@@ -1009,6 +1009,7 @@ fn target_filter_variant_name(f: &TargetFilter) -> &'static str {
         TargetFilter::Any => "Any",
         TargetFilter::Player => "Player",
         TargetFilter::Controller => "Controller",
+        TargetFilter::OriginalController => "OriginalController",
         TargetFilter::ScopedPlayer => "ScopedPlayer",
         TargetFilter::SelfRef => "SelfRef",
         TargetFilter::Typed(_) => "Typed",
@@ -1032,6 +1033,7 @@ fn target_filter_variant_name(f: &TargetFilter) -> &'static str {
         TargetFilter::ParentTarget => "ParentTarget",
         TargetFilter::ParentTargetSlot { .. } => "ParentTargetSlot",
         TargetFilter::ParentTargetController => "ParentTargetController",
+        TargetFilter::ParentTargetOwner => "ParentTargetOwner",
         TargetFilter::PostReplacementSourceController => "PostReplacementSourceController",
         TargetFilter::PostReplacementDamageTarget => "PostReplacementDamageTarget",
         TargetFilter::DefendingPlayer => "DefendingPlayer",
@@ -1517,7 +1519,7 @@ pub fn convert_player_predicate_trigger(
                 .collect::<ConvResult<_>>()?,
         },
 
-        // CR 500 + CR 102.1: "if it's [player]'s turn".
+        // CR 603.4 + CR 102.1: "if it's [player]'s turn".
         Players::IsTheirTurn => {
             require_you_player(player, "Players::IsTheirTurn (trigger)")?;
             TriggerCondition::DuringPlayersTurn {

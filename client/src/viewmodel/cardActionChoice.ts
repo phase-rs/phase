@@ -22,3 +22,27 @@ export function isManaObjectAction(action: GameAction, object: GameObject | unde
   if (action.type !== "ActivateAbility") return false;
   return object?.abilities?.[action.data.ability_index]?.effect?.type === "Mana";
 }
+
+/**
+ * Filter `legalActionsByObject` entries for a zone-viewable card to the
+ * play-or-cast actions only.
+ *
+ * Engine authority — covers Adventure, Foretell, Plot, Suspend, Warp, and any
+ * future exile-cast permission (cast-family variants), plus `PlayLand` for
+ * Future Sight / Bolas's Citadel / Magus of the Future top-of-library land
+ * plays. The frontend renders whatever the engine reports — no per-mechanic
+ * permission inspection.
+ */
+export function playOrCastActionsForObject(
+  legalActionsByObject: Record<string, GameAction[]> | undefined,
+  objectId: ObjectId,
+): GameAction[] {
+  return collectObjectActions(legalActionsByObject, objectId).filter((a) =>
+    a.type === "CastSpell"
+    || a.type === "CastSpellAsSneak"
+    || a.type === "CastSpellAsWebSlinging"
+    || a.type === "CastSpellAsMiracle"
+    || a.type === "CastSpellAsMadness"
+    || a.type === "PlayLand"
+  );
+}

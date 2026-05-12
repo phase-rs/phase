@@ -26,12 +26,13 @@ use super::oracle_util::{
 };
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, AttachmentKind, CastVariantPaid, Comparator, ControllerRef,
-    CounterTriggerFilter, DamageKindFilter, Effect, FilterProp, PlayerFilter, QuantityExpr,
-    QuantityRef, StaticCondition, TargetFilter, TriggerCondition, TriggerConstraint,
-    TriggerDefinition, TypeFilter, TypedFilter, UnlessCost, UnlessPayModifier,
+    AbilityCost, AbilityDefinition, AbilityKind, AttachmentKind, CastVariantPaid, Comparator,
+    ControllerRef, CounterTriggerFilter, DamageKindFilter, Effect, FilterProp, PlayerFilter,
+    QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
 };
 use crate::types::card_type::CoreType;
+use crate::types::counter::parse_counter_type;
 use crate::types::events::PlayerActionKind;
 use crate::types::mana::ManaColor;
 use crate::types::phase::Phase;
@@ -76,12 +77,23 @@ fn self_recursion_trigger_zone(ability: &crate::types::ability::AbilityDefinitio
 }
 
 fn effect_adds_mana_to_triggering_player(effect_lower: &str) -> bool {
+    // CR 109.5 + CR 117.3a: "its controller" binds to the antecedent of the
+    // trigger condition (e.g. "enchanted land" → the land's controller).
+    // For TapsForMana triggers on Auras (Fertile Ground, Wild Growth, Utopia
+    // Sprawl, Trace of Abundance, Verdant Haven, Market Festival, Weirding
+    // Wood, Overgrowth), the antecedent is the enchanted permanent and its
+    // controller equals the player who tapped it for mana — i.e. the
+    // ManaAdded event's `player_id`, which `PlayerFilter::TriggeringPlayer`
+    // extracts. Routing these effects through `TriggeringPlayer` keeps the
+    // mana with the land's controller even when an opponent's Aura is
+    // attached.
     value(
         (),
         pair(
             alt((
                 tag::<_, _, OracleError<'_>>("that player "),
                 tag("that opponent "),
+                tag("its controller "),
             )),
             alt((tag("adds "), tag("add "))),
         ),
@@ -802,6 +814,7 @@ fn strip_constraint_sentences(text: &str) -> String {
 /// - "sacrifice it unless you discard a card at random"  (CR 608.2c — UnlessCost::DiscardCard)
 /// - "destroy it unless you sacrifice a creature"        (UnlessCost::Sacrifice)
 /// - "draw a card unless you pay 2 life"                 (CR 119.4 — UnlessCost::PayLife)
+/// - "sacrifice it unless you pay {E}{E}"                (CR 107.14 — UnlessCost::PayEnergy)
 fn extract_unless_pay_modifier(
     text: &str,
     condition_lower: &str,
@@ -838,10 +851,9 @@ fn extract_unless_pay_modifier(
     }
 
     // CR 118.12 + CR 608.2c + CR 119.4: Non-mana alternative costs ("you discard
-    // a card", "you sacrifice a [filter]", "you pay N life") map to the existing
-    // `UnlessCost::{DiscardCard, Sacrifice, PayLife}` variants — the runtime
-    // resolver in `engine_payment_choices.rs` already handles all four via
-    // `WaitingFor::WardDiscardChoice` / `WaitingFor::WardSacrificeChoice`.
+    // a card", "you sacrifice a [filter]", "you pay N life") map to existing
+    // `UnlessCost` variants — the runtime resolver in `engine_payment_choices.rs`
+    // owns the payment choice.
     if let Some(cost) = parse_unless_alt_cost(after_unless) {
         let cleaned = text[..unless_pos].trim().to_string();
         return (
@@ -900,11 +912,18 @@ fn extract_unless_pay_modifier(
     }
 
     // Determine the cost type
-    let cost = if cost_text == "{x}" || cost_text == "{X}" {
+    let cost = if let Some((amount, rest)) =
+        super::oracle_effect::parse_fixed_energy_unless_cost(cost_text)
+    {
+        if !rest.trim().is_empty() {
+            return (text.to_string(), None);
+        }
+        AbilityCost::PayEnergy { amount }
+    } else if cost_text == "{x}" || cost_text == "{X}" {
         // Check for "where X is" clause
         let remainder = &cost_str[cost_end..];
         if let Some(quantity) = parse_where_x_is_trigger(remainder) {
-            UnlessCost::DynamicGeneric { quantity }
+            AbilityCost::ManaDynamic { quantity }
         } else {
             return (text.to_string(), None);
         }
@@ -915,7 +934,13 @@ fn extract_unless_pay_modifier(
         {
             return (text.to_string(), None);
         }
-        UnlessCost::Fixed { cost: mana_cost }
+        if let Some(cost) =
+            super::oracle_effect::parse_unless_for_each_payment(&cost_str[cost_end..], &mana_cost)
+        {
+            cost
+        } else {
+            AbilityCost::Mana { cost: mana_cost }
+        }
     };
 
     // Payer was already determined by the combinator above.
@@ -984,7 +1009,7 @@ fn parse_inferred_pronoun_unless_alt_cost(
     after_unless: &str,
     effect_before_unless: &str,
     condition_lower: &str,
-) -> Option<(UnlessCost, TargetFilter)> {
+) -> Option<(AbilityCost, TargetFilter)> {
     let cost = if let Ok((rest, _)) =
         tag::<_, _, OracleError<'_>>("they discard ").parse(after_unless)
     {
@@ -998,20 +1023,22 @@ fn parse_inferred_pronoun_unless_alt_cost(
     Some((cost, payer))
 }
 
-fn parse_unless_life_cost(rest: &str) -> Option<UnlessCost> {
+fn parse_unless_life_cost(rest: &str) -> Option<AbilityCost> {
     let (amount, after_num) = parse_number(rest)?;
     if tag::<_, _, OracleError<'_>>("life")
         .parse(after_num.trim_start())
         .is_ok()
     {
-        return Some(UnlessCost::PayLife {
-            amount: amount as i32,
+        return Some(AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed {
+                value: amount as i32,
+            },
         });
     }
     None
 }
 
-fn parse_unless_discard_cost(discard_tail: &str) -> Option<UnlessCost> {
+fn parse_unless_discard_cost(discard_tail: &str) -> Option<AbilityCost> {
     let trailing = discard_tail.trim().trim_end_matches('.').trim();
     let trailing = alt((
         tag::<_, _, OracleError<'_>>("a "),
@@ -1028,13 +1055,21 @@ fn parse_unless_discard_cost(discard_tail: &str) -> Option<UnlessCost> {
                     .parse(rest)
                     .is_ok()
             {
-                return Some(UnlessCost::DiscardCard { filter: None });
+                return Some(AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    filter: None,
+                    random: false,
+                    self_ref: false,
+                });
             }
         }
         if let Some(filter) = super::oracle_effect::imperative::parse_discard_card_filter(trailing)
         {
-            return Some(UnlessCost::DiscardCard {
+            return Some(AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
                 filter: Some(filter),
+                random: false,
+                self_ref: false,
             });
         }
     }
@@ -1055,10 +1090,10 @@ fn parse_unless_discard_cost(discard_tail: &str) -> Option<UnlessCost> {
 ///
 /// FIDELITY NOTE: `UnlessCost::DiscardCard` does not currently model "at random"
 /// — the engine resolves via `WaitingFor::WardDiscardChoice` (player-chosen).
-/// This is a known sub-fidelity gap (Balduvian Horde class). Parameterizing
-/// `UnlessCost::DiscardCard` with a `random` axis is deferred pending the
-/// `UnlessCost`/`AbilityCost` unification refactor.
-fn parse_unless_alt_cost(after_unless: &str) -> Option<UnlessCost> {
+/// This is a known sub-fidelity gap (Balduvian Horde class). Post the
+/// 2026-05-09 fold, the `random: bool` field on `AbilityCost::Discard` is
+/// the natural home for this; wiring it into the runtime is future work.
+fn parse_unless_alt_cost(after_unless: &str) -> Option<AbilityCost> {
     // "you discard a card" — match prefix, accept any trailing modifiers
     // ("at random", trailing punctuation) since the caller strips the entire
     // unless-clause wholesale.
@@ -1089,12 +1124,12 @@ fn parse_unless_alt_cost(after_unless: &str) -> Option<UnlessCost> {
     None
 }
 
-/// Parse the tail of "you sacrifice ..." into an `UnlessCost::Sacrifice`.
+/// Parse the tail of "you sacrifice ..." into an `AbilityCost::Sacrifice`.
 /// Expects lowercased text. Accepts:
 /// - `a creature` / `an artifact` / `a [type] you control`
 /// - `two creatures` / `three lands`
 /// - terminal sentence punctuation
-fn parse_unless_sacrifice_filter(rest: &str) -> Option<UnlessCost> {
+fn parse_unless_sacrifice_filter(rest: &str) -> Option<AbilityCost> {
     // Trim trailing sentence punctuation so it doesn't leak into parse_target.
     let trimmed = rest.trim().trim_end_matches('.').trim();
     if trimmed.is_empty() {
@@ -1140,18 +1175,21 @@ fn parse_unless_sacrifice_filter(rest: &str) -> Option<UnlessCost> {
         return None;
     }
 
-    Some(UnlessCost::Sacrifice { count, filter })
+    Some(AbilityCost::Sacrifice {
+        target: filter,
+        count,
+    })
 }
 
 /// CR 118.12: Parse "you return [count] [filter] [you control] to its/their
-/// owner's hand" into `UnlessCost::ReturnToHand`. Expects lowercased text after
+/// owner's hand" into `AbilityCost::ReturnToHand`. Expects lowercased text after
 /// "you return ". Handles patterns like:
 /// - "an artifact you control to its owner's hand"
 /// - "two forests you control to their owner's hand"
 /// - "another creature you control to its owner's hand"
 /// - "an untapped island you control to its owner's hand"
 /// - "a non-lair land you control to its owner's hand"
-fn parse_unless_return_to_hand(rest: &str) -> Option<UnlessCost> {
+fn parse_unless_return_to_hand(rest: &str) -> Option<AbilityCost> {
     let to_pos = rest.find(" to ")?; // allow-noncombinator: delimiter split on pre-tokenized unless clause text
     let filter_part = rest[..to_pos].trim().trim_end_matches('.').trim();
     if filter_part.is_empty() {
@@ -1196,9 +1234,9 @@ fn parse_unless_return_to_hand(rest: &str) -> Option<UnlessCost> {
         },
     };
 
-    Some(UnlessCost::ReturnToHand {
+    Some(AbilityCost::ReturnToHand {
         count,
-        filter,
+        filter: Some(filter),
         from_zone,
     })
 }
@@ -1265,8 +1303,9 @@ fn substitute_another_in_filter(filter: &TargetFilter) -> TargetFilter {
     }
 }
 
-/// CR 603.4: Rewrite `Another` inside any `ObjectCount` / `ObjectCountDistinctNames`
-/// filter carried by a `QuantityExpr`. Leaves non-object-count refs untouched.
+/// CR 603.4: Rewrite `Another` inside any `ObjectCount` / `ObjectCountDistinct`
+/// or `Aggregate` filter carried by a `QuantityExpr`. Leaves non-population
+/// refs untouched.
 fn substitute_another_in_expr(expr: &QuantityExpr) -> QuantityExpr {
     match expr {
         QuantityExpr::Ref {
@@ -1277,9 +1316,28 @@ fn substitute_another_in_expr(expr: &QuantityExpr) -> QuantityExpr {
             },
         },
         QuantityExpr::Ref {
-            qty: QuantityRef::ObjectCountDistinctNames { filter },
+            qty: QuantityRef::ObjectCountDistinct { filter, qualities },
         } => QuantityExpr::Ref {
-            qty: QuantityRef::ObjectCountDistinctNames {
+            qty: QuantityRef::ObjectCountDistinct {
+                filter: substitute_another_in_filter(filter),
+                qualities: qualities.clone(),
+            },
+        },
+        // CR 603.4 + CR 109.3: Aggregate populations are also "object
+        // populations" in the same sense as ObjectCount — when an
+        // intervening-if references an aggregate over "each other <type>",
+        // the exclusion must be trigger-relative, not source-relative.
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::Aggregate {
+                    function,
+                    property,
+                    filter,
+                },
+        } => QuantityExpr::Ref {
+            qty: QuantityRef::Aggregate {
+                function: *function,
+                property: *property,
                 filter: substitute_another_in_filter(filter),
             },
         },
@@ -1826,7 +1884,7 @@ fn parse_no_mana_spent_clause(i: &str) -> OracleResult<'_, &str> {
     .parse(i)
 }
 
-/// CR 603.4 + CR 102.1 + CR 113.3c: Extract "if it's / it is / it isn't /
+/// CR 603.4 + CR 102.1: Extract "if it's / it is / it isn't /
 /// it's not / it is not that player's turn" — intervening-if where "that
 /// player" anaphors to the triggering event's player. Source-referential
 /// (no static-condition equivalent) because the player binding lives in
@@ -1907,9 +1965,9 @@ fn try_extract_intervening(
     ))
 }
 
-/// CR 702.49a: Parse "whenever you activate a ninjutsu ability" trigger.
-/// Matches all ninjutsu-family activation patterns.
-fn try_parse_ninjutsu_activation_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
+/// CR 702.49a + CR 702.142b: Parse "whenever you activate a [keyword] ability" triggers.
+/// Matches ninjutsu-family and boast activation patterns.
+fn try_parse_keyword_activation_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     for prefix in ["whenever you activate ", "when you activate "] {
         let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) else {
             continue;
@@ -1922,6 +1980,15 @@ fn try_parse_ninjutsu_activation_trigger(lower: &str) -> Option<(TriggerMode, Tr
             let mut def = make_base();
             def.mode = TriggerMode::NinjutsuActivated;
             return Some((TriggerMode::NinjutsuActivated, def));
+        }
+        // CR 702.142b: Match "a boast ability" — covers boast keyword activation
+        if tag::<_, _, OracleError<'_>>("a boast ability")
+            .parse(rest)
+            .is_ok()
+        {
+            let mut def = make_base();
+            def.mode = TriggerMode::BoastAbilityActivated;
+            return Some((TriggerMode::BoastAbilityActivated, def));
         }
     }
     None
@@ -2040,7 +2107,7 @@ fn try_extract_had_counter_condition(
     Some((
         strip_condition_clause(text, pos, clause_len),
         Some(TriggerCondition::HadCounters {
-            counter_type: Some(counter_type_text.to_string()),
+            counter_type: Some(parse_counter_type(counter_type_text)),
         }),
     ))
 }
@@ -4602,7 +4669,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
 
     // CR 702.49a: "whenever you activate a ninjutsu ability" — ninjutsu-family activation trigger.
     // Covers all ninjutsu variants (ninjutsu, commander ninjutsu, sneak).
-    if let Some(result) = try_parse_ninjutsu_activation_trigger(lower) {
+    if let Some(result) = try_parse_keyword_activation_trigger(lower) {
         return Some(result);
     }
 
@@ -4931,9 +4998,12 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         }
         // Handle "multicolored" as a spell property (not a type phrase)
         if scan_contains(spell_clause, "multicolored") {
-            def.valid_card = Some(TargetFilter::Typed(
-                TypedFilter::default().properties(vec![FilterProp::Multicolored]),
-            ));
+            def.valid_card = Some(TargetFilter::Typed(TypedFilter::default().properties(
+                vec![FilterProp::ColorCount {
+                    comparator: Comparator::GE,
+                    count: 2,
+                }],
+            )));
         } else {
             let (filter, _rest) = parse_type_phrase(spell_clause);
             let is_meaningful = match &filter {
@@ -5576,13 +5646,26 @@ fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinit
     Some((TriggerMode::CounterRemoved, def))
 }
 
-/// CR 700.4: Parse "is/are put into [possessive] graveyard [from zone]" patterns.
+/// CR 700.4 + CR 603.6c + CR 109.5: Parse "is/are put into [possessive] graveyard
+/// [from <origin-possessive>]" patterns.
+///
 /// Handles all forms:
 /// - "is put into a graveyard from anywhere" (no origin restriction)
 /// - "is put into a graveyard from the battlefield" (equivalent to "dies")
 /// - "is put into your graveyard [from your library]" (controller filter + optional origin)
 /// - "is put into an opponent's graveyard from anywhere" (opponent controller filter)
+/// - "is put into an opponent's graveyard from their library" (CR 109.5: "their"
+///   anaphor binds back to the previously named opponent — Undead Alchemist class)
+/// - "is put into a player's graveyard from any library" (Bloodchief Ascension class)
 /// - "are put into your graveyard from your library" (plural form for batched triggers)
+///
+/// The graveyard's possessive narrows `valid_card.controller` (CR 109.5: a card
+/// going into player P's graveyard is P's card). This is what `match_changes_zone`
+/// actually reads when deciding to fire — historically the possessive only set
+/// `valid_target`, which `match_changes_zone` ignores for ChangesZone, so the
+/// trigger fired for any card going to any graveyard. `valid_target` is also
+/// preserved so downstream effect resolution (e.g. `target: ParentTarget`) keeps
+/// the narrowed scope.
 fn try_parse_put_into_graveyard(
     subject: &TargetFilter,
     rest: &str,
@@ -5595,26 +5678,7 @@ fn try_parse_put_into_graveyard(
     .parse(rest)
     .ok()?;
 
-    // Parse the graveyard possessive: "a graveyard", "your graveyard", "an opponent's graveyard"
-    fn parse_graveyard_possessive(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
-        alt((
-            value(None, tag("a graveyard")),
-            value(
-                Some(TargetFilter::Typed(
-                    TypedFilter::default().controller(ControllerRef::You),
-                )),
-                tag("your graveyard"),
-            ),
-            value(
-                Some(TargetFilter::Typed(
-                    TypedFilter::default().controller(ControllerRef::Opponent),
-                )),
-                tag("an opponent's graveyard"),
-            ),
-        ))
-        .parse(input)
-    }
-    let (after_gy, valid_target) = parse_graveyard_possessive.parse(after_verb).ok()?;
+    let (after_gy, possessive) = parse_graveyard_possessive.parse(after_verb).ok()?;
 
     // Parse optional "from [zone]" clause
     let after_gy = after_gy.trim_start();
@@ -5622,18 +5686,7 @@ fn try_parse_put_into_graveyard(
         value((), tag::<_, _, OracleError<'_>>("from ")).parse(after_gy)
     {
         let after_from = after_from.trim_start();
-        // Use nom alt() for origin zone matching
-        fn parse_origin_zone(input: &str) -> OracleResult<'_, Option<Zone>> {
-            alt((
-                value(Some(Zone::Battlefield), tag("the battlefield")),
-                // CR 700.4: "from anywhere" means no origin restriction
-                value(None, tag("anywhere")),
-                value(Some(Zone::Library), tag("your library")),
-                value(Some(Zone::Hand), tag("your hand")),
-            ))
-            .parse(input)
-        }
-        parse_origin_zone
+        parse_graveyard_origin_zone
             .parse(after_from)
             .ok()
             .map(|(_, z)| z)
@@ -5643,13 +5696,67 @@ fn try_parse_put_into_graveyard(
         None
     };
 
+    let valid_card = match possessive.clone() {
+        Some(ctrl) => Some(add_controller(subject.clone(), ctrl)),
+        None => Some(subject.clone()),
+    };
+    let valid_target =
+        possessive.map(|ctrl| TargetFilter::Typed(TypedFilter::default().controller(ctrl)));
+
     let mut def = make_base();
     def.mode = TriggerMode::ChangesZone;
     def.destination = Some(Zone::Graveyard);
     def.origin = origin;
-    def.valid_card = Some(subject.clone());
+    def.valid_card = valid_card;
     def.valid_target = valid_target;
     Some((TriggerMode::ChangesZone, def))
+}
+
+/// CR 109.5: Parse the graveyard possessive in "put into [possessive] graveyard".
+/// Returns the controller scope of the graveyard's owner, or `None` for unowned
+/// ("a graveyard"). Shared by `try_parse_put_into_graveyard` and the batched
+/// "one or more" variant so the two parse paths stay in lockstep.
+fn parse_graveyard_possessive(input: &str) -> OracleResult<'_, Option<ControllerRef>> {
+    alt((
+        value(None, tag("a graveyard")),
+        value(Some(ControllerRef::You), tag("your graveyard")),
+        value(
+            Some(ControllerRef::Opponent),
+            tag("an opponent's graveyard"),
+        ),
+        // CR 109.5: "their graveyard" is an anaphor; in every "put into [...]
+        // graveyard" pattern that uses it the antecedent is the opponent named
+        // earlier in the same clause (Undead Alchemist class).
+        value(Some(ControllerRef::Opponent), tag("their graveyard")),
+        // CR 109.5: "a player's graveyard" — Bloodchief Ascension class. Bare
+        // "a player" leaves controller unscoped (matches any).
+        value(None, tag("a player's graveyard")),
+    ))
+    .parse(input)
+}
+
+/// CR 603.6c + CR 109.5: Parse the origin zone for a put-into-graveyard trigger.
+/// Returns `Some(Zone)` for a constrained origin, or `None` for "anywhere".
+/// Shared by `try_parse_put_into_graveyard` and the batched variant.
+fn parse_graveyard_origin_zone(input: &str) -> OracleResult<'_, Option<Zone>> {
+    alt((
+        value(Some(Zone::Battlefield), tag("the battlefield")),
+        // CR 603.6c: "from anywhere" — no origin restriction; the trigger
+        // is explicitly NOT treated as a leaves-the-battlefield ability.
+        value(None, tag("anywhere")),
+        // Library origins: every possessive form maps to Zone::Library.
+        // CR 109.5: "their library" is an anaphor back to the graveyard's owner;
+        // "a player's library" / "any library" leave the owner unconstrained
+        // (the valid_card filter from the graveyard possessive already handles
+        // owner narrowing when present).
+        value(Some(Zone::Library), tag("your library")),
+        value(Some(Zone::Library), tag("their library")),
+        value(Some(Zone::Library), tag("an opponent's library")),
+        value(Some(Zone::Library), tag("a player's library")),
+        value(Some(Zone::Library), tag("any library")),
+        value(Some(Zone::Hand), tag("your hand")),
+    ))
+    .parse(input)
 }
 
 /// Parse "[subject] is/are put into [possessive] hand from [zone]" — dredge-style
@@ -5807,27 +5914,10 @@ fn try_parse_one_or_more_put_into_graveyard(
             return None;
         };
 
-        // Parse the graveyard possessive using nom alt()
-        // Reuse the same combinator as try_parse_put_into_graveyard
-        fn parse_gy_possessive_batch(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
-            alt((
-                value(None, tag("a graveyard")),
-                value(
-                    Some(TargetFilter::Typed(
-                        TypedFilter::default().controller(ControllerRef::You),
-                    )),
-                    tag("your graveyard"),
-                ),
-                value(
-                    Some(TargetFilter::Typed(
-                        TypedFilter::default().controller(ControllerRef::Opponent),
-                    )),
-                    tag("an opponent's graveyard"),
-                ),
-            ))
-            .parse(input)
-        }
-        let Ok((after_gy, valid_target)) = parse_gy_possessive_batch.parse(after_put) else {
+        // CR 109.5 + CR 603.6c: Shared graveyard possessive + origin combinators
+        // (see try_parse_put_into_graveyard) keep singular/batched paths in
+        // lockstep — every new possessive or origin form lives in one place.
+        let Ok((after_gy, possessive)) = parse_graveyard_possessive.parse(after_put) else {
             continue;
         };
 
@@ -5837,15 +5927,7 @@ fn try_parse_one_or_more_put_into_graveyard(
             value((), tag::<_, _, OracleError<'_>>("from ")).parse(after_gy)
         {
             let after_from = after_from.trim_start();
-            fn parse_origin_zone_batch(input: &str) -> OracleResult<'_, Option<Zone>> {
-                alt((
-                    value(Some(Zone::Battlefield), tag("the battlefield")),
-                    value(None, tag("anywhere")),
-                    value(Some(Zone::Library), tag("your library")),
-                ))
-                .parse(input)
-            }
-            parse_origin_zone_batch
+            parse_graveyard_origin_zone
                 .parse(after_from)
                 .ok()
                 .map(|(_, z)| z)
@@ -5855,7 +5937,7 @@ fn try_parse_one_or_more_put_into_graveyard(
         };
 
         // Parse the subject type filter: "creature cards", "land cards", "cards"
-        let filter = if subject_text == "cards" {
+        let base_filter = if subject_text == "cards" {
             None
         } else if let Some(type_text) = subject_text.strip_suffix(" cards") {
             let (f, remainder) = parse_type_phrase(type_text);
@@ -5867,11 +5949,25 @@ fn try_parse_one_or_more_put_into_graveyard(
             continue;
         };
 
+        // CR 109.5: Merge the graveyard owner's controller scope into valid_card
+        // (the field `match_changes_zone` actually consults). valid_target is
+        // preserved for downstream effect targeting / displays.
+        let valid_card = match (base_filter, possessive.clone()) {
+            (Some(f), Some(ctrl)) => Some(add_controller(f, ctrl)),
+            (Some(f), None) => Some(f),
+            (None, Some(ctrl)) => {
+                Some(TargetFilter::Typed(TypedFilter::default().controller(ctrl)))
+            }
+            (None, None) => None,
+        };
+        let valid_target =
+            possessive.map(|ctrl| TargetFilter::Typed(TypedFilter::default().controller(ctrl)));
+
         let mut def = make_base();
         def.mode = TriggerMode::ChangesZoneAll;
         def.destination = Some(Zone::Graveyard);
         def.origin = origin;
-        def.valid_card = filter;
+        def.valid_card = valid_card;
         def.valid_target = valid_target;
         def.batched = true;
         return Some((TriggerMode::ChangesZoneAll, def));
@@ -6298,10 +6394,10 @@ mod tests {
     use crate::parser::oracle_ir::context::ParseContext;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
-        AbilityCondition, AbilityKind, AggregateFunction, Comparator, ContinuousModification,
-        ControllerRef, DamageModification, Duration, Effect, FilterProp, ObjectScope, PlayerFilter,
-        PlayerScope, PtValue, QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
-        UnlessCost,
+        AbilityCondition, AbilityCost, AbilityKind, AggregateFunction, Comparator,
+        ContinuousModification, ControllerRef, CountScope, DamageModification, Duration, Effect,
+        FilterProp, ObjectScope, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
+        TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::replacements::ReplacementEvent;
@@ -6352,6 +6448,64 @@ mod tests {
             })
         );
         assert!(def.execute.is_some());
+    }
+
+    #[test]
+    fn trigger_intervening_if_spell_from_hand_this_turn_attaches_condition() {
+        let def = parse_trigger_line(
+            "At the beginning of your end step, if you haven't cast a spell from your hand this turn, draw a card.",
+            "Jem Lightfoote, Sky Explorer",
+        );
+        match def.condition {
+            Some(TriggerCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::SpellsCastThisTurn {
+                                scope: CountScope::Controller,
+                                filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
+                            },
+                    },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            }) => assert!(properties.contains(&FilterProp::InZone { zone: Zone::Hand })),
+            Some(TriggerCondition::And { conditions }) => {
+                assert!(conditions.iter().any(|condition| matches!(
+                    condition,
+                    TriggerCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::SpellsCastThisTurn {
+                                scope: CountScope::Controller,
+                                filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
+                            },
+                        },
+                        comparator: Comparator::EQ,
+                        rhs: QuantityExpr::Fixed { value: 0 },
+                    } if properties.contains(&FilterProp::InZone { zone: Zone::Hand })
+                )))
+            }
+            other => panic!("expected cast-origin intervening condition, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trigger_intervening_if_source_didnt_attack_this_turn_attaches_condition() {
+        let def = parse_trigger_line(
+            "At the beginning of your end step, if this creature didn't attack this turn, put a +1/+1 counter on it.",
+            "Air Nomad Student",
+        );
+        assert!(matches!(
+            def.condition,
+            Some(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::And { .. },
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            })
+        ));
     }
 
     // CR 603.6a + CR 611.2b: "Whenever a permanent you control enters tapped, ..." —
@@ -8233,9 +8387,12 @@ mod tests {
         );
         assert_eq!(
             def.valid_card,
-            Some(TargetFilter::Typed(
-                TypedFilter::default().properties(vec![FilterProp::Multicolored])
-            ))
+            Some(TargetFilter::Typed(TypedFilter::default().properties(
+                vec![FilterProp::ColorCount {
+                    comparator: Comparator::GE,
+                    count: 2,
+                }]
+            )))
         );
     }
 
@@ -8249,7 +8406,10 @@ mod tests {
         assert_eq!(
             def.valid_card,
             Some(TargetFilter::Typed(
-                TypedFilter::new(TypeFilter::Card).properties(vec![FilterProp::Multicolored])
+                TypedFilter::new(TypeFilter::Card).properties(vec![FilterProp::ColorCount {
+                    comparator: Comparator::GE,
+                    count: 2,
+                }])
             ))
         );
         let execute = def.execute.as_deref().expect("trigger should execute");
@@ -8478,6 +8638,166 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[test]
+    fn trigger_intervening_if_card_left_your_graveyard_this_turn() {
+        let def = parse_trigger_line(
+            "At the beginning of your end step, if a card left your graveyard this turn, draw a card.",
+            "Primary Research",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::End));
+        let Some(TriggerCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        }) = &def.condition
+        else {
+            panic!(
+                "expected QuantityComparison intervening-if, got {:?}",
+                def.condition
+            );
+        };
+        assert_eq!(*comparator, Comparator::GE);
+        assert_eq!(*rhs, QuantityExpr::Fixed { value: 1 });
+        assert!(matches!(
+            lhs,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ZoneChangeCountThisTurn {
+                    from: Some(Zone::Graveyard),
+                    to: None,
+                    ..
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn trigger_intervening_if_permanent_was_put_into_your_hand_from_battlefield() {
+        let def = parse_trigger_line(
+            "At the beginning of your end step, if a permanent was put into your hand from the battlefield this turn, draw a card.",
+            "Barrin, Tolarian Archmage",
+        );
+        let Some(TriggerCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        }) = &def.condition
+        else {
+            panic!(
+                "expected QuantityComparison intervening-if, got {:?}",
+                def.condition
+            );
+        };
+        assert_eq!(*comparator, Comparator::GE);
+        assert_eq!(*rhs, QuantityExpr::Fixed { value: 1 });
+        assert!(matches!(
+            lhs,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ZoneChangeCountThisTurn {
+                    from: Some(Zone::Battlefield),
+                    to: Some(Zone::Hand),
+                    ..
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn trigger_intervening_if_artifact_or_creature_was_put_into_graveyard_from_battlefield() {
+        let def = parse_trigger_line(
+            "At the beginning of your end step, if an artifact or creature was put into a graveyard from the battlefield this turn, put a +1/+1 counter on this creature.",
+            "Ichor Shade",
+        );
+        assert!(matches!(
+            def.condition,
+            Some(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneChangeCountThisTurn {
+                        from: Some(Zone::Battlefield),
+                        to: Some(Zone::Graveyard),
+                        filter: TargetFilter::Or { .. },
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            })
+        ));
+    }
+
+    #[test]
+    fn trigger_intervening_if_source_dealt_damage_to_opponent_this_turn() {
+        let def = parse_trigger_line(
+            "At the beginning of each end step, if this creature dealt damage to an opponent this turn, put a +1/+1 counter on it.",
+            "Dunerider Outlaw",
+        );
+        let Some(TriggerCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        }) = &def.condition
+        else {
+            panic!(
+                "expected QuantityComparison intervening-if, got {:?}",
+                def.condition
+            );
+        };
+        assert_eq!(*comparator, Comparator::GE);
+        assert_eq!(*rhs, QuantityExpr::Fixed { value: 1 });
+        assert!(matches!(
+            lhs,
+            QuantityExpr::Ref {
+                qty: QuantityRef::DamageDealtThisTurn {
+                    source,
+                    ..
+                }
+            } if **source == TargetFilter::SelfRef
+        ));
+    }
+
+    #[test]
+    fn trigger_intervening_if_source_was_dealt_damage_this_turn() {
+        let def = parse_trigger_line(
+            "At the beginning of each end step, if this creature was dealt damage this turn, put a +0/+1 counter on it.",
+            "Wall of Resistance",
+        );
+        assert!(matches!(
+            def.condition,
+            Some(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::DamageDealtThisTurn {
+                        source,
+                        target,
+                        ..
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }) if *source == TargetFilter::Any && *target == TargetFilter::SelfRef
+        ));
+    }
+
+    #[test]
+    fn trigger_intervening_if_counter_was_put_on_owned_permanent_this_turn() {
+        let def = parse_trigger_line(
+            "At the beginning of each end step, if a +1/+1 counter was put on a permanent under your control this turn, put a +1/+1 counter on this creature.",
+            "Fairgrounds Trumpeter",
+        );
+        assert!(matches!(
+            def.condition,
+            Some(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CounterAddedThisTurn {
+                        actor: CountScope::All,
+                        counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                        ..
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            })
+        ));
     }
 
     // --- ControlCount condition tests ---
@@ -9056,6 +9376,13 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::TapsForMana);
         assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
+        // CR 109.5 + CR 605.1b: "its controller" antecedent is the enchanted
+        // land — the player who tapped it for mana. `PlayerFilter::TriggeringPlayer`
+        // rebinds the resolving ability's controller to the ManaAdded event's
+        // `player_id` so the bonus mana routes to the land's controller even
+        // when the Aura is opponent-controlled.
+        let execute = def.execute.as_deref().unwrap();
+        assert_eq!(execute.player_scope, Some(PlayerFilter::TriggeringPlayer));
     }
 
     #[test]
@@ -9069,6 +9396,29 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::TapsForMana);
         assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
+        let execute = def.execute.as_deref().unwrap();
+        assert_eq!(execute.player_scope, Some(PlayerFilter::TriggeringPlayer));
+    }
+
+    #[test]
+    fn trigger_fertile_ground_its_controller_adds_routes_to_triggering_player() {
+        // CR 109.5 + CR 605.1b regression for the "its controller adds …"
+        // Aura class (Fertile Ground, Wild Growth, Utopia Sprawl, Verdant Haven,
+        // Trace of Abundance, Market Festival, Weirding Wood, Overgrowth):
+        // bonus mana must go to the enchanted land's controller, not the
+        // aura's controller, when an opponent ends up attaching the aura.
+        let def = parse_trigger_line(
+            "Whenever enchanted land is tapped for mana, its controller adds an additional one mana of any color.",
+            "Fertile Ground",
+        );
+        assert_eq!(def.mode, TriggerMode::TapsForMana);
+        assert_eq!(def.valid_card, Some(TargetFilter::AttachedTo));
+        let execute = def.execute.as_deref().unwrap();
+        assert_eq!(execute.player_scope, Some(PlayerFilter::TriggeringPlayer));
+        assert!(matches!(
+            execute.effect.as_ref(),
+            crate::types::ability::Effect::Mana { .. }
+        ));
     }
 
     #[test]
@@ -9354,7 +9704,7 @@ mod tests {
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         assert_eq!(
             unless_pay.cost,
-            UnlessCost::DynamicGeneric {
+            AbilityCost::ManaDynamic {
                 quantity: QuantityExpr::Ref {
                     qty: QuantityRef::Power {
                         scope: crate::types::ability::ObjectScope::Source
@@ -9375,7 +9725,7 @@ mod tests {
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         assert_eq!(unless_pay.payer, TargetFilter::Controller);
         assert!(
-            matches!(unless_pay.cost, UnlessCost::Fixed { .. }),
+            matches!(unless_pay.cost, AbilityCost::Mana { .. }),
             "cost should be Fixed mana, got {:?}",
             unless_pay.cost
         );
@@ -9385,6 +9735,54 @@ mod tests {
             matches!(*execute.effect, Effect::Sacrifice { .. }),
             "execute should be Sacrifice, got {:?}",
             execute.effect
+        );
+    }
+
+    #[test]
+    fn trigger_unless_you_pay_energy() {
+        let def = parse_trigger_line(
+            "At the beginning of your end step, sacrifice this creature unless you pay {E}{E}.",
+            "Lathnu Hellion",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::Controller);
+        assert_eq!(unless_pay.cost, AbilityCost::PayEnergy { amount: 2 });
+        let execute = def.execute.as_ref().expect("should have execute");
+        assert!(
+            matches!(*execute.effect, Effect::Sacrifice { .. }),
+            "execute should be Sacrifice, got {:?}",
+            execute.effect
+        );
+    }
+
+    /// CR 608.2k + CR 603.7c: Self-ETB "sacrifice it" anaphor — Azorius
+    /// Herald, Balduvian Horde, Glint Hawk, Faerie Impostor, Phlage. The
+    /// bare object pronoun "it" in a `SelfRef`-subject trigger sub-effect
+    /// must resolve to `TargetFilter::SelfRef` (the source itself), NOT to
+    /// `ParentTarget` — the trigger introduces no parent-target chain.
+    ///
+    /// This locks in the divergent behavior between `resolve_it_pronoun`
+    /// (which returns `SelfRef` for `Some(SelfRef)` subjects) and
+    /// `resolve_pronoun_target` (which returns `ParentTarget` for the same
+    /// subject case to support parent-target chains like
+    /// "tap target creature. exile it"). The two helpers serve different
+    /// anaphor contexts; the sacrifice imperative path delegates to
+    /// `resolve_it_pronoun` because no parent target is in scope for the
+    /// self-ETB trigger sub-effect.
+    #[test]
+    fn self_etb_sacrifice_it_anaphor_binds_to_self_ref() {
+        let def = parse_trigger_line(
+            "When ~ enters, sacrifice it unless {U} was spent to cast it.",
+            "Azorius Herald",
+        );
+        let execute = def.execute.as_ref().expect("should have execute");
+        let Effect::Sacrifice { target, .. } = &*execute.effect else {
+            panic!("expected Sacrifice, got {:?}", execute.effect);
+        };
+        assert_eq!(
+            *target,
+            TargetFilter::SelfRef,
+            "sacrifice target must bind to the self (entering source), not ParentTarget"
         );
     }
 
@@ -9400,7 +9798,15 @@ mod tests {
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         assert_eq!(unless_pay.payer, TargetFilter::Controller);
         assert!(
-            matches!(unless_pay.cost, UnlessCost::DiscardCard { filter: None }),
+            matches!(
+                unless_pay.cost,
+                AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    filter: None,
+                    random: false,
+                    self_ref: false
+                }
+            ),
             "cost should be DiscardCard, got {:?}",
             unless_pay.cost
         );
@@ -9422,7 +9828,10 @@ mod tests {
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         assert_eq!(unless_pay.payer, TargetFilter::Controller);
         match &unless_pay.cost {
-            UnlessCost::Sacrifice { count, filter } => {
+            AbilityCost::Sacrifice {
+                count,
+                target: filter,
+            } => {
                 assert_eq!(*count, 1);
                 match filter {
                     TargetFilter::Typed(typed) => {
@@ -9452,7 +9861,12 @@ mod tests {
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         assert_eq!(unless_pay.payer, TargetFilter::Controller);
         assert!(
-            matches!(unless_pay.cost, UnlessCost::PayLife { amount: 1 }),
+            matches!(
+                unless_pay.cost,
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 1 }
+                }
+            ),
             "cost should be PayLife {{ amount: 1 }}, got {:?}",
             unless_pay.cost
         );
@@ -9470,7 +9884,12 @@ mod tests {
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         assert_eq!(unless_pay.payer, TargetFilter::Controller);
         assert!(
-            matches!(unless_pay.cost, UnlessCost::PayLife { amount: 2 }),
+            matches!(
+                unless_pay.cost,
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 2 }
+                }
+            ),
             "cost should be PayLife {{ amount: 2 }}, got {:?}",
             unless_pay.cost
         );
@@ -9501,7 +9920,12 @@ mod tests {
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         assert_eq!(unless_pay.payer, TargetFilter::TriggeringPlayer);
         assert!(
-            matches!(unless_pay.cost, UnlessCost::PayLife { amount: 2 }),
+            matches!(
+                unless_pay.cost,
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 2 }
+                }
+            ),
             "cost should be PayLife {{ amount: 2 }}, got {:?}",
             unless_pay.cost
         );
@@ -9524,8 +9948,9 @@ mod tests {
         );
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         match &unless_pay.cost {
-            UnlessCost::DiscardCard {
+            AbilityCost::Discard {
                 filter: Some(TargetFilter::Typed(typed)),
+                ..
             } => assert!(
                 typed
                     .type_filters
@@ -9534,7 +9959,7 @@ mod tests {
                 "filter should include noncreature, got {:?}",
                 typed.type_filters
             ),
-            other => panic!("cost should be filtered DiscardCard, got {:?}", other),
+            other => panic!("cost should be filtered Discard, got {:?}", other),
         }
     }
 
@@ -9549,9 +9974,9 @@ mod tests {
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         assert_eq!(unless_pay.payer, TargetFilter::Controller);
         match &unless_pay.cost {
-            UnlessCost::ReturnToHand {
+            AbilityCost::ReturnToHand {
                 count,
-                filter,
+                filter: Some(filter),
                 from_zone,
             } => {
                 assert_eq!(*count, 1);
@@ -9592,7 +10017,11 @@ mod tests {
         );
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         match &unless_pay.cost {
-            UnlessCost::ReturnToHand { count, filter, .. } => {
+            AbilityCost::ReturnToHand {
+                count,
+                filter: Some(filter),
+                ..
+            } => {
                 assert_eq!(*count, 1);
                 let has_another_creature = match filter {
                     TargetFilter::And { filters } => filters.iter().any(|f| {
@@ -9627,7 +10056,7 @@ mod tests {
         );
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         match &unless_pay.cost {
-            UnlessCost::ReturnToHand {
+            AbilityCost::ReturnToHand {
                 count, from_zone, ..
             } => {
                 assert_eq!(*count, 2);
@@ -9647,7 +10076,7 @@ mod tests {
         );
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         match &unless_pay.cost {
-            UnlessCost::ReturnToHand {
+            AbilityCost::ReturnToHand {
                 count, from_zone, ..
             } => {
                 assert_eq!(*count, 1);
@@ -9667,10 +10096,10 @@ mod tests {
         );
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         match &unless_pay.cost {
-            UnlessCost::ReturnToHand {
+            AbilityCost::ReturnToHand {
                 count,
                 from_zone,
-                filter,
+                filter: Some(filter),
             } => {
                 assert_eq!(*count, 1);
                 assert_eq!(
@@ -9766,7 +10195,7 @@ mod tests {
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         assert_eq!(unless_pay.payer, TargetFilter::TriggeringPlayer);
         assert!(
-            matches!(unless_pay.cost, UnlessCost::Fixed { .. }),
+            matches!(unless_pay.cost, AbilityCost::Mana { .. }),
             "cost should be Fixed mana, got {:?}",
             unless_pay.cost
         );
@@ -9782,7 +10211,7 @@ mod tests {
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         assert_eq!(unless_pay.payer, TargetFilter::TriggeringPlayer);
         assert!(
-            matches!(unless_pay.cost, UnlessCost::Fixed { .. }),
+            matches!(unless_pay.cost, AbilityCost::Mana { .. }),
             "cost should be Fixed mana, got {:?}",
             unless_pay.cost
         );
@@ -9822,7 +10251,15 @@ mod tests {
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         assert_eq!(unless_pay.payer, TargetFilter::TriggeringPlayer);
         assert!(
-            matches!(unless_pay.cost, UnlessCost::DiscardCard { filter: None }),
+            matches!(
+                unless_pay.cost,
+                AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    filter: None,
+                    random: false,
+                    self_ref: false
+                }
+            ),
             "cost should be DiscardCard, got {:?}",
             unless_pay.cost
         );
@@ -9844,6 +10281,27 @@ mod tests {
         assert!(
             execute.sub_ability.is_some(),
             "monarch branch should remain available for downstream parsing"
+        );
+    }
+
+    #[test]
+    fn trigger_unless_pay_for_each_uses_dynamic_generic_cost() {
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, sacrifice this creature unless you pay {1} for each card in your hand.",
+            "Extravagant Spirit",
+        );
+
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::Controller);
+        assert!(
+            matches!(
+                unless_pay.cost,
+                AbilityCost::ManaDynamic {
+                    quantity: QuantityExpr::Ref { .. }
+                }
+            ),
+            "unless payment should use dynamic generic cost, got {:?}",
+            unless_pay.cost
         );
     }
 
@@ -10391,7 +10849,7 @@ mod tests {
         assert_eq!(def.constraint, None);
     }
 
-    /// CR 504.2 + CR 603.7c: Dictate of Kruphix / Kami of the Crescent Moon —
+    /// CR 603.2b + CR 102.1: Dictate of Kruphix / Kami of the Crescent Moon —
     /// "At the beginning of each player's draw step, that player draws an
     /// additional card." `target` must be `ScopedPlayer`; the runtime then
     /// binds it to the active player at trigger fire time
@@ -10413,7 +10871,7 @@ mod tests {
         }
     }
 
-    /// CR 504.2 + CR 603.4 + CR 603.7c: Ghirapur Orrery — the intervening-if
+    /// CR 603.2b + CR 603.4 + CR 102.1: Ghirapur Orrery — the intervening-if
     /// "if that player has no cards in hand" must hoist onto the trigger
     /// definition as a `QuantityComparison` against `HandSize { ScopedPlayer }`,
     /// not be silently dropped. Without this, every player would draw three
@@ -10962,13 +11420,31 @@ mod tests {
 
         let execute = def.execute.as_deref().expect("execute ability");
         match &*execute.effect {
-            Effect::Sacrifice { target, count } => {
+            Effect::Sacrifice { target, count, .. } => {
                 assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
                 assert_eq!(
                     *target,
-                    TargetFilter::Typed(
-                        TypedFilter::creature().controller(ControllerRef::Opponent)
-                    )
+                    TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
+                );
+            }
+            other => panic!("expected Sacrifice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn portal_to_phyrexia_etb_scopes_each_opponent_sacrifice_to_scoped_player() {
+        let def = parse_trigger_line(
+            "When this artifact enters, each opponent sacrifices three creatures of their choice.",
+            "Portal to Phyrexia",
+        );
+        let execute = def.execute.as_deref().expect("execute ability");
+        assert_eq!(execute.player_scope, Some(PlayerFilter::Opponent));
+        match &*execute.effect {
+            Effect::Sacrifice { target, count, .. } => {
+                assert_eq!(*count, QuantityExpr::Fixed { value: 3 });
+                assert_eq!(
+                    *target,
+                    TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
                 );
             }
             other => panic!("expected Sacrifice, got {other:?}"),
@@ -11301,12 +11777,116 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::ChangesZone);
         assert_eq!(def.origin, Some(Zone::Library));
         assert_eq!(def.destination, Some(Zone::Graveyard));
+        // CR 109.5: "your graveyard" narrows valid_card.controller (the field
+        // match_changes_zone actually consults) — not just valid_target.
+        if let Some(TargetFilter::Typed(tf)) = &def.valid_card {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+        } else {
+            panic!(
+                "Expected Typed valid_card with controller=You, got {:?}",
+                def.valid_card
+            );
+        }
         assert_eq!(
             def.valid_target,
             Some(TargetFilter::Typed(
                 TypedFilter::default().controller(ControllerRef::You)
             ))
         );
+    }
+
+    /// Regression for issue #311: Undead Alchemist class. "Whenever a creature
+    /// card is put into an opponent's graveyard from their library" must:
+    ///   - set origin = Library (CR 603.6c: from-library zone constraint)
+    ///   - set valid_card.controller = Opponent (CR 109.5: "their" anaphor
+    ///     binds back to the previously named opponent; valid_card is the field
+    ///     match_changes_zone consults).
+    ///     Without these, the trigger fires when the controller's own creatures go
+    ///     from battlefield to graveyard — the user-reported softlock chain.
+    #[test]
+    fn trigger_put_into_opponent_graveyard_from_their_library() {
+        let def = parse_trigger_line(
+            "Whenever a creature card is put into an opponent's graveyard from their library, exile that card.",
+            "Undead Alchemist",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.origin, Some(Zone::Library));
+        assert_eq!(def.destination, Some(Zone::Graveyard));
+        if let Some(TargetFilter::Typed(tf)) = &def.valid_card {
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::Opponent),
+                "valid_card.controller must be Opponent so the trigger does not \
+                 fire on the source's own death"
+            );
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "Expected Creature type filter, got {:?}",
+                tf.type_filters
+            );
+        } else {
+            panic!(
+                "Expected Typed valid_card with controller=Opponent, got {:?}",
+                def.valid_card
+            );
+        }
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+    }
+
+    /// CR 109.5 + CR 700.4: Bloodchief Ascension class — "an opponent's
+    /// graveyard from anywhere". `origin = None` (no zone restriction) but
+    /// `valid_card.controller = Opponent` so the trigger only fires for cards
+    /// owned by an opponent.
+    #[test]
+    fn trigger_put_into_opponent_graveyard_from_anywhere() {
+        let def = parse_trigger_line(
+            "Whenever a card is put into an opponent's graveyard from anywhere, you gain 1 life.",
+            "Bloodchief Ascension",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.origin, None);
+        assert_eq!(def.destination, Some(Zone::Graveyard));
+        if let Some(TargetFilter::Typed(tf)) = &def.valid_card {
+            assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+        } else {
+            panic!(
+                "Expected Typed valid_card with controller=Opponent, got {:?}",
+                def.valid_card
+            );
+        }
+    }
+
+    /// CR 109.5: "a player's graveyard from any library" — owner-unscoped form.
+    /// Both possessives leave `valid_card.controller` and `origin` constrained
+    /// only on the side that matters: origin=Library (CR 603.6c) but no
+    /// controller filter on the card (since "a player" / "any" cover all).
+    #[test]
+    fn trigger_put_into_any_player_graveyard_from_any_library() {
+        let def = parse_trigger_line(
+            "Whenever a creature card is put into a player's graveyard from any library, draw a card.",
+            "Spelltracker",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.origin, Some(Zone::Library));
+        assert_eq!(def.destination, Some(Zone::Graveyard));
+        if let Some(TargetFilter::Typed(tf)) = &def.valid_card {
+            assert_eq!(tf.controller, None, "Expected no controller scope");
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "Expected Creature type filter, got {:?}",
+                tf.type_filters
+            );
+        } else {
+            panic!(
+                "Expected Typed valid_card with controller=None, got {:?}",
+                def.valid_card
+            );
+        }
     }
 
     #[test]
@@ -11326,12 +11906,20 @@ mod tests {
                 TypedFilter::default().controller(ControllerRef::You)
             ))
         );
-        // Subject filter should be creature type
+        // CR 109.5: Subject filter must carry both the creature type AND the
+        // owner-narrowed controller scope so the matcher fires only for the
+        // controller's cards.
         if let Some(TargetFilter::Typed(tf)) = &def.valid_card {
             assert!(
                 tf.type_filters.contains(&TypeFilter::Creature),
                 "Expected Creature in type_filters, got {:?}",
                 tf.type_filters
+            );
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::You),
+                "Expected controller=You merged from 'your graveyard', got {:?}",
+                tf.controller
             );
         } else {
             panic!("Expected Typed creature filter, got {:?}", def.valid_card);
@@ -11444,8 +12032,14 @@ mod tests {
         assert_eq!(def.origin, None);
         assert_eq!(def.destination, Some(Zone::Graveyard));
         assert!(def.batched);
-        // "cards" with no type restriction should have no valid_card filter
-        assert_eq!(def.valid_card, None);
+        // "your graveyard" scopes the affected cards to the controller even
+        // when "cards" carries no additional type restriction.
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You)
+            ))
+        );
     }
 
     #[test]
@@ -11547,7 +12141,12 @@ mod tests {
                 count,
                 target,
             } => {
-                assert_eq!(counter_type, "charge");
+                assert_eq!(
+                    counter_type,
+                    &Some(crate::types::counter::CounterType::Generic(
+                        "charge".to_string()
+                    ))
+                );
                 assert_eq!(*count, -1, "count=-1 is the remove-all sentinel");
                 assert!(matches!(target, TargetFilter::SelfRef));
             }
@@ -12494,7 +13093,7 @@ mod tests {
 
     // -- Nom bridge fallback integration tests --
 
-    // CR 603.4 + CR 102.1 + CR 113.3c: "that player's turn" patterns bind to
+    // CR 603.4 + CR 102.1: "that player's turn" patterns bind to
     // the trigger event's player (drawer / tapper / damaged player / etc.), not
     // the trigger controller. Both the affirmative ("if it's") and negation
     // ("if it isn't" / "if it's not") forms are parsed via the source-referential
@@ -12890,7 +13489,7 @@ mod tests {
         assert_eq!(
             cond.unwrap(),
             TriggerCondition::HadCounters {
-                counter_type: Some("+1/+1".to_string()),
+                counter_type: Some(crate::types::counter::CounterType::Plus1Plus1),
             }
         );
     }
@@ -13772,7 +14371,10 @@ mod tests {
                 target,
                 counter_type,
             } => {
-                assert_eq!(counter_type, "P1P1");
+                assert_eq!(
+                    counter_type,
+                    &crate::types::counter::CounterType::Plus1Plus1
+                );
                 assert_eq!(
                     count,
                     &QuantityExpr::Ref {
@@ -13947,9 +14549,10 @@ mod tests {
                 target,
                 ..
             } => {
-                // +1/+1 counters use the normalized "P1P1" canonical form
-                // (see oracle_effect::counter::normalize_counter_type).
-                assert_eq!(counter_type, "P1P1");
+                assert_eq!(
+                    counter_type,
+                    &crate::types::counter::CounterType::Plus1Plus1
+                );
                 assert!(
                     matches!(target, TargetFilter::SelfRef),
                     "+1/+1 counter must land on the post-copy self, got {target:?}"
@@ -14054,6 +14657,63 @@ mod tests {
             }
             other => panic!("expected BecomeCopy, got {other:?}"),
         }
+    }
+
+    /// CR 208.1 + CR 603.4 + CR 109.3: Selvala, Heart of the Wilds — the ETB
+    /// trigger fires unconditionally for every other creature, but the "may
+    /// draw a card" effect is gated on the triggering creature's power being
+    /// strictly greater than the max power of every other creature.
+    /// Regression for the silently-dropped intervening-if condition (#333).
+    #[test]
+    fn trigger_intervening_if_selvala_power_greater_than_each_other() {
+        let def = parse_trigger_line(
+            "Whenever another creature enters, its controller may draw a card if its power is greater than each other creature's power.",
+            "Selvala, Heart of the Wilds",
+        );
+        let Some(TriggerCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        }) = &def.condition
+        else {
+            panic!(
+                "expected QuantityComparison intervening-if, got {:?}",
+                def.condition
+            );
+        };
+        // LHS: the triggering creature's power.
+        assert_eq!(*comparator, Comparator::GT);
+        assert_eq!(
+            *lhs,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::EventSource,
+                },
+            }
+        );
+        // RHS: Max(power) across creatures excluding the triggering object.
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::Aggregate {
+                    function,
+                    property,
+                    filter,
+                },
+        } = rhs
+        else {
+            panic!("expected Aggregate Max Power rhs, got {rhs:?}");
+        };
+        assert_eq!(*function, AggregateFunction::Max);
+        assert_eq!(*property, crate::types::ability::ObjectProperty::Power);
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed creature filter, got {filter:?}");
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+        assert!(
+            tf.properties.contains(&FilterProp::OtherThanTriggerObject),
+            "expected OtherThanTriggerObject in aggregate filter, got {:?}",
+            tf.properties
+        );
     }
 }
 

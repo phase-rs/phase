@@ -540,8 +540,16 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
     };
     let actor = PlayerId(actor);
 
+    // In P2P-host multiplayer mode, debug actions are gated on the
+    // sandbox per-player permission set, mirroring the server-core gate.
+    // Single-player (non-multiplayer) WASM ignores this branch entirely.
     if matches!(action, GameAction::Debug(_)) && is_multiplayer_mode() {
-        return JsValue::from_str("Engine error: debug actions disabled in multiplayer");
+        let permitted = with_state(|state| state.debug_permitted.contains(&actor)).unwrap_or(false);
+        if !permitted {
+            return JsValue::from_str(
+                "Engine error: debug actions disabled (Sandbox mode off or no permission)",
+            );
+        }
     }
 
     if let GameAction::Debug(engine::types::actions::DebugAction::CreateCard {

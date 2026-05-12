@@ -4,10 +4,13 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use super::ability::{AbilityCost, CardPlayMode, QuantityExpr, QuantityRef, TargetFilter};
+use super::ability::{
+    AbilityCost, CardPlayMode, CostCategory, QuantityExpr, QuantityRef, TargetFilter,
+};
 use super::keywords::Keyword;
 use super::mana::{ManaColor, ManaCost};
 use super::phase::Phase;
+use super::zones::Zone;
 
 /// CR 109.5 + CR 102.1: The "who" axis of a continuous prohibition static.
 ///
@@ -178,6 +181,29 @@ impl fmt::Display for ActivationExemption {
         match self {
             ActivationExemption::None => write!(f, "none"),
             ActivationExemption::ManaAbilities => write!(f, "mana"),
+        }
+    }
+}
+
+/// CR 118.3 + CR 119.4b + CR 601.2h + CR 602.2b: A non-mana cost payment
+/// category prohibited by a static ability.
+///
+/// This is intentionally cost-scoped. `PayLife` blocks paying life as a cost
+/// without preventing damage or other life loss, unlike `CantLoseLife`.
+/// `Sacrifice` carries the object filter for the permanents that can't be
+/// sacrificed as costs, allowing "sacrifice a permanent" costs to remain
+/// payable with legal permanents outside the forbidden filter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CostPaymentProhibition {
+    PayLife,
+    Sacrifice { filter: TargetFilter },
+}
+
+impl fmt::Display for CostPaymentProhibition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CostPaymentProhibition::PayLife => write!(f, "PayLife"),
+            CostPaymentProhibition::Sacrifice { .. } => write!(f, "Sacrifice"),
         }
     }
 }
@@ -383,6 +409,27 @@ pub enum StaticMode {
         /// "This effect can't reduce the mana in that cost to less than one mana."
         #[serde(default, skip_serializing_if = "Option::is_none")]
         minimum_mana: Option<u32>,
+        /// CR 601.2f: Dynamic multiplier for cost reduction (e.g., "for each Dragon you control").
+        /// When present, the total reduction is `amount * resolve_quantity(dynamic_count)`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dynamic_count: Option<QuantityRef>,
+    },
+    /// CR 702.142b: Modifies the per-turn activation limit for abilities matching
+    /// a keyword tag. E.g., "Creatures you control can boast twice during each of
+    /// your turns rather than once" → overrides `OnlyOnceEachTurn` to `MaxTimesEachTurn(2)`
+    /// for boast-tagged abilities on affected permanents.
+    ModifyActivationLimit {
+        /// The keyword tag whose activation limit is modified.
+        keyword: String,
+        /// The new per-turn activation count.
+        new_limit: u8,
+    },
+    /// CR 602.5e + CR 611.3a: Static permission allowing affected permanents'
+    /// activated abilities in the specified cost category to be activated at
+    /// instant timing. The affected permanent filter lives on `StaticDefinition`.
+    /// Canonical class: The Wandering Emperor's same-turn loyalty permission.
+    ActivateAsInstant {
+        cost_category: CostCategory,
     },
     /// CR 601.2f: Increases the cost of spells matching the filter.
     /// Permanent-based cost increase applied during casting (Thalia, etc.).
@@ -390,6 +437,44 @@ pub enum StaticMode {
         amount: ManaCost,
         spell_filter: Option<TargetFilter>,
         dynamic_count: Option<QuantityRef>,
+    },
+    /// CR 601.2f: Floors the total mana cost of matching spells. Per CR 601.2f,
+    /// this belongs to the "any effects that directly affect the total cost"
+    /// step that runs after all additive/subtractive cost modifiers and just
+    /// before the cost is "locked in." Trinisphere class: "each spell that
+    /// would cost less than three mana to cast costs three mana to cast."
+    ///
+    /// Per the Trinisphere ruling: "apply Trinisphere's effect if the mana
+    /// component of the spell's cost is less than three mana" — applied last,
+    /// after RaiseCost / ReduceCost / pending reductions / Affinity have all
+    /// settled. The floor never reduces a cost.
+    ///
+    /// `amount` is the floor expressed as a `ManaCost` (always pure-generic in
+    /// printed cards; shape-shared with `RaiseCost`/`ReduceCost` for uniform
+    /// serialization). The runtime compares `mana_cost.mana_value()` against
+    /// `amount.mana_value()` and tops up generic mana to reach the floor —
+    /// colored requirements are never modified, per the Trinisphere reminder
+    /// text "Additional mana ... may be paid with any color of mana or
+    /// colorless mana."
+    ///
+    /// `spell_filter` narrows which spells are floored. `None` = all spells
+    /// (Trinisphere). No `dynamic_count` field — printed cost-floor effects
+    /// are always a fixed amount, distinguishing this variant's shape from
+    /// its `RaiseCost`/`ReduceCost` siblings.
+    MinimumCost {
+        amount: ManaCost,
+        spell_filter: Option<TargetFilter>,
+    },
+    /// CR 118.3 + CR 601.2h + CR 602.2b: The scoped player can't pay a
+    /// matching non-mana cost to cast spells or activate abilities.
+    ///
+    /// Yasharn's class: "Players can't pay life or sacrifice nonland
+    /// permanents to cast spells or activate abilities." This does not stop
+    /// life loss or effect-driven sacrifices; it is enforced only at cost
+    /// payability/payment boundaries.
+    CantPayCost {
+        who: ProhibitionScope,
+        cost: CostPaymentProhibition,
     },
     CantGainLife,
     CantLoseLife,
@@ -424,6 +509,12 @@ pub enum StaticMode {
         frequency: CastFrequency,
         /// Play (lands+spells) vs Cast (spells only)
         play_mode: CardPlayMode,
+        /// CR 614.1a: "If a spell cast this way would be put into your
+        /// graveyard, exile it instead." This is narrower than flashback: it
+        /// replaces only stack-to-graveyard destinations produced by this
+        /// permission.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        graveyard_destination_replacement: Option<Zone>,
     },
     /// CR 401.5 + CR 118.9 + CR 601.2a: Static ability granting permission to
     /// play/cast the top card of the controller's library when it matches
@@ -571,6 +662,10 @@ pub enum StaticMode {
     CantUntap,
     /// CR 509.1c: This creature must be blocked if able.
     MustBeBlocked,
+    /// CR 701.15b: This creature is goaded for as long as the static applies.
+    /// The source controller is the goading player for the "attack another
+    /// player if able" requirement.
+    Goaded,
     CantAttackAlone,
     CantBlockAlone,
     MayLookAtTopOfLibrary,
@@ -657,10 +752,18 @@ impl Hash for StaticMode {
                 keyword,
                 amount,
                 minimum_mana,
+                ..
             } => {
                 keyword.hash(state);
                 amount.hash(state);
                 minimum_mana.hash(state);
+            }
+            StaticMode::ModifyActivationLimit { keyword, new_limit } => {
+                keyword.hash(state);
+                new_limit.hash(state);
+            }
+            StaticMode::ActivateAsInstant { cost_category } => {
+                cost_category.hash(state);
             }
             StaticMode::ExtraBlockers { count } => count.hash(state),
             StaticMode::RevealTopOfLibrary { all_players } => all_players.hash(state),
@@ -671,9 +774,11 @@ impl Hash for StaticMode {
             StaticMode::GraveyardCastPermission {
                 frequency,
                 play_mode,
+                graveyard_destination_replacement,
             } => {
                 frequency.hash(state);
                 play_mode.hash(state);
+                graveyard_destination_replacement.hash(state);
             }
             StaticMode::TopOfLibraryCastPermission { play_mode, .. } => {
                 // alt_cost contains AbilityCost which lacks Hash; discriminant + play_mode only.
@@ -688,6 +793,8 @@ impl Hash for StaticMode {
             // These are never used as HashMap keys (handled by is_data_carrying_static).
             StaticMode::ReduceCost { .. }
             | StaticMode::RaiseCost { .. }
+            | StaticMode::MinimumCost { .. }
+            | StaticMode::CantPayCost { .. }
             | StaticMode::DefilerCostReduction { .. }
             | StaticMode::CantDraw { .. }
             | StaticMode::PerTurnCastLimit { .. }
@@ -728,6 +835,7 @@ impl fmt::Display for StaticMode {
                 keyword,
                 amount,
                 minimum_mana,
+                ..
             } => {
                 if let Some(minimum_mana) = minimum_mana {
                     write!(f, "ReduceAbilityCost({keyword},{amount},{minimum_mana})")
@@ -735,7 +843,15 @@ impl fmt::Display for StaticMode {
                     write!(f, "ReduceAbilityCost({keyword},{amount})")
                 }
             }
+            StaticMode::ModifyActivationLimit { keyword, new_limit } => {
+                write!(f, "ModifyActivationLimit({keyword},{new_limit})")
+            }
+            StaticMode::ActivateAsInstant { cost_category } => {
+                write!(f, "ActivateAsInstant({cost_category:?})")
+            }
             StaticMode::RaiseCost { .. } => write!(f, "RaiseCost"),
+            StaticMode::MinimumCost { .. } => write!(f, "MinimumCost"),
+            StaticMode::CantPayCost { who, cost } => write!(f, "CantPayCost({who},{cost})"),
             StaticMode::CantGainLife => write!(f, "CantGainLife"),
             StaticMode::CantLoseLife => write!(f, "CantLoseLife"),
             StaticMode::MustAttack => write!(f, "MustAttack"),
@@ -746,7 +862,17 @@ impl fmt::Display for StaticMode {
             StaticMode::GraveyardCastPermission {
                 frequency,
                 play_mode,
-            } => write!(f, "GraveyardCastPermission({play_mode},{frequency})"),
+                graveyard_destination_replacement,
+            } => {
+                if matches!(graveyard_destination_replacement, Some(Zone::Exile)) {
+                    write!(
+                        f,
+                        "GraveyardCastPermission({play_mode},{frequency},exile_on_graveyard)"
+                    )
+                } else {
+                    write!(f, "GraveyardCastPermission({play_mode},{frequency})")
+                }
+            }
             StaticMode::TopOfLibraryCastPermission {
                 play_mode,
                 alt_cost,
@@ -809,6 +935,7 @@ impl fmt::Display for StaticMode {
             StaticMode::CantTap => write!(f, "CantTap"),
             StaticMode::CantUntap => write!(f, "CantUntap"),
             StaticMode::MustBeBlocked => write!(f, "MustBeBlocked"),
+            StaticMode::Goaded => write!(f, "Goaded"),
             StaticMode::CantAttackAlone => write!(f, "CantAttackAlone"),
             StaticMode::CantBlockAlone => write!(f, "CantBlockAlone"),
             StaticMode::MayLookAtTopOfLibrary => write!(f, "MayLookAtTopOfLibrary"),
@@ -889,6 +1016,7 @@ impl FromStr for StaticMode {
                             keyword: kw.to_string(),
                             amount: amt.parse().unwrap_or(1),
                             minimum_mana: extra.and_then(|value| value.parse().ok()),
+                            dynamic_count: None,
                         }
                     } else {
                         StaticMode::Other(s.to_string())
@@ -897,10 +1025,50 @@ impl FromStr for StaticMode {
                     StaticMode::Other(s.to_string())
                 }
             }
+            s if s.starts_with("ModifyActivationLimit(") => {
+                let inner = s
+                    .strip_prefix("ModifyActivationLimit(")
+                    .and_then(|s| s.strip_suffix(')'));
+                if let Some(inner) = inner {
+                    let mut parts = inner.split(',');
+                    if let (Some(kw), Some(limit)) = (parts.next(), parts.next()) {
+                        StaticMode::ModifyActivationLimit {
+                            keyword: kw.to_string(),
+                            new_limit: limit.parse().unwrap_or(2),
+                        }
+                    } else {
+                        StaticMode::Other(s.to_string())
+                    }
+                } else {
+                    StaticMode::Other(s.to_string())
+                }
+            }
+            s if s.starts_with("ActivateAsInstant(") => {
+                let inner = s
+                    .strip_prefix("ActivateAsInstant(")
+                    .and_then(|s| s.strip_suffix(')'));
+                match inner {
+                    Some("PaysLoyalty") => StaticMode::ActivateAsInstant {
+                        cost_category: CostCategory::PaysLoyalty,
+                    },
+                    _ => StaticMode::Other(s.to_string()),
+                }
+            }
             "RaiseCost" => StaticMode::RaiseCost {
                 amount: ManaCost::zero(),
                 spell_filter: None,
                 dynamic_count: None,
+            },
+            // CR 601.2f: Cost-floor static (Trinisphere class). Legacy unit-string
+            // defaults to a zero floor — meaningful instances are constructed via
+            // the parser with the printed amount.
+            "MinimumCost" => StaticMode::MinimumCost {
+                amount: ManaCost::zero(),
+                spell_filter: None,
+            },
+            "CantPayCost" => StaticMode::CantPayCost {
+                who: ProhibitionScope::AllPlayers,
+                cost: CostPaymentProhibition::PayLife,
             },
             "CantGainLife" => StaticMode::CantGainLife,
             "CantLoseLife" => StaticMode::CantLoseLife,
@@ -920,21 +1088,27 @@ impl FromStr for StaticMode {
             "GraveyardCastPermission" => StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::OncePerTurn,
                 play_mode: CardPlayMode::Cast,
+                graveyard_destination_replacement: None,
             },
             s if s.starts_with("GraveyardCastPermission(") => {
                 let inner = s
                     .strip_prefix("GraveyardCastPermission(")
                     .and_then(|s| s.strip_suffix(')'))
                     .unwrap_or("");
-                if let Some((pm, freq)) = inner.split_once(',') {
+                let parts = inner.split(',').collect::<Vec<_>>();
+                if let [pm, freq, rest @ ..] = parts.as_slice() {
                     StaticMode::GraveyardCastPermission {
                         play_mode: pm.parse().unwrap_or(CardPlayMode::Cast),
                         frequency: freq.parse().unwrap_or(CastFrequency::OncePerTurn),
+                        graveyard_destination_replacement: rest
+                            .contains(&"exile_on_graveyard")
+                            .then_some(Zone::Exile),
                     }
                 } else {
                     StaticMode::GraveyardCastPermission {
                         frequency: CastFrequency::OncePerTurn,
                         play_mode: CardPlayMode::Cast,
+                        graveyard_destination_replacement: None,
                     }
                 }
             }
@@ -991,6 +1165,7 @@ impl FromStr for StaticMode {
             "CantTap" => StaticMode::CantTap,
             "CantUntap" => StaticMode::CantUntap,
             "MustBeBlocked" => StaticMode::MustBeBlocked,
+            "Goaded" => StaticMode::Goaded,
             "CantAttackAlone" => StaticMode::CantAttackAlone,
             "CantBlockAlone" => StaticMode::CantBlockAlone,
             "MayLookAtTopOfLibrary" => StaticMode::MayLookAtTopOfLibrary,
@@ -1301,10 +1476,12 @@ mod tests {
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::OncePerTurn,
                 play_mode: CardPlayMode::Cast,
+                graveyard_destination_replacement: None,
             },
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::Unlimited,
                 play_mode: CardPlayMode::Play,
+                graveyard_destination_replacement: None,
             },
             // Cast-from-hand-free permissions (Omniscience; Zaffai).
             StaticMode::CastFromHandFree {

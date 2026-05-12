@@ -12,7 +12,7 @@ import { useBoardInteractionState } from "./BoardInteractionContext.tsx";
 import { PermanentCard } from "./PermanentCard.tsx";
 import {
   GROUP_STAGGER_PX,
-  getCreatureGroupRenderMode,
+  getGroupRenderMode,
   type BattlefieldRowType,
 } from "./groupRenderMode.ts";
 
@@ -74,7 +74,7 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
     return group.ids.some((id) => committedAttackerIds.has(id));
   }, [combatMode, committedAttackerIds, group.ids, rowType]);
 
-  const renderMode = getCreatureGroupRenderMode(group, rowType, {
+  const renderMode = getGroupRenderMode(group, {
     manualExpanded,
     containsCommittedAttackerDuringBlockers: containsAttacker,
   });

@@ -104,13 +104,15 @@ run_tool_with_recovery() {
   local output_file="$1"
   shift
 
-  if "$@" > "$output_file"; then
-    return 0
-  fi
-
-  echo "Tool profile build failed; clearing target/tool and retrying once..." >&2
-  rm -rf target/tool
   "$@" > "$output_file"
+
+  #if "$@" > "$output_file"; then
+  #  return 0
+  #fi
+
+  #echo "Tool profile build failed; clearing target/tool and retrying once..." >&2
+  #rm -rf target/tool
+  #"$@" > "$output_file"
 }
 
 OUTPUT_TMP="${OUTPUT}.tmp"

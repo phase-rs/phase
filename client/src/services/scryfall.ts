@@ -80,12 +80,15 @@ export function loadPrintingsData(): Promise<PrintingsDataMap | null> {
 export function hasAlternatePrintingsSync(oracleId: string): boolean {
   if (!printingsDataResolved) return false;
   const printings = printingsDataResolved[oracleId];
-  return printings != null && printings.length > 0;
+  if (!printings) return false;
+  const nonList = printings.filter((p) => p.set !== "plst");
+  return nonList.length > 1;
 }
 
 export async function getCardPrintings(oracleId: string): Promise<PrintingEntry[]> {
   const data = await loadPrintingsData();
-  return data?.[oracleId] ?? [];
+  const printings = data?.[oracleId] ?? [];
+  return printings.filter((p) => p.set !== "plst");
 }
 
 export async function getCardPrintingsByName(cardName: string): Promise<PrintingEntry[]> {

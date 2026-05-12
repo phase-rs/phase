@@ -29,9 +29,12 @@ export interface PlayerAvatar {
   cardName: string;
 }
 
-export function assignRandomAvatars(playerCount: number, seed?: number): PlayerAvatar[] {
+export function assignRandomAvatars(playerCount: number, seed?: number | string): PlayerAvatar[] {
   const shuffled = [...PLANESWALKER_IDENTITIES];
-  const random = mulberry32(seed ?? Date.now());
+  const numericSeed = typeof seed === "string"
+    ? hashStringToSeed(seed)
+    : seed ?? Date.now();
+  const random = mulberry32(numericSeed);
   for (let i = shuffled.length - 1; i > 0; i--) {
     const j = Math.floor(random() * (i + 1));
     [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
@@ -48,6 +51,14 @@ export async function fetchAvatarArtUrl(cardName: string): Promise<string | null
   } catch {
     return null;
   }
+}
+
+function hashStringToSeed(s: string): number {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) {
+    h = ((h * 33) ^ s.charCodeAt(i)) | 0;
+  }
+  return h >>> 0;
 }
 
 function mulberry32(seed: number): () => number {

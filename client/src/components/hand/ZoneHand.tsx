@@ -60,17 +60,20 @@ export function ZoneHand({ zone }: ZoneHandProps) {
     return new Set(Object.keys(legalActionsByObject ?? {}).map(Number));
   }, [legalActionsByObject]);
 
-  // Filter zone objects to only castable/activatable ones, excluding face-down cards
+  // Filter zone objects to only castable/activatable ones — engine authority.
+  //
+  // CR 702.143a: Foretold cards in exile are face-down but their owner may
+  // look at them and cast them on a later turn. The engine surfaces
+  // `CastSpell` for foretold (and other "may cast from exile" mechanics like
+  // Plot, Suspend, Warp) only when the timing/permission predicates pass, so
+  // `actionableObjectIds.has(...)` is the single authority. Adding a
+  // client-side `!face_down` filter here was a logic-layer override that
+  // hid foretold cards from their owner — fixed for issue #320.
   const castableObjects = useMemo(() => {
     if (!objects) return [];
     return zoneObjectIds
       .map((id) => objects[id])
-      .filter(
-        (obj) =>
-          obj &&
-          !obj.face_down &&
-          actionableObjectIds.has(Number(obj.id)),
-      );
+      .filter((obj) => obj && actionableObjectIds.has(Number(obj.id)));
   }, [zoneObjectIds, objects, actionableObjectIds]);
 
   const playCard = useCallback(

@@ -1,5 +1,9 @@
 use crate::ai_support::copy_target_mana_value_ceiling;
-use crate::types::ability::{AbilityDefinition, Effect, ResolvedAbility, TargetFilter, TargetRef};
+use crate::types::ability::{
+    AbilityDefinition, Effect, PostReplacementContinuation, ResolvedAbility, TargetFilter,
+    TargetRef,
+};
+use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
@@ -7,11 +11,14 @@ use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
+use super::ability_utils::build_resolved_from_def_with_targets;
 use super::effects;
 use super::effects::deal_damage::{apply_damage_after_replacement, DamageContext};
 use super::effects::destroy::apply_destroy_after_replacement;
 use super::effects::draw::apply_draw_after_replacement;
 use super::effects::life::{apply_life_gain_after_replacement, apply_life_loss_after_replacement};
+use super::effects::mill::apply_mill_after_replacement;
+use super::effects::scry::apply_scry_after_replacement;
 use super::effects::token::apply_create_token_after_replacement;
 use super::engine::EngineError;
 use super::sacrifice::apply_sacrifice_after_replacement;
@@ -166,6 +173,16 @@ pub(super) fn handle_replacement_choice(
                 draw @ ProposedEvent::Draw { .. } => {
                     apply_draw_after_replacement(state, draw, events);
                 }
+                // CR 701.22a: Scry accepted after replacement choice.
+                scry @ ProposedEvent::Scry { .. } => {
+                    apply_scry_after_replacement(state, scry, events);
+                }
+                // CR 701.17a: Mill accepted after replacement choice — delegate
+                // to the shared helper so count clamping and library movement
+                // match the non-choice delivery.
+                mill @ ProposedEvent::Mill { .. } => {
+                    let _ = apply_mill_after_replacement(state, mill, events);
+                }
                 // CR 119.1: Life gain accepted after replacement choice.
                 gain @ ProposedEvent::LifeGain { .. } => {
                     apply_life_gain_after_replacement(state, gain, events);
@@ -278,17 +295,14 @@ pub(super) fn handle_replacement_choice(
                 replacement_ctx = Some(ctx);
             }
 
-            if let Some(effect_def) = state.post_replacement_effect.take() {
+            if state.post_replacement_continuation.is_some() {
                 // The ETB-replacement post-effect resolves against the
                 // zone-changing object, not the replacement source — drop the
                 // source slot so it doesn't leak into an unrelated later
                 // replacement.
                 state.post_replacement_source = None;
-                state.post_replacement_event_source = None;
-                state.post_replacement_event_target = None;
-                if let Some(next_waiting_for) = apply_post_replacement_effect(
+                if let Some(next_waiting_for) = apply_pending_post_replacement_effect(
                     state,
-                    &effect_def,
                     zone_change_object_id,
                     replacement_ctx.as_ref(),
                     events,
@@ -358,7 +372,7 @@ pub(super) fn handle_copy_target_choice(
 
     let ability = copy_effect_for_source(state, source_id)
         .map(|effect_def| {
-            resolved_ability_from_definition(
+            build_resolved_from_def_with_targets(
                 effect_def,
                 source_id,
                 player,
@@ -379,7 +393,40 @@ pub(super) fn handle_copy_target_choice(
             )
         });
     let _ = effects::resolve_ability_chain(state, &ability, events, 0);
+    crate::game::layers::evaluate_layers(state);
+    let enter_modifiers =
+        super::replacement::current_self_enter_replacement_modifiers(state, source_id);
+    if let Some(tapped) = enter_modifiers.enter_tapped {
+        if let Some(obj) = state.objects.get_mut(&source_id) {
+            obj.tapped = tapped;
+        }
+    }
+    apply_etb_counters(state, source_id, &enter_modifiers.counters, events);
     state.layers_dirty = true;
+    // CR 614.12a + CR 707.9: The battlefield-entry `ZoneChanged` event was
+    // captured into `state.deferred_entry_events` when `CopyTargetChoice` was
+    // set up, *before* `BecomeCopy` had a chance to push the copied object's
+    // characteristics and any `GrantTrigger` continuous modifications (e.g.
+    // Callidus Assassin's "destroy another creature with the same name")
+    // into `trigger_definitions`. With the copy now resolved and layers
+    // re-evaluated, replay those events through the same trigger pipeline
+    // the pipeline would have run for them (`process_triggers` for CR 603.2
+    // event-based triggers + `check_delayed_triggers` for CR 603.7c delayed
+    // triggers) so granted ETBs and observer ETBs (Soul Warden) match
+    // against the realized copy. Replay is gated on the source still being
+    // on the battlefield — concede / error / chained-replacement paths can
+    // leave a stale event in the vec, and we discard rather than fire a
+    // phantom entry trigger.
+    let deferred = std::mem::take(&mut state.deferred_entry_events);
+    let source_still_on_battlefield = state
+        .objects
+        .get(&source_id)
+        .is_some_and(|obj| obj.zone == Zone::Battlefield);
+    if !deferred.is_empty() && source_still_on_battlefield {
+        super::triggers::process_triggers(state, &deferred);
+        let delayed_events = super::triggers::check_delayed_triggers(state, &deferred);
+        events.extend(delayed_events);
+    }
     effects::drain_pending_continuation(state, events);
     Ok(WaitingFor::Priority {
         player: state.active_player,
@@ -452,8 +499,88 @@ pub(super) fn apply_post_replacement_effect(
         .map(TargetRef::Object)
         .into_iter()
         .collect::<Vec<_>>();
-    let resolved = resolved_ability_from_definition(effect_def, source_id, controller, targets);
+    let resolved = build_resolved_from_def_with_targets(effect_def, source_id, controller, targets);
     let _ = effects::resolve_ability_chain(state, &resolved, events, 0);
+
+    match &state.waiting_for {
+        WaitingFor::Priority { .. } => None,
+        wf => Some(wf.clone()),
+    }
+}
+
+pub(super) fn apply_pending_post_replacement_effect(
+    state: &mut GameState,
+    object_id: Option<ObjectId>,
+    spell_resolution: Option<&crate::types::game_state::PendingSpellResolution>,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
+    let source = state.post_replacement_source.take().or(object_id);
+    // CR 614.12a + CR 615.5: Single dispatch on the unified continuation slot.
+    // `Resolved` carries captured targets (prevention follow-ups); `Template`
+    // is an AST that resolves against `source` for ETB / Optional accept.
+    let waiting_for = match state.post_replacement_continuation.take() {
+        Some(PostReplacementContinuation::Resolved(resolved)) => {
+            apply_post_replacement_resolved_effect(state, &resolved, events)
+        }
+        Some(PostReplacementContinuation::Template(effect_def)) => {
+            apply_post_replacement_effect(state, &effect_def, source, spell_resolution, events)
+        }
+        None => None,
+    };
+    state.post_replacement_event_source = None;
+    state.post_replacement_event_target = None;
+    // CR 614.12a + CR 707.9: When the post-effect pauses on `CopyTargetChoice`,
+    // the entering object's battlefield-entry `ZoneChanged` event is already
+    // in `events` (emitted by the prior `move_to_zone`). `BecomeCopy` and its
+    // `GrantTrigger` modifications haven't been applied yet, so a trigger
+    // scan over that event right now would miss every granted ETB (Callidus
+    // Assassin's destroy-same-name). Defer the event into
+    // `state.deferred_entry_events`; `handle_copy_target_choice` replays it
+    // after `BecomeCopy` resolves and layers re-evaluate. Captured at the
+    // single producer site so both the stack-resolution path (non-optional
+    // copy replacements) and the `handle_replacement_choice` path (optional
+    // "you may have this enter as a copy" replacements) defer uniformly.
+    capture_deferred_entry_events_if_copy_target_choice(state, waiting_for.as_ref(), events);
+    waiting_for
+}
+
+/// CR 614.12a + CR 707.9: If `waiting_for` is `CopyTargetChoice`, clone any
+/// battlefield-entry `ZoneChanged` events for the entering source into
+/// `state.deferred_entry_events`. The original `events` vec is preserved so
+/// the frontend animates the entry as soon as the spell resolves; the deferred
+/// copy is replayed through `process_triggers` / `check_delayed_triggers` once
+/// `BecomeCopy` resolves in `handle_copy_target_choice`.
+///
+/// Defense in depth: clears any stale events from a prior `CopyTargetChoice`
+/// that exited abnormally (concede mid-choice, eliminate_player, error return
+/// before drain) so the replay never fires triggers against a phantom object.
+fn capture_deferred_entry_events_if_copy_target_choice(
+    state: &mut GameState,
+    waiting_for: Option<&WaitingFor>,
+    events: &[GameEvent],
+) {
+    let Some(WaitingFor::CopyTargetChoice { source_id, .. }) = waiting_for else {
+        return;
+    };
+    let source_id = *source_id;
+    state.deferred_entry_events.clear();
+    for event in events {
+        if matches!(
+            event,
+            GameEvent::ZoneChanged { object_id, to, .. }
+                if *object_id == source_id && *to == Zone::Battlefield
+        ) {
+            state.deferred_entry_events.push(event.clone());
+        }
+    }
+}
+
+fn apply_post_replacement_resolved_effect(
+    state: &mut GameState,
+    resolved: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
+    let _ = effects::resolve_ability_chain(state, resolved, events, 0);
 
     match &state.waiting_for {
         WaitingFor::Priority { .. } => None,
@@ -477,6 +604,9 @@ fn apply_pending_spell_resolution(
     // replacement / triggered abilities can gate on which kickers were paid.
     if let Some(obj) = state.objects.get_mut(&ctx.object_id) {
         obj.cast_from_zone = ctx.cast_from_zone;
+        if let Some(permission) = ctx.cast_timing_permission {
+            obj.cast_timing_permission = Some((permission, state.turn_number));
+        }
         obj.kickers_paid.clone_from(&ctx.kickers_paid);
         obj.convoked_creatures.clone_from(&ctx.convoked_creatures);
     }
@@ -577,7 +707,7 @@ fn apply_pending_spell_resolution(
 pub(super) fn apply_etb_counters(
     state: &mut GameState,
     object_id: ObjectId,
-    counters: &[(String, u32)],
+    counters: &[(CounterType, u32)],
     events: &mut Vec<GameEvent>,
 ) {
     let actor = state
@@ -585,10 +715,14 @@ pub(super) fn apply_etb_counters(
         .get(&object_id)
         .map(|obj| obj.controller)
         .unwrap_or(PlayerId(0));
-    for (counter_type_str, count) in counters {
-        let ct = crate::types::counter::parse_counter_type(counter_type_str);
+    for (counter_type, count) in counters {
         super::effects::counters::add_counter_with_replacement(
-            state, actor, object_id, ct, *count, events,
+            state,
+            actor,
+            object_id,
+            counter_type.clone(),
+            *count,
+            events,
         );
     }
 }
@@ -620,39 +754,6 @@ fn find_copy_targets(
         .collect()
 }
 
-fn resolved_ability_from_definition(
-    def: &AbilityDefinition,
-    source_id: ObjectId,
-    controller: PlayerId,
-    targets: Vec<TargetRef>,
-) -> ResolvedAbility {
-    let mut resolved =
-        ResolvedAbility::new(*def.effect.clone(), targets, source_id, controller).kind(def.kind);
-    if let Some(sub) = &def.sub_ability {
-        resolved = resolved.sub_ability(resolved_ability_from_definition(
-            sub,
-            source_id,
-            controller,
-            Vec::new(),
-        ));
-    }
-    if let Some(else_ab) = &def.else_ability {
-        resolved.else_ability = Some(Box::new(resolved_ability_from_definition(
-            else_ab,
-            source_id,
-            controller,
-            Vec::new(),
-        )));
-    }
-    if let Some(d) = def.duration.clone() {
-        resolved = resolved.duration(d);
-    }
-    if let Some(c) = def.condition.clone() {
-        resolved = resolved.condition(c);
-    }
-    resolved
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::game_object::GameObject;
@@ -660,7 +761,9 @@ mod tests {
     use crate::game::engine::apply_as_current;
     use crate::game::replacement::{self as replacement_mod, ReplacementResult};
     use crate::game::zones::create_object;
-    use crate::types::ability::{ReplacementDefinition, ReplacementMode};
+    use crate::types::ability::{
+        AbilityKind, QuantityExpr, ReplacementDefinition, ReplacementMode,
+    };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
@@ -1167,6 +1270,384 @@ mod tests {
         assert!(
             !targets.contains(&gy_creature),
             "Clone with no zone filter must not leak into the graveyard"
+        );
+    }
+
+    /// 2026-05-09 audit M4 regression: the unified
+    /// `post_replacement_continuation` slot dispatches a `Template` arm by
+    /// resolving the AST against the supplied source — the pre-fold path
+    /// that used `state.post_replacement_effect`.
+    #[test]
+    fn post_replacement_continuation_template_dispatches_against_source() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Lossy Land".to_string(),
+            Zone::Battlefield,
+        );
+        let initial_life = state.players[0].life;
+
+        let template = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: None,
+            },
+        );
+        state.post_replacement_continuation =
+            Some(PostReplacementContinuation::Template(Box::new(template)));
+
+        let mut events = Vec::new();
+        let waiting =
+            apply_pending_post_replacement_effect(&mut state, Some(source), None, &mut events);
+
+        // Resolved cleanly — no follow-up WaitingFor and slot drained.
+        assert!(waiting.is_none(), "Template path resolved without prompt");
+        assert!(state.post_replacement_continuation.is_none());
+        // Source's controller (P0) lost 2 life.
+        assert_eq!(state.players[0].life, initial_life - 2);
+    }
+
+    /// 2026-05-09 audit M4 regression: the unified slot dispatches a
+    /// `Resolved` arm by resolving the captured `ResolvedAbility` directly
+    /// — the pre-fold path that used `state.post_replacement_resolved_effect`
+    /// (e.g. Phyrexian Hydra's runtime-built prevention follow-up).
+    #[test]
+    fn post_replacement_continuation_resolved_dispatches_directly() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Shielded Hydra".to_string(),
+            Zone::Battlefield,
+        );
+        let initial_life = state.players[1].life;
+
+        // Build a resolved follow-up that targets P1 explicitly — emulates the
+        // runtime_execute path where the source/controller and counter quantity
+        // are captured at shield-creation time.
+        let resolved = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: Some(TargetFilter::Controller),
+            },
+            Vec::new(),
+            source,
+            PlayerId(1),
+        );
+        state.post_replacement_continuation =
+            Some(PostReplacementContinuation::Resolved(Box::new(resolved)));
+
+        let mut events = Vec::new();
+        let waiting =
+            apply_pending_post_replacement_effect(&mut state, Some(source), None, &mut events);
+
+        assert!(waiting.is_none(), "Resolved path resolved without prompt");
+        assert!(state.post_replacement_continuation.is_none());
+        // Resolved ability's own controller (P1) lost 3 life.
+        assert_eq!(state.players[1].life, initial_life - 3);
+    }
+
+    /// 2026-05-09 audit M4 backward-compat: legacy serialized GameState with
+    /// the pre-fold `post_replacement_effect` field (Template binding state)
+    /// migrates into the new unified slot when `finalize_public_state` runs
+    /// (driven here by calling `migrate_post_replacement_continuation`
+    /// directly).
+    #[test]
+    fn migrate_post_replacement_continuation_lifts_legacy_template() {
+        let mut state = GameState::new_two_player(42);
+        let template = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: None,
+            },
+        );
+        // Simulate legacy deserialization: only the legacy slot is populated.
+        state.legacy_post_replacement_effect = Some(Box::new(template.clone()));
+        assert!(state.post_replacement_continuation.is_none());
+
+        state.migrate_post_replacement_continuation();
+
+        match state.post_replacement_continuation {
+            Some(PostReplacementContinuation::Template(ref def)) => {
+                assert_eq!(**def, template);
+            }
+            other => panic!("expected Template after migration, got {other:?}"),
+        }
+        assert!(state.legacy_post_replacement_effect.is_none());
+        assert!(state.legacy_post_replacement_resolved_effect.is_none());
+    }
+
+    /// 2026-05-09 audit M4 backward-compat: legacy serialized GameState with
+    /// the pre-fold `post_replacement_resolved_effect` field (Resolved
+    /// binding state) migrates into the new unified slot. Resolved wins over
+    /// Template if both are (impossibly) populated, mirroring the pre-fold
+    /// dispatcher precedence at `apply_pending_post_replacement_effect`.
+    #[test]
+    fn migrate_post_replacement_continuation_lifts_legacy_resolved() {
+        let mut state = GameState::new_two_player(42);
+        let resolved = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: Some(TargetFilter::Controller),
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        state.legacy_post_replacement_resolved_effect = Some(Box::new(resolved.clone()));
+
+        state.migrate_post_replacement_continuation();
+
+        match state.post_replacement_continuation {
+            Some(PostReplacementContinuation::Resolved(ref boxed)) => {
+                assert_eq!(**boxed, resolved);
+            }
+            other => panic!("expected Resolved after migration, got {other:?}"),
+        }
+        assert!(state.legacy_post_replacement_effect.is_none());
+        assert!(state.legacy_post_replacement_resolved_effect.is_none());
+    }
+
+    /// 2026-05-09 audit M4 backward-compat (defensive): when both legacy
+    /// slots happen to deserialize alongside a new-shape slot — for instance
+    /// because a producer wrote a hybrid blob — the new slot wins and the
+    /// legacy fields are cleared. Migration is idempotent.
+    #[test]
+    fn migrate_post_replacement_continuation_prefers_new_slot_when_present() {
+        let mut state = GameState::new_two_player(42);
+        let new_template = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+                target: None,
+            },
+        );
+        state.post_replacement_continuation = Some(PostReplacementContinuation::Template(
+            Box::new(new_template.clone()),
+        ));
+        // Legacy slots also populated (corrupted/hybrid input).
+        state.legacy_post_replacement_effect = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Untap {
+                target: TargetFilter::SelfRef,
+            },
+        )));
+
+        state.migrate_post_replacement_continuation();
+
+        match state.post_replacement_continuation {
+            Some(PostReplacementContinuation::Template(ref def)) => {
+                assert_eq!(**def, new_template);
+            }
+            other => panic!("new slot must survive migration, got {other:?}"),
+        }
+        assert!(state.legacy_post_replacement_effect.is_none());
+        assert!(state.legacy_post_replacement_resolved_effect.is_none());
+    }
+
+    /// CR 614.12a + CR 707.9 + CR 603.2: Drive Callidus Assassin's full path —
+    /// optional "enter as a copy" replacement → accept → mid-entry copy
+    /// target choice → pick target → granted "destroy same-name" trigger
+    /// fires. Regression coverage for the case where the entering object's
+    /// `ZoneChanged` event was emitted *before* `BecomeCopy` could push the
+    /// granted trigger onto `trigger_definitions`, so a naive trigger scan
+    /// at entry time silently dropped the trigger. The capture inside
+    /// `apply_pending_post_replacement_effect` defers the event into
+    /// `state.deferred_entry_events`; `handle_copy_target_choice` replays
+    /// it after `BecomeCopy` resolves + layers re-evaluate.
+    #[test]
+    fn callidus_optional_copy_replacement_fires_granted_destroy_trigger_end_to_end() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, ContinuousModification, Effect, FilterProp,
+            TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
+        };
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Opponent's Bear — serves as both the copy source AND the destroy
+        // target. After Callidus becomes a copy of it, the granted trigger's
+        // `Another + SameName` filter selects "another creature named Bear",
+        // which is the only candidate (the copy itself is `Another`-excluded).
+        let bear = make_creature(&mut state, PlayerId(1), "Bear");
+        {
+            let obj = state.objects.get_mut(&bear).unwrap();
+            obj.base_name = "Bear".to_string();
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+
+        // Callidus Assassin enters via an Optional `Moved` replacement that
+        // executes `BecomeCopy` with `GrantTrigger(destroy SameName)` — the
+        // shape the parser produces for Polymorphine. Tap-wrapping (the real
+        // card's "enter tapped as a copy") is structurally orthogonal here;
+        // `first_non_modifier_ability` walks past Tap to find BecomeCopy, so
+        // exercising BecomeCopy directly tests the same code path.
+        let granted_trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Destroy {
+                    target: TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Creature)
+                            .properties(vec![FilterProp::Another, FilterProp::SameName]),
+                    ),
+                    cant_regenerate: false,
+                },
+            ))
+            .valid_card(TargetFilter::SelfRef)
+            .destination(Zone::Battlefield);
+
+        let callidus = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Callidus Assassin".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&callidus).unwrap();
+            obj.base_name = "Callidus Assassin".to_string();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types.core_types.push(CoreType::Creature);
+            obj.base_power = Some(3);
+            obj.base_toughness = Some(3);
+            obj.power = Some(3);
+            obj.toughness = Some(3);
+            obj.replacement_definitions.push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    // CR 614.12: A replacement on a card entering the
+                    // battlefield (i.e. evaluated while the card is still
+                    // on the stack) is only considered when its
+                    // `valid_card` is `SelfRef`. `find_applicable_replacements`
+                    // enforces this at `replacement.rs:2058-2062`. Polymorphine
+                    // is a self-replacement on the entering card, so the
+                    // parser sets `SelfRef` automatically; the test must
+                    // mirror that wiring.
+                    .valid_card(TargetFilter::SelfRef)
+                    .destination_zone(Zone::Battlefield)
+                    .mode(ReplacementMode::Optional { decline: None })
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::BecomeCopy {
+                            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                            duration: None,
+                            mana_value_limit: None,
+                            additional_modifications: vec![ContinuousModification::GrantTrigger {
+                                trigger: Box::new(granted_trigger.clone()),
+                            }],
+                        },
+                    )),
+            );
+        }
+
+        // Propose the Stack→Battlefield ZoneChange so the replacement
+        // pipeline surfaces the optional choice.
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::ZoneChange {
+            object_id: callidus,
+            from: Zone::Stack,
+            to: Zone::Battlefield,
+            cause: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            enter_with_counters: Vec::new(),
+            controller_override: None,
+            enter_transformed: false,
+            applied: std::collections::HashSet::new(),
+        };
+        let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!("expected NeedsChoice (Polymorphine is optional), got {result:?}");
+        };
+        state.waiting_for = replacement_mod::replacement_choice_waiting_for(player, &state);
+        state.priority_player = player;
+
+        // ── Accept Polymorphine ────────────────────────────────────────────
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("accept Polymorphine");
+
+        // Post-accept invariants — these are what the prior fix attempts
+        // missed:
+        //
+        // 1. `state.waiting_for == CopyTargetChoice` (the choice surfaces)
+        // 2. `state.deferred_entry_events` contains the freshly-emitted
+        //    `ZoneChanged` (the producer-site capture worked)
+        // 3. The granted trigger is NOT yet on the entering object —
+        //    `BecomeCopy` hasn't resolved
+        let WaitingFor::CopyTargetChoice {
+            source_id,
+            valid_targets,
+            ..
+        } = state.waiting_for.clone()
+        else {
+            panic!(
+                "expected CopyTargetChoice after accepting Polymorphine, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(source_id, callidus);
+        assert!(
+            valid_targets.contains(&bear),
+            "opponent's Bear must be a valid copy target"
+        );
+        assert_eq!(
+            state.deferred_entry_events.len(),
+            1,
+            "Callidus's battlefield-entry ZoneChanged must be deferred for replay"
+        );
+        assert!(matches!(
+            state.deferred_entry_events[0],
+            GameEvent::ZoneChanged { object_id, to, .. }
+                if object_id == callidus && to == Zone::Battlefield
+        ));
+
+        // ── Pick Bear as the copy target ───────────────────────────────────
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(crate::types::ability::TargetRef::Object(bear)),
+            },
+        )
+        .expect("pick copy target");
+
+        // Post-copy invariants:
+        //
+        // 1. Callidus's name now matches Bear (copy applied)
+        // 2. The granted trigger landed on `trigger_definitions`
+        // 3. The deferred event was drained
+        // 4. The destroy trigger fired — it either sits in `pending_trigger`
+        //    awaiting target selection or is already on the stack
+        let copy = &state.objects[&callidus];
+        assert_eq!(copy.name, "Bear", "BecomeCopy must overwrite name");
+        assert!(
+            copy.trigger_definitions
+                .iter_all()
+                .any(|t| t == &granted_trigger),
+            "GrantTrigger must place the destroy-trigger on the copy"
+        );
+        assert!(
+            state.deferred_entry_events.is_empty(),
+            "deferred entry events must be drained after copy choice resolves"
+        );
+        let trigger_fired = state.pending_trigger.is_some()
+            || state.stack.iter().any(|entry| {
+                matches!(
+                    entry.kind,
+                    crate::types::game_state::StackEntryKind::TriggeredAbility {
+                        source_id: trig_source,
+                        ..
+                    } if trig_source == callidus
+                )
+            });
+        assert!(
+            trigger_fired,
+            "Callidus's granted destroy-same-name trigger must fire from the deferred entry replay"
         );
     }
 }

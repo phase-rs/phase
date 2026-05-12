@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::game::replacement::{self, ReplacementResult};
-use crate::types::ability::RestrictionExpiry;
+use crate::types::ability::{ReplacementDefinition, RestrictionExpiry};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{AutoPassMode, GameState, WaitingFor};
@@ -79,6 +79,15 @@ pub fn advance_phase(state: &mut GameState, events: &mut Vec<GameEvent>) {
         }
     }
 
+    enter_phase(state, next, events);
+}
+
+/// Enter a phase directly: set phase, clear mana pools (CR 500.5), reset
+/// priority (CR 117.3a), invalidate LKI (CR 400.7), emit PhaseChanged.
+/// Called by `advance_phase` after extra-phase/replacement resolution, and
+/// directly by callers that need to skip intermediate phases (e.g.,
+/// CR 508.8 combat-skip when no attackers are possible).
+fn enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameEvent>) {
     state.phase = next;
     if next == Phase::BeginCombat {
         state.combat_phases_started_this_turn =
@@ -95,8 +104,11 @@ pub fn advance_phase(state: &mut GameState, events: &mut Vec<GameEvent>) {
             | Phase::CombatDamage
             | Phase::EndCombat
     );
+    let entering_cleanup = next == Phase::Cleanup;
     for player in &mut state.players {
-        player.mana_pool.clear_step_transition(in_combat);
+        player
+            .mana_pool
+            .clear_step_transition(in_combat, entering_cleanup);
         // CR 121.1 + CR 504.1: `cards_drawn_this_step` resets on every step
         // transition so `ExceptFirstDrawInDrawStep` conditions can identify
         // the first card drawn during the new step (most importantly, the
@@ -309,6 +321,14 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
 /// they control. CR 702.26m: If the untap step is skipped, phasing is also
 /// skipped — callers must gate this whole function on `should_skip_step`.
 pub fn execute_untap(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    execute_untap_with_choices(state, events, &HashSet::new());
+}
+
+pub fn execute_untap_with_choices(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    chosen_not_to_untap: &HashSet<ObjectId>,
+) {
     // Phase any phased-out player back in at the start of their next turn.
     // Player phasing is not formally governed by CR 702.26 (permanent-only);
     // this mirrors the permanent behaviour so duration semantics line up
@@ -414,7 +434,10 @@ pub fn execute_untap(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
     for id in to_untap {
         // CR 502.3: Skip permanents that have CantUntap (transient or intrinsic).
-        if cant_untap_ids.contains(&id) || intrinsic_cant_untap.contains(&id) {
+        if chosen_not_to_untap.contains(&id)
+            || cant_untap_ids.contains(&id)
+            || intrinsic_cant_untap.contains(&id)
+        {
             continue;
         }
 
@@ -476,6 +499,33 @@ pub fn execute_untap(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 502.3: Prune "until controller's next untap step" effects AFTER the untap
     // step has been processed, so the permanent skips exactly one untap.
     super::layers::prune_controller_untap_step_effects(state, active);
+}
+
+pub fn untap_choice_candidates(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            state.objects.get(id).is_some_and(|obj| {
+                obj.controller == player
+                    && obj.tapped
+                    && super::functioning_abilities::active_static_definitions(state, obj).any(
+                        |sd| {
+                            sd.mode == StaticMode::MayChooseNotToUntap
+                                && super::static_abilities::check_static_ability(
+                                    state,
+                                    StaticMode::MayChooseNotToUntap,
+                                    &super::static_abilities::StaticCheckContext {
+                                        target_id: Some(*id),
+                                        ..Default::default()
+                                    },
+                                )
+                        },
+                    )
+            })
+        })
+        .collect()
 }
 
 /// CR 502.3 + CR 113.6: Second-pass untap for `UntapsDuringEachOtherPlayersUntapStep`
@@ -645,22 +695,19 @@ pub fn execute_draw(state: &mut GameState, events: &mut Vec<GameEvent>) -> Optio
 pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Option<WaitingFor> {
     // CR 701.19b: Regeneration shields expire at cleanup.
     // CR 615: Prevention effects also expire.
-    // CR 514.2: Resolution-time replacements with `expires_at_eot` (e.g., the
-    // "if [target] would die this turn, exile it instead" rider on damage
-    // spells) also expire here regardless of whether they fired.
+    // CR 514.2: Resolution-time replacements with `expiry: EndOfTurn` (e.g.,
+    // the "if [target] would die this turn, exile it instead" rider on
+    // damage spells) also expire here regardless of whether they fired.
     // Also prune any consumed shields from earlier this turn.
+    let expires_at_eot = |r: &ReplacementDefinition| {
+        r.shield_kind.is_shield() || matches!(r.expiry, Some(RestrictionExpiry::EndOfTurn))
+    };
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
-        obj.replacement_definitions.retain(|r| {
-            !(r.shield_kind.is_shield()
-                || r.expires_at_eot
-                || matches!(r.expiry, Some(RestrictionExpiry::EndOfTurn)))
-        });
+        obj.replacement_definitions.retain(|r| !expires_at_eot(r));
     }
-    state.pending_damage_replacements.retain(|r| {
-        !(r.shield_kind.is_shield()
-            || r.expires_at_eot
-            || matches!(r.expiry, Some(RestrictionExpiry::EndOfTurn)))
-    });
+    state
+        .pending_damage_replacements
+        .retain(|r| !expires_at_eot(r));
 
     // CR 514.2: Prune "until end of turn" transient continuous effects.
     super::layers::prune_end_of_turn_effects(state);
@@ -984,6 +1031,14 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 // CR 614.1b + CR 614.10a: Skip the untap step if a static or
                 // one-shot "skip your next untap step" replacement applies.
                 if !should_skip_step_now(state, Phase::Untap) {
+                    let candidates = untap_choice_candidates(state, state.active_player);
+                    if !candidates.is_empty() {
+                        return WaitingFor::UntapChoice {
+                            player: state.active_player,
+                            candidates,
+                            chosen_not_to_untap: Vec::new(),
+                        };
+                    }
                     execute_untap(state, events);
                 }
                 // CR 502.4 / CR 117.3a: No player receives priority during the untap step.
@@ -1063,18 +1118,12 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     advance_phase(state, events);
                     // Continue to DeclareAttackers
                 } else {
-                    // No triggers, no attackers — skip all combat phases.
+                    // CR 508.8: No attackers possible and no begin-combat
+                    // triggers — skip declare attackers through end of combat.
+                    // Don't return: continue the loop so the PostCombatMain
+                    // match arm runs process_phase_triggers (survival, etc.).
                     state.combat = None;
-                    state.phase = Phase::PostCombatMain;
-                    state.priority_player = state.active_player;
-                    state.priority_passes.clear();
-                    state.priority_pass_count = 0;
-                    events.push(GameEvent::PhaseChanged {
-                        phase: Phase::PostCombatMain,
-                    });
-                    return WaitingFor::Priority {
-                        player: state.active_player,
-                    };
+                    enter_phase(state, Phase::PostCombatMain, events);
                 }
             }
             Phase::DeclareAttackers => {
@@ -1747,6 +1796,112 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::PermanentUntapped { object_id } if *object_id == id)));
+    }
+
+    fn install_may_choose_not_to_untap_static(state: &mut GameState, source_id: ObjectId) {
+        use crate::types::ability::StaticDefinition;
+        let def = StaticDefinition::new(StaticMode::MayChooseNotToUntap);
+        let obj = state.objects.get_mut(&source_id).unwrap();
+        obj.static_definitions.push(def.clone());
+        Arc::make_mut(&mut obj.base_static_definitions).push(def);
+    }
+
+    #[test]
+    fn untap_choice_candidates_include_tapped_permanents_with_may_not_untap() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let shackles = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Vedalken Shackles".to_string(),
+            Zone::Battlefield,
+        );
+        install_may_choose_not_to_untap_static(&mut state, shackles);
+        state.objects.get_mut(&shackles).unwrap().tapped = true;
+
+        let untapped_static = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Untapped Shackles".to_string(),
+            Zone::Battlefield,
+        );
+        install_may_choose_not_to_untap_static(&mut state, untapped_static);
+
+        let normal_tapped = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&normal_tapped).unwrap().tapped = true;
+
+        assert_eq!(untap_choice_candidates(&state, PlayerId(0)), vec![shackles]);
+    }
+
+    #[test]
+    fn execute_untap_with_choices_leaves_chosen_permanent_tapped() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let shackles = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Vedalken Shackles".to_string(),
+            Zone::Battlefield,
+        );
+        install_may_choose_not_to_untap_static(&mut state, shackles);
+        state.objects.get_mut(&shackles).unwrap().tapped = true;
+
+        let normal_tapped = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&normal_tapped).unwrap().tapped = true;
+
+        let mut choices = HashSet::new();
+        choices.insert(shackles);
+        execute_untap_with_choices(&mut state, &mut Vec::new(), &choices);
+
+        assert!(state.objects[&shackles].tapped);
+        assert!(!state.objects[&normal_tapped].tapped);
+    }
+
+    #[test]
+    fn auto_advance_prompts_for_untap_choice_before_untapping() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.phase = Phase::Untap;
+
+        let shackles = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Vedalken Shackles".to_string(),
+            Zone::Battlefield,
+        );
+        install_may_choose_not_to_untap_static(&mut state, shackles);
+        state.objects.get_mut(&shackles).unwrap().tapped = true;
+
+        let waiting = auto_advance(&mut state, &mut Vec::new());
+
+        assert!(matches!(
+            waiting,
+            WaitingFor::UntapChoice {
+                player: PlayerId(0),
+                candidates,
+                ..
+            } if candidates == vec![shackles]
+        ));
+        assert!(state.objects[&shackles].tapped);
     }
 
     /// CR 502.3 + CR 113.6: Seedborn Muse class — its controller untaps

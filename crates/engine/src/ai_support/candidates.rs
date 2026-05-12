@@ -5,11 +5,10 @@ use crate::game::combat::AttackTarget;
 use crate::game::deck_loading::DeckEntry;
 use crate::game::game_object::RoomDoor;
 use crate::game::keywords;
-use crate::game::mana_abilities;
 use crate::game::mana_sources;
 use crate::types::ability::ChoiceType;
 use crate::types::ability::TargetRef;
-use crate::types::actions::{CastChoice, GameAction, LearnOption};
+use crate::types::actions::{CastChoice, GameAction, LearnOption, MulliganChoice};
 use crate::types::card::LayoutKind;
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{ConvokeMode, GameState, TargetSelectionSlot, WaitingFor};
@@ -329,21 +328,48 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
-        WaitingFor::MulliganDecision { .. } => vec![
-            candidate(
-                GameAction::MulliganDecision { keep: true },
-                TacticalClass::Selection,
-                state.waiting_for.acting_player(),
-            ),
-            candidate(
-                GameAction::MulliganDecision { keep: false },
-                TacticalClass::Selection,
-                state.waiting_for.acting_player(),
-            ),
-        ],
-        WaitingFor::MulliganBottomCards { player, count } => {
-            bottom_card_actions(state, *player, *count)
-        }
+        // CR 103.5 + 103.5b: For simultaneous mulligan, generate candidates
+        // for each pending player. AI search iterates over the cross-product;
+        // the engine accepts them in any arrival order. When a pending player
+        // has one or more Serum Powders in hand, emit one `UseSerumPowder`
+        // candidate per Powder so the policy may pick that branch.
+        WaitingFor::MulliganDecision { pending, .. } => pending
+            .iter()
+            .flat_map(|entry| {
+                let mut actions = vec![
+                    candidate(
+                        GameAction::MulliganDecision {
+                            choice: MulliganChoice::Keep,
+                        },
+                        TacticalClass::Selection,
+                        Some(entry.player),
+                    ),
+                    candidate(
+                        GameAction::MulliganDecision {
+                            choice: MulliganChoice::Mulligan,
+                        },
+                        TacticalClass::Selection,
+                        Some(entry.player),
+                    ),
+                ];
+                for powder_id in serum_powders_in_hand(state, entry.player) {
+                    actions.push(candidate(
+                        GameAction::MulliganDecision {
+                            choice: MulliganChoice::UseSerumPowder {
+                                object_id: powder_id,
+                            },
+                        },
+                        TacticalClass::Selection,
+                        Some(entry.player),
+                    ));
+                }
+                actions
+            })
+            .collect(),
+        WaitingFor::MulliganBottomCards { pending } => pending
+            .iter()
+            .flat_map(|entry| bottom_card_actions(state, entry.player, entry.count))
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -387,6 +413,21 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             valid_blocker_ids,
             valid_block_targets,
         } => blocker_actions(*player, valid_blocker_ids, valid_block_targets),
+        WaitingFor::UntapChoice {
+            player, candidates, ..
+        } => candidates
+            .iter()
+            .map(|object_id| {
+                candidate(
+                    GameAction::ChooseUntap {
+                        object_id: *object_id,
+                        untap: true,
+                    },
+                    TacticalClass::Utility,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::EquipTarget {
             player,
             equipment_id,
@@ -591,7 +632,7 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             // clones state + applies the action per candidate. Without a cap, a
             // count=4 search against an 80-card library produces ~C(80,4) ≈ 1.6M
             // combinations and stalls validation for hours. The cap is constraint-
-            // aware so DistinctNames searches collapse duplicate-named entries
+            // aware so distinct-name searches collapse duplicate-named entries
             // before combinatorial explosion (Gifts Ungiven against an 80-card pool
             // with 8 distinct names → 8 candidate ids, C(8,4)=70 legal combos).
             //
@@ -669,11 +710,12 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             player,
             cards,
             count,
+            min_count,
             up_to,
             ..
         } => {
             if *up_to {
-                (0..=*count)
+                (*min_count..=*count)
                     .flat_map(|size| combinations(cards, size))
                     .map(|combo| {
                         candidate(
@@ -1985,6 +2027,23 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
                 ));
             }
         }
+        // CR 401.5 + CR 305.1: Land on top of library playable via
+        // `TopOfLibraryCastPermission { play_mode: Play }` (Future Sight,
+        // Bolas's Citadel, Magus of the Future).
+        if let Some((top_id, _source)) =
+            casting::top_of_library_land_playable_by_permission(state, player)
+        {
+            if let Some(obj) = state.objects.get(&top_id) {
+                actions.push(candidate(
+                    GameAction::PlayLand {
+                        object_id: top_id,
+                        card_id: obj.card_id,
+                    },
+                    TacticalClass::Land,
+                    Some(player),
+                ));
+            }
+        }
     }
 
     // CR 702.61a: Spells and non-mana activated abilities are suppressed by split second.
@@ -2708,6 +2767,25 @@ fn named_choice_actions(
         .collect()
 }
 
+/// CR 103.5b + Serum Powder Oracle text: collect every ObjectId in `player`'s
+/// hand whose object name is "Serum Powder" (CR 201.2 — name match is exact
+/// and case-insensitive on canonical English).
+fn serum_powders_in_hand(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
+    let Some(p) = state.players.iter().find(|p| p.id == player) else {
+        return Vec::new();
+    };
+    p.hand
+        .iter()
+        .copied()
+        .filter(|oid| {
+            state
+                .objects
+                .get(oid)
+                .is_some_and(|o| o.name.eq_ignore_ascii_case("Serum Powder"))
+        })
+        .collect()
+}
+
 fn bottom_card_actions(state: &GameState, player: PlayerId, count: u8) -> Vec<CandidateAction> {
     let p = &state.players[player.0 as usize];
     let hand: Vec<_> = p.hand.iter().copied().collect();
@@ -2738,65 +2816,10 @@ fn bottom_card_actions(state: &GameState, player: PlayerId, count: u8) -> Vec<Ca
 // Note: UntapLandForMana is intentionally omitted — it is a human-only undo action.
 // AI never populates lands_tapped_for_mana, so the handler would reject it anyway.
 fn mana_tap_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction> {
-    let mut actions = Vec::new();
-    for &obj_id in &state.battlefield {
-        if let Some(obj) = state.objects.get(&obj_id) {
-            if obj.controller != player || obj.tapped {
-                continue;
-            }
-            // Lands: single-option lands use TapLandForMana; multi-option lands
-            // (duals, triomes) use ActivateAbility per mana ability so the AI
-            // can choose which color to produce.
-            if obj.card_types.core_types.contains(&CoreType::Land) {
-                let land_options =
-                    mana_sources::activatable_land_mana_options(state, obj_id, player);
-                if land_options.len() == 1 {
-                    actions.push(candidate(
-                        GameAction::TapLandForMana { object_id: obj_id },
-                        TacticalClass::Mana,
-                        Some(player),
-                    ));
-                } else {
-                    // Generate one ActivateAbility per distinct mana ability index
-                    let mut seen_indices = Vec::new();
-                    for opt in &land_options {
-                        if let Some(idx) = opt.ability_index {
-                            if !seen_indices.contains(&idx) {
-                                seen_indices.push(idx);
-                                actions.push(candidate(
-                                    GameAction::ActivateAbility {
-                                        source_id: obj_id,
-                                        ability_index: idx,
-                                    },
-                                    TacticalClass::Mana,
-                                    Some(player),
-                                ));
-                            }
-                        }
-                    }
-                }
-            // CR 605.1b: Non-land permanents with mana abilities use ActivateAbility
-            } else if !obj.card_types.core_types.contains(&CoreType::Land)
-                && !mana_sources::activatable_mana_options(state, obj_id, player).is_empty()
-            {
-                if let Some(idx) = obj
-                    .abilities
-                    .iter()
-                    .position(mana_abilities::is_mana_ability)
-                {
-                    actions.push(candidate(
-                        GameAction::ActivateAbility {
-                            source_id: obj_id,
-                            ability_index: idx,
-                        },
-                        TacticalClass::Mana,
-                        Some(player),
-                    ));
-                }
-            }
-        }
-    }
-    actions
+    super::activatable_object_mana_actions_for_player(state, player)
+        .into_iter()
+        .map(|action| candidate(action, TacticalClass::Mana, Some(player)))
+        .collect()
 }
 
 fn mana_payment_actions(
@@ -2995,7 +3018,7 @@ fn station_target_candidates(
 
 /// CR 608.2c: Cap a SearchChoice candidate pool to at most `cap` ids before
 /// the combinatorial enumerator runs. Constraint-aware: under
-/// `DistinctNames` the canonical id per printed name is kept (further
+/// distinct-name constraints keep the canonical id per printed name (further
 /// duplicates are inert because they cannot legally appear in any chosen set
 /// alongside their twin), so the cap collapses sized libraries with many
 /// repeated names down to the unique-name set first. The cap exists strictly
@@ -3010,13 +3033,15 @@ fn cap_search_choice_pool(
     constraint: &crate::types::ability::SearchSelectionConstraint,
     cap: usize,
 ) -> Vec<crate::types::identifiers::ObjectId> {
-    use crate::types::ability::SearchSelectionConstraint;
+    use crate::types::ability::{SearchSelectionConstraint, SharedQuality};
     // CR 201.2: Two cards "have the same name" iff their printed name strings
-    // match. Under DistinctNames, keep the first id encountered per name —
+    // match. Under distinct-name constraints, keep the first id encountered per name —
     // later duplicates can never appear in a legal chosen set with their twin
     // and only inflate the candidate count.
     let collapsed: Vec<crate::types::identifiers::ObjectId> = match constraint {
-        SearchSelectionConstraint::DistinctNames => {
+        SearchSelectionConstraint::DistinctQualities { qualities }
+            if matches!(qualities.as_slice(), [SharedQuality::Name]) =>
+        {
             let mut seen = std::collections::HashSet::new();
             cards
                 .iter()
@@ -3027,9 +3052,10 @@ fn cap_search_choice_pool(
                 })
                 .collect()
         }
-        SearchSelectionConstraint::None | SearchSelectionConstraint::TotalManaValue { .. } => {
-            cards.to_vec()
-        }
+        SearchSelectionConstraint::None
+        | SearchSelectionConstraint::DistinctQualities { .. }
+        | SearchSelectionConstraint::TotalManaValue { .. }
+        | SearchSelectionConstraint::MatchEachFilter { .. } => cards.to_vec(),
     };
     if collapsed.len() <= cap {
         collapsed
@@ -3630,6 +3656,84 @@ mod tests {
     }
 
     #[test]
+    fn mana_payment_actions_include_no_tap_sacrifice_mana_abilities() {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::ManaPayment {
+            player: PlayerId(0),
+            convoke_mode: None,
+        };
+
+        let altar = create_object(
+            &mut state,
+            CardId(303),
+            PlayerId(0),
+            "Phyrexian Altar".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&altar).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.tapped = true;
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::AnyOneColor {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            color_options: vec![
+                                ManaColor::White,
+                                ManaColor::Blue,
+                                ManaColor::Black,
+                                ManaColor::Red,
+                                ManaColor::Green,
+                            ],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Sacrifice {
+                    target: TargetFilter::Typed(
+                        crate::types::ability::TypedFilter::creature()
+                            .controller(crate::types::ability::ControllerRef::You),
+                    ),
+                    count: 1,
+                }),
+            );
+        }
+
+        let creature = create_object(
+            &mut state,
+            CardId(304),
+            PlayerId(0),
+            "Sacrifice Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let actions = candidate_actions(&state);
+
+        assert!(actions.iter().any(|candidate| {
+            matches!(
+                candidate.action,
+                GameAction::ActivateAbility {
+                    source_id,
+                    ability_index: 0,
+                } if source_id == altar
+            )
+        }));
+    }
+
+    #[test]
     fn priority_actions_do_not_offer_lands_as_cast_spells() {
         let mut state = GameState::new_two_player(42);
         state.phase = Phase::PreCombatMain;
@@ -3690,15 +3794,15 @@ mod tests {
     }
 
     /// CR 608.2c + CR 701.23: SearchChoice candidate enumeration must drop
-    /// combinations that violate `SearchSelectionConstraint::DistinctNames`.
-    /// The engine pool cap is also constraint-aware: under DistinctNames the
+    /// combinations that violate distinct-name search constraints.
+    /// The engine pool cap is also constraint-aware: under distinct names the
     /// duplicate-named entry is collapsed to its canonical id before
     /// combinations are generated (a duplicate cannot legally appear in any
     /// chosen set with its twin), so a 5-card pool with one duplicate
     /// collapses to 4 unique-name ids → C(4,2) = 6 combinations.
     #[test]
     fn search_choice_candidates_filter_distinct_names() {
-        use crate::types::ability::SearchSelectionConstraint;
+        use crate::types::ability::{SearchSelectionConstraint, SharedQuality};
         use crate::types::identifiers::ObjectId;
 
         let mut state = GameState::new_two_player(42);
@@ -3732,7 +3836,7 @@ mod tests {
             "C(5,2) baseline must be 10 combinations when no constraint applies"
         );
 
-        // With DistinctNames the engine pool cap collapses the duplicate
+        // With distinct names the engine pool cap collapses the duplicate
         // Alpha to a single canonical id (5 → 4 ids), and the post-hoc
         // selection-constraint filter then enumerates C(4,2) = 6 combos —
         // every one of which contains two distinct names.
@@ -3742,13 +3846,15 @@ mod tests {
             count: 2,
             reveal: false,
             up_to: false,
-            constraint: SearchSelectionConstraint::DistinctNames,
+            constraint: SearchSelectionConstraint::DistinctQualities {
+                qualities: vec![SharedQuality::Name],
+            },
         };
         let filtered = candidate_actions_broad(&state);
         assert_eq!(
             filtered.len(),
             6,
-            "DistinctNames must collapse duplicate-named ids before enumeration"
+            "distinct names must collapse duplicate-named ids before enumeration"
         );
         for action in &filtered {
             let GameAction::SelectCards { cards } = &action.action else {
@@ -3776,7 +3882,7 @@ mod tests {
     /// previously stalled `validate_candidates` for hours.
     #[test]
     fn search_choice_distinct_names_caps_large_pool_to_unique_names() {
-        use crate::types::ability::SearchSelectionConstraint;
+        use crate::types::ability::{SearchSelectionConstraint, SharedQuality};
         use crate::types::identifiers::ObjectId;
 
         let mut state = GameState::new_two_player(42);
@@ -3798,7 +3904,9 @@ mod tests {
             count: 4,
             reveal: false,
             up_to: true,
-            constraint: SearchSelectionConstraint::DistinctNames,
+            constraint: SearchSelectionConstraint::DistinctQualities {
+                qualities: vec![SharedQuality::Name],
+            },
         };
         let actions = candidate_actions_broad(&state);
         // Σ_{k=0..=4} C(8, k) = 1 + 8 + 28 + 56 + 70 = 163.

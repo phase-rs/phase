@@ -3,6 +3,7 @@ import { motion, useReducedMotion } from "framer-motion";
 import type { ReactNode } from "react";
 
 import type { WaitingFor } from "../../adapter/types.ts";
+import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { DialogPeekCtx, type DialogPeekContext } from "./dialogPeekContext.ts";
@@ -50,6 +51,14 @@ function isClickThroughDialog(waitingFor: WaitingFor | null | undefined): boolea
 
 export function DialogHost({ children }: { children: ReactNode }) {
   const waitingFor = useGameStore((s) => s.waitingFor);
+  // Only treat a `WaitingFor` as a host-anchored dialog when the local
+  // player can actually act on it. Otherwise (opponent searching their
+  // library, scrying, etc.) the engine's WaitingFor is on the opponent and
+  // every concrete modal inside the host already returns null — wrapping
+  // anyway leaves an empty `fixed inset-0 z-40` overlay that swallows
+  // pointer events and prevents the local player from hovering / zooming
+  // cards while they spectate.
+  const canActForWaitingState = useCanActForWaitingState();
   // UI-driven dialogs (e.g. the planeswalker / multi-ability picker fired
   // from PermanentCard while the player has Priority) also need the host to
   // anchor `fixed inset-0` descendants to the viewport. Subscribing here
@@ -66,7 +75,8 @@ export function DialogHost({ children }: { children: ReactNode }) {
     setPeeked(false);
   }, [waitingFor, hasUiDialog]);
 
-  const dialogVisible = isDialogVisibleFor(waitingFor) || hasUiDialog;
+  const dialogVisible =
+    (isDialogVisibleFor(waitingFor) && canActForWaitingState) || hasUiDialog;
   const clickThrough = isClickThroughDialog(waitingFor);
   // Only wrap when there's a centered dialog that benefits from being
   // anchored to the viewport. Click-through overlays (TargetingOverlay)

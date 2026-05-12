@@ -10,7 +10,7 @@ use super::ability::{
     ChooseFromZoneConstraint, ContinuousModification, CostPaidObjectSnapshot,
     DelayedTriggerCondition, Duration, EffectKind, GameRestriction, KeywordAction, KickerVariant,
     ModalChoice, ResolvedAbility, SearchSelectionConstraint, StaticCondition, TargetFilter,
-    TargetRef, TriggerCondition, UnlessCost,
+    TargetRef, TriggerCondition,
 };
 use super::card::CardFace;
 use super::card_type::{CoreType, Supertype};
@@ -40,6 +40,10 @@ fn default_game_number() -> u8 {
 }
 
 fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
+pub(crate) fn is_zero_usize(value: &usize) -> bool {
     *value == 0
 }
 
@@ -182,6 +186,37 @@ pub struct SpellCastRecord {
     /// the underlying object (which may have left the stack).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub has_x_in_cost: bool,
+    /// CR 400.1 + CR 601.2a: Zone the spell was cast from, captured at cast-time
+    /// so per-turn spell-history conditions can answer "from your hand" after
+    /// the spell has moved on from the stack. Per CR 601.2a every cast spell
+    /// is moved "from where it is" to the stack, so this field is always
+    /// populated. Older serialized snapshots emitted this as `Option<Zone>`
+    /// (with `null` for the default); the custom deserializer accepts both
+    /// shapes and falls back to `Zone::Hand` (the dominant origin per
+    /// CR 601.2a) when the field is missing or `null`.
+    #[serde(
+        default = "default_spell_cast_record_from_zone",
+        deserialize_with = "deserialize_spell_cast_record_from_zone"
+    )]
+    pub from_zone: Zone,
+}
+
+/// CR 601.2a: Default origin zone for `SpellCastRecord.from_zone`. Hand is the
+/// overwhelmingly common cast origin, so it's the safe default for snapshots
+/// that pre-date the non-Option migration.
+fn default_spell_cast_record_from_zone() -> Zone {
+    Zone::Hand
+}
+
+/// Backwards-compatible deserializer for `SpellCastRecord.from_zone`. Accepts
+/// the modern non-Option encoding (`"Hand"`, `"Battlefield"`, …), the legacy
+/// `Option<Zone>` encoding (`null` → `Zone::Hand`), and absent fields (handled
+/// by `#[serde(default = …)]` upstream of this hook).
+fn deserialize_spell_cast_record_from_zone<'de, D>(de: D) -> Result<Zone, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<Zone>::deserialize(de)?.unwrap_or_else(default_spell_cast_record_from_zone))
 }
 
 /// CR 601.2f: A pending one-shot cost reduction for the next spell a player casts.
@@ -358,6 +393,8 @@ pub struct BattlefieldEntryRecord {
     pub core_types: Vec<CoreType>,
     pub subtypes: Vec<String>,
     pub supertypes: Vec<Supertype>,
+    #[serde(default)]
+    pub colors: Vec<ManaColor>,
     pub controller: PlayerId,
 }
 
@@ -402,6 +439,8 @@ pub struct ChosenDamageSource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DamageRecord {
     pub source_id: ObjectId,
+    #[serde(default)]
+    pub source_controller: PlayerId,
     pub target: TargetRef,
     pub amount: u32,
     #[serde(default)]
@@ -616,6 +655,8 @@ pub struct PendingCast {
     /// How this spell was cast — threads through the casting pipeline to finalize_cast.
     #[serde(default)]
     pub casting_variant: CastingVariant,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast_timing_permission: Option<crate::types::ability::CastTimingPermission>,
     /// CR 601.2d: When set, after target selection the caster must distribute this
     /// resource (damage, counters, life) among the chosen targets via DistributeAmong.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -679,6 +720,7 @@ impl PendingCast {
             activation_ability_index: None,
             target_constraints: Vec::new(),
             casting_variant: CastingVariant::Normal,
+            cast_timing_permission: None,
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
@@ -710,7 +752,13 @@ pub enum ManaAbilityResume {
         convoke_mode: Option<ConvokeMode>,
     },
     UnlessPayment {
-        cost: UnlessCost,
+        /// CR 118.12: Carried-through cost from `WaitingFor::UnlessPayment`.
+        /// See the matching `WaitingFor::UnlessPayment.cost` doc-comment for
+        /// the legacy-shape deserialization contract. Boxed so the
+        /// enclosing `ManaAbilityResume` enum stays compact (other variants
+        /// are zero-sized or carry only an `Option`).
+        #[serde(deserialize_with = "crate::types::ability::deserialize_ability_cost_compat_boxed")]
+        cost: Box<AbilityCost>,
         pending_effect: Box<ResolvedAbility>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         trigger_event: Option<GameEvent>,
@@ -959,15 +1007,43 @@ pub struct PendingBeginGameAbility {
     pub ability: ResolvedAbility,
 }
 
+/// CR 103.5: Per-player state during the simultaneous mulligan decision phase.
+/// One entry per player who has not yet declared "keep".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MulliganDecisionEntry {
+    pub player: PlayerId,
+    pub mulligan_count: u8,
+}
+
+/// CR 103.5: Per-player state during the simultaneous bottom-cards phase.
+/// One entry per player who must put cards on the bottom of their library.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MulliganBottomEntry {
+    pub player: PlayerId,
+    pub count: u8,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum WaitingFor {
     Priority {
         player: PlayerId,
     },
+    /// CR 103.5 + 103.5b: London mulligan — each un-kept player decides
+    /// simultaneously. The `pending` list holds every player who has not yet
+    /// chosen `MulliganChoice::Keep`, each with their current mulligan count.
+    /// Players act in any order; `Keep` removes the actor from `pending`,
+    /// `Mulligan` increments their count and redraws but keeps them in
+    /// `pending`, and `UseSerumPowder { object_id }` (CR 103.5b) exiles the
+    /// hand and redraws the same number without incrementing the count, also
+    /// keeping the player in `pending`. When `pending` is empty the flow
+    /// advances to `MulliganBottomCards` (if anyone owes bottoms) or
+    /// `finish_mulligans`.
+    ///
+    /// CR 103.5d deferred: Two-Headed Giant team mulligans are not modeled
+    /// (the format lacks team semantics).
     MulliganDecision {
-        player: PlayerId,
-        mulligan_count: u8,
+        pending: Vec<MulliganDecisionEntry>,
         /// CR 103.5c + Commander RC supplement: whether this game grants a
         /// free first mulligan (multiplayer ≥3 seats, or a duel in a format
         /// where `GameFormat::grants_free_first_mulligan()` is true).
@@ -975,9 +1051,12 @@ pub enum WaitingFor {
         /// without re-deriving format/seat rules.
         free_first_mulligan: bool,
     },
+    /// CR 103.5: After all players have kept, each player who mulliganed at
+    /// least once (and is not on the free-first discount) must put N cards on
+    /// the bottom of their library, where N = `count`. All such players choose
+    /// simultaneously and submit `SelectCards { cards }` in any order.
     MulliganBottomCards {
-        player: PlayerId,
-        count: u8,
+        pending: Vec<MulliganBottomEntry>,
     },
     ManaPayment {
         player: PlayerId,
@@ -1018,6 +1097,14 @@ pub enum WaitingFor {
         valid_blocker_ids: Vec<ObjectId>,
         #[serde(default)]
         valid_block_targets: HashMap<ObjectId, Vec<ObjectId>>,
+    },
+    /// CR 502.3: During the untap step, the active player may choose not to
+    /// untap permanents with "You may choose not to untap..." static abilities.
+    UntapChoice {
+        player: PlayerId,
+        candidates: Vec<ObjectId>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        chosen_not_to_untap: Vec<ObjectId>,
     },
     GameOver {
         winner: Option<PlayerId>,
@@ -1210,6 +1297,10 @@ pub enum WaitingFor {
         player: PlayerId,
         cards: Vec<ObjectId>,
         count: usize,
+        /// CR 107.1c: Minimum number of cards that must be selected when a
+        /// choice allows a range. Defaults to 0 for ordinary "up to" choices.
+        #[serde(default, skip_serializing_if = "is_zero_usize")]
+        min_count: usize,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         up_to: bool,
         source_id: ObjectId,
@@ -1501,7 +1592,12 @@ pub enum WaitingFor {
     /// and ward costs (CR 702.21a).
     UnlessPayment {
         player: PlayerId,
-        cost: UnlessCost,
+        /// CR 118.12: The cost to pay. Stored as the unified `AbilityCost`
+        /// taxonomy. Forward-compatible deserialization accepts the legacy
+        /// `UnlessCost` JSON shape (see `deserialize_ability_cost_compat` in
+        /// `types/ability.rs`).
+        #[serde(deserialize_with = "crate::types::ability::deserialize_ability_cost_compat")]
+        cost: AbilityCost,
         /// The effect to execute if the player declines to pay.
         pending_effect: Box<ResolvedAbility>,
         /// Trigger event context to restore if declining the payment resumes a
@@ -1787,6 +1883,14 @@ pub enum WaitingFor {
         /// Vote tallies indexed parallel to `options`. `tallies[i]` is the
         /// number of votes cast for `options[i]` so far.
         tallies: Vec<u32>,
+        /// CR 608.2c + CR 701.38: Per-vote ballot ledger. Each entry is
+        /// `(voter, choice_index)` recorded when the voter casts that vote.
+        /// Mirrors `tallies` aggregation but preserves voter identity so the
+        /// per-choice sub-effect can route to `PlayerFilter::VotedFor` against
+        /// `state.last_vote_ballots`. Append-only; the lifecycle matches
+        /// `last_zone_changed_ids` (cleared at chain depth 0).
+        #[serde(default)]
+        ballots: im::Vector<(PlayerId, u8)>,
         /// CR 701.38: Per-choice sub-effects. `per_choice_effect[i]` resolves
         /// once for each vote tallied against `options[i]`. Carried on the
         /// WaitingFor so the resolver chain doesn't need to re-find the source
@@ -2030,16 +2134,34 @@ pub enum RetargetScope {
 
 impl WaitingFor {
     /// Extract the player who must act, if any.
+    ///
+    /// CR 103.5: For simultaneous-decision states (`MulliganDecision`,
+    /// `MulliganBottomCards`) this returns `Some(p)` only when exactly one
+    /// player is pending, and `None` when multiple are pending — callers
+    /// that need set semantics must use [`Self::acting_players`] instead.
     pub fn acting_player(&self) -> Option<PlayerId> {
         match self {
+            WaitingFor::MulliganDecision { pending, .. } => {
+                if pending.len() == 1 {
+                    Some(pending[0].player)
+                } else {
+                    None
+                }
+            }
+            WaitingFor::MulliganBottomCards { pending } => {
+                if pending.len() == 1 {
+                    Some(pending[0].player)
+                } else {
+                    None
+                }
+            }
             WaitingFor::Priority { player }
-            | WaitingFor::MulliganDecision { player, .. }
-            | WaitingFor::MulliganBottomCards { player, .. }
             | WaitingFor::ManaPayment { player, .. }
             | WaitingFor::ChooseXValue { player, .. }
             | WaitingFor::TargetSelection { player, .. }
             | WaitingFor::DeclareAttackers { player, .. }
             | WaitingFor::DeclareBlockers { player, .. }
+            | WaitingFor::UntapChoice { player, .. }
             | WaitingFor::ReplacementChoice { player, .. }
             | WaitingFor::CopyTargetChoice { player, .. }
             | WaitingFor::ExploreChoice { player, .. }
@@ -2126,6 +2248,26 @@ impl WaitingFor {
             | WaitingFor::MadnessCastOffer { player, .. }
             | WaitingFor::CommanderZoneChoice { player, .. } => Some(*player),
             WaitingFor::GameOver { .. } => None,
+        }
+    }
+
+    /// CR 103.5: Set of players who are currently authorized to act in this
+    /// `WaitingFor` state. For all single-player-pending variants this returns
+    /// a single-element Vec containing [`Self::acting_player`]. For the
+    /// simultaneous mulligan variants this returns every player still pending.
+    ///
+    /// Engine authorization checks should use this in preference to
+    /// `acting_player()` so the simultaneous variants accept actions from any
+    /// of the pending players in any arrival order.
+    pub fn acting_players(&self) -> Vec<PlayerId> {
+        match self {
+            WaitingFor::MulliganDecision { pending, .. } => {
+                pending.iter().map(|e| e.player).collect()
+            }
+            WaitingFor::MulliganBottomCards { pending } => {
+                pending.iter().map(|e| e.player).collect()
+            }
+            _ => self.acting_player().into_iter().collect(),
         }
     }
 
@@ -2333,6 +2475,11 @@ pub enum CastingVariant {
         /// frequencies (those track by source only).
         #[serde(default)]
         slot_type: Option<super::card_type::CoreType>,
+        /// CR 614.1a: Some graveyard cast permissions add "If a spell cast
+        /// this way would be put into your graveyard, exile it instead."
+        /// This replaces only stack-to-graveyard destinations.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        graveyard_destination_replacement: Option<Zone>,
     },
     /// CR 601.2b + CR 118.9a: Cast from hand via a `CastFromHandFree` static
     /// permission source (Zaffai). Stores the granting permanent's ObjectId for
@@ -2429,6 +2576,29 @@ pub enum CastingVariant {
     Bestow,
 }
 
+impl CastingVariant {
+    pub fn stack_to_graveyard_replacement(self) -> Option<Zone> {
+        if matches!(
+            self,
+            CastingVariant::Flashback | CastingVariant::Aftermath | CastingVariant::Harmonize
+        ) {
+            return Some(Zone::Exile);
+        }
+        if let CastingVariant::GraveyardPermission {
+            graveyard_destination_replacement,
+            ..
+        } = self
+        {
+            return graveyard_destination_replacement;
+        }
+        None
+    }
+
+    pub fn replaces_stack_to_graveyard_with_exile(self) -> bool {
+        matches!(self.stack_to_graveyard_replacement(), Some(Zone::Exile))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum StackEntryKind {
@@ -2462,6 +2632,14 @@ pub enum StackEntryKind {
         /// Used by the frontend to distinguish triggers from the same source.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         description: Option<String>,
+        /// Display name of the source object captured when this trigger went on
+        /// the stack. Pre-resolved here so the frontend can render
+        /// "From <name>" without dereferencing `source_id` through the objects
+        /// map (which is display-layer logic per the engine/frontend split).
+        /// Empty when the source has no name (synthetic game-rule triggers
+        /// like monarch draw use `ObjectId(0)`).
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        source_name: String,
     },
     /// CR 113.3b: Activated keyword abilities (Equip / Crew / Saddle / Station)
     /// enter the stack after cost-payment + target selection and resolve with
@@ -2516,16 +2694,38 @@ pub struct GameState {
 
     // Replacement effects
     pub pending_replacement: Option<PendingReplacement>,
-    /// Transient: effect to resolve after a replacement choice's zone change completes.
-    /// Set by `continue_replacement` for Optional replacements, consumed by the caller.
+    /// CR 614.12a + CR 615.5: Continuation effect to resolve after a
+    /// replacement's modifications complete. The two binding states (Template
+    /// AST vs. Resolved with captured targets) share one slot via
+    /// `PostReplacementContinuation`. Set by `continue_replacement` for
+    /// Optional replacements and by `apply_single_replacement` for Mandatory
+    /// post-effects; drained by `apply_pending_post_replacement_effect`.
+    ///
+    /// Pre-2026-05-09 audit M4 fold: legacy `post_replacement_effect` and
+    /// `post_replacement_resolved_effect` fields were merged here. Old saved
+    /// JSON migrates via `migrate_post_replacement_continuation`, called from
+    /// `finalize_public_state`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub post_replacement_effect: Option<Box<crate::types::ability::AbilityDefinition>>,
+    pub post_replacement_continuation: Option<crate::types::ability::PostReplacementContinuation>,
+    /// Pre-2026-05-09 audit M4 compat: legacy template slot. Read from old
+    /// JSON only; migrated into `post_replacement_continuation` by
+    /// `migrate_post_replacement_continuation`. Never written to.
+    #[serde(default, skip_serializing, rename = "post_replacement_effect")]
+    pub(crate) legacy_post_replacement_effect:
+        Option<Box<crate::types::ability::AbilityDefinition>>,
+    /// Pre-2026-05-09 audit M4 compat: legacy resolved slot. Read from old
+    /// JSON only; migrated into `post_replacement_continuation` by
+    /// `migrate_post_replacement_continuation`. Never written to.
+    #[serde(default, skip_serializing, rename = "post_replacement_resolved_effect")]
+    pub(crate) legacy_post_replacement_resolved_effect:
+        Option<Box<crate::types::ability::ResolvedAbility>>,
 
     /// CR 615.5: Source object of the replacement that stashed
-    /// `post_replacement_effect`. Used by prevention follow-ups (e.g. Phyrexian
-    /// Hydra) so the post-effect's `SelfRef`-targeted PutCounter resolves
-    /// against the shield's own object rather than the damaged target. Set
-    /// alongside `post_replacement_effect` and consumed at the same time.
+    /// `post_replacement_continuation`. Used by prevention follow-ups (e.g.
+    /// Phyrexian Hydra) so the post-effect's `SelfRef`-targeted PutCounter
+    /// resolves against the shield's own object rather than the damaged target.
+    /// Set alongside `post_replacement_continuation` and consumed at the same
+    /// time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_replacement_source: Option<crate::types::identifiers::ObjectId>,
 
@@ -2554,6 +2754,20 @@ pub struct GameState {
     /// after the zone change completes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_spell_resolution: Option<PendingSpellResolution>,
+
+    /// CR 614.12a + CR 707.9 + CR 603.2: `ZoneChanged`-to-battlefield events
+    /// for an object whose entry is paused mid-resolution awaiting an
+    /// interactive choice (e.g. `WaitingFor::CopyTargetChoice`). Per CR
+    /// 614.12a, effects that modify how a permanent enters function
+    /// continuously *while it is entering* — so the entry isn't finalized
+    /// (and trigger scanning can't run) until the choice resolves. The
+    /// post-action pipeline moves matching events here before
+    /// `process_triggers`, and `handle_copy_target_choice` replays them
+    /// after `BecomeCopy` resolves + layers re-evaluate so granted ETBs
+    /// (Callidus Assassin's destroy-same-name) and observer ETBs
+    /// (Soul Warden) match against the fully-realized copy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deferred_entry_events: Vec<GameEvent>,
 
     // Layer system
     pub layers_dirty: bool,
@@ -2708,11 +2922,26 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub lands_tapped_for_mana: HashMap<PlayerId, Vec<ObjectId>>,
 
+    /// CR 103.5: Per-player locked-in mulligan count, populated as each player
+    /// declares "keep" during the simultaneous decision phase. Read by the
+    /// bottoms-phase builder to compute how many cards each player must put
+    /// on the bottom of their library. Cleared when the mulligan flow finishes.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub final_mulligan_counts: HashMap<PlayerId, u8>,
+
     /// When true, `GameAction::Debug(...)` actions are accepted.
     /// Set at game initialization, immutable after creation.
     /// Always false for multiplayer games.
     #[serde(default)]
     pub debug_mode: bool,
+
+    /// Set of players who have been granted permission to submit
+    /// `GameAction::Debug(_)` in a sandbox game. Initialized to the host's
+    /// `PlayerId` at game creation when `format_config.allow_debug_actions`
+    /// is true; empty otherwise. The host can grant/revoke entries via
+    /// `GameAction::GrantDebugPermission` / `RevokeDebugPermission`.
+    #[serde(default)]
+    pub debug_permitted: BTreeSet<PlayerId>,
 
     #[serde(default)]
     pub match_config: MatchConfig,
@@ -2899,7 +3128,7 @@ pub struct GameState {
     /// Added by delayed triggers like "that creature enters with an additional +1/+1 counter".
     /// Consumed when the object enters the battlefield. Each entry: (object_id, counter_type, count).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub pending_etb_counters: Vec<(ObjectId, String, u32)>,
+    pub pending_etb_counters: Vec<(ObjectId, CounterType, u32)>,
 
     /// Modal modes chosen this turn per source: (ObjectId, mode_index).
     /// CR 700.2: "choose one that hasn't been chosen this turn"
@@ -3010,6 +3239,19 @@ pub struct GameState {
     /// Cleared at depth 0 in resolve_ability_chain.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub last_zone_changed_ids: Vec<ObjectId>,
+
+    /// CR 608.2c + CR 701.38: Per-vote ballots from the most recent
+    /// `Effect::Vote` resolution within the current top-level ability
+    /// resolution. Each entry is `(voter, choice_index)`; populated by
+    /// `vote::resolve_tally` immediately before per-choice sub-effects fan
+    /// out, and read by `PlayerFilter::VotedFor` to route per-choice
+    /// `player_scope` sub-effects ("for each player who chose money,
+    /// you and that player each ...").
+    ///
+    /// Mirrors `last_zone_changed_ids` lifecycle: cleared at chain depth 0
+    /// in `resolve_ability_chain` so cross-resolution leakage is impossible.
+    #[serde(default)]
+    pub last_vote_ballots: im::Vector<(PlayerId, u8)>,
 
     /// CR 608.2c + CR 109.5: Player actions performed during the current
     /// top-level ability resolution. Distinct from turn-level trackers like
@@ -3154,6 +3396,8 @@ pub struct PendingSpellResolution {
     pub controller: PlayerId,
     pub casting_variant: CastingVariant,
     pub cast_from_zone: Option<crate::types::zones::Zone>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast_timing_permission: Option<crate::types::ability::CastTimingPermission>,
     pub spell_targets: Vec<crate::types::ability::TargetRef>,
     #[serde(default)]
     pub actual_mana_spent: u32,
@@ -3255,11 +3499,14 @@ impl GameState {
             max_lands_per_turn: 1,
             priority_pass_count: 0,
             pending_replacement: None,
-            post_replacement_effect: None,
+            post_replacement_continuation: None,
+            legacy_post_replacement_effect: None,
+            legacy_post_replacement_resolved_effect: None,
             post_replacement_source: None,
             post_replacement_event_source: None,
             post_replacement_event_target: None,
             pending_spell_resolution: None,
+            deferred_entry_events: Vec::new(),
             layers_dirty: true,
             next_timestamp: 1,
             public_state_dirty: PublicStateDirty::all_dirty(),
@@ -3291,6 +3538,7 @@ impl GameState {
             auto_pass: HashMap::new(),
             phase_stops: HashMap::new(),
             lands_tapped_for_mana: HashMap::new(),
+            final_mulligan_counts: HashMap::new(),
             match_config: MatchConfig::default(),
             match_phase: MatchPhase::InGame,
             match_score: MatchScore::default(),
@@ -3355,6 +3603,7 @@ impl GameState {
             last_created_token_ids: Vec::new(),
             last_revealed_ids: Vec::new(),
             last_zone_changed_ids: Vec::new(),
+            last_vote_ballots: im::Vector::new(),
             player_actions_this_way: HashSet::new(),
             last_effect_amount: None,
             last_effect_count: None,
@@ -3378,6 +3627,7 @@ impl GameState {
             pending_activations: Vec::new(),
             commander_declined_zone_return: HashSet::new(),
             debug_mode: false,
+            debug_permitted: BTreeSet::new(),
         }
     }
 
@@ -3444,6 +3694,32 @@ impl GameState {
         self.layers_dirty = true;
         id
     }
+
+    /// CR 614.12a + CR 615.5: Migrate the pre-2026-05-09 audit M4 split-slot
+    /// shape (`post_replacement_effect` + `post_replacement_resolved_effect`)
+    /// into the unified `post_replacement_continuation` slot. Idempotent —
+    /// no-op when both legacy slots are empty (the steady-state case once a
+    /// post-load hop has run). Called from `finalize_public_state` so every
+    /// deserialize boundary (engine-wasm restore, multiplayer host resume,
+    /// gamePersistence rehydration) gets the migration without per-callsite
+    /// plumbing. The Resolved arm wins when both legacy slots are
+    /// (impossibly) populated, mirroring the pre-fold dispatcher precedence
+    /// at `engine_replacement.rs::apply_pending_post_replacement_effect`.
+    pub fn migrate_post_replacement_continuation(&mut self) {
+        if self.post_replacement_continuation.is_some() {
+            self.legacy_post_replacement_effect = None;
+            self.legacy_post_replacement_resolved_effect = None;
+            return;
+        }
+        if let Some(resolved) = self.legacy_post_replacement_resolved_effect.take() {
+            self.post_replacement_continuation =
+                Some(crate::types::ability::PostReplacementContinuation::Resolved(resolved));
+            self.legacy_post_replacement_effect = None;
+        } else if let Some(template) = self.legacy_post_replacement_effect.take() {
+            self.post_replacement_continuation =
+                Some(crate::types::ability::PostReplacementContinuation::Template(template));
+        }
+    }
 }
 
 impl Default for GameState {
@@ -3475,6 +3751,7 @@ impl PartialEq for GameState {
             && self.priority_pass_count == other.priority_pass_count
             && self.pending_replacement == other.pending_replacement
             && self.pending_spell_resolution == other.pending_spell_resolution
+            && self.deferred_entry_events == other.deferred_entry_events
             && self.layers_dirty == other.layers_dirty
             && self.next_timestamp == other.next_timestamp
             && self.public_state_dirty == other.public_state_dirty
@@ -3564,6 +3841,7 @@ impl PartialEq for GameState {
             && self.last_named_choice == other.last_named_choice
             && self.last_revealed_ids == other.last_revealed_ids
             && self.last_zone_changed_ids == other.last_zone_changed_ids
+            && self.last_vote_ballots == other.last_vote_ballots
             && self.player_actions_this_way == other.player_actions_this_way
             && self.last_effect_count == other.last_effect_count
             && self.last_effect_counts_by_player == other.last_effect_counts_by_player
@@ -3578,7 +3856,10 @@ impl Eq for GameState {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{AbilityKind, Effect, QuantityExpr};
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, PostReplacementContinuation, QuantityExpr,
+        ResolvedAbility, TargetFilter,
+    };
 
     #[test]
     fn default_creates_two_player_game() {
@@ -3691,6 +3972,7 @@ mod tests {
                 activation_ability_index: None,
                 target_constraints: vec![],
                 casting_variant: CastingVariant::Normal,
+                cast_timing_permission: None,
                 distribute: None,
                 origin_zone: Zone::Hand,
                 additional_cost_flow: None,
@@ -3708,13 +3990,17 @@ mod tests {
             player: PlayerId(0),
         }));
         variants.push(Box::new(WaitingFor::MulliganDecision {
-            player: PlayerId(0),
-            mulligan_count: 1,
+            pending: vec![MulliganDecisionEntry {
+                player: PlayerId(0),
+                mulligan_count: 1,
+            }],
             free_first_mulligan: false,
         }));
         variants.push(Box::new(WaitingFor::MulliganBottomCards {
-            player: PlayerId(0),
-            count: 2,
+            pending: vec![MulliganBottomEntry {
+                player: PlayerId(0),
+                count: 2,
+            }],
         }));
         variants.push(Box::new(WaitingFor::ManaPayment {
             player: PlayerId(0),
@@ -3909,6 +4195,7 @@ mod tests {
             player: PlayerId(0),
             cards: vec![ObjectId(1)],
             count: 1,
+            min_count: 0,
             up_to: false,
             source_id: ObjectId(100),
             effect_kind: crate::types::ability::EffectKind::Sacrifice,
@@ -3955,6 +4242,7 @@ mod tests {
             activation_ability_index: None,
             target_constraints: vec![],
             casting_variant: CastingVariant::Normal,
+            cast_timing_permission: None,
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
@@ -4133,6 +4421,7 @@ mod tests {
             player: PlayerId(0),
             cards: vec![ObjectId(1), ObjectId(2)],
             count: 1,
+            min_count: 0,
             up_to: true,
             source_id: ObjectId(10),
             effect_kind: crate::types::ability::EffectKind::ChangeZone,
@@ -4326,5 +4615,143 @@ mod tests {
         let mut deserialized: GameState = serde_json::from_str(&serialized).unwrap();
         deserialized.rng = ChaCha20Rng::seed_from_u64(deserialized.rng_seed);
         assert_eq!(state, deserialized);
+    }
+
+    /// 2026-05-09 audit M4 backward-compat: a JSON snapshot saved before the
+    /// post-replacement-continuation slot fold (with the legacy
+    /// `post_replacement_effect` field) deserializes cleanly and the legacy
+    /// content lifts into the new unified slot once
+    /// `migrate_post_replacement_continuation` runs (called from
+    /// `finalize_public_state` at every deserialize boundary).
+    #[test]
+    fn legacy_post_replacement_effect_field_lifts_into_unified_slot() {
+        // Build a baseline state, serialize it, then splice in the legacy
+        // field name so the snapshot mirrors a pre-fold producer.
+        let baseline = GameState::new_two_player(42);
+        let mut snapshot: serde_json::Value = serde_json::to_value(&baseline).unwrap();
+        let template = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: None,
+            },
+        );
+        let template_json = serde_json::to_value(&template).unwrap();
+        snapshot
+            .as_object_mut()
+            .unwrap()
+            .insert("post_replacement_effect".to_string(), template_json);
+
+        let serialized = serde_json::to_string(&snapshot).unwrap();
+        let mut state: GameState = serde_json::from_str(&serialized).unwrap();
+        // Pre-migration: legacy slot populated, unified slot empty.
+        assert!(state.post_replacement_continuation.is_none());
+        assert!(state.legacy_post_replacement_effect.is_some());
+
+        state.migrate_post_replacement_continuation();
+
+        match state.post_replacement_continuation {
+            Some(PostReplacementContinuation::Template(ref def)) => {
+                assert_eq!(**def, template);
+            }
+            other => panic!("expected Template after migration, got {other:?}"),
+        }
+        assert!(state.legacy_post_replacement_effect.is_none());
+    }
+
+    /// 2026-05-09 audit M4 backward-compat (Resolved variant): a pre-fold
+    /// snapshot with `post_replacement_resolved_effect` lifts to
+    /// `PostReplacementContinuation::Resolved` after migration.
+    #[test]
+    fn legacy_post_replacement_resolved_effect_field_lifts_into_unified_slot() {
+        let baseline = GameState::new_two_player(42);
+        let mut snapshot: serde_json::Value = serde_json::to_value(&baseline).unwrap();
+        let resolved = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: Some(TargetFilter::Controller),
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let resolved_json = serde_json::to_value(&resolved).unwrap();
+        snapshot.as_object_mut().unwrap().insert(
+            "post_replacement_resolved_effect".to_string(),
+            resolved_json,
+        );
+
+        let serialized = serde_json::to_string(&snapshot).unwrap();
+        let mut state: GameState = serde_json::from_str(&serialized).unwrap();
+        assert!(state.post_replacement_continuation.is_none());
+        assert!(state.legacy_post_replacement_resolved_effect.is_some());
+
+        state.migrate_post_replacement_continuation();
+
+        match state.post_replacement_continuation {
+            Some(PostReplacementContinuation::Resolved(ref boxed)) => {
+                assert_eq!(**boxed, resolved);
+            }
+            other => panic!("expected Resolved after migration, got {other:?}"),
+        }
+        assert!(state.legacy_post_replacement_resolved_effect.is_none());
+    }
+
+    /// CR 601.2a: A `SpellCastRecord` snapshot from an older serialized state
+    /// (when `from_zone` was `Option<Zone>` and the default was `null`) must
+    /// deserialize into a record whose `from_zone` is `Zone::Hand` — the
+    /// dominant cast-from origin per CR 601.2a.
+    #[test]
+    fn spell_cast_record_legacy_null_from_zone_deserializes_to_hand() {
+        let legacy_json = r#"{
+            "core_types": ["Creature"],
+            "supertypes": [],
+            "subtypes": ["Bird"],
+            "keywords": ["Flying"],
+            "colors": ["Blue"],
+            "mana_value": 3,
+            "from_zone": null
+        }"#;
+        let record: SpellCastRecord = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(record.from_zone, Zone::Hand);
+    }
+
+    /// CR 601.2a: A `SpellCastRecord` snapshot that omits `from_zone` entirely
+    /// (e.g., a pre-migration snapshot serialized while the field still had
+    /// `skip_serializing_if = "Option::is_none"`) must deserialize into
+    /// `Zone::Hand` via the `serde(default = …)` hook.
+    #[test]
+    fn spell_cast_record_missing_from_zone_deserializes_to_hand() {
+        let no_field_json = r#"{
+            "core_types": ["Instant"],
+            "supertypes": [],
+            "subtypes": [],
+            "keywords": [],
+            "colors": [],
+            "mana_value": 1
+        }"#;
+        let record: SpellCastRecord = serde_json::from_str(no_field_json).unwrap();
+        assert_eq!(record.from_zone, Zone::Hand);
+    }
+
+    /// CR 601.2a: A snapshot with a real `from_zone` value (the modern non-Option
+    /// encoding) must deserialize unchanged — the legacy adapter must not
+    /// rewrite valid origin zones.
+    #[test]
+    fn spell_cast_record_explicit_from_zone_round_trips() {
+        let original = SpellCastRecord {
+            core_types: vec![CoreType::Sorcery],
+            supertypes: vec![],
+            subtypes: vec![],
+            keywords: vec![],
+            colors: vec![],
+            mana_value: 4,
+            has_x_in_cost: false,
+            from_zone: Zone::Graveyard,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let round_tripped: SpellCastRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped, original);
+        assert_eq!(round_tripped.from_zone, Zone::Graveyard);
     }
 }

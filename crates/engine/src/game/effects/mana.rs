@@ -636,6 +636,28 @@ mod tests {
     }
 
     #[test]
+    fn produce_event_context_amount_of_one_color() {
+        let mut state = GameState::new_two_player(42);
+        state.last_effect_count = Some(4);
+        let mut events = Vec::new();
+
+        resolve(
+            &mut state,
+            &make_mana_ability(ManaProduction::AnyOneColor {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                color_options: vec![ManaColor::Red],
+                contribution: ManaContribution::Base,
+            }),
+            &mut events,
+        )
+        .unwrap();
+
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 4);
+    }
+
+    #[test]
     fn produce_empty_is_noop() {
         let mut state = GameState::new_two_player(42);
         let mut events = Vec::new();

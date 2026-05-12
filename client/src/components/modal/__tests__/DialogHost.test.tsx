@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { DialogHost } from "../DialogHost.tsx";
 import { DialogShell } from "../DialogShell.tsx";
@@ -10,14 +10,28 @@ function setWaitingFor(waitingFor: WaitingFor | null) {
   useGameStore.setState({ waitingFor });
 }
 
+// Minimal gameState stub: `useCanActForWaitingState` short-circuits to false
+// when `gameState` is null, so every test that expects the local player to
+// be the actor needs a non-null state. The hook only reads
+// `turn_decision_controller` and `active_player`, both 0 here so player 0
+// (default PLAYER_ID) qualifies as the local actor.
+const stubGameState = {
+  turn_decision_controller: 0,
+  active_player: 0,
+} as never;
+
 describe("DialogHost", () => {
+  beforeEach(() => {
+    useGameStore.setState({ gameState: stubGameState });
+  });
   afterEach(() => {
     cleanup();
     setWaitingFor(null);
+    useGameStore.setState({ gameState: null });
   });
 
   it("hides the peek-restore tab while the dialog is visible (un-peeked)", () => {
-    setWaitingFor({ type: "ModeChoice", data: {} } as never);
+    setWaitingFor({ type: "ModeChoice", data: { player: 0 } } as never);
     render(
       <DialogHost>
         <DialogShell title="t">
@@ -29,7 +43,7 @@ describe("DialogHost", () => {
   });
 
   it("toggles peek when the shell's peek button is clicked", () => {
-    setWaitingFor({ type: "ModeChoice", data: {} } as never);
+    setWaitingFor({ type: "ModeChoice", data: { player: 0 } } as never);
     render(
       <DialogHost>
         <DialogShell title="t">
@@ -58,8 +72,23 @@ describe("DialogHost", () => {
     expect(screen.queryByLabelText("Restore dialog")).not.toBeInTheDocument();
   });
 
+  it("does not establish a viewport-blocking wrapper when the opponent is the waiting player (regression)", () => {
+    // Opponent (player 1) is searching their library; local player is 0.
+    // The host MUST NOT wrap children in `fixed inset-0 z-40`, otherwise
+    // the empty overlay swallows pointer events and the local viewer can't
+    // hover/zoom cards while spectating.
+    setWaitingFor({ type: "SearchLibrary", data: { player: 1 } } as never);
+    const { container } = render(
+      <DialogHost>
+        <div data-testid="child" />
+      </DialogHost>,
+    );
+    const wrapper = container.firstElementChild as HTMLElement | null;
+    expect(wrapper?.className ?? "").not.toMatch(/fixed/);
+  });
+
   it("resets peek to false when WaitingFor changes (regression)", () => {
-    setWaitingFor({ type: "ModeChoice", data: {} } as never);
+    setWaitingFor({ type: "ModeChoice", data: { player: 0 } } as never);
     render(
       <DialogHost>
         <DialogShell title="t">
@@ -72,7 +101,7 @@ describe("DialogHost", () => {
     expect(screen.getByLabelText("Restore dialog")).toBeInTheDocument();
 
     act(() => {
-      setWaitingFor({ type: "ReplacementChoice", data: {} } as never);
+      setWaitingFor({ type: "ReplacementChoice", data: { player: 0 } } as never);
     });
     expect(screen.queryByLabelText("Restore dialog")).not.toBeInTheDocument();
   });

@@ -4,8 +4,9 @@ use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ActivationRestriction, CastingPermission, Duration,
     Effect, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint, PaymentCost, PtValue,
-    QuantityExpr, SearchSelectionConstraint, StaticDefinition, TargetFilter, UnlessCost,
+    QuantityExpr, SearchSelectionConstraint, StaticDefinition, TargetFilter,
 };
+use crate::types::counter::CounterType;
 use crate::types::game_state::DistributionUnit;
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
@@ -31,6 +32,12 @@ pub(crate) struct ParsedEffectClause {
     /// modal (e.g., "its controller may search their library"). Lowered into
     /// `AbilityDefinition.optional` so the resolver prompts the acting player.
     pub(crate) optional: bool,
+    /// CR 118.12: When set, the parsed effect carries an "unless [player] pays
+    /// [cost]" modifier (e.g., "Counter target spell unless its controller
+    /// pays {2}"). Lowered into `AbilityDefinition.unless_pay` so the
+    /// resolution-time runtime owns the payment choice via the unified
+    /// `unless_pay` pipeline (rather than a per-effect bespoke path).
+    pub(crate) unless_pay: Option<crate::types::ability::UnlessPayModifier>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -117,6 +124,9 @@ pub(crate) struct SeekDetails {
     pub(crate) from_top: Option<usize>,
     pub(crate) destination: Zone,
     pub(crate) enter_tapped: bool,
+    /// Alchemy digital-only analogue to search multi-filters: "seek a X card
+    /// and a Y card" performs one independent seek per filter.
+    pub(crate) extra_filters: Vec<TargetFilter>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -179,7 +189,7 @@ pub(crate) enum ContinuationAst {
         attach_to_source: bool,
     },
     RevealHandFilter {
-        card_filter: TargetFilter,
+        card_filter: Option<TargetFilter>,
         choice_optional: bool,
     },
     ManaRestriction {
@@ -215,6 +225,13 @@ pub(crate) enum ContinuationAst {
     /// already moved chosen cards out of the library. Appends a library-bottom placement
     /// step onto the preceding ChangeZone so the unchosen cards are handled by that chain.
     PutChoiceRemainderOnBottom,
+    /// "Put/shuffle the chosen cards into <zone> and put the rest into <zone>"
+    /// after a tracked-set choice. The choice resolver injects chosen cards into
+    /// the first continuation and unchosen cards into its immediate sub-ability.
+    ChoicePartitionDestinations {
+        chosen_destination: Zone,
+        rest_destination: Zone,
+    },
     /// "Put the rest on the bottom/into your graveyard" after Dig/RevealTop —
     /// sets `rest_destination` on the preceding Dig effect. The destination is
     /// parsed from the text (bottom of library, graveyard, hand, etc.).
@@ -248,7 +265,7 @@ pub(crate) enum ContinuationAst {
     /// CR 122.6a: "The token enters with X +1/+1 counters on it, where X is ..."
     /// Absorbs into the preceding Token effect by populating `enter_with_counters`.
     TokenEntersWithCounters {
-        counter_type: String,
+        counter_type: CounterType,
         count: QuantityExpr,
     },
     /// "After that turn, that player takes an extra turn." after a controlled-turn effect.
@@ -473,9 +490,14 @@ impl TargetedImperativeAst {
     /// fields that represent "N objects/cards" are rewritten.
     pub(crate) fn with_for_each_quantity(self, quantity: QuantityExpr) -> Self {
         match self {
-            Self::Sacrifice { target, count } => Self::Sacrifice {
+            Self::Sacrifice {
+                target,
+                count,
+                min_count,
+            } => Self::Sacrifice {
                 target,
                 count: replace_fixed_quantity(count, quantity),
+                min_count,
             },
             Self::Discard {
                 count,
@@ -516,6 +538,9 @@ pub(crate) enum TargetedImperativeAst {
         /// case; "sacrifice N X" / "sacrifice half the permanents they
         /// control" carry the parsed dynamic count.
         count: QuantityExpr,
+        /// Minimum number of permanents the player must choose when `count` is
+        /// an up-to/ranged quantity. Used for "one or more" choices.
+        min_count: usize,
     },
     Discard {
         count: QuantityExpr,
@@ -548,6 +573,10 @@ pub(crate) enum TargetedImperativeAst {
     /// resolver iterates every matching permanent instead of prompting for one.
     ReturnAll {
         target: TargetFilter,
+        /// CR 107.1a + CR 608.2d: Optional counted subset for phrases such as
+        /// "return half the creatures they control, rounded up." `None`
+        /// preserves all/each mass-bounce semantics.
+        count: Option<QuantityExpr>,
     },
     /// CR 400.7: Return to the battlefield (zone change, not bounce).
     ReturnToBattlefield {
@@ -561,13 +590,22 @@ pub(crate) enum TargetedImperativeAst {
         enter_tapped: bool,
         /// CR 122.1 + CR 122.6: Counters placed on the returned object as it
         /// enters the battlefield.
-        enter_with_counters: Vec<(String, QuantityExpr)>,
+        enter_with_counters: Vec<(CounterType, QuantityExpr)>,
     },
     /// CR 400.6: Return to a specific non-hand, non-battlefield zone (zone change).
     ReturnToZone {
         target: TargetFilter,
         origin: Option<Zone>,
         destination: Zone,
+    },
+    /// CR 400.7 + CR 608.2c: Mass return to a non-default zone. Lowers to
+    /// `ChangeZoneAll` so the resolver scans every matching object instead of
+    /// requiring player target slots.
+    ReturnAllToZone {
+        target: TargetFilter,
+        origin: Option<Zone>,
+        destination: Zone,
+        enter_tapped: bool,
     },
     Fight {
         target: TargetFilter,
@@ -657,6 +695,9 @@ pub(crate) enum SearchCreationImperativeAst {
         from_top: Option<usize>,
         destination: Zone,
         enter_tapped: bool,
+        /// Alchemy digital-only analogue to search multi-filters: "seek a X card
+        /// and a Y card" performs one independent seek per filter.
+        extra_filters: Vec<TargetFilter>,
     },
     /// CR 400.7 + CR 701.23 + CR 701.24: "Search [possessive] graveyard, hand,
     /// and library for any number of cards with that name and exile them."
@@ -696,7 +737,9 @@ pub(crate) enum HandRevealImperativeAst {
     LookAt {
         target: TargetFilter,
     },
-    RevealAll,
+    RevealAll {
+        card_filter: TargetFilter,
+    },
     /// "reveals a number of cards from their hand equal to X" (CR 701.20a).
     RevealPartial {
         count: crate::types::ability::QuantityExpr,
@@ -772,7 +815,7 @@ pub(crate) enum PutImperativeAst {
         /// CR 122.1 + CR 614.1c: Counters granted as the moved object enters
         /// (e.g., "with two additional +1/+1 counters on it"). Each entry is
         /// `(counter_type, count)`.
-        enter_with_counters: Vec<(String, QuantityExpr)>,
+        enter_with_counters: Vec<(CounterType, QuantityExpr)>,
     },
     TopOfLibrary,
     BottomOfLibrary,
@@ -867,7 +910,12 @@ pub(crate) enum ZoneCounterImperativeAst {
     Counter {
         target: TargetFilter,
         source_static: Option<Box<StaticDefinition>>,
-        unless_payment: Option<UnlessCost>,
+        /// CR 118.12: "Counter target spell unless its controller pays {X}"
+        /// modifier. Lowered to `ParsedEffectClause.unless_pay` and ultimately
+        /// to `AbilityDefinition.unless_pay`, so the runtime resolves the
+        /// payment via the unified `unless_pay` pipeline rather than a
+        /// counter-specific branch.
+        unless_pay: Option<crate::types::ability::UnlessPayModifier>,
         /// CR 701.6 + CR 405.1: When `true`, lower to `Effect::CounterAll`
         /// (mass counter) instead of `Effect::Counter`. Mirrors the
         /// `Destroy { all }` and `Exile { all }` flags above. Triggered by
@@ -875,7 +923,7 @@ pub(crate) enum ZoneCounterImperativeAst {
         all: bool,
     },
     PutCounter {
-        counter_type: String,
+        counter_type: CounterType,
         count: QuantityExpr,
         target: TargetFilter,
     },
@@ -887,25 +935,25 @@ pub(crate) enum ZoneCounterImperativeAst {
     /// Gift of the Viper, Qarsi Revenant, Nezumi Prowler, Arwen, Champion of
     /// Dusan, Quicksilver.
     PutCounterList {
-        entries: Vec<(String, QuantityExpr)>,
+        entries: Vec<(CounterType, QuantityExpr)>,
         target: TargetFilter,
         multi_target: Option<MultiTargetSpec>,
     },
     /// CR 122.1: "Put counters on each/all" — mass counter placement without targeting.
     PutCounterAll {
-        counter_type: String,
+        counter_type: CounterType,
         count: QuantityExpr,
         target: TargetFilter,
     },
     RemoveCounter {
-        counter_type: String,
+        counter_type: Option<CounterType>,
         count: i32,
         target: TargetFilter,
     },
     /// CR 122.5 / CR 122.8: Transfer counters from source to target.
     MoveCounters {
         source: TargetFilter,
-        counter_type: Option<String>,
+        counter_type: Option<CounterType>,
         count: Option<QuantityExpr>,
         mode: crate::types::ability::CounterTransferMode,
         target: TargetFilter,
@@ -953,6 +1001,7 @@ pub(crate) fn parsed_clause(effect: Effect) -> ParsedEffectClause {
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     }
 }
 
@@ -992,6 +1041,7 @@ pub(crate) enum OracleBlockAst {
         cost_text: String,
         header: ModalHeaderAst,
         modes: Vec<ModeAst>,
+        constraints: ActivatedConstraintAst,
     },
     Modal {
         header: ModalHeaderAst,

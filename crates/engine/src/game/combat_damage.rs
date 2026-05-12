@@ -1062,6 +1062,44 @@ mod tests {
         assert_eq!(state.players[0].life, 23);
     }
 
+    /// CR 702.15b: Damage dealt by a source with lifelink causes that source's
+    /// controller to gain that much life — regardless of whether the damage is dealt
+    /// to a player or to a blocking creature. Regression test for GH #324: user
+    /// reported lifelink did not credit life when the attacker was blocked.
+    #[test]
+    fn lifelink_gains_life_when_attacker_is_blocked() {
+        let mut state = setup();
+        // 3/3 attacker with lifelink, 2/2 vanilla blocker.
+        let attacker = create_creature(&mut state, PlayerId(0), "Lifelinker", 3, 3);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Lifelink);
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+
+        // CR 702.15b: Controller gains life equal to damage dealt to the blocker (3).
+        assert_eq!(
+            state.players[0].life, 23,
+            "Lifelink attacker should gain life from damage dealt to the blocker"
+        );
+        // Defending player took no damage (attacker was blocked).
+        assert_eq!(state.players[1].life, 20);
+        // Blocker took 3 damage (and dies via SBA).
+        // Either damage_marked is 3 or it's already in the graveyard.
+        let blocker_dead = state
+            .objects
+            .get(&blocker)
+            .map(|o| o.zone != Zone::Battlefield)
+            .unwrap_or(true);
+        assert!(blocker_dead, "Blocker should have died from 3 damage");
+    }
+
     #[test]
     fn combat_no_combat_state_is_noop() {
         let mut state = setup();
@@ -1234,6 +1272,45 @@ mod tests {
         // Infect: poison counters, no life loss
         assert_eq!(state.players[1].life, 20);
         assert_eq!(state.players[1].poison_counters, 3);
+    }
+
+    #[test]
+    fn toxic_to_player_adds_poison_and_still_deals_damage() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Toxic", 3, 3);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Toxic(2));
+        setup_combat(&mut state, vec![attacker], vec![]);
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+
+        assert_eq!(state.players[1].life, 17);
+        assert_eq!(state.players[1].poison_counters, 2);
+    }
+
+    #[test]
+    fn toxic_to_creature_does_not_add_poison() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Toxic", 3, 3);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Toxic(2));
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 4);
+        setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+
+        assert_eq!(state.objects[&blocker].damage_marked, 3);
+        assert_eq!(state.players[1].poison_counters, 0);
     }
 
     #[test]

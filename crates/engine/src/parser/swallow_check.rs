@@ -24,12 +24,13 @@
 use super::oracle::ParsedAbilities;
 use super::oracle_ir::diagnostic::{CascadeSlot, OracleDiagnostic};
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, ContinuousModification, Effect, ModalSelectionConstraint,
-    OpponentMayScope, PlayerFilter, QuantityExpr, ReplacementDefinition, ReplacementMode,
-    StaticDefinition, TargetFilter, TriggerDefinition,
+    AbilityCondition, AbilityDefinition, ContinuousModification, Effect, FilterProp,
+    ModalSelectionConstraint, OpponentMayScope, PlayerFilter, QuantityExpr, ReplacementDefinition,
+    ReplacementMode, StaticDefinition, TargetFilter, TriggerDefinition,
 };
 use crate::types::statics::StaticMode;
 use crate::types::triggers::TriggerMode;
+use crate::types::zones::Zone;
 
 /// Strip parenthesized reminder text. Reminder text is the parser's
 /// responsibility to ignore at the keyword level — keywords themselves are
@@ -359,7 +360,7 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
 /// Recursive walk: does any def in the tree carry an `AddTargetReplacement`
 /// effect? This single Effect variant simultaneously encodes a replacement
 /// effect (CR 614.1a "instead"), a conditional gate ("if [target] would die"),
-/// and an EOT duration (the carried replacement's `expires_at_eot`). Its
+/// and an EOT duration (the carried replacement's `expiry: EndOfTurn`). Its
 /// presence satisfies the Replacement_Instead, Condition_If, and
 /// Duration_ThisTurn detectors when the original text matches the
 /// "die this turn, exile instead" rider grammar.
@@ -412,6 +413,10 @@ fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
             // "you may cast X as though it had flash if you pay Y" —
             // generalized cast-timing/keyword permission, always opt-in.
             | StaticMode::CastWithKeyword { .. }
+            // CR 602.5e: "You may activate [abilities] any time you could
+            // cast an instant" is an activation-timing permission, not an
+            // optional effect to execute during resolution.
+            | StaticMode::ActivateAsInstant { .. }
             // CR 117.3a: "You may play lands from your graveyard"
             // (Crucible, Ramunap Excavator, etc.) — graveyard-as-zone
             // cast permission, structurally opt-in.
@@ -447,6 +452,23 @@ fn def_tree_has_unimplemented(def: &AbilityDefinition) -> bool {
     def.mode_abilities.iter().any(def_tree_has_unimplemented)
 }
 
+fn trigger_tree_has_unimplemented(trigger: &TriggerDefinition) -> bool {
+    trigger
+        .execute
+        .as_deref()
+        .is_some_and(def_tree_has_unimplemented)
+}
+
+fn static_definition_has_unimplemented(s: &StaticDefinition) -> bool {
+    s.modifications.iter().any(|m| match m {
+        ContinuousModification::GrantTrigger { trigger } => trigger_tree_has_unimplemented(trigger),
+        ContinuousModification::GrantAbility { definition } => {
+            def_tree_has_unimplemented(definition)
+        }
+        _ => false,
+    })
+}
+
 fn any_ability_has_unimplemented(parsed: &ParsedAbilities) -> bool {
     parsed.abilities.iter().any(def_tree_has_unimplemented)
         || parsed
@@ -457,6 +479,7 @@ fn any_ability_has_unimplemented(parsed: &ParsedAbilities) -> bool {
             .replacements
             .iter()
             .any(|r| r.execute.as_deref().is_some_and(def_tree_has_unimplemented))
+        || parsed.statics.iter().any(static_definition_has_unimplemented)
         // CR 603: A `TriggerMode::Unknown(_)` is the trigger-side equivalent
         // of `Effect::Unimplemented` — the parser preserved the original
         // trigger text but couldn't classify the timing/event. Suppress
@@ -521,6 +544,52 @@ fn any_ability_has_exile_parent_rider(parsed: &ParsedAbilities) -> bool {
             t.execute
                 .as_deref()
                 .is_some_and(def_tree_has_exile_parent_rider)
+        })
+}
+
+fn target_filter_has_zone(filter: &TargetFilter, zone: Zone) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf.properties.iter().any(
+            |prop| matches!(prop, FilterProp::InZone { zone: prop_zone } if *prop_zone == zone),
+        ),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
+            .iter()
+            .any(|filter| target_filter_has_zone(filter, zone)),
+        TargetFilter::Not { filter } => target_filter_has_zone(filter, zone),
+        _ => false,
+    }
+}
+
+fn def_tree_has_graveyard_cast_from_zone(def: &AbilityDefinition) -> bool {
+    if let Effect::CastFromZone { target, .. } = &*def.effect {
+        if target_filter_has_zone(target, Zone::Graveyard) {
+            return true;
+        }
+    }
+    if let Some(ref sub) = def.sub_ability {
+        if def_tree_has_graveyard_cast_from_zone(sub) {
+            return true;
+        }
+    }
+    if let Some(ref else_ab) = def.else_ability {
+        if def_tree_has_graveyard_cast_from_zone(else_ab) {
+            return true;
+        }
+    }
+    def.mode_abilities
+        .iter()
+        .any(def_tree_has_graveyard_cast_from_zone)
+}
+
+fn any_ability_has_graveyard_cast_from_zone(parsed: &ParsedAbilities) -> bool {
+    parsed
+        .abilities
+        .iter()
+        .any(def_tree_has_graveyard_cast_from_zone)
+        || parsed.triggers.iter().any(|t| {
+            t.execute
+                .as_deref()
+                .is_some_and(def_tree_has_graveyard_cast_from_zone)
         })
 }
 
@@ -797,6 +866,15 @@ fn def_tree_has_duration(def: &AbilityDefinition) -> bool {
     if def.duration.is_some() {
         return true;
     }
+    if matches!(
+        &*def.effect,
+        Effect::Mana {
+            expiry: Some(_),
+            ..
+        }
+    ) {
+        return true;
+    }
     if let Some(ref sub) = def.sub_ability {
         if def_tree_has_duration(sub) {
             return true;
@@ -1051,6 +1129,10 @@ fn detect_dynamic_qty(
         // Sylvan Library class: "For each of those cards, pay N life or put
         // the card on top" is captured as a dedicated per-card choice effect.
         "ChooseDrawnThisTurnPayOrTopdeck",
+        // CR 608.2c + CR 701.38: "For each player who chose <choice>" vote
+        // bodies are captured by `PlayerFilter::VotedFor`, which resolves
+        // against the vote ballot ledger rather than a QuantityExpr.
+        "VotedFor",
     ];
     if json_has_any(ast_json, dynamic_markers) {
         return;
@@ -1113,6 +1195,14 @@ fn detect_condition_if(
     if any_ability_has_exile_parent_rider(parsed) {
         return;
     }
+    // CR 614.1a + CR 701.5: The imperative CastFromZone resolver grants
+    // graveyard casts by moving the selected card to exile before casting.
+    // For coverage purposes that represents "If that spell would be put into
+    // your graveyard, exile it instead" riders on Dreadhorde Arcanist-class
+    // triggers, even though it is not a separate ReplacementDefinition.
+    if any_ability_has_graveyard_cast_from_zone(parsed) {
+        return;
+    }
     if any_ability_has_conditional_mana_spell_grant(parsed) {
         return;
     }
@@ -1138,6 +1228,22 @@ fn detect_condition_if(
     // the `Prevented` arm.
     // allow-noncombinator: swallow detector marker scan on classified text
     if stripped.contains("if damage is prevented this way") {
+        return;
+    }
+    // CR 615 + CR 615.5: "If damage would be dealt to <target> this turn,
+    // prevent that damage [and put that many counters on it]" is encoded
+    // structurally as an `Effect::PreventDamage` whose `amount: All` +
+    // `duration: UntilEndOfTurn` IS the conditional gate (the shield fires
+    // only when matching damage is proposed; otherwise it sits dormant until
+    // cleanup). Gatta and Luzzu is the motivating case. The marker test is
+    // narrow: the `if`-clause body must lead with "prevent" so generic
+    // "if damage" patterns (e.g., damage-redirect replacements that DO want
+    // a separate `condition` field) aren't suppressed.
+    if stripped.contains("if damage would be dealt to") // allow-noncombinator: swallow detector marker scan on classified text
+        && stripped.contains("prevent that damage") // allow-noncombinator: swallow detector marker scan on classified text
+        && ast_json.contains("\"type\":\"PreventDamage\"")
+    // allow-noncombinator: structural AST-shape JSON probe
+    {
         return;
     }
     // CR 118.12 + CR 614.12a: "you may pay [cost]. If you don't, ..."
@@ -1199,6 +1305,10 @@ fn detect_condition_if(
         // CR 117.3a: TopOfLibraryCastPermission with `alt_cost` IS the "if
         // you cast a spell this way, pay X" gate (Bolas's Citadel etc.).
         "TopOfLibraryCastPermission",
+        // CR 614.1a: GraveyardCastPermission with this flag carries the "if
+        // a spell cast this way would be put into your graveyard, exile it
+        // instead" replacement rider.
+        "graveyard_destination_replacement",
         // CR 705: FlipCoin / FlipCoins / RollDie variants encode the
         // "if you win the flip" / "if you lose" / die-result branches as
         // structured win_effect/lose_effect/results sub-trees. Their
@@ -1268,16 +1378,17 @@ fn detect_condition_unless(
         "\"unless_filter\":{",
         "\"unless_pay\":{",
         "\"unless_condition\":{",
-        "\"unless_payment\":{",
         "\"condition\":{",
         "Unless",
         // CR 605.1a: `CantBeActivated { exemption: ManaAbilities }` is the
         // structural encoding of "can't be activated unless they're mana abilities."
         "\"exemption\":\"ManaAbilities\"",
-        // CR 118.12: "Counter target spell unless its controller pays X" —
-        // captured as `Effect::Counter { unless_payment: Some(_) }` (Censor,
-        // Mana Leak, Disrupt, Spell Shrivel, etc.).
-        "\"unless_payment\":",
+        // CR 118.12 (post-2026-05-09 fold): "Counter target spell unless its
+        // controller pays X" is now captured as
+        // `AbilityDefinition.unless_pay` rather than
+        // `Effect::Counter.unless_payment`. The `"unless_pay":{` marker
+        // above subsumes both the trigger-level and counter-level encodings
+        // — the `unless_payment` marker has been retired.
     ];
     if json_has_any(ast_json, markers) {
         return;
@@ -1302,6 +1413,24 @@ fn detect_condition_as_long_as(
 ) {
     // allow-noncombinator: swallow detector marker scan on classified text
     if !cleaned.contains("as long as ") {
+        return;
+    }
+    // CR 400.7i + CR 609.4b: "play/cast that card for as long as it remains
+    // exiled, and mana ..." is represented as a zone-scoped PlayFromExile
+    // permission on the exiled object. The permission is stored with
+    // Duration::Permanent because zones::apply_zone_exit_cleanup removes it
+    // when the card stops being the exiled object this effect refers to.
+    let exile_duration_clause_recognized = [
+        "as long as it remains exiled",
+        "as long as that card remains exiled",
+        "as long as those cards remain exiled",
+    ]
+    .iter()
+    .any(|phrase| cleaned.contains(phrase));
+    if exile_duration_clause_recognized
+        && json_has_any(ast_json, &["\"type\":\"PlayFromExile\""])
+        && json_has_any(ast_json, &["\"duration\":\"Permanent\""])
+    {
         return;
     }
     let markers: &[&str] = &[
@@ -1466,10 +1595,10 @@ fn detect_duration_this_turn(
         "ThisTurn",
         "EndOfTurn",
         "EndOfCombat",
-        // CR 514.2: AddTargetReplacement carries `expires_at_eot: true`,
+        // CR 514.2: AddTargetReplacement carries `expiry: Some(RestrictionExpiry::EndOfTurn)`,
         // which IS the EOT duration encoded structurally on the
         // ReplacementDefinition rather than via `def.duration`.
-        "\"expires_at_eot\":true",
+        "\"expiry\":{\"type\":\"EndOfTurn\"}",
         // CR 614.6: `DamageDone` replacement events scope to a single
         // resolution (one-shot prevention/redirection); the "this turn"
         // wording is implicit in the spell-level replacement lifetime,
@@ -1513,9 +1642,12 @@ fn detect_duration_this_turn(
         "YouHadCreatureEnterThisTurn",
         "YouHadAngelOrBerserkerEnterThisTurn",
         "YouHadArtifactEnterThisTurn",
+        "BattlefieldEntriesThisTurn",
+        "EnteredThisTurn",
         "CardsLeftYourGraveyardThisTurnAtLeast",
         "SourceEnteredThisTurn",
         "OpponentSearchedLibraryThisTurn",
+        "OpponentGainedLife",
         "CastSpellThisTurn",
         "SpellsCastThisTurn",
         "AttackedThisTurn",
@@ -1891,6 +2023,19 @@ mod tests {
     }
 
     #[test]
+    fn condition_if_accepts_graveyard_cast_exile_rider() {
+        let parsed = parse_named(
+            "Trample\n\
+             Whenever this creature attacks, you may cast target instant or sorcery card with mana value less than or equal to this creature's power from your graveyard without paying its mana cost. \
+             If that spell would be put into your graveyard, exile it instead.",
+            "Dreadhorde Arcanist",
+            &["Creature"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Condition_If"));
+    }
+
+    #[test]
     fn duration_this_turn_accepts_life_loss_turn_history_condition() {
         let parsed = parse(
             "{1}{R}, Discard a card, Sacrifice a Vampire: Draw two cards. \
@@ -1926,6 +2071,18 @@ mod tests {
     }
 
     #[test]
+    fn duration_this_turn_accepts_entered_this_turn_quantity_condition() {
+        let parsed = parse_named(
+            "Reach\n\
+             This creature gets +1/+0 and has trample as long as you control a land creature or a land entered the battlefield under your control this turn.",
+            "Earth Rumble Wrestlers",
+            &["Creature"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Duration_ThisTurn"));
+    }
+
+    #[test]
     fn optional_you_may_accepts_delayed_trigger_inner_optionality() {
         let parsed = parse(
             "Whenever a creature enters this turn, you may draw a card.",
@@ -1936,10 +2093,48 @@ mod tests {
     }
 
     #[test]
+    fn optional_you_may_accepts_activation_timing_permission_static() {
+        let parsed = parse_named(
+            "Flash\n\
+             As long as The Wandering Emperor entered this turn, you may activate her loyalty abilities any time you could cast an instant.\n\
+             [+1]: Put a +1/+1 counter on up to one target creature.",
+            "The Wandering Emperor",
+            &["Planeswalker"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
     fn dynamic_qty_accepts_counter_multiplier_carrier() {
         let parsed = parse(
             "Put a +1/+1 counter on target creature you control, then double the number of +1/+1 counters on that creature.",
             &["Instant"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
+    }
+
+    #[test]
+    fn dynamic_qty_suppressed_for_unimplemented_granted_trigger_child() {
+        let parsed = parse_named(
+            "Commander creatures you own have \"When this creature enters and at the beginning of your upkeep, each player may put two +1/+1 counters on a creature they control. For each opponent who does, you gain protection from that player until your next turn.\"",
+            "Noble Heritage",
+            &["Enchantment"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
+    }
+
+    #[test]
+    fn dynamic_qty_accepts_vote_voted_for_carrier() {
+        let parsed = parse_named(
+            "At the beginning of your upkeep, each opponent chooses money, friends, or secrets. \
+             For each player who chose money, you and that player each create a Treasure token. \
+             For each player who chose friends, you and that player each create a 1/1 green and white Citizen creature token. \
+             For each player who chose secrets, you and that player each draw a card.",
+            "Master of Ceremonies",
+            &["Creature"],
         );
 
         assert!(!has_swallowed_detector(&parsed, "DynamicQty"));

@@ -9,6 +9,7 @@ use crate::types::ability::{
     AbilityDefinition, AbilityKind, CounterTriggerFilter, Duration, Effect, QuantityExpr,
     ReplacementDefinition, TargetFilter, TriggerDefinition,
 };
+use crate::types::counter::CounterType;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
@@ -183,7 +184,7 @@ pub(crate) fn parse_saga_chapters(
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::PutCounter {
-                counter_type: "lore".to_string(),
+                counter_type: CounterType::Lore,
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,
             },

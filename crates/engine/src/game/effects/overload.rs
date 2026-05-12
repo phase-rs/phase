@@ -98,6 +98,7 @@ fn transform_effect_in_place(effect: &mut Effect) {
         } => Effect::BounceAll {
             target,
             destination,
+            count: None,
         },
         // CR 702.96b + CR 701.13a: Winds of Abandon overload — promote the
         // single-target `ChangeZone` to its mass counterpart so "exile target
@@ -127,6 +128,7 @@ fn transform_effect_in_place(effect: &mut Effect) {
             origin,
             destination,
             target,
+            enter_tapped: false,
         },
         // Effects without an all-matching counterpart (e.g. `Counter` for
         // Counterflux) are preserved as-is. No overload corpus card has a
@@ -217,8 +219,10 @@ mod tests {
             Effect::BounceAll {
                 destination,
                 ref target,
+                count,
             } => {
                 assert!(destination.is_none(), "default destination preserved");
+                assert!(count.is_none(), "overload does not add counted bounce");
                 assert!(matches!(target, TargetFilter::Typed(_)));
             }
             ref other => panic!("expected BounceAll, got {other:?}"),
@@ -269,6 +273,7 @@ mod tests {
                 origin,
                 destination,
                 ref target,
+                ..
             } => {
                 assert!(origin.is_none());
                 assert_eq!(destination, Zone::Exile);
@@ -289,7 +294,6 @@ mod tests {
         let mut def = leaf(Effect::Counter {
             target: creature_filter(),
             source_static: None,
-            unless_payment: None,
         });
         transform_ability_def(&mut def);
         assert!(matches!(*def.effect, Effect::Counter { .. }));

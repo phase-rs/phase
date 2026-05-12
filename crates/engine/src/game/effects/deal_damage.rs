@@ -27,10 +27,12 @@ use crate::types::proposed_event::ProposedEvent;
 pub(crate) struct DamageContext {
     pub(crate) source_id: ObjectId,
     pub(crate) controller: PlayerId,
+    pub(crate) source_is_creature: bool,
     pub(crate) has_deathtouch: bool,
     pub(crate) has_lifelink: bool,
     pub(crate) has_wither: bool,
     pub(crate) has_infect: bool,
+    pub(crate) combat_damage_poison: u32,
 }
 
 impl DamageContext {
@@ -40,10 +42,19 @@ impl DamageContext {
         state.objects.get(&source_id).map(|obj| Self {
             source_id,
             controller: obj.controller,
+            source_is_creature: obj.card_types.core_types.contains(&CoreType::Creature),
             has_deathtouch: obj.has_keyword(&Keyword::Deathtouch),
             has_lifelink: obj.has_keyword(&Keyword::Lifelink),
             has_wither: obj.has_keyword(&Keyword::Wither),
             has_infect: obj.has_keyword(&Keyword::Infect),
+            combat_damage_poison: obj
+                .keywords
+                .iter()
+                .filter_map(|keyword| match keyword {
+                    Keyword::Toxic(amount) => Some(*amount),
+                    _ => None,
+                })
+                .sum(),
         })
     }
 
@@ -54,10 +65,12 @@ impl DamageContext {
         Self {
             source_id,
             controller,
+            source_is_creature: false,
             has_deathtouch: false,
             has_lifelink: false,
             has_wither: false,
             has_infect: false,
+            combat_damage_poison: 0,
         }
     }
 }
@@ -75,7 +88,8 @@ pub(crate) enum DamageResult {
 ///
 /// Handles: protection (CR 702.16b), replacement effects (CR 120.4b), damage marking
 /// (CR 120.3e), planeswalker loyalty (CR 120.3c / CR 306.8), wither (CR 702.80),
-/// infect (CR 702.90), deathtouch (CR 702.2b), lifelink (CR 702.15b), and
+/// infect (CR 702.90), toxic (CR 702.164c), deathtouch (CR 702.2b),
+/// lifelink (CR 702.15b), and
 /// DamageDealt event emission.
 ///
 /// Event ordering: DamageDealt is emitted before lifelink LifeChanged.
@@ -165,27 +179,20 @@ pub(crate) fn apply_damage_to_target(
         ReplacementResult::Prevented => {
             // CR 615.5: A prevention effect's additional effect (e.g.
             // Phyrexian Hydra's "Put a -1/-1 counter on ~ for each 1 damage
-            // prevented this way") is stashed as `post_replacement_effect` by
-            // the prevention applier. Resolve it inline here so the follow-up
+            // prevented this way") is stashed as `post_replacement_continuation`
+            // by the prevention applier. Resolve it inline here so the follow-up
             // takes place "immediately afterward" as the rule requires. The
             // applier already stamped `state.last_effect_count` with the
             // prevented amount so `EventContextAmount` resolves correctly.
-            if let Some(effect_def) = state.post_replacement_effect.take() {
-                let source = state.post_replacement_source.take();
+            if state.post_replacement_continuation.is_some() {
                 // CR 615.5 + CR 609.7: leave `post_replacement_event_source`
                 // populated for the call so `TargetFilter::PostReplacementSourceController`
                 // can resolve against the prevented event's damage source. Clear
                 // after the call to prevent leakage into unrelated later
                 // replacements.
-                let _ = crate::game::engine_replacement::apply_post_replacement_effect(
-                    state,
-                    &effect_def,
-                    source,
-                    None,
-                    events,
+                let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+                    state, None, None, events,
                 );
-                state.post_replacement_event_source = None;
-                state.post_replacement_event_target = None;
             }
             Ok(DamageResult::Applied(0))
         }
@@ -204,7 +211,8 @@ pub(crate) fn apply_damage_to_target(
 /// Extracted from `apply_damage_to_target`'s Execute arm so the same logic can be
 /// invoked by `handle_replacement_choice` when a player accepts a damage replacement
 /// choice. Handles wither/infect (CR 702.80 / CR 702.90), planeswalker loyalty
-/// (CR 120.3c / CR 306.8), creature damage marking (CR 120.3e), poison (CR 702.90),
+/// (CR 120.3c / CR 306.8), creature damage marking (CR 120.3e), poison
+/// (CR 702.90 / CR 702.164c),
 /// life loss (CR 120.3a), excess damage (CR 120.10), damage record tracking, and
 /// lifelink (CR 702.15b / CR 120.3f).
 ///
@@ -330,6 +338,17 @@ pub(crate) fn apply_damage_after_replacement(
                     return DamageResult::NeedsChoice;
                 }
             }
+            if is_combat
+                && actual_amount > 0
+                && ctx.source_is_creature
+                && ctx.combat_damage_poison > 0
+            {
+                // CR 702.164c: Toxic adds poison counters when a creature
+                // deals combat damage to a player.
+                if let Some(player) = state.players.iter_mut().find(|p| p.id == *player_id) {
+                    player.poison_counters += ctx.combat_damage_poison;
+                }
+            }
         }
     }
 
@@ -385,6 +404,7 @@ pub(crate) fn apply_damage_after_replacement(
     if actual_amount > 0 {
         state.damage_dealt_this_turn.push(DamageRecord {
             source_id: ctx.source_id,
+            source_controller: ctx.controller,
             target: t.clone(),
             amount: actual_amount,
             is_combat,
@@ -508,10 +528,22 @@ pub fn resolve(
             .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
     };
 
-    // Resolve effective targets: use explicit targets if present, otherwise derive
-    // implicit target from the TargetFilter for non-targeted damage ("to you", "to itself").
+    // CR 120.1 + CR 608.2c: Resolve effective damage targets.
+    //
+    // `SelfRef` is the printed-name anaphor (`~`) — always resolves to the
+    // source object regardless of `ability.targets`. Short-circuit BEFORE the
+    // `ability.targets.is_empty()` fallback so chained
+    // `DealDamage { target: SelfRef }` sub-abilities don't inherit the
+    // parent's targets via chain propagation in
+    // `effects::mod.rs::resolve_ability_chain` (issue #323 class).
+    //
+    // Other implicit-target filters (`Controller`) keep the pre-existing
+    // "fall back when targets are empty" semantic.
     let implicit;
-    let effective_targets: &[TargetRef] = if !ability.targets.is_empty() {
+    let effective_targets: &[TargetRef] = if matches!(target_filter, TargetFilter::SelfRef) {
+        implicit = vec![TargetRef::Object(ability.source_id)];
+        &implicit
+    } else if !ability.targets.is_empty() {
         if matches!(damage_source, Some(DamageSource::Target)) && ability.targets.len() > 1 {
             &ability.targets[1..]
         } else {
@@ -520,7 +552,6 @@ pub fn resolve(
     } else {
         implicit = match target_filter {
             TargetFilter::Controller => vec![TargetRef::Player(ability.controller)],
-            TargetFilter::SelfRef => vec![TargetRef::Object(ability.source_id)],
             _ => vec![],
         };
         &implicit
@@ -757,6 +788,14 @@ fn collect_matching_players(
                         });
                         triggering != Some(p.id)
                     }
+                    // CR 608.2c + CR 701.38: Match each player who cast a vote
+                    // for the recorded choice index. Mirrors the
+                    // `ZoneChangedThisWay` arm — consults the transient
+                    // `last_vote_ballots` ledger.
+                    PlayerFilter::VotedFor { choice_index } => state
+                        .last_vote_ballots
+                        .iter()
+                        .any(|(voter, idx)| *voter == p.id && *idx == choice_index),
                 }
         })
         .map(|p| p.id)
@@ -854,6 +893,12 @@ pub fn resolve_each_player(
                         });
                         triggering != Some(p.id)
                     }
+                    // CR 608.2c + CR 701.38: Match each player who cast a vote
+                    // for the recorded choice index in the most recent vote.
+                    PlayerFilter::VotedFor { choice_index } => state
+                        .last_vote_ballots
+                        .iter()
+                        .any(|(voter, idx)| *voter == p.id && *idx == *choice_index),
                 }
         })
         .map(|p| p.id)
@@ -1112,7 +1157,7 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::PutCounter {
-                            counter_type: "M1M1".to_string(),
+                            counter_type: CounterType::Minus1Minus1,
                             count: QuantityExpr::Ref {
                                 qty: QuantityRef::EventContextAmount,
                             },
@@ -1285,7 +1330,7 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::PutCounter {
-                            counter_type: "M1M1".to_string(),
+                            counter_type: CounterType::Minus1Minus1,
                             count: QuantityExpr::Ref {
                                 qty: QuantityRef::EventContextAmount,
                             },

@@ -64,7 +64,16 @@ export function GameListItem({ game, onJoin, compatible = true }: GameListItemPr
 
   return (
     <button
-      onClick={() => !disabled && onJoin(game.game_code, game.format)}
+      onClick={() => {
+        if (disabled) return;
+        if (game.is_sandbox === true) {
+          const ok = window.confirm(
+            "This is a Sandbox game. Players with debug permission can directly manipulate game state. Continue?",
+          );
+          if (!ok) return;
+        }
+        onJoin(game.game_code, game.format);
+      }}
       disabled={disabled}
       title={disabledTitle}
       className={
@@ -101,6 +110,17 @@ export function GameListItem({ game, onJoin, compatible = true }: GameListItemPr
           title="Peer-to-peer game (host runs the engine)"
         >
           P2P
+        </span>
+      )}
+
+      {/* Sandbox badge — rendered when the host enabled debug actions for
+          this game. Joiners should be warned this isn't a competitive match. */}
+      {game.is_sandbox === true && (
+        <span
+          className="flex-shrink-0 rounded bg-amber-500/20 px-1.5 py-0.5 text-xs font-semibold text-amber-300"
+          title="This game allows debug actions. Use for testing — not a competitive match."
+        >
+          SANDBOX
         </span>
       )}
 

@@ -4,8 +4,8 @@ use std::str::FromStr;
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until};
-use nom::character::complete::{alpha1, space1};
-use nom::combinator::{opt, rest, value};
+use nom::character::complete::{alpha1, space0, space1};
+use nom::combinator::{all_consuming, eof, opt, rest, value};
 use nom::multi::many0;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -19,7 +19,7 @@ use super::oracle_nom::error::OracleResult;
 use super::oracle_nom::filter as nom_filter;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::target as nom_target;
-use super::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
+use super::oracle_quantity::{parse_cda_quantity, parse_for_each_clause, parse_quantity_ref};
 use super::oracle_target::{
     parse_combat_status_prefix, parse_counter_suffix, parse_mana_value_suffix, parse_target,
     parse_that_clause_suffix, parse_type_phrase,
@@ -30,8 +30,9 @@ use super::oracle_util::{
     SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
 };
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, AttachmentKind, BasicLandType, CardPlayMode, ChosenSubtypeKind,
-    Comparator, ContinuousModification, ControllerRef, CountScope, FilterProp, ObjectScope,
+    AbilityDefinition, AbilityKind, AbilityTag, ActivationRestriction, AttachmentKind,
+    BasicLandType, CardPlayMode, ChosenSubtypeKind, Comparator, ContinuousModification,
+    ControllerRef, CostCategory, CountScope, FilterProp, ObjectScope, ParsedCondition,
     QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
     TypedFilter,
 };
@@ -41,8 +42,8 @@ use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::statics::{
-    ActivationExemption, CastFrequency, CastingProhibitionCondition, HandSizeModification,
-    ProhibitionScope, StaticMode, TriggerCause,
+    ActivationExemption, CastFrequency, CastingProhibitionCondition, CostPaymentProhibition,
+    HandSizeModification, ProhibitionScope, StaticMode, TriggerCause,
 };
 use crate::types::zones::Zone;
 
@@ -303,6 +304,7 @@ enum RuleStaticPredicate {
     MustAttack,
     MustBlock,
     MustBeBlocked,
+    Goaded,
     BlockOnlyCreaturesWithFlying,
     Shroud,
     Hexproof,
@@ -373,6 +375,42 @@ pub(crate) fn try_parse_graveyard_keyword_grant_clause(
 enum InvertedAsLongAs {
     Allow,
     Skip,
+}
+
+fn parse_cost_payment_prohibition_statics(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<Vec<StaticDefinition>> {
+    let (who, predicate) = strip_casting_prohibition_subject(tp.lower)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("can't pay life or sacrifice ")
+        .parse(predicate)
+        .ok()?;
+    let (after_suffix, filter_text) = terminated(
+        take_until::<_, _, OracleError<'_>>(" to cast spells or activate abilities"),
+        tag::<_, _, OracleError<'_>>(" to cast spells or activate abilities"),
+    )
+    .parse(rest)
+    .ok()?;
+    let (_, _) = (opt(tag::<_, _, OracleError<'_>>(".")), eof)
+        .parse(after_suffix)
+        .ok()?;
+    let (filter, filter_remainder) = parse_type_phrase(filter_text.trim());
+    if !filter_remainder.trim().is_empty() || matches!(filter, TargetFilter::Any) {
+        return None;
+    }
+
+    Some(vec![
+        StaticDefinition::new(StaticMode::CantPayCost {
+            who: who.clone(),
+            cost: CostPaymentProhibition::PayLife,
+        })
+        .description(text.to_string()),
+        StaticDefinition::new(StaticMode::CantPayCost {
+            who,
+            cost: CostPaymentProhibition::Sacrifice { filter },
+        })
+        .description(text.to_string()),
+    ])
 }
 
 /// Parse a static/continuous ability line into a StaticDefinition.
@@ -452,6 +490,14 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     let text = strip_reminder_text(text);
     let lower = text.to_lowercase();
     let tp = TextPair::new(&text, &lower);
+
+    if let Some(defs) = parse_cost_payment_prohibition_statics(&tp, &text) {
+        return defs.into_iter().next();
+    }
+
+    if let Some(def) = parse_loyalty_activation_timing_permission(&tp, &text) {
+        return Some(def);
+    }
 
     // CR 510.1c: Attached-object conditional variants must precede the generic
     // inverted "As long as ..." rewrite so the condition binds to the
@@ -1247,7 +1293,18 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
 
             // CR 509.1b: "can't be blocked by <filter>" — extract blocker restriction filter.
             if let Ok((by_rest, _)) = tag::<_, _, OracleError<'_>>("by ").parse(after_blocked) {
-                let (filter, remainder) = parse_type_phrase(by_rest);
+                // CR 105.4 + CR 608.2c (issue #327): Try the chosen-qualifier
+                // parser first so "creatures of that color" / "creatures of
+                // the chosen color" produces a filter with
+                // `FilterProp::IsChosenColor`. Falls back to `parse_type_phrase`
+                // for non-anaphor filter shapes.
+                let by_rest_tp = TextPair::new(by_rest, by_rest);
+                let (filter, remainder) =
+                    if let Some(chosen) = parse_chosen_qualifier_subject(&by_rest_tp) {
+                        (chosen, "")
+                    } else {
+                        parse_type_phrase(by_rest)
+                    };
                 if !matches!(filter, TargetFilter::Any) {
                     let mut def = StaticDefinition::new(StaticMode::CantBeBlockedBy { filter })
                         .affected(TargetFilter::SelfRef)
@@ -1641,13 +1698,41 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     // NOTE: "enters with N counters" patterns are now handled by oracle_replacement.rs
     // as proper Moved replacement effects (paralleling the "enters tapped" pattern).
 
+    // --- CR 702.142b: "[Filter] can boast N times ... rather than once" ---
+    // Birgi, God of Storytelling: modifies per-turn activation limit for boast abilities.
+    if let Some((new_limit, _)) = nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, _) = take_until("can boast ").parse(i)?;
+        let (i, _) = tag("can boast ").parse(i)?;
+        // "twice" / "thrice" are multiplicative adverbs; "[N] times" is cardinal.
+        let (i, n) = alt((
+            value(2u32, tag("twice")),
+            value(3u32, tag("thrice")),
+            terminated(nom_primitives::parse_number, tag(" times")),
+        ))
+        .parse(i)?;
+        let (i, _) = take_until("rather than once").parse(i)?;
+        let (i, _) = tag("rather than once").parse(i)?;
+        Ok((i, n as u8))
+    }) {
+        // Parse the affected filter from the beginning of the text (before "can boast")
+        let (affected, _) = parse_type_phrase(tp.original);
+        return Some(
+            StaticDefinition::new(StaticMode::ModifyActivationLimit {
+                keyword: "boast".to_string(),
+                new_limit,
+            })
+            .affected(affected)
+            .description(text.to_string()),
+        );
+    }
+
     // --- "{Ability} abilities you activate cost {N} less to activate" ---
     // CR 601.2f: Ability-type-specific cost reduction (e.g., Silver-Fur Master, Fluctuator).
     if nom_primitives::scan_contains(tp.lower, "abilities you activate")
         && nom_primitives::scan_contains(tp.lower, "less to activate")
     {
         // Extract keyword name and amount via nom combinators
-        if let Some(((keyword, amount), _)) = nom_on_lower(tp.original, tp.lower, |i| {
+        if let Some(((keyword, amount), remainder)) = nom_on_lower(tp.original, tp.lower, |i| {
             let (i, kw) = terminated(
                 nom::bytes::complete::take_until(" abilities you activate"),
                 tag(" abilities you activate"),
@@ -1663,11 +1748,26 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         })
         .filter(|((keyword, _), _)| !keyword.trim().is_empty())
         {
+            // CR 601.2f: Extract optional "for each [X]" dynamic count clause from remainder.
+            let remainder_lower = remainder.to_lowercase();
+            let dynamic_count: Option<QuantityRef> = tag::<_, _, OracleError<'_>>(" for each ")
+                .parse(remainder_lower.as_str())
+                .ok()
+                .and_then(|(for_each_rest, _)| {
+                    super::oracle_quantity::parse_for_each_clause_expr(for_each_rest)
+                })
+                .map(|expr| match expr {
+                    QuantityExpr::Ref { qty } => qty,
+                    _ => QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(TypedFilter::card()),
+                    },
+                });
             return Some(
                 StaticDefinition::new(StaticMode::ReduceAbilityCost {
                     keyword: keyword.trim().to_string(),
                     amount,
                     minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
+                    dynamic_count,
                 })
                 .affected(TargetFilter::Typed(
                     TypedFilter::card().controller(ControllerRef::You),
@@ -1698,12 +1798,21 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
                         keyword: "activated".to_string(),
                         amount,
                         minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
+                        dynamic_count: None,
                     })
                     .affected(affected)
                     .description(text.to_string()),
                 );
             }
         }
+    }
+
+    // --- CR 601.2f: Cost-floor statics (Trinisphere class) ---
+    // Pattern: "each spell that would cost less than {N} mana to cast costs {N} mana to cast"
+    // Dispatched BEFORE the additive cost modifier branch because the floor's "less than"
+    // would otherwise be misclassified as a ReduceCost shape.
+    if let Some(def) = try_parse_cost_floor(&text, &lower) {
+        return Some(def);
     }
 
     // --- CR 601.2f: Cost modification statics ---
@@ -1887,6 +1996,52 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     None
 }
 
+fn parse_self_loyalty_activation_permission(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            tag("you may activate "),
+            opt(alt((
+                tag("her "),
+                tag("his "),
+                tag("its "),
+                tag("their "),
+                tag("~'s "),
+            ))),
+            tag("loyalty abilities any time you could cast an instant"),
+        ),
+    )
+    .parse(input)
+}
+
+fn parse_loyalty_activation_timing_permission(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    let condition = nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, condition_text) =
+            preceded(tag("as long as "), terminated(take_until(", "), tag(", "))).parse(i)?;
+        let (i, _) = parse_self_loyalty_activation_permission(i)?;
+        let (i, _) = opt(tag(".")).parse(i)?;
+        let (i, _) = all_consuming(value((), tag(""))).parse(i)?;
+        Ok((i, condition_text.to_string()))
+    })
+    .map(|(condition_text, _)| {
+        parse_static_condition(&condition_text).unwrap_or(StaticCondition::Unrecognized {
+            text: condition_text,
+        })
+    })?;
+
+    Some(
+        StaticDefinition::new(StaticMode::ActivateAsInstant {
+            cost_category: CostCategory::PaysLoyalty,
+        })
+        .affected(TargetFilter::SelfRef)
+        .condition(condition)
+        .description(text.to_string()),
+    )
+}
+
 /// Like `parse_static_line`, but returns all `StaticDefinition`s produced by a line.
 ///
 /// Most lines produce zero or one static. Compound forms like
@@ -1916,6 +2071,11 @@ pub(crate) fn parse_static_line_multi_ir(text: &str) -> Vec<StaticIr> {
 fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition> {
     let stripped = strip_reminder_text(text);
     let lower = stripped.to_lowercase();
+    let tp = TextPair::new(&stripped, &lower);
+
+    if let Some(defs) = parse_cost_payment_prohibition_statics(&tp, &stripped) {
+        return defs;
+    }
 
     if let Some(defs) = parse_compound_subject_rule_static(&stripped, &lower) {
         return defs;
@@ -2166,10 +2326,7 @@ fn try_split_and_must_attack_block(text: &str) -> Option<Vec<StaticDefinition>> 
         ))
         .parse(i)
     })?;
-    if !rest.trim().trim_end_matches('.').is_empty() {
-        return None;
-    }
-
+    let tail_predicates = parse_rule_static_tail_predicates(rest)?;
     let cut_end = before
         .trim_end_matches(|ch: char| ch == ',' || ch.is_whitespace())
         .len();
@@ -2194,6 +2351,13 @@ fn try_split_and_must_attack_block(text: &str) -> Option<Vec<StaticDefinition>> 
         }
         defs.push(companion);
     }
+    for predicate in tail_predicates {
+        let mut companion = lower_rule_static(predicate, affected.clone(), text);
+        if let Some(condition) = condition.clone() {
+            companion = companion.condition(condition);
+        }
+        defs.push(companion);
+    }
     Some(defs)
 }
 
@@ -2213,7 +2377,23 @@ fn parse_property_descriptor(
 
     // CR 105.2c: "colorless creatures" — zero colors
     if desc_lower == "colorless" {
-        props.push(FilterProp::Colorless);
+        props.push(FilterProp::ColorCount {
+            comparator: Comparator::EQ,
+            count: 0,
+        });
+        return Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(props),
+        ));
+    }
+
+    // CR 105.2a: "monocolored creatures" — exactly one color
+    if desc_lower == "monocolored" {
+        props.push(FilterProp::ColorCount {
+            comparator: Comparator::EQ,
+            count: 1,
+        });
         return Some(TargetFilter::Typed(
             TypedFilter::creature()
                 .controller(ControllerRef::You)
@@ -2223,7 +2403,10 @@ fn parse_property_descriptor(
 
     // CR 105.2: "multicolored creatures" — two or more colors
     if desc_lower == "multicolored" {
-        props.push(FilterProp::Multicolored);
+        props.push(FilterProp::ColorCount {
+            comparator: Comparator::GE,
+            count: 2,
+        });
         return Some(TargetFilter::Typed(
             TypedFilter::creature()
                 .controller(ControllerRef::You)
@@ -2823,6 +3006,24 @@ fn parse_subject_additive_type_static(text: &str) -> Option<StaticDefinition> {
     let subject = text[..subject_lower.len()].trim();
     let predicate = &text[text.len() - predicate_lower.len()..];
     let affected = parse_continuous_subject_filter(subject)?;
+
+    let predicate_tp = TextPair::new(predicate, predicate_lower);
+    if let Some((before_cond, after_cond)) = predicate_tp.split_around(" as long as ") {
+        let modifications = parse_additive_type_clause_modifications(before_cond.original)?;
+        let condition_text = after_cond.original.trim().trim_end_matches('.');
+        let condition =
+            parse_static_condition(condition_text).unwrap_or(StaticCondition::Unrecognized {
+                text: condition_text.to_string(),
+            });
+        return Some(
+            StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(modifications)
+                .condition(condition)
+                .description(text.to_string()),
+        );
+    }
+
     let modifications = parse_additive_type_clause_modifications(predicate)?;
     Some(
         StaticDefinition::continuous()
@@ -2902,8 +3103,10 @@ pub(crate) fn parse_additive_type_clause_modifications(
     .parse(after_suffix_lower)
     .ok()?
     .1;
-    let granted_modifications = granted_lower
+    let granted_original = granted_lower
         .map(|granted| &clause_original[clause_original.len() - granted.len()..])
+        .map(str::trim);
+    let granted_modifications = granted_original
         .map(parse_quoted_ability_modifications)
         .unwrap_or_default();
 
@@ -2928,6 +3131,9 @@ pub(crate) fn parse_additive_type_clause_modifications(
     }
 
     modifications.extend(granted_modifications);
+    if let Some(granted) = granted_original {
+        push_base_pt_mana_value_dynamic_modifications(&mut modifications, &granted.to_lowercase());
+    }
     (!modifications.is_empty()).then_some(modifications)
 }
 
@@ -3105,10 +3311,20 @@ fn parse_conditional_static(text: &str) -> Option<StaticDefinition> {
         });
 
     let mut def = parse_static_line(remainder.trim())?;
-    if def.condition.is_some() {
-        return None;
-    }
-    def.condition = Some(condition);
+    // CR 611.3a + CR 118.12a: When the inner static already carries a typed
+    // condition (e.g. combat-tax `UnlessPay` for "creatures can't attack you
+    // unless their controller pays {1}"), compose both conditions via
+    // `StaticCondition::And` rather than dropping one. This is the only correct
+    // way to model lines like "As long as ~ is untapped, creatures can't attack
+    // you unless their controller pays {1}..." (Archangel of Tithes) — the
+    // outer `Not(SourceIsTapped)` gates whether the tax is active, the inner
+    // `UnlessPay` carries the tax cost. Both must survive to runtime.
+    def.condition = Some(match def.condition.take() {
+        Some(existing) => StaticCondition::And {
+            conditions: vec![condition, existing],
+        },
+        None => condition,
+    });
     def.description = Some(text.to_string());
     Some(def)
 }
@@ -3263,6 +3479,7 @@ fn parse_combat_tax_static(tp: &TextPair<'_>, text: &str) -> Option<StaticDefini
         affected,
         base_cost,
         scaling,
+        defended,
     } = outcome;
     let mut def = StaticDefinition::new(mode)
         .affected(affected)
@@ -3270,6 +3487,7 @@ fn parse_combat_tax_static(tp: &TextPair<'_>, text: &str) -> Option<StaticDefini
     def.condition = Some(StaticCondition::UnlessPay {
         cost: base_cost,
         scaling,
+        defended,
     });
     Some(def)
 }
@@ -3293,6 +3511,12 @@ struct CombatTaxParse {
     affected: TargetFilter,
     base_cost: ManaCost,
     scaling: crate::types::ability::UnlessPayScaling,
+    /// CR 506.3 + CR 508.1d: Which declared attacks this tax applies to. `None`
+    /// for the block side and for tax-attack lines with no explicit defender
+    /// scope. `Some(AttackTargetFilter::Player)` for "...attack you...";
+    /// `Some(AttackTargetFilter::PlayerOrPlaneswalker)` for "...attack you or
+    /// planeswalkers you control...".
+    defended: Option<crate::types::triggers::AttackTargetFilter>,
 }
 
 /// Subject axis of the combat-tax grammar.
@@ -3314,7 +3538,7 @@ enum CombatTaxSubject {
 /// Grammar (case-insensitive, leading "creatures " already consumed by nom):
 ///   body      := subject restriction scope? " unless " payer mana_cost suffix?
 ///   subject   := "creatures "
-///   restriction := "can't attack" | "can't block"
+///   restriction := "can't attack" | "can't block" | "can't attack or block"
 ///   scope     := " you" | " you or planeswalkers you control"
 ///   payer     := "their controller pays " | "its controller pays "
 ///   suffix    := " for each of those creatures" dynamic_x?
@@ -3348,17 +3572,38 @@ fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxParse> {
     ))
     .parse(input)?;
 
-    let (input, is_attack) = alt((
-        value(true, tag_no_case::<_, _, OracleError<'_>>("can't attack")),
-        value(false, tag_no_case::<_, _, OracleError<'_>>("can't block")),
+    let (input, mode) = alt((
+        value(
+            StaticMode::CantAttackOrBlock,
+            tag_no_case::<_, _, OracleError<'_>>("can't attack or block"),
+        ),
+        value(
+            StaticMode::CantAttack,
+            tag_no_case::<_, _, OracleError<'_>>("can't attack"),
+        ),
+        value(
+            StaticMode::CantBlock,
+            tag_no_case::<_, _, OracleError<'_>>("can't block"),
+        ),
     ))
     .parse(input)?;
 
-    // Optional attack scope: " you" or " you or planeswalkers you control".
-    // For the block side the scope is implicit ("can't block" has no "you").
-    let (input, _scope) = opt(alt((
-        tag_no_case::<_, _, OracleError<'_>>(" you or planeswalkers you control"),
-        tag_no_case::<_, _, OracleError<'_>>(" you"),
+    // CR 506.3 + CR 508.1d: Optional attack-target scope captured as typed
+    // `AttackTargetFilter` so the runtime can filter taxed attackers by their
+    // declared `AttackTarget`. Block-side restrictions have no defender scope
+    // (the defender is implicit), so `defended` stays `None` for `CantBlock`.
+    // Order matters: " you or planeswalkers you control" must precede " you"
+    // so the longer phrase wins (nom `alt` is leftmost-match).
+    use crate::types::triggers::AttackTargetFilter;
+    let (input, defended) = opt(alt((
+        value(
+            AttackTargetFilter::PlayerOrPlaneswalker,
+            tag_no_case::<_, _, OracleError<'_>>(" you or planeswalkers you control"),
+        ),
+        value(
+            AttackTargetFilter::Player,
+            tag_no_case::<_, _, OracleError<'_>>(" you"),
+        ),
     )))
     .parse(input)?;
 
@@ -3393,12 +3638,12 @@ fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxParse> {
     // Optional ", where X is the number of <filter>" — only valid when the base
     // cost carried an {X} shard. Used by Sphere of Safety.
     let (input, dynamic_qty) = opt(parse_dynamic_x_clause).parse(input)?;
-
-    let mode = if is_attack {
-        StaticMode::CantAttack
+    let (input, for_each_qty) = if per_affected.is_none() {
+        opt(parse_for_each_cost_quantity).parse(input)?
     } else {
-        StaticMode::CantBlock
+        (input, None)
     };
+    let dynamic_qty = dynamic_qty.or(for_each_qty);
 
     // Subject-driven affected filter:
     //   - `Creatures` (Ghostly Prison family): opponents' creatures. `ControllerRef::Opponent`
@@ -3453,6 +3698,15 @@ fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxParse> {
         (false, None) => UnlessPayScaling::Flat,
     };
 
+    // CR 509.1c: Block-side taxes never carry a defender scope (the "defender"
+    // for a CantBlock restriction is implicit — it's the static's controller
+    // who is being attacked, but the restriction governs blockers). Drop any
+    // scope that snuck in to keep the AST faithful to the rules.
+    let defended = match mode {
+        StaticMode::CantBlock => None,
+        _ => defended,
+    };
+
     Ok((
         input,
         CombatTaxParse {
@@ -3460,8 +3714,18 @@ fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxParse> {
             affected,
             base_cost,
             scaling,
+            defended,
         },
     ))
+}
+
+fn parse_for_each_cost_quantity(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (input, _) = tag_no_case::<_, _, OracleError<'_>>(" for each ").parse(input)?;
+    let lowered = input.trim_end_matches('.').to_lowercase();
+    let quantity = parse_for_each_clause(&lowered).ok_or_else(|| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Fail))
+    })?;
+    Ok(("", quantity))
 }
 
 /// Parse ", where X is the number of <filter>" → `QuantityRef::ObjectCount {...}`.
@@ -3604,7 +3868,7 @@ fn parse_keyword_with_where_x(input: &str) -> Option<(Keyword, Option<QuantityRe
     let (rest, keyword_text) = nom::bytes::complete::take_till::<_, _, VE<'_>>(|c| c == ',')
         .parse(input)
         .ok()?;
-    let keyword = Keyword::from_str(keyword_text.trim()).ok()?;
+    let keyword = super::oracle_keyword::parse_keyword_from_oracle(keyword_text.trim())?;
     let rest = rest.trim();
     if rest.is_empty() {
         return Some((keyword, None));
@@ -3649,21 +3913,43 @@ fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option<StaticDefi
     let condition = scoped_tp.as_ref().map(|_| StaticCondition::DuringYourTurn);
     let tp = scoped_tp.as_ref().unwrap_or(tp);
 
-    // Pattern 1: "[type] spells you cast [from zone] have [keyword]."
-    // Find " have " to split subject from keyword
-    let have_pos = tp.lower.match_indices(" have ").next()?.0;
+    // Pattern 1: "[type] spell(s) you cast [from zone] have/has [keyword]."
+    // Find the predicate separator to split subject from keyword.
+    let (have_pos, have_len) = tp
+        .lower
+        .match_indices(" have ")
+        .next()
+        .map(|(pos, sep)| (pos, sep.len()))
+        .or_else(|| {
+            tp.lower
+                .match_indices(" has ")
+                .next()
+                .map(|(pos, sep)| (pos, sep.len()))
+        })?;
     let subject = &tp.lower[..have_pos];
-    let keyword_str = tp.lower[have_pos + " have ".len()..].trim();
+    let keyword_str = tp.lower[have_pos + have_len..].trim();
 
     // Parse the keyword — must be a valid keyword. A trailing "where X is …"
     // clause binds an earlier variable-X mana-value qualifier on the subject.
     let (keyword, where_x) = parse_keyword_with_where_x(keyword_str)?;
 
     // Find "spells you cast" in the subject — may be preceded by a type descriptor
-    let spells_marker = "spells you cast";
-    if let Some(marker_pos) = subject.find(spells_marker) {
-        let type_part = subject[..marker_pos].trim();
-        let after_spells = subject[marker_pos + spells_marker.len()..].trim();
+    let spell_marker = subject
+        .match_indices("spells you cast")
+        .next()
+        .map(|(pos, matched)| (pos, matched.len()))
+        .or_else(|| {
+            subject
+                .match_indices("spell you cast")
+                .next()
+                .map(|(pos, matched)| (pos, matched.len()))
+        });
+    if let Some((marker_pos, marker_len)) = spell_marker {
+        let raw_type_part = subject[..marker_pos].trim();
+        let type_part = tag::<_, _, VE<'_>>("each ")
+            .parse(raw_type_part)
+            .map_or(raw_type_part, |(rest, _)| rest.trim());
+        let after_spells = subject[marker_pos + marker_len..].trim();
 
         // Walk a cursor through optional qualifiers — zone first, then MV —
         // so combinations like "from exile with mana value 4 or greater" parse
@@ -3703,29 +3989,21 @@ fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option<StaticDefi
         });
         let _ = cursor; // qualifiers are optional; remaining slice is unused
 
-        // Build the affected filter
-        let mut typed = if type_part.is_empty() {
+        let base_filter = if type_part.is_empty() {
             // "Spells you cast" (no type prefix) — applies to all spells
-            TypedFilter::card()
+            TargetFilter::Typed(TypedFilter::card())
         } else {
             // Parse the spell type filter from the prefix
-            let type_prefix_original = &tp.original[..marker_pos].trim();
-            let (base_filter, _) = parse_type_phrase(type_prefix_original);
-            match base_filter {
-                TargetFilter::Typed(tf) => tf,
-                _ => TypedFilter::card(),
-            }
+            let type_prefix_original = tp.original[..marker_pos].trim();
+            let lower_prefix = type_prefix_original.to_lowercase();
+            let prefix_tp = TextPair::new(type_prefix_original, &lower_prefix);
+            let type_prefix_tp = nom_tag_tp(&prefix_tp, "each ").unwrap_or(prefix_tp);
+            parse_type_phrase(type_prefix_tp.original.trim()).0
         };
-        typed = typed.controller(ControllerRef::You);
-        if let Some(zone_prop) = zone_filter {
-            typed.properties.push(zone_prop);
-        }
-        if let Some(mv_prop) = mv_filter {
-            typed.properties.push(mv_prop);
-        }
+        let affected = apply_spell_keyword_subject_constraints(base_filter, zone_filter, mv_filter);
 
         let mut def = StaticDefinition::new(StaticMode::CastWithKeyword { keyword })
-            .affected(TargetFilter::Typed(typed))
+            .affected(affected)
             .description(text.to_string());
         if let Some(condition) = condition.clone() {
             def = def.condition(condition);
@@ -3763,16 +4041,55 @@ fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option<StaticDefi
     None
 }
 
+fn apply_spell_keyword_subject_constraints(
+    filter: TargetFilter,
+    zone_filter: Option<FilterProp>,
+    mv_filter: Option<FilterProp>,
+) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(mut typed) => {
+            typed = typed.controller(ControllerRef::You);
+            if let Some(prop) = zone_filter {
+                typed.properties.push(prop);
+            }
+            if let Some(prop) = mv_filter {
+                typed.properties.push(prop);
+            }
+            TargetFilter::Typed(typed)
+        }
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(|filter| {
+                    apply_spell_keyword_subject_constraints(
+                        filter,
+                        zone_filter.clone(),
+                        mv_filter.clone(),
+                    )
+                })
+                .collect(),
+        },
+        other => other,
+    }
+}
+
 /// Parse creature subject phrases containing "of the chosen color/type" qualifiers.
 /// Handles patterns like:
 /// - "Creatures you control of the chosen color"
 /// - "Creatures of the chosen color"
 /// - "Creatures of the chosen type your opponents control"
 /// - "creature you control of the chosen type other than this Vehicle"
+/// - "creatures of that color" (CR 608.2c anaphor form after a `Choose a color`)
+/// - "creatures of that type" (CR 608.2c anaphor form after a `Choose a creature type`)
 ///
-/// CR 105.4: "of the chosen color" → `FilterProp::IsChosenColor`
-/// CR 205.3m: "of the chosen type" → `FilterProp::IsChosenCreatureType`
-fn parse_chosen_qualifier_subject(tp: &TextPair<'_>) -> Option<TargetFilter> {
+/// CR 105.4: "of the chosen color" / "of that color" → `FilterProp::IsChosenColor`
+/// CR 205.3m: "of the chosen type" / "of that type" → `FilterProp::IsChosenCreatureType`
+///
+/// Issue #327: the "of that color" / "of that type" anaphor forms are
+/// equivalent to "of the chosen color" / "of the chosen type" — same typed
+/// reference, same runtime resolution. They differ only orthographically
+/// (CR 608.2c anaphor vs CR 113.6 explicit chosen-attribute reference).
+pub(crate) fn parse_chosen_qualifier_subject(tp: &TextPair<'_>) -> Option<TargetFilter> {
     type VE<'a> = OracleError<'a>;
 
     // Must start with "creature" or "creatures"
@@ -3784,18 +4101,23 @@ fn parse_chosen_qualifier_subject(tp: &TextPair<'_>) -> Option<TargetFilter> {
         return None;
     };
 
-    // Try to find "of the chosen color" or "of the chosen type" somewhere in the rest
+    // Try to find "of the chosen color" / "of that color" / "of the chosen
+    // type" / "of that type" somewhere in the rest. Same typed reference for
+    // both anaphor forms — see fn doc.
     let chosen_prop: FilterProp;
     let before_chosen: &str;
     let after_chosen: &str;
 
-    if let Ok((_, (before, after))) = nom_primitives::split_once_on(rest, "of the chosen color") {
+    let color_split = nom_primitives::split_once_on(rest, "of the chosen color")
+        .or_else(|_| nom_primitives::split_once_on(rest, "of that color"));
+    let type_split = nom_primitives::split_once_on(rest, "of the chosen type")
+        .or_else(|_| nom_primitives::split_once_on(rest, "of that type"));
+
+    if let Ok((_, (before, after))) = color_split {
         chosen_prop = FilterProp::IsChosenColor;
         before_chosen = before.trim();
         after_chosen = after.trim();
-    } else if let Ok((_, (before, after))) =
-        nom_primitives::split_once_on(rest, "of the chosen type")
-    {
+    } else if let Ok((_, (before, after))) = type_split {
         chosen_prop = FilterProp::IsChosenCreatureType;
         before_chosen = before.trim();
         after_chosen = after.trim();
@@ -4149,19 +4471,46 @@ fn parse_commander_subject_filter(subject: &str) -> Option<TargetFilter> {
     let (i, other) = opt(tag::<_, _, VE>("other ")).parse(i).ok()?;
     let has_other = other.is_some();
 
-    // The bare commander token (singular or plural).
+    // The bare commander token (singular or plural), optionally as an adjective
+    // on a creature subject ("commander creatures").
     let (i, _) = alt((tag::<_, _, VE>("commanders"), tag::<_, _, VE>("commander")))
         .parse(i)
         .ok()?;
+    let (i, is_creature_subject) = alt((
+        value(true, tag::<_, _, VE>(" creatures")),
+        value(true, tag::<_, _, VE>(" creature")),
+        value(false, tag::<_, _, VE>("")),
+    ))
+    .parse(i)
+    .ok()?;
 
-    // Optional controller suffix.
-    let (i, controller) = alt((
-        value(Some(ControllerRef::You), tag::<_, _, VE>(" you control")),
+    // Optional ownership/controller suffix. Ownership composes as a property
+    // because CR 108.3 ownership and CR 108.4 control are distinct axes.
+    let (i, (controller, owned)) = alt((
         value(
-            Some(ControllerRef::Opponent),
-            tag::<_, _, VE>(" your opponents control"),
+            (
+                Some(ControllerRef::You),
+                Some(FilterProp::Owned {
+                    controller: ControllerRef::You,
+                }),
+            ),
+            tag::<_, _, VE>(" you own and control"),
         ),
-        value(None, tag::<_, _, VE>("")),
+        value((Some(ControllerRef::You), None), tag(" you control")),
+        value(
+            (Some(ControllerRef::Opponent), None),
+            tag(" your opponents control"),
+        ),
+        value(
+            (
+                None,
+                Some(FilterProp::Owned {
+                    controller: ControllerRef::You,
+                }),
+            ),
+            tag(" you own"),
+        ),
+        value((None, None), tag("")),
     ))
     .parse(i)
     .ok()?;
@@ -4175,7 +4524,14 @@ fn parse_commander_subject_filter(subject: &str) -> Option<TargetFilter> {
     if has_other {
         props.push(FilterProp::Another);
     }
-    let mut typed = TypedFilter::permanent().properties(props);
+    if let Some(owned) = owned {
+        props.push(owned);
+    }
+    let mut typed = if is_creature_subject {
+        TypedFilter::creature().properties(props)
+    } else {
+        TypedFilter::permanent().properties(props)
+    };
     if let Some(c) = controller {
         typed = typed.controller(c);
     }
@@ -4548,8 +4904,28 @@ fn parse_combat_rule_static_predicate_nom(input: &str) -> OracleResult<'_, RuleS
                 tag("must be blocked if able"),
             )),
         ),
+        value(
+            RuleStaticPredicate::Goaded,
+            alt((tag("is goaded"), tag("are goaded"))),
+        ),
     ))
     .parse(input)
+}
+
+fn parse_rule_static_tail_predicates(rest: &str) -> Option<Vec<RuleStaticPredicate>> {
+    let mut remaining = rest;
+    let mut predicates = Vec::new();
+
+    loop {
+        let trimmed = remaining.trim();
+        if trimmed.is_empty() || trimmed == "." {
+            return Some(predicates);
+        }
+        let (after_separator, _) = parse_rule_static_separator_nom(trimmed).ok()?;
+        let (after_predicate, predicate) = parse_rule_static_predicate_nom(after_separator).ok()?;
+        predicates.push(predicate);
+        remaining = after_predicate;
+    }
 }
 
 fn parse_cant_attack_rule_static_predicate_nom(
@@ -4592,6 +4968,9 @@ fn lower_rule_static(
             .affected(affected)
             .description(description.to_string()),
         RuleStaticPredicate::MustBeBlocked => StaticDefinition::new(StaticMode::MustBeBlocked)
+            .affected(affected)
+            .description(description.to_string()),
+        RuleStaticPredicate::Goaded => StaticDefinition::new(StaticMode::Goaded)
             .affected(affected)
             .description(description.to_string()),
         RuleStaticPredicate::BlockOnlyCreaturesWithFlying => {
@@ -5892,7 +6271,13 @@ fn parse_enchanted_equipped_predicate(
         // CR 509.1b: "can't be blocked by <filter>" → CantBeBlockedBy
         if let Some(rest) = nom_tag_lower(&pred_lower, &pred_lower, "can't be blocked by ") {
             let filter_text = rest.trim_end_matches('.');
-            let (filter, _) = parse_type_phrase(filter_text);
+            // CR 105.4 + CR 608.2c (issue #327): see parallel comment in
+            // `parse_static_line_inner`'s CantBeBlockedBy branch.
+            let filter_text_tp = TextPair::new(filter_text, filter_text);
+            let filter = parse_chosen_qualifier_subject(&filter_text_tp).unwrap_or_else(|| {
+                let (f, _) = parse_type_phrase(filter_text);
+                f
+            });
             if !matches!(filter, TargetFilter::Any) {
                 return Some(
                     StaticDefinition::new(StaticMode::CantBeBlockedBy { filter })
@@ -6081,20 +6466,24 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     };
     let tp = stripped_tp;
     let text_stripped = tp.original;
-    let lower = tp.lower;
+    let unquoted_text = strip_quoted_segments(text_stripped);
+    let unquoted_lower = unquoted_text.to_lowercase();
+    let unquoted_tp = TextPair::new(&unquoted_text, &unquoted_lower);
     let mut modifications = Vec::new();
 
-    if nom_primitives::scan_contains(tp.lower, "lose all abilities")
-        || nom_primitives::scan_contains(tp.lower, "loses all abilities")
-        || nom_primitives::scan_contains(tp.lower, "lose all other abilities")
-        || nom_primitives::scan_contains(tp.lower, "loses all other abilities")
+    if nom_primitives::scan_contains(unquoted_tp.lower, "lose all abilities")
+        || nom_primitives::scan_contains(unquoted_tp.lower, "loses all abilities")
+        || nom_primitives::scan_contains(unquoted_tp.lower, "lose all other abilities")
+        || nom_primitives::scan_contains(unquoted_tp.lower, "loses all other abilities")
     {
         modifications.push(ContinuousModification::RemoveAllAbilities);
     }
 
-    if let Some(dynamic_mods) = parse_dynamic_for_each_pt_modifications(text_stripped) {
+    if let Some(dynamic_mods) = parse_dynamic_for_each_pt_modifications(&unquoted_text) {
         modifications.extend(dynamic_mods);
-    } else if let Some(rest_tp) = nom_tag_tp(&tp, "gets ").or_else(|| nom_tag_tp(&tp, "get ")) {
+    } else if let Some(rest_tp) =
+        nom_tag_tp(&unquoted_tp, "gets ").or_else(|| nom_tag_tp(&unquoted_tp, "get "))
+    {
         let after = rest_tp.original.trim();
         if let Some((p, t)) = parse_pt_mod(after) {
             modifications.push(ContinuousModification::AddPower { value: p });
@@ -6106,7 +6495,7 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     // toughness-combat-damage rule to the same affected object as a P/T
     // modification ("Enchanted creature gets +0/+2 and assigns...").
     if nom_primitives::scan_contains(
-        lower,
+        unquoted_lower.as_str(),
         "assigns combat damage equal to its toughness rather than its power",
     ) {
         modifications.push(ContinuousModification::AssignDamageFromToughness);
@@ -6114,7 +6503,9 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
 
     // CR 613.4c: Scan for "get +X/+X" / "gets +X/+X" anywhere in the text
     // for dynamic P/T modification (e.g., Craterhoof Behemoth)
-    if let Some(dynamic_mods) = parse_dynamic_pt_in_text(lower, where_x_expression.as_deref()) {
+    if let Some(dynamic_mods) =
+        parse_dynamic_pt_in_text(&unquoted_lower, where_x_expression.as_deref())
+    {
         modifications.extend(dynamic_mods);
     }
 
@@ -6122,18 +6513,20 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     // at layer 7b. Checked before the fixed-literal parser so X-bearing patterns
     // are not mis-parsed as literal integers.
     if let Some((power, toughness)) =
-        parse_base_pt_dynamic(text_stripped, where_x_expression.as_deref())
+        parse_base_pt_dynamic(&unquoted_text, where_x_expression.as_deref())
     {
         modifications.push(ContinuousModification::SetPowerDynamic { value: power });
         modifications.push(ContinuousModification::SetToughnessDynamic { value: toughness });
-    } else if let Some((power, toughness)) = parse_base_pt_mod(text_stripped) {
-        modifications.push(ContinuousModification::SetPower { value: power });
-        modifications.push(ContinuousModification::SetToughness { value: toughness });
+    } else if !push_base_pt_mana_value_dynamic_modifications(&mut modifications, &unquoted_lower) {
+        if let Some((power, toughness)) = parse_base_pt_mod(&unquoted_text) {
+            modifications.push(ContinuousModification::SetPower { value: power });
+            modifications.push(ContinuousModification::SetToughness { value: toughness });
+        }
     }
-    if let Some(power) = parse_base_power_mod(text_stripped) {
+    if let Some(power) = parse_base_power_mod(&unquoted_text) {
         modifications.push(ContinuousModification::SetPower { value: power });
     }
-    if let Some(toughness) = parse_base_toughness_mod(text_stripped) {
+    if let Some(toughness) = parse_base_toughness_mod(&unquoted_text) {
         modifications.push(ContinuousModification::SetToughness { value: toughness });
     }
 
@@ -6141,17 +6534,18 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
         modifications.push(modification);
     }
 
-    if let Some(additive_modifications) = parse_additive_type_clause_modifications(text_stripped) {
+    if let Some(additive_modifications) = parse_additive_type_clause_modifications(&unquoted_text) {
         modifications.extend(additive_modifications);
     }
 
     // CR 702: Guard "can't have or gain [keyword]" from extract_keyword_clause —
     // "have" inside "can't have" must NOT produce AddKeyword.
-    if nom_primitives::scan_contains(lower, "can't have")
-        || nom_primitives::scan_contains(lower, "can't have or gain")
+    if nom_primitives::scan_contains(&unquoted_lower, "can't have")
+        || nom_primitives::scan_contains(&unquoted_lower, "can't have or gain")
     {
         // Parse the keyword from "can't have or gain [keyword]" / "can't have [keyword]"
-        let stripped_lower = lower.strip_suffix('.').unwrap_or(lower);
+        // allow-noncombinator: punctuation cleanup after parser dispatch, not dispatch itself.
+        let stripped_lower = unquoted_lower.strip_suffix('.').unwrap_or(&unquoted_lower);
         let cant_text = if let Ok((_, (_, after))) =
             nom_primitives::split_once_on(stripped_lower, "can't have or gain ")
         {
@@ -6172,7 +6566,7 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
                 // It will be handled at the static definition level.
             }
         }
-    } else if let Some(keyword_text) = extract_keyword_clause(text_stripped) {
+    } else if let Some(keyword_text) = extract_keyword_clause(&unquoted_text) {
         for part in split_keyword_list(keyword_text.trim().trim_end_matches('.')) {
             let part_trimmed = part.trim().trim_end_matches('.');
             let part_lower = part_trimmed.to_lowercase();
@@ -6207,7 +6601,7 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     }
 
     // CR 702: "lose [keyword]" / "loses [keyword]" — keyword removal.
-    if let Some(keyword_text) = extract_lose_keyword_clause(text_stripped) {
+    if let Some(keyword_text) = extract_lose_keyword_clause(&unquoted_text) {
         for part in split_keyword_list(keyword_text.trim().trim_end_matches('.')) {
             if let Some(kw) = map_keyword(part.trim().trim_end_matches('.')) {
                 modifications.push(ContinuousModification::RemoveKeyword { keyword: kw });
@@ -6220,9 +6614,41 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     // animation type-sequence combinator so one CR-205 type-line decomposes
     // into one AddType/AddSubtype modification per token (not a single
     // whole-phrase AddSubtype string).
-    modifications.extend(parse_becomes_type_addition_modifications(&tp));
+    modifications.extend(parse_becomes_type_addition_modifications(&unquoted_tp));
 
     modifications
+}
+
+fn strip_quoted_segments(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut in_quote = false;
+    for ch in text.chars() {
+        if ch == '"' {
+            if !in_quote {
+                remove_trailing_quote_connector(&mut output);
+            }
+            in_quote = !in_quote;
+            output.push(' ');
+        } else if in_quote {
+            output.push(' ');
+        } else {
+            output.push(ch);
+        }
+    }
+    output
+}
+
+fn remove_trailing_quote_connector(text: &mut String) {
+    let trimmed_len = text.trim_end().len();
+    text.truncate(trimmed_len);
+    for connector in [" and", " or"] {
+        if text.ends_with(connector) {
+            let new_len = text.len() - connector.len();
+            text.truncate(new_len);
+            break;
+        }
+    }
+    text.push(' ');
 }
 
 /// CR 613.4c: Scan text for "get(s) +X/+X" and resolve X via where_x_expression.
@@ -6341,6 +6767,40 @@ fn parse_base_pt_mod(text: &str) -> Option<(i32, i32)> {
     let tp = TextPair::new(text, &lower);
     let pt_text = tp.strip_after("base power and toughness ")?.original.trim();
     parse_pt_mod(pt_text)
+}
+
+fn parse_base_pt_mana_value_dynamic(lower: &str) -> Option<QuantityExpr> {
+    type VE<'a> = OracleError<'a>;
+    nom_primitives::scan_split_at_phrase(lower, |input| {
+        alt((
+            tag::<_, _, VE<'_>>("base power and base toughness each equal to its mana value"),
+            tag("base power and toughness each equal to its mana value"),
+            tag("power and toughness each equal to its mana value"),
+            tag("base power and base toughness are each equal to its mana value"),
+            tag("base power and toughness are each equal to its mana value"),
+            tag("power and toughness are each equal to its mana value"),
+        ))
+        .parse(input)
+    })?;
+    Some(QuantityExpr::Ref {
+        qty: QuantityRef::ObjectManaValue {
+            scope: ObjectScope::Recipient,
+        },
+    })
+}
+
+fn push_base_pt_mana_value_dynamic_modifications(
+    modifications: &mut Vec<ContinuousModification>,
+    lower: &str,
+) -> bool {
+    let Some(value) = parse_base_pt_mana_value_dynamic(lower) else {
+        return false;
+    };
+    modifications.push(ContinuousModification::SetPowerDynamic {
+        value: value.clone(),
+    });
+    modifications.push(ContinuousModification::SetToughnessDynamic { value });
+    true
 }
 
 /// One side of a dynamic base-P/T value token like `X/X` or `-X/2`.
@@ -6511,6 +6971,10 @@ pub(crate) fn parse_quoted_ability_modifications(text: &str) -> Vec<ContinuousMo
 }
 
 fn parse_quoted_rule_static_modifications(text: &str) -> Option<Vec<ContinuousModification>> {
+    if find_cost_separator(text).is_some() {
+        return None;
+    }
+
     let modifications: Vec<_> = parse_static_line_multi(text)
         .into_iter()
         .map(|definition| {
@@ -6539,6 +7003,36 @@ fn parse_quoted_rule_static_modifications(text: &str) -> Option<Vec<ContinuousMo
 /// a spell-like effect.
 fn parse_quoted_ability(text: &str) -> AbilityDefinition {
     let lower = text.to_lowercase();
+
+    // CR 702.142a: Detect "Boast — " prefix and strip it, adding the implicit
+    // Boast activation restrictions + tag. This handles cards that grant Boast
+    // abilities via quoted text (e.g., Besieged Viking Village).
+    if let Some(((), rest_original)) = nom_on_lower(text, &lower, |i| {
+        value(
+            (),
+            alt((
+                tag("boast \u{2014} "),
+                tag("boast -- "),
+                tag("boast—"),
+                tag("boast-"),
+            )),
+        )
+        .parse(i)
+    }) {
+        let mut def = parse_quoted_ability(rest_original);
+        // CR 702.142a: "Activate only if this creature attacked this turn
+        // and only once each turn."
+        def.activation_restrictions
+            .push(ActivationRestriction::OnlyOnceEachTurn);
+        def.activation_restrictions
+            .push(ActivationRestriction::RequiresCondition {
+                condition: Some(ParsedCondition::SourceAttackedThisTurn),
+            });
+        // CR 702.142b: Tag as Boast for meta-reference effects.
+        def.ability_tag = Some(AbilityTag::Boast);
+        def.description = Some(format!("Boast \u{2014} {}", rest_original));
+        return def;
+    }
 
     // CR 603.1: Detect trigger prefixes and route to trigger parser.
     // Quoted ability text starting with "When"/"Whenever"/"At the beginning of" is a
@@ -6978,6 +7472,7 @@ fn try_parse_graveyard_cast_permission(text: &str, lower: &str) -> Option<Static
             StaticDefinition::new(StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::OncePerTurnPerPermanentType,
                 play_mode: CardPlayMode::Play,
+                graveyard_destination_replacement: None,
             })
             .affected(affected)
             .description(text.to_string()),
@@ -7021,10 +7516,16 @@ fn try_parse_graveyard_cast_permission(text: &str, lower: &str) -> Option<Static
         Cow::Borrowed(filter_text)
     };
 
-    let (filter, _) = parse_type_phrase(&cleaned);
+    let (filter, self_ref_permission) = parse_graveyard_permission_filter(&cleaned);
 
     // Parse optional alt-cost rider from the text after "from your graveyard".
     let rider_kind = parse_alt_cost_rider(trailing).ok().map(|(_, k)| k);
+    let graveyard_destination_replacement = parse_exile_spell_cast_this_way_rider(trailing)
+        .is_ok()
+        .then_some(Zone::Exile);
+    let condition = parse_graveyard_permission_condition(trailing)
+        .ok()
+        .and_then(|(rest, condition)| rest.is_empty().then_some(condition));
 
     let affected = if let Some(kind) = rider_kind {
         inject_keyword_kind_filter_prop(filter, kind)
@@ -7032,14 +7533,51 @@ fn try_parse_graveyard_cast_permission(text: &str, lower: &str) -> Option<Static
         filter
     };
 
-    Some(
-        StaticDefinition::new(StaticMode::GraveyardCastPermission {
-            frequency,
-            play_mode,
-        })
-        .affected(affected)
-        .description(text.to_string()),
-    )
+    let mut def = StaticDefinition::new(StaticMode::GraveyardCastPermission {
+        frequency,
+        play_mode,
+        graveyard_destination_replacement,
+    })
+    .affected(affected)
+    .description(text.to_string());
+    if let Some(condition) = condition {
+        def = def.condition(condition);
+    }
+    if self_ref_permission {
+        def = def.active_zones(vec![Zone::Graveyard]);
+    }
+    Some(def)
+}
+
+fn parse_graveyard_permission_filter(input: &str) -> (TargetFilter, bool) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("this card").parse(input) {
+        if rest.is_empty() {
+            return (TargetFilter::SelfRef, true);
+        }
+    }
+    let (filter, _) = parse_type_phrase(input);
+    (filter, false)
+}
+
+fn parse_graveyard_permission_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, condition) =
+        preceded(tag(" as long as "), nom_condition::parse_inner_condition).parse(input)?;
+    let (rest, _) = opt(tag(".")).parse(rest)?;
+    Ok((rest, condition))
+}
+
+fn parse_exile_spell_cast_this_way_rider(input: &str) -> OracleResult<'_, ()> {
+    all_consuming(preceded(
+        terminated(opt(tag(".")), space0),
+        value(
+            (),
+            terminated(
+                tag("if a spell cast this way would be put into your graveyard, exile it instead"),
+                opt(tag(".")),
+            ),
+        ),
+    ))
+    .parse(input)
 }
 
 /// CR 401.5 + CR 118.9 + CR 601.2a: Parse "you may [play|cast] [filter] from
@@ -7427,6 +7965,81 @@ fn merge_cost_modifier_target_filter(
     }
 }
 
+/// CR 601.2f: Parse the Trinisphere-class cost-floor static.
+///
+/// Pattern (canonical form, with optional trailing "as long as <condition>"):
+///   "each spell that would cost less than <N> mana to cast costs <N> mana to cast"
+///
+/// Both numbers must be the same — that's the floor. Per the Trinisphere
+/// ruling, this is a "directly affect the total cost" effect applied after
+/// every additive/subtractive modifier, just before the cost is "locked in".
+///
+/// Returns a `StaticMode::MinimumCost` with `spell_filter = None` (the printed
+/// pattern affects all spells; future filtered variants would attach a filter
+/// here) and any trailing "as long as" / "if" condition lifted into the
+/// `StaticDefinition.condition` field (handles Trinisphere's "as long as this
+/// artifact is untapped" gate).
+fn try_parse_cost_floor(text: &str, lower: &str) -> Option<StaticDefinition> {
+    use nom::sequence::preceded;
+
+    // Strip optional trailing condition before matching the body — keeps the
+    // body combinator focused on the cost-floor shape only.
+    let (body_lower, condition_text) = if let Some((cond_pos, marker)) = [" as long as ", " if "]
+        .into_iter()
+        .filter_map(|marker| lower.rfind(marker).map(|pos| (pos, marker)))
+        .max_by_key(|(pos, _)| *pos)
+    {
+        let cond = lower[cond_pos + marker.len()..]
+            .trim()
+            .trim_end_matches('.')
+            .to_string();
+        (lower[..cond_pos].trim_end_matches('.'), Some(cond))
+    } else {
+        (lower.trim_end_matches('.'), None)
+    };
+
+    // Body combinator: "each spell that would cost less than <N> mana to cast costs <N> mana to cast"
+    let parse_body = (
+        tag::<_, _, OracleError<'_>>("each spell that would cost less than "),
+        nom_primitives::parse_number_or_x,
+        tag(" mana to cast costs "),
+        nom_primitives::parse_number_or_x,
+        tag(" mana to cast"),
+    );
+    let (rest, (_, n1, _, n2, _)) = preceded(
+        // Tolerate leading whitespace from the canonical-rewrite path.
+        nom::character::complete::space0,
+        parse_body,
+    )
+    .parse(body_lower)
+    .ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    if n1 != n2 {
+        return None;
+    }
+    let amount = ManaCost::generic(n1);
+
+    let mut definition = StaticDefinition::new(StaticMode::MinimumCost {
+        amount,
+        spell_filter: None,
+    })
+    .description(text.to_string());
+
+    if let Some(cond_text) = condition_text {
+        if let Some(sc) = parse_cost_modifier_condition(&cond_text) {
+            definition.condition = Some(sc);
+        } else if let Ok((rest_cond, sc)) = nom_condition::parse_inner_condition(&cond_text) {
+            if rest_cond.trim().is_empty() || rest_cond.trim() == "." {
+                definition.condition = Some(sc);
+            }
+        }
+    }
+
+    Some(definition)
+}
+
 /// CR 601.2f: Parse cost modification statics from Oracle text.
 /// Handles all four sub-patterns:
 /// 1. Type-filtered: "Creature spells you cast cost {1} less to cast"
@@ -7691,6 +8304,7 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
             // emit this variant for cost statics.
             Some(ControllerRef::ScopedPlayer) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::TargetPlayer) => TargetFilter::Typed(TypedFilter::card()),
+            Some(ControllerRef::ParentTargetController) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::DefendingPlayer) => TargetFilter::Typed(TypedFilter::card()),
             None => TargetFilter::Typed(TypedFilter::card()),
         }
@@ -8143,8 +8757,8 @@ fn try_parse_scoped_must_attack_block(lower: &str, text: &str) -> Option<Vec<Sta
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AggregateFunction, CardTypeSetSource, CountScope, PlayerScope, SharedQuality,
-        SharedQualityRelation, TypeFilter, ZoneRef,
+        AggregateFunction, CardTypeSetSource, CountScope, Duration, Effect, PlayerScope,
+        SharedQuality, SharedQualityRelation, TypeFilter, ZoneRef,
     };
 
     /// CR 205.1a + CR 205.2 + CR 205.3 + CR 613.1c: "becomes a [subtype]*
@@ -8921,6 +9535,64 @@ mod tests {
                 _ => panic!("Expected Typed filter"),
             }
         }
+    }
+
+    /// CR 601.2f: Trinisphere — the cost-floor static. The line begins with
+    /// "As long as ~ is untapped," (inverted form) which the static parser
+    /// rewrites to canonical "<effect> as long as <condition>" before
+    /// re-dispatching. The cost-floor arm catches the rewritten body and
+    /// produces `MinimumCost { amount: {3}, spell_filter: None }` with the
+    /// `Not(SourceIsTapped)` condition lifted into `definition.condition`.
+    #[test]
+    fn static_trinisphere_cost_floor_with_untapped_condition() {
+        let def = parse_static_line(
+            "As long as ~ is untapped, each spell that would cost less than three mana to cast costs three mana to cast.",
+        )
+        .expect("Trinisphere line must parse");
+        match &def.mode {
+            StaticMode::MinimumCost {
+                amount,
+                spell_filter,
+            } => {
+                assert_eq!(amount, &ManaCost::generic(3), "floor must be {{3}}");
+                assert!(spell_filter.is_none(), "Trinisphere has no spell filter");
+            }
+            other => panic!("expected MinimumCost, got {other:?}"),
+        }
+        assert!(
+            matches!(
+                def.condition,
+                Some(StaticCondition::Not { ref condition })
+                    if matches!(**condition, StaticCondition::SourceIsTapped)
+            ),
+            "Trinisphere must carry Not(SourceIsTapped); got {:?}",
+            def.condition
+        );
+    }
+
+    /// CR 601.2f: Building-block — the cost-floor parser handles canonical
+    /// (non-inverted) form too, with no trailing condition.
+    #[test]
+    fn static_cost_floor_canonical_form_no_condition() {
+        let def = parse_static_line(
+            "Each spell that would cost less than three mana to cast costs three mana to cast.",
+        )
+        .expect("canonical cost-floor line must parse");
+        assert!(
+            matches!(
+                def.mode,
+                StaticMode::MinimumCost {
+                    amount: ManaCost::Cost { generic: 3, .. },
+                    spell_filter: None,
+                }
+            ),
+            "expected MinimumCost(3); got {:?}",
+            def.mode
+        );
+        assert!(
+            def.condition.is_none(),
+            "canonical form has no trailing condition"
+        );
     }
 
     #[test]
@@ -9793,6 +10465,25 @@ mod tests {
     }
 
     #[test]
+    fn static_pump_must_be_blocked_and_goaded_emits_all_defs() {
+        let defs = parse_static_line_multi(
+            "Enchanted creature gets +3/+3, must be blocked if able, and is goaded.",
+        );
+        assert_eq!(defs.len(), 3);
+        assert_eq!(defs[0].mode, StaticMode::Continuous);
+        assert!(defs[0]
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 3 }));
+        assert!(defs[0]
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 3 }));
+        assert_eq!(defs[1].mode, StaticMode::MustBeBlocked);
+        assert_eq!(defs[2].mode, StaticMode::Goaded);
+        assert_eq!(defs[1].affected, defs[0].affected);
+        assert_eq!(defs[2].affected, defs[0].affected);
+    }
+
+    #[test]
     fn static_this_creature_can_block_only_creatures_with_flying() {
         let def = parse_static_line("This creature can block only creatures with flying.").unwrap();
         assert_eq!(def.mode, StaticMode::BlockRestriction);
@@ -9869,6 +10560,22 @@ mod tests {
                 TypedFilter::default().controller(ControllerRef::You),
             ))
         );
+    }
+
+    #[test]
+    fn static_same_turn_loyalty_abilities_activate_as_instant() {
+        let def = parse_static_line(
+            "As long as ~ entered this turn, you may activate her loyalty abilities any time you could cast an instant.",
+        )
+        .unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::ActivateAsInstant {
+                cost_category: CostCategory::PaysLoyalty,
+            }
+        );
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert_eq!(def.condition, Some(StaticCondition::SourceEnteredThisTurn));
     }
 
     #[test]
@@ -10026,6 +10733,35 @@ mod tests {
             assert_eq!(definition.kind, AbilityKind::Activated);
             assert!(definition.cost.is_some());
         }
+    }
+
+    #[test]
+    fn quoted_activated_restriction_grants_ability_not_static_mode() {
+        let def =
+            parse_static_line("Enchanted land has \"{T}: Target creature can't block this turn.\"")
+                .unwrap();
+
+        assert!(
+            !def.modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddStaticMode {
+                    mode: StaticMode::CantBlock
+                }
+            )),
+            "quoted activated ability must not become a static CantBlock grant"
+        );
+        let grant = def
+            .modifications
+            .iter()
+            .find(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+            .expect("should grant the quoted activated ability");
+        let ContinuousModification::GrantAbility { definition } = grant else {
+            unreachable!();
+        };
+        assert_eq!(definition.kind, AbilityKind::Activated);
+        assert!(definition.cost.is_some());
+        assert_eq!(definition.duration, Some(Duration::UntilEndOfTurn));
+        assert!(matches!(&*definition.effect, Effect::GenericEffect { .. }));
     }
 
     #[test]
@@ -10614,6 +11350,7 @@ mod tests {
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::OncePerTurn,
                 play_mode: CardPlayMode::Cast,
+                ..
             }
         ));
         let filter = def.affected.expect("should have affected filter");
@@ -10646,6 +11383,7 @@ mod tests {
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::OncePerTurn,
                 play_mode: CardPlayMode::Cast,
+                ..
             }
         ));
         match &def.affected {
@@ -10666,10 +11404,26 @@ mod tests {
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::OncePerTurn,
                 play_mode: CardPlayMode::Cast,
+                ..
             }
         ));
         // Should parse as a union or typed filter covering instant/sorcery
         assert!(def.affected.is_some());
+    }
+
+    #[test]
+    fn graveyard_cast_permission_exile_rider() {
+        let def = parse_static_line(
+            "Once during each of your turns, you may cast an instant or sorcery spell from your graveyard. If a spell cast this way would be put into your graveyard, exile it instead."
+        ).unwrap();
+        assert!(matches!(
+            def.mode,
+            StaticMode::GraveyardCastPermission {
+                frequency: CastFrequency::OncePerTurn,
+                play_mode: CardPlayMode::Cast,
+                graveyard_destination_replacement: Some(Zone::Exile),
+            }
+        ));
     }
 
     #[test]
@@ -10683,6 +11437,7 @@ mod tests {
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::OncePerTurn,
                 play_mode: CardPlayMode::Cast,
+                ..
             }
         ));
         // "zombie creature" → parse_type_phrase recognizes "zombie" as subtype.
@@ -10692,6 +11447,43 @@ mod tests {
             assert_eq!(tf.get_subtype(), Some("Zombie"));
         } else {
             panic!("Expected Typed filter with Zombie subtype");
+        }
+    }
+
+    #[test]
+    fn graveyard_cast_permission_gravecrawler_self_ref_condition() {
+        let text = "You may cast this card from your graveyard as long as you control a Zombie.";
+        let def = parse_static_line(text).expect("should parse Gravecrawler text");
+        assert!(matches!(
+            def.mode,
+            StaticMode::GraveyardCastPermission {
+                frequency: CastFrequency::Unlimited,
+                play_mode: CardPlayMode::Cast,
+                ..
+            }
+        ));
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert_eq!(def.active_zones, vec![Zone::Graveyard]);
+        match def.condition {
+            Some(StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(tf)),
+            }) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(
+                    tf.type_filters
+                        .contains(&TypeFilter::Subtype("Zombie".to_string())),
+                    "expected Zombie subtype condition, got: {:?}",
+                    tf.type_filters
+                );
+                assert!(
+                    tf.properties.contains(&FilterProp::InZone {
+                        zone: Zone::Battlefield,
+                    }),
+                    "expected battlefield control condition, got: {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("expected Zombie presence condition, got {other:?}"),
         }
     }
 
@@ -10767,6 +11559,7 @@ mod tests {
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::Unlimited,
                 play_mode: CardPlayMode::Play,
+                ..
             }
         ));
         if let Some(TargetFilter::Typed(tf)) = &def.affected {
@@ -10788,6 +11581,7 @@ mod tests {
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::Unlimited,
                 play_mode: CardPlayMode::Cast,
+                ..
             }
         ));
         if let Some(TargetFilter::Typed(tf)) = &def.affected {
@@ -10817,6 +11611,7 @@ mod tests {
                 StaticMode::GraveyardCastPermission {
                     frequency: CastFrequency::OncePerTurnPerPermanentType,
                     play_mode: CardPlayMode::Play,
+                    ..
                 }
             ),
             "expected OncePerTurnPerPermanentType + Play, got {:?}",
@@ -10844,6 +11639,7 @@ mod tests {
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::OncePerTurnPerPermanentType,
                 play_mode: CardPlayMode::Play,
+                ..
             }
         ));
     }
@@ -10860,6 +11656,7 @@ mod tests {
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::Unlimited,
                 play_mode: CardPlayMode::Cast,
+                ..
             }
         ));
         let filter = def.affected.expect("should have affected filter");
@@ -11291,6 +12088,48 @@ mod tests {
     }
 
     #[test]
+    fn static_self_gets_dynamic_pt_for_each_permanent_you_control_but_dont_own() {
+        let def = parse_static_line("~ gets +1/+1 for each land you control but don't own.")
+            .expect("control-without-ownership dynamic P/T static must parse");
+        assert_eq!(def.mode, StaticMode::Continuous);
+
+        let dynamic_power = def
+            .modifications
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::AddDynamicPower { value } => Some(value),
+                _ => None,
+            })
+            .expect("expected AddDynamicPower");
+        match dynamic_power {
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::ObjectCount {
+                        filter: TargetFilter::And { filters },
+                    },
+            } => {
+                assert!(matches!(
+                    filters.first(),
+                    Some(TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        controller: Some(ControllerRef::You),
+                        ..
+                    })) if type_filters == &vec![TypeFilter::Land]
+                ));
+                assert!(matches!(filters.get(1), Some(TargetFilter::Not { .. })));
+            }
+            other => panic!("expected ObjectCount over And filter, got {other:?}"),
+        }
+        assert!(
+            def.modifications
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::AddDynamicToughness { .. })),
+            "expected AddDynamicToughness, got {:?}",
+            def.modifications
+        );
+    }
+
+    #[test]
     fn static_reduce_ability_cost_ninjutsu() {
         // CR 601.2f: "Ninjutsu abilities you activate cost {1} less to activate"
         let def = parse_static_line("Ninjutsu abilities you activate cost {1} less to activate.")
@@ -11302,6 +12141,7 @@ mod tests {
                     ref keyword,
                     amount: 1,
                     minimum_mana: None,
+                    dynamic_count: None,
                 } if keyword == "ninjutsu"
             ),
             "Expected ReduceAbilityCost {{ keyword: ninjutsu, amount: 1 }}, got {:?}",
@@ -11321,6 +12161,7 @@ mod tests {
                 keyword: "equip".to_string(),
                 amount: 1,
                 minimum_mana: None,
+                dynamic_count: None,
             }
         );
     }
@@ -13726,11 +14567,31 @@ mod tests {
 
     #[test]
     fn static_other_colorless_creatures_get_plus() {
-        // CR 105.2b: "Other colorless creatures you control get +1/+1."
+        // CR 105.2c: "Other colorless creatures you control get +1/+1."
         let def = parse_static_line("Other colorless creatures you control get +1/+1.").unwrap();
         assert_eq!(def.mode, StaticMode::Continuous);
         if let Some(TargetFilter::Typed(ref tf)) = def.affected {
-            assert!(tf.properties.contains(&FilterProp::Colorless));
+            assert!(tf.properties.contains(&FilterProp::ColorCount {
+                comparator: Comparator::EQ,
+                count: 0,
+            }));
+            assert!(tf.properties.contains(&FilterProp::Another));
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+        } else {
+            panic!("Expected Typed filter, got {:?}", def.affected);
+        }
+    }
+
+    #[test]
+    fn static_other_monocolored_creatures_get_plus() {
+        // CR 105.2a: "Other monocolored creatures you control get +1/+1."
+        let def = parse_static_line("Other monocolored creatures you control get +1/+1.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        if let Some(TargetFilter::Typed(ref tf)) = def.affected {
+            assert!(tf.properties.contains(&FilterProp::ColorCount {
+                comparator: Comparator::EQ,
+                count: 1,
+            }));
             assert!(tf.properties.contains(&FilterProp::Another));
             assert_eq!(tf.controller, Some(ControllerRef::You));
         } else {
@@ -13797,7 +14658,10 @@ mod tests {
         let def = parse_static_line("Other multicolored creatures you control get +1/+0.").unwrap();
         assert_eq!(def.mode, StaticMode::Continuous);
         if let Some(TargetFilter::Typed(ref tf)) = def.affected {
-            assert!(tf.properties.contains(&FilterProp::Multicolored));
+            assert!(tf.properties.contains(&FilterProp::ColorCount {
+                comparator: Comparator::GE,
+                count: 2,
+            }));
             assert!(tf.properties.contains(&FilterProp::Another));
             assert_eq!(tf.controller, Some(ControllerRef::You));
         } else {
@@ -14132,6 +14996,7 @@ mod tests {
                 keyword: "activated".to_string(),
                 amount: 2,
                 minimum_mana: None,
+                dynamic_count: None,
             }
         );
     }
@@ -14148,6 +15013,7 @@ mod tests {
                 keyword: "activated".to_string(),
                 amount: 2,
                 minimum_mana: Some(1),
+                dynamic_count: None,
             }
         );
     }
@@ -14383,6 +15249,33 @@ mod tests {
     }
 
     #[test]
+    fn static_each_instant_and_sorcery_spell_you_cast_has_casualty() {
+        let def =
+            parse_static_line("Each instant and sorcery spell you cast has casualty 1.").unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::CastWithKeyword {
+                keyword: Keyword::Casualty(1),
+            }
+        );
+        match &def.affected {
+            Some(TargetFilter::Or { filters }) => {
+                assert!(
+                    filters.iter().all(|filter| matches!(
+                        filter,
+                        TargetFilter::Typed(tf)
+                            if tf.controller == Some(ControllerRef::You)
+                                && (tf.type_filters.contains(&TypeFilter::Instant)
+                                    || tf.type_filters.contains(&TypeFilter::Sorcery))
+                    )),
+                    "Expected instant/sorcery filters controlled by You, got {filters:?}"
+                );
+            }
+            other => panic!("Expected Some(Or instant/sorcery filter), got {other:?}"),
+        }
+    }
+
+    #[test]
     fn static_creature_cards_not_on_battlefield_have_flash() {
         // Leyline of Anticipation variant: "Creature cards you own that aren't on the battlefield have flash."
         let def =
@@ -14432,6 +15325,34 @@ mod tests {
         let def = parse_static_line("This creature can't be equipped.").unwrap();
         assert_eq!(def.mode, StaticMode::Other("CantBeEquipped".to_string()));
         assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn static_cant_pay_life_or_sacrifice_nonland_permanents_emits_cost_locks() {
+        let defs = parse_static_line_multi(
+            "Players can't pay life or sacrifice nonland permanents to cast spells or activate abilities.",
+        );
+        assert_eq!(defs.len(), 2, "expected pay-life and sacrifice locks");
+
+        assert!(defs.iter().any(|def| matches!(
+            def.mode,
+            StaticMode::CantPayCost {
+                who: ProhibitionScope::AllPlayers,
+                cost: CostPaymentProhibition::PayLife,
+            }
+        )));
+        assert!(defs.iter().any(|def| matches!(
+            &def.mode,
+            StaticMode::CantPayCost {
+                who: ProhibitionScope::AllPlayers,
+                cost: CostPaymentProhibition::Sacrifice {
+                    filter: TargetFilter::Typed(filter),
+                },
+            } if filter.type_filters.contains(&TypeFilter::Permanent)
+                && filter
+                    .type_filters
+                    .contains(&TypeFilter::Non(Box::new(TypeFilter::Land)))
+        )));
     }
 
     #[test]
@@ -15172,15 +16093,26 @@ mod tests {
 
     use crate::types::ability::UnlessPayScaling;
 
-    /// Helper: extract the `UnlessPay { cost, scaling }` from a parsed combat-tax static.
+    /// Helper: extract the `UnlessPay { cost, scaling, .. }` from a parsed
+    /// combat-tax static. Walks `StaticCondition::And` to find the embedded
+    /// `UnlessPay` so this helper works for both bare-tax statics
+    /// (Ghostly Prison) and conditional-tax statics
+    /// (Archangel of Tithes — `And { [Not(SourceIsTapped), UnlessPay {..}] }`).
     fn extract_unless_pay(def: &StaticDefinition) -> (ManaCost, UnlessPayScaling) {
-        match def
+        let cond = def
             .condition
             .as_ref()
-            .expect("combat-tax static must carry a condition")
-        {
-            StaticCondition::UnlessPay { cost, scaling } => (cost.clone(), scaling.clone()),
-            other => panic!("expected UnlessPay, got {other:?}"),
+            .expect("combat-tax static must carry a condition");
+        find_unless_pay(cond)
+            .map(|(c, s)| (c.clone(), s.clone()))
+            .unwrap_or_else(|| panic!("expected UnlessPay (possibly nested in And), got {cond:?}"))
+    }
+
+    fn find_unless_pay(cond: &StaticCondition) -> Option<(&ManaCost, &UnlessPayScaling)> {
+        match cond {
+            StaticCondition::UnlessPay { cost, scaling, .. } => Some((cost, scaling)),
+            StaticCondition::And { conditions } => conditions.iter().find_map(find_unless_pay),
+            _ => None,
         }
     }
 
@@ -15212,6 +16144,20 @@ mod tests {
             scaling,
             UnlessPayScaling::PerAffectedAndQuantityRef { .. }
         ));
+    }
+
+    /// CR 118.12a: Cowed by Wisdom — aura combat tax scaled by a game-state
+    /// quantity without multiplying by the number of affected creatures.
+    #[test]
+    fn combat_tax_enchanted_creature_for_each_quantity_ref() {
+        let def = parse_static_line(
+            "Enchanted creature can't attack or block unless its controller pays {1} for each card in your hand.",
+        )
+        .expect("Cowed by Wisdom should parse");
+        assert_eq!(def.mode, StaticMode::CantAttackOrBlock);
+        let (cost, scaling) = extract_unless_pay(&def);
+        assert_eq!(cost.mana_value(), 1);
+        assert!(matches!(scaling, UnlessPayScaling::PerQuantityRef { .. }));
     }
 
     /// CR 118.12a + CR 202.3e: Nils, Discipline Enforcer — counter-gated subject
@@ -15267,6 +16213,169 @@ mod tests {
             panic!("expected TypedFilter");
         };
         assert!(tf.properties.contains(&FilterProp::EnchantedBy));
+    }
+
+    /// CR 506.3 + CR 508.1d: Propaganda — `defended` field captures the
+    /// "you" attack-target scope so the runtime tax only applies to attacks
+    /// targeting the static's controller. Regression for issue #302
+    /// (Propaganda taxing attacks against the wrong player).
+    #[test]
+    fn combat_tax_propaganda_defended_player_scope() {
+        let def = parse_static_line(
+            "Creatures can't attack you unless their controller pays {2} for each creature they control that's attacking you.",
+        )
+        .expect("Propaganda should parse");
+        assert_eq!(def.mode, StaticMode::CantAttack);
+        let cond = def.condition.as_ref().expect("must carry a condition");
+        match cond {
+            StaticCondition::UnlessPay { defended, .. } => {
+                assert_eq!(
+                    defended.as_ref(),
+                    Some(&crate::types::triggers::AttackTargetFilter::Player),
+                    "Propaganda must capture defended=Player scope",
+                );
+            }
+            other => panic!("expected UnlessPay, got {other:?}"),
+        }
+    }
+
+    /// CR 506.3 + CR 508.1d: Sphere of Safety — `defended` field captures
+    /// "you or planeswalkers you control" → `PlayerOrPlaneswalker`.
+    #[test]
+    fn combat_tax_sphere_of_safety_defended_player_or_planeswalker() {
+        let def = parse_static_line(
+            "Creatures can't attack you or planeswalkers you control unless their controller pays {X} for each of those creatures, where X is the number of enchantments you control.",
+        )
+        .expect("Sphere of Safety should parse");
+        let cond = def.condition.as_ref().expect("must carry a condition");
+        match cond {
+            StaticCondition::UnlessPay { defended, .. } => {
+                assert_eq!(
+                    defended.as_ref(),
+                    Some(&crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker),
+                );
+            }
+            other => panic!("expected UnlessPay, got {other:?}"),
+        }
+    }
+
+    /// CR 509.1c: Block-side restriction — `defended` is `None` because the
+    /// "defender" of a block restriction is implicit (the static's controller).
+    #[test]
+    fn combat_tax_block_side_has_no_defended_scope() {
+        // No real card uses pure "Creatures can't block unless...", but the
+        // tax-block side of Archangel of Tithes does. Verified via the
+        // Archangel test below; here we check the bare grammar in isolation.
+        let def = parse_static_line(
+            "Creatures can't block unless their controller pays {1} for each of those creatures.",
+        )
+        .expect("CantBlock with cost should parse");
+        assert_eq!(def.mode, StaticMode::CantBlock);
+        let cond = def.condition.as_ref().expect("must carry a condition");
+        match cond {
+            StaticCondition::UnlessPay { defended, .. } => {
+                assert!(
+                    defended.is_none(),
+                    "block-side tax must have defended=None, got {defended:?}",
+                );
+            }
+            other => panic!("expected UnlessPay, got {other:?}"),
+        }
+    }
+
+    /// CR 506.3 + CR 611.3a + CR 118.12a: Archangel of Tithes — first line.
+    /// "As long as this creature is untapped, creatures can't attack you or
+    /// planeswalkers you control unless their controller pays {1} for each
+    /// of those creatures." Must compose `Not(SourceIsTapped)` (the gating
+    /// condition) AND `UnlessPay { defended=PlayerOrPlaneswalker, ... }`
+    /// (the tax payload). Regression for issue #309.
+    #[test]
+    fn combat_tax_archangel_of_tithes_untapped_attack() {
+        let def = parse_static_line(
+            "As long as this creature is untapped, creatures can't attack you or planeswalkers you control unless their controller pays {1} for each of those creatures.",
+        )
+        .expect("Archangel of Tithes attack-tax line should parse");
+        assert_eq!(def.mode, StaticMode::CantAttack);
+
+        // Composed condition: gate AND payload.
+        let Some(StaticCondition::And { conditions }) = def.condition.as_ref() else {
+            panic!("expected And(gate, UnlessPay), got {:?}", def.condition,);
+        };
+        assert_eq!(conditions.len(), 2, "expected exactly two conjuncts");
+
+        // The gate: Not(SourceIsTapped).
+        let has_gate = conditions.iter().any(|c| {
+            matches!(
+                c,
+                StaticCondition::Not { condition } if matches!(**condition, StaticCondition::SourceIsTapped)
+            )
+        });
+        assert!(
+            has_gate,
+            "missing Not(SourceIsTapped) gate, got {conditions:?}"
+        );
+
+        // The payload: UnlessPay {1, PerAffectedCreature, defended=PlayerOrPlaneswalker}.
+        let payload = conditions
+            .iter()
+            .find_map(|c| match c {
+                StaticCondition::UnlessPay {
+                    cost,
+                    scaling,
+                    defended,
+                } => Some((cost, scaling, defended.as_ref())),
+                _ => None,
+            })
+            .expect("missing UnlessPay payload");
+        assert_eq!(payload.0.mana_value(), 1);
+        assert!(matches!(payload.1, UnlessPayScaling::PerAffectedCreature));
+        assert_eq!(
+            payload.2,
+            Some(&crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker),
+        );
+    }
+
+    /// CR 509.1c + CR 611.3a + CR 118.12a: Archangel of Tithes — second line.
+    /// "As long as this creature is attacking, creatures can't block unless
+    /// their controller pays {1} for each of those creatures." Composes
+    /// `SourceIsAttacking` AND `UnlessPay { defended=None, ... }`.
+    #[test]
+    fn combat_tax_archangel_of_tithes_attacking_block() {
+        let def = parse_static_line(
+            "As long as this creature is attacking, creatures can't block unless their controller pays {1} for each of those creatures.",
+        )
+        .expect("Archangel of Tithes block-tax line should parse");
+        assert_eq!(def.mode, StaticMode::CantBlock);
+
+        let Some(StaticCondition::And { conditions }) = def.condition.as_ref() else {
+            panic!(
+                "expected And(SourceIsAttacking, UnlessPay), got {:?}",
+                def.condition,
+            );
+        };
+        let has_gate = conditions
+            .iter()
+            .any(|c| matches!(c, StaticCondition::SourceIsAttacking));
+        assert!(
+            has_gate,
+            "missing SourceIsAttacking gate, got {conditions:?}"
+        );
+
+        let payload = conditions
+            .iter()
+            .find_map(|c| match c {
+                StaticCondition::UnlessPay {
+                    cost,
+                    scaling,
+                    defended,
+                } => Some((cost, scaling, defended.as_ref())),
+                _ => None,
+            })
+            .expect("missing UnlessPay payload");
+        assert_eq!(payload.0.mana_value(), 1);
+        assert!(matches!(payload.1, UnlessPayScaling::PerAffectedCreature));
+        // CR 509.1c: block-side has no defender scope.
+        assert_eq!(payload.2, None);
     }
 
     /// CR 113.6 + CR 113.6b: Anger (Onslaught / Incarnation cycle). The static
@@ -15364,6 +16473,95 @@ mod tests {
             0,
             "literal SetPower/SetToughness must not be emitted for X/X"
         );
+    }
+
+    #[test]
+    fn base_pt_equal_to_recipient_mana_value_emits_dynamic_setters() {
+        let mods = parse_continuous_modifications(
+            "is a creature in addition to its other types and has base power and base toughness each equal to its mana value",
+        );
+        assert!(mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::SetPowerDynamic {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::Recipient
+                    }
+                }
+            }
+        )));
+        assert!(mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::SetToughnessDynamic {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::Recipient
+                    }
+                }
+            }
+        )));
+    }
+
+    #[test]
+    fn static_animation_base_pt_equal_to_mana_value_reaches_line_parser() {
+        let def = parse_static_line(
+            "Each other non-Aura enchantment is a creature in addition to its other types and has base power and base toughness each equal to its mana value.",
+        )
+        .expect("mana-value animation static should parse");
+        assert!(def.modifications.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::SetPowerDynamic {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::Recipient
+                        }
+                    }
+                }
+            )
+        }));
+        assert!(def.modifications.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::SetToughnessDynamic {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::Recipient
+                        }
+                    }
+                }
+            )
+        }));
+    }
+
+    #[test]
+    fn conditional_static_animation_base_pt_equal_to_mana_value_keeps_condition() {
+        let def = parse_static_line(
+            "As long as you control five or more enchantments, each other non-Aura enchantment you control is a creature in addition to its other types and has base power and base toughness each equal to its mana value.",
+        )
+        .expect("conditional mana-value animation static should parse");
+        assert!(matches!(
+            def.condition,
+            Some(StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 5 },
+            })
+        ));
+        assert!(def.modifications.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::SetPowerDynamic {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::Recipient
+                        }
+                    }
+                }
+            )
+        }));
     }
 
     // CR 700.9: "Modified creatures you control have <keyword>" class.
@@ -15482,6 +16680,117 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parse_commander_creatures_you_own_grant_attack_trigger() {
+        use crate::types::ability::{Effect, TriggerCondition};
+        use crate::types::triggers::{AttackTargetFilter, TriggerMode};
+
+        let def = parse_static_line(
+            "Commander creatures you own have \"Whenever this creature attacks a player, if no opponent has more life than that player, you create two Treasure tokens.\"",
+        )
+        .expect("Guild Artisan granted trigger should parse");
+
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert!(tf.properties.contains(&FilterProp::IsCommander));
+                assert!(tf.properties.contains(&FilterProp::Owned {
+                    controller: ControllerRef::You,
+                }));
+                assert_eq!(tf.controller, None);
+            }
+            other => panic!("expected Typed filter, got {other:?}"),
+        }
+
+        match def.modifications.as_slice() {
+            [ContinuousModification::GrantTrigger { trigger }] => {
+                assert_eq!(trigger.mode, TriggerMode::Attacks);
+                assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+                assert_eq!(
+                    trigger.attack_target_filter,
+                    Some(AttackTargetFilter::Player)
+                );
+                match trigger.condition.as_ref() {
+                    Some(TriggerCondition::QuantityComparison {
+                        comparator: Comparator::LE,
+                        rhs:
+                            QuantityExpr::Ref {
+                                qty:
+                                    QuantityRef::LifeTotal {
+                                        player: PlayerScope::DefendingPlayer,
+                                    },
+                            },
+                        ..
+                    }) => {}
+                    other => panic!("expected defending-player life condition, got {other:?}"),
+                }
+                let execute = trigger.execute.as_ref().expect("trigger must have effect");
+                match execute.effect.as_ref() {
+                    Effect::Token { name, count, .. } => {
+                        assert_eq!(name, "Treasure");
+                        assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
+                    }
+                    other => panic!("expected Treasure token creation, got {other:?}"),
+                }
+            }
+            other => panic!("expected single GrantTrigger modification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_initiative_background_attack_trigger_cluster() {
+        use crate::types::ability::{Effect, TriggerCondition};
+
+        let cases = [
+            "Commander creatures you own have \"Whenever this creature attacks a player, if no opponent has more life than that player, put a +1/+1 counter on this creature. It gains deathtouch and indestructible until end of turn.\"",
+            "Commander creatures you own have \"Whenever this creature attacks a player, if no opponent has more life than that player, you create two Treasure tokens.\"",
+            "Commander creatures you own have \"Whenever this creature attacks a player, if no opponent has more life than that player, another target creature you control gets +X/+X until end of turn, where X is this creature's power.\"",
+            "Commander creatures you own have \"Whenever this creature attacks a player, if no opponent has more life than that player, this creature can't be blocked this turn.\"",
+            "Commander creatures you own have \"Whenever this creature attacks a player, if no opponent has more life than that player, for each opponent, create a 1/1 white Soldier creature token that's tapped and attacking that opponent.\"",
+        ];
+
+        for text in cases {
+            let def = parse_static_line(text).expect("initiative Background should parse");
+            match def.modifications.as_slice() {
+                [ContinuousModification::GrantTrigger { trigger }] => {
+                    assert!(matches!(
+                        trigger.condition,
+                        Some(TriggerCondition::QuantityComparison {
+                            comparator: Comparator::LE,
+                            ..
+                        })
+                    ));
+                    let execute = trigger.execute.as_ref().expect("trigger must have effect");
+                    assert!(
+                        !matches!(execute.effect.as_ref(), Effect::Unimplemented { .. }),
+                        "granted trigger effect must be implemented for {text}"
+                    );
+                }
+                other => panic!("expected single GrantTrigger modification, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_quoted_grant_preserves_outer_keyword_only() {
+        let def = parse_static_line(
+            "Commander creatures you own have menace and \"This creature gets +X/+0, where X is the number of creature cards in your graveyard.\"",
+        )
+        .expect("Criminal Past-style mixed keyword and quoted ability should parse");
+
+        assert_eq!(def.modifications.len(), 2);
+        assert!(def.modifications.iter().any(|modification| matches!(
+            modification,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Menace
+            }
+        )));
+        assert!(def.modifications.iter().any(|modification| matches!(
+            modification,
+            ContinuousModification::GrantAbility { .. }
+        )));
+    }
+
     // CR 903.3d: parse_commander_subject_filter as a raw subject helper.
     // Unblocks subject-continuous-static dispatch (the secondary path).
     #[test]
@@ -15514,6 +16823,20 @@ mod tests {
             TargetFilter::Typed(tf) => {
                 assert_eq!(tf.controller, None);
                 assert!(tf.properties.contains(&FilterProp::IsCommander));
+            }
+            _ => panic!("expected Typed"),
+        }
+
+        let f = parse_commander_subject_filter("commander creatures you own")
+            .expect("commander creatures you own");
+        match f {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, None);
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert!(tf.properties.contains(&FilterProp::IsCommander));
+                assert!(tf.properties.contains(&FilterProp::Owned {
+                    controller: ControllerRef::You,
+                }));
             }
             _ => panic!("expected Typed"),
         }
@@ -15764,5 +17087,47 @@ mod snapshot_tests {
     fn static_granted_keyword() {
         let def = parse_static_line("Creatures you control have flying.").unwrap();
         insta::assert_json_snapshot!(def);
+    }
+
+    /// Issue #327: "of that color" anaphor (post-Choose) is the equivalent of
+    /// "of the chosen color" and must lower to a filter with IsChosenColor.
+    #[test]
+    fn parse_chosen_qualifier_subject_recognizes_that_color_anaphor() {
+        let lower = "creatures of that color".to_string();
+        let tp = TextPair::new("creatures of that color", &lower);
+        let filter = parse_chosen_qualifier_subject(&tp).expect("anaphor form should parse");
+        match filter {
+            TargetFilter::Typed(tf) => {
+                assert!(
+                    tf.properties
+                        .iter()
+                        .any(|p| matches!(p, FilterProp::IsChosenColor)),
+                    "expected IsChosenColor in properties, got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("expected Typed creature filter, got {other:?}"),
+        }
+    }
+
+    /// Issue #327: "of the chosen color" (explicit form) must still produce
+    /// the same IsChosenColor filter so the two grammatical forms unify.
+    #[test]
+    fn parse_chosen_qualifier_subject_recognizes_chosen_color_explicit() {
+        let lower = "creatures of the chosen color".to_string();
+        let tp = TextPair::new("creatures of the chosen color", &lower);
+        let filter = parse_chosen_qualifier_subject(&tp).expect("explicit form should parse");
+        match filter {
+            TargetFilter::Typed(tf) => {
+                assert!(
+                    tf.properties
+                        .iter()
+                        .any(|p| matches!(p, FilterProp::IsChosenColor)),
+                    "expected IsChosenColor in properties, got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("expected Typed creature filter, got {other:?}"),
+        }
     }
 }

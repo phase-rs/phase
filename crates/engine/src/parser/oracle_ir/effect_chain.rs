@@ -12,8 +12,9 @@ use super::ast::{ClauseBoundary, ContinuationAst, ParsedEffectClause};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ControllerRef,
     DelayedTriggerCondition, MultiTargetSpec, OpponentMayScope, PlayerFilter, QuantityExpr,
-    RoundingMode, UnlessPayModifier,
+    RoundingMode, TargetSelectionMode, UnlessPayModifier,
 };
+use crate::types::mana::ManaExpiry;
 
 /// Chain-level IR: the complete parsed representation of an effect chain before assembly.
 ///
@@ -63,6 +64,8 @@ pub(crate) enum SpecialClause {
     /// Follow-up to a drawn-this-turn choice: sets the life payment and
     /// confirms the topdeck branch without emitting a separate effect.
     DrawnThisTurnPayOrTopdeck { life_payment: QuantityExpr },
+    /// CR 106.4: Mana-retention rider — fold expiry onto the previous Mana effect.
+    ManaRetention(ManaExpiry),
 }
 
 /// Per-clause IR: captures everything about a single parsed chunk before chain assembly.
@@ -109,6 +112,12 @@ pub(crate) struct ClauseIr {
     pub(crate) special: Option<SpecialClause>,
     /// The raw normalized text (for debug/diagnostic purposes).
     pub(crate) source_text: String,
+    /// CR 115.1 + CR 701.9b: Target selection mode captured from `ParseContext`
+    /// after this chunk was parsed. Stamped onto the produced `AbilityDefinition`
+    /// during lowering. `Chosen` (default) for ordinary "target X" phrases;
+    /// `Random` when the parser stripped a leading "random " modifier.
+    #[serde(default, skip_serializing_if = "TargetSelectionMode::is_chosen")]
+    pub(crate) target_selection_mode: TargetSelectionMode,
 }
 
 #[cfg(test)]
@@ -152,6 +161,7 @@ mod tests {
             unless_pay: None,
             special: None,
             source_text: "draw a card".to_string(),
+            target_selection_mode: TargetSelectionMode::Chosen,
         };
         assert_eq!(clause.source_text, "draw a card");
         assert!(!clause.is_optional);
@@ -184,6 +194,7 @@ mod tests {
                 unless_pay: None,
                 special: None,
                 source_text: "draw two cards".to_string(),
+                target_selection_mode: TargetSelectionMode::Chosen,
             }],
             kind: AbilityKind::Spell,
             chain_rounding: None,

@@ -40,6 +40,7 @@ jq -c --argjson exclude "$NON_PLAYABLE" '
   [.[] |
     select(.oracle_id != null) |
     select(.layout as $l | $exclude | index($l) | not) |
+    select(.set != "plst") |
     {
       oracle_id: .oracle_id,
       entry: {

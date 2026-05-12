@@ -12,6 +12,10 @@ use super::turn_control;
 /// from `waiting_for`, evaluates layers when dirty, and derives display-only
 /// state used by the frontend.
 pub fn finalize_public_state(state: &mut GameState) {
+    // CR 614.12a + CR 615.5: Backward-compat for the 2026-05-09 audit M4
+    // post-replacement-continuation slot fold. Idempotent on already-migrated
+    // states; cheap on every other invocation.
+    state.migrate_post_replacement_continuation();
     sync_priority_player_from_waiting_for(state);
     if state.layers_dirty {
         evaluate_layers(state);

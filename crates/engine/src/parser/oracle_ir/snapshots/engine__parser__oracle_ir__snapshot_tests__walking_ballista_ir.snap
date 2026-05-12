@@ -53,7 +53,7 @@ expression: "&ir"
         "cost": {
           "type": "RemoveCounter",
           "count": 1,
-          "counter_type": "+1/+1",
+          "counter_type": "P1P1",
           "target": null
         },
         "sub_ability": null,

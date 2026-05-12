@@ -6,6 +6,7 @@ use crate::types::ability::{
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
+use crate::types::player::PlayerId;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 
@@ -70,6 +71,44 @@ fn resolve_source_filter(
     }
 }
 
+fn push_player_scoped_shield(
+    state: &mut GameState,
+    source_id: ObjectId,
+    shield: ReplacementDefinition,
+) {
+    let source_is_active_object = state
+        .objects
+        .get(&source_id)
+        .is_some_and(|obj| matches!(obj.zone, Zone::Battlefield | Zone::Command));
+    if source_is_active_object {
+        if let Some(obj) = state.objects.get_mut(&source_id) {
+            obj.replacement_definitions.push(shield);
+        }
+    } else {
+        state.pending_damage_replacements.push(shield);
+    }
+}
+
+fn player_damage_filter(player: PlayerId) -> DamageTargetFilter {
+    DamageTargetFilter::Player {
+        player: DamageTargetPlayerScope::Specific(player),
+    }
+}
+
+fn untargeted_damage_filter(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target: &TargetFilter,
+) -> Option<DamageTargetFilter> {
+    match target {
+        TargetFilter::Any => None,
+        filter if filter.is_context_ref() => Some(player_damage_filter(
+            super::resolve_player_for_context_ref(state, ability, filter),
+        )),
+        _ => None,
+    }
+}
+
 /// CR 615: Prevent damage — creates a prevention shield on the source object.
 ///
 /// The shield is stored as a `ReplacementDefinition` with `ShieldKind::Prevention`
@@ -83,13 +122,19 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (amount, scope, effect_source_filter) = match &ability.effect {
+    let (amount, target, scope, effect_source_filter) = match &ability.effect {
         Effect::PreventDamage {
             amount,
+            target,
             scope,
             damage_source_filter,
             ..
-        } => (*amount, *scope, damage_source_filter.clone()),
+        } => (
+            *amount,
+            target.clone(),
+            *scope,
+            damage_source_filter.clone(),
+        ),
         _ => {
             return Err(EffectError::InvalidParam(
                 "expected PreventDamage effect".to_string(),
@@ -117,34 +162,71 @@ pub fn resolve(
         shield = shield.combat_scope(CombatDamageScope::CombatOnly);
     }
 
+    // CR 608.2c: When the shield is bound to a parent's chosen object target
+    // (Gatta and Luzzu's `ParentTarget` referencing the chosen creature), we
+    // host on the object itself and scope via `valid_card: SelfRef` — the
+    // player-scoped `untargeted_damage_filter` below resolves `ParentTarget`
+    // to the controller, which would mis-scope an object-shield as a
+    // player-shield. Skip the player-filter inference in that case.
+    let host_on_parent_target_object = matches!(target, TargetFilter::ParentTarget)
+        && ability
+            .targets
+            .iter()
+            .any(|t| matches!(t, TargetRef::Object(_)));
+
+    if !host_on_parent_target_object {
+        if let Some(filter) = untargeted_damage_filter(state, ability, &target) {
+            shield = shield.damage_target_filter(filter);
+        }
+    }
+
+    if let Some(sub_ability) = &ability.sub_ability {
+        shield = shield.runtime_execute(sub_ability.as_ref().clone());
+    }
+
     // CR 615: For targeted prevention ("prevent the next N damage to target creature"),
     // the shield lives on the TARGET object — same pattern as regeneration shields.
     // This ensures the shield is found by find_applicable_replacements() which only
     // scans Battlefield/Command zones (instants move to graveyard after resolving).
     //
     // For untargeted effects (Fog: "prevent all combat damage"), the shield lives on
-    // the source permanent. If the source is an instant/sorcery, the shield won't persist
-    // after resolution — untargeted instant prevention requires a global mechanism (future work).
-    if !ability.targets.is_empty() {
-        for target in &ability.targets {
-            match target {
+    // the source permanent when possible; instant/sorcery shields that need to outlive
+    // stack resolution use the game-level pending registry instead.
+    //
+    // CR 608.2c: When this is a sub-ability of a parent that already chose a
+    // target (Gatta and Luzzu's "choose target creature ... If damage would be
+    // dealt to that creature this turn, prevent that damage"), the filter is
+    // `ParentTarget` — a context ref that aliases to the parent's `targets`.
+    // The shield host is the chosen creature in that case, so the targeted
+    // branch must also accept `ParentTarget` when `ability.targets` carries the
+    // inherited parent targets.
+    let host_on_targets = !ability.targets.is_empty()
+        && (!target.is_context_ref() || matches!(target, TargetFilter::ParentTarget));
+    if host_on_targets {
+        for selected_target in &ability.targets {
+            match selected_target {
                 TargetRef::Object(obj_id) => {
+                    // CR 614.1a: When the shield is hosted on a specific object,
+                    // scope it via `valid_card: SelfRef` so it only fires on
+                    // damage to its host — not damage to any object on the
+                    // battlefield. Mirrors the inline-test pattern for
+                    // host-bound prevention shields (e.g., Phyrexian Hydra,
+                    // Gatta and Luzzu's chosen creature).
+                    let mut object_shield = shield.clone();
+                    if object_shield.valid_card.is_none() {
+                        object_shield.valid_card = Some(TargetFilter::SelfRef);
+                    }
                     if let Some(obj) = state.objects.get_mut(obj_id) {
-                        obj.replacement_definitions.push(shield.clone());
+                        obj.replacement_definitions.push(object_shield);
                     }
                 }
-                TargetRef::Player(_) => {
-                    // Player-targeted prevention: attach to source (permanent abilities)
-                    // and scope with damage_target_filter.
-                    let player_shield =
-                        shield
-                            .clone()
-                            .damage_target_filter(DamageTargetFilter::Player {
-                                player: DamageTargetPlayerScope::Any,
-                            });
-                    if let Some(obj) = state.objects.get_mut(&ability.source_id) {
-                        obj.replacement_definitions.push(player_shield);
-                    }
+                TargetRef::Player(player) => {
+                    // Player-targeted prevention scopes to the chosen player and
+                    // persists globally when created by an instant/sorcery on the stack.
+                    let player_shield = shield
+                        .clone()
+                        .damage_target_filter(player_damage_filter(*player));
+                    push_player_scoped_shield(state, ability.source_id, player_shield);
                 }
             }
         }
@@ -179,10 +261,13 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::zones::create_object;
-    use crate::types::ability::{PreventionAmount, ShieldKind, TypedFilter};
+    use crate::game::{effects::deal_damage, zones::create_object};
+    use crate::types::ability::{
+        PreventionAmount, PtValue, QuantityExpr, QuantityRef, ShieldKind, TypedFilter,
+    };
     use crate::types::game_state::ChosenDamageSource;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -350,6 +435,151 @@ mod tests {
     }
 
     #[test]
+    fn prevention_shield_executes_prevented_damage_followup() {
+        let mut state = GameState::new_two_player(42);
+        let shield_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Inkshield".to_string(),
+            Zone::Stack,
+        );
+        let damage_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut token = ResolvedAbility::new(
+            Effect::Token {
+                name: "Inkling".to_string(),
+                power: PtValue::Fixed(2),
+                toughness: PtValue::Fixed(1),
+                types: vec!["Creature".to_string(), "Inkling".to_string()],
+                colors: vec![ManaColor::White, ManaColor::Black],
+                keywords: vec![Keyword::Flying],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+            vec![],
+            shield_source,
+            PlayerId(0),
+        );
+        token.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        });
+        let ability = make_prevent_ability(
+            shield_source,
+            PreventionAmount::All,
+            PreventionScope::CombatDamage,
+            vec![],
+        )
+        .sub_ability(token);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let ctx = deal_damage::DamageContext::from_source(&state, damage_source).unwrap();
+        let result = deal_damage::apply_damage_to_target(
+            &mut state,
+            &ctx,
+            TargetRef::Player(PlayerId(0)),
+            3,
+            true,
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(matches!(result, deal_damage::DamageResult::Applied(0)));
+        assert_eq!(state.players[0].life, 20);
+        let inklings = state
+            .objects
+            .values()
+            .filter(|obj| obj.zone == Zone::Battlefield && obj.name == "Inkling")
+            .count();
+        assert_eq!(inklings, 3);
+    }
+
+    #[test]
+    fn controller_scoped_instant_prevention_only_prevents_damage_to_controller() {
+        let mut state = GameState::new_two_player(42);
+        let shield_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Inkshield".to_string(),
+            Zone::Stack,
+        );
+        let damage_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                target: TargetFilter::Controller,
+                scope: PreventionScope::CombatDamage,
+                damage_source_filter: None,
+            },
+            vec![],
+            shield_source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.pending_damage_replacements.len(), 1);
+        assert_eq!(
+            state.pending_damage_replacements[0].damage_target_filter,
+            Some(DamageTargetFilter::Player {
+                player: DamageTargetPlayerScope::Specific(PlayerId(0)),
+            })
+        );
+
+        let ctx = deal_damage::DamageContext::from_source(&state, damage_source).unwrap();
+        let opponent_result = deal_damage::apply_damage_to_target(
+            &mut state,
+            &ctx,
+            TargetRef::Player(PlayerId(1)),
+            2,
+            true,
+            &mut events,
+        )
+        .unwrap();
+        assert!(matches!(
+            opponent_result,
+            deal_damage::DamageResult::Applied(2)
+        ));
+        assert_eq!(state.players[1].life, 18);
+
+        let controller_result = deal_damage::apply_damage_to_target(
+            &mut state,
+            &ctx,
+            TargetRef::Player(PlayerId(0)),
+            3,
+            true,
+            &mut events,
+        )
+        .unwrap();
+        assert!(matches!(
+            controller_result,
+            deal_damage::DamageResult::Applied(0)
+        ));
+        assert_eq!(state.players[0].life, 20);
+    }
+
+    #[test]
     fn emits_effect_resolved() {
         let mut state = GameState::new_two_player(42);
         let source = create_object(
@@ -376,5 +606,221 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    /// CR 615.1a: A `Prevention { All }` shield is not depletion-based — it
+    /// must remain active across multiple damage events for the rest of the
+    /// turn (lifetime governed by `expiry: EndOfTurn` per CR 514.2). Without
+    /// this contract the shield would prevent only the first damage event
+    /// (Gatta and Luzzu's reported bug, plus latent Pariah / Phyrexian Hydra
+    /// breakage). The depletion semantics of `Next(N)` are exercised by
+    /// `next_n_shield_remaining_capacity` below — the orthogonal axis.
+    #[test]
+    fn prevention_all_shield_persists_across_multiple_damage_events() {
+        use crate::types::ability::ShieldKind;
+        let mut state = GameState::new_two_player(42);
+        let target_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let damage_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Goblin".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Gatta-and-Luzzu-shaped shield: All-prevention, EOT expiry, hosted on
+        // the chosen creature (valid_card SelfRef so only damage to the host
+        // fires it).
+        state
+            .objects
+            .get_mut(&target_creature)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                    .prevention_shield(PreventionAmount::All)
+                    .valid_card(TargetFilter::SelfRef)
+                    .description("Persistent prevention shield".to_string()),
+            );
+        state
+            .objects
+            .get_mut(&target_creature)
+            .unwrap()
+            .replacement_definitions[0]
+            .expiry = Some(crate::types::ability::RestrictionExpiry::EndOfTurn);
+
+        // Fire three damage events back-to-back.
+        let ctx = deal_damage::DamageContext::from_source(&state, damage_source).unwrap();
+        for _ in 0..3 {
+            let mut events = Vec::new();
+            let result = deal_damage::apply_damage_to_target(
+                &mut state,
+                &ctx,
+                TargetRef::Object(target_creature),
+                4,
+                false,
+                &mut events,
+            )
+            .unwrap();
+            assert!(matches!(result, deal_damage::DamageResult::Applied(0)));
+        }
+
+        // Shield must still exist and still be unconsumed — every fire was
+        // absorbed without depleting the host's replacement_definitions.
+        let host = state.objects.get(&target_creature).unwrap();
+        assert_eq!(host.damage_marked, 0, "no damage should have been marked");
+        assert_eq!(
+            host.replacement_definitions.len(),
+            1,
+            "shield must survive: {:?}",
+            host.replacement_definitions
+        );
+        assert!(
+            !host.replacement_definitions[0].is_consumed,
+            "Prevention All must not be consumed on use"
+        );
+        assert!(matches!(
+            host.replacement_definitions[0].shield_kind,
+            ShieldKind::Prevention {
+                amount: PreventionAmount::All
+            }
+        ));
+    }
+
+    /// CR 615.7: `Prevention { Next(N) }` IS depletion-based — confirms the
+    /// orthogonal contract still holds after the All-fix above. Each absorbed
+    /// damage point reduces the shield by one; consumed shields are dropped
+    /// (via `is_consumed`) once N reaches zero.
+    #[test]
+    fn prevention_next_n_shield_depletes_with_each_use() {
+        use crate::types::ability::ShieldKind;
+        let mut state = GameState::new_two_player(42);
+        let target_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let damage_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Goblin".to_string(),
+            Zone::Battlefield,
+        );
+
+        state
+            .objects
+            .get_mut(&target_creature)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                    .prevention_shield(PreventionAmount::Next(3))
+                    .valid_card(TargetFilter::SelfRef)
+                    .description("Mending Hands shield".to_string()),
+            );
+
+        let ctx = deal_damage::DamageContext::from_source(&state, damage_source).unwrap();
+        // First fire: 1 damage absorbed, 2 remaining.
+        let mut events = Vec::new();
+        deal_damage::apply_damage_to_target(
+            &mut state,
+            &ctx,
+            TargetRef::Object(target_creature),
+            1,
+            false,
+            &mut events,
+        )
+        .unwrap();
+        let host = state.objects.get(&target_creature).unwrap();
+        assert!(matches!(
+            host.replacement_definitions[0].shield_kind,
+            ShieldKind::Prevention {
+                amount: PreventionAmount::Next(2)
+            }
+        ));
+        // Second fire: 2 damage absorbed, 0 remaining → consumed.
+        let mut events = Vec::new();
+        deal_damage::apply_damage_to_target(
+            &mut state,
+            &ctx,
+            TargetRef::Object(target_creature),
+            2,
+            false,
+            &mut events,
+        )
+        .unwrap();
+        let host = state.objects.get(&target_creature).unwrap();
+        assert!(host.replacement_definitions[0].is_consumed);
+    }
+
+    /// CR 608.2c: When a `PreventDamage` sub-ability inherits its parent's
+    /// targets via `target: ParentTarget` (Gatta and Luzzu pattern), the
+    /// shield must be hosted on those inherited targets — not on the
+    /// ability's own source object. This regression test fixes the case where
+    /// the shield was being placed on Gatta itself instead of the chosen
+    /// creature, leaving the chosen creature unprotected.
+    #[test]
+    fn prevent_damage_with_parent_target_hosts_shield_on_inherited_targets() {
+        use crate::types::ability::ShieldKind;
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Gatta and Luzzu".to_string(),
+            Zone::Battlefield,
+        );
+        let chosen = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Sub-ability shape: PreventDamage with target=ParentTarget and
+        // ability.targets propagated from the parent TargetOnly.
+        let ability = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                target: TargetFilter::ParentTarget,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: None,
+            },
+            vec![TargetRef::Object(chosen)],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Shield must land on the chosen creature, not on Gatta.
+        let chosen_obj = state.objects.get(&chosen).unwrap();
+        assert_eq!(
+            chosen_obj.replacement_definitions.len(),
+            1,
+            "shield must be hosted on the chosen target"
+        );
+        assert!(matches!(
+            chosen_obj.replacement_definitions[0].shield_kind,
+            ShieldKind::Prevention {
+                amount: PreventionAmount::All
+            }
+        ));
+        let source_obj = state.objects.get(&source).unwrap();
+        assert!(
+            source_obj.replacement_definitions.is_empty(),
+            "shield must NOT land on the source — got {:?}",
+            source_obj.replacement_definitions
+        );
     }
 }

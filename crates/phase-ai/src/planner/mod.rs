@@ -901,7 +901,7 @@ mod tests {
     use super::*;
     use engine::ai_support::{ActionMetadata, TacticalClass};
     use engine::game::zones::create_object;
-    use engine::types::actions::GameAction;
+    use engine::types::actions::{GameAction, MulliganChoice};
     use engine::types::card_type::CoreType;
     use engine::types::game_state::WaitingFor;
     use engine::types::identifiers::CardId;
@@ -933,7 +933,9 @@ mod tests {
                 },
             },
             CandidateAction {
-                action: GameAction::MulliganDecision { keep: true },
+                action: GameAction::MulliganDecision {
+                    choice: MulliganChoice::Keep,
+                },
                 metadata: ActionMetadata {
                     actor: Some(PlayerId(0)),
                     tactical_class: TacticalClass::Selection,

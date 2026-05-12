@@ -8,7 +8,7 @@ import { useBoardInteractionState } from "./BoardInteractionContext.tsx";
 import { GroupedPermanentDisplay } from "./GroupedPermanent.tsx";
 import {
   GROUP_STAGGER_PX,
-  getCreatureGroupRenderMode,
+  getGroupRenderMode,
   type BattlefieldRowType,
   visibleCardSlotCount,
   visibleStaggerCount,
@@ -120,7 +120,7 @@ export function BattlefieldRow({ groups, rowType, className }: BattlefieldRowPro
       rowType === "creatures"
       && combatMode === "blockers"
       && group.ids.some((id) => committedAttackerIds.has(id));
-    const renderMode = getCreatureGroupRenderMode(group, rowType, {
+    const renderMode = getGroupRenderMode(group, {
       manualExpanded,
       containsCommittedAttackerDuringBlockers,
     });

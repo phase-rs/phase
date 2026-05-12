@@ -258,9 +258,12 @@ pub enum ManaSpellGrant {
     },
 }
 
-/// When mana expires — controls lifecycle beyond the normal CR 500.4 phase drain.
+/// When mana expires — controls lifecycle beyond the normal CR 106.4 step/phase drain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ManaExpiry {
+    /// Mana persists through normal step/phase drains until the turn reaches cleanup.
+    /// Used by "Until end of turn, you don't lose this mana as steps and phases end."
+    EndOfTurn,
     /// Mana persists through combat steps but drains at EndCombat → PostCombatMain.
     /// Used by Firebending and similar "mana lasts within combat" mechanics.
     EndOfCombat,
@@ -743,17 +746,14 @@ impl ManaPool {
         self.mana.clear();
     }
 
-    /// CR 500.4: Clear mana on phase transition, retaining combat-expiry mana
-    /// while still within combat phases.
-    pub fn clear_step_transition(&mut self, in_combat: bool) {
-        if in_combat {
-            // Retain mana with EndOfCombat expiry; drain everything else
-            self.mana
-                .retain(|u| u.expiry == Some(ManaExpiry::EndOfCombat));
-        } else {
-            // Leaving combat or non-combat transition: drain everything
-            self.mana.clear();
-        }
+    /// CR 106.4: Clear mana on phase transition, retaining mana that carries an
+    /// explicit retention expiry until that expiry has been reached.
+    pub fn clear_step_transition(&mut self, in_combat: bool, entering_cleanup: bool) {
+        self.mana.retain(|u| match u.expiry {
+            Some(ManaExpiry::EndOfTurn) => !entering_cleanup,
+            Some(ManaExpiry::EndOfCombat) => in_combat,
+            None => false,
+        });
     }
 
     /// Remove all mana units produced by the given source.
@@ -932,6 +932,22 @@ mod tests {
         pool.add(make_unit(ManaType::White));
         pool.add(make_unit(ManaType::Blue));
         pool.clear();
+        assert_eq!(pool.total(), 0);
+    }
+
+    #[test]
+    fn mana_pool_retains_end_of_turn_mana_until_cleanup() {
+        let mut pool = ManaPool::default();
+        let mut retained = make_unit(ManaType::Green);
+        retained.expiry = Some(ManaExpiry::EndOfTurn);
+        pool.add(retained);
+        pool.add(make_unit(ManaType::Red));
+
+        pool.clear_step_transition(false, false);
+        assert_eq!(pool.count_color(ManaType::Green), 1);
+        assert_eq!(pool.count_color(ManaType::Red), 0);
+
+        pool.clear_step_transition(false, true);
         assert_eq!(pool.total(), 0);
     }
 

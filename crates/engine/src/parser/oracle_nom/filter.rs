@@ -14,7 +14,7 @@ use nom::Parser;
 use super::error::OracleResult;
 use super::primitives::{parse_article, parse_pt_modifier};
 use super::quantity::parse_quantity_expr_number;
-use crate::types::ability::{ControllerRef, FilterProp, QuantityExpr};
+use crate::types::ability::{Comparator, ControllerRef, FilterProp, QuantityExpr};
 use crate::types::counter::CounterType;
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
@@ -80,7 +80,7 @@ pub fn parse_property_filter(input: &str) -> OracleResult<'_, FilterProp> {
         value(FilterProp::Suspected, tag("suspected")),
         value(FilterProp::EnchantedBy, tag("enchanted")),
         value(FilterProp::EquippedBy, tag("equipped")),
-        value(FilterProp::Multicolored, tag("multicolored")),
+        parse_color_property,
         value(
             FilterProp::EnteredThisTurn,
             tag("entered the battlefield this turn"),
@@ -182,7 +182,27 @@ pub fn parse_color_property(input: &str) -> OracleResult<'_, FilterProp> {
         map(tag("green"), |_| FilterProp::HasColor {
             color: ManaColor::Green,
         }),
-        value(FilterProp::Multicolored, tag("multicolored")),
+        value(
+            FilterProp::ColorCount {
+                comparator: Comparator::EQ,
+                count: 0,
+            },
+            tag("colorless"),
+        ),
+        value(
+            FilterProp::ColorCount {
+                comparator: Comparator::EQ,
+                count: 1,
+            },
+            tag("monocolored"),
+        ),
+        value(
+            FilterProp::ColorCount {
+                comparator: Comparator::GE,
+                count: 2,
+            },
+            tag("multicolored"),
+        ),
     ))
     .parse(input)
 }
@@ -344,7 +364,23 @@ mod tests {
         assert_eq!(rest, " creature");
 
         let (rest2, p2) = parse_color_property("multicolored").unwrap();
-        assert_eq!(p2, FilterProp::Multicolored);
+        assert_eq!(
+            p2,
+            FilterProp::ColorCount {
+                comparator: Comparator::GE,
+                count: 2,
+            }
+        );
         assert_eq!(rest2, "");
+
+        let (rest3, p3) = parse_color_property("monocolored").unwrap();
+        assert_eq!(
+            p3,
+            FilterProp::ColorCount {
+                comparator: Comparator::EQ,
+                count: 1,
+            }
+        );
+        assert_eq!(rest3, "");
     }
 }

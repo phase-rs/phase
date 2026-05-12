@@ -87,7 +87,7 @@ pub fn resolve(
         // the chosen ID into cont.targets, and PutCounter reads from those targets.
         let continuation = ResolvedAbility::new(
             Effect::PutCounter {
-                counter_type: "+1/+1".to_string(),
+                counter_type: CounterType::Plus1Plus1,
                 count: QuantityExpr::Fixed { value: n as i32 },
                 target: crate::types::ability::TargetFilter::Any,
             },

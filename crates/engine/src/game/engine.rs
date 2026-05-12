@@ -185,14 +185,19 @@ fn check_actor_authorization(
         GameAction::SetPhaseStops { .. }
             | GameAction::CancelAutoPass
             | GameAction::Debug(_)
+            | GameAction::GrantDebugPermission { .. }
+            | GameAction::RevokeDebugPermission { .. }
             | GameAction::ReorderHand { .. }
     ) {
         return Ok(());
     }
-    if let Some(expected) = turn_control::authorized_submitter(state) {
-        if expected != actor {
-            return Err(EngineError::WrongPlayer);
-        }
+    // CR 103.5: For simultaneous-decision states (MulliganDecision,
+    // MulliganBottomCards), authorize against the full pending set so any
+    // pending player may submit in any order. Falls back to single-player
+    // semantics for every other variant.
+    let authorized = turn_control::authorized_submitters(state);
+    if !authorized.is_empty() && !authorized.contains(&actor) {
+        return Err(EngineError::WrongPlayer);
     }
     Ok(())
 }
@@ -211,11 +216,17 @@ pub fn apply_as_current(
 ) -> Result<ActionResult, EngineError> {
     let actor = match &action {
         GameAction::Concede { player_id } => *player_id,
-        _ => turn_control::authorized_submitter(state).ok_or_else(|| {
-            EngineError::InvalidAction(
-                "apply_as_current: no authorized submitter (game over?)".to_string(),
-            )
-        })?,
+        // CR 103.5: For simultaneous-decision states, pick the first pending
+        // player as the simulation representative. `authorized_submitters`
+        // returns the full set; `first()` is deterministic (seat-ordered).
+        _ => {
+            let submitters = turn_control::authorized_submitters(state);
+            submitters.first().copied().ok_or_else(|| {
+                EngineError::InvalidAction(
+                    "apply_as_current: no authorized submitter (game over?)".to_string(),
+                )
+            })?
+        }
     };
     apply(state, actor, action)
 }
@@ -1006,48 +1017,121 @@ fn apply_action(
         });
     }
 
-    // Debug actions bypass WaitingFor dispatch — gated on debug_mode flag.
+    // Debug actions bypass WaitingFor dispatch — gated on debug_mode flag
+    // (engine-level: the action runs) and `debug_permitted` (transport-level:
+    // the player may submit). The transport layer (server-core / WASM) is
+    // responsible for enforcing per-player permission; this engine check is
+    // a defense-in-depth invariant — a player not in `debug_permitted` should
+    // never have reached `apply`.
     if let GameAction::Debug(debug_action) = action {
         if !state.debug_mode {
             return Err(EngineError::InvalidAction(
                 "Debug actions require debug_mode to be enabled".into(),
             ));
         }
-        return super::engine_debug::apply_debug_action(state, actor, debug_action, &mut events);
+        if !state.debug_permitted.is_empty() && !state.debug_permitted.contains(&actor) {
+            return Err(EngineError::InvalidAction(
+                "Debug actions require debug permission".into(),
+            ));
+        }
+        let description = debug_action.describe(state);
+        let mut result =
+            super::engine_debug::apply_debug_action(state, actor, debug_action, &mut events)?;
+        result
+            .events
+            .push(crate::types::events::GameEvent::DebugActionUsed {
+                player_id: actor,
+                description,
+            });
+        return Ok(result);
     }
 
-    // Any deliberate player action (not auto-pass-related or a simple pass) cancels their auto-pass
-    if let Some(player) = turn_control::authorized_submitter(state) {
-        match &action {
-            GameAction::SetAutoPass { .. }
-            | GameAction::PassPriority
-            | GameAction::ReorderHand { .. } => {}
-            _ => {
-                state.auto_pass.remove(&player);
+    // Sandbox host-only grant/revoke of debug permission. server-core also
+    // checks this at the transport boundary; the engine repeats the check as
+    // defense-in-depth so WASM and P2P-host paths cannot be bypassed by a
+    // malicious actor crafting the action shape directly. The host convention
+    // (PlayerId(0)) is fixed across every transport — see
+    // `crates/server-core/src/session.rs` `HOST_PLAYER`. Emits a public audit
+    // event on success.
+    const HOST_PLAYER: PlayerId = PlayerId(0);
+    if matches!(
+        action,
+        GameAction::GrantDebugPermission { .. } | GameAction::RevokeDebugPermission { .. }
+    ) {
+        if !state.format_config.allow_debug_actions {
+            return Err(EngineError::ActionNotAllowed(
+                "Sandbox mode is not enabled for this game".to_string(),
+            ));
+        }
+        if actor != HOST_PLAYER {
+            return Err(EngineError::ActionNotAllowed(
+                "Only the host can grant or revoke debug permission".to_string(),
+            ));
+        }
+        if let GameAction::RevokeDebugPermission { player_id } = action {
+            if player_id == HOST_PLAYER {
+                return Err(EngineError::ActionNotAllowed(
+                    "The host cannot revoke their own debug permission".to_string(),
+                ));
             }
+        }
+    }
+    if let GameAction::GrantDebugPermission { player_id } = action {
+        state.debug_permitted.insert(player_id);
+        events.push(crate::types::events::GameEvent::DebugPermissionGranted {
+            host: actor,
+            player_id,
+        });
+        return Ok(ActionResult {
+            events,
+            waiting_for: state.waiting_for.clone(),
+            log_entries: vec![],
+        });
+    }
+    if let GameAction::RevokeDebugPermission { player_id } = action {
+        state.debug_permitted.remove(&player_id);
+        events.push(crate::types::events::GameEvent::DebugPermissionRevoked {
+            host: actor,
+            player_id,
+        });
+        return Ok(ActionResult {
+            events,
+            waiting_for: state.waiting_for.clone(),
+            log_entries: vec![],
+        });
+    }
+
+    // Any deliberate player action (not auto-pass-related or a simple pass) cancels their auto-pass.
+    // CR 103.5: Use the authenticated `actor` directly so the simultaneous mulligan
+    // variants (where `authorized_submitter` is None when multiple players are pending)
+    // still clear per-actor side-effect state correctly.
+    match &action {
+        GameAction::SetAutoPass { .. }
+        | GameAction::PassPriority
+        | GameAction::ReorderHand { .. } => {}
+        _ => {
+            state.auto_pass.remove(&actor);
         }
     }
 
     // Clear manual mana-tap tracking when the player commits to a non-mana action.
     // ActivateAbility is handled per-arm (only non-mana abilities clear tracking).
-    if let Some(player) = turn_control::authorized_submitter(state) {
-        match &action {
-            GameAction::PassPriority
-            | GameAction::PlayLand { .. }
-            | GameAction::CastSpell { .. }
-            | GameAction::Foretell { .. }
-            | GameAction::CastSpellAsSneak { .. }
-            | GameAction::CastSpellAsWebSlinging { .. }
-            | GameAction::CastSpellForFree { .. }
-            | GameAction::CastSpellAsMiracle { .. }
-            | GameAction::CancelCast
-            | GameAction::UnlockRoomDoor { .. }
-            | GameAction::PayUnlessCost { .. }
-            | GameAction::PayCombatTax { .. } => {
-                state.lands_tapped_for_mana.remove(&player);
-            }
-            _ => {}
+    match &action {
+        GameAction::PassPriority
+        | GameAction::PlayLand { .. }
+        | GameAction::CastSpell { .. }
+        | GameAction::Foretell { .. }
+        | GameAction::CastSpellAsSneak { .. }
+        | GameAction::CastSpellAsWebSlinging { .. }
+        | GameAction::CastSpellForFree { .. }
+        | GameAction::CastSpellAsMiracle { .. }
+        | GameAction::CancelCast
+        | GameAction::UnlockRoomDoor { .. }
+        | GameAction::PayUnlessCost { .. }
+        | GameAction::PayCombatTax { .. } => {
+            state.lands_tapped_for_mana.remove(&actor);
         }
+        _ => {}
     }
 
     // Validate and process action against current WaitingFor
@@ -1977,7 +2061,7 @@ fn apply_action(
                 let cost = pending_ref.cost.clone();
                 let spell_meta = casting::build_spell_meta(state, player, spell_object);
                 let any_color =
-                    super::static_abilities::player_can_spend_as_any_color(state, player);
+                    casting::player_can_spend_as_any_color_for_spell(state, player, spell_object);
                 let max_life = super::life_costs::max_phyrexian_life_payments(state, player);
                 let player_pool = state
                     .players
@@ -2217,22 +2301,20 @@ fn apply_action(
                 convoke_mode: Some(mode),
             }
         }
-        (
-            WaitingFor::MulliganDecision {
-                player,
-                mulligan_count,
-                ..
-            },
-            GameAction::MulliganDecision { keep },
-        ) => {
-            let p = *player;
-            let mc = *mulligan_count;
-            mulligan::handle_mulligan_decision(state, p, keep, mc, &mut events)
+        (WaitingFor::MulliganDecision { .. }, GameAction::MulliganDecision { choice }) => {
+            // CR 103.5 + 103.5b: `actor` is already authorized as a member of
+            // `pending` by `check_actor_authorization`. The mulligan module
+            // resolves the per-player state update and either re-emits
+            // MulliganDecision (with the actor removed if they kept, retained
+            // with bumped count if they mulliganed, or retained with the
+            // same count if they used Serum Powder) or advances to the next
+            // phase when the pending set is empty.
+            mulligan::handle_mulligan_decision(state, actor, choice, &mut events)
+                .map_err(EngineError::InvalidAction)?
         }
-        (WaitingFor::MulliganBottomCards { player, count }, GameAction::SelectCards { cards }) => {
-            let p = *player;
-            let c = *count;
-            mulligan::handle_mulligan_bottom(state, p, cards, c, &mut events)
+        (WaitingFor::MulliganBottomCards { .. }, GameAction::SelectCards { cards }) => {
+            // CR 103.5: `actor` is already authorized as a member of `pending`.
+            mulligan::handle_mulligan_bottom(state, actor, cards, &mut events)
                 .map_err(EngineError::InvalidAction)?
         }
         (WaitingFor::DeclareAttackers { player, .. }, GameAction::DeclareAttackers { attacks }) => {
@@ -2245,6 +2327,48 @@ fn apply_action(
         ) => {
             triggers_processed_inline = true;
             engine_combat::handle_declare_blockers(state, *player, &assignments, &mut events)?
+        }
+        (
+            WaitingFor::UntapChoice {
+                player,
+                candidates,
+                chosen_not_to_untap,
+            },
+            GameAction::ChooseUntap { object_id, untap },
+        ) => {
+            if state.priority_player
+                != turn_control::authorized_submitter_for_player(state, *player)
+            {
+                return Err(EngineError::NotYourPriority);
+            }
+            if !candidates.contains(&object_id) {
+                return Err(EngineError::InvalidAction(
+                    "Invalid untap choice object".to_string(),
+                ));
+            }
+
+            let remaining: Vec<ObjectId> = candidates
+                .iter()
+                .copied()
+                .filter(|candidate| candidate != &object_id)
+                .collect();
+            let mut declined = chosen_not_to_untap.clone();
+            if !untap {
+                declined.push(object_id);
+            }
+
+            if !remaining.is_empty() {
+                WaitingFor::UntapChoice {
+                    player: *player,
+                    candidates: remaining,
+                    chosen_not_to_untap: declined,
+                }
+            } else {
+                let skipped: std::collections::HashSet<ObjectId> = declined.into_iter().collect();
+                turns::execute_untap_with_choices(state, &mut events, &skipped);
+                turns::advance_phase(state, &mut events);
+                turns::auto_advance(state, &mut events)
+            }
         }
         (WaitingFor::ReplacementChoice { .. }, GameAction::ChooseReplacement { index }) => {
             engine_replacement::handle_replacement_choice(state, index, &mut events)?
@@ -3024,6 +3148,7 @@ fn apply_action(
                     pending.ability,
                     &pending.cost,
                     pending.casting_variant,
+                    pending.cast_timing_permission,
                     pending.origin_zone,
                     &mut events,
                 )?
@@ -3299,7 +3424,9 @@ fn handle_play_land(
         ));
     }
 
-    // Validate that object_id exists in hand or graveyard (with permission) and matches card_id
+    // Validate that object_id exists in hand or graveyard (with permission)
+    // or on top of library (with TopOfLibraryCastPermission { play_mode: Play })
+    // and matches card_id.
     let player_data = state
         .players
         .iter()
@@ -3318,9 +3445,18 @@ fn handle_play_land(
     };
     let in_graveyard_with_permission = gy_permission_source.is_some();
 
-    if !in_hand && !in_graveyard_with_permission {
+    // CR 401.5 + CR 305.1: Check top of library for
+    // `TopOfLibraryCastPermission { play_mode: Play }` (Future Sight,
+    // Bolas's Citadel, Magus of the Future). The helper already gates on
+    // "front of library + play-mode permission + filter match + is a land,"
+    // so we only need to confirm it points at the caller's object_id.
+    let in_library_with_permission =
+        super::casting::top_of_library_land_playable_by_permission(state, player)
+            .is_some_and(|(top_id, _)| top_id == object_id);
+
+    if !in_hand && !in_graveyard_with_permission && !in_library_with_permission {
         return Err(EngineError::InvalidAction(
-            "Card not found in hand or graveyard with play permission".to_string(),
+            "Card not found in hand, graveyard, or library with play permission".to_string(),
         ));
     }
     if !state
@@ -3407,7 +3543,14 @@ fn handle_play_land(
     }
 
     // Determine origin zone for the zone change event
-    let origin_zone = if in_hand { Zone::Hand } else { Zone::Graveyard };
+    let origin_zone = if in_hand {
+        Zone::Hand
+    } else if in_graveyard_with_permission {
+        Zone::Graveyard
+    } else {
+        // CR 401.5: in_library_with_permission — the card moves Library → Battlefield.
+        Zone::Library
+    };
 
     // Route through the replacement pipeline (handles ETB replacements like shock lands)
     let mut proposed = crate::types::proposed_event::ProposedEvent::zone_change(
@@ -3483,17 +3626,16 @@ fn handle_play_land(
             // execute ability is non-modifier work (Choose, etc.). Without this,
             // the choice prompt would fire at a random later resolution point with
             // the wrong controller context.
-            if let Some(effect_def) = state.post_replacement_effect.take() {
+            if state.post_replacement_continuation.is_some() {
                 state.post_replacement_source = None;
-                state.post_replacement_event_source = None;
-                state.post_replacement_event_target = None;
-                if let Some(next_waiting_for) = engine_replacement::apply_post_replacement_effect(
-                    state,
-                    &effect_def,
-                    Some(object_id),
-                    None,
-                    events,
-                ) {
+                if let Some(next_waiting_for) =
+                    engine_replacement::apply_pending_post_replacement_effect(
+                        state,
+                        Some(object_id),
+                        None,
+                        events,
+                    )
+                {
                     state.lands_played_this_turn += 1;
                     record_graveyard_play_permission(state, gy_permission_source, object_id);
                     if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
@@ -6276,32 +6418,35 @@ mod tests {
         let result = start_game_with_starting_player(&mut state, PlayerId(0));
         assert!(matches!(
             result.waiting_for,
-            WaitingFor::MulliganDecision {
-                player: PlayerId(0),
-                mulligan_count: 0,
-                ..
-            }
+            WaitingFor::MulliganDecision { .. }
         ));
 
         // Both players have 7 cards in hand
         assert_eq!(state.players[0].hand.len(), 7);
         assert_eq!(state.players[1].hand.len(), 7);
 
-        // Player 0 keeps
-        let result =
-            apply_as_current(&mut state, GameAction::MulliganDecision { keep: true }).unwrap();
+        // Player 0 keeps (apply_as_current picks first pending player = P0)
+        let result = apply_as_current(
+            &mut state,
+            GameAction::MulliganDecision {
+                choice: crate::types::actions::MulliganChoice::Keep,
+            },
+        )
+        .unwrap();
         assert!(matches!(
             result.waiting_for,
-            WaitingFor::MulliganDecision {
-                player: PlayerId(1),
-                mulligan_count: 0,
-                ..
-            }
+            WaitingFor::MulliganDecision { .. }
         ));
 
-        // Player 1 keeps -> game starts, auto-advances to PreCombatMain
-        let result =
-            apply_as_current(&mut state, GameAction::MulliganDecision { keep: true }).unwrap();
+        // Player 1 keeps (apply_as_current now picks P1 since P0 was removed)
+        // -> game starts, auto-advances to PreCombatMain
+        let result = apply_as_current(
+            &mut state,
+            GameAction::MulliganDecision {
+                choice: crate::types::actions::MulliganChoice::Keep,
+            },
+        )
+        .unwrap();
         assert!(matches!(
             result.waiting_for,
             WaitingFor::Priority {
@@ -6927,7 +7072,6 @@ mod tests {
                 Effect::Counter {
                     target: TargetFilter::Typed(TypedFilter::card()),
                     source_static: None,
-                    unless_payment: None,
                 },
             ));
             obj.mana_cost = ManaCost::Cost {
@@ -7215,6 +7359,7 @@ mod tests {
             activation_ability_index: None,
             target_constraints: vec![],
             casting_variant: crate::types::game_state::CastingVariant::Normal,
+            cast_timing_permission: None,
             distribute: None,
             origin_zone: crate::types::zones::Zone::Hand,
             additional_cost_flow: None,
@@ -9955,6 +10100,7 @@ mod exile_return_tests {
                 description: Some("When WA enters...".to_string()),
                 condition: None,
                 trigger_event: None,
+                source_name: String::new(),
             },
         });
 
@@ -10037,10 +10183,10 @@ mod phase_trigger_regression_tests {
     use crate::game::combat::AttackTarget;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCondition, AbilityDefinition, AbilityKind, ControllerRef, Effect, FilterProp,
-        GainLifePlayer, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility,
-        TargetFilter, TargetRef, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
-        UnlessCost, UnlessPayModifier,
+        AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect,
+        FilterProp, GainLifePlayer, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef,
+        ResolvedAbility, TargetFilter, TargetRef, TriggerConstraint, TriggerDefinition, TypeFilter,
+        TypedFilter, UnlessPayModifier,
     };
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
@@ -10536,7 +10682,7 @@ mod phase_trigger_regression_tests {
                     )),
                 });
             trigger.unless_pay = Some(UnlessPayModifier {
-                cost: UnlessCost::DynamicGeneric {
+                cost: AbilityCost::ManaDynamic {
                     quantity: QuantityExpr::Ref {
                         qty: QuantityRef::Power {
                             scope: ObjectScope::Source,
@@ -10597,7 +10743,7 @@ mod phase_trigger_regression_tests {
             state.waiting_for,
             WaitingFor::UnlessPayment {
                 player: PlayerId(1),
-                cost: UnlessCost::Fixed { ref cost },
+                cost: AbilityCost::Mana { ref cost },
                 ..
             } if *cost == ManaCost::generic(1)
         ));
@@ -10659,7 +10805,7 @@ mod phase_trigger_regression_tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Database,
                         Effect::PutCounter {
-                            counter_type: "P1P1".to_string(),
+                            counter_type: crate::types::counter::CounterType::Plus1Plus1,
                             count: QuantityExpr::Fixed { value: 1 },
                             target: TargetFilter::SelfRef,
                         },
@@ -10851,7 +10997,7 @@ mod phase_trigger_regression_tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Database,
                         Effect::PutCounter {
-                            counter_type: "P1P1".to_string(),
+                            counter_type: crate::types::counter::CounterType::Plus1Plus1,
                             count: QuantityExpr::Fixed { value: 1 },
                             target: TargetFilter::SelfRef,
                         },
@@ -10872,12 +11018,20 @@ mod phase_trigger_regression_tests {
         {
             let obj = state.objects.get_mut(&leyline).unwrap();
             obj.card_types.core_types.push(CoreType::Enchantment);
+            // Leyline of Hope: "If you would gain life, you gain that much
+            // life plus 1 instead." Parser emits the replaced amount as
+            // `Offset { inner: EventContextAmount, offset: 1 }`, not a delta.
             obj.replacement_definitions.push(
                 ReplacementDefinition::new(ReplacementEvent::GainLife).execute(
                     AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::GainLife {
-                            amount: QuantityExpr::Fixed { value: 1 },
+                            amount: QuantityExpr::Offset {
+                                inner: Box::new(QuantityExpr::Ref {
+                                    qty: crate::types::ability::QuantityRef::EventContextAmount,
+                                }),
+                                offset: 1,
+                            },
                             player: GainLifePlayer::Controller,
                         },
                     ),
@@ -11031,6 +11185,7 @@ mod phase_trigger_regression_tests {
             Effect::Sacrifice {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
             },
             vec![],
             source_id,
@@ -11134,7 +11289,9 @@ mod phase_trigger_regression_tests {
 
         state.waiting_for = WaitingFor::UnlessPayment {
             player: PlayerId(0),
-            cost: UnlessCost::PayLife { amount: 2 },
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
             pending_effect: Box::new(ability),
             trigger_event: None,
             effect_description: None,
@@ -11151,6 +11308,254 @@ mod phase_trigger_regression_tests {
             }
         ));
         assert!(state.pending_continuation.is_some());
+    }
+
+    /// CR 118.12 + CR 118.12a: "[Effect] unless [player] pays [cost]. If they do,
+    /// [alternative]." When the unless cost is paid, the primary effect is
+    /// suppressed AND the IfAPlayerDoes sub_ability runs as the alternative
+    /// outcome. Cards: Rhystic Lightning, Don't Make a Sound, Divert Disaster,
+    /// Assimilate Essence.
+    #[test]
+    fn unless_pay_success_runs_if_a_player_does_sub_ability() {
+        let mut state = setup_game_at_main_phase();
+        let source_id = create_object(
+            &mut state,
+            CardId(910),
+            PlayerId(0),
+            "Rhystic Lightning Stand-In".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Primary effect: gain 4 life. Alternative: gain 2 life.
+        // Using GainLife rather than DealDamage so the test stays self-contained
+        // (no target wiring required) — the runtime branching being verified is
+        // sub_ability resolution, not damage routing.
+        let mut primary = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 4 },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut alternative = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        alternative.condition = Some(AbilityCondition::IfAPlayerDoes);
+        primary.sub_ability = Some(Box::new(alternative));
+
+        // Player 1 (the unless payer) starts with 20 life and 2 energy to pay.
+        state.players[1].energy = 2;
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(1),
+            cost: AbilityCost::PayEnergy { amount: 2 },
+            pending_effect: Box::new(primary),
+            trigger_event: None,
+            effect_description: None,
+        };
+
+        let starting_life = state.players[0].life;
+        let result = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
+
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        // Cost was deducted from the unless payer.
+        assert_eq!(state.players[1].energy, 0);
+        // Primary suppressed (no +4 life), alternative ran (+2 life from sub_ability).
+        assert_eq!(state.players[0].life, starting_life + 2);
+    }
+
+    /// CR 118.12: When the unless cost is declined, the primary effect runs
+    /// and the IfAPlayerDoes sub_ability does NOT run (its condition reads
+    /// `optional_effect_performed` which stays false on the decline path).
+    #[test]
+    fn unless_pay_decline_runs_primary_not_if_a_player_does_sub() {
+        let mut state = setup_game_at_main_phase();
+        let source_id = create_object(
+            &mut state,
+            CardId(911),
+            PlayerId(0),
+            "Rhystic Lightning Stand-In".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut primary = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 4 },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut alternative = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        alternative.condition = Some(AbilityCondition::IfAPlayerDoes);
+        primary.sub_ability = Some(Box::new(alternative));
+
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(1),
+            cost: AbilityCost::PayEnergy { amount: 2 },
+            pending_effect: Box::new(primary),
+            trigger_event: None,
+            effect_description: None,
+        };
+
+        let starting_life = state.players[0].life;
+        let result =
+            apply_as_current(&mut state, GameAction::PayUnlessCost { pay: false }).unwrap();
+
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        // Primary ran (+4 life), alternative did NOT (no extra +2 life).
+        assert_eq!(state.players[0].life, starting_life + 4);
+    }
+
+    /// CR 118.12: An unless_pay effect with NO sub_ability still resolves
+    /// cleanly when the cost is paid (primary suppressed, no spurious chain
+    /// resolution).
+    #[test]
+    fn unless_pay_success_with_no_sub_ability_is_inert() {
+        let mut state = setup_game_at_main_phase();
+        let source_id = create_object(
+            &mut state,
+            CardId(912),
+            PlayerId(0),
+            "Plain Unless Effect".to_string(),
+            Zone::Battlefield,
+        );
+
+        let primary = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 4 },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+
+        state.players[1].energy = 2;
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(1),
+            cost: AbilityCost::PayEnergy { amount: 2 },
+            pending_effect: Box::new(primary),
+            trigger_event: None,
+            effect_description: None,
+        };
+
+        let starting_life = state.players[0].life;
+        let result = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
+
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.players[1].energy, 0);
+        // Primary suppressed; no sub_ability to run.
+        assert_eq!(state.players[0].life, starting_life);
+    }
+
+    /// Abandon Attachments #81 parallel: a stale `cost_payment_failed_flag`
+    /// from a previous resolution must NOT block the IfAPlayerDoes sub_ability
+    /// when the unless cost is paid. The success path clears the flag the
+    /// same way `handle_optional_effect_choice` does for accepts.
+    #[test]
+    fn unless_pay_success_clears_stale_cost_payment_failed_flag() {
+        let mut state = setup_game_at_main_phase();
+        // Simulate a previous resolution that left the flag set.
+        state.cost_payment_failed_flag = true;
+
+        let source_id = create_object(
+            &mut state,
+            CardId(913),
+            PlayerId(0),
+            "Stale Flag Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut primary = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 4 },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut alternative = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        alternative.condition = Some(AbilityCondition::IfAPlayerDoes);
+        primary.sub_ability = Some(Box::new(alternative));
+
+        state.players[1].energy = 2;
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(1),
+            cost: AbilityCost::PayEnergy { amount: 2 },
+            pending_effect: Box::new(primary),
+            trigger_event: None,
+            effect_description: None,
+        };
+
+        let starting_life = state.players[0].life;
+        let _ = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
+
+        // Alternative ran (+2 life), so the stale flag was correctly cleared.
+        assert_eq!(state.players[0].life, starting_life + 2);
+        assert!(
+            !state.cost_payment_failed_flag,
+            "cost_payment_failed_flag should be cleared by the success path"
+        );
+    }
+
+    #[test]
+    fn unless_energy_payment_deducts_energy_and_skips_effect() {
+        let mut state = setup_game_at_main_phase();
+        let source_id = create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(0),
+            "Energy Source".to_string(),
+            Zone::Battlefield,
+        );
+        state.players[0].energy = 2;
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(0),
+            cost: AbilityCost::PayEnergy { amount: 2 },
+            pending_effect: Box::new(ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: crate::types::ability::GainLifePlayer::Controller,
+                },
+                vec![],
+                source_id,
+                PlayerId(0),
+            )),
+            trigger_event: None,
+            effect_description: None,
+        };
+
+        let result = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
+
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.players[0].energy, 0);
+        assert_eq!(state.players[0].life, 20);
     }
 
     #[test]
@@ -11192,12 +11597,15 @@ mod phase_trigger_regression_tests {
 
         state.waiting_for = WaitingFor::UnlessPayment {
             player: PlayerId(0),
-            cost: UnlessCost::DiscardCard {
+            cost: AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
                 filter: Some(TargetFilter::Typed(TypedFilter {
                     type_filters: vec![TypeFilter::Land],
                     controller: None,
                     properties: vec![],
                 })),
+                random: false,
+                self_ref: false,
             },
             pending_effect: Box::new(draw_that_many(source_id, PlayerId(0))),
             trigger_event: None,
@@ -11265,6 +11673,7 @@ mod phase_trigger_regression_tests {
             Effect::Sacrifice {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
             },
             vec![TargetRef::Player(PlayerId(0))],
             source_id,
@@ -11315,6 +11724,7 @@ mod phase_trigger_regression_tests {
             player: PlayerId(0),
             cards: vec![obj_id],
             count: 1,
+            min_count: 0,
             up_to: false,
             source_id,
             effect_kind: EffectKind::Sacrifice,
@@ -11350,6 +11760,40 @@ mod phase_trigger_regression_tests {
         assert!(state.players[0].graveyard.contains(&obj_id));
         assert_eq!(state.players[0].life, 22);
         assert_eq!(state.last_effect_count, Some(1));
+    }
+
+    #[test]
+    fn effect_zone_choice_up_to_respects_min_count() {
+        let mut state = setup_game_at_main_phase();
+        let source_id = ObjectId(100);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Chosen Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        state.waiting_for = WaitingFor::EffectZoneChoice {
+            player: PlayerId(0),
+            cards: vec![obj_id],
+            count: 1,
+            min_count: 1,
+            up_to: true,
+            source_id,
+            effect_kind: EffectKind::Sacrifice,
+            zone: Zone::Battlefield,
+            destination: None,
+            enter_tapped: false,
+            enter_transformed: false,
+            under_your_control: false,
+            enters_attacking: false,
+            owner_library: false,
+        };
+
+        let result = apply_as_current(&mut state, GameAction::SelectCards { cards: vec![] });
+
+        assert!(result.is_err());
+        assert!(state.battlefield.contains(&obj_id));
     }
 
     #[test]
@@ -11526,6 +11970,7 @@ mod phase_trigger_regression_tests {
                     TypedFilter::creature().controller(ControllerRef::ScopedPlayer),
                 ),
                 count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
             },
         );
         let ability = ResolvedAbility::new(
@@ -11570,6 +12015,7 @@ mod phase_trigger_regression_tests {
                     TypedFilter::creature().controller(ControllerRef::ScopedPlayer),
                 ),
                 count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
             },
         );
         let token_branch = AbilityDefinition::new(
@@ -11667,6 +12113,7 @@ mod phase_trigger_regression_tests {
             Effect::Sacrifice {
                 target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
                 count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
             },
             vec![],
             source_id,
@@ -11868,6 +12315,245 @@ mod phase_trigger_regression_tests {
         assert!(clone
             .keywords
             .contains(&crate::types::keywords::Keyword::Flying));
+    }
+
+    #[test]
+    fn copy_target_choice_applies_copied_enter_with_counters_replacement_before_sba() {
+        let mut state = GameState::new_two_player(42);
+
+        let ghave = zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Ghave, Guru of Spores".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&ghave).unwrap();
+            obj.base_power = Some(0);
+            obj.base_toughness = Some(0);
+            obj.power = Some(5);
+            obj.toughness = Some(5);
+            obj.counters
+                .insert(crate::types::counter::CounterType::Plus1Plus1, 5);
+            let enter_with_counters = crate::types::ability::ReplacementDefinition::new(
+                crate::types::replacements::ReplacementEvent::Moved,
+            )
+            .execute(crate::types::ability::AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 5 },
+                    target: TargetFilter::SelfRef,
+                },
+            ))
+            .valid_card(TargetFilter::SelfRef);
+            obj.base_replacement_definitions = Arc::new(vec![enter_with_counters.clone()]);
+            obj.replacement_definitions.push(enter_with_counters);
+        }
+
+        let assassin = zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Callidus Assassin".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&assassin).unwrap();
+            obj.base_power = Some(3);
+            obj.base_toughness = Some(3);
+            obj.power = Some(3);
+            obj.toughness = Some(3);
+            obj.replacement_definitions.push(
+                crate::types::ability::ReplacementDefinition::new(
+                    crate::types::replacements::ReplacementEvent::Moved,
+                )
+                .execute(crate::types::ability::AbilityDefinition::new(
+                    crate::types::ability::AbilityKind::Spell,
+                    Effect::BecomeCopy {
+                        target: TargetFilter::Typed(crate::types::ability::TypedFilter::new(
+                            crate::types::ability::TypeFilter::Creature,
+                        )),
+                        duration: None,
+                        mana_value_limit: None,
+                        additional_modifications: Vec::new(),
+                    },
+                )),
+            );
+        }
+
+        state.waiting_for = WaitingFor::CopyTargetChoice {
+            player: PlayerId(0),
+            source_id: assassin,
+            valid_targets: vec![ghave],
+            max_mana_value: None,
+        };
+
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(ghave)),
+            },
+        )
+        .expect("copy target choice should resolve");
+
+        let copied = state.objects.get(&assassin).unwrap();
+        assert_eq!(copied.zone, Zone::Battlefield);
+        assert_eq!(copied.name, "Ghave, Guru of Spores");
+        assert_eq!(
+            copied
+                .counters
+                .get(&crate::types::counter::CounterType::Plus1Plus1)
+                .copied(),
+            Some(5),
+            "CR 614.12: copied self ETB counters must apply before SBAs"
+        );
+        assert_eq!(copied.power, Some(5));
+        assert_eq!(copied.toughness, Some(5));
+    }
+
+    /// CR 614.12a + CR 707.9: Callidus Assassin grants its copy a "When this
+    /// creature enters" trigger as part of the entering-as-copy bundle. The
+    /// ETB event for the copy must fire *after* the player chooses a target
+    /// for the copy effect and `BecomeCopy` has stamped the granted trigger
+    /// onto `trigger_definitions` — otherwise the trigger silently never
+    /// fires. Regression for: the deferred-trigger replay path in
+    /// `engine_priority::run_post_action_pipeline` +
+    /// `engine_replacement::handle_copy_target_choice`.
+    #[test]
+    fn copy_target_choice_fires_granted_etb_trigger_against_deferred_entry_event() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, ContinuousModification, QuantityExpr, TriggerDefinition,
+        };
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+
+        let bear = zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&bear).unwrap();
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+
+        // Granted trigger: "When this creature enters, controller draws a card."
+        // Targetless to keep the test focused on the deferral mechanism rather
+        // than target-selection plumbing.
+        let granted = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ))
+            .valid_card(TargetFilter::SelfRef)
+            .destination(Zone::Battlefield);
+
+        let assassin = zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Callidus Assassin".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&assassin).unwrap();
+            obj.base_power = Some(3);
+            obj.base_toughness = Some(3);
+            obj.power = Some(3);
+            obj.toughness = Some(3);
+            obj.replacement_definitions.push(
+                crate::types::ability::ReplacementDefinition::new(
+                    crate::types::replacements::ReplacementEvent::Moved,
+                )
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::BecomeCopy {
+                        target: TargetFilter::Typed(crate::types::ability::TypedFilter::new(
+                            crate::types::ability::TypeFilter::Creature,
+                        )),
+                        duration: None,
+                        mana_value_limit: None,
+                        additional_modifications: vec![ContinuousModification::GrantTrigger {
+                            trigger: Box::new(granted.clone()),
+                        }],
+                    },
+                )),
+            );
+        }
+
+        // Capture a real `ZoneChanged` for Callidus by bouncing it through
+        // stack→battlefield once. We then put it in the deferred queue to
+        // model what the post-action pipeline does at the moment
+        // `CopyTargetChoice` is set up.
+        {
+            let mut warmup_events: Vec<GameEvent> = Vec::new();
+            zones::move_to_zone(&mut state, assassin, Zone::Stack, &mut warmup_events);
+            warmup_events.clear();
+            zones::move_to_zone(&mut state, assassin, Zone::Battlefield, &mut warmup_events);
+            let entry_event = warmup_events
+                .into_iter()
+                .find(|e| {
+                    matches!(
+                        e,
+                        GameEvent::ZoneChanged { object_id, to, .. }
+                            if *object_id == assassin && *to == Zone::Battlefield
+                    )
+                })
+                .expect("move_to_zone must emit a ZoneChanged for the entry");
+            state.deferred_entry_events.push(entry_event);
+        }
+        state.waiting_for = WaitingFor::CopyTargetChoice {
+            player: PlayerId(0),
+            source_id: assassin,
+            valid_targets: vec![bear],
+            max_mana_value: None,
+        };
+
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(bear)),
+            },
+        )
+        .expect("copy target choice should resolve");
+
+        // After the copy resolves and layers re-evaluate, the granted trigger
+        // must be on the copy's trigger_definitions...
+        let copied = state.objects.get(&assassin).unwrap();
+        assert!(
+            copied.trigger_definitions.iter_all().any(|t| t == &granted),
+            "BecomeCopy's GrantTrigger modification must be present on the copy"
+        );
+
+        // ...and the deferred entry event must have been replayed through
+        // process_triggers, so the granted ETB matched and queued.
+        assert!(
+            state.deferred_entry_events.is_empty(),
+            "deferred entry events must be drained after copy choice resolves"
+        );
+        let trigger_fired = state.pending_trigger.is_some()
+            || state.stack.iter().any(|entry| {
+                matches!(
+                    entry.kind,
+                    crate::types::game_state::StackEntryKind::TriggeredAbility { source_id, .. }
+                        if source_id == assassin
+                )
+            });
+        assert!(
+            trigger_fired,
+            "granted ETB trigger must fire from the deferred entry event"
+        );
     }
 
     #[test]
@@ -14078,6 +14764,131 @@ mod mdfc_land_tests {
         assert!(
             land_actions.is_empty(),
             "CR 712.8a: MDFC Creature/Land in graveyard should not be offered as PlayLand"
+        );
+    }
+
+    /// Engine-level defense-in-depth: a non-host actor must not be able to
+    /// grant debug permission, even when sandbox mode is enabled. server-core
+    /// also checks this at the transport boundary; this test pins the
+    /// engine-side guard so WASM/P2P-host adapters cannot be bypassed by
+    /// crafting the action shape directly.
+    #[test]
+    fn grant_debug_permission_rejected_for_non_host() {
+        let mut state = GameState::new(
+            crate::types::format::FormatConfig::standard().with_sandbox(),
+            2,
+            42,
+        );
+        let err = apply(
+            &mut state,
+            PlayerId(1),
+            GameAction::GrantDebugPermission {
+                player_id: PlayerId(1),
+            },
+        )
+        .expect_err("non-host Grant must be rejected");
+        assert!(
+            matches!(err, EngineError::ActionNotAllowed(_)),
+            "got {:?}",
+            err
+        );
+        assert!(
+            !state.debug_permitted.contains(&PlayerId(1)),
+            "permission must not have been mutated on rejection"
+        );
+    }
+
+    /// Engine-level defense-in-depth: Grant/Revoke is rejected outright when
+    /// the format does not have `allow_debug_actions` set. Closes the WASM /
+    /// P2P-host path that previously skipped this check.
+    #[test]
+    fn grant_debug_permission_rejected_when_sandbox_disabled() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 2, 42);
+        let err = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::GrantDebugPermission {
+                player_id: PlayerId(1),
+            },
+        )
+        .expect_err("Grant must be rejected when sandbox is disabled");
+        assert!(
+            matches!(err, EngineError::ActionNotAllowed(_)),
+            "got {:?}",
+            err
+        );
+    }
+
+    /// Engine-level: the host may grant; afterwards the granted player can
+    /// submit a Debug action that the engine accepts.
+    #[test]
+    fn grant_debug_permission_succeeds_for_host_and_unlocks_debug() {
+        let mut state = GameState::new(
+            crate::types::format::FormatConfig::standard().with_sandbox(),
+            2,
+            42,
+        );
+        state.debug_mode = true;
+        // Host (PlayerId(0)) is implicitly authorized; seed empty set first.
+        state.debug_permitted.clear();
+
+        let result = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::GrantDebugPermission {
+                player_id: PlayerId(1),
+            },
+        )
+        .expect("host Grant should succeed");
+        assert!(state.debug_permitted.contains(&PlayerId(1)));
+        assert!(result
+            .events
+            .iter()
+            .any(|e| matches!(e, GameEvent::DebugPermissionGranted { .. })));
+
+        // Post-grant: the granted player can now submit a Debug action that
+        // the engine accepts. Use `ShuffleLibrary` — a side-effect-light op
+        // that doesn't require pre-existing objects.
+        let debug_result = apply(
+            &mut state,
+            PlayerId(1),
+            GameAction::Debug(crate::types::actions::DebugAction::ShuffleLibrary {
+                player_id: PlayerId(1),
+            }),
+        )
+        .expect("granted player's Debug action should succeed");
+        assert!(debug_result
+            .events
+            .iter()
+            .any(|e| matches!(e, GameEvent::DebugActionUsed { .. })));
+    }
+
+    /// Engine-level: the host may not revoke their own permission — that
+    /// would leave nobody able to act in sandbox.
+    #[test]
+    fn revoke_debug_permission_rejects_host_self_revoke() {
+        let mut state = GameState::new(
+            crate::types::format::FormatConfig::standard().with_sandbox(),
+            2,
+            42,
+        );
+        state.debug_permitted.insert(PlayerId(0));
+        let err = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::RevokeDebugPermission {
+                player_id: PlayerId(0),
+            },
+        )
+        .expect_err("host self-revoke must be rejected");
+        assert!(
+            matches!(err, EngineError::ActionNotAllowed(_)),
+            "got {:?}",
+            err
+        );
+        assert!(
+            state.debug_permitted.contains(&PlayerId(0)),
+            "host permission must remain on rejection"
         );
     }
 }

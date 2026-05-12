@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { useNavigate } from "react-router";
 import type { ScryfallCard } from "../../services/scryfall";
 import { hasAlternatePrintingsSync, resolveOracleIdSync } from "../../services/scryfall";
@@ -319,10 +319,13 @@ export function DeckBuilder({
     setDeckName(name);
   }, [applyDeckToEditor, onFormatChange]);
 
+  const handleLoadRef = useRef(handleLoad);
+  handleLoadRef.current = handleLoad;
+
   useEffect(() => {
     if (!initialDeckName) return;
-    void handleLoad(initialDeckName);
-  }, [initialDeckName, handleLoad]);
+    void handleLoadRef.current(initialDeckName);
+  }, [initialDeckName]);
 
   useEffect(() => {
     if (!isCommander || commanders.length > 0) return;

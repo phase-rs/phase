@@ -216,6 +216,7 @@ fn player_effect_to_static(
             return Ok(StaticDefinition::new(StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::Unlimited,
                 play_mode: CardPlayMode::Play,
+                graveyard_destination_replacement: None,
             })
             .affected(affected));
         }
@@ -260,6 +261,10 @@ fn controller_to_scope(c: &ControllerRef) -> ConvResult<ProhibitionScope> {
             needed_variant: "ScopedPlayer".into(),
         }),
         ControllerRef::TargetPlayer => Ok(ProhibitionScope::AllPlayers),
+        ControllerRef::ParentTargetController => Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "ProhibitionScope",
+            needed_variant: "ParentTargetController".into(),
+        }),
         ControllerRef::DefendingPlayer => Err(ConversionGap::EnginePrerequisiteMissing {
             engine_type: "ProhibitionScope",
             needed_variant: "DefendingPlayer".into(),

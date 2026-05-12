@@ -657,7 +657,6 @@ mod tests {
                 Effect::Counter {
                     target: TargetFilter::Any,
                     source_static: None,
-                    unless_payment: None,
                 },
             );
             ability.kind = AbilityKind::Spell;

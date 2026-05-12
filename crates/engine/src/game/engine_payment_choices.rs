@@ -1,6 +1,6 @@
 use crate::game::filter;
 use crate::types::ability::{
-    AbilityCondition, Effect, EffectKind, TargetFilter, TargetRef, UnlessCost,
+    AbilityCondition, AbilityCost, Effect, EffectKind, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -236,26 +236,74 @@ pub(super) fn handle_unless_payment(
     let mut payment_failed = !pay;
     if pay {
         match cost {
-            UnlessCost::Fixed { cost: mana_cost } => {
+            // CR 118.12: Pay the static mana component of the unless cost.
+            AbilityCost::Mana { cost: mana_cost } => {
                 casting::pay_unless_cost(state, player, &mana_cost, events)?;
             }
-            UnlessCost::DynamicGeneric { .. } => {
-                unreachable!("DynamicGeneric should be resolved before payment");
+            // CR 118.4 + CR 107.3c: A dynamic generic cost should have been
+            // resolved into a fixed `Mana { cost }` upstream (in the
+            // `unless_pay` interceptor in `effects::mod`). Reaching this arm
+            // means the resolution was skipped — that's an engine invariant
+            // bug, not a runtime condition.
+            AbilityCost::ManaDynamic { .. } => {
+                unreachable!("ManaDynamic should be resolved before payment");
             }
-            UnlessCost::PayLife { amount } => {
-                // CR 118.12 + CR 118.3 + CR 119.4 + CR 119.8: Unless-pay life
-                // routes through the single-authority helper. An unpayable cost
-                // (insufficient life, or CantLoseLife lock) causes the "unless"
-                // branch to fall through to the effect still happening.
-                let life_amount = u32::try_from(amount.max(0)).unwrap_or(0);
+            // CR 118.12 + CR 118.3 + CR 119.4 + CR 119.8: Unless-pay life
+            // routes through the single-authority helper. An unpayable cost
+            // (insufficient life, or CantLoseLife lock) causes the "unless"
+            // branch to fall through to the effect still happening.
+            AbilityCost::PayLife { amount } => {
+                // CR 107.3c: Resolve the `QuantityExpr` against game state so
+                // dynamic life amounts (e.g., "pay X life where X is your
+                // opponents' life total") read the chosen X at payment time.
+                let life_amount = crate::game::quantity::resolve_quantity_with_targets(
+                    state,
+                    &amount,
+                    pending_effect.as_ref(),
+                );
+                let life_amount = u32::try_from(life_amount.max(0)).unwrap_or(0);
                 match pay_life_as_cost(state, player, life_amount, events) {
                     PayLifeCostResult::Paid { .. } => {}
-                    PayLifeCostResult::InsufficientLife | PayLifeCostResult::LockedCantLoseLife => {
+                    PayLifeCostResult::InsufficientLife | PayLifeCostResult::Prohibited => {
                         payment_failed = true;
                     }
                 }
             }
-            UnlessCost::DiscardCard { filter } => {
+            // CR 118.12 + CR 118.12a: "[Effect] unless [player] pays [cost]"
+            // — the player chose to pay; deduct the cost and skip the effect.
+            // CR 107.14: Paying {E} removes one energy counter from the
+            // paying player per `{E}` symbol in the cost. Energy counters
+            // are tracked on `Player.energy` (no zone), so the deduction is
+            // a direct counter-state mutation.
+            AbilityCost::PayEnergy { amount } => {
+                let Some(player_state) = state.players.iter_mut().find(|p| p.id == player) else {
+                    return Err(EngineError::InvalidAction(
+                        "Unless payment player not found".to_string(),
+                    ));
+                };
+                if player_state.energy < amount {
+                    payment_failed = true;
+                } else {
+                    player_state.energy -= amount;
+                    events.push(GameEvent::EnergyChanged {
+                        player,
+                        delta: -(amount as i32),
+                    });
+                }
+            }
+            // CR 118.12 + CR 701.9: Unless-discard. Defers to the unified
+            // `WardDiscardChoice` waiting state (the name predates the fold
+            // and now covers both ward and counter unless-discard cases).
+            // `count`/`random`/`self_ref` axes from the unified `Discard`
+            // shape are not yet consumed at this site — extending them is
+            // future work tracked alongside the `Balduvian Horde` random-
+            // discard fidelity gap.
+            AbilityCost::Discard {
+                count: _,
+                filter,
+                random: _,
+                self_ref: _,
+            } => {
                 let hand_cards = crate::game::casting::find_eligible_discard_targets(
                     state,
                     player,
@@ -273,7 +321,12 @@ pub(super) fn handle_unless_payment(
                     return Ok(action_result(events, state.waiting_for.clone()));
                 }
             }
-            UnlessCost::Sacrifice { count, ref filter } => {
+            // CR 118.12 + CR 701.21: Unless-sacrifice — collect eligible
+            // permanents and surface the choice via `WardSacrificeChoice`.
+            AbilityCost::Sacrifice {
+                count,
+                target: ref filter,
+            } => {
                 let sac_source = pending_effect.source_id;
                 let ctx = crate::game::filter::FilterContext::from_source_with_controller(
                     sac_source, player,
@@ -308,7 +361,10 @@ pub(super) fn handle_unless_payment(
                     return Ok(action_result(events, state.waiting_for.clone()));
                 }
             }
-            UnlessCost::ReturnToHand {
+            // CR 118.12: Return-to-hand unless cost. `from_zone` defaults to
+            // battlefield (the standard shape); `Some(Zone::Graveyard)` is
+            // used by Harvest Wurm and similar.
+            AbilityCost::ReturnToHand {
                 count,
                 ref filter,
                 ref from_zone,
@@ -325,6 +381,7 @@ pub(super) fn handle_unless_payment(
                         .unwrap_or_default(),
                     _ => state.battlefield.iter().copied().collect(),
                 };
+                let filter_ref = filter.as_ref();
                 let eligible: Vec<ObjectId> = zone_objects
                     .iter()
                     .filter(|id| {
@@ -334,9 +391,11 @@ pub(super) fn handle_unless_payment(
                             .map(|obj| {
                                 obj.controller == player
                                     && !obj.is_emblem
-                                    && crate::game::filter::matches_target_filter(
-                                        state, **id, filter, &ctx,
-                                    )
+                                    && filter_ref.is_none_or(|f| {
+                                        crate::game::filter::matches_target_filter(
+                                            state, **id, f, &ctx,
+                                        )
+                                    })
                             })
                             .unwrap_or(false)
                     })
@@ -354,6 +413,31 @@ pub(super) fn handle_unless_payment(
                     return Ok(action_result(events, state.waiting_for.clone()));
                 }
             }
+            // CR 118.12: AbilityCost variants below are not currently emitted
+            // as unless-pay costs by the parser. If a card surfaces one, the
+            // unless branch fails and the effect happens unconditionally.
+            // Listed exhaustively (no wildcard) so future cost additions
+            // force a deliberate decision here.
+            AbilityCost::Tap
+            | AbilityCost::Untap
+            | AbilityCost::Unattach
+            | AbilityCost::Loyalty { .. }
+            | AbilityCost::PaySpeed { .. }
+            | AbilityCost::Exile { .. }
+            | AbilityCost::CollectEvidence { .. }
+            | AbilityCost::TapCreatures { .. }
+            | AbilityCost::RemoveCounter { .. }
+            | AbilityCost::Mill { .. }
+            | AbilityCost::Exert
+            | AbilityCost::Blight { .. }
+            | AbilityCost::Reveal { .. }
+            | AbilityCost::Composite { .. }
+            | AbilityCost::Waterbend { .. }
+            | AbilityCost::NinjutsuFamily { .. }
+            | AbilityCost::EffectCost { .. }
+            | AbilityCost::Unimplemented { .. } => {
+                payment_failed = true;
+            }
         }
 
         if !payment_failed {
@@ -362,19 +446,51 @@ pub(super) fn handle_unless_payment(
                 kind: EffectKind::from(&pending_effect.effect),
                 source_id: pending_effect.source_id,
             });
+
+            // CR 118.12 + CR 118.12a: "[Effect] unless [player] pays [cost].
+            // If they do, [alternative]." When the payment succeeds, the
+            // primary effect is suppressed (above) and the `IfAPlayerDoes`
+            // sub_ability runs as the alternative outcome. Mirrors the
+            // `OpponentMayChoice` accept path (`engine_payment_choices.rs`
+            // L88-L94) which sets `optional_effect_performed=true` on the
+            // accepted ability so `evaluate_condition` honors `IfAPlayerDoes`
+            // (`effects/mod.rs` L2156-L2158). Cards: Rhystic Lightning,
+            // Don't Make a Sound, Divert Disaster, Assimilate Essence.
+            if let Some(sub) = pending_effect
+                .sub_ability
+                .as_ref()
+                .filter(|sub| matches!(sub.condition, Some(AbilityCondition::IfAPlayerDoes)))
+            {
+                // Abandon Attachments #81 parallel: a stale
+                // `cost_payment_failed_flag` from a previous resolution would
+                // make `evaluate_condition` reject the IfAPlayerDoes condition
+                // (`effects/mod.rs` L2156-L2158: `&& !cost_payment_failed_flag`).
+                // Clear it on the success path the same way
+                // `handle_optional_effect_choice` (L29) and
+                // `handle_opponent_may_choice` (L88) do for their accept paths.
+                state.cost_payment_failed_flag = false;
+                let mut sub_resolved = sub.as_ref().clone();
+                if sub_resolved.targets.is_empty() {
+                    sub_resolved.targets = pending_effect.targets.clone();
+                }
+                sub_resolved.context = pending_effect.context.clone();
+                sub_resolved.context.optional_effect_performed = true;
+                let previous_trigger_event = state.current_trigger_event.clone();
+                state.current_trigger_event = trigger_event.clone();
+                let result = effects::resolve_ability_chain(state, &sub_resolved, events, 0);
+                state.current_trigger_event = previous_trigger_event;
+                result.map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+            }
         }
     }
 
     if !pay || payment_failed {
-        let mut ability = pending_effect.as_ref().clone();
+        let ability = pending_effect.as_ref().clone();
         clear_echo_due_for_echo_payment(state, &ability);
-        if let Effect::Counter {
-            ref mut unless_payment,
-            ..
-        } = ability.effect
-        {
-            *unless_payment = None;
-        }
+        // Post-fold: `unless_pay` was already cleared on `pending_effect`
+        // when the unless prompt was first surfaced (`effects::mod` strips
+        // it before sending the pending effect into `WaitingFor`), so no
+        // further stripping is needed here.
         let previous_trigger_event = state.current_trigger_event.clone();
         state.current_trigger_event = trigger_event.clone();
         let result = effects::resolve_ability_chain(state, &ability, events, 0);
@@ -516,7 +632,7 @@ pub(super) fn handle_unless_payment_activate_ability(
         &ability_def,
         events,
         crate::types::game_state::ManaAbilityResume::UnlessPayment {
-            cost,
+            cost: Box::new(cost),
             pending_effect,
             trigger_event,
             effect_description,
@@ -806,5 +922,167 @@ mod tests {
         );
 
         assert!(result.is_err());
+    }
+
+    /// CR 118.12 + CR 119.4 + CR 107.3c (M1 fold): An unless-pay-life cost
+    /// with a `QuantityExpr` amount evaluates the quantity at unless-time.
+    /// Pre-fold the cost was an `i32`; post-fold it carries the same widened
+    /// `QuantityExpr` shape as `AbilityCost::PayLife`. Using a fixed expr
+    /// here exercises the resolution path without needing a dynamic ref.
+    #[test]
+    fn unless_pay_life_widened_to_quantity_expr_resolves_at_payment() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 20;
+        let pending = ResolvedAbility::new(gain_life(5), vec![], ObjectId(100), PlayerId(0));
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(0),
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+            },
+            pending_effect: Box::new(pending),
+            trigger_event: None,
+            effect_description: None,
+        };
+
+        let mut events = Vec::new();
+        let waiting_for = state.waiting_for.clone();
+        handle_unless_payment(&mut state, waiting_for, true, &mut events)
+            .expect("unless-pay-life should resolve");
+        // Player paid 3 life — life total drops by 3, gain-life effect skipped.
+        assert_eq!(state.players[0].life, 17);
+    }
+
+    /// CR 118.12 + CR 107.14: Unless-PayEnergy stamps an `EnergyChanged`
+    /// event and skips the pending effect when the payment succeeds.
+    #[test]
+    fn unless_pay_energy_deducts_and_skips_effect() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].energy = 5;
+        let pending = ResolvedAbility::new(gain_life(2), vec![], ObjectId(100), PlayerId(0));
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(0),
+            cost: AbilityCost::PayEnergy { amount: 2 },
+            pending_effect: Box::new(pending),
+            trigger_event: None,
+            effect_description: None,
+        };
+
+        let mut events = Vec::new();
+        let waiting_for = state.waiting_for.clone();
+        handle_unless_payment(&mut state, waiting_for, true, &mut events)
+            .expect("unless-pay-energy should resolve");
+        assert_eq!(state.players[0].energy, 3);
+        // Pending GainLife was skipped because payment succeeded — life unchanged.
+        assert_eq!(state.players[0].life, 20);
+    }
+
+    /// CR 118.12 (M1 fold + Harvest Wurm shape): An unless ReturnToHand cost
+    /// with `from_zone: Some(Zone::Graveyard)` collects eligible cards from
+    /// the graveyard zone (not battlefield).
+    #[test]
+    fn unless_return_to_hand_from_graveyard_collects_graveyard_cards() {
+        use crate::game::zones::create_object;
+        use crate::types::card_type::CardType;
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+        let mut state = GameState::new_two_player(42);
+        // Place a Land card in player 0's graveyard.
+        let land_id = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Graveyard,
+        );
+        let land_types = CardType {
+            core_types: vec![CoreType::Land],
+            ..Default::default()
+        };
+        state.objects.get_mut(&land_id).unwrap().card_types = land_types;
+        let pending = ResolvedAbility::new(gain_life(2), vec![], ObjectId(100), PlayerId(0));
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(0),
+            cost: AbilityCost::ReturnToHand {
+                count: 1,
+                filter: None, // any card in the graveyard
+                from_zone: Some(Zone::Graveyard),
+            },
+            pending_effect: Box::new(pending),
+            trigger_event: None,
+            effect_description: None,
+        };
+
+        let mut events = Vec::new();
+        let waiting_for = state.waiting_for.clone();
+        handle_unless_payment(&mut state, waiting_for, true, &mut events)
+            .expect("unless-return-to-hand should surface choice");
+        match &state.waiting_for {
+            WaitingFor::UnlessBounceChoice { permanents, .. } => {
+                assert!(
+                    permanents.contains(&land_id),
+                    "graveyard card should be eligible, got {:?}",
+                    permanents
+                );
+            }
+            other => panic!("expected UnlessBounceChoice, got {:?}", other),
+        }
+    }
+
+    /// CR 118.12 (M1 backward compat): An old `UnlessCost::PayLife { amount: 2 }`
+    /// JSON shape deserializes as the new
+    /// `AbilityCost::PayLife { amount: QuantityExpr::Fixed { value: 2 } }`.
+    #[test]
+    fn legacy_unless_cost_pay_life_deserializes_to_ability_cost() {
+        use crate::types::ability::{deserialize_ability_cost_compat, AbilityCost, QuantityExpr};
+        let json = r#"{"type":"PayLife","amount":2}"#;
+        let mut de = serde_json::Deserializer::from_str(json);
+        let cost: AbilityCost =
+            deserialize_ability_cost_compat(&mut de).expect("legacy deserialize");
+        assert_eq!(
+            cost,
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 }
+            }
+        );
+    }
+
+    /// CR 118.12 (M1 backward compat): Legacy `UnlessCost::Fixed { cost: ... }`
+    /// folds to `AbilityCost::Mana { cost: ... }`.
+    #[test]
+    fn legacy_unless_cost_fixed_deserializes_to_ability_cost_mana() {
+        use crate::types::ability::{deserialize_ability_cost_compat, AbilityCost};
+        use crate::types::mana::ManaCost;
+        let json = r#"{"type":"Fixed","cost":{"type":"Cost","shards":[],"generic":3}}"#;
+        let mut de = serde_json::Deserializer::from_str(json);
+        let cost: AbilityCost =
+            deserialize_ability_cost_compat(&mut de).expect("legacy Fixed deserialize");
+        assert_eq!(
+            cost,
+            AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![],
+                    generic: 3,
+                }
+            }
+        );
+    }
+
+    /// CR 118.12 (M1 backward compat): Legacy `UnlessCost::Sacrifice` renames
+    /// `filter` → `target` to match `AbilityCost::Sacrifice` shape.
+    #[test]
+    fn legacy_unless_cost_sacrifice_renames_filter_to_target() {
+        use crate::types::ability::{deserialize_ability_cost_compat, AbilityCost, TargetFilter};
+        let json = r#"{"type":"Sacrifice","count":2,"filter":{"type":"Any"}}"#;
+        let mut de = serde_json::Deserializer::from_str(json);
+        let cost: AbilityCost =
+            deserialize_ability_cost_compat(&mut de).expect("legacy Sacrifice deserialize");
+        assert_eq!(
+            cost,
+            AbilityCost::Sacrifice {
+                target: TargetFilter::Any,
+                count: 2,
+            }
+        );
     }
 }

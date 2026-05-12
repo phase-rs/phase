@@ -83,29 +83,11 @@ tilt logs check-frontend --tail 30 --since 2m  # TS type-check + lint
 
 **How to wait for current results without dumping logs:**
 ```bash
-resources=(clippy test-engine card-data)
-deadline=$((SECONDS + 900))
-until [[ $SECONDS -ge $deadline ]]; do
-  all_done=1
-  for r in $resources; do
-    json=$(tilt get uiresource "$r" -o json)
-    st=$(jq -r '.status.updateStatus // "unknown"' <<< "$json")
-    current=$(jq -r '.status.currentBuild.spanID // "none"' <<< "$json")
-    last=$(jq -r '.status.buildHistory[0].finishTime // "none"' <<< "$json")
-    err=$(jq -r '.status.buildHistory[0].error // ""' <<< "$json")
-    printf '%s status=%s current=%s last=%s\n' "$r" "$st" "$current" "$last"
-    if [[ "$st" == "error" && "$current" == "none" ]]; then
-      printf '%s error=%s\n' "$r" "$err"
-      exit 1
-    fi
-    [[ "$st" == "ok" && "$current" == "none" ]] || all_done=0
-  done
-  [[ $all_done -eq 1 ]] && exit 0
-  sleep 20
-done
-echo "Timed out waiting for Tilt resources" >&2
-exit 124
+./scripts/tilt-wait.sh clippy test-engine card-data        # wait until all settle (no timeout)
+./scripts/tilt-wait.sh --interval 10 clippy                # poll faster for a single fast resource
+./scripts/tilt-wait.sh --timeout 600 clippy test-engine    # bound the wait
 ```
+Exit codes: `0` all ok, `1` a resource is in terminal error (`updateStatus=error` with no in-flight build), `124` timeout (only when `--timeout` is set). The script prints one `<resource> status=… current=… last=…` line per tick so you can see why a wait is taking time without paying for log payloads. After exit 1, fetch details with `tilt logs <resource> --tail 50 --since 2m`.
 
 **Rules:**
 - After saving files, wait ~10-30s for Tilt to detect changes and rebuild, then check logs.

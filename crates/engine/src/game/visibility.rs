@@ -250,6 +250,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         player,
         ref cards,
         count,
+        min_count,
         up_to,
         source_id,
         effect_kind,
@@ -267,6 +268,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 player,
                 cards: cards.iter().map(|_| ObjectId(0)).collect(),
                 count,
+                min_count,
                 up_to,
                 source_id,
                 effect_kind,
@@ -394,6 +396,7 @@ mod tests {
             activation_ability_index: None,
             target_constraints: vec![],
             casting_variant: CastingVariant::Normal,
+            cast_timing_permission: None,
             distribute: None,
             origin_zone: crate::types::zones::Zone::Hand,
             additional_cost_flow: None,
@@ -818,6 +821,53 @@ mod tests {
                 assert_eq!(cards, vec![ObjectId(0)])
             }
             other => panic!("expected ChooseFromZoneChoice, got {other:?}"),
+        }
+    }
+
+    /// CR 903.10a: commander damage is public game state — every viewer
+    /// (the dealing player, the receiving player, and every spectator) must
+    /// see how much damage each commander has dealt to each player. The
+    /// visibility filter must therefore preserve `commander_damage` verbatim
+    /// for every viewer, and `derive_views` must populate the
+    /// per-victim grouping irrespective of who is viewing.
+    #[test]
+    fn commander_damage_is_visible_to_every_viewer() {
+        use crate::game::derived_views::derive_views;
+        use crate::types::game_state::CommanderDamageEntry;
+
+        let mut state = GameState::new(FormatConfig::commander(), 2, 42);
+        let cmd = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Public Commander".to_string(),
+            Zone::Command,
+        );
+        state.objects.get_mut(&cmd).unwrap().is_commander = true;
+        state.commander_damage.push(CommanderDamageEntry {
+            player: PlayerId(1),
+            commander: cmd,
+            damage: 7,
+        });
+
+        for viewer in [PlayerId(0), PlayerId(1)] {
+            let filtered = filter_state_for_viewer(&state, viewer);
+            assert_eq!(
+                filtered.commander_damage.len(),
+                1,
+                "viewer {viewer:?} must see the commander-damage entry",
+            );
+            let views = derive_views(&filtered);
+            let from_p0 = views
+                .commander_damage_by_attacker
+                .get(&PlayerId(0))
+                .unwrap_or_else(|| {
+                    panic!("viewer {viewer:?} must see P0's attacker entry");
+                });
+            assert_eq!(from_p0.len(), 1);
+            assert_eq!(from_p0[0].victim, PlayerId(1));
+            assert_eq!(from_p0[0].damage, 7);
+            assert_eq!(from_p0[0].commander, cmd);
         }
     }
 

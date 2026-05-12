@@ -40,6 +40,7 @@ import { ChooseXValueUI } from "../components/mana/ChooseXValueUI.tsx";
 import { ManaPaymentUI } from "../components/mana/ManaPaymentUI.tsx";
 import { PayAmountChoiceUI } from "../components/mana/PayAmountChoiceUI.tsx";
 import { CardDataMissingModal } from "../components/modal/CardDataMissingModal.tsx";
+import { UnhandledWaitingForModal } from "../components/modal/UnhandledWaitingForModal.tsx";
 import { AdventureCastModal } from "../components/modal/AdventureCastModal.tsx";
 import { CascadeChoiceModal } from "../components/modal/CascadeChoiceModal.tsx";
 import { ModalFaceModal } from "../components/modal/ModalFaceModal.tsx";
@@ -642,6 +643,9 @@ function GamePageContent({
   const turnNumber = useGameStore((s) => s.gameState?.turn_number);
   const engineWaitingFor = useGameStore((s) => s.gameState?.waiting_for);
   const deckPools = useGameStore((s) => s.gameState?.deck_pools);
+  const isSandboxGame = useGameStore(
+    (s) => s.gameState?.format_config?.allow_debug_actions === true,
+  );
   const [showAiHand, setShowAiHand] = useState(false);
   const [showDebugBounds, setShowDebugBounds] = useState(false);
   const [viewingZone, setViewingZone] = useState<{
@@ -697,6 +701,21 @@ function GamePageContent({
     },
     [adapter],
   );
+
+  // Issue #311 safety net: when the engine emits a WaitingFor variant the
+  // frontend has no UI for, this handler is the user's escape hatch.
+  // - Online: concede (server forfeits the seat, opponents see GameOver).
+  // - AI / local: clear local state + navigate home (no opponent to notify).
+  const handleUnhandledExit = useCallback(() => {
+    if (isOnlineMode) {
+      handleConcede();
+      return;
+    }
+    if (gameId) {
+      clearGame(gameId);
+    }
+    navigate("/");
+  }, [isOnlineMode, gameId, handleConcede, navigate]);
 
   const isDragging = useUiStore((s) => s.isDragging);
   const inspectedFaceIndex = useUiStore((s) => s.inspectedFaceIndex);
@@ -781,11 +800,23 @@ function GamePageContent({
     [dispatch],
   );
 
+  // CR 103.5 + 103.5b: `id` encodes the three branches of MulliganChoice.
+  // "keep"           → MulliganChoice::Keep
+  // "mulligan"       → MulliganChoice::Mulligan
+  // "powder:<oid>"   → MulliganChoice::UseSerumPowder { object_id: <oid> }
   const handleMulliganChoice = useCallback(
     (id: string) => {
+      if (id.startsWith("powder:")) {
+        const objectId = Number(id.slice("powder:".length));
+        dispatch({
+          type: "MulliganDecision",
+          data: { choice: { type: "UseSerumPowder", data: { object_id: objectId } } },
+        });
+        return;
+      }
       dispatch({
         type: "MulliganDecision",
-        data: { keep: id === "keep" },
+        data: { choice: { type: id === "keep" ? "Keep" : "Mulligan" } },
       });
     },
     [dispatch],
@@ -855,6 +886,18 @@ function GamePageContent({
     >
       <BattlefieldBackground />
       <StackDisplay />
+
+      {/* Persistent Sandbox banner — visible to all players whenever the
+          game's format_config has debug actions enabled. Not dismissible. */}
+      {isSandboxGame && (
+        <div
+          className="pointer-events-none fixed left-0 right-0 top-0 z-30 select-none bg-amber-600 px-4 py-1 text-center text-xs font-bold uppercase tracking-wider text-white shadow-md"
+          role="status"
+          aria-label="Sandbox mode banner"
+        >
+          Sandbox Mode — debug actions enabled
+        </div>
+      )}
 
       {/* Reconnecting banner */}
       {reconnectState.status === "reconnecting" && (
@@ -1192,6 +1235,11 @@ function GamePageContent({
             <OptionalEffectModal />
           )}
 
+        {waitingFor?.type === "UntapChoice" &&
+          canActForWaitingState && (
+            <UntapChoiceModal />
+          )}
+
         {/* Unless payment choice ("Counter unless you pay {X}") */}
         {waitingFor?.type === "UnlessPayment" &&
           canActForWaitingState && (
@@ -1207,24 +1255,38 @@ function GamePageContent({
           />
         )}
 
+      {/* CR 103.5: Simultaneous mulligan — render this player's modal iff
+          they are in the pending set. Each player decides independently. */}
       {waitingFor?.type === "MulliganDecision" &&
-        waitingFor.data.player === playerId && (
-          <MulliganDecisionPrompt
-            playerId={waitingFor.data.player}
-            mulliganCount={waitingFor.data.mulligan_count}
-            freeFirstMulligan={waitingFor.data.free_first_mulligan}
-            onChoose={handleMulliganChoice}
-          />
-        )}
+        (() => {
+          const entry = waitingFor.data.pending.find(
+            (e) => e.player === playerId,
+          );
+          if (!entry) return null;
+          return (
+            <MulliganDecisionPrompt
+              playerId={entry.player}
+              mulliganCount={entry.mulligan_count}
+              freeFirstMulligan={waitingFor.data.free_first_mulligan}
+              onChoose={handleMulliganChoice}
+            />
+          );
+        })()}
 
       {waitingFor?.type === "MulliganBottomCards" &&
-        waitingFor.data.player === playerId && (
-          <MulliganBottomCardsPrompt
-            playerId={waitingFor.data.player}
-            count={waitingFor.data.count}
-            onChoose={handleBottomCards}
-          />
-        )}
+        (() => {
+          const entry = waitingFor.data.pending.find(
+            (e) => e.player === playerId,
+          );
+          if (!entry) return null;
+          return (
+            <MulliganBottomCardsPrompt
+              playerId={entry.player}
+              count={entry.count}
+              onChoose={handleBottomCards}
+            />
+          );
+        })()}
 
       {waitingFor?.type === "BetweenGamesSideboard" &&
         waitingFor.data.player === playerId &&
@@ -1300,6 +1362,16 @@ function GamePageContent({
           gameStartedAt={gameStartedAt}
         />
       )}
+
+      {/* Issue #311: Fail-loud safety net for orphan WaitingFor states.
+          Renders only when (a) the engine is waiting on the local player
+          and (b) the WaitingFor type has no UI handler in the frontend.
+          Without this, an unknown WaitingFor would silently hang the game
+          with no way to escape — see UnhandledWaitingForModal for details. */}
+      <UnhandledWaitingForModal
+        onExit={handleUnhandledExit}
+        exitLabel={isOnlineMode ? "Concede game" : "Return to menu"}
+      />
     </div>
   );
 }
@@ -1377,6 +1449,7 @@ function MulliganDecisionPrompt({
 }: MulliganDecisionPromptProps) {
   const player = useGameStore((s) => s.gameState?.players[playerId]);
   const objects = useGameStore((s) => s.gameState?.objects);
+  const legalActions = useGameStore((s) => s.legalActions);
   const hoverProps = useInspectHoverProps();
   const [buttonsVisible, setButtonsVisible] = useState(false);
 
@@ -1386,27 +1459,50 @@ function MulliganDecisionPrompt({
   const nextMulliganFree = freeFirstMulligan && mulliganCount === 0;
   const nextHandSize = 7 - Math.max(0, mulliganCount + 1 - (freeFirstMulligan ? 1 : 0));
 
+  // CR 103.5b + Serum Powder Oracle text: surface one button per legal
+  // `UseSerumPowder` action the engine has already enumerated. The engine
+  // (`ai_support::candidates::serum_powders_in_hand`) is the single authority
+  // for which hand object qualifies — the FE must not duplicate the
+  // name-match check. Each candidate carries an `object_id` whose display
+  // name comes from `objects[id]?.name`.
+  const serumPowderIds: number[] = legalActions
+    .map((a) =>
+      a.type === "MulliganDecision" && a.data.choice.type === "UseSerumPowder"
+        ? a.data.choice.data.object_id
+        : null,
+    )
+    .filter((oid): oid is number => oid !== null);
+
   if (!player || !objects) {
+    const fallbackOptions = [
+      {
+        id: "keep",
+        label: "Keep Hand",
+        description:
+          bottomOnKeep > 0
+            ? `Put ${bottomOnKeep} on the bottom`
+            : "No cards to the bottom",
+      },
+      {
+        id: "mulligan",
+        label: nextMulliganFree ? "Free Mulligan" : "Mulligan",
+        description: nextMulliganFree
+          ? "Shuffle and draw 7 — no cards to the bottom"
+          : "Shuffle and draw 7 again",
+      },
+      // CR 103.5b: A Powder option per legal `UseSerumPowder` candidate the
+      // engine emitted. The button label uses the object's engine-provided
+      // name so the FE never re-evaluates which hand objects qualify.
+      ...serumPowderIds.map((oid) => ({
+        id: `powder:${oid}`,
+        label: `Use ${objects?.[oid]?.name ?? "Serum Powder"}`,
+        description: "Exile every card in hand, draw the same number — not a mulligan",
+      })),
+    ];
     return (
       <ChoiceModal
         title={`London Mulligan (${mulliganCount} taken)`}
-        options={[
-          {
-            id: "keep",
-            label: "Keep Hand",
-            description:
-              bottomOnKeep > 0
-                ? `Put ${bottomOnKeep} on the bottom`
-                : "No cards to the bottom",
-          },
-          {
-            id: "mulligan",
-            label: nextMulliganFree ? "Free Mulligan" : "Mulligan",
-            description: nextMulliganFree
-              ? "Shuffle and draw 7 — no cards to the bottom"
-              : "Shuffle and draw 7 again",
-          },
-        ]}
+        options={fallbackOptions}
         onChoose={onChoose}
       />
     );
@@ -1441,6 +1537,18 @@ function MulliganDecisionPrompt({
               >
                 {nextMulliganFree ? "Free Mulligan" : `Mulligan to ${nextHandSize}`}
               </button>
+              {/* CR 103.5b: One button per legal `UseSerumPowder` candidate
+                  the engine surfaced. Name comes from engine-provided state. */}
+              {serumPowderIds.map((oid) => (
+                <button
+                  key={oid}
+                  onClick={() => onChoose(`powder:${oid}`)}
+                  className="rounded-[10px] border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs font-semibold text-amber-200 transition hover:bg-amber-500/20 hover:text-amber-100 lg:min-h-11 lg:rounded-[16px] lg:px-5 lg:py-3 lg:text-base"
+                  title="Exile every card in your hand and draw the same number. Not a mulligan — count and bottoms unaffected."
+                >
+                  {`Use ${objects?.[oid]?.name ?? "Serum Powder"}`}
+                </button>
+              ))}
               <button
                 onClick={() => onChoose("keep")}
                 className="rounded-[10px] bg-cyan-500 px-3 py-1.5 text-xs font-semibold text-slate-950 shadow-[0_14px_34px_rgba(6,182,212,0.28)] transition hover:bg-cyan-400 lg:min-h-11 lg:rounded-[16px] lg:px-5 lg:py-3 lg:text-base"
@@ -1804,7 +1912,13 @@ function GameOverScreen({
 
   const handleRematch = () => {
     const newId = crypto.randomUUID();
-    const params = new URLSearchParams();
+    // Preserve the original launch configuration (format, players, match,
+    // first, source, draftId, …) by copying the current URL's searchParams.
+    // Only drop params that are bound to this specific game instance — the
+    // P2P join code and per-room name don't apply to a fresh game.
+    const params = new URLSearchParams(searchParams);
+    params.delete("code");
+    params.delete("roomName");
     if (mode) params.set("mode", mode);
     params.set("difficulty", difficulty);
     navigate(`/game/${newId}?${params.toString()}`);
@@ -2041,6 +2155,49 @@ function OptionalEffectModal() {
   if (waitingFor?.type !== "OptionalEffectChoice" && waitingFor?.type !== "OpponentMayChoice") return null;
 
   return <OptionalEffectModalContent waitingFor={waitingFor} objects={objects} dispatch={dispatch} />;
+}
+
+// ── Untap Choice Modal ─────────────────────────────────────────────────
+
+function UntapChoiceModal() {
+  const dispatch = useGameDispatch();
+  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const objects = useGameStore((s) => s.gameState?.objects);
+
+  if (waitingFor?.type !== "UntapChoice") return null;
+
+  const objectId = waitingFor.data.candidates[0];
+  if (objectId == null) return null;
+
+  const object = objects?.[objectId];
+  const name = object?.name ?? "Permanent";
+
+  return (
+    <ChoiceModal
+      title={`Untap ${name}?`}
+      subtitle="Choose whether this permanent untaps during your untap step."
+      previewCardName={object?.name}
+      previewCardTypes={object?.card_types}
+      options={[
+        {
+          id: "untap",
+          label: "Untap",
+          description: `${name} untaps now.`,
+        },
+        {
+          id: "keep-tapped",
+          label: "Keep tapped",
+          description: `${name} stays tapped this untap step.`,
+        },
+      ]}
+      onChoose={(id) =>
+        dispatch({
+          type: "ChooseUntap",
+          data: { object_id: objectId, untap: id === "untap" },
+        })
+      }
+    />
+  );
 }
 
 // ── Unless Payment Modal (CR 118.12) ────────────────────────────────────

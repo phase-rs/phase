@@ -40,6 +40,7 @@ export default defineConfig({
     __DECKS_URL__: JSON.stringify("/decks.json"),
     __APP_VERSION__: JSON.stringify("0.0.0-test"),
     __BUILD_HASH__: JSON.stringify("testhash"),
+    __GIT_REPO_URL__: JSON.stringify("https://github.com/phase-rs/phase"),
   },
   test: {
     environment: "happy-dom",

@@ -102,12 +102,11 @@ pub fn resolve(
                 if !gate_passes {
                     continue;
                 }
-                let ct = crate::types::counter::parse_counter_type(&counter_type);
                 super::counters::add_counter_with_replacement(
                     state,
                     ability.controller,
                     ability.source_id,
-                    ct,
+                    counter_type,
                     n,
                     events,
                 );
@@ -1086,6 +1085,70 @@ mod tests {
                 .iter_all()
                 .any(|t| matches!(t.mode, TriggerMode::Phase)),
             "the propagated trigger must be the printed BoC phase trigger"
+        );
+    }
+
+    #[test]
+    fn granted_trigger_propagates_through_chained_copy() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, ContinuousModification, TriggerDefinition,
+        };
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+        let bear = create_creature(&mut state, 1, PlayerId(0), "Bear", 2, 2);
+        let assassin = create_creature(&mut state, 2, PlayerId(0), "Callidus Assassin", 3, 3);
+        let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::Destroy {
+                    target: TargetFilter::Typed(
+                        crate::types::ability::TypedFilter::creature().properties(vec![
+                            crate::types::ability::FilterProp::Another,
+                            crate::types::ability::FilterProp::SameName,
+                        ]),
+                    ),
+                    cant_regenerate: false,
+                },
+            ))
+            .valid_card(TargetFilter::SelfRef)
+            .destination(Zone::Battlefield);
+
+        let assassin_to_bear = ResolvedAbility::new(
+            Effect::BecomeCopy {
+                target: TargetFilter::Any,
+                duration: None,
+                mana_value_limit: None,
+                additional_modifications: vec![ContinuousModification::GrantTrigger {
+                    trigger: Box::new(trigger.clone()),
+                }],
+            },
+            vec![TargetRef::Object(bear)],
+            assassin,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &assassin_to_bear, &mut events).unwrap();
+        evaluate_layers(&mut state);
+        assert!(
+            state.objects[&assassin]
+                .trigger_definitions
+                .iter_all()
+                .any(|t| t == &trigger),
+            "the first copy must receive the granted trigger"
+        );
+
+        let image = create_creature(&mut state, 3, PlayerId(0), "Phantasmal Image", 0, 0);
+        let image_to_assassin = make_copy_ability(assassin, image, PlayerId(0), None);
+        resolve(&mut state, &image_to_assassin, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        assert!(
+            state.objects[&image]
+                .trigger_definitions
+                .iter_all()
+                .any(|t| t == &trigger),
+            "CR 707.9a: copy-effect granted triggers are copiable values"
         );
     }
 

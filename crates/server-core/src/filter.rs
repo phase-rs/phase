@@ -59,7 +59,6 @@ mod tests {
             Effect::Counter {
                 target: TargetFilter::Any,
                 source_static: None,
-                unless_payment: None,
             },
         )]);
 
@@ -309,6 +308,7 @@ mod tests {
             player: PlayerId(0),
             cards: vec![card_a, card_b],
             count: 1,
+            min_count: 0,
             up_to: true,
             source_id: ObjectId(100),
             effect_kind: engine::types::ability::EffectKind::ChangeZone,

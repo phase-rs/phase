@@ -610,7 +610,6 @@ fn setup_pitch_scenario() -> (
         .with_ability(Effect::Counter {
             target: TargetFilter::Any,
             source_static: None,
-            unless_payment: None,
         })
         .with_additional_cost(AdditionalCost::Required(AbilityCost::Exile {
             count: 1,
@@ -870,6 +869,7 @@ fn play_land_from_graveyard_with_permission() {
             StaticDefinition::new(StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::Unlimited,
                 play_mode: CardPlayMode::Play,
+                graveyard_destination_replacement: None,
             })
             .affected(TargetFilter::Typed(
                 engine::types::ability::TypedFilter::new(TypeFilter::Land),
@@ -935,6 +935,7 @@ fn play_land_from_graveyard_respects_land_drop_limit() {
             StaticDefinition::new(StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::Unlimited,
                 play_mode: CardPlayMode::Play,
+                graveyard_destination_replacement: None,
             })
             .affected(TargetFilter::Typed(
                 engine::types::ability::TypedFilter::new(TypeFilter::Land),
@@ -1001,6 +1002,7 @@ fn muldrotha_per_permanent_type_blocks_second_land_from_graveyard() {
             StaticDefinition::new(StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::OncePerTurnPerPermanentType,
                 play_mode: CardPlayMode::Play,
+                graveyard_destination_replacement: None,
             })
             .affected(TargetFilter::Typed(
                 engine::types::ability::TypedFilter::new(TypeFilter::Permanent),
@@ -1078,6 +1080,7 @@ fn muldrotha_per_permanent_type_resets_at_turn_start() {
             StaticDefinition::new(StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::OncePerTurnPerPermanentType,
                 play_mode: CardPlayMode::Play,
+                graveyard_destination_replacement: None,
             })
             .affected(TargetFilter::Typed(
                 engine::types::ability::TypedFilter::new(TypeFilter::Permanent),

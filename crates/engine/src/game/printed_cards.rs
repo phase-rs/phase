@@ -205,23 +205,23 @@ pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) 
 /// counters" replacement for planeswalkers (loyalty counters equal to printed
 /// loyalty) and battles (defense counters equal to printed defense).
 ///
-/// Returned as `(counter_type_string, count)` entries suitable for pushing
+/// Returned as `(counter_type, count)` entries suitable for pushing
 /// onto `ProposedEvent::ZoneChange::enter_with_counters`. The replacement
 /// pipeline then dispatches each entry through `add_counter_with_replacement`
 /// so Doubling Season / Hardened Scales / Vorinclex apply per CR 614.1a.
 ///
 /// Returns an empty vec for non-planeswalker, non-battle permanents or when
 /// the face carries no printed loyalty/defense number.
-pub fn intrinsic_etb_counters(obj: &GameObject) -> Vec<(String, u32)> {
+pub fn intrinsic_etb_counters(obj: &GameObject) -> Vec<(CounterType, u32)> {
     let mut counters = Vec::new();
     if let Some(loy) = obj.loyalty {
         if loy > 0 {
-            counters.push((CounterType::Loyalty.as_str().to_string(), loy));
+            counters.push((CounterType::Loyalty, loy));
         }
     }
     if let Some(def) = obj.defense {
         if def > 0 {
-            counters.push((CounterType::Defense.as_str().to_string(), def));
+            counters.push((CounterType::Defense, def));
         }
     }
     // CR 702.156a + CR 107.3m: Ravenous is an intrinsic ETB replacement
@@ -230,7 +230,7 @@ pub fn intrinsic_etb_counters(obj: &GameObject) -> Vec<(String, u32)> {
     if obj.has_keyword(&Keyword::Ravenous) {
         if let Some(x_paid) = obj.cost_x_paid {
             if x_paid > 0 {
-                counters.push((CounterType::Plus1Plus1.as_str().to_string(), x_paid));
+                counters.push((CounterType::Plus1Plus1, x_paid));
             }
         }
     }
@@ -620,7 +620,7 @@ mod tests {
 
         assert_eq!(
             intrinsic_etb_counters(&obj),
-            vec![(CounterType::Plus1Plus1.as_str().to_string(), 4)]
+            vec![(CounterType::Plus1Plus1, 4)]
         );
     }
 

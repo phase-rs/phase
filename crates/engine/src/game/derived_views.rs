@@ -312,6 +312,7 @@ mod tests {
                     condition: None,
                     trigger_event: None,
                     description: Some("landfall".into()),
+                    source_name: String::new(),
                 },
             });
         }

@@ -14,8 +14,7 @@ expression: "&ir"
             "target": {
               "type": "ParentTarget"
             },
-            "source_static": null,
-            "unless_payment": null
+            "source_static": null
           },
           "cost": null,
           "sub_ability": null,

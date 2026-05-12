@@ -30,6 +30,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::DistributeAmong { .. } => DecisionKind::SelectTarget,
         WaitingFor::DeclareAttackers { .. } => DecisionKind::DeclareAttackers,
         WaitingFor::DeclareBlockers { .. } => DecisionKind::DeclareBlockers,
+        WaitingFor::UntapChoice { .. } => DecisionKind::ActivateAbility,
         // CR 508.1d + CR 509.1c: Combat tax — route by context so the attack-tax
         // policy sees `DeclareAttackers` candidates and the block-tax policy sees
         // `DeclareBlockers` candidates.
@@ -166,8 +167,10 @@ mod tests {
         assert_eq!(
             classify(
                 &WaitingFor::MulliganDecision {
-                    player: PlayerId(0),
-                    mulligan_count: 0,
+                    pending: vec![engine::types::game_state::MulliganDecisionEntry {
+                        player: PlayerId(0),
+                        mulligan_count: 0,
+                    }],
                     free_first_mulligan: false,
                 },
                 &dummy_action

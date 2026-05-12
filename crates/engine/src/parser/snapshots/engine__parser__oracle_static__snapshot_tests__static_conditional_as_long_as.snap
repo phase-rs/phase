@@ -1,5 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_static.rs
+assertion_line: 15899
 expression: def
 ---
 {
@@ -28,6 +29,10 @@ expression: def
       "properties": [
         {
           "type": "Another"
+        },
+        {
+          "type": "InZone",
+          "zone": "Battlefield"
         }
       ]
     }

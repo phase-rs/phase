@@ -1,7 +1,7 @@
 use rand::Rng;
 
 use engine::ai_support::build_decision_context;
-use engine::types::actions::GameAction;
+use engine::types::actions::{GameAction, MulliganChoice};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
@@ -20,6 +20,24 @@ use crate::tactical_gate::gate_candidates;
 use crate::threat_profile::{
     build_threat_profile_multiplayer, ArchetypeBaseProbabilities, ThreatProfile,
 };
+
+/// CR 103.5b + Serum Powder Oracle text: return the first object in `player`'s
+/// hand named "Serum Powder", if any. Used by the AI mulligan-decision branch
+/// to auto-use a Powder rather than mulligan or, in the deterministic-default
+/// path, rather than blindly keep — Serum Powder is strictly better than a
+/// mulligan (no bottoming, no mulligan count increment).
+fn first_serum_powder_in_hand(
+    state: &GameState,
+    player: PlayerId,
+) -> Option<engine::types::identifiers::ObjectId> {
+    let p = state.players.iter().find(|p| p.id == player)?;
+    p.hand.iter().copied().find(|oid| {
+        state
+            .objects
+            .get(oid)
+            .is_some_and(|o| o.name.eq_ignore_ascii_case("Serum Powder"))
+    })
+}
 
 /// AI safety cap on repeated activation of the same activated ability on the
 /// same source within a single turn. CR 117.1b permits unbounded activation
@@ -50,6 +68,24 @@ pub fn choose_action(
     config: &AiConfig,
     rng: &mut impl Rng,
 ) -> Option<GameAction> {
+    // CR 103.5: For simultaneous mulligan states, the AI controller's only
+    // job is to act on behalf of `ai_player`. If `ai_player` is not in the
+    // pending set, there is nothing to choose — return None so the WASM
+    // bridge doesn't fabricate an action that would fail authorization.
+    match &state.waiting_for {
+        WaitingFor::MulliganDecision { pending, .. }
+            if !pending.iter().any(|e| e.player == ai_player) =>
+        {
+            return None;
+        }
+        WaitingFor::MulliganBottomCards { pending }
+            if !pending.iter().any(|e| e.player == ai_player) =>
+        {
+            return None;
+        }
+        _ => {}
+    }
+
     // CR 702.104a: Tribute prompt — the AI's pay/decline decision has a
     // dedicated simple-eval heuristic rather than going through the tactical
     // policy registry. Punishment value vs counter value.
@@ -250,6 +286,14 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::DeclareBlockers { .. } => Some(GameAction::DeclareBlockers {
             assignments: Vec::new(),
         }),
+        WaitingFor::UntapChoice { candidates, .. } => {
+            candidates
+                .first()
+                .map(|&object_id| GameAction::ChooseUntap {
+                    object_id,
+                    untap: true,
+                })
+        }
 
         // Target selection: skip optional slots, fizzle mandatory ones.
         // TriggerTargetSelection is not a pending cast — the trigger is
@@ -331,8 +375,20 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         // Replacement choice: pick the first option.
         WaitingFor::ReplacementChoice { .. } => Some(GameAction::ChooseReplacement { index: 0 }),
 
-        // Mulligan: keep the hand.
-        WaitingFor::MulliganDecision { .. } => Some(GameAction::MulliganDecision { keep: true }),
+        // CR 103.5 + 103.5b: Mulligan default = keep, unless the AI has a
+        // Serum Powder in hand, in which case use it first (auto-heuristic —
+        // see `first_serum_powder_in_hand`).
+        WaitingFor::MulliganDecision { pending, .. } => {
+            let entry = pending.first()?;
+            Some(match first_serum_powder_in_hand(state, entry.player) {
+                Some(object_id) => GameAction::MulliganDecision {
+                    choice: MulliganChoice::UseSerumPowder { object_id },
+                },
+                None => GameAction::MulliganDecision {
+                    choice: MulliganChoice::Keep,
+                },
+            })
+        }
         WaitingFor::MulliganBottomCards { .. } => {
             Some(GameAction::SelectCards { cards: Vec::new() })
         }
@@ -907,38 +963,51 @@ pub(crate) fn deterministic_choice(
     // `MulliganRegistry` for structured, feature-aware hand evaluation. All
     // registered `MulliganPolicy` implementations contribute; search can't
     // evaluate these (the hand isn't yet committed to an opening state).
-    if let WaitingFor::MulliganDecision {
-        player,
-        mulligan_count,
-        ..
-    } = &state.waiting_for
-    {
-        let ctx = build_ai_context(state, *player, config);
+    //
+    // CR 103.5: With simultaneous mulligan, `pending` may contain several
+    // players. The AI controller's job is to choose for `ai_player`; if
+    // `ai_player` is in the pending set, evaluate their own hand. Otherwise
+    // no action is owed by this AI right now.
+    if let WaitingFor::MulliganDecision { pending, .. } = &state.waiting_for {
+        let entry = pending.iter().find(|e| e.player == ai_player)?;
+        let player = entry.player;
+        let mulligan_count = entry.mulligan_count;
+        let ctx = build_ai_context(state, player, config);
         let default_features = crate::features::DeckFeatures::default();
         let default_plan = crate::plan::PlanSnapshot::default();
         let features = ctx
             .session
             .features
-            .get(player)
+            .get(&player)
             .unwrap_or(&default_features);
-        let plan = ctx.session.plan.get(player).unwrap_or(&default_plan);
+        let plan = ctx.session.plan.get(&player).unwrap_or(&default_plan);
         let hand: Vec<_> = state.players[player.0 as usize]
             .hand
             .iter()
             .copied()
             .collect();
-        let turn_order = crate::policies::mulligan::turn_order_for(state, *player);
+        let turn_order = crate::policies::mulligan::turn_order_for(state, player);
         let decision = crate::policies::mulligan::MulliganRegistry::default().evaluate_hand(
             &hand,
             state,
             features,
             plan,
             turn_order,
-            *mulligan_count,
+            mulligan_count,
         );
-        return Some(GameAction::MulliganDecision {
-            keep: decision.keep,
-        });
+        // CR 103.5b + Serum Powder Oracle text: if the AI would mulligan and
+        // it has a Serum Powder in hand, prefer the Powder — it's a strictly
+        // better action than a mulligan (no bottoming, no mulligan count
+        // increment). When the registry says keep, take the keep — don't burn
+        // a Powder on a hand the policies already endorsed.
+        let choice = if decision.keep {
+            MulliganChoice::Keep
+        } else if let Some(object_id) = first_serum_powder_in_hand(state, player) {
+            MulliganChoice::UseSerumPowder { object_id }
+        } else {
+            MulliganChoice::Mulligan
+        };
+        return Some(GameAction::MulliganDecision { choice });
     }
 
     // Scry/Dig/Surveil: use card evaluation heuristics
@@ -2053,7 +2122,7 @@ mod tests {
     /// uniquely-named cards.
     #[test]
     fn gifts_ungiven_search_choice_returns_quickly_with_distinct_names() {
-        use engine::types::ability::SearchSelectionConstraint;
+        use engine::types::ability::{SearchSelectionConstraint, SharedQuality};
         use std::time::Instant;
 
         let mut state = make_state();
@@ -2087,7 +2156,9 @@ mod tests {
             count: 4,
             reveal: true,
             up_to: true,
-            constraint: SearchSelectionConstraint::DistinctNames,
+            constraint: SearchSelectionConstraint::DistinctQualities {
+                qualities: vec![SharedQuality::Name],
+            },
         };
 
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);

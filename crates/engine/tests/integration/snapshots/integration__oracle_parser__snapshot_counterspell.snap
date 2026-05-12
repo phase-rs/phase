@@ -1,6 +1,5 @@
 ---
-source: crates/engine/tests/oracle_parser.rs
-assertion_line: 44
+source: crates/engine/tests/integration/oracle_parser.rs
 expression: result
 ---
 {
@@ -22,8 +21,7 @@ expression: result
             }
           ]
         },
-        "source_static": null,
-        "unless_payment": null
+        "source_static": null
       },
       "cost": null,
       "sub_ability": null,

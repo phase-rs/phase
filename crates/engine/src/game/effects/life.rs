@@ -99,7 +99,15 @@ pub fn resolve_gain(
                 });
             }
         }
-        ReplacementResult::Prevented => {}
+        ReplacementResult::Prevented => {
+            // CR 614.1a + CR 614.12a — Issue #317: Cross-event-type
+            // substitution ("If you would gain life, draw that many cards
+            // instead" — Lich). The applier returned `Prevented` and stashed
+            // the substitute effect (e.g., Draw) as a post-replacement
+            // continuation. Drain it now so the replacement actually
+            // runs in the same resolution step.
+            drain_substitution_continuation(state, events);
+        }
         ReplacementResult::NeedsChoice(player) => {
             // TODO(CR 614.7): When multiple replacement effects apply to life gain, controller should choose which applies first. Currently falls through unconditionally.
             state.waiting_for =
@@ -144,13 +152,36 @@ pub fn apply_life_gain(
         ReplacementResult::Execute(event) => {
             Ok(apply_life_gain_after_replacement(state, event, events))
         }
-        ReplacementResult::Prevented => Ok(0),
+        ReplacementResult::Prevented => {
+            // CR 614.1a + CR 614.12a — Issue #317: Drain substitute effect
+            // stashed by cross-event-type replacement (Lich-class).
+            drain_substitution_continuation(state, events);
+            Ok(0)
+        }
         ReplacementResult::NeedsChoice(player) => {
             // CR 614.7: Multiple competing replacements — player must choose.
             state.waiting_for =
                 crate::game::replacement::replacement_choice_waiting_for(player, state);
             Err(ReplacementDeferred)
         }
+    }
+}
+
+/// CR 614.1a + CR 614.12a — Issue #317: Drain a `post_replacement_continuation`
+/// stashed by cross-event-type substitution in a life-gain or life-loss
+/// replacement. Mirrors the drain points in `engine.rs` (land plays) and
+/// `stack.rs` (stack resolution); life-change events have no natural drain
+/// site otherwise, so the substitute effect ("draw that many cards instead",
+/// Lich) would silently never run.
+///
+/// `EventContextAmount` in the substitute reads `state.last_effect_count`
+/// (CR 615.5 fallback path), which the applier stamps with the prevented
+/// amount before returning.
+fn drain_substitution_continuation(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    if state.post_replacement_continuation.is_some() {
+        let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+            state, None, None, events,
+        );
     }
 }
 
@@ -215,7 +246,12 @@ pub fn apply_damage_life_loss(
         ReplacementResult::Execute(event) => {
             Ok(apply_life_loss_after_replacement(state, event, events))
         }
-        ReplacementResult::Prevented => Ok(0),
+        ReplacementResult::Prevented => {
+            // CR 614.1a + CR 614.12a — Issue #317: Drain substitute effect
+            // stashed by cross-event-type replacement.
+            drain_substitution_continuation(state, events);
+            Ok(0)
+        }
         ReplacementResult::NeedsChoice(player) => {
             // CR 614.7: Multiple competing replacements — player must choose.
             state.waiting_for =
@@ -314,7 +350,11 @@ pub fn resolve_lose(
                 });
             }
         }
-        ReplacementResult::Prevented => {}
+        ReplacementResult::Prevented => {
+            // CR 614.1a + CR 614.12a — Issue #317: Drain substitute effect
+            // stashed by cross-event-type replacement.
+            drain_substitution_continuation(state, events);
+        }
         ReplacementResult::NeedsChoice(player) => {
             state.waiting_for =
                 crate::game::replacement::replacement_choice_waiting_for(player, state);
@@ -911,6 +951,191 @@ mod tests {
         assert_eq!(
             state.players[1].life, p1_life_before,
             "P1 must not lose life despite being in ability.targets — Controller filter must not consult inherited targets"
+        );
+    }
+
+    /// Issue #310 audit: "Each opponent loses N life." (Bloodletting,
+    /// Bloodtithe Harvester face, etc.) parses as `Effect::LoseLife
+    /// { target: None }` with `player_scope: Opponent` on the surrounding
+    /// ability. The player_scope iteration loop must rebind `controller`
+    /// to each opponent per CR 608.2 + CR 109.5 so the inner LoseLife
+    /// resolver picks the iterated player as the life loser.
+    #[test]
+    fn player_scope_opponent_lose_life_targets_each_opponent() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::types::ability::PlayerFilter;
+
+        let mut state = GameState::new_two_player(42);
+        let p0_life_before = state.players[0].life;
+        let p1_life_before = state.players[1].life;
+
+        let mut ability = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::Opponent);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(
+            state.players[0].life, p0_life_before,
+            "caster must not lose life from Each opponent loses N life"
+        );
+        assert_eq!(
+            state.players[1].life,
+            p1_life_before - 2,
+            "opponent must lose 2 life"
+        );
+    }
+
+    /// Issue #317 (Lich): "If you would gain life, draw that many cards
+    /// instead." The replacement substitutes a *different* event type
+    /// (`Effect::Draw`) for the original `LifeGain` event. CR 614.1a +
+    /// CR 614.12a: the original event is suppressed, the substitute effect
+    /// runs as a post-replacement continuation. `EventContextAmount` in
+    /// "draw that many cards" must resolve against the original prevented
+    /// gain quantity (via `state.last_effect_count` per the CR 615.5
+    /// fallback path).
+    #[test]
+    fn lich_gain_life_substituted_by_draw_cards_instead() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, GainLifePlayer, ReplacementDefinition,
+        };
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        // Lich source — its GainLife replacement substitutes Draw.
+        let lich = create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(0),
+            "Lich".to_string(),
+            Zone::Battlefield,
+        );
+        let replacement =
+            ReplacementDefinition::new(ReplacementEvent::GainLife).execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::EventContextAmount,
+                    },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        state
+            .objects
+            .get_mut(&lich)
+            .unwrap()
+            .replacement_definitions = vec![replacement].into();
+
+        // Stock the controller's library so Draw has cards to pull.
+        for i in 0..10 {
+            create_object(
+                &mut state,
+                CardId(600 + i),
+                PlayerId(0),
+                format!("Library {i}"),
+                Zone::Library,
+            );
+        }
+
+        let p0_life_before = state.players[0].life;
+        let p0_hand_before = state.players[0].hand.len();
+
+        // Resolve a "you gain 4 life" effect on Lich's controller.
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 4 },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_gain(&mut state, &ability, &mut events).unwrap();
+
+        // Life must NOT change — the original LifeGain event is suppressed.
+        assert_eq!(
+            state.players[0].life, p0_life_before,
+            "Lich's controller must not gain life — replacement substitutes Draw"
+        );
+        // Hand must contain 4 additional cards — "draw that many cards instead".
+        assert_eq!(
+            state.players[0].hand.len(),
+            p0_hand_before + 4,
+            "Lich's controller must draw 4 cards (matching the prevented gain amount)"
+        );
+        // The post-replacement continuation must be drained.
+        assert!(
+            state.post_replacement_continuation.is_none(),
+            "post_replacement_continuation must be drained after life-gain replacement"
+        );
+    }
+
+    /// Issue #317: A scaling-shape replacement (`Effect::GainLife { amount:
+    /// Multiply { factor: 2, inner: EventContextAmount } }` — Boon Reflection
+    /// shape) must still flow through Branch 2 of `gain_life_applier` and
+    /// modify the amount — not be misclassified as substitution. This pins
+    /// the boundary between "scaling" (same event type, modified amount) and
+    /// "substitution" (different event type).
+    #[test]
+    fn gain_life_scaling_shape_modifies_amount_does_not_substitute() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, GainLifePlayer, ReplacementDefinition,
+        };
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let doubler = create_object(
+            &mut state,
+            CardId(501),
+            PlayerId(0),
+            "Boon Reflection".to_string(),
+            Zone::Battlefield,
+        );
+        let replacement =
+            ReplacementDefinition::new(ReplacementEvent::GainLife).execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Multiply {
+                        factor: 2,
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: crate::types::ability::QuantityRef::EventContextAmount,
+                        }),
+                    },
+                    player: GainLifePlayer::Controller,
+                },
+            ));
+        state
+            .objects
+            .get_mut(&doubler)
+            .unwrap()
+            .replacement_definitions = vec![replacement].into();
+
+        let p0_life_before = state.players[0].life;
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_gain(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.players[0].life,
+            p0_life_before + 6,
+            "Boon Reflection doubles the gain to 6 — scaling, not substitution"
         );
     }
 }

@@ -2,7 +2,7 @@ use crate::game::mana_sources::mana_color_to_type;
 use crate::types::ability::{
     DoubleTarget, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
-use crate::types::counter::parse_counter_type;
+use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -26,7 +26,7 @@ pub fn resolve(
 
     match target_kind {
         DoubleTarget::Counters { counter_type } => {
-            resolve_double_counters(state, ability, events, target, counter_type.as_deref())
+            resolve_double_counters(state, ability, events, target, counter_type.as_ref())
         }
         DoubleTarget::LifeTotal => resolve_double_life(state, ability, events, target),
         DoubleTarget::ManaPool { color } => {
@@ -41,9 +41,9 @@ fn resolve_double_counters(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
     target: &TargetFilter,
-    counter_type: Option<&str>,
+    counter_type: Option<&CounterType>,
 ) -> Result<(), EffectError> {
-    let obj_ids = resolve_object_targets(ability, target);
+    let obj_ids = resolve_object_targets(ability, target, state);
 
     for obj_id in obj_ids {
         // Snapshot current counters to avoid borrow issues
@@ -52,12 +52,11 @@ fn resolve_double_counters(
                 .objects
                 .get(&obj_id)
                 .ok_or(EffectError::ObjectNotFound(obj_id))?;
-            if let Some(ct_str) = counter_type {
+            if let Some(ct) = counter_type {
                 // CR 701.10e: Double only the specified counter type
-                let ct = parse_counter_type(ct_str);
-                let count = obj.counters.get(&ct).copied().unwrap_or(0);
+                let count = obj.counters.get(ct).copied().unwrap_or(0);
                 if count > 0 {
-                    vec![(ct, count)]
+                    vec![(ct.clone(), count)]
                 } else {
                     vec![]
                 }
@@ -217,21 +216,21 @@ fn resolve_double_mana(
 }
 
 /// Resolve object targets from ability targets or self-ref.
-fn resolve_object_targets(ability: &ResolvedAbility, target: &TargetFilter) -> Vec<ObjectId> {
-    match target {
-        TargetFilter::SelfRef | TargetFilter::None => vec![ability.source_id],
-        _ => ability
-            .targets
-            .iter()
-            .filter_map(|t| {
-                if let TargetRef::Object(id) = t {
-                    Some(*id)
-                } else {
-                    None
-                }
-            })
-            .collect(),
-    }
+///
+/// CR 608.2c + 603.10a: Delegates to the unified 3-tier dispatch
+/// (`targeting::resolved_targets`) so `SelfRef` always resolves to the source
+/// object regardless of `ability.targets` (issue #323 class — chained
+/// `Double { target: SelfRef }` sub-abilities would otherwise inherit the
+/// parent's targets via chain propagation in
+/// `effects::mod.rs::resolve_ability_chain`). `None` falls back to the
+/// source only when `ability.targets` is empty.
+fn resolve_object_targets(
+    ability: &ResolvedAbility,
+    target: &TargetFilter,
+    state: &GameState,
+) -> Vec<ObjectId> {
+    let effective_targets = crate::game::targeting::resolved_targets(ability, target, state);
+    super::effect_object_targets(target, &effective_targets)
 }
 
 /// Resolve a player target from the ability.
@@ -299,6 +298,7 @@ mod tests {
             forward_result: false,
             unless_pay: None,
             distribution: None,
+            target_selection_mode: crate::types::ability::TargetSelectionMode::Chosen,
         }
     }
 
@@ -320,7 +320,7 @@ mod tests {
         let mut events = Vec::new();
         let ability = make_double_ability(
             DoubleTarget::Counters {
-                counter_type: Some("+1/+1".to_string()),
+                counter_type: Some(CounterType::Plus1Plus1),
             },
             TargetFilter::Any,
             PlayerId(0),

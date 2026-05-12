@@ -42,9 +42,22 @@ pub fn run_ai_actions(
     let mut rng = rand::rng();
 
     for _ in 0..MAX_AI_ACTIONS_PER_SEQUENCE {
+        // CR 103.5: For simultaneous mulligan states, `acting_player()` returns
+        // None when multiple players are pending. Fall back to the first
+        // AI-controlled pending player so AI-vs-AI auto-play can advance
+        // through the mulligan phase one decision at a time.
         let actor = match state.waiting_for.acting_player() {
             Some(p) if ai_players.contains(&p) => p,
-            _ => break, // Human's turn or game over
+            Some(_) => break, // Single human's turn
+            None => match state
+                .waiting_for
+                .acting_players()
+                .into_iter()
+                .find(|p| ai_players.contains(p))
+            {
+                Some(p) => p,
+                None => break, // No AI player is pending
+            },
         };
 
         let config = match ai_configs.get(&actor) {

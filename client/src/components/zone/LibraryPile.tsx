@@ -1,7 +1,13 @@
+import { useCallback, useMemo } from "react";
+
+import type { ObjectId } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
-import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
+import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { useUiStore } from "../../stores/uiStore.ts";
+import { playOrCastActionsForObject } from "../../viewmodel/cardActionChoice.ts";
 
 interface LibraryPileProps {
   playerId: number;
@@ -39,24 +45,59 @@ export function LibraryPile({ playerId, size }: LibraryPileProps) {
       playerId === myId &&
       (s.gameState?.players[playerId]?.can_look_at_top_of_library ?? false),
   );
-  const isRevealed = useGameStore((s) => {
-    const lib = s.gameState?.players[playerId]?.library;
-    if (!lib || lib.length === 0) return false;
-    return s.gameState?.revealed_cards?.includes(lib[0]) ?? false;
-  });
-  const topCardName = useGameStore((s) => {
+  const topObjectId = useGameStore((s) => {
     const lib = s.gameState?.players[playerId]?.library;
     if (!lib || lib.length === 0) return null;
-    const topId = lib[0];
-    // Show top card if player can peek (Future Sight) or if card is publicly revealed
+    // library[0] = top of library (engine convention from zones.rs)
+    return lib[0];
+  });
+  const isRevealed = useGameStore((s) => {
+    if (topObjectId == null) return false;
+    return s.gameState?.revealed_cards?.includes(topObjectId) ?? false;
+  });
+  const topCardName = useGameStore((s) => {
+    if (topObjectId == null) return null;
     const peek =
       playerId === myId &&
       (s.gameState?.players[playerId]?.can_look_at_top_of_library ?? false);
-    const revealed = s.gameState?.revealed_cards?.includes(topId) ?? false;
+    const revealed = s.gameState?.revealed_cards?.includes(topObjectId) ?? false;
     if (!peek && !revealed) return null;
-    // library[0] = top of library (engine convention from zones.rs)
-    return s.gameState?.objects[topId]?.name ?? null;
+    return s.gameState?.objects[topObjectId]?.name ?? null;
   });
+
+  const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
+  const waitingFor = useGameStore((s) => s.waitingFor);
+  const canActForWaitingState = useCanActForWaitingState();
+  const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
+  const dispatchAction = useGameDispatch();
+
+  const isMyLibrary = playerId === myId;
+  const hasPriority = waitingFor?.type === "Priority" && canActForWaitingState;
+
+  // CR 401.5 + CR 118.9 + CR 305.9: cast/play-action surfacing is engine-
+  // authoritative — the entry exists in `legalActionsByObject` only when the
+  // engine has already validated the TopOfLibraryCastPermission filter, mana,
+  // timing, and (for `PlayLand`) the land-drop slot. The frontend renders
+  // the reported actions, never computes them. Future Sight / Bolas's
+  // Citadel / Magus of the Future surface `PlayLand` here; Mystic Forge /
+  // Realmwalker surface the `CastSpell` family.
+  const playActions = useMemo(() => {
+    if (!isMyLibrary || !hasPriority || topObjectId == null) return [];
+    return playOrCastActionsForObject(legalActionsByObject, topObjectId);
+  }, [isMyLibrary, hasPriority, topObjectId, legalActionsByObject]);
+
+  const canPlay = playActions.length > 0;
+
+  const handlePlay = useCallback(() => {
+    if (playActions.length === 0 || topObjectId == null) return;
+    if (playActions.length === 1) {
+      void dispatchAction(playActions[0]);
+    } else {
+      // Multiple options (e.g., cast normal + alt-cost) — defer to the shared
+      // ability-choice modal so the player can pick.
+      setPendingAbilityChoice({ objectId: topObjectId as ObjectId, actions: playActions });
+    }
+  }, [playActions, topObjectId, dispatchAction, setPendingAbilityChoice]);
 
   if (count === 0) return null;
 
@@ -68,7 +109,11 @@ export function LibraryPile({ playerId, size }: LibraryPileProps) {
   return (
     <div
       className="relative"
-      title={`Library (${count})`}
+      title={
+        canPlay
+          ? `Play ${topCardName ?? "top of library"} from top of library`
+          : `Library (${count})`
+      }
       data-library-pile={playerId}
       style={{ width: w, height: h }}
     >
@@ -87,9 +132,24 @@ export function LibraryPile({ playerId, size }: LibraryPileProps) {
       ))}
 
       {/* Top card */}
-      <div
-        className={`relative h-full w-full overflow-hidden rounded-lg border shadow-md ${
-          isRevealed ? "border-amber-500" : isPeeking ? "border-cyan-600" : "border-gray-600"
+      <button
+        type="button"
+        onClick={canPlay ? handlePlay : undefined}
+        disabled={!canPlay}
+        aria-label={
+          canPlay
+            ? `Play ${topCardName ?? "top of library"} from top of library`
+            : `Library (${count} cards)`
+        }
+        data-library-top-cast={canPlay ? "true" : "false"}
+        className={`relative block h-full w-full overflow-hidden rounded-lg border shadow-md ${
+          canPlay
+            ? "border-amber-400 ring-2 ring-amber-400/70 shadow-[0_0_12px_3px_rgba(245,158,11,0.5)] cursor-pointer"
+            : isRevealed
+              ? "border-amber-500 cursor-default"
+              : isPeeking
+                ? "border-cyan-600 cursor-default"
+                : "border-gray-600 cursor-default"
         }`}
       >
         {isPeeking ? (
@@ -102,7 +162,7 @@ export function LibraryPile({ playerId, size }: LibraryPileProps) {
             draggable={false}
           />
         )}
-      </div>
+      </button>
 
       {/* Count badge */}
       <div className="absolute -bottom-1 -right-1 z-10 flex h-5 w-5 items-center justify-center rounded-full bg-gray-900 text-[9px] font-bold text-gray-300 ring-1 ring-gray-600">

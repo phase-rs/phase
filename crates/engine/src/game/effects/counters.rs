@@ -5,7 +5,9 @@ use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     CounterTransferMode, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
-use crate::types::counter::{parse_counter_type, CounterType};
+#[cfg(test)]
+use crate::types::counter::parse_counter_type;
+use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{CounterAddedRecord, GameState};
 use crate::types::identifiers::ObjectId;
@@ -249,7 +251,7 @@ pub fn resolve_add(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (counter_type_str, counter_num) = match &ability.effect {
+    let (counter_type, counter_num) = match &ability.effect {
         Effect::AddCounter {
             counter_type,
             count,
@@ -267,9 +269,8 @@ pub fn resolve_add(
                     as u32;
             (counter_type.clone(), resolved_count)
         }
-        _ => ("P1P1".to_string(), 1),
+        _ => (CounterType::Plus1Plus1, 1),
     };
-    let ct = parse_counter_type(&counter_type_str);
 
     // CR 601.2d: If distribution was assigned at cast time, apply per-target counter counts.
     if let Some(distribution) = &ability.distribution {
@@ -279,20 +280,20 @@ pub fn resolve_add(
                     state,
                     ability.controller,
                     *obj_id,
-                    ct.clone(),
+                    counter_type.clone(),
                     *count,
                     events,
                 );
             }
         }
     } else {
-        let targets = resolve_defined_or_targets(ability);
+        let targets = resolve_defined_or_targets(state, ability);
         for obj_id in targets {
             add_counter_with_replacement(
                 state,
                 ability.controller,
                 obj_id,
-                ct.clone(),
+                counter_type.clone(),
                 counter_num,
                 events,
             );
@@ -313,7 +314,7 @@ pub fn resolve_add_all(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (counter_type_str, counter_num, target_filter) = match &ability.effect {
+    let (counter_type, counter_num, target_filter) = match &ability.effect {
         Effect::PutCounterAll {
             counter_type,
             count,
@@ -326,7 +327,6 @@ pub fn resolve_add_all(
         }
         _ => return Ok(()),
     };
-    let ct = parse_counter_type(&counter_type_str);
     let target_filter = crate::game::effects::resolved_object_filter(ability, &target_filter);
 
     // Collect matching IDs first to avoid borrow conflict during mutation.
@@ -344,7 +344,7 @@ pub fn resolve_add_all(
             state,
             ability.controller,
             obj_id,
-            ct.clone(),
+            counter_type.clone(),
             counter_num,
             events,
         );
@@ -364,24 +364,23 @@ pub fn resolve_multiply(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (counter_type_str, multiplier) = match &ability.effect {
+    let (counter_type, multiplier) = match &ability.effect {
         Effect::MultiplyCounter {
             counter_type,
             multiplier,
             ..
         } => (counter_type.clone(), *multiplier as u32),
-        _ => ("P1P1".to_string(), 2),
+        _ => (CounterType::Plus1Plus1, 2),
     };
 
-    let targets = resolve_defined_or_targets(ability);
+    let targets = resolve_defined_or_targets(state, ability);
     for obj_id in targets {
-        let ct = parse_counter_type(&counter_type_str);
         let current = state
             .objects
             .get(&obj_id)
             .ok_or(EffectError::ObjectNotFound(obj_id))?
             .counters
-            .get(&ct)
+            .get(&counter_type)
             .copied()
             .unwrap_or(0);
         let to_add = current.saturating_mul(multiplier).saturating_sub(current);
@@ -390,7 +389,14 @@ pub fn resolve_multiply(
             // additional counters, so this must flow through the central
             // counter-addition path for replacement effects and per-turn
             // "counters you've put" history.
-            add_counter_with_replacement(state, ability.controller, obj_id, ct, to_add, events);
+            add_counter_with_replacement(
+                state,
+                ability.controller,
+                obj_id,
+                counter_type.clone(),
+                to_add,
+                events,
+            );
         }
     }
 
@@ -404,6 +410,7 @@ pub fn resolve_multiply(
 
 /// Resolve targeting to object IDs using the typed TargetFilter.
 fn resolve_defined_or_targets(
+    state: &GameState,
     ability: &ResolvedAbility,
 ) -> Vec<crate::types::identifiers::ObjectId> {
     let target_spec = match &ability.effect {
@@ -414,13 +421,38 @@ fn resolve_defined_or_targets(
         _ => None,
     };
 
-    if let Some(TargetFilter::None) = target_spec {
+    // CR 608.2c: SelfRef is the printed-name anaphor — always resolves to the
+    // source object regardless of `ability.targets`. Mirrors the post-#323
+    // short-circuit in `targeting::resolved_targets`. Without this, a chained
+    // `AddCounter { target: SelfRef }` sub-ability would inherit the parent's
+    // targets via chain propagation in `effects::mod.rs::resolve_ability_chain`.
+    if let Some(TargetFilter::SelfRef) = target_spec {
         return vec![ability.source_id];
     }
 
-    // If the filter is SelfRef, target the source
-    if let Some(TargetFilter::SelfRef) = target_spec {
-        return vec![ability.source_id];
+    // CR 603.10a (tier 2 of `resolved_targets`): `None` falls back to source
+    // only when no chosen targets were supplied — preserves the LTB
+    // self-trigger anaphor ("put a +1/+1 counter on it") while letting chain
+    // propagation populate the target slot for legitimately targeted
+    // sub-abilities.
+    if let Some(TargetFilter::None) = target_spec {
+        if ability.targets.is_empty() {
+            return vec![ability.source_id];
+        }
+    }
+
+    if let Some(filter) = target_spec {
+        let event_targets =
+            crate::game::targeting::resolve_event_context_targets(state, filter, ability.source_id);
+        if !event_targets.is_empty() {
+            return event_targets
+                .into_iter()
+                .filter_map(|target| match target {
+                    TargetRef::Object(id) => Some(id),
+                    TargetRef::Player(_) => None,
+                })
+                .collect();
+        }
     }
 
     ability
@@ -451,13 +483,7 @@ pub fn resolve_move(
             count,
             mode,
             target,
-        } => (
-            source,
-            counter_type.as_deref().map(parse_counter_type),
-            count.as_ref(),
-            *mode,
-            target,
-        ),
+        } => (source, counter_type.as_ref(), count.as_ref(), *mode, target),
         _ => return Ok(()),
     };
 
@@ -479,7 +505,7 @@ pub fn resolve_move(
 
     for source_id in source_ids {
         let source_counters =
-            counter_transfer_source_counters(state, source_id, mode, counter_type_filter.as_ref());
+            counter_transfer_source_counters(state, source_id, mode, counter_type_filter);
 
         if source_counters.is_empty() {
             continue;
@@ -639,22 +665,31 @@ pub fn resolve_remove(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (counter_type_str, raw_count) = match &ability.effect {
+    let (counter_type, raw_count) = match &ability.effect {
         Effect::RemoveCounter {
             counter_type,
             count,
             ..
         } => (counter_type.clone(), *count),
-        _ => ("P1P1".to_string(), 1),
+        _ => (Some(CounterType::Plus1Plus1), 1),
     };
 
-    // CR 122.1: Empty counter_type means "all types" — collect each type on the object.
-    let all_types = counter_type_str.is_empty();
-
-    let targets = resolve_defined_or_targets(ability);
+    let targets = resolve_defined_or_targets(state, ability);
     for obj_id in targets {
         // Build the list of (counter_type, count) pairs to remove.
-        let removals: Vec<(CounterType, u32)> = if all_types {
+        let removals: Vec<(CounterType, u32)> = if let Some(counter_type) = &counter_type {
+            // CR 122.1: count == -1 means "remove all" — resolve to the actual counter count.
+            let counter_num = if raw_count < 0 {
+                state
+                    .objects
+                    .get(&obj_id)
+                    .and_then(|obj| obj.counters.get(counter_type).copied())
+                    .unwrap_or(0)
+            } else {
+                raw_count as u32
+            };
+            vec![(counter_type.clone(), counter_num)]
+        } else {
             // Remove all counter types. count == -1 means remove all of each type;
             // positive count means remove up to that many total (player's choice — for now, remove
             // proportionally starting from the first type).
@@ -670,10 +705,8 @@ pub fn resolve_remove(
                 })
                 .unwrap_or_default();
             if raw_count < 0 {
-                // Remove all of every type.
                 counters
             } else {
-                // Remove up to N total counters across all types.
                 let mut budget = raw_count as u32;
                 counters
                     .into_iter()
@@ -687,19 +720,6 @@ pub fn resolve_remove(
                     })
                     .collect()
             }
-        } else {
-            let ct = parse_counter_type(&counter_type_str);
-            // CR 122.1: count == -1 means "remove all" — resolve to the actual counter count.
-            let counter_num = if raw_count < 0 {
-                state
-                    .objects
-                    .get(&obj_id)
-                    .and_then(|obj| obj.counters.get(&ct).copied())
-                    .unwrap_or(0)
-            } else {
-                raw_count as u32
-            };
-            vec![(ct, counter_num)]
         };
 
         for (ct, counter_num) in removals {
@@ -760,7 +780,7 @@ mod tests {
             &mut state,
             &make_counter_ability(
                 Effect::AddCounter {
-                    counter_type: "P1P1".to_string(),
+                    counter_type: CounterType::Plus1Plus1,
                     count: QuantityExpr::Fixed { value: 2 },
                     target: TargetFilter::Any,
                 },
@@ -795,7 +815,7 @@ mod tests {
             &mut state,
             &make_counter_ability(
                 Effect::RemoveCounter {
-                    counter_type: "P1P1".to_string(),
+                    counter_type: Some(CounterType::Plus1Plus1),
                     count: 3,
                     target: TargetFilter::Any,
                 },
@@ -824,7 +844,7 @@ mod tests {
             &mut state,
             &make_counter_ability(
                 Effect::AddCounter {
-                    counter_type: "charge".to_string(),
+                    counter_type: CounterType::Generic("charge".to_string()),
                     count: QuantityExpr::Fixed { value: 3 },
                     target: TargetFilter::Any,
                 },
@@ -856,7 +876,7 @@ mod tests {
             &mut state,
             &make_counter_ability(
                 Effect::AddCounter {
-                    counter_type: "P1P1".to_string(),
+                    counter_type: CounterType::Plus1Plus1,
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Any,
                 },
@@ -898,7 +918,7 @@ mod tests {
             &mut state,
             &make_counter_ability(
                 Effect::MultiplyCounter {
-                    counter_type: "P1P1".to_string(),
+                    counter_type: CounterType::Plus1Plus1,
                     multiplier: 2,
                     target: TargetFilter::Any,
                 },
@@ -935,7 +955,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::PutCounter {
-                counter_type: "P1P1".to_string(),
+                counter_type: CounterType::Plus1Plus1,
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,
             },
@@ -1021,7 +1041,7 @@ mod tests {
         trigger.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::PutCounterAll {
-                counter_type: "P1P1".to_string(),
+                counter_type: CounterType::Plus1Plus1,
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::Power {
                         scope: crate::types::ability::ObjectScope::Source,
@@ -1178,7 +1198,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::MoveCounters {
                 source: TargetFilter::SelfRef,
-                counter_type: Some("P1P1".to_string()),
+                counter_type: Some(CounterType::Plus1Plus1),
                 count: Some(QuantityExpr::Fixed { value: 1 }),
                 mode: CounterTransferMode::Move,
                 target: TargetFilter::Any,
@@ -1251,7 +1271,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::MoveCounters {
                 source: TargetFilter::Any,
-                counter_type: Some("P1P1".to_string()),
+                counter_type: Some(CounterType::Plus1Plus1),
                 count: Some(QuantityExpr::Fixed { value: 1 }),
                 mode: CounterTransferMode::Move,
                 target: TargetFilter::Any,
@@ -1657,7 +1677,7 @@ mod tests {
         obj.loyalty = Some(3);
         obj.base_loyalty = Some(3);
 
-        let intrinsic = vec![(CounterType::Loyalty.as_str().to_string(), 3u32)];
+        let intrinsic = vec![(CounterType::Loyalty, 3u32)];
         let mut events = Vec::new();
         apply_etb_counters(&mut state, pw_id, &intrinsic, &mut events);
 

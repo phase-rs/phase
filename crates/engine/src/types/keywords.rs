@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use super::ability::{
     AbilityCost, ControllerRef, FilterProp, QuantityExpr, TargetFilter, TypedFilter,
 };
+use super::counter::{parse_counter_type, CounterType};
 use super::mana::{ManaColor, ManaCost};
 
 /// CR 702.34a: Flashback cost — either a mana cost or a non-mana cost
@@ -153,6 +154,9 @@ pub enum KeywordKind {
     Champion,
     Training,
     Assist,
+    /// Acorn/Un-set keyword: Augment. Not present in the main Comprehensive
+    /// Rules file, but it is still a keyword characteristic for card filters.
+    Augment,
     /// CR 702.127: Aftermath — see `Keyword::Aftermath`.
     Aftermath,
     JumpStart,
@@ -286,6 +290,10 @@ pub enum HexproofFilter {
     CardType(String),
     /// "hexproof from monocolored", "hexproof from multicolored"
     Quality(String),
+    /// CR 702.11d + CR 105.4 + CR 609.6: "Hexproof from that color" / "from the
+    /// chosen color" — resolved at runtime from the source permanent's
+    /// `chosen_attributes`. Parallels `ProtectionTarget::ChosenColor`.
+    ChosenColor,
 }
 
 /// What a Protection keyword protects from (CR 702.16).
@@ -414,7 +422,7 @@ pub enum Keyword {
 
     // ETB counter (e.g., P1P1:1)
     EtbCounter {
-        counter_type: String,
+        counter_type: CounterType,
         count: u32,
     },
 
@@ -637,6 +645,10 @@ pub enum Keyword {
     Training,
     /// CR 702.132a: Assist — another player can help pay the generic mana cost of this spell.
     Assist,
+    /// Acorn/Un-set keyword: Augment. Runtime host-combine semantics are not
+    /// implemented; the keyword identity is used for characteristic filters
+    /// such as "a card with augment".
+    Augment,
     /// CR 702.127a: Aftermath allows casting this half of a split card only
     /// from a graveyard, and exiles the spell any time it leaves the stack if
     /// it was cast from a graveyard.
@@ -649,9 +661,9 @@ pub enum Keyword {
     /// CR 702.52a: Transmute {cost} — discard this card and pay {cost} to search
     /// your library for a card with the same mana value.
     Transmute(ManaCost),
-    /// CR 702.120a: Escalate {cost} — additional cost for each mode chosen beyond the first
+    /// CR 702.120a: Escalate [cost] — additional cost for each mode chosen beyond the first
     /// on a modal spell.
-    Escalate(ManaCost),
+    Escalate(AbilityCost),
     /// CR 702.59a: Recover {cost} — triggered ability: when a creature is put into your
     /// graveyard from the battlefield, you may pay {cost} to return this card from your
     /// graveyard to your hand; otherwise exile it.
@@ -903,6 +915,7 @@ impl Keyword {
             Keyword::Champion(_) => KeywordKind::Champion,
             Keyword::Training => KeywordKind::Training,
             Keyword::Assist => KeywordKind::Assist,
+            Keyword::Augment => KeywordKind::Augment,
             Keyword::Aftermath => KeywordKind::Aftermath,
             Keyword::JumpStart => KeywordKind::JumpStart,
             Keyword::Cipher => KeywordKind::Cipher,
@@ -1203,13 +1216,13 @@ fn parse_enchant_target(s: &str) -> TargetFilter {
 }
 
 /// Parse an EtbCounter parameter string (e.g., "P1P1:1") into counter_type and count.
-fn parse_etb_counter(s: &str) -> (String, u32) {
+fn parse_etb_counter(s: &str) -> (CounterType, u32) {
     if let Some(idx) = s.rfind(':') {
-        let counter_type = s[..idx].to_string();
+        let counter_type = parse_counter_type(&s[..idx]);
         let count = s[idx + 1..].parse::<u32>().unwrap_or(1);
         (counter_type, count)
     } else {
-        (s.to_string(), 1)
+        (parse_counter_type(s), 1)
     }
 }
 
@@ -1381,8 +1394,12 @@ impl FromStr for Keyword {
                 }
                 // CR 702.52a: Transmute {cost}
                 "transmute" => return Ok(Keyword::Transmute(parse_keyword_mana_cost(p))),
-                // CR 702.120a: Escalate {cost}
-                "escalate" => return Ok(Keyword::Escalate(parse_keyword_mana_cost(p))),
+                // CR 702.120a: Escalate [cost]
+                "escalate" => {
+                    return Ok(Keyword::Escalate(AbilityCost::Mana {
+                        cost: parse_keyword_mana_cost(p),
+                    }))
+                }
                 // CR 702.59a: Recover {cost}
                 "recover" => return Ok(Keyword::Recover(parse_keyword_mana_cost(p))),
                 // CR 702.148a: Cleave {cost}
@@ -1524,6 +1541,7 @@ impl FromStr for Keyword {
             "sunburst" => Ok(Keyword::Sunburst),
             "training" => Ok(Keyword::Training),
             "assist" => Ok(Keyword::Assist),
+            "augment" => Ok(Keyword::Augment),
             "aftermath" => Ok(Keyword::Aftermath),
             "jump-start" | "jumpstart" => Ok(Keyword::JumpStart),
             "cipher" => Ok(Keyword::Cipher),
@@ -1557,6 +1575,11 @@ fn parse_hexproof_filter(s: &str) -> HexproofFilter {
         "red" => HexproofFilter::Color(ManaColor::Red),
         "green" => HexproofFilter::Color(ManaColor::Green),
         "monocolored" | "multicolored" => HexproofFilter::Quality(lower),
+        // CR 702.11d + CR 105.4 + CR 609.6: "that color" / "the chosen color"
+        // anaphors after a preceding `Choose a color` instruction. Resolved at
+        // runtime via `ChosenAttribute::Color` on the granting source. Mirrors
+        // `ProtectionTarget::ChosenColor` (CR 702.16).
+        "that color" | "the chosen color" | "chosen color" => HexproofFilter::ChosenColor,
         _ => HexproofFilter::CardType(lower),
     }
 }
@@ -1805,6 +1828,14 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Casualty" => Ok(Keyword::Casualty(uint(data))),
         // CR 702.42a
         "Entwine" => Ok(Keyword::Entwine(mana(data)?)),
+        // CR 702.120a: accept both legacy ManaCost format and new AbilityCost tagged format.
+        "Escalate" => {
+            if let Ok(cost) = serde_json::from_value::<AbilityCost>(data.clone()) {
+                Ok(Keyword::Escalate(cost))
+            } else {
+                Ok(Keyword::Escalate(AbilityCost::Mana { cost: mana(data)? }))
+            }
+        }
         // CR 702.41a
         "Affinity" => {
             let tf: TypedFilter =
@@ -1894,8 +1925,8 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
             let counter_type = obj
                 .get("counter_type")
                 .and_then(|v| v.as_str())
-                .unwrap_or("P1P1")
-                .to_string();
+                .map(parse_counter_type)
+                .unwrap_or(CounterType::Plus1Plus1);
             let count = obj.get("count").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
             Ok(Keyword::EtbCounter {
                 counter_type,
@@ -1910,6 +1941,7 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Champion" => Ok(Keyword::Champion(data.as_str().unwrap_or("").to_string())),
         "Training" => Ok(Keyword::Training),
         "Assist" => Ok(Keyword::Assist),
+        "Augment" => Ok(Keyword::Augment),
         "JumpStart" => Ok(Keyword::JumpStart),
         "Cipher" => Ok(Keyword::Cipher),
         "Transmute" => Ok(Keyword::Transmute(mana(data)?)),
@@ -2183,7 +2215,7 @@ mod tests {
             count,
         } = &kw
         {
-            assert_eq!(counter_type, "P1P1");
+            assert_eq!(counter_type, &CounterType::Plus1Plus1);
             assert_eq!(*count, 1);
         }
 
@@ -2193,7 +2225,7 @@ mod tests {
             count,
         } = &kw2
         {
-            assert_eq!(counter_type, "P1P1");
+            assert_eq!(counter_type, &CounterType::Plus1Plus1);
             assert_eq!(*count, 3);
         }
     }
@@ -2334,7 +2366,7 @@ mod tests {
             Keyword::Protection(ProtectionTarget::ChosenColor),
             Keyword::Unknown("CustomKeyword".to_string()),
             Keyword::EtbCounter {
-                counter_type: "P1P1".to_string(),
+                counter_type: CounterType::Plus1Plus1,
                 count: 2,
             },
             Keyword::Toxic(2),

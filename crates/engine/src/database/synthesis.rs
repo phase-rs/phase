@@ -7,10 +7,10 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, CardPlayMode,
     CastVariantPaid, ChoiceType, ContinuousModification, ControllerRef, CounterTriggerFilter,
     Duration, Effect, FilterProp, KickerVariant, ManaContribution, ManaProduction,
-    ModalSelectionCondition, ModalSelectionConstraint, NinjutsuVariant, PtValue, QuantityExpr,
-    ReplacementCondition, ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint,
-    StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessCost, UnlessPayModifier,
+    ModalSelectionCondition, ModalSelectionConstraint, NinjutsuVariant, ObjectScope, PtValue,
+    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, RuntimeHandler,
+    SearchSelectionConstraint, StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition,
+    TypeFilter, TypedFilter, UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -116,6 +116,58 @@ pub fn layout_faces(layout: &CardLayout) -> Vec<&CardFace> {
 // ---------------------------------------------------------------------------
 // Synthesize functions — keyword → ability/trigger expansion
 // ---------------------------------------------------------------------------
+
+pub struct KeywordTriggerInstaller;
+
+impl KeywordTriggerInstaller {
+    pub fn triggers_for(keyword: &Keyword) -> Vec<TriggerDefinition> {
+        match keyword {
+            Keyword::Echo(cost) => vec![build_echo_trigger(cost.clone())],
+            Keyword::Undying => vec![build_dies_return_with_counter_trigger(
+                "P1P1", "+1/+1", "702.93a",
+            )],
+            Keyword::Persist => vec![build_dies_return_with_counter_trigger(
+                "M1M1", "-1/-1", "702.79a",
+            )],
+            Keyword::Annihilator(n) => vec![build_annihilator_trigger(*n)],
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn trigger_matches_keyword_kind(trigger: &TriggerDefinition, keyword: &Keyword) -> bool {
+        match keyword {
+            Keyword::Echo(_) => is_echo_trigger(trigger),
+            Keyword::Undying => {
+                is_dies_return_with_counter_trigger(trigger, &CounterType::Plus1Plus1)
+            }
+            Keyword::Persist => {
+                is_dies_return_with_counter_trigger(trigger, &CounterType::Minus1Minus1)
+            }
+            Keyword::Annihilator(_) => is_annihilator_attack_trigger(trigger),
+            _ => false,
+        }
+    }
+
+    fn install_matching<F>(face: &mut CardFace, matches_keyword: F)
+    where
+        F: Fn(&Keyword) -> bool,
+    {
+        let desired: Vec<TriggerDefinition> = face
+            .keywords
+            .iter()
+            .filter(|keyword| matches_keyword(keyword))
+            .flat_map(Self::triggers_for)
+            .collect();
+
+        for (index, trigger) in desired.iter().enumerate() {
+            let desired_before = desired[..index].iter().filter(|t| *t == trigger).count();
+            let existing = face.triggers.iter().filter(|t| *t == trigger).count();
+            if existing <= desired_before {
+                face.triggers.push(trigger.clone());
+            }
+        }
+    }
+}
 
 pub fn synthesize_basic_land_mana(face: &mut CardFace) {
     let land_mana: Vec<(&str, ManaColor)> = vec![
@@ -719,7 +771,7 @@ pub fn synthesize_level_up(face: &mut CardFace) {
                     AbilityDefinition::new(
                         AbilityKind::Activated,
                         Effect::PutCounter {
-                            counter_type: "level".to_string(),
+                            counter_type: CounterType::Generic("level".to_string()),
                             count: QuantityExpr::Fixed { value: 1 },
                             target: TargetFilter::SelfRef,
                         },
@@ -909,7 +961,7 @@ pub fn synthesize_scavenge(face: &mut CardFace) {
             // target creature." SelfPower is resolved via LKI at resolution time so the
             // power read is the card's last known power before it was exiled.
             let effect = Effect::PutCounter {
-                counter_type: "P1P1".to_string(),
+                counter_type: CounterType::Plus1Plus1,
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::Power {
                         scope: crate::types::ability::ObjectScope::Source,
@@ -946,6 +998,23 @@ fn typecycling_subtype_to_filter(subtype: &str) -> TargetFilter {
     } else {
         TargetFilter::Typed(TypedFilter::card().subtype(subtype.to_string()))
     }
+}
+
+/// CR 702.153a: The canonical `AbilityDefinition` produced by a Casualty
+/// trigger — a self-referential `CopySpell` gated on the additional cost
+/// having been paid. This is the single authority for what a casualty trigger
+/// resolves into; both `synthesize_casualty` (intrinsic, embedded as the
+/// trigger's `execute`) and the dynamically-granted casualty path in
+/// `triggers::process_triggers` (instantiated via `build_resolved_from_def`)
+/// share this shape.
+pub fn casualty_copy_ability_definition() -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CopySpell {
+            target: TargetFilter::SelfRef,
+        },
+    )
+    .condition(AbilityCondition::additional_cost_paid_any())
 }
 
 /// CR 702.153a: Synthesize Casualty N into an optional sacrifice cost + self-cast copy trigger.
@@ -996,19 +1065,11 @@ pub fn synthesize_casualty(face: &mut CardFace) {
         return;
     }
 
-    let copy_effect = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::CopySpell {
-            target: TargetFilter::SelfRef,
-        },
-    )
-    .condition(AbilityCondition::additional_cost_paid_any());
-
     face.triggers.push(
         TriggerDefinition::new(TriggerMode::SpellCast)
             .valid_card(TargetFilter::SelfRef)
             .trigger_zones(vec![Zone::Stack])
-            .execute(copy_effect)
+            .execute(casualty_copy_ability_definition())
             .description("Casualty — copy this spell when cast with casualty paid".to_string()),
     );
 }
@@ -1153,6 +1214,7 @@ pub fn synthesize_evoke(face: &mut CardFace) {
         Effect::Sacrifice {
             target: TargetFilter::SelfRef,
             count: QuantityExpr::Fixed { value: 1 },
+            min_count: 0,
         },
     );
     let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
@@ -1176,62 +1238,7 @@ pub fn synthesize_evoke(face: &mut CardFace) {
 /// The runtime marks each new echo permanent `echo_due` when it enters and
 /// clears the marker when the unless-payment is handled.
 pub fn synthesize_echo(face: &mut CardFace) {
-    let echo_costs: Vec<ManaCost> = face
-        .keywords
-        .iter()
-        .filter_map(|kw| {
-            if let Keyword::Echo(cost) = kw {
-                Some(cost.clone())
-            } else {
-                None
-            }
-        })
-        .collect();
-    if echo_costs.is_empty() {
-        return;
-    }
-
-    let already_has_trigger = face.triggers.iter().any(|t| {
-        matches!(t.mode, TriggerMode::PayEcho)
-            && t.phase == Some(Phase::Upkeep)
-            && matches!(t.valid_target, Some(TargetFilter::Controller))
-            && matches!(t.condition, Some(TriggerCondition::EchoDue))
-            && t.unless_pay.is_some()
-            && matches!(
-                t.execute.as_deref().map(|a| &*a.effect),
-                Some(Effect::Sacrifice {
-                    target: TargetFilter::SelfRef,
-                    ..
-                })
-            )
-    });
-    if already_has_trigger {
-        return;
-    }
-
-    for cost in echo_costs {
-        let sac = AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: QuantityExpr::Fixed { value: 1 },
-            },
-        );
-        let mut trigger = TriggerDefinition::new(TriggerMode::PayEcho)
-            .phase(Phase::Upkeep)
-            .valid_target(TargetFilter::Controller)
-            .condition(TriggerCondition::EchoDue)
-            .execute(sac)
-            .description(
-                "CR 702.30a: At the beginning of your upkeep, sacrifice this permanent unless you pay its echo cost."
-                    .to_string(),
-            );
-        trigger.unless_pay = Some(UnlessPayModifier {
-            cost: UnlessCost::Fixed { cost },
-            payer: TargetFilter::Controller,
-        });
-        face.triggers.push(trigger);
-    }
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Echo(_)));
 }
 
 /// CR 702.175a: Offspring represents two abilities:
@@ -1312,6 +1319,722 @@ pub fn synthesize_offspring(face: &mut CardFace) {
     face.triggers.push(trigger);
 }
 
+/// CR 702.123a: Fabricate N — "When this permanent enters, you may put N
+/// +1/+1 counters on it. If you don't, create N 1/1 colorless Servo artifact
+/// creature tokens."
+///
+/// CR 702.123b: Each instance of Fabricate triggers separately. A card with
+/// two `Keyword::Fabricate(N)` entries synthesizes two distinct ETB triggers.
+///
+/// Modeled as an ETB trigger whose execute body is `Effect::ChooseOneOf` with
+/// two branches:
+///   - Branch A: `PutCounter { P1P1, count: N, target: SelfRef }`
+///   - Branch B: `Token { Servo 1/1 colorless artifact creature, count: N }`
+///
+/// The CR phrasing ("you may put… if you don't, create…") is structurally
+/// equivalent to a controller-chosen branch: the controller decides which of
+/// the two outcomes resolves. `ChooseOneOf` is the existing primitive for
+/// "you may A or B" patterns and is the correct building block here — adding
+/// a bespoke "may/else" variant would duplicate it without categorical gain.
+///
+/// Timing axis: Fabricate's counter branch is a CR 603 *triggered* ability
+/// that resolves AFTER the permanent has entered, not a CR 614.1c as-enters
+/// replacement. Consequences: counter-placement replacements that modify
+/// "+1/+1 counter placement" broadly (Doubling Season, Hardened Scales) DO
+/// apply to Fabricate's counter branch via the standard counter-placement
+/// modification path. Effects scoped specifically to "enters with counters"
+/// as-enters replacements do NOT apply — Fabricate's counters are added
+/// post-ETB by trigger resolution. Do not move this synthesis into the
+/// as-enters replacement window: that would change the rules-correct timing.
+pub fn synthesize_fabricate(face: &mut CardFace) {
+    let fabricate_values: Vec<u32> = face
+        .keywords
+        .iter()
+        .filter_map(|kw| match kw {
+            Keyword::Fabricate(n) => Some(*n),
+            _ => None,
+        })
+        .collect();
+    if fabricate_values.is_empty() {
+        return;
+    }
+
+    // Idempotency: skip if an ETB ChooseOneOf{P1P1 | Servo} trigger already
+    // exists. Match by structural shape (mode + destination + valid_card +
+    // execute effect kind) so re-running the synthesizer on an already-built
+    // face is a no-op.
+    let already_has_trigger = face.triggers.iter().any(|t| {
+        matches!(t.mode, TriggerMode::ChangesZone)
+            && t.destination == Some(Zone::Battlefield)
+            && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+            && matches!(
+                t.execute.as_deref().map(|a| &*a.effect),
+                Some(Effect::ChooseOneOf { branches, .. })
+                    if branches.iter().any(|b| matches!(
+                        &*b.effect,
+                        Effect::Token { name, .. } if name == "Servo"
+                    ))
+            )
+    });
+    if already_has_trigger {
+        return;
+    }
+
+    for n in fabricate_values {
+        let count_expr = QuantityExpr::Fixed { value: n as i32 };
+        let counter_word = if n == 1 { "counter" } else { "counters" };
+        let token_word = if n == 1 { "token" } else { "tokens" };
+
+        let counters_branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: count_expr.clone(),
+                target: TargetFilter::SelfRef,
+            },
+        )
+        .description(format!("Put {n} +1/+1 {counter_word} on it"));
+
+        // CR 111.1 + CR 111.4: Token is a 1/1 colorless Servo artifact
+        // creature token. `types` carries both core types ("Artifact",
+        // "Creature") and the creature subtype ("Servo") — mirrors the
+        // Treasure pattern (`["Artifact", "Treasure"]`) and Mobilize Warrior
+        // pattern (`["Creature", "Warrior"]`). Colorless is represented as
+        // an empty `colors` vec.
+        let servos_branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Token {
+                name: "Servo".to_string(),
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
+                types: vec![
+                    "Artifact".to_string(),
+                    "Creature".to_string(),
+                    "Servo".to_string(),
+                ],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: count_expr,
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+        )
+        .description(format!(
+            "Create {n} 1/1 colorless Servo artifact creature {token_word}"
+        ));
+
+        let choose = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: crate::types::ability::PlayerFilter::Controller,
+                branches: vec![counters_branch, servos_branch],
+            },
+        );
+
+        let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .destination(Zone::Battlefield)
+            .valid_card(TargetFilter::SelfRef)
+            .execute(choose)
+            .description(format!(
+                "CR 702.123a: Fabricate {n} — when this permanent enters, put {n} +1/+1 {counter_word} on it or create {n} 1/1 colorless Servo artifact creature {token_word}."
+            ));
+        face.triggers.push(trigger);
+    }
+}
+
+/// CR 702.93a: Undying — "When this permanent is put into a graveyard from the
+/// battlefield, if it had no +1/+1 counters on it, return it to the battlefield
+/// under its owner's control with a +1/+1 counter on it."
+///
+/// Synthesizes one dies-triggered ability per `Keyword::Undying` on the face:
+///   * `TriggerMode::ChangesZone` with `origin = Battlefield`, `destination =
+///     Graveyard`, `valid_card = SelfRef` (the canonical dies trigger shape;
+///     CR 603.10a — leaves-the-battlefield triggers look back in time).
+///   * `condition = Not(HadCounters { Some("P1P1") })` — CR 400.7 LKI lookup
+///     against `state.lki_cache` for the source's pre-death counter map.
+///   * Execute body: `Effect::ChangeZone` from `Graveyard` → `Battlefield`
+///     targeting `SelfRef`, with `enter_with_counters = [("P1P1", 1)]`. The
+///     default `under_your_control = false` matches the rule's "under its
+///     owner's control" exactly.
+///
+/// Per CR 113.2c ("If an object has multiple instances of the same ability,
+/// each instance functions independently") combined with the absence of a
+/// redundancy clause in CR 702.93 (compare CR 702.2f for deathtouch and
+/// CR 702.9c for flying, which explicitly mark those keywords as redundant),
+/// every `Keyword::Undying` on the face emits a distinct trigger.
+///
+/// Sibling of `synthesize_persist` — both share this dies-trigger shape and
+/// differ only in counter polarity (CR 702.79a vs CR 702.93a). They are kept
+/// as separate synthesizers (not parameterized into one) because the keyword
+/// enum carries the polarity choice at the type level; no runtime branching
+/// is needed.
+pub fn synthesize_undying(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Undying));
+}
+
+/// CR 702.79a: Persist — "When this permanent is put into a graveyard from the
+/// battlefield, if it had no -1/-1 counters on it, return it to the battlefield
+/// under its owner's control with a -1/-1 counter on it."
+///
+/// Mirror of `synthesize_undying` with -1/-1 counters (`CounterType::Minus1Minus1`
+/// → `"M1M1"`). Per CR 113.2c and the absence of a redundancy clause in
+/// CR 702.79, every `Keyword::Persist` instance functions independently, so
+/// one synthesized trigger is emitted per keyword on the face.
+pub fn synthesize_persist(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Persist));
+}
+
+/// CR 702.86a: Annihilator N — "Whenever this creature attacks, defending
+/// player sacrifices N permanents."
+///
+/// Each `Keyword::Annihilator(n)` on the face emits one attack-triggered
+/// ability whose execute body is `Effect::Sacrifice` over the permanent pool
+/// controlled by the per-attacker defending player. The defending player is
+/// resolved at resolution time through
+/// `ControllerRef::DefendingPlayer` →
+/// `defending_player_for_attacker(state, ability.source_id)` (CR 508.5 / 508.5a:
+/// the defending player relative to an attacking creature is the specific
+/// player that creature is attacking — never "each opponent"). This means in
+/// multiplayer, only the player being attacked by THIS creature sacrifices.
+///
+/// CR 702.86b: "If a creature has multiple instances of annihilator, each
+/// triggers separately." One trigger is synthesized per `Keyword::Annihilator`
+/// on the face. (CR 113.2c also independently mandates that multiple instances
+/// of an ability function independently.)
+///
+/// The trigger uses `TriggerMode::Attacks` with `valid_card = SelfRef` so it
+/// fires only when this creature is among the declared attackers
+/// (`match_attacks` in `trigger_matchers.rs`).
+///
+/// Sacrifice count is encoded as `QuantityExpr::Fixed { value: n }`. The
+/// shared sacrifice resolver (`game::effects::sacrifice::resolve`) routes
+/// `ControllerRef::DefendingPlayer` through `resolve_sacrifice_scope` and
+/// handles the "fewer permanents than N" case via the CR 609.3 "does only as
+/// much as possible" mandatory-all fast-path — no separate "as many as
+/// possible" plumbing is needed here.
+pub fn synthesize_annihilator(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Annihilator(_)));
+}
+
+/// Idempotency-shape predicate for `synthesize_annihilator`. True iff `trigger`
+/// is the synthesized Annihilator attack-trigger shape (`TriggerMode::Attacks`
+/// with `valid_card = SelfRef` and execute body `Effect::Sacrifice` over a
+/// `ControllerRef::DefendingPlayer` permanent filter).
+///
+/// The check is narrow on purpose: an unrelated `Attacks` trigger on the same
+/// face (e.g., "Whenever ~ attacks, you draw a card") must NOT be counted as
+/// an existing Annihilator emission.
+fn is_annihilator_attack_trigger(t: &TriggerDefinition) -> bool {
+    if !matches!(t.mode, TriggerMode::Attacks)
+        || !matches!(t.valid_card, Some(TargetFilter::SelfRef))
+    {
+        return false;
+    }
+    let Some(execute) = t.execute.as_deref() else {
+        return false;
+    };
+    let Effect::Sacrifice { target, .. } = &*execute.effect else {
+        return false;
+    };
+    matches!(
+        target,
+        TargetFilter::Typed(tf)
+            if tf.controller == Some(ControllerRef::DefendingPlayer)
+    )
+}
+
+fn is_echo_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::PayEcho)
+        && t.phase == Some(Phase::Upkeep)
+        && matches!(t.valid_target, Some(TargetFilter::Controller))
+        && matches!(t.condition, Some(TriggerCondition::EchoDue))
+        && t.unless_pay.is_some()
+        && matches!(
+            t.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                ..
+            })
+        )
+}
+
+fn build_echo_trigger(cost: ManaCost) -> TriggerDefinition {
+    let sac = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Sacrifice {
+            target: TargetFilter::SelfRef,
+            count: QuantityExpr::Fixed { value: 1 },
+            min_count: 0,
+        },
+    );
+    let mut trigger = TriggerDefinition::new(TriggerMode::PayEcho)
+        .phase(Phase::Upkeep)
+        .valid_target(TargetFilter::Controller)
+        .condition(TriggerCondition::EchoDue)
+        .execute(sac)
+        .description(
+            "CR 702.30a: At the beginning of your upkeep, sacrifice this permanent unless you pay its echo cost."
+                .to_string(),
+        );
+    trigger.unless_pay = Some(UnlessPayModifier {
+        cost: AbilityCost::Mana { cost },
+        payer: TargetFilter::Controller,
+    });
+    trigger
+}
+
+fn build_annihilator_trigger(n: u32) -> TriggerDefinition {
+    // CR 701.21a: sacrifice moves the permanent to its owner's graveyard.
+    // Sacrifice scope derives from the target filter's `ControllerRef`;
+    // `DefendingPlayer` routes to `defending_player_for_attacker(state,
+    // source_id)` at resolution.
+    let sacrifice_effect = Effect::Sacrifice {
+        target: TargetFilter::Typed(
+            TypedFilter::permanent().controller(ControllerRef::DefendingPlayer),
+        ),
+        count: QuantityExpr::Fixed { value: n as i32 },
+        min_count: 0,
+    };
+
+    let execute =
+        AbilityDefinition::new(AbilityKind::Spell, sacrifice_effect).description(format!(
+            "Defending player sacrifices {n} permanent{}",
+            if n == 1 { "" } else { "s" }
+        ));
+
+    TriggerDefinition::new(TriggerMode::Attacks)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(execute)
+        .description(format!(
+            "CR 702.86a: Annihilator {n} — whenever ~ attacks, defending player sacrifices {n} permanent{}.",
+            if n == 1 { "" } else { "s" }
+        ))
+}
+
+/// Shared trigger builder for the Undying/Persist class (CR 702.93a / CR 702.79a):
+/// "When this permanent dies, if it had no `<polarity>` counters on it, return
+/// it to the battlefield under its owner's control with a `<polarity>` counter
+/// on it."
+///
+/// Build-for-the-class: parameterized over the counter polarity string
+/// (`"P1P1"` or `"M1M1"`). Any future "dies → return with single typed
+/// counter, gated on the same counter type's prior absence" keyword can reuse
+/// this directly.
+fn build_dies_return_with_counter_trigger(
+    counter_type: &str,
+    counter_label: &str,
+    cr_ref: &str,
+) -> TriggerDefinition {
+    let counter_type = crate::types::counter::parse_counter_type(counter_type);
+    // CR 122.1 + CR 614.1c: Single +1/+1 (or -1/-1) counter applied as
+    // the object enters the battlefield, via the existing
+    // `Effect::ChangeZone.enter_with_counters` plumbing.
+    let return_effect = Effect::ChangeZone {
+        origin: Some(Zone::Graveyard),
+        destination: Zone::Battlefield,
+        target: TargetFilter::SelfRef,
+        owner_library: false,
+        enter_transformed: false,
+        // CR 702.93a / CR 702.79a: "under its owner's control" — default
+        // (false) sends the object to its owner's control. `true` would
+        // override to the ability controller's control.
+        under_your_control: false,
+        enter_tapped: false,
+        enters_attacking: false,
+        up_to: false,
+        enter_with_counters: vec![(counter_type.clone(), QuantityExpr::Fixed { value: 1 })],
+    };
+
+    let execute = AbilityDefinition::new(AbilityKind::Spell, return_effect).description(format!(
+        "Return it to the battlefield with a {counter_label} counter on it"
+    ));
+
+    // CR 400.7 + CR 603.10a: "if it had no <polarity> counters on it" —
+    // negate `HadCounters` to express the absence of the specific counter
+    // type in the LKI snapshot captured by `apply_zone_exit_cleanup`.
+    let condition = TriggerCondition::Not {
+        condition: Box::new(TriggerCondition::HadCounters {
+            counter_type: Some(counter_type),
+        }),
+    };
+
+    TriggerDefinition::new(TriggerMode::ChangesZone)
+        .origin(Zone::Battlefield)
+        .destination(Zone::Graveyard)
+        .valid_card(TargetFilter::SelfRef)
+        .condition(condition)
+        .execute(execute)
+        .description(format!(
+            "CR {cr_ref}: When ~ dies, if it had no {counter_label} counters on it, return it to the battlefield under its owner's control with a {counter_label} counter on it."
+        ))
+}
+
+/// Idempotency-shape predicate for `synthesize_dies_return_with_counter`.
+/// True iff `trigger` is the synthesized dies-trigger shape for the given
+/// counter polarity. The check is intentionally narrow — it matches the
+/// engine's exact wire-up (origin/destination/valid_card on the trigger plus
+/// the counter type on the execute body's `enter_with_counters`) — so an
+/// unrelated dies-trigger on the same face (e.g., "When ~ dies, draw a card")
+/// is correctly ignored.
+fn is_dies_return_with_counter_trigger(t: &TriggerDefinition, counter_type: &CounterType) -> bool {
+    if !matches!(t.mode, TriggerMode::ChangesZone)
+        || t.origin != Some(Zone::Battlefield)
+        || t.destination != Some(Zone::Graveyard)
+        || !matches!(t.valid_card, Some(TargetFilter::SelfRef))
+    {
+        return false;
+    }
+    let Some(execute) = t.execute.as_deref() else {
+        return false;
+    };
+    matches!(
+        &*execute.effect,
+        Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Battlefield,
+            target: TargetFilter::SelfRef,
+            enter_with_counters,
+            ..
+        } if enter_with_counters
+            .iter()
+            .any(|(ct, _)| ct == counter_type)
+    )
+}
+
+/// CR 702.43a: Modular N — "This permanent enters the battlefield with N +1/+1
+/// counters on it. When it's put into a graveyard from the battlefield, you
+/// may put a +1/+1 counter on target artifact creature for each +1/+1 counter
+/// on this permanent."
+///
+/// Per CR 702.43b ("If a creature has multiple instances of modular, each one
+/// works separately") and CR 113.2c, each `Keyword::Modular(n)` on the face
+/// emits its own ETB-with-counters replacement AND its own dies-transfer
+/// trigger. No printed card today has multiple Modular instances, but the
+/// per-instance synthesis pins the rule shape so a future printing routes
+/// correctly.
+///
+/// Wiring (composed entirely from existing primitives — no new enum variants):
+///
+///   1. **ETB-with-N P1P1 counters** — `ReplacementDefinition` on
+///      `ReplacementEvent::Moved` with `valid_card = SelfRef`, executing
+///      `Effect::PutCounter { counter_type: "P1P1", count: Fixed(n), target:
+///      SelfRef }`. Mirrors the parser's Walking Ballista shape for "this
+///      creature enters with X +1/+1 counters on it" (CR 614.1c).
+///
+///   2. **Dies-transfer trigger** — `TriggerMode::ChangesZone` (Battlefield →
+///      Graveyard) with `valid_card = SelfRef` (canonical dies trigger; CR
+///      603.10a — leaves-the-battlefield triggers look back in time). The
+///      execute body is `Effect::PutCounter` targeting a single artifact
+///      creature with `count = QuantityRef::CountersOn { scope: Source,
+///      counter_type: Some("P1P1") }`. Per CR 122.1 + CR 400.7 the `Source`
+///      scope falls back to the LKI snapshot when the dying object is in the
+///      graveyard at resolution, so the count reflects the pre-death P1P1
+///      counter total (which may differ from N due to Hardened Scales doubling,
+///      added counters from other sources, or -1/-1 counter annihilation).
+///      The ability is marked `.optional()` per CR 603.5 — optional triggered
+///      abilities go on the stack and the controller is prompted "you may"
+///      when the ability resolves.
+///
+/// Build-for-the-class: any future "dies → transfer counters of one type to a
+/// target permanent of a fixed type/property class" keyword can lift this
+/// shape directly (parameterize over counter type + target type filter).
+pub fn synthesize_modular(face: &mut CardFace) {
+    let modular_values: Vec<u32> = face
+        .keywords
+        .iter()
+        .filter_map(|kw| match kw {
+            Keyword::Modular(n) => Some(*n),
+            _ => None,
+        })
+        .collect();
+    if modular_values.is_empty() {
+        return;
+    }
+
+    // ETB-with-counters replacement: per-N idempotency match on the synthesized
+    // Moved → PutCounter(SelfRef, P1P1, Fixed(N)) replacement. The predicate is
+    // narrowed to the exact N so a card that carries both a printed "enters
+    // with K +1/+1 counters" replacement AND `Keyword::Modular(N)` with K≠N
+    // can't silently dedupe — each Modular instance only counts an existing
+    // ETB replacement as covered when its `Fixed` value equals that instance's
+    // N. Walking Ballista's `count: CostXPaid` variant fails the `Fixed { .. }`
+    // pattern regardless and never collides.
+    //
+    // Dies-transfer is shape-only because the execute body has no N dependence
+    // (count is the LKI-counted runtime quantity, identical across all
+    // instances on a single face).
+    let existing_dies: usize = face
+        .triggers
+        .iter()
+        .filter(|t| is_modular_dies_transfer_trigger(t))
+        .count();
+
+    // Per CR 702.43b + CR 113.2c: each Modular instance emits its own ETB
+    // replacement. To survive re-running synthesis idempotently, count
+    // existing same-N replacements and emit only the delta — `Modular(2)`
+    // twice on a face needs two `Fixed(2)` replacements; running synthesis
+    // again must not add a third.
+    for &n in &modular_values {
+        let needed = modular_values.iter().filter(|m| **m == n).count();
+        let existing = face
+            .replacements
+            .iter()
+            .filter(|r| is_modular_etb_replacement(r, n))
+            .count();
+        if existing >= needed {
+            continue;
+        }
+        let etb_counters = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: n as i32 },
+                target: TargetFilter::SelfRef,
+            },
+        )
+        .description(format!(
+            "This permanent enters with {n} +1/+1 counter{} on it",
+            if n == 1 { "" } else { "s" }
+        ));
+
+        let replacement = ReplacementDefinition {
+            event: ReplacementEvent::Moved,
+            execute: Some(Box::new(etb_counters)),
+            valid_card: Some(TargetFilter::SelfRef),
+            description: Some(format!(
+                "CR 702.43a: Modular {n} — this permanent enters with {n} +1/+1 counter{} on it.",
+                if n == 1 { "" } else { "s" }
+            )),
+            ..ReplacementDefinition::new(ReplacementEvent::Moved)
+        };
+        face.replacements.push(replacement);
+    }
+
+    for _ in modular_values.iter().skip(existing_dies) {
+        // CR 122.1 + CR 400.7: Transfer count reads from the source object's
+        // counter map, with LKI fallback. At dies-trigger resolution the source
+        // is already in the graveyard, so this resolves against the LKI
+        // snapshot captured by `apply_zone_exit_cleanup` — capturing any
+        // counters added by Hardened Scales, removed by -1/-1 annihilation,
+        // etc. before death.
+        let transfer = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: Some(CounterType::Plus1Plus1),
+                    },
+                },
+                // CR 702.43a: "target artifact creature" — conjunction of
+                // Artifact + Creature core types.
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().with_type(TypeFilter::Artifact),
+                ),
+            },
+        )
+        .description("Put a +1/+1 counter on target artifact creature for each +1/+1 counter on this permanent".to_string())
+        // CR 603.5: "you may" — optional triggered abilities go on the stack
+        // and the controller is prompted to skip the option during resolution.
+        .optional();
+
+        let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .origin(Zone::Battlefield)
+            .destination(Zone::Graveyard)
+            .valid_card(TargetFilter::SelfRef)
+            .execute(transfer)
+            .description(
+                "CR 702.43a: Modular — when this creature dies, you may put a +1/+1 counter on target artifact creature for each +1/+1 counter on it."
+                    .to_string(),
+            );
+        face.triggers.push(trigger);
+    }
+}
+
+/// Idempotency-shape predicate for `synthesize_modular`'s ETB-with-counters
+/// replacement. True iff `replacement` is a `Moved` replacement on `SelfRef`
+/// whose execute body is `Effect::PutCounter` placing exactly `expected_n`
+/// P1P1 counters on `SelfRef` with a fixed count.
+///
+/// The `expected_n` argument is load-bearing: a card carrying both a parsed
+/// "enters with K +1/+1 counters" replacement AND `Keyword::Modular(N)` with
+/// K ≠ N must NOT silently dedupe — the K replacement is not a Modular-N
+/// replacement and the synthesizer must still emit Fixed(N). Matching by
+/// shape alone (any `Fixed { value }`) would treat K as covering N and skip
+/// the emit, leaving the card with the wrong ETB count.
+fn is_modular_etb_replacement(replacement: &ReplacementDefinition, expected_n: u32) -> bool {
+    if !matches!(replacement.event, ReplacementEvent::Moved)
+        || !matches!(replacement.valid_card, Some(TargetFilter::SelfRef))
+    {
+        return false;
+    }
+    let Some(execute) = replacement.execute.as_deref() else {
+        return false;
+    };
+    matches!(
+        &*execute.effect,
+        Effect::PutCounter {
+            counter_type,
+            count: QuantityExpr::Fixed { value },
+            target: TargetFilter::SelfRef,
+        } if *counter_type == CounterType::Plus1Plus1 && *value == expected_n as i32
+    )
+}
+
+/// Idempotency-shape predicate for `synthesize_modular`'s dies-transfer
+/// trigger. True iff `trigger` is a dies trigger (Battlefield → Graveyard) on
+/// `SelfRef` whose execute body is `Effect::PutCounter` placing P1P1 counters
+/// on an artifact-creature target with an LKI-counter-count quantity ref.
+fn is_modular_dies_transfer_trigger(t: &TriggerDefinition) -> bool {
+    if !matches!(t.mode, TriggerMode::ChangesZone)
+        || t.origin != Some(Zone::Battlefield)
+        || t.destination != Some(Zone::Graveyard)
+        || !matches!(t.valid_card, Some(TargetFilter::SelfRef))
+    {
+        return false;
+    }
+    let Some(execute) = t.execute.as_deref() else {
+        return false;
+    };
+    matches!(
+        &*execute.effect,
+        Effect::PutCounter {
+            counter_type,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::CountersOn {
+                    scope: ObjectScope::Source,
+                    counter_type: Some(lki_ct),
+                },
+            },
+            target: TargetFilter::Typed(tf),
+        } if *counter_type == CounterType::Plus1Plus1
+            && *lki_ct == CounterType::Plus1Plus1
+            && tf.type_filters.iter().any(|f| matches!(f, TypeFilter::Creature))
+            && tf.type_filters.iter().any(|f| matches!(f, TypeFilter::Artifact))
+    )
+}
+
+/// CR 702.54a: Bloodthirst N is a static ability. "Bloodthirst N" means
+/// "If an opponent was dealt damage this turn, this permanent enters with
+/// N +1/+1 counters on it." Modeled as a `ReplacementEvent::Moved` (i.e.,
+/// ETB) replacement on `SelfRef` whose `condition` is the per-turn
+/// damage-history gate `ReplacementCondition::OpponentDamagedThisTurn`. The
+/// gate is checked at replacement-applicability time so the condition
+/// reflects game state at the moment the permanent attempts to enter, not
+/// at synthesis time.
+///
+/// CR 702.54c + CR 113.2c: Each Bloodthirst instance applies separately.
+/// No printed card today carries two instances, but the per-N idempotency
+/// match below treats the count as load-bearing so a granted-Bloodthirst
+/// case or future printing routes correctly. The idempotency predicate
+/// additionally requires the gating `OpponentDamagedThisTurn` condition,
+/// so a parsed `ReplacementEvent::Moved` + `PutCounter(SelfRef, P1P1,
+/// Fixed(N))` without the condition (e.g., a printed unconditional "enters
+/// with N counters" replacement) does NOT pre-satisfy the Bloodthirst
+/// emission — both will coexist.
+///
+/// Bloodthirst X (CR 702.54b, single printed card "Petrified Wood-Kin")
+/// is NOT handled here: it currently parses to `Bloodthirst(1)` due to a
+/// parser-side limitation in representing X-form Bloodthirst, and the
+/// X-resolution-to-damage-amount semantics are distinct from Fixed-N.
+/// That gap is tracked separately as a parser-bug ticket.
+pub fn synthesize_bloodthirst(face: &mut CardFace) {
+    let bloodthirst_values: Vec<u32> = face
+        .keywords
+        .iter()
+        .filter_map(|kw| match kw {
+            Keyword::Bloodthirst(n) => Some(*n),
+            _ => None,
+        })
+        .collect();
+    if bloodthirst_values.is_empty() {
+        return;
+    }
+
+    // Per CR 702.54c + CR 113.2c: each Bloodthirst instance emits its own
+    // ETB replacement. To survive re-running synthesis idempotently, count
+    // existing same-N replacements and emit only the delta.
+    for &n in &bloodthirst_values {
+        let needed = bloodthirst_values.iter().filter(|m| **m == n).count();
+        let existing = face
+            .replacements
+            .iter()
+            .filter(|r| is_bloodthirst_etb_replacement(r, n))
+            .count();
+        if existing >= needed {
+            continue;
+        }
+        let etb_counters = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: n as i32 },
+                target: TargetFilter::SelfRef,
+            },
+        )
+        .description(format!(
+            "This permanent enters with {n} +1/+1 counter{} on it",
+            if n == 1 { "" } else { "s" }
+        ));
+
+        let replacement = ReplacementDefinition {
+            event: ReplacementEvent::Moved,
+            execute: Some(Box::new(etb_counters)),
+            valid_card: Some(TargetFilter::SelfRef),
+            condition: Some(ReplacementCondition::OpponentDamagedThisTurn),
+            description: Some(format!(
+                "CR 702.54a: Bloodthirst {n} — if an opponent was dealt damage this turn, this permanent enters with {n} +1/+1 counter{} on it.",
+                if n == 1 { "" } else { "s" }
+            )),
+            ..ReplacementDefinition::new(ReplacementEvent::Moved)
+        };
+        face.replacements.push(replacement);
+    }
+}
+
+/// Idempotency-shape predicate for `synthesize_bloodthirst`. True iff
+/// `replacement` is a `Moved` replacement on `SelfRef` gated by
+/// `ReplacementCondition::OpponentDamagedThisTurn` whose execute body is
+/// `Effect::PutCounter` placing exactly `expected_n` P1P1 counters on
+/// `SelfRef` with a fixed count.
+///
+/// The `expected_n` argument is load-bearing: a card carrying both a parsed
+/// "enters with K +1/+1 counters" replacement AND `Keyword::Bloodthirst(N)`
+/// with K ≠ N must NOT silently dedupe. The condition match is also
+/// load-bearing: an unconditional ETB-with-counters replacement (e.g., a
+/// printed "this permanent enters with N +1/+1 counters on it") with the
+/// same N is NOT a Bloodthirst replacement and must not pre-satisfy the
+/// emit (Bloodthirst is conditional on damage history, the printed
+/// unconditional one always fires).
+fn is_bloodthirst_etb_replacement(replacement: &ReplacementDefinition, expected_n: u32) -> bool {
+    if !matches!(replacement.event, ReplacementEvent::Moved)
+        || !matches!(replacement.valid_card, Some(TargetFilter::SelfRef))
+        || !matches!(
+            replacement.condition,
+            Some(ReplacementCondition::OpponentDamagedThisTurn)
+        )
+    {
+        return false;
+    }
+    let Some(execute) = replacement.execute.as_deref() else {
+        return false;
+    };
+    matches!(
+        &*execute.effect,
+        Effect::PutCounter {
+            counter_type,
+            count: QuantityExpr::Fixed { value },
+            target: TargetFilter::SelfRef,
+        } if *counter_type == CounterType::Plus1Plus1 && *value == expected_n as i32
+    )
+}
+
 /// CR 702.62a: Suspend N—{cost} synthesizes three abilities for every face
 /// carrying `Keyword::Suspend { count, cost }`:
 ///
@@ -1370,7 +2093,7 @@ pub fn synthesize_suspend(face: &mut CardFace) {
             && matches!(
                 &*a.effect,
                 Effect::PutCounter { counter_type, target: TargetFilter::SelfRef, .. }
-                    if counter_type == "time"
+                    if *counter_type == CounterType::Time
             )
     });
     if !already_has_activation {
@@ -1393,7 +2116,7 @@ pub fn synthesize_suspend(face: &mut CardFace) {
             // typed CounterType variant; the legacy String API for PutCounter
             // takes the canonical `as_str()` value ("time").
             Effect::PutCounter {
-                counter_type: CounterType::Time.as_str().to_string(),
+                counter_type: CounterType::Time,
                 count: QuantityExpr::Fixed {
                     value: time_counters as i32,
                 },
@@ -1419,15 +2142,15 @@ pub fn synthesize_suspend(face: &mut CardFace) {
             && matches!(t.valid_card, Some(TargetFilter::SelfRef))
             && matches!(
                 t.execute.as_deref().map(|a| &*a.effect),
-                Some(Effect::RemoveCounter { counter_type, target: TargetFilter::SelfRef, .. })
-                    if counter_type == "time"
+                Some(Effect::RemoveCounter { counter_type: Some(counter_type), target: TargetFilter::SelfRef, .. })
+                    if *counter_type == CounterType::Time
             )
     });
     if !already_has_upkeep_trigger {
         let remove_one = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::RemoveCounter {
-                counter_type: CounterType::Time.as_str().to_string(),
+                counter_type: Some(CounterType::Time),
                 count: 1,
                 target: TargetFilter::SelfRef,
             },
@@ -1618,6 +2341,30 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_echo(face);
     // CR 702.175a: Offspring — optional additional cost + ETB 1/1 copy trigger.
     synthesize_offspring(face);
+    // CR 702.123a: Fabricate N — ETB trigger with controller-chosen branch
+    // between N +1/+1 counters or N 1/1 colorless Servo artifact creature
+    // tokens. Modeled via `Effect::ChooseOneOf`.
+    synthesize_fabricate(face);
+    // CR 702.93a: Undying — dies trigger that returns the permanent with a
+    // +1/+1 counter, gated on having had no +1/+1 counter at death (LKI).
+    synthesize_undying(face);
+    // CR 702.79a: Persist — dies trigger that returns the permanent with a
+    // -1/-1 counter, gated on having had no -1/-1 counter at death (LKI).
+    // Sibling of Undying via shared `synthesize_dies_return_with_counter`.
+    synthesize_persist(face);
+    // CR 702.86a: Annihilator N — attacks trigger that forces the defending
+    // player to sacrifice N permanents. CR 702.86b: each instance triggers
+    // separately. Defending player resolved per-attacker via
+    // `ControllerRef::DefendingPlayer` (CR 508.5 / 508.5a).
+    synthesize_annihilator(face);
+    // CR 702.43a + CR 702.43b: Modular N — ETB-with-N-P1P1 replacement plus a
+    // dies-trigger transferring counters (LKI-counted) to a target artifact
+    // creature. Each instance functions independently.
+    synthesize_modular(face);
+    // CR 702.54a + CR 702.54c: Bloodthirst N — ETB-with-N-P1P1 replacement
+    // gated on "an opponent was dealt damage this turn". Each instance
+    // functions independently. Bloodthirst X is parser-deferred.
+    synthesize_bloodthirst(face);
     // CR 702.62a: Suspend — hand-activated alt-cost + upkeep counter-removal +
     // last-counter free-cast. Runs after Evoke to keep alt-cost synthesizers
     // grouped; idempotent so order against Cycling/Madness is irrelevant.
@@ -2593,6 +3340,1437 @@ mod evoke_synthesis_tests {
 }
 
 #[cfg(test)]
+mod fabricate_synthesis_tests {
+    use super::*;
+
+    fn fabricate_face(n: u32) -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Fabricate(n));
+        face
+    }
+
+    /// CR 702.123a: Fabricate synthesizes an ETB ChooseOneOf trigger whose
+    /// two branches are the P1P1 counter placement and the Servo token
+    /// creation, both parameterized by N.
+    #[test]
+    fn synthesize_fabricate_adds_etb_choose_branches() {
+        let mut face = fabricate_face(2);
+        synthesize_fabricate(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| {
+                matches!(t.mode, TriggerMode::ChangesZone)
+                    && t.destination == Some(Zone::Battlefield)
+                    && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+            })
+            .expect("fabricate should add an ETB trigger");
+
+        let Some(Effect::ChooseOneOf { branches, .. }) =
+            trigger.execute.as_deref().map(|a| &*a.effect)
+        else {
+            panic!("fabricate execute should be ChooseOneOf");
+        };
+        assert_eq!(branches.len(), 2, "fabricate offers two branches");
+
+        let counter_branch = branches
+            .iter()
+            .find(|b| matches!(&*b.effect, Effect::PutCounter { .. }))
+            .expect("one branch must place +1/+1 counters");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = &*counter_branch.effect
+        else {
+            unreachable!();
+        };
+        assert_eq!(counter_type, &CounterType::Plus1Plus1);
+        assert!(matches!(count, QuantityExpr::Fixed { value: 2 }));
+        assert!(matches!(target, TargetFilter::SelfRef));
+
+        let token_branch = branches
+            .iter()
+            .find(|b| matches!(&*b.effect, Effect::Token { .. }))
+            .expect("one branch must create Servo tokens");
+        let Effect::Token {
+            name,
+            power,
+            toughness,
+            types,
+            colors,
+            count,
+            ..
+        } = &*token_branch.effect
+        else {
+            unreachable!();
+        };
+        assert_eq!(name, "Servo");
+        assert!(matches!(power, PtValue::Fixed(1)));
+        assert!(matches!(toughness, PtValue::Fixed(1)));
+        assert_eq!(
+            types,
+            &vec![
+                "Artifact".to_string(),
+                "Creature".to_string(),
+                "Servo".to_string()
+            ]
+        );
+        assert!(colors.is_empty(), "Servo tokens are colorless");
+        assert!(matches!(count, QuantityExpr::Fixed { value: 2 }));
+    }
+
+    /// Repeated synthesis must not duplicate the trigger (idempotency).
+    #[test]
+    fn synthesize_fabricate_is_idempotent() {
+        let mut face = fabricate_face(1);
+        synthesize_fabricate(&mut face);
+        synthesize_fabricate(&mut face);
+        let count = face
+            .triggers
+            .iter()
+            .filter(|t| {
+                matches!(t.mode, TriggerMode::ChangesZone)
+                    && t.destination == Some(Zone::Battlefield)
+                    && matches!(
+                        t.execute.as_deref().map(|a| &*a.effect),
+                        Some(Effect::ChooseOneOf { .. })
+                    )
+            })
+            .count();
+        assert_eq!(count, 1, "fabricate trigger should be deduped");
+    }
+
+    /// Cards without Fabricate are unaffected.
+    #[test]
+    fn synthesize_fabricate_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flying);
+        synthesize_fabricate(&mut face);
+        assert!(face.triggers.is_empty());
+    }
+
+    /// Negative test: a creature ETB without Fabricate must not synthesize
+    /// a ChooseOneOf trigger. Guards against false positives that would
+    /// prompt on every non-Fabricate creature.
+    #[test]
+    fn synthesize_fabricate_does_not_affect_other_keywords() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Trample);
+        face.keywords.push(Keyword::Vigilance);
+        synthesize_fabricate(&mut face);
+        assert!(face.triggers.is_empty());
+    }
+
+    /// CR 702.123b: Each instance of Fabricate triggers separately, so a
+    /// card with two `Keyword::Fabricate` entries synthesizes two triggers.
+    /// No printed card has this today; the test guards the rule shape.
+    #[test]
+    fn synthesize_fabricate_emits_one_trigger_per_instance() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Fabricate(1));
+        face.keywords.push(Keyword::Fabricate(3));
+        synthesize_fabricate(&mut face);
+        let triggers: Vec<_> = face
+            .triggers
+            .iter()
+            .filter(|t| {
+                matches!(
+                    t.execute.as_deref().map(|a| &*a.effect),
+                    Some(Effect::ChooseOneOf { .. })
+                )
+            })
+            .collect();
+        assert_eq!(triggers.len(), 2);
+        // Idempotency dedupe is by structural shape, but the first call
+        // installs both N=1 and N=3 in one pass — the second call sees the
+        // shape match and skips entirely. Verify both Ns are present from
+        // the first pass.
+        let ns: Vec<i32> = triggers
+            .iter()
+            .filter_map(|t| match t.execute.as_deref().map(|a| &*a.effect) {
+                Some(Effect::ChooseOneOf { branches, .. }) => {
+                    branches.iter().find_map(|b| match &*b.effect {
+                        Effect::PutCounter {
+                            count: QuantityExpr::Fixed { value },
+                            ..
+                        } => Some(*value),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(ns.contains(&1) && ns.contains(&3));
+    }
+}
+
+#[cfg(test)]
+mod fabricate_runtime_tests {
+    //! CR 702.123a runtime integration: the synthesized ETB ChooseOneOf
+    //! trigger fires on enters-the-battlefield, lands on the stack as a
+    //! triggered ability, resolves into `WaitingFor::ChooseOneOfBranch`,
+    //! and each branch produces the rule-correct outcome (P1P1 counters
+    //! or Servo tokens).
+
+    use super::*;
+    use crate::game::printed_cards::apply_card_face_to_object;
+    use crate::game::triggers::process_triggers;
+    use crate::game::zones::create_object;
+    use crate::types::actions::GameAction;
+    use crate::types::card_type::CoreType;
+    use crate::types::events::GameEvent;
+    use crate::types::game_state::{GameState, StackEntryKind, WaitingFor, ZoneChangeRecord};
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::player::PlayerId;
+
+    /// Build a `CardFace` that mimics a Cultivator-of-Blades-shaped card
+    /// (creature with `Fabricate N`) and apply the full synthesis pipeline.
+    fn fabricate_creature_face(name: &str, n: u32) -> CardFace {
+        let mut face = CardFace {
+            name: name.to_string(),
+            power: Some(PtValue::Fixed(2)),
+            toughness: Some(PtValue::Fixed(2)),
+            keywords: vec![Keyword::Fabricate(n)],
+            ..CardFace::default()
+        };
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_all(&mut face);
+        face
+    }
+
+    /// CR 603.6a + CR 111.1: Synthesize an enters-the-battlefield event so
+    /// `process_triggers` recognizes the ETB and the synthesized Fabricate
+    /// trigger fires.
+    fn etb_event(object_id: ObjectId, name: &str) -> GameEvent {
+        GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Stack),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord {
+                name: name.to_string(),
+                core_types: vec![CoreType::Creature],
+                subtypes: vec![],
+                ..ZoneChangeRecord::test_minimal(object_id, Some(Zone::Stack), Zone::Battlefield)
+            }),
+        }
+    }
+
+    fn setup_state_with_priority(controller: PlayerId) -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        state.active_player = controller;
+        state.priority_player = controller;
+        state.waiting_for = WaitingFor::Priority { player: controller };
+        state
+    }
+
+    /// Cast a Fabricate creature from hand, then pass priority through the
+    /// normal stack pipeline until the ETB trigger resolves into the
+    /// ChooseOneOfBranch prompt. This intentionally does not synthesize the
+    /// ZoneChanged event or call process_triggers directly.
+    fn cast_and_resolve_fabricate_to_choice(
+        face: &CardFace,
+        controller: PlayerId,
+    ) -> (GameState, ObjectId) {
+        let mut state = setup_state_with_priority(controller);
+        let next_card = CardId(state.next_object_id);
+        let obj_id = create_object(
+            &mut state,
+            next_card,
+            controller,
+            face.name.clone(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            apply_card_face_to_object(obj, face);
+        }
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: obj_id,
+                card_id: next_card,
+                targets: vec![],
+            },
+        )
+        .unwrap();
+
+        let mut saw_fabricate_trigger_on_stack = false;
+        for _ in 0..8 {
+            if matches!(state.waiting_for, WaitingFor::ChooseOneOfBranch { .. }) {
+                assert!(
+                    saw_fabricate_trigger_on_stack,
+                    "Fabricate ETB trigger must land on the stack before resolving"
+                );
+                assert_eq!(
+                    state.objects.get(&obj_id).unwrap().zone,
+                    Zone::Battlefield,
+                    "Fabricate creature must enter through stack resolution"
+                );
+                return (state, obj_id);
+            }
+
+            assert!(
+                matches!(state.waiting_for, WaitingFor::Priority { .. }),
+                "expected priority while advancing cast/trigger pipeline, got {:?}",
+                state.waiting_for
+            );
+            saw_fabricate_trigger_on_stack |= state
+                .stack
+                .iter()
+                .any(|entry| matches!(&entry.kind, StackEntryKind::TriggeredAbility { .. }));
+            crate::game::engine::apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        }
+
+        panic!(
+            "Fabricate ETB trigger did not resolve to ChooseOneOfBranch; waiting_for={:?}, stack_len={}",
+            state.waiting_for,
+            state.stack.len()
+        );
+    }
+
+    /// CR 702.123a branch A: choosing the +1/+1 counter branch places N
+    /// P1P1 counters on the permanent that entered via normal spell
+    /// resolution.
+    #[test]
+    fn fabricate_e2e_counter_branch_places_p1p1_counters_on_self() {
+        let face = fabricate_creature_face("Cultivator of Blades", 2);
+        let (mut state, obj_id) = cast_and_resolve_fabricate_to_choice(&face, PlayerId(0));
+
+        // Confirm the choose-one-of prompt is waiting on the controller.
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ChooseOneOfBranch {
+                player: PlayerId(0),
+                ..
+            }
+        ));
+
+        // Branch 0 = P1P1 counters per synthesizer construction order.
+        crate::game::engine::apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 })
+            .unwrap();
+
+        let obj = state.objects.get(&obj_id).unwrap();
+        let p1p1_count: u32 = obj
+            .counters
+            .iter()
+            .filter(|(ct, _)| **ct == crate::types::counter::CounterType::Plus1Plus1)
+            .map(|(_, n)| *n)
+            .sum();
+        assert_eq!(
+            p1p1_count, 2,
+            "Fabricate 2 counter branch must place 2 +1/+1 counters"
+        );
+    }
+
+    /// CR 702.123a branch B: choosing the Servo branch creates N 1/1
+    /// colorless Servo artifact creature tokens under the controller after
+    /// normal spell and ETB-trigger resolution.
+    #[test]
+    fn fabricate_e2e_servo_branch_creates_artifact_creature_tokens() {
+        let face = fabricate_creature_face("Cultivator of Blades", 2);
+        let (mut state, _obj_id) = cast_and_resolve_fabricate_to_choice(&face, PlayerId(0));
+
+        // Branch 1 = Servo tokens.
+        crate::game::engine::apply_as_current(&mut state, GameAction::ChooseBranch { index: 1 })
+            .unwrap();
+
+        let servos: Vec<&crate::game::game_object::GameObject> = state
+            .objects
+            .values()
+            .filter(|obj| obj.name == "Servo" && obj.is_token)
+            .collect();
+        assert_eq!(
+            servos.len(),
+            2,
+            "Fabricate 2 token branch must create 2 Servos"
+        );
+        for token in &servos {
+            assert!(
+                token.card_types.core_types.contains(&CoreType::Artifact),
+                "Servo must be an artifact"
+            );
+            assert!(
+                token.card_types.core_types.contains(&CoreType::Creature),
+                "Servo must be a creature"
+            );
+            assert!(
+                token.card_types.subtypes.iter().any(|s| s == "Servo"),
+                "Servo must carry Servo subtype"
+            );
+            assert!(token.color.is_empty(), "Servo must be colorless");
+            assert_eq!(token.controller, PlayerId(0));
+        }
+    }
+
+    /// CR 702.123a with Fabricate 1 — Ambitious Aetherborn shape — exercises
+    /// the same flow with N=1 to guard against off-by-one collapse of the
+    /// branch construction.
+    #[test]
+    fn fabricate_one_resolves_with_singleton_payload() {
+        let face = fabricate_creature_face("Ambitious Aetherborn", 1);
+        let (mut state, obj_id) = cast_and_resolve_fabricate_to_choice(&face, PlayerId(0));
+
+        crate::game::engine::apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 })
+            .unwrap();
+
+        let obj = state.objects.get(&obj_id).unwrap();
+        let p1p1_count: u32 = obj
+            .counters
+            .iter()
+            .filter(|(ct, _)| **ct == crate::types::counter::CounterType::Plus1Plus1)
+            .map(|(_, n)| *n)
+            .sum();
+        assert_eq!(p1p1_count, 1);
+    }
+
+    /// Lower-level trigger plumbing negative: a non-Fabricate creature ETB
+    /// event must not synthesize a ChooseOneOf prompt. The positive branch
+    /// tests above cover the full cast/priority/stack runtime pipeline.
+    #[test]
+    fn etb_without_fabricate_does_not_emit_choose_one_of() {
+        let mut face = CardFace {
+            name: "Plain Bear".to_string(),
+            power: Some(PtValue::Fixed(2)),
+            toughness: Some(PtValue::Fixed(2)),
+            ..CardFace::default()
+        };
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_all(&mut face);
+
+        let mut state = setup_state_with_priority(PlayerId(0));
+
+        let next_card = CardId(state.next_object_id);
+        let obj_id = create_object(
+            &mut state,
+            next_card,
+            PlayerId(0),
+            face.name.clone(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            apply_card_face_to_object(obj, &face);
+        }
+        process_triggers(&mut state, &[etb_event(obj_id, &face.name)]);
+        assert!(
+            !state
+                .stack
+                .iter()
+                .any(|entry| matches!(&entry.kind, StackEntryKind::TriggeredAbility { .. })),
+            "non-Fabricate ETB must not push a triggered ability"
+        );
+    }
+}
+
+#[cfg(test)]
+mod undying_persist_synthesis_tests {
+    //! CR 702.93a + CR 702.79a: Shape tests for the synthesized dies-triggers
+    //! that return a permanent with a counter, gated on its LKI counter state.
+    //! Pinned to the exact wire-up the runtime resolver consumes:
+    //! `TriggerMode::ChangesZone` (Battlefield → Graveyard), `valid_card =
+    //! SelfRef`, `condition = Not(HadCounters(...))`, execute body
+    //! `Effect::ChangeZone` (Graveyard → Battlefield) with
+    //! `enter_with_counters = [(polarity, 1)]`.
+    use super::*;
+
+    fn face_with_keyword(kw: Keyword) -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(kw);
+        face
+    }
+
+    /// CR 702.93a: Undying synthesizes a dies-trigger that returns the
+    /// permanent with one +1/+1 counter, gated on the LKI absence of any
+    /// +1/+1 counter.
+    #[test]
+    fn synthesize_undying_adds_dies_trigger_with_p1p1_return() {
+        let mut face = face_with_keyword(Keyword::Undying);
+        synthesize_undying(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| is_dies_return_with_counter_trigger(t, &CounterType::Plus1Plus1))
+            .expect("undying should synthesize a dies-return trigger");
+
+        // Trigger shape: dies (battlefield → graveyard) with self-ref filter.
+        assert!(matches!(trigger.mode, TriggerMode::ChangesZone));
+        assert_eq!(trigger.origin, Some(Zone::Battlefield));
+        assert_eq!(trigger.destination, Some(Zone::Graveyard));
+        assert!(matches!(trigger.valid_card, Some(TargetFilter::SelfRef)));
+
+        // Condition: Not(HadCounters { Some("P1P1") }) — LKI-gated absence.
+        let Some(TriggerCondition::Not { condition }) = &trigger.condition else {
+            panic!("undying condition should be Not(...)");
+        };
+        let TriggerCondition::HadCounters { counter_type } = condition.as_ref() else {
+            panic!("undying inner condition should be HadCounters");
+        };
+        assert_eq!(counter_type, &Some(CounterType::Plus1Plus1));
+
+        // Execute: ChangeZone graveyard → battlefield + one P1P1 counter.
+        let execute = trigger.execute.as_deref().expect("execute body required");
+        let Effect::ChangeZone {
+            origin,
+            destination,
+            target,
+            under_your_control,
+            enter_with_counters,
+            ..
+        } = &*execute.effect
+        else {
+            panic!("undying execute should be Effect::ChangeZone");
+        };
+        assert_eq!(*origin, Some(Zone::Graveyard));
+        assert_eq!(*destination, Zone::Battlefield);
+        assert!(matches!(target, TargetFilter::SelfRef));
+        // CR 702.93a: "under its owner's control" — default routing (no
+        // override) places the object under its owner.
+        assert!(!*under_your_control);
+        assert_eq!(enter_with_counters.len(), 1);
+        let (ct, qty) = &enter_with_counters[0];
+        assert_eq!(ct, &CounterType::Plus1Plus1);
+        assert!(matches!(qty, QuantityExpr::Fixed { value: 1 }));
+    }
+
+    /// CR 702.79a: Persist mirror of the Undying shape test — -1/-1 counters,
+    /// same trigger/effect topology.
+    #[test]
+    fn synthesize_persist_adds_dies_trigger_with_m1m1_return() {
+        let mut face = face_with_keyword(Keyword::Persist);
+        synthesize_persist(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| is_dies_return_with_counter_trigger(t, &CounterType::Minus1Minus1))
+            .expect("persist should synthesize a dies-return trigger");
+
+        let Some(TriggerCondition::Not { condition }) = &trigger.condition else {
+            panic!("persist condition should be Not(...)");
+        };
+        let TriggerCondition::HadCounters { counter_type } = condition.as_ref() else {
+            panic!("persist inner condition should be HadCounters");
+        };
+        assert_eq!(counter_type, &Some(CounterType::Minus1Minus1));
+
+        let execute = trigger.execute.as_deref().expect("execute body required");
+        let Effect::ChangeZone {
+            enter_with_counters,
+            ..
+        } = &*execute.effect
+        else {
+            panic!("persist execute should be Effect::ChangeZone");
+        };
+        let (ct, qty) = &enter_with_counters[0];
+        assert_eq!(ct, &CounterType::Minus1Minus1);
+        assert!(matches!(qty, QuantityExpr::Fixed { value: 1 }));
+    }
+
+    /// Repeated synthesis must not duplicate the trigger — the idempotency
+    /// guard counts existing matching-shape triggers and skips when the
+    /// keyword count is already satisfied.
+    #[test]
+    fn synthesize_undying_is_idempotent() {
+        let mut face = face_with_keyword(Keyword::Undying);
+        synthesize_undying(&mut face);
+        synthesize_undying(&mut face);
+        let count = face
+            .triggers
+            .iter()
+            .filter(|t| is_dies_return_with_counter_trigger(t, &CounterType::Plus1Plus1))
+            .count();
+        assert_eq!(count, 1, "undying trigger should be deduped");
+    }
+
+    #[test]
+    fn synthesize_persist_is_idempotent() {
+        let mut face = face_with_keyword(Keyword::Persist);
+        synthesize_persist(&mut face);
+        synthesize_persist(&mut face);
+        let count = face
+            .triggers
+            .iter()
+            .filter(|t| is_dies_return_with_counter_trigger(t, &CounterType::Minus1Minus1))
+            .count();
+        assert_eq!(count, 1, "persist trigger should be deduped");
+    }
+
+    /// Faces without the keyword get no synthesized trigger.
+    #[test]
+    fn synthesize_undying_noop_without_keyword() {
+        let mut face = face_with_keyword(Keyword::Flying);
+        synthesize_undying(&mut face);
+        assert!(face.triggers.is_empty());
+    }
+
+    #[test]
+    fn synthesize_persist_noop_without_keyword() {
+        let mut face = face_with_keyword(Keyword::Trample);
+        synthesize_persist(&mut face);
+        assert!(face.triggers.is_empty());
+    }
+
+    /// CR 113.2c + absence of redundancy clause in CR 702.93: multiple
+    /// instances of Undying each function independently and so each emit a
+    /// trigger. No printed card today has multiple Undying keywords; the
+    /// test pins the rule shape so a future printing routes correctly.
+    #[test]
+    fn synthesize_undying_emits_one_trigger_per_instance() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Undying);
+        face.keywords.push(Keyword::Undying);
+        synthesize_undying(&mut face);
+        let count = face
+            .triggers
+            .iter()
+            .filter(|t| is_dies_return_with_counter_trigger(t, &CounterType::Plus1Plus1))
+            .count();
+        assert_eq!(count, 2);
+    }
+
+    /// A face that carries both Undying and Persist (no printed card today)
+    /// synthesizes two distinct triggers — one per polarity. The shared
+    /// `is_dies_return_with_counter_trigger` predicate is keyed on counter
+    /// type so the Persist trigger doesn't dedupe the Undying trigger.
+    #[test]
+    fn synthesize_undying_and_persist_coexist_with_distinct_triggers() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Undying);
+        face.keywords.push(Keyword::Persist);
+        synthesize_undying(&mut face);
+        synthesize_persist(&mut face);
+
+        let p1p1 = face
+            .triggers
+            .iter()
+            .filter(|t| is_dies_return_with_counter_trigger(t, &CounterType::Plus1Plus1))
+            .count();
+        let m1m1 = face
+            .triggers
+            .iter()
+            .filter(|t| is_dies_return_with_counter_trigger(t, &CounterType::Minus1Minus1))
+            .count();
+        assert_eq!(p1p1, 1, "exactly one Undying trigger");
+        assert_eq!(m1m1, 1, "exactly one Persist trigger");
+    }
+}
+
+#[cfg(test)]
+mod undying_persist_runtime_tests {
+    //! CR 702.93a + CR 702.79a runtime integration: a battlefield permanent
+    //! with the keyword dies, `apply_zone_exit_cleanup` captures its LKI
+    //! counter map into `state.lki_cache`, `process_triggers` fires the
+    //! synthesized dies-trigger, the intervening `Not(HadCounters)` condition
+    //! reads the LKI snapshot, and `resolve_top` resolves `Effect::ChangeZone`
+    //! to return the permanent with a single +1/+1 (or -1/-1) counter.
+
+    use super::*;
+    use crate::game::printed_cards::apply_card_face_to_object;
+    use crate::game::triggers::process_triggers;
+    use crate::game::zones::{create_object, move_to_zone};
+    use crate::types::card_type::CoreType;
+    use crate::types::counter::CounterType;
+    use crate::types::events::GameEvent;
+    use crate::types::game_state::{GameState, StackEntryKind, WaitingFor};
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::player::PlayerId;
+
+    /// Build a creature face with the given keyword and run the full
+    /// synthesis pipeline to install the dies-trigger.
+    fn creature_face_with_keyword(name: &str, kw: Keyword) -> CardFace {
+        let mut face = CardFace {
+            name: name.to_string(),
+            power: Some(PtValue::Fixed(2)),
+            toughness: Some(PtValue::Fixed(1)),
+            keywords: vec![kw],
+            ..CardFace::default()
+        };
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_all(&mut face);
+        face
+    }
+
+    /// Stand up a two-player state with `face` on the battlefield under
+    /// `controller`. Returns the state and the spawned object id so callers
+    /// can mutate counters before killing the creature.
+    fn setup_with_creature(face: &CardFace, controller: PlayerId) -> (GameState, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        state.active_player = controller;
+        state.priority_player = controller;
+        state.waiting_for = WaitingFor::Priority { player: controller };
+
+        let next_card = CardId(state.next_object_id);
+        let obj_id = create_object(
+            &mut state,
+            next_card,
+            controller,
+            face.name.clone(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            apply_card_face_to_object(obj, face);
+        }
+        (state, obj_id)
+    }
+
+    /// Kill the permanent (battlefield → graveyard), fire its dies-trigger,
+    /// then resolve the top of the stack. Returns the events the chain
+    /// produced so callers can inspect the return-to-battlefield event.
+    fn kill_and_resolve(state: &mut GameState, obj_id: ObjectId) -> Vec<GameEvent> {
+        let mut events = Vec::new();
+        // CR 603.10a: `move_to_zone` captures LKI in `apply_zone_exit_cleanup`
+        // before the object physically leaves the battlefield and emits the
+        // `ZoneChanged` event that `process_triggers` consumes.
+        move_to_zone(state, obj_id, Zone::Graveyard, &mut events);
+        process_triggers(state, &events);
+        let mut resolve_events = Vec::new();
+        if !state.stack.is_empty() {
+            crate::game::stack::resolve_top(state, &mut resolve_events);
+        }
+        resolve_events
+    }
+
+    /// CR 702.93a happy path: a creature with Undying that dies with zero
+    /// +1/+1 counters returns to the battlefield with one +1/+1 counter.
+    #[test]
+    fn undying_returns_with_counter_when_died_with_zero_p1p1_counters() {
+        let face = creature_face_with_keyword("Young Wolf", Keyword::Undying);
+        let (mut state, obj_id) = setup_with_creature(&face, PlayerId(0));
+
+        let _ = kill_and_resolve(&mut state, obj_id);
+
+        let obj = state.objects.get(&obj_id).expect("object still tracked");
+        assert_eq!(
+            obj.zone,
+            Zone::Battlefield,
+            "undying should return the permanent to the battlefield"
+        );
+        assert_eq!(obj.owner, PlayerId(0));
+        // CR 702.93a: "under its owner's control"
+        assert_eq!(obj.controller, PlayerId(0));
+        let p1p1: u32 = obj
+            .counters
+            .iter()
+            .filter(|(ct, _)| **ct == CounterType::Plus1Plus1)
+            .map(|(_, n)| *n)
+            .sum();
+        assert_eq!(p1p1, 1, "undying returns with exactly one +1/+1 counter");
+    }
+
+    /// CR 702.93a negative path: a creature with Undying that died WITH a
+    /// +1/+1 counter must NOT return. The intervening `Not(HadCounters)`
+    /// condition gates the trigger out at the check phase, so the stack
+    /// never has a triggered ability for the return.
+    #[test]
+    fn undying_does_not_return_when_died_with_one_p1p1_counter() {
+        let face = creature_face_with_keyword("Strangleroot Geist", Keyword::Undying);
+        let (mut state, obj_id) = setup_with_creature(&face, PlayerId(0));
+
+        // Seed a +1/+1 counter on the live creature so the LKI snapshot
+        // (captured at `move_to_zone` entry) shows the counter.
+        state
+            .objects
+            .get_mut(&obj_id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+
+        let _ = kill_and_resolve(&mut state, obj_id);
+
+        let obj = state.objects.get(&obj_id).expect("object still tracked");
+        assert_eq!(
+            obj.zone,
+            Zone::Graveyard,
+            "undying must NOT return a creature that died with a +1/+1 counter"
+        );
+        assert!(
+            !state
+                .stack
+                .iter()
+                .any(|e| matches!(e.kind, StackEntryKind::TriggeredAbility { .. })),
+            "no surviving trigger on the stack — the intervening-if filtered it"
+        );
+    }
+
+    /// CR 702.79a happy path: Persist returns the permanent with one -1/-1
+    /// counter if it died with no -1/-1 counter.
+    #[test]
+    fn persist_returns_with_counter_when_died_with_zero_m1m1_counters() {
+        let face = creature_face_with_keyword("Kitchen Finks", Keyword::Persist);
+        let (mut state, obj_id) = setup_with_creature(&face, PlayerId(0));
+
+        let _ = kill_and_resolve(&mut state, obj_id);
+
+        let obj = state.objects.get(&obj_id).expect("object still tracked");
+        assert_eq!(obj.zone, Zone::Battlefield);
+        let m1m1: u32 = obj
+            .counters
+            .iter()
+            .filter(|(ct, _)| **ct == CounterType::Minus1Minus1)
+            .map(|(_, n)| *n)
+            .sum();
+        assert_eq!(m1m1, 1, "persist returns with exactly one -1/-1 counter");
+    }
+
+    /// CR 702.79a negative path: Persist creature that died with a -1/-1
+    /// counter must NOT return.
+    #[test]
+    fn persist_does_not_return_when_died_with_one_m1m1_counter() {
+        let face = creature_face_with_keyword("Murderous Redcap", Keyword::Persist);
+        let (mut state, obj_id) = setup_with_creature(&face, PlayerId(0));
+
+        state
+            .objects
+            .get_mut(&obj_id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Minus1Minus1, 1);
+
+        let _ = kill_and_resolve(&mut state, obj_id);
+
+        let obj = state.objects.get(&obj_id).expect("object still tracked");
+        assert_eq!(
+            obj.zone,
+            Zone::Graveyard,
+            "persist must NOT return a creature that died with a -1/-1 counter"
+        );
+    }
+
+    /// CR 603 multi-trigger semantics: a permanent that carries BOTH Undying
+    /// and Persist (a contrived dual-keyword card) puts both triggers on the
+    /// stack on death. The first to resolve returns the permanent to the
+    /// battlefield.
+    ///
+    /// The engine reuses `obj_id` for the returned permanent (CR 400.7 makes
+    /// it a new game object conceptually, but the implementation preserves
+    /// the `ObjectId` across the zone change). When the second trigger
+    /// resolves, its `Effect::ChangeZone` evaluates `from_zone =
+    /// Zone::Battlefield`, which fails the `expected_origin ==
+    /// Some(Zone::Graveyard)` guard at `change_zone.rs:501-505` and the
+    /// move silently no-ops. `enter_with_counters` runs only on a successful
+    /// move, so the second trigger places no counter either.
+    ///
+    /// Post-condition pinned by this test: exactly one battlefield object
+    /// with the name, and exactly ONE counter (polarity = whichever trigger
+    /// resolved first). Asserting the counter total catches a future
+    /// regression in which the origin guard is weakened and the second
+    /// trigger's `enter_with_counters` accidentally executes.
+    #[test]
+    fn undying_and_persist_together_on_same_face_does_not_double_return() {
+        let mut face = CardFace {
+            name: "Test Dual".to_string(),
+            power: Some(PtValue::Fixed(2)),
+            toughness: Some(PtValue::Fixed(1)),
+            keywords: vec![Keyword::Undying, Keyword::Persist],
+            ..CardFace::default()
+        };
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_all(&mut face);
+
+        let (mut state, obj_id) = setup_with_creature(&face, PlayerId(0));
+
+        // Die with zero counters — both Undying and Persist conditions
+        // evaluate true at trigger-condition check.
+        let mut events = Vec::new();
+        move_to_zone(&mut state, obj_id, Zone::Graveyard, &mut events);
+        process_triggers(&mut state, &events);
+
+        // Drain the entire stack.
+        while !state.stack.is_empty() {
+            let mut resolve_events = Vec::new();
+            crate::game::stack::resolve_top(&mut state, &mut resolve_events);
+        }
+
+        let obj = state.objects.get(&obj_id).expect("object still tracked");
+        assert_eq!(obj.zone, Zone::Battlefield);
+        let count_in_battlefield = state
+            .objects
+            .values()
+            .filter(|o| o.zone == Zone::Battlefield && o.name == "Test Dual")
+            .count();
+        assert_eq!(
+            count_in_battlefield, 1,
+            "dual-keyword permanent must not be double-returned"
+        );
+        // The origin guard at change_zone.rs:501-505 prevents the
+        // second-to-resolve trigger from executing its move, so its
+        // `enter_with_counters` never runs. Exactly one counter ends up on
+        // the returned permanent (polarity = whichever trigger resolved
+        // first).
+        let total_counters: u32 = obj.counters.values().sum();
+        assert_eq!(
+            total_counters, 1,
+            "exactly one counter from the first-resolved trigger; the origin guard prevents the second"
+        );
+    }
+
+    /// CR 702.79a "under its owner's control" — the returned permanent must
+    /// route to its OWNER, not the controller at the moment of death.
+    ///
+    /// Setup: a Persist creature owned by player 0 but with `controller`
+    /// directly set to player 1 (a synthetic stand-in for the
+    /// Threaten / Act-of-Treason class — no live control-changing layered
+    /// effect is installed, so the post-return layers pass resets controller
+    /// to owner via CR 613.1b). Kill it, drain the trigger, run SBAs so the
+    /// `state.layers_dirty` flag set by the return-zone-change is consumed.
+    /// Assert the returned permanent ends under player 0's control.
+    ///
+    /// This pins the `under_your_control: false` field's "send to owner"
+    /// semantics: without it, a control-grab would steal the Persist /
+    /// Undying creature permanently on death. The assertion guards the
+    /// composition of:
+    ///   * `ctrl_override = None` in `effects/change_zone.rs:515-519`
+    ///     (because `under_your_control == false`).
+    ///   * No direct controller mutation in `move_to_zone` /
+    ///     `deliver_replaced_zone_change`.
+    ///   * Layer 2 (control-changing) reset to owner during the next
+    ///     `evaluate_layers` pass (`layers.rs:523` — CR 613.1b).
+    #[test]
+    fn persist_returns_under_owner_not_controller_after_control_grab() {
+        // Use a 2/2 base so the post-return -1/-1 counter doesn't push the
+        // permanent to 0 toughness — otherwise the SBA pass we run below
+        // (to force a layers re-evaluation) would send it back to the
+        // graveyard before the owner-vs-controller assertion.
+        let mut face = CardFace {
+            name: "Stolen Finks".to_string(),
+            power: Some(PtValue::Fixed(2)),
+            toughness: Some(PtValue::Fixed(2)),
+            keywords: vec![Keyword::Persist],
+            ..CardFace::default()
+        };
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_all(&mut face);
+        let (mut state, obj_id) = setup_with_creature(&face, PlayerId(0));
+
+        // CR 110.2: Simulate a Threaten-style temporary control swap so the
+        // creature is OWNED by player 0 but CONTROLLED by player 1 at the
+        // moment it dies. (Two-player state from `setup_with_creature` gives
+        // us PlayerId(0) and PlayerId(1).)
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            assert_eq!(obj.owner, PlayerId(0), "precondition: owner is P0");
+            obj.controller = PlayerId(1);
+        }
+
+        let _ = kill_and_resolve(&mut state, obj_id);
+
+        // CR 704.3: Run SBAs so the layers pass triggered by the return
+        // zone-change (which sets `state.layers_dirty = true` in
+        // `effects/change_zone.rs:52`) actually evaluates. Layer 2 resets
+        // `controller` to `owner` per CR 613.1b for any battlefield object
+        // without an active control-changing continuous effect.
+        let mut sba_events = Vec::new();
+        crate::game::sba::check_state_based_actions(&mut state, &mut sba_events);
+
+        let obj = state.objects.get(&obj_id).expect("object still tracked");
+        assert_eq!(
+            obj.zone,
+            Zone::Battlefield,
+            "persist returns the permanent to the battlefield"
+        );
+        // CR 702.79a "under its owner's control" — owner wins over the
+        // pre-death controller. `under_your_control: false` on the
+        // `Effect::ChangeZone` causes `move_to_zone` not to write any
+        // controller override; CR 613.1b then resets controller to owner
+        // during the next layers pass.
+        assert_eq!(
+            obj.owner,
+            PlayerId(0),
+            "owner unchanged across the zone round-trip"
+        );
+        assert_eq!(
+            obj.controller,
+            PlayerId(0),
+            "persist must return under its owner's control, not under the death-time controller"
+        );
+    }
+}
+
+#[cfg(test)]
+mod annihilator_synthesis_tests {
+    //! CR 702.86a + CR 702.86b shape tests: the synthesized Annihilator
+    //! trigger is an `Attacks` trigger gated on `SelfRef` whose execute body
+    //! is `Effect::Sacrifice` over a permanent filter scoped to the defending
+    //! player via `ControllerRef::DefendingPlayer`.
+    use super::*;
+
+    fn annihilator_face(n: u32) -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Annihilator(n));
+        face
+    }
+
+    /// CR 702.86a: synthesizer emits an `Attacks` trigger with execute body
+    /// `Effect::Sacrifice` over `DefendingPlayer`-controlled permanents.
+    #[test]
+    fn synthesize_annihilator_adds_attack_trigger() {
+        let mut face = annihilator_face(2);
+        synthesize_annihilator(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::Attacks))
+            .expect("annihilator should add an Attacks trigger");
+
+        assert!(
+            matches!(trigger.valid_card, Some(TargetFilter::SelfRef)),
+            "valid_card must be SelfRef so the trigger fires only when this \
+             creature attacks (not when other attackers are declared)"
+        );
+
+        let Some(execute) = trigger.execute.as_deref() else {
+            panic!("execute body required");
+        };
+        let Effect::Sacrifice {
+            target,
+            count,
+            min_count,
+        } = &*execute.effect
+        else {
+            panic!("execute body must be Effect::Sacrifice");
+        };
+        assert_eq!(*min_count, 0);
+        assert!(matches!(count, QuantityExpr::Fixed { value: 2 }));
+
+        let TargetFilter::Typed(tf) = target else {
+            panic!("sacrifice target must be a TypedFilter");
+        };
+        assert_eq!(
+            tf.controller,
+            Some(ControllerRef::DefendingPlayer),
+            "sacrifice scope must be the defending player (CR 508.5)"
+        );
+        // CR 701.21a: Annihilator sacrifices permanents, not just creatures.
+        assert!(
+            tf.type_filters
+                .iter()
+                .any(|f| matches!(f, TypeFilter::Permanent)),
+            "filter must target permanents"
+        );
+    }
+
+    /// Repeated synthesis must not duplicate the trigger (idempotency).
+    #[test]
+    fn synthesize_annihilator_is_idempotent() {
+        let mut face = annihilator_face(1);
+        synthesize_annihilator(&mut face);
+        synthesize_annihilator(&mut face);
+        let count = face
+            .triggers
+            .iter()
+            .filter(|t| is_annihilator_attack_trigger(t))
+            .count();
+        assert_eq!(count, 1, "annihilator trigger should be deduped");
+    }
+
+    /// Cards without Annihilator are unaffected.
+    #[test]
+    fn synthesize_annihilator_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flying);
+        synthesize_annihilator(&mut face);
+        assert!(face.triggers.is_empty());
+    }
+
+    /// Negative test: a creature with unrelated keywords must not synthesize
+    /// an Annihilator trigger.
+    #[test]
+    fn synthesize_annihilator_does_not_affect_other_keywords() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Trample);
+        face.keywords.push(Keyword::Vigilance);
+        synthesize_annihilator(&mut face);
+        assert!(face.triggers.is_empty());
+    }
+
+    /// CR 702.86b: "If a creature has multiple instances of annihilator, each
+    /// triggers separately." A card with two `Keyword::Annihilator` entries
+    /// (e.g., a hypothetical card with two printed instances, or one printed
+    /// plus one granted) synthesizes two distinct triggers. CR 113.2c also
+    /// independently requires this.
+    #[test]
+    fn synthesize_annihilator_emits_one_trigger_per_instance() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Annihilator(1));
+        face.keywords.push(Keyword::Annihilator(3));
+        synthesize_annihilator(&mut face);
+        let triggers: Vec<_> = face
+            .triggers
+            .iter()
+            .filter(|t| is_annihilator_attack_trigger(t))
+            .collect();
+        assert_eq!(triggers.len(), 2);
+
+        // Both N=1 and N=3 must be present from the first pass.
+        let ns: Vec<i32> = triggers
+            .iter()
+            .filter_map(|t| match t.execute.as_deref().map(|a| &*a.effect) {
+                Some(Effect::Sacrifice {
+                    count: QuantityExpr::Fixed { value },
+                    ..
+                }) => Some(*value),
+                _ => None,
+            })
+            .collect();
+        assert!(ns.contains(&1) && ns.contains(&3));
+    }
+
+    /// Idempotency-shape predicate must NOT match unrelated `Attacks` triggers
+    /// (e.g., "Whenever this creature attacks, draw a card"). A face with both
+    /// a card-draw Attacks trigger and `Keyword::Annihilator(1)` must produce
+    /// the Annihilator trigger without the predicate misclassifying the
+    /// draw-trigger as Annihilator.
+    #[test]
+    fn synthesize_annihilator_distinguishes_unrelated_attacks_triggers() {
+        let mut face = annihilator_face(1);
+        // Install an unrelated Attacks trigger on the face FIRST.
+        let unrelated = TriggerDefinition::new(TriggerMode::Attacks)
+            .valid_card(TargetFilter::SelfRef)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        face.triggers.push(unrelated);
+        synthesize_annihilator(&mut face);
+
+        let annihilator_count = face
+            .triggers
+            .iter()
+            .filter(|t| is_annihilator_attack_trigger(t))
+            .count();
+        assert_eq!(
+            annihilator_count, 1,
+            "the unrelated draw-on-attack trigger must not pre-satisfy the \
+             Annihilator idempotency check"
+        );
+        // Total triggers: 1 draw + 1 Annihilator.
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|t| matches!(t.mode, TriggerMode::Attacks))
+                .count(),
+            2
+        );
+    }
+}
+
+#[cfg(test)]
+mod annihilator_runtime_tests {
+    //! CR 702.86a runtime integration: an attacking creature with
+    //! `Keyword::Annihilator(N)` declared as an attacker fires the synthesized
+    //! Attacks trigger via `process_triggers(&[AttackersDeclared { … }])`. The
+    //! triggered ability lands on the stack; `resolve_top` invokes the
+    //! Sacrifice resolver, which routes `ControllerRef::DefendingPlayer`
+    //! through `defending_player_for_attacker(state, source_id)` (reading
+    //! `state.combat.attackers`) to identify the player who must sacrifice.
+
+    use super::*;
+    use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
+    use crate::game::printed_cards::apply_card_face_to_object;
+    use crate::game::triggers::process_triggers;
+    use crate::game::zones::create_object;
+    use crate::types::actions::GameAction;
+    use crate::types::card_type::CoreType;
+    use crate::types::events::GameEvent;
+    use crate::types::game_state::{GameState, StackEntryKind, WaitingFor};
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::player::PlayerId;
+
+    /// Build an Annihilator-bearing creature face and run the full synthesis
+    /// pipeline so the Attacks trigger is installed.
+    fn annihilator_creature_face(name: &str, n: u32) -> CardFace {
+        let mut face = CardFace {
+            name: name.to_string(),
+            power: Some(PtValue::Fixed(15)),
+            toughness: Some(PtValue::Fixed(15)),
+            keywords: vec![Keyword::Annihilator(n)],
+            ..CardFace::default()
+        };
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_all(&mut face);
+        face
+    }
+
+    /// Place a generic permanent (no special abilities) on the battlefield
+    /// for `controller`. Used to populate the defending player's sacrifice
+    /// pool.
+    fn place_dummy_permanent(state: &mut GameState, controller: PlayerId, name: &str) -> ObjectId {
+        let card_id = CardId(state.next_object_id);
+        let id = create_object(
+            state,
+            card_id,
+            controller,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        // CR 701.21a: a permanent (Annihilator sacrifices "permanents", which
+        // includes any non-emblem battlefield object). Mark as a creature so
+        // it cleanly satisfies the TypeFilter::Permanent check without
+        // overloading the test fixture.
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        id
+    }
+
+    /// Build an `AttackersDeclared` event for `attacker_id` attacking
+    /// `defending_player`. Mirrors the event shape produced by
+    /// `declare_attackers` so `match_attacks` recognizes it as a real attack
+    /// declaration.
+    fn attackers_declared_event(attacker_id: ObjectId, defending_player: PlayerId) -> GameEvent {
+        GameEvent::AttackersDeclared {
+            attacker_ids: vec![attacker_id],
+            defending_player,
+            attacks: vec![(attacker_id, AttackTarget::Player(defending_player))],
+        }
+    }
+
+    /// Spawn an Annihilator creature attacking `defending_player`, populate
+    /// `state.combat.attackers` so `defending_player_for_attacker` can find
+    /// the per-attacker defending player, then fire the AttackersDeclared
+    /// event and resolve the synthesized trigger off the stack.
+    fn attack_and_resolve_to_sacrifice(
+        state: &mut GameState,
+        face: &CardFace,
+        controller: PlayerId,
+        defending_player: PlayerId,
+    ) -> ObjectId {
+        let next_card = CardId(state.next_object_id);
+        let attacker_id = create_object(
+            state,
+            next_card,
+            controller,
+            face.name.clone(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&attacker_id).unwrap();
+            apply_card_face_to_object(obj, face);
+        }
+
+        // CR 508.5: `defending_player_for_attacker` reads from
+        // `state.combat.attackers`. Populate the attacker entry so the
+        // sacrifice resolver can identify the defending player by source id.
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::new(
+                attacker_id,
+                AttackTarget::Player(defending_player),
+                defending_player,
+            )],
+            ..Default::default()
+        });
+
+        process_triggers(
+            state,
+            &[attackers_declared_event(attacker_id, defending_player)],
+        );
+
+        assert!(
+            state
+                .stack
+                .iter()
+                .any(|entry| matches!(&entry.kind, StackEntryKind::TriggeredAbility { .. })),
+            "Annihilator Attacks trigger must land on the stack"
+        );
+
+        let mut resolve_events = Vec::new();
+        crate::game::stack::resolve_top(state, &mut resolve_events);
+        attacker_id
+    }
+
+    /// CR 702.86a + CR 508.5 happy path: an attacker with Annihilator 2
+    /// attacks P1; P1 has 3 sacrifice-eligible permanents and must choose 2
+    /// of them to sacrifice. The synthesized trigger should park the engine
+    /// in `WaitingFor::EffectZoneChoice` with P1 as the chooser and
+    /// `count = 2`.
+    #[test]
+    fn annihilator_attacks_defending_player_sacrifices_n_permanents() {
+        let face = annihilator_creature_face("Emrakul's Echo", 2);
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = crate::types::phase::Phase::DeclareAttackers;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let p1_a = place_dummy_permanent(&mut state, PlayerId(1), "Pawn A");
+        let p1_b = place_dummy_permanent(&mut state, PlayerId(1), "Pawn B");
+        let p1_c = place_dummy_permanent(&mut state, PlayerId(1), "Pawn C");
+        // Ability controller has a permanent too; it must NOT enter the
+        // defending player's sacrifice pool.
+        let p0_own = place_dummy_permanent(&mut state, PlayerId(0), "Own Pawn");
+
+        let _attacker =
+            attack_and_resolve_to_sacrifice(&mut state, &face, PlayerId(0), PlayerId(1));
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                player,
+                cards,
+                count,
+                effect_kind,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(1), "defending player chooses sacrifices");
+                assert_eq!(*count, 2, "Annihilator 2 sacrifices exactly 2");
+                assert_eq!(*effect_kind, crate::types::ability::EffectKind::Sacrifice);
+                assert!(cards.contains(&p1_a));
+                assert!(cards.contains(&p1_b));
+                assert!(cards.contains(&p1_c));
+                assert!(
+                    !cards.contains(&p0_own),
+                    "attacker's controller's permanent must NOT be in the \
+                     defending player's sacrifice pool"
+                );
+                assert_eq!(cards.len(), 3);
+            }
+            other => panic!("expected EffectZoneChoice on defending player, got {other:?}"),
+        }
+
+        // Drive the choice: defending player sacrifices two specific
+        // permanents.
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![p1_a, p1_b],
+            },
+        )
+        .unwrap();
+
+        // CR 701.21a: sacrificed permanents end up in their owner's graveyard.
+        assert_eq!(
+            state.objects.get(&p1_a).unwrap().zone,
+            Zone::Graveyard,
+            "Pawn A sacrificed"
+        );
+        assert_eq!(
+            state.objects.get(&p1_b).unwrap().zone,
+            Zone::Graveyard,
+            "Pawn B sacrificed"
+        );
+        assert_eq!(
+            state.objects.get(&p1_c).unwrap().zone,
+            Zone::Battlefield,
+            "Pawn C not chosen, still on battlefield"
+        );
+        assert_eq!(
+            state.objects.get(&p0_own).unwrap().zone,
+            Zone::Battlefield,
+            "attacker controller's permanent never threatened"
+        );
+    }
+
+    /// CR 609.3: "If an effect attempts to do something impossible, it does
+    /// only as much as possible." When the resolved sacrifice count meets or
+    /// exceeds the defending player's eligible pool and the effect is
+    /// mandatory, every eligible permanent is sacrificed. Annihilator 2
+    /// against a defender with only one permanent must sacrifice that one
+    /// permanent (and not hang waiting for the second choice).
+    #[test]
+    fn annihilator_with_fewer_permanents_than_n_sacrifices_all_of_them() {
+        let face = annihilator_creature_face("Ulamog's Echo", 2);
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = crate::types::phase::Phase::DeclareAttackers;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let only_one = place_dummy_permanent(&mut state, PlayerId(1), "Sole Pawn");
+
+        let _attacker =
+            attack_and_resolve_to_sacrifice(&mut state, &face, PlayerId(0), PlayerId(1));
+
+        // CR 609.3 fast-path: the resolver takes the mandatory-all branch
+        // ("does only as much as possible") and does not park in
+        // EffectZoneChoice — the sole permanent goes straight to the
+        // graveyard.
+        assert_eq!(
+            state.objects.get(&only_one).unwrap().zone,
+            Zone::Graveyard,
+            "the sole eligible permanent is sacrificed in the mandatory-all path"
+        );
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
+            "no EffectZoneChoice — fewer permanents than N means CR 609.3 \
+             auto-sacrifices the entire pool"
+        );
+    }
+
+    /// CR 508.5a multiplayer invariant: when an attacker with Annihilator
+    /// attacks P1 in a 3-player game, only P1 sacrifices — P2 (a defending
+    /// player not being attacked by THIS creature) is unaffected. This is
+    /// the key correctness property that distinguishes
+    /// `ControllerRef::DefendingPlayer` (per-attacker lookup) from a hypo-
+    /// thetical "each opponent" sacrifice.
+    #[test]
+    fn annihilator_in_multiplayer_targets_defending_player_not_all_opponents() {
+        let face = annihilator_creature_face("Kozilek's Echo", 1);
+
+        // CR 802.1: multiplayer game. Use the 3-player constructor so the
+        // sacrifice pool resolution can distinguish "defending player" from
+        // "each opponent".
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        state.turn_number = 2;
+        state.phase = crate::types::phase::Phase::DeclareAttackers;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        // P1 (defending) has 2 permanents; P2 (uninvolved) has 1 permanent.
+        let p1_a = place_dummy_permanent(&mut state, PlayerId(1), "P1 Pawn A");
+        let p1_b = place_dummy_permanent(&mut state, PlayerId(1), "P1 Pawn B");
+        let p2_only = place_dummy_permanent(&mut state, PlayerId(2), "P2 Pawn");
+
+        let _attacker =
+            attack_and_resolve_to_sacrifice(&mut state, &face, PlayerId(0), PlayerId(1));
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice { player, cards, .. } => {
+                assert_eq!(
+                    *player,
+                    PlayerId(1),
+                    "only the defending player (P1) chooses — never P2"
+                );
+                assert!(cards.contains(&p1_a) && cards.contains(&p1_b));
+                assert!(
+                    !cards.contains(&p2_only),
+                    "P2's permanent must NOT be in the sacrifice pool; only \
+                     the per-attacker defending player (P1) sacrifices \
+                     (CR 508.5a)"
+                );
+            }
+            other => panic!("expected EffectZoneChoice on P1, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
 mod echo_synthesis_tests {
     use super::*;
     use crate::types::mana::{ManaCost, ManaCostShard};
@@ -2632,7 +4810,7 @@ mod echo_synthesis_tests {
         assert!(matches!(
             trigger.unless_pay.as_ref(),
             Some(UnlessPayModifier {
-                cost: UnlessCost::Fixed {
+                cost: AbilityCost::Mana {
                     cost: ManaCost::Cost { generic: 3, .. },
                 },
                 payer: TargetFilter::Controller,
@@ -2867,7 +5045,7 @@ mod scavenge_synthesis_tests {
                 count,
                 target,
             } => {
-                assert_eq!(counter_type, "P1P1");
+                assert_eq!(counter_type, &CounterType::Plus1Plus1);
                 assert!(matches!(
                     count,
                     QuantityExpr::Ref {
@@ -3574,7 +5752,7 @@ mod suspend_synthesis_tests {
                 count,
                 target,
             } => {
-                assert_eq!(counter_type, "time");
+                assert_eq!(counter_type, &CounterType::Time);
                 assert!(matches!(target, TargetFilter::SelfRef));
                 assert!(matches!(count, QuantityExpr::Fixed { value: 3 }));
             }
@@ -3604,7 +5782,7 @@ mod suspend_synthesis_tests {
                 counter_type,
                 target: TargetFilter::SelfRef,
                 ..
-            }) => assert_eq!(counter_type, "time"),
+            }) => assert_eq!(counter_type, &Some(CounterType::Time)),
             other => panic!("expected RemoveCounter effect, got {other:?}"),
         }
 
@@ -3934,6 +6112,39 @@ mod idempotency_tests {
             "casualty trigger should only register once"
         );
     }
+
+    /// CR 702.153a: The intrinsic synthesized casualty trigger embeds the
+    /// canonical `casualty_copy_ability_definition()` as its `execute`. This
+    /// regression test guards the L9 fix: both `synthesize_casualty` and the
+    /// dynamically-granted casualty path in `triggers::process_triggers` must
+    /// derive the trigger's resolved ability shape from this single source of
+    /// truth (effect = `CopySpell { SelfRef }`, condition =
+    /// `additional_cost_paid_any`).
+    #[test]
+    fn intrinsic_casualty_trigger_uses_shared_canonical_definition() {
+        let mut face = CardFace::default();
+        face.card_type.core_types.push(CoreType::Sorcery);
+        face.keywords.push(Keyword::Casualty(1));
+        synthesize_casualty(&mut face);
+
+        let canonical = casualty_copy_ability_definition();
+        let trig = face
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::SpellCast))
+            .expect("synthesize_casualty should produce a SpellCast trigger");
+        let execute = trig
+            .execute
+            .as_ref()
+            .expect("casualty trigger must have an execute ability");
+
+        assert_eq!(
+            **execute, canonical,
+            "intrinsic casualty trigger's execute must equal the canonical \
+             casualty_copy_ability_definition() — single source of truth for \
+             both intrinsic and dynamically-granted casualty"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -4257,5 +6468,1512 @@ mod offspring_synthesis_tests {
         assert_eq!(face.additional_cost, Some(existing));
         // Trigger is still synthesized
         assert_eq!(face.triggers.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod modular_synthesis_tests {
+    //! CR 702.43a + CR 702.43b: Shape tests for the synthesized Modular pair.
+    //! Pinned to the exact wire-up the runtime resolver consumes:
+    //!   * ETB-with-counters: `ReplacementEvent::Moved` with `valid_card =
+    //!     SelfRef`, execute `Effect::PutCounter { counter_type: "P1P1",
+    //!     count: Fixed(N), target: SelfRef }`.
+    //!   * Dies-transfer: `TriggerMode::ChangesZone` (Battlefield → Graveyard)
+    //!     with `valid_card = SelfRef`, execute `Effect::PutCounter` placing
+    //!     P1P1 counters on a target artifact-creature with the count read
+    //!     from the source's LKI counter map via `QuantityRef::CountersOn {
+    //!     scope: Source, counter_type: Some("P1P1") }`.
+    use super::*;
+
+    fn face_with_modular(n: u32) -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Modular(n));
+        face
+    }
+
+    /// CR 702.43a clause 1: ETB-with-N-counters replacement.
+    #[test]
+    fn synthesize_modular_adds_etb_counters_replacement() {
+        let mut face = face_with_modular(2);
+        synthesize_modular(&mut face);
+
+        let replacement = face
+            .replacements
+            .iter()
+            .find(|r| is_modular_etb_replacement(r, 2))
+            .expect("modular should synthesize an ETB-with-counters replacement");
+
+        assert!(matches!(replacement.event, ReplacementEvent::Moved));
+        assert!(matches!(
+            replacement.valid_card,
+            Some(TargetFilter::SelfRef)
+        ));
+
+        let execute = replacement
+            .execute
+            .as_deref()
+            .expect("ETB replacement requires execute body");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = &*execute.effect
+        else {
+            panic!("modular ETB execute body should be Effect::PutCounter");
+        };
+        assert_eq!(counter_type, &CounterType::Plus1Plus1);
+        assert!(matches!(target, TargetFilter::SelfRef));
+        assert!(matches!(count, QuantityExpr::Fixed { value: 2 }));
+    }
+
+    /// CR 702.43a clause 2: Dies-transfer trigger reads the source's LKI P1P1
+    /// counter count and places that many counters on a target artifact
+    /// creature.
+    #[test]
+    fn synthesize_modular_adds_dies_transfer_trigger() {
+        let mut face = face_with_modular(1);
+        synthesize_modular(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| is_modular_dies_transfer_trigger(t))
+            .expect("modular should synthesize a dies-transfer trigger");
+
+        assert!(matches!(trigger.mode, TriggerMode::ChangesZone));
+        assert_eq!(trigger.origin, Some(Zone::Battlefield));
+        assert_eq!(trigger.destination, Some(Zone::Graveyard));
+        assert!(matches!(trigger.valid_card, Some(TargetFilter::SelfRef)));
+
+        let execute = trigger
+            .execute
+            .as_deref()
+            .expect("dies trigger requires execute body");
+
+        // CR 603.5: "you may" — optional triggered ability; controller is
+        // prompted before the effect runs.
+        assert!(
+            execute.optional,
+            "modular dies-transfer must be optional per CR 702.43a 'you may'"
+        );
+
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = &*execute.effect
+        else {
+            panic!("modular dies execute body should be Effect::PutCounter");
+        };
+        assert_eq!(counter_type, &CounterType::Plus1Plus1);
+
+        // Count = LKI P1P1 counter count on the dying source.
+        let QuantityExpr::Ref { qty } = count else {
+            panic!("modular dies count should be a QuantityRef::Ref");
+        };
+        let QuantityRef::CountersOn {
+            scope,
+            counter_type: lki_ct,
+        } = qty
+        else {
+            panic!("modular dies count should be QuantityRef::CountersOn");
+        };
+        assert!(matches!(scope, ObjectScope::Source));
+        assert_eq!(lki_ct, &Some(CounterType::Plus1Plus1));
+
+        // Target = artifact creature (conjunction).
+        let TargetFilter::Typed(tf) = target else {
+            panic!("modular dies target must be a TypedFilter");
+        };
+        assert!(tf
+            .type_filters
+            .iter()
+            .any(|f| matches!(f, TypeFilter::Creature)));
+        assert!(tf
+            .type_filters
+            .iter()
+            .any(|f| matches!(f, TypeFilter::Artifact)));
+    }
+
+    /// Re-running synthesis must not duplicate the replacement or the trigger.
+    #[test]
+    fn synthesize_modular_is_idempotent() {
+        let mut face = face_with_modular(2);
+        synthesize_modular(&mut face);
+        synthesize_modular(&mut face);
+
+        assert_eq!(
+            face.replacements
+                .iter()
+                .filter(|r| is_modular_etb_replacement(r, 2))
+                .count(),
+            1,
+            "ETB replacement should be deduped"
+        );
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|t| is_modular_dies_transfer_trigger(t))
+                .count(),
+            1,
+            "dies-transfer trigger should be deduped"
+        );
+    }
+
+    /// A face without `Keyword::Modular` is unaffected.
+    #[test]
+    fn synthesize_modular_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flying);
+        synthesize_modular(&mut face);
+        assert!(face.replacements.is_empty());
+        assert!(face.triggers.is_empty());
+    }
+
+    /// CR 113.2c + CR 702.43b: each Modular instance emits its own ETB-counters
+    /// replacement + dies-transfer trigger. No printed card today has two
+    /// Modular instances; the test pins the rule so a future printing (or a
+    /// granted-Modular case) routes correctly.
+    #[test]
+    fn synthesize_modular_emits_two_abilities_per_instance() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Modular(1));
+        face.keywords.push(Keyword::Modular(3));
+        synthesize_modular(&mut face);
+
+        // CR 113.2c: each instance emits its own ETB replacement; the
+        // predicate is per-N so we filter by either N to find the matching
+        // instance's emission.
+        let replacement_n1 = face
+            .replacements
+            .iter()
+            .filter(|r| is_modular_etb_replacement(r, 1))
+            .count();
+        let replacement_n3 = face
+            .replacements
+            .iter()
+            .filter(|r| is_modular_etb_replacement(r, 3))
+            .count();
+        assert_eq!(replacement_n1, 1, "exactly one Fixed(1) ETB replacement");
+        assert_eq!(replacement_n3, 1, "exactly one Fixed(3) ETB replacement");
+
+        let replacements: Vec<_> = face
+            .replacements
+            .iter()
+            .filter(|r| is_modular_etb_replacement(r, 1) || is_modular_etb_replacement(r, 3))
+            .collect();
+        assert_eq!(replacements.len(), 2);
+
+        // Both N=1 and N=3 must be present from the first pass.
+        let ns: Vec<i32> = replacements
+            .iter()
+            .filter_map(|r| match r.execute.as_deref().map(|a| &*a.effect) {
+                Some(Effect::PutCounter {
+                    count: QuantityExpr::Fixed { value },
+                    ..
+                }) => Some(*value),
+                _ => None,
+            })
+            .collect();
+        assert!(ns.contains(&1) && ns.contains(&3));
+
+        let triggers = face
+            .triggers
+            .iter()
+            .filter(|t| is_modular_dies_transfer_trigger(t))
+            .count();
+        assert_eq!(
+            triggers, 2,
+            "each Modular instance independently emits its dies-transfer"
+        );
+    }
+
+    /// Negative test: unrelated keywords do not synthesize Modular.
+    #[test]
+    fn synthesize_modular_does_not_affect_other_keywords() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Trample);
+        face.keywords.push(Keyword::Vigilance);
+        synthesize_modular(&mut face);
+        assert!(face.replacements.is_empty());
+        assert!(face.triggers.is_empty());
+    }
+
+    /// Idempotency-shape predicates must NOT match unrelated replacements /
+    /// triggers (e.g., a Moved replacement with a different counter type, or a
+    /// dies-trigger that draws a card).
+    #[test]
+    fn synthesize_modular_distinguishes_unrelated_replacements_and_triggers() {
+        let mut face = face_with_modular(1);
+
+        // Unrelated dies trigger: "When ~ dies, draw a card."
+        let unrelated_dies = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .origin(Zone::Battlefield)
+            .destination(Zone::Graveyard)
+            .valid_card(TargetFilter::SelfRef)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        face.triggers.push(unrelated_dies);
+
+        synthesize_modular(&mut face);
+
+        let modular_dies = face
+            .triggers
+            .iter()
+            .filter(|t| is_modular_dies_transfer_trigger(t))
+            .count();
+        assert_eq!(
+            modular_dies, 1,
+            "the unrelated draw-on-death trigger must not pre-satisfy the \
+             Modular idempotency check"
+        );
+    }
+
+    /// CR 614.1c regression guard: a face that already carries a parsed
+    /// "enters with K +1/+1 counters" ETB replacement with K ≠ N MUST still
+    /// receive a synthesized Fixed(N) replacement. The per-N predicate
+    /// prevents the K-replacement from silently pre-satisfying the Modular-N
+    /// idempotency check (and the resulting card from entering with the
+    /// wrong counter count). No printed card carries both today, but the
+    /// safety is one line of code and pins the predicate semantics.
+    #[test]
+    fn synthesize_modular_does_not_dedupe_unrelated_etb_counter_replacement() {
+        let mut face = face_with_modular(2);
+
+        // Pre-existing K=3 ETB replacement (as if a parser had emitted one
+        // for a printed "this permanent enters with 3 +1/+1 counters on it"
+        // clause). Shape matches Modular's emission except for the count.
+        let unrelated_etb = ReplacementDefinition {
+            event: ReplacementEvent::Moved,
+            execute: Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 3 },
+                    target: TargetFilter::SelfRef,
+                },
+            ))),
+            valid_card: Some(TargetFilter::SelfRef),
+            description: Some("Pre-existing K=3 ETB replacement".to_string()),
+            ..ReplacementDefinition::new(ReplacementEvent::Moved)
+        };
+        face.replacements.push(unrelated_etb);
+
+        synthesize_modular(&mut face);
+
+        // Both replacements must coexist: the unrelated Fixed(3) and the
+        // synthesized Fixed(2).
+        let fixed2 = face
+            .replacements
+            .iter()
+            .filter(|r| is_modular_etb_replacement(r, 2))
+            .count();
+        let fixed3 = face
+            .replacements
+            .iter()
+            .filter(|r| is_modular_etb_replacement(r, 3))
+            .count();
+        assert_eq!(fixed2, 1, "Fixed(2) Modular ETB must still be emitted");
+        assert_eq!(fixed3, 1, "Pre-existing Fixed(3) replacement preserved");
+    }
+}
+
+#[cfg(test)]
+mod modular_runtime_tests {
+    //! CR 702.43a runtime integration: an Arcbound-style creature with
+    //! `Keyword::Modular(n)` enters with N +1/+1 counters via the synthesized
+    //! Moved replacement, and on death pushes a dies-transfer trigger that
+    //! reads the LKI P1P1 counter count from `state.lki_cache` and places
+    //! that many counters on a target artifact creature. The "you may" gate
+    //! is honored by parking the engine in `WaitingFor::OptionalEffectChoice`.
+
+    use super::*;
+    use crate::game::printed_cards::apply_card_face_to_object;
+    use crate::game::stack::resolve_top;
+    use crate::game::triggers::process_triggers;
+    use crate::game::zones::{create_object, move_to_zone};
+    use crate::types::actions::GameAction;
+    use crate::types::card_type::CoreType;
+    use crate::types::counter::CounterType;
+    use crate::types::game_state::{GameState, StackEntryKind, WaitingFor};
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::player::PlayerId;
+
+    /// Build an artifact-creature face with `Keyword::Modular(n)` and run the
+    /// full synthesis pipeline. Arcbound family cards are all artifact
+    /// creatures.
+    fn arcbound_face(name: &str, n: u32, base_pt: i32) -> CardFace {
+        let mut face = CardFace {
+            name: name.to_string(),
+            power: Some(PtValue::Fixed(base_pt)),
+            toughness: Some(PtValue::Fixed(base_pt)),
+            keywords: vec![Keyword::Modular(n)],
+            ..CardFace::default()
+        };
+        face.card_type.core_types.push(CoreType::Artifact);
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_all(&mut face);
+        face
+    }
+
+    /// Plain artifact creature target (no Modular). Used as the transfer
+    /// destination in the dies-trigger tests.
+    fn plain_artifact_creature_face(name: &str) -> CardFace {
+        let mut face = CardFace {
+            name: name.to_string(),
+            power: Some(PtValue::Fixed(1)),
+            toughness: Some(PtValue::Fixed(1)),
+            ..CardFace::default()
+        };
+        face.card_type.core_types.push(CoreType::Artifact);
+        face.card_type.core_types.push(CoreType::Creature);
+        face
+    }
+
+    fn setup_state_with_priority(controller: PlayerId) -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        state.active_player = controller;
+        state.priority_player = controller;
+        state.waiting_for = WaitingFor::Priority { player: controller };
+        state
+    }
+
+    /// Spawn an Arcbound creature in the Hand, then drive a real
+    /// `ProposedEvent::ZoneChange { from: Hand, to: Battlefield }` through
+    /// the engine replacement pipeline. The synthesized
+    /// `ReplacementEvent::Moved` is absorbed by the pipeline into
+    /// `enter_with_counters`, which `apply_etb_counters` then applies via
+    /// `add_counter_with_replacement` — going through the same path
+    /// `ReplacementEvent::AddCounter` modifiers (e.g., Hardened Scales) hook
+    /// into. This exercises the full ETB-with-counters wiring end-to-end.
+    fn spawn_arcbound_via_etb_pipeline(
+        state: &mut GameState,
+        face: &CardFace,
+        controller: PlayerId,
+    ) -> ObjectId {
+        let next_card = CardId(state.next_object_id);
+        // Place the object in Hand first so the proposed Hand→Battlefield
+        // ZoneChange routes through the replacement pipeline.
+        let obj_id = create_object(state, next_card, controller, face.name.clone(), Zone::Hand);
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            apply_card_face_to_object(obj, face);
+        }
+
+        let proposed = crate::types::proposed_event::ProposedEvent::zone_change(
+            obj_id,
+            Zone::Hand,
+            Zone::Battlefield,
+            None,
+        );
+        let mut events = Vec::new();
+        let result = crate::game::replacement::replace_event(state, proposed, &mut events);
+        let crate::game::replacement::ReplacementResult::Execute(event) = result else {
+            panic!(
+                "Arcbound ETB replacement is Mandatory — pipeline must execute directly, got {result:?}"
+            );
+        };
+        let crate::types::proposed_event::ProposedEvent::ZoneChange {
+            object_id,
+            to,
+            enter_with_counters,
+            ..
+        } = event
+        else {
+            panic!("pipeline must yield a ZoneChange execute event");
+        };
+        move_to_zone(state, object_id, to, &mut events);
+        // CR 614.1c: Apply the counters the Moved replacement absorbed into
+        // `enter_with_counters`. Each entry routes through
+        // `add_counter_with_replacement` (the public single-authority counter
+        // entry point) so Hardened-Scales-class AddCounter modifiers
+        // (CR 614.1a) layer on. Mirrors the loop in
+        // `engine_replacement::apply_etb_counters`, which is `pub(super)`
+        // and not reachable from the database module — re-implementing the
+        // public-API loop here is cleaner than widening visibility for one
+        // test consumer.
+        let actor = state
+            .objects
+            .get(&object_id)
+            .map(|obj| obj.controller)
+            .unwrap_or(controller);
+        for (counter_type, count) in &enter_with_counters {
+            crate::game::effects::counters::add_counter_with_replacement(
+                state,
+                actor,
+                object_id,
+                counter_type.clone(),
+                *count,
+                &mut events,
+            );
+        }
+        obj_id
+    }
+
+    /// Place an Arcbound creature directly on the battlefield with N P1P1
+    /// counters pre-installed, bypassing the ETB replacement pipeline. Used
+    /// by dies-trigger tests that isolate LKI counter-snapshot semantics —
+    /// the ETB path is exercised separately by
+    /// `spawn_arcbound_via_etb_pipeline`. The "with_counters" suffix is
+    /// load-bearing: callers must read this as a post-ETB shortcut, NOT as
+    /// a pipeline-driving helper.
+    fn place_arcbound_on_battlefield_with_counters(
+        state: &mut GameState,
+        face: &CardFace,
+        controller: PlayerId,
+    ) -> ObjectId {
+        let next_card = CardId(state.next_object_id);
+        let obj_id = create_object(
+            state,
+            next_card,
+            controller,
+            face.name.clone(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            apply_card_face_to_object(obj, face);
+        }
+        // Manually install the N counters the (skipped) ETB pipeline would
+        // have placed — matches the post-replacement state the dies trigger
+        // sees in real games.
+        if let Some(Keyword::Modular(n)) = face
+            .keywords
+            .iter()
+            .find(|kw| matches!(kw, Keyword::Modular(_)))
+        {
+            state
+                .objects
+                .get_mut(&obj_id)
+                .unwrap()
+                .counters
+                .insert(CounterType::Plus1Plus1, *n);
+        }
+        obj_id
+    }
+
+    /// CR 702.43a clause 1 + CR 614.1c runtime: a real Hand→Battlefield
+    /// ZoneChange routed through `replace_event` triggers the synthesized
+    /// `ReplacementEvent::Moved`, which absorbs the `Effect::PutCounter`
+    /// execute body into `enter_with_counters` on the ZoneChange event. The
+    /// caller (`spawn_arcbound_via_etb_pipeline`) then calls `move_to_zone`
+    /// followed by `add_counter_with_replacement` per absorbed counter,
+    /// mirroring the dispatch path
+    /// `engine_replacement::handle_replacement_choice` and `stack::resolve_top`
+    /// use for spell-cast and choice-resume entries. After the pipeline
+    /// settles, the object has exactly N P1P1 counters — proving the
+    /// synthesized replacement integrates with the engine, not just that
+    /// shape inspection matches the synthesizer's emit.
+    #[test]
+    fn modular_etb_via_pipeline_places_n_p1p1_counters() {
+        let face = arcbound_face("Arcbound Crusher", 2, 5);
+
+        let mut state = setup_state_with_priority(PlayerId(0));
+        let obj_id = spawn_arcbound_via_etb_pipeline(&mut state, &face, PlayerId(0));
+
+        // After the pipeline executes the Moved replacement and apply_etb_counters
+        // runs, the object is on the battlefield with 2 P1P1 counters.
+        let obj = state.objects.get(&obj_id).expect("object exists");
+        assert_eq!(
+            obj.zone,
+            Zone::Battlefield,
+            "object must reach battlefield after pipeline"
+        );
+        let p1p1 = *obj.counters.get(&CounterType::Plus1Plus1).unwrap_or(&0);
+        assert_eq!(
+            p1p1, 2,
+            "the synthesized ETB replacement routed through replace_event \
+             must place exactly Modular N (=2) +1/+1 counters"
+        );
+    }
+
+    /// Shape-only check (decoupled from the pipeline test above): the
+    /// synthesized replacement's execute body carries `Fixed(N)` so it can
+    /// be absorbed by the Moved-event applier as ETB counters. Distinct from
+    /// the synthesis_tests module's shape test in that it asserts against
+    /// the post-`synthesize_all` face that an Arcbound Crusher would carry.
+    #[test]
+    fn arcbound_face_carries_fixed_n_etb_replacement() {
+        let face = arcbound_face("Arcbound Crusher", 2, 5);
+        let replacement = face
+            .replacements
+            .iter()
+            .find(|r| is_modular_etb_replacement(r, 2))
+            .expect("Arcbound Crusher should have the synthesized ETB replacement");
+        let execute = replacement.execute.as_deref().unwrap();
+        let Effect::PutCounter {
+            count: QuantityExpr::Fixed { value },
+            ..
+        } = &*execute.effect
+        else {
+            panic!("ETB execute should be PutCounter with a fixed count");
+        };
+        assert_eq!(*value, 2, "Modular 2 places 2 counters on ETB");
+    }
+
+    /// CR 702.43a clause 2 happy path: a dying Arcbound creature with K
+    /// counters on it transfers K counters to a target artifact creature
+    /// (controller accepts the optional "you may").
+    #[test]
+    fn modular_dies_transfers_counters_to_target_artifact_creature() {
+        let arcbound = arcbound_face("Arcbound Worker", 1, 1);
+        let target_face = plain_artifact_creature_face("Steel Walker");
+
+        let mut state = setup_state_with_priority(PlayerId(0));
+        let arcbound_id =
+            place_arcbound_on_battlefield_with_counters(&mut state, &arcbound, PlayerId(0));
+
+        let target_card = CardId(state.next_object_id);
+        let target_id = create_object(
+            &mut state,
+            target_card,
+            PlayerId(0),
+            target_face.name.clone(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&target_id).unwrap();
+            apply_card_face_to_object(obj, &target_face);
+        }
+
+        // Kill the Arcbound creature. `move_to_zone` snapshots LKI counters
+        // into `state.lki_cache` so the dies trigger's LKI-counted quantity
+        // resolves to 1 (the Modular N=1 ETB total).
+        let mut events = Vec::new();
+        move_to_zone(&mut state, arcbound_id, Zone::Graveyard, &mut events);
+        process_triggers(&mut state, &events);
+
+        assert!(
+            state
+                .stack
+                .iter()
+                .any(|e| matches!(e.kind, StackEntryKind::TriggeredAbility { .. })),
+            "modular dies-transfer must land on the stack"
+        );
+
+        // Resolve the trigger. Because it's optional, the engine parks in
+        // `OptionalEffectChoice` for the controller; accept the prompt.
+        let mut resolve_events = Vec::new();
+        resolve_top(&mut state, &mut resolve_events);
+
+        // Drive the optional "may" choice → accept, then target selection.
+        drive_optional_then_select_target(&mut state, target_id);
+
+        let target_p1p1 = *state
+            .objects
+            .get(&target_id)
+            .unwrap()
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .unwrap_or(&0);
+        assert_eq!(
+            target_p1p1, 1,
+            "target artifact creature gains exactly 1 +1/+1 counter (= LKI source count)"
+        );
+    }
+
+    /// CR 702.43a clause 2 + CR 400.7 + CR 122.2: the transfer count reads
+    /// from LKI, so a creature that died with MORE counters than its printed
+    /// Modular N transfers the modified post-ETB count — whatever counter
+    /// total the LKI snapshot captured at zone exit. The test mutates
+    /// `obj.counters` directly to a non-N value before death so the LKI
+    /// snapshot pre-exit deviates from `Modular(N)`; this isolates the LKI
+    /// look-back wiring (`resolve_counters_on_scope::Source` zone-keyed
+    /// fallback) from any specific counter-modifier replacement effect.
+    ///
+    /// The "extra counters acquired post-ETB" framing is honest: the test
+    /// proves "LKI captures whatever counter count was on the object at
+    /// death," NOT "Hardened Scales doubles Modular ETB end-to-end." The
+    /// latter is exercised separately by `hardened_scales_doubles_modular_etb`
+    /// below.
+    #[test]
+    fn modular_dies_transfers_extra_counters_acquired_post_etb() {
+        let arcbound = arcbound_face("Arcbound Worker", 1, 1);
+        let target_face = plain_artifact_creature_face("Steel Walker");
+
+        let mut state = setup_state_with_priority(PlayerId(0));
+        let arcbound_id =
+            place_arcbound_on_battlefield_with_counters(&mut state, &arcbound, PlayerId(0));
+        // Direct mutation: simulate "Arcbound Worker ETB'd with 1 counter;
+        // an additional counter was added by another source mid-life." LKI
+        // must capture the modified total (2), not the printed Modular N (1).
+        state
+            .objects
+            .get_mut(&arcbound_id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 2);
+
+        let target_card = CardId(state.next_object_id);
+        let target_id = create_object(
+            &mut state,
+            target_card,
+            PlayerId(0),
+            target_face.name.clone(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&target_id).unwrap();
+            apply_card_face_to_object(obj, &target_face);
+        }
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, arcbound_id, Zone::Graveyard, &mut events);
+        process_triggers(&mut state, &events);
+
+        let mut resolve_events = Vec::new();
+        resolve_top(&mut state, &mut resolve_events);
+        drive_optional_then_select_target(&mut state, target_id);
+
+        let target_p1p1 = *state
+            .objects
+            .get(&target_id)
+            .unwrap()
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .unwrap_or(&0);
+        assert_eq!(
+            target_p1p1, 2,
+            "transfer reads LKI count (2), NOT printed Modular N (1)"
+        );
+    }
+
+    /// CR 702.43a + CR 614.1a + CR 614.1c real Hardened Scales end-to-end:
+    /// install an `AddCounter` modifier (`QuantityModification::Plus { 1 }`,
+    /// scoped to P1P1 counters via `CounterMatch::OfType(Plus1Plus1)`) on a
+    /// separate battlefield object, then drive a Modular N=1 Arcbound Worker
+    /// through the ETB pipeline. The flow:
+    ///
+    ///   1. `replace_event(ZoneChange { Hand → Battlefield })` matches the
+    ///      synthesized Modular `Moved` replacement, absorbing
+    ///      `Effect::PutCounter { Fixed(1), SelfRef }` into the ZoneChange's
+    ///      `enter_with_counters = [("P1P1", 1)]`.
+    ///   2. `apply_etb_counters` → `add_counter_with_replacement` proposes
+    ///      `ProposedEvent::AddCounter { count: 1 }`, which goes through the
+    ///      pipeline a second time. Hardened Scales matches via
+    ///      `AddCounter`+`Plus1Plus1`, modifies count → 2.
+    ///   3. The modified AddCounter applies, placing 2 P1P1 counters.
+    ///   4. Killing the creature now snapshots `{P1P1: 2}` into LKI.
+    ///   5. The dies-trigger transfers the LKI-counted 2 to the target.
+    ///
+    /// Proves both halves of the Modular wiring (CR 614.1c absorption + CR
+    /// 122.1 LKI-counted transfer) compose correctly with a real CR 614.1a
+    /// AddCounter modifier — exactly what Hardened Scales + Arcbound Worker
+    /// does in a real game.
+    #[test]
+    fn hardened_scales_doubles_modular_etb_and_dies_transfer() {
+        use crate::types::ability::QuantityModification;
+        use crate::types::counter::CounterMatch;
+
+        let arcbound = arcbound_face("Arcbound Worker", 1, 1);
+        let target_face = plain_artifact_creature_face("Steel Walker");
+
+        let mut state = setup_state_with_priority(PlayerId(0));
+
+        // Install Hardened Scales as a battlefield object with an
+        // `AddCounter` quantity modifier filtered to P1P1 counters. The
+        // pipeline matches the modifier when the proposed AddCounter event's
+        // counter type matches the `CounterMatch` filter.
+        let hs_card = CardId(state.next_object_id);
+        let hs_id = create_object(
+            &mut state,
+            hs_card,
+            PlayerId(0),
+            "Hardened Scales".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let hs_obj = state.objects.get_mut(&hs_id).unwrap();
+            hs_obj.card_types.core_types.push(CoreType::Enchantment);
+            hs_obj.replacement_definitions.push(
+                ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                    .quantity_modification(QuantityModification::Plus { value: 1 })
+                    .counter_match(CounterMatch::OfType(CounterType::Plus1Plus1))
+                    .description("Hardened Scales".to_string()),
+            );
+        }
+
+        // Drive the Modular ETB through the full pipeline. The Moved
+        // replacement absorbs Fixed(1) into enter_with_counters; the inner
+        // AddCounter event is then modified by Hardened Scales → count=2.
+        let arcbound_id = spawn_arcbound_via_etb_pipeline(&mut state, &arcbound, PlayerId(0));
+        let etb_counters = *state
+            .objects
+            .get(&arcbound_id)
+            .unwrap()
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .unwrap_or(&0);
+        assert_eq!(
+            etb_counters, 2,
+            "Hardened Scales must add +1 to the Modular N=1 ETB: 1 + 1 = 2"
+        );
+
+        // Stand up the transfer target.
+        let target_card = CardId(state.next_object_id);
+        let target_id = create_object(
+            &mut state,
+            target_card,
+            PlayerId(0),
+            target_face.name.clone(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&target_id).unwrap();
+            apply_card_face_to_object(obj, &target_face);
+        }
+
+        // Kill the Arcbound Worker. LKI captures {P1P1: 2}.
+        let mut events = Vec::new();
+        move_to_zone(&mut state, arcbound_id, Zone::Graveyard, &mut events);
+        process_triggers(&mut state, &events);
+
+        let mut resolve_events = Vec::new();
+        resolve_top(&mut state, &mut resolve_events);
+        drive_optional_then_select_target(&mut state, target_id);
+
+        // The transfer reads LKI = 2 and places 2 counters on the target.
+        // Hardened Scales matches the inner AddCounter event again (it's a
+        // P1P1 add) and adds another +1, so the target ends up with 3.
+        // CR 614.5 prevents a replacement from re-applying to its own
+        // already-replaced event, but Modular's transfer is a NEW AddCounter
+        // event (not the same instance), so Hardened Scales fires on it too.
+        let target_p1p1 = *state
+            .objects
+            .get(&target_id)
+            .unwrap()
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .unwrap_or(&0);
+        assert_eq!(
+            target_p1p1, 3,
+            "transfer count from LKI (2) is itself modified by Hardened \
+             Scales on the transfer event: 2 + 1 = 3"
+        );
+    }
+
+    /// CR 603.5: controller declines the optional "you may" — no counters
+    /// transfer.
+    #[test]
+    fn modular_dies_may_be_skipped_by_controller() {
+        let arcbound = arcbound_face("Arcbound Stinger", 1, 1);
+        let target_face = plain_artifact_creature_face("Steel Walker");
+
+        let mut state = setup_state_with_priority(PlayerId(0));
+        let arcbound_id =
+            place_arcbound_on_battlefield_with_counters(&mut state, &arcbound, PlayerId(0));
+
+        let target_card = CardId(state.next_object_id);
+        let target_id = create_object(
+            &mut state,
+            target_card,
+            PlayerId(0),
+            target_face.name.clone(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&target_id).unwrap();
+            apply_card_face_to_object(obj, &target_face);
+        }
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, arcbound_id, Zone::Graveyard, &mut events);
+        process_triggers(&mut state, &events);
+
+        let mut resolve_events = Vec::new();
+        resolve_top(&mut state, &mut resolve_events);
+
+        // Decline the "may" prompt.
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "optional dies-transfer must park engine on OptionalEffectChoice"
+        );
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::DecideOptionalEffect { accept: false },
+        )
+        .unwrap();
+
+        let target_p1p1 = *state
+            .objects
+            .get(&target_id)
+            .unwrap()
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .unwrap_or(&0);
+        assert_eq!(
+            target_p1p1, 0,
+            "decline leaves target unchanged — no counters transferred"
+        );
+    }
+
+    /// CR 702.43a + CR 115.1e + CR 115.2 + CR 800: in a 3-player game, an
+    /// opponent-controlled artifact creature is a first-class legal target
+    /// for the Modular dies-transfer. The target filter is
+    /// `TypedFilter::creature().with_type(Artifact)` — no controller
+    /// restriction. P0 (the dying Modular's controller) has none of their
+    /// own artifact creatures; P1 has the artifact-creature target; P2 has
+    /// a plain (non-artifact) creature that the Artifact + Creature
+    /// conjunction filter must exclude. Auto-select binds P1's creature
+    /// (the unique legal target), proving:
+    ///   (a) opponent-controlled targets are not restricted away
+    ///   (b) the conjunction filter actually filters — P2's plain creature
+    ///       must NOT be considered a legal target
+    /// Mirrors the 3-player rigor of
+    /// `annihilator_in_multiplayer_targets_defending_player_not_all_opponents`.
+    #[test]
+    fn modular_dies_in_3p_can_target_opponents_artifact_creature() {
+        let arcbound = arcbound_face("Arcbound Stinger", 1, 1);
+        let target_face = plain_artifact_creature_face("Opposing Walker");
+
+        // CR 800.1: 3-player game.
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        state.turn_number = 2;
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let arcbound_id =
+            place_arcbound_on_battlefield_with_counters(&mut state, &arcbound, PlayerId(0));
+
+        // P1 controls the artifact-creature target.
+        let p1_target_card = CardId(state.next_object_id);
+        let p1_target_id = create_object(
+            &mut state,
+            p1_target_card,
+            PlayerId(1),
+            target_face.name.clone(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&p1_target_id).unwrap();
+            apply_card_face_to_object(obj, &target_face);
+        }
+
+        // P2 controls a plain (non-artifact) creature — an illegal target.
+        // Asserts the Artifact + Creature conjunction filter actually
+        // excludes non-artifact creatures rather than letting any creature
+        // through.
+        let p2_decoy_card = CardId(state.next_object_id);
+        let p2_decoy_id = create_object(
+            &mut state,
+            p2_decoy_card,
+            PlayerId(2),
+            "Plain Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&p2_decoy_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, arcbound_id, Zone::Graveyard, &mut events);
+        process_triggers(&mut state, &events);
+
+        // Exactly one legal target (P1's artifact creature) — auto-select
+        // binds it. P2's plain creature is excluded by the Artifact
+        // requirement on the target filter.
+        assert!(
+            state
+                .stack
+                .iter()
+                .any(|e| matches!(e.kind, StackEntryKind::TriggeredAbility { .. })),
+            "trigger with one legal target must auto-bind and push to stack"
+        );
+
+        let mut resolve_events = Vec::new();
+        resolve_top(&mut state, &mut resolve_events);
+        drive_optional_then_select_target(&mut state, p1_target_id);
+
+        let p1_p1p1 = *state
+            .objects
+            .get(&p1_target_id)
+            .unwrap()
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .unwrap_or(&0);
+        let p2_p1p1 = *state
+            .objects
+            .get(&p2_decoy_id)
+            .unwrap()
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .unwrap_or(&0);
+        assert_eq!(
+            p1_p1p1, 1,
+            "the opponent-controlled artifact creature is a legal target \
+             and receives the transfer"
+        );
+        assert_eq!(
+            p2_p1p1, 0,
+            "the non-artifact creature is excluded by the Artifact + \
+             Creature conjunction filter"
+        );
+    }
+
+    /// Driver: accept the optional `may` prompt. Targets are auto-selected at
+    /// stack-push time (CR 603.3d) when the synthesized trigger has exactly
+    /// one legal target — every happy-path fixture here places exactly one
+    /// legal artifact-creature target on the battlefield, so the engine
+    /// auto-binds it (including the 3-player test, where P2's plain creature
+    /// is filtered out by the Artifact requirement).
+    fn drive_optional_then_select_target(state: &mut GameState, _target_id: ObjectId) {
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "expected OptionalEffectChoice, got {:?}",
+            state.waiting_for
+        );
+        crate::game::engine::apply_as_current(
+            state,
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod bloodthirst_synthesis_tests {
+    //! CR 702.54a + CR 702.54c: Shape tests for the synthesized Bloodthirst
+    //! ETB-with-counters replacement. Pinned to the exact wire-up the
+    //! runtime resolver consumes: `ReplacementEvent::Moved` with `valid_card
+    //! = SelfRef`, `condition = OpponentDamagedThisTurn`, execute
+    //! `Effect::PutCounter { counter_type: "P1P1", count: Fixed(N), target:
+    //! SelfRef }`.
+    use super::*;
+
+    fn face_with_bloodthirst(n: u32) -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Bloodthirst(n));
+        face
+    }
+
+    /// CR 702.54a: ETB-with-N-counters replacement gated on
+    /// `OpponentDamagedThisTurn`.
+    #[test]
+    fn synthesize_bloodthirst_adds_conditional_etb_replacement() {
+        let mut face = face_with_bloodthirst(2);
+        synthesize_bloodthirst(&mut face);
+
+        let replacement = face
+            .replacements
+            .iter()
+            .find(|r| is_bloodthirst_etb_replacement(r, 2))
+            .expect("bloodthirst should synthesize an ETB-with-counters replacement");
+
+        assert!(matches!(replacement.event, ReplacementEvent::Moved));
+        assert!(matches!(
+            replacement.valid_card,
+            Some(TargetFilter::SelfRef)
+        ));
+        assert!(matches!(
+            replacement.condition,
+            Some(ReplacementCondition::OpponentDamagedThisTurn)
+        ));
+
+        let execute = replacement
+            .execute
+            .as_deref()
+            .expect("ETB replacement requires execute body");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = &*execute.effect
+        else {
+            panic!("bloodthirst ETB execute body should be Effect::PutCounter");
+        };
+        assert_eq!(counter_type, &CounterType::Plus1Plus1);
+        assert!(matches!(target, TargetFilter::SelfRef));
+        assert!(matches!(count, QuantityExpr::Fixed { value: 2 }));
+    }
+
+    /// Re-running synthesis must not duplicate the replacement.
+    #[test]
+    fn synthesize_bloodthirst_is_idempotent() {
+        let mut face = face_with_bloodthirst(3);
+        synthesize_bloodthirst(&mut face);
+        synthesize_bloodthirst(&mut face);
+
+        assert_eq!(
+            face.replacements
+                .iter()
+                .filter(|r| is_bloodthirst_etb_replacement(r, 3))
+                .count(),
+            1,
+            "ETB replacement should be deduped"
+        );
+    }
+
+    /// A face without `Keyword::Bloodthirst` is unaffected.
+    #[test]
+    fn synthesize_bloodthirst_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flying);
+        synthesize_bloodthirst(&mut face);
+        assert!(face.replacements.is_empty());
+        assert!(face.triggers.is_empty());
+    }
+
+    /// Negative test: unrelated keywords do not synthesize Bloodthirst.
+    #[test]
+    fn synthesize_bloodthirst_does_not_affect_other_keywords() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Trample);
+        face.keywords.push(Keyword::Vigilance);
+        synthesize_bloodthirst(&mut face);
+        assert!(face.replacements.is_empty());
+    }
+
+    /// CR 113.2c + CR 702.54c: each Bloodthirst instance emits its own ETB
+    /// replacement. No printed card today has two Bloodthirst instances;
+    /// the test pins the rule so a future printing (or a granted-Bloodthirst
+    /// case) routes correctly.
+    #[test]
+    fn synthesize_bloodthirst_emits_one_replacement_per_instance() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Bloodthirst(1));
+        face.keywords.push(Keyword::Bloodthirst(3));
+        synthesize_bloodthirst(&mut face);
+
+        let replacement_n1 = face
+            .replacements
+            .iter()
+            .filter(|r| is_bloodthirst_etb_replacement(r, 1))
+            .count();
+        let replacement_n3 = face
+            .replacements
+            .iter()
+            .filter(|r| is_bloodthirst_etb_replacement(r, 3))
+            .count();
+        assert_eq!(replacement_n1, 1, "exactly one Fixed(1) ETB replacement");
+        assert_eq!(replacement_n3, 1, "exactly one Fixed(3) ETB replacement");
+    }
+
+    /// CR 702.54a regression guard: a face that already carries a parsed
+    /// "enters with K +1/+1 counters" ETB replacement with K ≠ N MUST still
+    /// receive a synthesized Fixed(N) replacement. The per-N predicate
+    /// prevents the K-replacement from silently pre-satisfying the
+    /// Bloodthirst-N idempotency check (and the resulting card from
+    /// entering with the wrong counter count).
+    #[test]
+    fn is_bloodthirst_etb_replacement_per_n_predicate_distinguishes_k_vs_n() {
+        let mut face = face_with_bloodthirst(2);
+
+        // Pre-existing K=3 unconditional ETB replacement (as if a parser had
+        // emitted one for a printed "this permanent enters with 3 +1/+1
+        // counters on it" clause). Shape matches Bloodthirst's emission except
+        // for the count AND the absence of the OpponentDamagedThisTurn
+        // condition.
+        let unrelated_etb = ReplacementDefinition {
+            event: ReplacementEvent::Moved,
+            execute: Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 3 },
+                    target: TargetFilter::SelfRef,
+                },
+            ))),
+            valid_card: Some(TargetFilter::SelfRef),
+            ..ReplacementDefinition::new(ReplacementEvent::Moved)
+        };
+        face.replacements.push(unrelated_etb);
+
+        synthesize_bloodthirst(&mut face);
+
+        // The K=3 replacement does not match the per-N predicate (its count
+        // is 3, not 2; and it has no condition).
+        let fixed_2_with_condition = face
+            .replacements
+            .iter()
+            .filter(|r| is_bloodthirst_etb_replacement(r, 2))
+            .count();
+        assert_eq!(
+            fixed_2_with_condition, 1,
+            "Bloodthirst N=2 must emit its own Fixed(2)+condition replacement"
+        );
+
+        // An unconditional ETB-counters replacement with the SAME N as
+        // Bloodthirst N must ALSO not dedupe — Bloodthirst is conditional,
+        // the printed unconditional replacement is not. They must coexist.
+        let mut face2 = face_with_bloodthirst(2);
+        let unconditional_same_n = ReplacementDefinition {
+            event: ReplacementEvent::Moved,
+            execute: Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::SelfRef,
+                },
+            ))),
+            valid_card: Some(TargetFilter::SelfRef),
+            ..ReplacementDefinition::new(ReplacementEvent::Moved)
+        };
+        face2.replacements.push(unconditional_same_n);
+        synthesize_bloodthirst(&mut face2);
+        // Two replacements: the unconditional one (no condition) and the
+        // Bloodthirst-synthesized one (with condition).
+        assert_eq!(
+            face2.replacements.len(),
+            2,
+            "unconditional Fixed(N) and conditional Fixed(N) must coexist — \
+             they are not the same replacement"
+        );
+        assert_eq!(
+            face2
+                .replacements
+                .iter()
+                .filter(|r| is_bloodthirst_etb_replacement(r, 2))
+                .count(),
+            1,
+            "only the gated one is a Bloodthirst replacement"
+        );
+    }
+}
+
+#[cfg(test)]
+mod bloodthirst_runtime_tests {
+    //! CR 702.54a runtime integration: a Bloodthirst-bearing creature
+    //! enters with N +1/+1 counters via the synthesized Moved replacement
+    //! ONLY IF an opponent of the controller was dealt damage earlier this
+    //! turn (recorded in `state.damage_dealt_this_turn`). Without the
+    //! recorded damage the replacement still matches the event but its
+    //! condition is false, so the ETB-with-counters effect is suppressed
+    //! and the permanent enters with 0 counters.
+
+    use super::*;
+    use crate::game::printed_cards::apply_card_face_to_object;
+    use crate::game::zones::{create_object, move_to_zone};
+    use crate::types::ability::{QuantityModification, TargetRef};
+    use crate::types::card_type::CoreType;
+    use crate::types::counter::{CounterMatch, CounterType};
+    use crate::types::game_state::{DamageRecord, GameState, WaitingFor};
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::player::PlayerId;
+
+    /// Build a creature face with `Keyword::Bloodthirst(n)` and run the
+    /// full synthesis pipeline.
+    fn bloodthirst_face(name: &str, n: u32, base_pt: i32) -> CardFace {
+        let mut face = CardFace {
+            name: name.to_string(),
+            power: Some(PtValue::Fixed(base_pt)),
+            toughness: Some(PtValue::Fixed(base_pt)),
+            keywords: vec![Keyword::Bloodthirst(n)],
+            ..CardFace::default()
+        };
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_all(&mut face);
+        face
+    }
+
+    fn setup_state_with_priority(controller: PlayerId) -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        state.active_player = controller;
+        state.priority_player = controller;
+        state.waiting_for = WaitingFor::Priority { player: controller };
+        state
+    }
+
+    /// Drive a real Hand→Battlefield ZoneChange through the replacement
+    /// pipeline, mirroring `spawn_arcbound_via_etb_pipeline`. The
+    /// synthesized `ReplacementEvent::Moved` is absorbed by the pipeline
+    /// into `enter_with_counters` (when the condition holds) and the
+    /// resulting per-counter `add_counter_with_replacement` calls layer in
+    /// any `AddCounter` modifiers (e.g., Hardened Scales).
+    fn spawn_bloodthirst_via_etb_pipeline(
+        state: &mut GameState,
+        face: &CardFace,
+        controller: PlayerId,
+    ) -> ObjectId {
+        let next_card = CardId(state.next_object_id);
+        let obj_id = create_object(state, next_card, controller, face.name.clone(), Zone::Hand);
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            apply_card_face_to_object(obj, face);
+        }
+
+        let proposed = crate::types::proposed_event::ProposedEvent::zone_change(
+            obj_id,
+            Zone::Hand,
+            Zone::Battlefield,
+            None,
+        );
+        let mut events = Vec::new();
+        let result = crate::game::replacement::replace_event(state, proposed, &mut events);
+        // When the condition is false, the replacement is not a candidate
+        // and `replace_event` returns the unmodified Execute(ZoneChange)
+        // with empty `enter_with_counters`. When the condition is true the
+        // replacement applies and `enter_with_counters` is populated.
+        let crate::game::replacement::ReplacementResult::Execute(event) = result else {
+            panic!("Bloodthirst ETB pipeline must return Execute, got {result:?}");
+        };
+        let crate::types::proposed_event::ProposedEvent::ZoneChange {
+            object_id,
+            to,
+            enter_with_counters,
+            ..
+        } = event
+        else {
+            panic!("pipeline must yield a ZoneChange execute event");
+        };
+        move_to_zone(state, object_id, to, &mut events);
+        let actor = state
+            .objects
+            .get(&object_id)
+            .map(|obj| obj.controller)
+            .unwrap_or(controller);
+        for (counter_type, count) in &enter_with_counters {
+            crate::game::effects::counters::add_counter_with_replacement(
+                state,
+                actor,
+                object_id,
+                counter_type.clone(),
+                *count,
+                &mut events,
+            );
+        }
+        obj_id
+    }
+
+    /// CR 702.54a: with no recorded opponent damage this turn, the
+    /// Bloodthirst ETB replacement's condition is false and the permanent
+    /// enters with 0 counters. The Moved event still resolves (the
+    /// replacement only gates the inner counter-placing effect).
+    #[test]
+    fn bloodthirst_etb_no_damage_dealt_enters_without_counters() {
+        let face = bloodthirst_face("Test Bloodthirster", 2, 2);
+
+        let mut state = setup_state_with_priority(PlayerId(0));
+        // Verify the per-turn damage tracker is empty at the start.
+        assert!(state.damage_dealt_this_turn.is_empty());
+
+        let obj_id = spawn_bloodthirst_via_etb_pipeline(&mut state, &face, PlayerId(0));
+
+        let obj = state.objects.get(&obj_id).expect("object exists");
+        assert_eq!(obj.zone, Zone::Battlefield, "object must reach battlefield");
+        let p1p1 = *obj.counters.get(&CounterType::Plus1Plus1).unwrap_or(&0);
+        assert_eq!(
+            p1p1, 0,
+            "Bloodthirst with no opponent damage this turn: no counters"
+        );
+    }
+
+    /// CR 702.54a: when an opponent has been dealt damage this turn, the
+    /// Bloodthirst condition is true and the permanent enters with N P1P1
+    /// counters via the absorbed `Effect::PutCounter` execute body.
+    #[test]
+    fn bloodthirst_etb_after_damage_dealt_enters_with_n_counters() {
+        let face = bloodthirst_face("Test Bloodthirster", 3, 2);
+
+        let mut state = setup_state_with_priority(PlayerId(0));
+        // Record direct damage to opponent (PlayerId(1)) earlier this turn.
+        state.damage_dealt_this_turn.push(DamageRecord {
+            source_id: ObjectId(999), // any source; CR 702.54a doesn't care
+            source_controller: PlayerId(0),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 1,
+            is_combat: false,
+        });
+
+        let obj_id = spawn_bloodthirst_via_etb_pipeline(&mut state, &face, PlayerId(0));
+
+        let obj = state.objects.get(&obj_id).expect("object exists");
+        assert_eq!(obj.zone, Zone::Battlefield);
+        let p1p1 = *obj.counters.get(&CounterType::Plus1Plus1).unwrap_or(&0);
+        assert_eq!(
+            p1p1, 3,
+            "Bloodthirst N=3 with opponent damaged earlier this turn → 3 counters"
+        );
+    }
+
+    /// CR 702.54a + CR 614.1c: the condition is checked at the ETB window
+    /// (replacement-applicability time). If opponent damage happens AFTER
+    /// the permanent has entered, no retroactive counters appear.
+    #[test]
+    fn bloodthirst_condition_only_checks_at_etb_window() {
+        let face = bloodthirst_face("Test Bloodthirster", 2, 2);
+
+        let mut state = setup_state_with_priority(PlayerId(0));
+        // No damage recorded yet.
+        let obj_id = spawn_bloodthirst_via_etb_pipeline(&mut state, &face, PlayerId(0));
+
+        // After the permanent has entered, record damage to the opponent.
+        // This must NOT retroactively add counters.
+        state.damage_dealt_this_turn.push(DamageRecord {
+            source_id: ObjectId(999),
+            source_controller: PlayerId(0),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 4,
+            is_combat: false,
+        });
+
+        let obj = state.objects.get(&obj_id).expect("object exists");
+        let p1p1 = *obj.counters.get(&CounterType::Plus1Plus1).unwrap_or(&0);
+        assert_eq!(
+            p1p1, 0,
+            "post-ETB damage must not retroactively add counters"
+        );
+    }
+
+    /// CR 702.54a + CR 115.1 (multiplayer): in a 3-player game, ANY
+    /// opponent being dealt damage satisfies the condition. The rule
+    /// reads "an opponent" not "a specific opponent" — damage to any
+    /// non-controller, non-eliminated player suffices.
+    #[test]
+    fn bloodthirst_in_3p_any_opponent_damaged_satisfies_condition() {
+        let face = bloodthirst_face("Test Bloodthirster", 1, 2);
+
+        // Build a 3-player state. `new_two_player` is the only constructor;
+        // we extend with a third player by mirroring its initialization.
+        // `opponents()` consults `seat_order` (CR 102.2), so both
+        // `state.players` and `state.seat_order` must include the third
+        // seat or the helper will not recognize it as an opponent.
+        let mut state = setup_state_with_priority(PlayerId(0));
+        let third_player = {
+            let template = state.players[1].clone();
+            let mut p2 = template;
+            p2.id = PlayerId(2);
+            state.players.push(p2);
+            state.seat_order.push(PlayerId(2));
+            PlayerId(2)
+        };
+
+        // Damage dealt to the SECOND opponent (PlayerId(2)) — not the
+        // primary opponent (PlayerId(1)). Bloodthirst still triggers.
+        state.damage_dealt_this_turn.push(DamageRecord {
+            source_id: ObjectId(999),
+            source_controller: PlayerId(0),
+            target: TargetRef::Player(third_player),
+            amount: 2,
+            is_combat: false,
+        });
+
+        let obj_id = spawn_bloodthirst_via_etb_pipeline(&mut state, &face, PlayerId(0));
+
+        let p1p1 = *state
+            .objects
+            .get(&obj_id)
+            .unwrap()
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .unwrap_or(&0);
+        assert_eq!(p1p1, 1, "damage to ANY opponent satisfies CR 702.54a");
+    }
+
+    /// CR 702.54a + CR 614.1a + CR 614.1c: with the condition satisfied,
+    /// the Bloodthirst ETB absorbs a `PutCounter(Fixed(N))` into
+    /// `enter_with_counters`. Each per-counter `AddCounter` event then
+    /// passes through the replacement pipeline, where a real Hardened
+    /// Scales replacement (`QuantityModification::Plus { 1 }` filtered to
+    /// P1P1) modifies the count → N + 1 counters land.
+    #[test]
+    fn bloodthirst_with_hardened_scales_doubles_counters_when_condition_met() {
+        let face = bloodthirst_face("Test Bloodthirster", 2, 2);
+
+        let mut state = setup_state_with_priority(PlayerId(0));
+        // Condition satisfied: an opponent was damaged earlier this turn.
+        state.damage_dealt_this_turn.push(DamageRecord {
+            source_id: ObjectId(999),
+            source_controller: PlayerId(0),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 1,
+            is_combat: true,
+        });
+
+        // Install Hardened Scales as a battlefield object.
+        let hs_card = CardId(state.next_object_id);
+        let hs_id = create_object(
+            &mut state,
+            hs_card,
+            PlayerId(0),
+            "Hardened Scales".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let hs_obj = state.objects.get_mut(&hs_id).unwrap();
+            hs_obj.card_types.core_types.push(CoreType::Enchantment);
+            hs_obj.replacement_definitions.push(
+                ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                    .quantity_modification(QuantityModification::Plus { value: 1 })
+                    .counter_match(CounterMatch::OfType(CounterType::Plus1Plus1))
+                    .description("Hardened Scales".to_string()),
+            );
+        }
+
+        let obj_id = spawn_bloodthirst_via_etb_pipeline(&mut state, &face, PlayerId(0));
+        let p1p1 = *state
+            .objects
+            .get(&obj_id)
+            .unwrap()
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .unwrap_or(&0);
+        assert_eq!(
+            p1p1, 3,
+            "Hardened Scales adds +1 to the Bloodthirst N=2 ETB: 2 + 1 = 3"
+        );
+    }
+
+    /// CR 514.2 + CR 702.54a: the damage-history store is cleared at the
+    /// start of the next turn (`start_next_turn` clears
+    /// `damage_dealt_this_turn`). Damage on turn 1 must NOT carry over
+    /// into a Bloodthirst check on turn 2.
+    #[test]
+    fn bloodthirst_condition_clears_at_end_of_turn() {
+        let face = bloodthirst_face("Test Bloodthirster", 2, 2);
+
+        let mut state = setup_state_with_priority(PlayerId(0));
+        // Turn 1: opponent took damage.
+        state.damage_dealt_this_turn.push(DamageRecord {
+            source_id: ObjectId(999),
+            source_controller: PlayerId(0),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 2,
+            is_combat: true,
+        });
+
+        // Advance to the next turn via the real engine path that clears
+        // `damage_dealt_this_turn`.
+        let mut events = Vec::new();
+        crate::game::turns::start_next_turn(&mut state, &mut events);
+        assert!(
+            state.damage_dealt_this_turn.is_empty(),
+            "start_next_turn must clear the per-turn damage record"
+        );
+
+        // Re-park the engine on priority for the new active player so the
+        // ETB pipeline has a consistent starting state.
+        let new_active = state.active_player;
+        state.priority_player = new_active;
+        state.waiting_for = WaitingFor::Priority { player: new_active };
+
+        let obj_id = spawn_bloodthirst_via_etb_pipeline(&mut state, &face, new_active);
+        let p1p1 = *state
+            .objects
+            .get(&obj_id)
+            .unwrap()
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .unwrap_or(&0);
+        assert_eq!(
+            p1p1, 0,
+            "after turn rollover the previous turn's damage no longer counts"
+        );
     }
 }

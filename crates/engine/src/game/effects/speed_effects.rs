@@ -125,6 +125,21 @@ fn players_for_filter(
                 .map(|player| player.id)
                 .collect()
         }
+        // CR 608.2c + CR 701.38: Players who cast a vote for the recorded
+        // choice index in the most recent vote within the current top-level
+        // resolution. Read directly off the transient ballot ledger.
+        PlayerFilter::VotedFor { choice_index } => state
+            .players
+            .iter()
+            .filter(|player| !player.is_eliminated)
+            .filter(|player| {
+                state
+                    .last_vote_ballots
+                    .iter()
+                    .any(|(voter, idx)| *voter == player.id && *idx == *choice_index)
+            })
+            .map(|player| player.id)
+            .collect(),
     }
 }
 

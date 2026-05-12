@@ -2,8 +2,10 @@ use engine::game::game_object::GameObject;
 use engine::types::ability::{
     ContinuousModification, Effect, PtValue, QuantityExpr, TargetFilter, TypeFilter,
 };
+use engine::types::counter::CounterType;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
+use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
 use super::context::PolicyContext;
@@ -31,13 +33,13 @@ fn invert(polarity: EffectPolarity) -> EffectPolarity {
 /// CR 122.1: Counters sign — `+1/+1` is beneficial to the bearer, `-1/-1`
 /// harmful. Non-P/T counter types (poison, loyalty, charge, etc.) are classified
 /// as Contextual because their value to the bearer depends on card semantics.
-fn counter_sign_polarity(counter_type: &str) -> EffectPolarity {
-    if counter_type.starts_with('+') {
-        EffectPolarity::Beneficial
-    } else if counter_type.starts_with('-') {
-        EffectPolarity::Harmful
-    } else {
-        EffectPolarity::Contextual
+fn counter_sign_polarity(counter_type: &CounterType) -> EffectPolarity {
+    match counter_type {
+        CounterType::Plus1Plus1 => EffectPolarity::Beneficial,
+        CounterType::Minus1Minus1 => EffectPolarity::Harmful,
+        CounterType::Generic(s) if s.starts_with('+') => EffectPolarity::Beneficial,
+        CounterType::Generic(s) if s.starts_with('-') => EffectPolarity::Harmful,
+        _ => EffectPolarity::Contextual,
     }
 }
 
@@ -69,7 +71,11 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         // removing a +1/+1 counter harms the bearer, removing a -1/-1 counter
         // helps it (Hexcaster's Mark, Solemnity-style interactions, Vampire
         // Hexmage). Same building-block class as PutCounter, opposite sign.
-        Effect::RemoveCounter { counter_type, .. } => invert(counter_sign_polarity(counter_type)),
+        Effect::RemoveCounter { counter_type, .. } => counter_type
+            .as_ref()
+            .map(counter_sign_polarity)
+            .map(invert)
+            .unwrap_or(EffectPolarity::Contextual),
         Effect::MultiplyCounter {
             counter_type,
             multiplier,
@@ -362,7 +368,44 @@ pub(crate) fn aura_polarity(source: &GameObject) -> EffectPolarity {
         }
     }
 
+    // CR 109.5 + CR 605.1b: Some Auras carry their benefit on a triggered
+    // ability that routes the effect to the enchanted permanent's controller
+    // ("its controller adds an additional one mana of any color" — Fertile
+    // Ground, Wild Growth, Utopia Sprawl, Verdant Haven, Trace of Abundance,
+    // Market Festival, Weirding Wood, Overgrowth). Without inspecting
+    // triggers, these auras appear `Contextual` and the AI cannot tell that
+    // gifting one to an opponent is a strict negative for itself. A
+    // `TapsForMana` trigger that adds mana is unambiguously beneficial to
+    // the host's controller.
+    for trigger in source.trigger_definitions.iter_unchecked() {
+        match trigger_mode_polarity_for_host(trigger) {
+            EffectPolarity::Contextual => continue,
+            polarity => return polarity,
+        }
+    }
+
     EffectPolarity::Contextual
+}
+
+/// Classify a trigger on an Aura as beneficial/harmful to the *enchanted
+/// permanent's controller* (the host's controller — not the aura's controller).
+/// Used by `aura_polarity` to flag auras whose value accrues to the host owner
+/// (e.g. mana-doubling auras: Fertile Ground class) so the AI prefers attaching
+/// them to its own permanents and avoids gifting them to opponents.
+fn trigger_mode_polarity_for_host(
+    trigger: &engine::types::ability::TriggerDefinition,
+) -> EffectPolarity {
+    let Some(execute) = trigger.execute.as_deref() else {
+        return EffectPolarity::Contextual;
+    };
+    match trigger.mode {
+        // "Whenever enchanted land is tapped for mana, its controller adds …"
+        // — bonus mana goes to the host's controller.
+        TriggerMode::TapsForMana if matches!(&*execute.effect, Effect::Mana { .. }) => {
+            EffectPolarity::Beneficial
+        }
+        _ => EffectPolarity::Contextual,
+    }
 }
 
 /// Classify a static mode as beneficial/harmful to the enchanted permanent.

@@ -269,11 +269,23 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
     ? "0 0 6px 1px rgba(255,255,255,0.3)"
     : undefined;
 
+  // CR 702.26: Per-permanent phasing — phased-out permanents stay on the
+  // battlefield but are treated as though they don't exist (CR 702.26d). We
+  // surface this with the same sky-blue "ethereal plane" tint used for
+  // player-area phasing (PlayerArea.tsx), plus a mild opacity drop so the
+  // card stays readable. Player-area phasing is rendered separately on
+  // PlayerArea; both can be active independently.
+  const isPhasedOut = obj.phase_status?.status === "PhasedOut";
+
   // Filter out loyalty counters — shown separately as the loyalty badge
   const counters = Object.entries(obj.counters).filter((entry): entry is [string, number] => entry[1] != null && entry[0] !== "loyalty");
 
   // Tap rotation: 17deg in MTGA mode (or compact-height), 90deg in classic mode
-  const tapOpacity = (isCompactHeight || tapRotation === "mtga") && obj.tapped && !isAttacking ? 0.85 : 1;
+  const tapBaseOpacity = (isCompactHeight || tapRotation === "mtga") && obj.tapped && !isAttacking ? 0.85 : 1;
+  // CR 702.26: Phased-out permanents render at 70% opacity (matching the
+  // player-area phasing treatment in PlayerArea.tsx commit 4d6cfb506) so the
+  // sky-blue tint reads as "ethereal" rather than overpowering the art.
+  const tapOpacity = isPhasedOut ? Math.min(tapBaseOpacity, 0.7) : tapBaseOpacity;
   const isRotatedFull = isAttacking || obj.tapped;
 
   // Attacker slide-forward: player creatures slide up, opponent creatures slide down.
@@ -458,6 +470,14 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
       {useArtCrop ? (
         <div className={`relative z-10 rounded-lg ${glowClass}`}>
           <ArtCropCard objectId={objectId} />
+          {/* CR 702.26: phased-out tint overlay — sky-blue mix-blend-screen
+              matches the player-area treatment (PlayerArea.tsx 4d6cfb506). */}
+          {isPhasedOut && (
+            <div
+              data-phased-out="true"
+              className="absolute inset-0 z-20 bg-sky-500/25 mix-blend-screen pointer-events-none rounded-lg"
+            />
+          )}
         </div>
       ) : (
         <>
@@ -466,6 +486,14 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
             {/* Keyword strip overlay — inside the card image wrapper so absolute positioning works */}
             {showKeywordStrip && obj.keywords.length > 0 && !obj.face_down && (
               <KeywordStrip keywords={obj.keywords} baseKeywords={obj.base_keywords} />
+            )}
+            {/* CR 702.26: phased-out tint overlay — sky-blue mix-blend-screen
+                matches the player-area treatment (PlayerArea.tsx 4d6cfb506). */}
+            {isPhasedOut && (
+              <div
+                data-phased-out="true"
+                className="absolute inset-0 z-20 bg-sky-500/25 mix-blend-screen pointer-events-none rounded-lg"
+              />
             )}
           </div>
 

@@ -16,6 +16,7 @@ use crate::types::ability::{
     AbilityCost, CostReduction, FilterProp, PlayerScope, QuantityExpr, QuantityRef, TargetFilter,
     TypedFilter,
 };
+use crate::types::counter::parse_counter_type;
 use crate::types::zones::Zone;
 
 /// Parse the cost portion before `:` in an Oracle activated ability.
@@ -357,7 +358,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                     .to_string();
                 return AbilityCost::RemoveCounter {
                     count: u32::MAX,
-                    counter_type,
+                    counter_type: parse_counter_type(&counter_type),
                     target: None,
                 };
             }
@@ -369,7 +370,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                     .to_string();
                 return AbilityCost::RemoveCounter {
                     count,
-                    counter_type,
+                    counter_type: parse_counter_type(&counter_type),
                     target: None,
                 };
             }
@@ -379,7 +380,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                 let counter_type = words[2].to_string();
                 return AbilityCost::RemoveCounter {
                     count: 1,
-                    counter_type,
+                    counter_type: parse_counter_type(&counter_type),
                     target: None,
                 };
             }
@@ -455,6 +456,16 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         if let Some(filter_and_zone) = try_parse_return_to_hand_cost(&rest_lower) {
             return filter_and_zone;
         }
+    }
+
+    // CR 701.3d: "Unattach this Equipment" / "Unattach ~" — explicit
+    // activation costs on Equipment such as Sunforger.
+    if nom_on_lower(text, &lower, |i| {
+        value((), alt((tag("unattach this equipment"), tag("unattach ~")))).parse(i)
+    })
+    .is_some()
+    {
+        return AbilityCost::Unattach;
     }
 
     // "Reveal this card from your hand" — reveal self cost
@@ -758,11 +769,29 @@ fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
     let filter_text = nom_on_lower(filter_text, filter_text, nom_primitives::parse_article)
         .map(|((), rest)| rest)
         .unwrap_or(filter_text);
-    // "~" is the self-reference placeholder — filter: None means "this permanent"
-    if filter_text == "~" {
+    // "~" is the self-reference placeholder. Preserve it as an explicit
+    // SelfRef so the runtime does not treat an unconstrained filter as "any
+    // permanent you control".
+    if nom_on_lower(filter_text, filter_text, |i| {
+        value(
+            (),
+            alt((
+                tag("~"),
+                tag("this card"),
+                tag("this creature"),
+                tag("this artifact"),
+                tag("this equipment"),
+                tag("this land"),
+            )),
+        )
+        .parse(i)
+    })
+    .is_some_and(|((), rest)| rest.trim().is_empty())
+    {
         return Some(AbilityCost::ReturnToHand {
             count: 1,
-            filter: None,
+            filter: Some(TargetFilter::SelfRef),
+            from_zone: None,
         });
     }
     let target_text = format!("target {filter_text}");
@@ -776,6 +805,7 @@ fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
     Some(AbilityCost::ReturnToHand {
         count: 1,
         filter: Some(filter),
+        from_zone: None,
     })
 }
 
@@ -870,6 +900,15 @@ mod tests {
     }
 
     #[test]
+    fn cost_unattach_this_equipment() {
+        assert_eq!(
+            parse_oracle_cost("Unattach this Equipment"),
+            AbilityCost::Unattach
+        );
+        assert_eq!(parse_oracle_cost("Unattach ~"), AbilityCost::Unattach);
+    }
+
+    #[test]
     fn cost_mana() {
         assert_eq!(
             parse_oracle_cost("{2}{W}"),
@@ -923,7 +962,20 @@ mod tests {
             parse_oracle_cost("Return ~ to its owner's hand"),
             AbilityCost::ReturnToHand {
                 count: 1,
-                filter: None,
+                filter: Some(TargetFilter::SelfRef),
+                from_zone: None,
+            }
+        );
+    }
+
+    #[test]
+    fn cost_return_this_land_to_hand_is_self_ref() {
+        assert_eq!(
+            parse_oracle_cost("Return this land to its owner's hand"),
+            AbilityCost::ReturnToHand {
+                count: 1,
+                filter: Some(TargetFilter::SelfRef),
+                from_zone: None,
             }
         );
     }
@@ -1279,9 +1331,14 @@ mod tests {
     #[test]
     fn cost_return_land_to_hand() {
         match parse_oracle_cost("Return a land you control to its owner's hand") {
-            AbilityCost::ReturnToHand { count, filter } => {
+            AbilityCost::ReturnToHand {
+                count,
+                filter,
+                from_zone,
+            } => {
                 assert_eq!(count, 1);
                 assert!(filter.is_some());
+                assert!(from_zone.is_none());
             }
             other => panic!("Expected ReturnToHand, got {:?}", other),
         }
@@ -1293,6 +1350,7 @@ mod tests {
             AbilityCost::ReturnToHand {
                 count,
                 filter: Some(TargetFilter::Typed(filter)),
+                from_zone: None,
             } => {
                 assert_eq!(count, 1);
                 assert_eq!(filter.get_subtype(), Some("Forest"));

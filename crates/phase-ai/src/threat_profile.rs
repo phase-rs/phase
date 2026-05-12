@@ -421,7 +421,6 @@ mod tests {
             abilities: vec![make_ability(Effect::Counter {
                 target: TargetFilter::Any,
                 source_static: None,
-                unless_payment: None,
             })],
             ..Default::default()
         };

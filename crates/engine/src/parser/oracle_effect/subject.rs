@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till};
-use nom::combinator::{all_consuming, value, verify};
+use nom::combinator::{all_consuming, opt, value, verify};
 use nom::sequence::preceded;
 use nom::Parser;
 
@@ -20,8 +20,8 @@ use super::super::oracle_nom::error::OracleResult;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::target::parse_event_context_ref;
 use super::super::oracle_static::{
-    parse_additive_type_clause_modifications, parse_continuous_modifications,
-    parse_static_line_multi,
+    parse_additive_type_clause_modifications, parse_chosen_qualifier_subject,
+    parse_continuous_modifications, parse_static_line_multi,
 };
 use super::super::oracle_target::{parse_target, parse_type_phrase};
 use super::super::oracle_util::{
@@ -159,6 +159,10 @@ fn extract_subject_text(text: &str) -> Option<String> {
 fn try_parse_subject_additive_type_clause(text: &str, ctx: &mut ParseContext) -> Option<ClauseAst> {
     type VE<'a> = OracleError<'a>;
 
+    if let Some(clause) = try_parse_contracted_subject_additive_type_clause(text, ctx) {
+        return Some(clause);
+    }
+
     let lower = text.to_lowercase();
     let (subject_lower, predicate_lower) = nom_primitives::scan_split_at_phrase(&lower, |i| {
         alt((tag::<_, _, VE>("are "), tag::<_, _, VE>("is "))).parse(i)
@@ -170,6 +174,40 @@ fn try_parse_subject_additive_type_clause(text: &str, ctx: &mut ParseContext) ->
     let predicate = &text[text.len() - predicate_lower.len()..];
     let application = additive_type_subject_application(subject_text, ctx)?;
     let clause = build_additive_type_continuous_clause(&application, predicate)?;
+
+    Some(ClauseAst::SubjectPredicate {
+        subject: Box::new(SubjectPhraseAst {
+            affected: application.affected,
+            target: application.target,
+            multi_target: application.multi_target,
+            inherits_parent: application.inherits_parent,
+            is_optional: application.is_optional,
+        }),
+        predicate: Box::new(PredicateAst::Continuous {
+            effect: clause.effect,
+            duration: clause.duration,
+            sub_ability: clause.sub_ability,
+        }),
+    })
+}
+
+fn try_parse_contracted_subject_additive_type_clause(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ClauseAst> {
+    type VE<'a> = OracleError<'a>;
+
+    let lower = text.to_lowercase();
+    let (_, (subject_text, prefix_len)) = alt((
+        value(("it", "it's ".len()), tag::<_, _, VE>("it's ")),
+        value(("it", "it’s ".len()), tag::<_, _, VE>("it’s ")),
+    ))
+    .parse(lower.as_str())
+    .ok()?;
+    let rest_original = &text[prefix_len..];
+    let predicate = format!("is {rest_original}");
+    let application = additive_type_subject_application(subject_text, ctx)?;
+    let clause = build_additive_type_continuous_clause(&application, &predicate)?;
 
     Some(ClauseAst::SubjectPredicate {
         subject: Box::new(SubjectPhraseAst {
@@ -257,6 +295,7 @@ fn build_additive_type_continuous_clause(
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -305,6 +344,7 @@ fn try_parse_subject_restriction_clause(
             sub_ability: None,
             condition: None,
             optional: false,
+            unless_pay: None,
         });
     }
 
@@ -360,6 +400,7 @@ fn try_parse_subject_restriction_clause(
             sub_ability: None,
             condition: None,
             optional: false,
+            unless_pay: None,
         });
     }
 
@@ -417,6 +458,7 @@ fn try_parse_can_attack_with_defender(
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -789,6 +831,18 @@ pub(super) fn parse_subject_application(
         // structural check that the remaining tail is `<noun>'s controller` /
         // `<noun>'s owner`, mirroring the existing `parse_target` path that uses
         // `find("'s controller")` for the same purpose.
+        if after_det.ends_with("'s controller may") // allow-noncombinator: post-tokenized subject suffix classification
+            || after_det.ends_with("'s owner may")
+        // allow-noncombinator: post-tokenized subject suffix classification
+        {
+            return Some(SubjectApplication {
+                affected: TargetFilter::ParentTargetController,
+                target: None,
+                multi_target: None,
+                inherits_parent: false,
+                is_optional: true,
+            });
+        }
         if after_det.ends_with("'s controller") || after_det.ends_with("'s owner") {
             return Some(SubjectApplication {
                 affected: TargetFilter::ParentTargetController,
@@ -1099,6 +1153,7 @@ fn try_split_pump_compound(
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -1129,6 +1184,7 @@ fn build_continuous_clause(
             multi_target: None,
             condition: None,
             optional: false,
+            unless_pay: None,
         });
     }
 
@@ -1167,6 +1223,7 @@ fn build_continuous_clause(
             multi_target: None,
             condition: None,
             optional: false,
+            unless_pay: None,
         });
     }
 
@@ -1206,6 +1263,7 @@ fn build_continuous_clause(
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -1422,6 +1480,7 @@ fn build_become_clause(
             multi_target: None,
             condition: None,
             optional: false,
+            unless_pay: None,
         });
     }
 
@@ -1460,6 +1519,7 @@ fn build_become_clause(
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -1530,6 +1590,7 @@ fn try_parse_become_and_attack_if_able(
         multi_target: application.multi_target.clone(),
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -1612,6 +1673,7 @@ fn try_parse_set_life_total(
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -1690,6 +1752,7 @@ fn try_parse_become_choice(
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -1746,6 +1809,7 @@ fn build_life_lock_clause(scope_filter: TargetFilter) -> ParsedEffectClause {
         sub_ability: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     }
 }
 
@@ -1782,19 +1846,29 @@ fn build_restriction_clause(
             let mut def = StaticDefinition::new(mode.clone())
                 .affected(affected.clone())
                 .description(predicate.to_string());
-            // CR 613.2 layer 6: Combat/untap restriction modes with a duration are enforced
-            // via active_static_definitions() — inject AddStaticMode so the layer system
-            // propagates them onto the targeted object (CR 509.1a + CR 508.1d + CR 502.5).
-            if duration.is_some()
-                && matches!(
-                    mode,
-                    StaticMode::CantBlock
-                        | StaticMode::CantAttack
-                        | StaticMode::CantAttackOrBlock
-                        | StaticMode::CantBeBlocked
-                        | StaticMode::CantUntap
-                )
-            {
+            // CR 613.2 layer 6 + CR 509.1b (issue #327): Combat/untap restriction
+            // modes granted to a target need AddStaticMode so the layer system
+            // propagates them onto the granted creature's `static_definitions`
+            // — without it, the transient continuous effect carries empty
+            // modifications and the runtime block / attack check never sees
+            // the rule. Unconditional on duration: a leading "Until your
+            // next turn, ..." clause is duration-stripped by `peel_clause`
+            // before `build_restriction_clause` runs, so `duration` here can
+            // be `None` even when the restriction is duration-scoped — the
+            // peeled duration is reapplied via `with_clause_duration` on the
+            // outer clause. The injection is intrinsic to the mode, not the
+            // duration: intrinsic statics never reach this grant path
+            // (`build_restriction_clause` is the subject-predicate route).
+            if matches!(
+                mode,
+                StaticMode::CantBlock
+                    | StaticMode::CantAttack
+                    | StaticMode::CantAttackOrBlock
+                    | StaticMode::CantBeBlocked
+                    | StaticMode::CantBeBlockedBy { .. }
+                    | StaticMode::CantBeBlockedExceptBy { .. }
+                    | StaticMode::CantUntap
+            ) {
                 def = def.modifications(vec![ContinuousModification::AddStaticMode {
                     mode: mode.clone(),
                 }]);
@@ -1815,6 +1889,7 @@ fn build_restriction_clause(
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -1909,7 +1984,17 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     .parse(lower)
     {
         let filter_text = by_rest.trim_end_matches('.').trim_end_matches(" this turn");
-        let (filter, _) = parse_type_phrase(filter_text);
+        // CR 105.4 + CR 608.2c (issue #327): Try the "of the chosen / of that"
+        // qualifier parser first so "creatures of that color" lowers to a
+        // typed filter with `FilterProp::IsChosenColor`. The plain
+        // `parse_type_phrase` would silently drop the trailing qualifier and
+        // leave the filter as a bare-creature match, making the restriction
+        // accept ALL creatures rather than only those of the chosen color.
+        let filter_tp = TextPair::new(filter_text, filter_text);
+        let filter = parse_chosen_qualifier_subject(&filter_tp).unwrap_or_else(|| {
+            let (f, _) = parse_type_phrase(filter_text);
+            f
+        });
         if !matches!(filter, TargetFilter::Any) {
             return Some(vec![StaticMode::CantBeBlockedBy { filter }]);
         }
@@ -1967,13 +2052,20 @@ fn extract_pump_modifiers(
 /// the targeted permanent's controller gains life based on the permanent's stats.
 pub(super) fn try_parse_targeted_controller_gain_life(text: &str) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
-    tag::<_, _, OracleError<'_>>("its controller ")
+    let (after_prefix, _) = opt(tag::<_, _, OracleError<'_>>("then "))
         .parse(lower.as_str())
         .ok()?;
-    if !lower.contains("gain") || !lower.contains("life") {
+    let (after_subject, _) = tag::<_, _, OracleError<'_>>("its controller ")
+        .parse(after_prefix)
+        .ok()?;
+    if !nom_primitives::scan_contains(&lower, "gain")
+        || !nom_primitives::scan_contains(&lower, "life")
+    {
         return None;
     }
-    let amount = if lower.contains("equal to its power") || lower.contains("its power") {
+    let amount = if nom_primitives::scan_contains(&lower, "equal to its power")
+        || nom_primitives::scan_contains(&lower, "its power")
+    {
         QuantityExpr::Ref {
             qty: QuantityRef::Power {
                 scope: crate::types::ability::ObjectScope::Target,
@@ -1987,13 +2079,20 @@ pub(super) fn try_parse_targeted_controller_gain_life(text: &str) -> Option<Pars
                 scope: crate::types::ability::ObjectScope::Target,
             },
         }
+    } else if nom_primitives::scan_contains(&lower, "equal to its mana value")
+        || nom_primitives::scan_contains(&lower, "its mana value")
+    {
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: crate::types::ability::ObjectScope::Target,
+            },
+        }
     } else {
         // Try to parse a fixed amount: "its controller gains 3 life"
-        let after = &lower["its controller ".len()..];
         let after = alt((tag::<_, _, OracleError<'_>>("gains "), tag("gain ")))
-            .parse(after)
+            .parse(after_subject)
             .map(|(rest, _)| rest)
-            .unwrap_or(after);
+            .unwrap_or(after_subject);
         QuantityExpr::Fixed {
             value: parse_number(after).map(|(n, _)| n as i32).unwrap_or(1),
         }
@@ -2510,6 +2609,46 @@ mod tests {
             Effect::GainLife {
                 amount: QuantityExpr::Ref {
                     qty: QuantityRef::Toughness {
+                        scope: crate::types::ability::ObjectScope::Target
+                    }
+                },
+                player: GainLifePlayer::TargetedController
+            }
+        ));
+    }
+
+    #[test]
+    fn targeted_controller_gains_life_equal_to_target_mana_value() {
+        let clause = try_parse_targeted_controller_gain_life(
+            "Its controller gains life equal to its mana value.",
+        )
+        .expect("targeted controller mana value gain life clause");
+
+        assert!(matches!(
+            clause.effect,
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: crate::types::ability::ObjectScope::Target
+                    }
+                },
+                player: GainLifePlayer::TargetedController
+            }
+        ));
+    }
+
+    #[test]
+    fn targeted_controller_gain_life_accepts_then_prefix() {
+        let clause = try_parse_targeted_controller_gain_life(
+            "Then its controller gains life equal to its mana value.",
+        )
+        .expect("chained targeted controller mana value gain life clause");
+
+        assert!(matches!(
+            clause.effect,
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
                         scope: crate::types::ability::ObjectScope::Target
                     }
                 },

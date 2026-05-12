@@ -237,7 +237,7 @@ fn effect_has_p1p1_counter(effect: &engine::types::ability::Effect) -> bool {
     matches!(
         effect,
         Effect::AddCounter { counter_type, .. } | Effect::PutCounter { counter_type, .. }
-            if counter_type == "P1P1"
+            if counter_type == &CounterType::Plus1Plus1
     )
 }
 
@@ -292,7 +292,7 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::AddCounter {
-                counter_type: "P1P1".to_string(),
+                counter_type: CounterType::Plus1Plus1,
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
             },

@@ -1,14 +1,12 @@
-use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
 use crate::game::zones;
 use crate::types::ability::{
     Duration, Effect, EffectError, EffectKind, ResolvedAbility, StaticDefinition, TargetFilter,
-    TargetRef, UnlessCost,
+    TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{CastingVariant, GameState, StackEntryKind, WaitingFor};
+use crate::types::game_state::{GameState, StackEntryKind};
 use crate::types::identifiers::ObjectId;
-use crate::types::mana::ManaCost;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
@@ -17,9 +15,12 @@ use crate::types::zones::Zone;
 /// Abilities are simply removed from the stack (they aren't cards).
 /// Respects CantBeCountered static ability.
 ///
-/// If the effect carries `unless_payment`, the spell's controller is given the
-/// choice to pay the cost. If they can and do pay, the spell is NOT countered.
-/// CR 118.12.
+/// CR 118.12: "Counter target spell unless its controller pays {X}" is no
+/// longer handled here. The unless-pay modifier travels on
+/// `ResolvedAbility.unless_pay` and is intercepted by the unified pipeline
+/// in `game::effects::mod` BEFORE this resolver runs. By the time we reach
+/// `resolve`, either the player declined to pay (so the counter goes
+/// through unconditionally) or there was no unless-pay to begin with.
 ///
 /// If the effect carries a `source_static`, it is applied to the counter's source
 /// (e.g., Tidebinder) with `affected: SpecificObject(source_permanent_id)` after
@@ -30,52 +31,10 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (source_static, unless_payment) = match &ability.effect {
-        Effect::Counter {
-            source_static,
-            unless_payment,
-            ..
-        } => (source_static.clone(), unless_payment.clone()),
-        _ => (None, None),
+    let source_static = match &ability.effect {
+        Effect::Counter { source_static, .. } => source_static.clone(),
+        _ => None,
     };
-
-    // CR 118.12: "Unless pays" — always present the choice to the spell's controller.
-    // The player may activate mana abilities before deciding whether to pay.
-    if let Some(ref unless_cost) = unless_payment {
-        if let Some(TargetRef::Object(obj_id)) = ability.targets.first() {
-            // Search by both id (spells) and source_id (abilities) — use rev() to
-            // match the most recently pushed entry when a permanent has multiple
-            // abilities on the stack.
-            let target_controller = state
-                .stack
-                .iter()
-                .rev()
-                .find(|e| e.id == *obj_id || e.source_id == *obj_id)
-                .map(|e| e.controller);
-
-            if let Some(controller) = target_controller {
-                let resolved_cost = resolve_unless_cost(unless_cost, state, ability);
-                // CR 118.7: If the cost is {0}, the player is considered to have paid.
-                if matches!(&resolved_cost, UnlessCost::Fixed { cost } if *cost == ManaCost::zero())
-                {
-                    // Effect is prevented — spell survives.
-                    events.push(GameEvent::EffectResolved {
-                        kind: EffectKind::Counter,
-                        source_id: ability.source_id,
-                    });
-                    return Ok(());
-                }
-                state.waiting_for = WaitingFor::UnlessPayment {
-                    player: controller,
-                    cost: resolved_cost,
-                    pending_effect: Box::new(ability.clone()),
-                    trigger_event: state.current_trigger_event.clone(),
-                    effect_description: Some("counter target spell".to_string()),
-                };
-                return Ok(());
-            }
-        }
-    }
 
     for target in &ability.targets {
         if let TargetRef::Object(obj_id) = target {
@@ -123,15 +82,12 @@ pub fn resolve(
                 // Aftermath, and Harmonize exile when leaving the stack for
                 // any reason, including when countered. Escape (CR 702.138)
                 // has no such clause — countered escape spells go to graveyard.
-                let exiles_on_counter = matches!(
-                    &state.stack[idx].kind,
+                let exiles_on_counter = match &state.stack[idx].kind {
                     StackEntryKind::Spell {
-                        casting_variant: CastingVariant::Harmonize
-                            | CastingVariant::Flashback
-                            | CastingVariant::Aftermath,
-                        ..
-                    }
-                );
+                        casting_variant, ..
+                    } => casting_variant.replaces_stack_to_graveyard_with_exile(),
+                    _ => false,
+                };
                 let source_permanent_id = state.stack[idx].source_id;
                 state.stack.remove(idx);
 
@@ -258,15 +214,12 @@ pub fn resolve_all(
         // CR 702.34a / CR 702.127a / CR 702.180a: Flashback / Aftermath /
         // Harmonize exile on leaving the stack for any reason, including
         // counter. Escape (CR 702.138) has no such clause.
-        let exiles_on_counter = matches!(
-            &state.stack[idx].kind,
+        let exiles_on_counter = match &state.stack[idx].kind {
             StackEntryKind::Spell {
-                casting_variant: CastingVariant::Harmonize
-                    | CastingVariant::Flashback
-                    | CastingVariant::Aftermath,
-                ..
-            }
-        );
+                casting_variant, ..
+            } => casting_variant.replaces_stack_to_graveyard_with_exile(),
+            _ => false,
+        };
         state.stack.remove(idx);
 
         if is_spell {
@@ -294,26 +247,6 @@ pub fn resolve_all(
     });
 
     Ok(())
-}
-
-/// Execute the counter unconditionally (used after opponent declines to pay
-/// an "unless pays" cost, or when they can't pay at all).
-/// Strips `unless_payment` to prevent re-entering the payment choice.
-pub fn resolve_unconditional(
-    state: &mut GameState,
-    ability: &ResolvedAbility,
-    events: &mut Vec<GameEvent>,
-) -> Result<(), EffectError> {
-    let mut ability = ability.clone();
-    // Strip unless_payment to prevent re-prompting
-    if let Effect::Counter {
-        ref mut unless_payment,
-        ..
-    } = ability.effect
-    {
-        *unless_payment = None;
-    }
-    resolve(state, &ability, events)
 }
 
 /// Register a transient continuous effect for a counter's source_static.
@@ -354,28 +287,6 @@ fn apply_source_static(
     );
 }
 
-/// CR 118.12: Resolve an `UnlessCost` to a concrete cost.
-/// For `Fixed`, returns as-is. For `DynamicGeneric`, evaluates the quantity
-/// expression against current game state and returns `Fixed`.
-/// Non-mana costs (`PayLife`, `DiscardCard`, `Sacrifice`) pass through unchanged.
-pub(crate) fn resolve_unless_cost(
-    cost: &UnlessCost,
-    state: &GameState,
-    ability: &ResolvedAbility,
-) -> UnlessCost {
-    match cost {
-        UnlessCost::DynamicGeneric { quantity } => {
-            // CR 107.1b: Ability context lets X-based unless-costs
-            // ("pay X life" / "pay {X}") read the caster-chosen X.
-            let amount = resolve_quantity_with_targets(state, quantity, ability);
-            UnlessCost::Fixed {
-                cost: ManaCost::generic(amount.max(0) as u32),
-            }
-        }
-        other => other.clone(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,7 +322,6 @@ mod tests {
             Effect::Counter {
                 target: TargetFilter::Any,
                 source_static: None,
-                unless_payment: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -426,6 +336,51 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::SpellCountered { .. })));
+    }
+
+    #[test]
+    fn graveyard_permission_exile_rider_exiles_countered_spell() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Spell".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(StackEntry {
+            id: obj_id,
+            source_id: obj_id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::GraveyardPermission {
+                    source: ObjectId(200),
+                    frequency: crate::types::statics::CastFrequency::OncePerTurn,
+                    slot_type: None,
+                    graveyard_destination_replacement: Some(Zone::Exile),
+                },
+                actual_mana_spent: 0,
+            },
+        });
+
+        let ability = ResolvedAbility::new(
+            Effect::Counter {
+                target: TargetFilter::Any,
+                source_static: None,
+            },
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.stack.is_empty());
+        assert!(state.exile.contains(&obj_id));
+        assert!(!state.players[1].graveyard.contains(&obj_id));
     }
 
     #[test]
@@ -464,7 +419,6 @@ mod tests {
             Effect::Counter {
                 target: TargetFilter::Any,
                 source_static: None,
-                unless_payment: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -525,6 +479,7 @@ mod tests {
                 condition: None,
                 trigger_event: None,
                 description: None,
+                source_name: String::new(),
             },
         });
 
@@ -535,7 +490,6 @@ mod tests {
             Effect::Counter {
                 target: TargetFilter::StackAbility,
                 source_static: Some(source_static),
-                unless_payment: None,
             },
             vec![TargetRef::Object(ability_on_stack)],
             tidebinder,
@@ -616,7 +570,6 @@ mod tests {
             Effect::Counter {
                 target: TargetFilter::Any,
                 source_static: Some(source_static),
-                unless_payment: None,
             },
             vec![TargetRef::Object(spell_id)],
             tidebinder,
@@ -659,7 +612,6 @@ mod tests {
             Effect::Counter {
                 target: TargetFilter::Any,
                 source_static: None,
-                unless_payment: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -675,6 +627,58 @@ mod tests {
             Zone::Exile,
             "Flashback spell should be exiled when countered"
         );
+    }
+
+    /// CR 118.12 (M1 fold): Post the 2026-05-09 fold, the counter resolver
+    /// has no bespoke `unless_pay` branch — the modifier flows through the
+    /// generic `ResolvedAbility.unless_pay` path in `effects::mod`. This
+    /// test guards against re-introducing a counter-specific branch by
+    /// verifying that the resolver itself unconditionally counters when
+    /// invoked directly with no `unless_pay` (the `unless_pay` is consumed
+    /// upstream before the ability reaches `counter::resolve`).
+    #[test]
+    fn counter_resolver_unconditionally_counters_when_unless_pay_consumed_upstream() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Spell".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(StackEntry {
+            id: obj_id,
+            source_id: obj_id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        // Build a Counter ability — no unless_pay set on the ResolvedAbility,
+        // mirroring what reaches `counter::resolve` after the unified
+        // `unless_pay` interceptor strips the modifier from `pending_effect`.
+        let ability = ResolvedAbility::new(
+            Effect::Counter {
+                target: TargetFilter::Any,
+                source_static: None,
+            },
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Spell counters unconditionally — the resolver does not search for
+        // an unless modifier on `ability.unless_pay`, because the runtime
+        // owns that gate at the call layer above.
+        assert!(state.stack.is_empty(), "spell should be countered");
+        assert!(state.players[1].graveyard.contains(&obj_id));
     }
 
     /// CR 701.6 + CR 405.1: Mass counter iterates the stack and counters every
@@ -829,6 +833,7 @@ mod tests {
                     condition: None,
                     trigger_event: None,
                     description: None,
+                    source_name: String::new(),
                 },
             });
         }

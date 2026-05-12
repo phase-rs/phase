@@ -13,11 +13,11 @@ use nom::Parser;
 use super::error::{OracleError, OracleResult};
 use super::primitives::{parse_article, parse_color, parse_mana_cost, parse_number};
 use super::quantity as nom_quantity;
-use crate::parser::oracle_target::parse_type_phrase;
+use crate::parser::oracle_target::{parse_type_phrase, parse_zone_suffix};
 use crate::types::ability::{
     AggregateFunction, CastManaObjectScope, CastManaSpentMetric, Comparator, ControllerRef,
-    CountScope, FilterProp, ObjectProperty, PlayerScope, QuantityExpr, QuantityRef,
-    StaticCondition, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+    CountScope, DamageGroupKey, FilterProp, ObjectProperty, ObjectScope, PlayerScope, QuantityExpr,
+    QuantityRef, SharedQuality, StaticCondition, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::PlayerActionKind;
@@ -52,20 +52,33 @@ pub fn parse_inner_condition(input: &str) -> OracleResult<'_, StaticCondition> {
 fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
         parse_turn_conditions,
+        // CR 208.1 + CR 603.4 + CR 109.3: Superlative-comparison gate
+        // ("if its power is greater than each other creature's power" /
+        // "if it has the greatest power among creatures on the battlefield").
+        // Must precede `parse_source_state_conditions` so the longer phrase
+        // wins over the fixed-N "its power is N or greater" combinator inside
+        // that group (which only matches numeric thresholds).
+        parse_subject_property_superlative_comparison,
         parse_source_state_conditions,
         parse_player_state_conditions,
         parse_you_have_conditions,
         parse_that_player_has_conditions,
+        // CR 201.2 + CR 603.4: Named-pair MUST precede the generic compound
+        // control combinator so " and " between named cards binds to the
+        // names list, not interpreted as a second `you control` clause.
+        parse_control_named_pair,
         parse_compound_control_presence,
         parse_filter_have_total_property,
         parse_control_conditions,
         parse_opponent_poison_conditions,
         parse_defending_player_comparison_conditions,
+        parse_no_opponent_comparison_conditions,
         parse_opponent_comparison_conditions,
         parse_life_conditions,
         parse_zone_conditions,
         parse_there_are_counters_on_source,
         parse_there_are_conditions,
+        parse_there_exists_compound_zone_condition,
         parse_there_exists_condition,
         parse_subject_first_zone_count,
     ))
@@ -74,12 +87,69 @@ fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondit
 
 fn parse_event_history_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
+        parse_damage_dealt_this_turn_conditions,
+        parse_source_damage_threshold_this_turn,
+        parse_source_didnt_this_turn,
         parse_entered_this_turn,
         parse_opponent_cast_spell_this_turn,
         parse_youve_this_turn,
+        parse_first_spell_this_game_condition,
         parse_event_state_conditions,
     ))
     .parse(input)
+}
+
+fn parse_damage_dealt_this_turn_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
+    alt((
+        parse_source_dealt_damage_to_opponent_this_turn,
+        parse_source_was_dealt_damage_this_turn,
+    ))
+    .parse(input)
+}
+
+fn parse_source_dealt_damage_to_opponent_this_turn(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = alt((tag("~"), tag("this creature"))).parse(input)?;
+    let (rest, _) = tag(" dealt damage to ").parse(rest)?;
+    let (rest, target) = alt((
+        value(
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            alt((tag("an opponent"), tag("opponent"))),
+        ),
+        value(TargetFilter::Player, alt((tag("a player"), tag("player")))),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag(" this turn").parse(rest)?;
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::DamageDealtThisTurn {
+                source: Box::new(TargetFilter::SelfRef),
+                target: Box::new(target),
+                aggregate: AggregateFunction::Sum,
+                group_by: None,
+            },
+            1,
+        ),
+    ))
+}
+
+fn parse_source_was_dealt_damage_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = alt((tag("~"), tag("this creature"), tag("this permanent"))).parse(input)?;
+    let (rest, _) = tag(" was dealt damage this turn").parse(rest)?;
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::DamageDealtThisTurn {
+                source: Box::new(TargetFilter::Any),
+                target: Box::new(TargetFilter::SelfRef),
+                aggregate: AggregateFunction::Sum,
+                group_by: None,
+            },
+            1,
+        ),
+    ))
 }
 
 fn parse_resolution_context_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -108,6 +178,103 @@ fn parse_compound_control_presence(input: &str) -> OracleResult<'_, StaticCondit
             conditions: vec![first, second],
         },
     ))
+}
+
+/// CR 201.2 + CR 603.4: Parse "you control [type] named [Name1] and [Name2]"
+/// as a conjunction of two single-named presence checks. Each named card is its
+/// own control predicate; the AND in the source phrase joins the two names, not
+/// the type word.
+///
+/// Empires cycle canonical: Scepter of Empires' "if you control artifacts named
+/// Crown of Empires and Throne of Empires" — semantically requires you control
+/// one artifact named "Crown of Empires" AND one artifact named "Throne of
+/// Empires". Distinct from `parse_compound_control_presence` (which requires
+/// "you control" twice and joins distinct typed filters); here the bare type
+/// word is shared across both names.
+///
+/// Must precede `parse_compound_control_presence` so the trailing " and "
+/// is bound to the names list, not interpreted as a second `you control` clause.
+fn parse_control_named_pair(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("you control ").parse(input)?;
+    // Split on " named " — the type-phrase head precedes it, the names list follows.
+    let (after_named, type_text) = take_until(" named ").parse(rest)?;
+    let (after_named, _) = tag(" named ").parse(after_named)?;
+    let (filter_base, type_remainder) = parse_type_phrase(type_text);
+    if matches!(filter_base, TargetFilter::Any) || !type_remainder.trim().is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    // Strip any FilterProp::Named that parse_type_phrase may have attached so the
+    // synthesized per-name conjuncts carry exactly one Named property each.
+    let filter_base = strip_filter_named_property(filter_base);
+    // First name extends to " and "; second name extends to end-of-clause
+    // (period or end of input). Both use take_until-style scanning to avoid
+    // string-method dispatch.
+    let (after_first_name, first_name) = take_until(" and ").parse(after_named)?;
+    let (after_first_name, _) = tag(" and ").parse(after_first_name)?;
+    // Second name: stop at period or end. parse_until_clause_end consumes the
+    // remainder up to a sentence boundary so trailing punctuation does not bleed
+    // into the captured name.
+    let (rest_after_pair, second_name) = parse_until_clause_end(after_first_name)?;
+    let first_name = first_name.trim();
+    let second_name = second_name.trim();
+    if first_name.is_empty() || second_name.is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let first_filter = with_named_property(filter_base.clone(), first_name);
+    let second_filter = with_named_property(filter_base, second_name);
+    let first = StaticCondition::IsPresent {
+        filter: Some(inject_controller_you(first_filter)),
+    };
+    let second = StaticCondition::IsPresent {
+        filter: Some(inject_controller_you(second_filter)),
+    };
+    Ok((
+        rest_after_pair,
+        StaticCondition::And {
+            conditions: vec![first, second],
+        },
+    ))
+}
+
+/// Consume bytes up to a clause boundary (period, comma, or end of input).
+/// Returns the captured slice and the remainder positioned at the boundary.
+fn parse_until_clause_end(input: &str) -> OracleResult<'_, &str> {
+    use nom::bytes::complete::take_till;
+    take_till(|c| c == '.' || c == ',').parse(input)
+}
+
+/// Append a `FilterProp::Named { name }` to a typed filter. Used by
+/// `parse_control_named_pair` to materialize per-name conjuncts.
+fn with_named_property(filter: TargetFilter, name: &str) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(mut tf) => {
+            tf.properties.push(FilterProp::Named {
+                name: name.to_string(),
+            });
+            TargetFilter::Typed(tf)
+        }
+        other => other,
+    }
+}
+
+/// Remove any `FilterProp::Named` from a typed filter. Used to clean up the
+/// shared base filter before the per-name conjuncts attach their own name
+/// property in `parse_control_named_pair`.
+fn strip_filter_named_property(filter: TargetFilter) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(mut tf) => {
+            tf.properties
+                .retain(|prop| !matches!(prop, FilterProp::Named { .. }));
+            TargetFilter::Typed(tf)
+        }
+        other => other,
+    }
 }
 
 fn parse_control_presence_tail(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -653,6 +820,287 @@ fn parse_hand_size_predicate(rest: &str, player: PlayerScope) -> Option<(&str, S
     None
 }
 
+/// CR 208.1 + CR 603.4 + CR 109.3:
+/// Parse superlative-comparison conditions of the form
+/// "its <property> is <comparator> each other <type>'s <property>" and the
+/// equivalent surface forms "it has the [greatest|lowest] <property> among
+/// <filter>" / "...or is tied for [greatest|lowest] <property> among
+/// <filter>". The subject anaphor ("its" / "it") binds to the triggering
+/// object (CR 603.4 + CR 109.3), the right-hand side aggregates the same
+/// property across every OTHER object of the filtered class via
+/// `FilterProp::OtherThanTriggerObject` (CR 603.4 + CR 109.3 — see the
+/// `OtherThanTriggerObject` doc on `FilterProp`). The comparator-aggregate
+/// pairing (Max for "greater than"/"greatest"; Min for "less than"/"lowest")
+/// is grammatical coupling, not a CR-defined rule. Used by Selvala, Heart of
+/// the Wilds' ETB draw gate.
+///
+/// Outputs `StaticCondition::QuantityComparison` with:
+/// - LHS `QuantityRef::Power|Toughness|ObjectManaValue { scope:
+///   ObjectScope::EventSource }` — the triggering object's current property.
+/// - RHS `QuantityRef::Aggregate { function: Max|Min, property, filter }`
+///   where `filter` carries `FilterProp::OtherThanTriggerObject` to exclude
+///   the triggering object from the aggregate population at runtime.
+///
+/// The combinator emits `OtherThanTriggerObject` directly (not `Another`)
+/// because the pattern is semantically anchored to a trigger context: the
+/// "each other" phrase only makes sense relative to a single anchored
+/// subject (the triggering object). This sidesteps the static→ability
+/// condition bridge, which passes filters through unchanged.
+fn parse_subject_property_superlative_comparison(input: &str) -> OracleResult<'_, StaticCondition> {
+    // Two surface forms are accepted:
+    //   A. "its <prop> is <comparator phrase> each/every other <type>'s <prop>"
+    //   B. "it has the [greatest|lowest] <prop> among <filter>"
+    //      (with optional "or is tied for [greatest|lowest] <prop> among
+    //      <filter>" extension that relaxes strict > to >=)
+    //
+    // Status: Form A is reached by the trigger intervening-if path
+    // (`extract_if_condition` → `parse_inner_condition`) for Selvala-class
+    // cards. Form B is wired into the same `parse_inner_condition` entry but
+    // is not yet reached by real cards: Strength-Testing Hammer and Wretched
+    // Banquet route through sub-clause/trailing-suffix paths that don't
+    // currently delegate to this combinator. Form B is retained so that the
+    // follow-up routing fix (extending `strip_property_conditional` to accept
+    // aggregate RHS, or routing the "then if" sub-clause body through
+    // `try_nom_condition_as_ability_condition`) lands a one-line change
+    // rather than re-deriving the grammar.
+    alt((
+        parse_subject_property_inequality_form,
+        parse_subject_has_superlative_form,
+    ))
+    .parse(input)
+}
+
+/// Surface form A: "its <prop> is <comparator phrase> each other <type>'s <prop>".
+fn parse_subject_property_inequality_form(input: &str) -> OracleResult<'_, StaticCondition> {
+    // Subject anaphor: "its " — binds to the triggering object.
+    let (rest, _) = tag("its ").parse(input)?;
+    // Property on the LHS.
+    let (rest, lhs_property) = parse_property_keyword(rest)?;
+    // Connective: " is ".
+    let (rest, _) = tag(" is ").parse(rest)?;
+    // Comparator phrase yields (Comparator, AggregateFunction) — the aggregate
+    // function on the RHS is coupled to the comparator direction so the
+    // semantics are existential: GT/GE pair with Max, LT/LE pair with Min.
+    let (rest, (comparator, aggregate)) = parse_superlative_comparator_phrase(rest)?;
+    // Aggregate scope: "each other <type>'s <prop>" / "every other <type>'s <prop>".
+    let (rest, _) = alt((tag("each other "), tag("every other "))).parse(rest)?;
+    // <type> phrase. parse_type_phrase consumes "creature", "creature you
+    // control", etc. — without the "other" prefix (already stripped above so
+    // we control the exclusion semantics through OtherThanTriggerObject).
+    let (filter, remainder) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let consumed = rest.len() - remainder.len();
+    let rest = &rest[consumed..];
+    // Possessive "'s " + property keyword (must match LHS property).
+    let (rest, _) = tag("'s ").parse(rest)?;
+    let (rest, rhs_property) = parse_property_keyword(rest)?;
+    if lhs_property != rhs_property {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((
+        rest,
+        build_superlative_comparison(filter, lhs_property, comparator, aggregate),
+    ))
+}
+
+/// Surface form B: "it has the greatest <prop> among <filter>" and the
+/// "...or is tied for greatest <prop> among <filter>" relaxation. The
+/// "among <filter>" clause is shared by both halves of the disjunction
+/// (when present), so it appears at the end of the full phrase.
+/// "lowest" / "least" map to Min; "greatest" / "highest" map to Max.
+fn parse_subject_has_superlative_form(input: &str) -> OracleResult<'_, StaticCondition> {
+    // Subject: "it has the " or "~ has the ".
+    let (rest, _) = alt((tag("it has the "), tag("~ has the "))).parse(input)?;
+    // Superlative adjective → AggregateFunction.
+    let (rest, aggregate) = parse_superlative_adjective(rest)?;
+    let (rest, _) = tag(" ").parse(rest)?;
+    // Property.
+    let (rest, property) = parse_property_keyword(rest)?;
+    // Optional "or is tied for <same superlative> <same property>" tail
+    // relaxes strict GT/LT to GE/LE. The tail does NOT carry its own
+    // "among <filter>" — the filter clause is shared and comes after.
+    let (rest, comparator) = parse_optional_tied_for_tail(rest, aggregate, property)?;
+    // " among <filter>".
+    let (rest, _) = tag(" among ").parse(rest)?;
+    let (filter, remainder) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let consumed = rest.len() - remainder.len();
+    let rest = &rest[consumed..];
+    Ok((
+        rest,
+        build_superlative_comparison(filter, property, comparator, aggregate),
+    ))
+}
+
+/// Parse a superlative adjective into its corresponding `AggregateFunction`.
+fn parse_superlative_adjective(input: &str) -> OracleResult<'_, AggregateFunction> {
+    alt((
+        value(AggregateFunction::Max, tag("greatest")),
+        value(AggregateFunction::Max, tag("highest")),
+        value(AggregateFunction::Min, tag("lowest")),
+        value(AggregateFunction::Min, tag("least")),
+    ))
+    .parse(input)
+}
+
+/// Property keyword parser — used by both LHS and RHS of the comparison.
+fn parse_property_keyword(input: &str) -> OracleResult<'_, ObjectProperty> {
+    alt((
+        value(ObjectProperty::Power, tag("power")),
+        value(ObjectProperty::Toughness, tag("toughness")),
+        value(ObjectProperty::ManaValue, tag("mana value")),
+    ))
+    .parse(input)
+}
+
+/// Parse the comparator phrase between "is " and "each other ...".
+///
+/// The aggregate function is coupled to the comparator direction by the
+/// grammar (not a CR rule): GT/GE compare against the Max of the population
+/// (∃ object with greater property than each ⟺ subject > Max of others);
+/// LT/LE compare against Min.
+fn parse_superlative_comparator_phrase(
+    input: &str,
+) -> OracleResult<'_, (Comparator, AggregateFunction)> {
+    // Order matters: longer phrases ("greater than or equal to") must precede
+    // their prefixes ("greater than") so the longer form wins.
+    alt((
+        value(
+            (Comparator::GE, AggregateFunction::Max),
+            tag("greater than or equal to "),
+        ),
+        value(
+            (Comparator::LE, AggregateFunction::Min),
+            tag("less than or equal to "),
+        ),
+        value(
+            (Comparator::GT, AggregateFunction::Max),
+            tag("greater than "),
+        ),
+        value((Comparator::LT, AggregateFunction::Min), tag("less than ")),
+    ))
+    .parse(input)
+}
+
+/// Parse the optional "or is tied for [greatest|lowest] [property]" tail.
+/// Presence relaxes strict GT/LT to GE/LE. The matched superlative and
+/// property must agree with the leading clause. The shared trailing
+/// "among <filter>" is parsed by the caller.
+fn parse_optional_tied_for_tail(
+    input: &str,
+    aggregate: AggregateFunction,
+    property: ObjectProperty,
+) -> OracleResult<'_, Comparator> {
+    let strict_comparator = match aggregate {
+        AggregateFunction::Max => Comparator::GT,
+        AggregateFunction::Min => Comparator::LT,
+        // Sum aggregate is not produced by this combinator; default to GT
+        // for completeness (this arm is dead).
+        AggregateFunction::Sum => Comparator::GT,
+    };
+    // The leading clause may end here (no "or is tied for" tail) — return GT/LT.
+    let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" or is tied for ").parse(input) else {
+        return Ok((input, strict_comparator));
+    };
+    // Match the same superlative as the leading clause.
+    let (rest, tied_aggregate) = parse_superlative_adjective(rest)?;
+    if tied_aggregate != aggregate {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let (rest, _) = tag(" ").parse(rest)?;
+    let (rest, tied_property) = parse_property_keyword(rest)?;
+    if tied_property != property {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    // Strict-greater + tied = non-strict (>=); same for less-than + tied =
+    // (<=). This is grammatical relaxation, not a CR-defined rule.
+    let relaxed = match strict_comparator {
+        Comparator::GT => Comparator::GE,
+        Comparator::LT => Comparator::LE,
+        other => other,
+    };
+    Ok((rest, relaxed))
+}
+
+/// Build the `StaticCondition::QuantityComparison` for a superlative-comparison
+/// condition once all parts have been parsed.
+///
+/// `filter` is the population for the aggregate side; this function attaches
+/// `FilterProp::OtherThanTriggerObject` so the runtime aggregate resolver
+/// excludes the triggering object (CR 603.4 + CR 109.3).
+fn build_superlative_comparison(
+    filter: TargetFilter,
+    property: ObjectProperty,
+    comparator: Comparator,
+    aggregate: AggregateFunction,
+) -> StaticCondition {
+    let lhs_qty = match property {
+        ObjectProperty::Power => QuantityRef::Power {
+            scope: ObjectScope::EventSource,
+        },
+        ObjectProperty::Toughness => QuantityRef::Toughness {
+            scope: ObjectScope::EventSource,
+        },
+        ObjectProperty::ManaValue => QuantityRef::ObjectManaValue {
+            scope: ObjectScope::EventSource,
+        },
+    };
+    let aggregate_filter = attach_other_than_trigger_object(filter);
+    StaticCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref { qty: lhs_qty },
+        comparator,
+        rhs: QuantityExpr::Ref {
+            qty: QuantityRef::Aggregate {
+                function: aggregate,
+                property,
+                filter: aggregate_filter,
+            },
+        },
+    }
+}
+
+/// Attach `FilterProp::OtherThanTriggerObject` to a `TargetFilter`'s property
+/// list so the runtime aggregate resolver excludes the triggering object.
+///
+/// CR 603.4 + CR 109.3: "each other <type>" in a trigger-anchored context
+/// means "every <type> except the triggering object." `OtherThanTriggerObject`
+/// is the established typed marker the resolver reads to perform the
+/// subtraction (see its doc on `FilterProp`).
+fn attach_other_than_trigger_object(filter: TargetFilter) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(mut tf) => {
+            if !tf
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::OtherThanTriggerObject))
+            {
+                tf.properties.push(FilterProp::OtherThanTriggerObject);
+            }
+            TargetFilter::Typed(tf)
+        }
+        other => other,
+    }
+}
+
 /// Parse "you have" quantity conditions: hand size, graveyard size, life.
 ///
 /// Composable: "you have " + threshold/absence + quantity suffix.
@@ -805,7 +1253,7 @@ fn creatures_you_controlled_left_battlefield_this_turn_ref() -> QuantityRef {
 fn parse_control_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
         // CR 201.2 + CR 603.4: "you control N or more [type] with different names"
-        // → QuantityComparison(ObjectCountDistinctNames >= N). Tried before the
+        // → QuantityComparison(ObjectCountDistinct[Name] >= N). Tried before the
         // plain ObjectCount arm so the `with different names` suffix is not
         // mis-classified as a raw count threshold. Field of the Dead canonical.
         parse_control_count_ge_distinct_names,
@@ -853,7 +1301,7 @@ fn parse_ge_threshold(input: &str) -> OracleResult<'_, u32> {
 }
 
 /// CR 201.2 + CR 603.4: Parse "you control N or more [type] with different names"
-/// → `QuantityComparison { ObjectCountDistinctNames(filter) >= N }`.
+/// → `QuantityComparison { ObjectCountDistinct[Name](filter) >= N }`.
 ///
 /// Field of the Dead: "if you control seven or more lands with different
 /// names". Two objects with the same printed name count once. General enough
@@ -879,7 +1327,10 @@ fn parse_control_count_ge_distinct_names(input: &str) -> OracleResult<'_, Static
         &input[consumed..],
         StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::ObjectCountDistinctNames { filter },
+                qty: QuantityRef::ObjectCountDistinct {
+                    filter,
+                    qualities: vec![SharedQuality::Name],
+                },
             },
             comparator: Comparator::GE,
             rhs: QuantityExpr::Fixed { value: n as i32 },
@@ -1101,7 +1552,19 @@ fn parse_filter_have_total_property(input: &str) -> OracleResult<'_, StaticCondi
 /// Inject `ControllerRef::You` into a TargetFilter produced by `parse_type_phrase`.
 fn inject_controller_you(filter: TargetFilter) -> TargetFilter {
     match filter {
-        TargetFilter::Typed(tf) => TargetFilter::Typed(tf.controller(ControllerRef::You)),
+        TargetFilter::Typed(mut tf) => {
+            tf.controller = Some(ControllerRef::You);
+            if !tf
+                .properties
+                .iter()
+                .any(|prop| matches!(prop, FilterProp::InZone { .. }))
+            {
+                tf.properties.push(FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                });
+            }
+            TargetFilter::Typed(tf)
+        }
         other => other,
     }
 }
@@ -1312,6 +1775,30 @@ fn parse_day_night_condition(input: &str) -> OracleResult<'_, StaticCondition> {
     Ok((rest, StaticCondition::DayNightIs { state }))
 }
 
+/// CR 117.1: "this is the first spell you've cast this game" / "this spell
+/// is the first spell you've cast this game" — gates an instead-override on
+/// the controller's per-game cast count being zero (i.e., this is the first
+/// spell). The subject ("this" / "this spell") is anaphoric to the cast
+/// itself; both forms compose with `QuantityRef::SpellsCastThisGame == 0`.
+///
+/// Maps to `StaticCondition::QuantityComparison` so the existing
+/// `static_condition_to_ability_condition` bridge converts it to
+/// `AbilityCondition::QuantityCheck` in instead-clause assembly.
+fn parse_first_spell_this_game_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = alt((tag("this is "), tag("this spell is "))).parse(input)?;
+    let (rest, _) = tag("the first spell you've cast this game").parse(rest)?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::SpellsCastThisGame,
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        },
+    ))
+}
+
 /// Parse "you've [done X] this turn" conditions.
 ///
 /// CR 119: Life gain/loss event conditions.
@@ -1439,6 +1926,10 @@ fn parse_event_state_conditions(input: &str) -> OracleResult<'_, StaticCondition
 
 fn parse_zone_history_condition(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
+        parse_card_left_your_graveyard_this_turn,
+        parse_permanent_put_into_your_hand_from_battlefield_this_turn,
+        parse_card_put_into_your_graveyard_from_anywhere_this_turn,
+        parse_object_put_into_graveyard_from_battlefield_this_turn,
         parse_creature_died_this_turn_conditions,
         // "a nonland permanent left the battlefield this turn" (Revolt variant)
         value(
@@ -1472,6 +1963,141 @@ fn parse_zone_history_condition(input: &str) -> OracleResult<'_, StaticCondition
         parse_you_sacrificed_this_turn,
     ))
     .parse(input)
+}
+
+fn parse_card_left_your_graveyard_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
+    value(
+        make_quantity_ge(
+            QuantityRef::ZoneChangeCountThisTurn {
+                from: Some(Zone::Graveyard),
+                to: None,
+                filter: add_owned_you_with_props(TargetFilter::Any, &[FilterProp::NonToken]),
+            },
+            1,
+        ),
+        tag("a card left your graveyard this turn"),
+    )
+    .parse(input)
+}
+
+fn parse_permanent_put_into_your_hand_from_battlefield_this_turn(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = parse_article(input)?;
+    let (rest, type_text) =
+        take_until(" was put into your hand from the battlefield this turn").parse(rest)?;
+    let (rest, _) = tag(" was put into your hand from the battlefield this turn").parse(rest)?;
+    let (filter, leftover) = parse_type_phrase(type_text.trim());
+    if !leftover.trim().is_empty() || filter == TargetFilter::Any {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::ZoneChangeCountThisTurn {
+                from: Some(Zone::Battlefield),
+                to: Some(Zone::Hand),
+                filter: add_owned_you_with_props(filter, &[]),
+            },
+            1,
+        ),
+    ))
+}
+
+fn parse_card_put_into_your_graveyard_from_anywhere_this_turn(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = parse_article(input)?;
+    let suffix = " card was put into your graveyard from anywhere this turn";
+    let (rest, type_text) = take_until(suffix).parse(rest)?;
+    let (rest, _) = tag(suffix).parse(rest)?;
+    let (filter, leftover) = parse_type_phrase(type_text.trim());
+    if !leftover.trim().is_empty() || filter == TargetFilter::Any {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::ZoneChangeCountThisTurn {
+                from: None,
+                to: Some(Zone::Graveyard),
+                filter: add_owned_you_with_props(filter, &[FilterProp::NonToken]),
+            },
+            1,
+        ),
+    ))
+}
+
+fn parse_object_put_into_graveyard_from_battlefield_this_turn(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = parse_article(input)?;
+    let suffix = " was put into a graveyard from the battlefield this turn";
+    let (rest, type_text) = take_until(suffix).parse(rest)?;
+    let (rest, _) = tag(suffix).parse(rest)?;
+    let (filter, leftover) = parse_type_phrase(type_text.trim());
+    if !leftover.trim().is_empty() || filter == TargetFilter::Any {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::ZoneChangeCountThisTurn {
+                from: Some(Zone::Battlefield),
+                to: Some(Zone::Graveyard),
+                filter,
+            },
+            1,
+        ),
+    ))
+}
+
+/// CR 109.5: Append `Owned { controller: You }` plus any caller-supplied
+/// `extras` to `filter`'s property set, skipping props whose variant tag
+/// already appears (presence is variant-tag equality via `mem::discriminant`,
+/// matching the original tag-only `matches!(p, FilterProp::X { .. })` checks).
+/// Pass `&[]` for the bare "owned by you" case; pass `&[FilterProp::NonToken]`
+/// for "you own a nontoken card" patterns. Wraps `TargetFilter::Any` into a
+/// fresh `Typed` filter carrying the same property set; returns other variants
+/// (`Player`, `SpecificObject`, …) unchanged because owner-tagging is
+/// meaningless on non-typed shapes.
+fn add_owned_you_with_props(filter: TargetFilter, extras: &[FilterProp]) -> TargetFilter {
+    let owned = FilterProp::Owned {
+        controller: ControllerRef::You,
+    };
+    let push_unique_by_tag = |props: &mut Vec<FilterProp>, prop: FilterProp| {
+        let tag = std::mem::discriminant(&prop);
+        if !props.iter().any(|p| std::mem::discriminant(p) == tag) {
+            props.push(prop);
+        }
+    };
+    match filter {
+        TargetFilter::Typed(mut typed) => {
+            push_unique_by_tag(&mut typed.properties, owned);
+            for extra in extras {
+                push_unique_by_tag(&mut typed.properties, extra.clone());
+            }
+            TargetFilter::Typed(typed)
+        }
+        TargetFilter::Any => {
+            let mut props = vec![owned];
+            props.extend(extras.iter().cloned());
+            TargetFilter::Typed(TypedFilter::default().properties(props))
+        }
+        other => other,
+    }
 }
 
 fn parse_life_history_condition(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -1520,6 +2146,37 @@ fn parse_life_history_condition(input: &str) -> OracleResult<'_, StaticCondition
         parse_you_gained_life_this_turn,
     ))
     .parse(input)
+}
+
+fn parse_source_damage_threshold_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = parse_article(input)?;
+    let (rest, _) = tag("source ").parse(rest)?;
+    let (rest, controller) = alt((
+        value(ControllerRef::You, tag("you controlled")),
+        value(ControllerRef::Opponent, tag("an opponent controlled")),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag(" dealt ").parse(rest)?;
+    let (rest, amount) = parse_number(rest)?;
+    let (rest, _) = tag(" or more damage this turn").parse(rest)?;
+
+    // CR 120.9: "by a specific source controlled by X" — group damage records
+    // by source id then take the max per-source sum (matches "any one source"
+    // wording; damage from multiple sources is not combined).
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::DamageDealtThisTurn {
+                source: Box::new(TargetFilter::Typed(
+                    TypedFilter::default().controller(controller),
+                )),
+                target: Box::new(TargetFilter::Any),
+                aggregate: AggregateFunction::Max,
+                group_by: Some(DamageGroupKey::SourceId),
+            },
+            amount,
+        ),
+    ))
 }
 
 fn parse_discard_history_condition(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -2068,26 +2725,35 @@ fn parse_cast_one_spell_this_turn(input: &str) -> OracleResult<'_, StaticConditi
 }
 
 fn parse_one_spell_this_turn_after_cast(input: &str) -> OracleResult<'_, StaticCondition> {
-    let rest = input;
-    let (rest, _) = parse_article(rest)?;
+    let (rest, filter) = parse_one_spell_this_turn_filter(input)?;
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::SpellsCastThisTurn {
+                scope: CountScope::Controller,
+                filter,
+            },
+            1,
+        ),
+    ))
+}
+
+fn parse_one_spell_this_turn_filter(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
+    let (rest, _) = parse_article(input)?;
     let (rest, type_text) = take_until(" this turn").parse(rest)?;
     let (rest, _) = tag(" this turn").parse(rest)?;
+    if let Ok((empty, _)) = tag::<_, _, OracleError<'_>>("spell").parse(type_text) {
+        if empty.trim().is_empty() {
+            return Ok((rest, None));
+        }
+    }
     let Some(filter) = parse_spell_history_filter(type_text) else {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Fail,
         )));
     };
-    Ok((
-        rest,
-        make_quantity_ge(
-            QuantityRef::SpellsCastThisTurn {
-                scope: CountScope::Controller,
-                filter: Some(filter),
-            },
-            1,
-        ),
-    ))
+    Ok((rest, Some(filter)))
 }
 
 fn parse_you_cast_both_spell_kinds_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -2368,6 +3034,9 @@ fn parse_spell_history_filter_with_optional_article(type_text: &str) -> Option<T
 }
 
 pub(crate) fn parse_spell_history_filter(type_text: &str) -> Option<TargetFilter> {
+    if let Some(filter) = parse_spell_history_filter_with_zone_suffix(type_text) {
+        return Some(filter);
+    }
     let type_text = strip_spell_history_noun(type_text);
     if let Ok((rest, filter)) = value(
         TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Historic])),
@@ -2407,6 +3076,52 @@ pub(crate) fn parse_spell_history_filter(type_text: &str) -> Option<TargetFilter
     Some(TargetFilter::Typed(
         TypedFilter::card().properties(vec![FilterProp::HasColor { color }]),
     ))
+}
+
+fn parse_spell_history_filter_with_zone_suffix(type_text: &str) -> Option<TargetFilter> {
+    let (suffix, base_text) = take_until::<_, _, OracleError<'_>>(" from ")
+        .parse(type_text)
+        .ok()?;
+    let (props, _controller, consumed) = parse_zone_suffix(suffix)?;
+    if !suffix[consumed..].trim().is_empty() {
+        return None;
+    }
+
+    let base_filter = parse_spell_history_base_filter(base_text.trim())?;
+    Some(add_spell_history_filter_qualifiers(base_filter, props))
+}
+
+fn parse_spell_history_base_filter(type_text: &str) -> Option<TargetFilter> {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("spell").parse(type_text) {
+        if rest.trim().is_empty() {
+            return Some(TargetFilter::Any);
+        }
+    }
+    parse_spell_history_filter(type_text)
+}
+
+fn add_spell_history_filter_qualifiers(
+    filter: TargetFilter,
+    props: Vec<FilterProp>,
+) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(mut typed) => {
+            for prop in props {
+                if !typed.properties.contains(&prop) {
+                    typed.properties.push(prop);
+                }
+            }
+            TargetFilter::Typed(typed)
+        }
+        TargetFilter::Any => TargetFilter::Typed(TypedFilter::default().properties(props)),
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(|inner| add_spell_history_filter_qualifiers(inner, props.clone()))
+                .collect(),
+        },
+        other => other,
+    }
 }
 
 fn strip_spell_history_noun(type_text: &str) -> &str {
@@ -2453,21 +3168,41 @@ fn parse_counter_added_this_turn(input: &str) -> OracleResult<'_, StaticConditio
 /// Composed as `QuantityComparison(ref EQ 0)` rather than `Not(ref >= 1)`.
 fn parse_you_didnt_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you haven't ").parse(input) {
-        return value(
-            make_quantity_comparison(
-                QuantityRef::SpellsCastThisTurn {
-                    scope: CountScope::Controller,
-                    filter: None,
+        let (rest, _) = tag("cast ").parse(rest)?;
+        let (rest, filter) = parse_one_spell_this_turn_filter(rest)?;
+        return Ok((
+            rest,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: CountScope::Controller,
+                        filter,
+                    },
                 },
-                Comparator::EQ,
-                0,
-            ),
-            tag("cast a spell this turn"),
-        )
-        .parse(rest);
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            },
+        ));
     }
 
     let (rest, _) = tag("you didn't ").parse(input)?;
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("cast ").parse(rest) {
+        let (rest, filter) = parse_one_spell_this_turn_filter(rest)?;
+        return Ok((
+            rest,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: CountScope::Controller,
+                        filter,
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            },
+        ));
+    }
+
     alt((
         value(
             make_quantity_comparison(
@@ -2496,6 +3231,38 @@ fn parse_you_didnt_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
         ),
     ))
     .parse(rest)
+}
+
+fn parse_source_didnt_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = alt((tag("~ didn't "), tag("this creature didn't "))).parse(input)?;
+    alt((
+        value(
+            make_source_history_absence(FilterProp::AttackedThisTurn),
+            tag("attack this turn"),
+        ),
+        value(
+            make_source_history_absence(FilterProp::EnteredThisTurn),
+            tag("enter the battlefield this turn"),
+        ),
+    ))
+    .parse(rest)
+}
+
+fn make_source_history_absence(prop: FilterProp) -> StaticCondition {
+    StaticCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::SelfRef,
+                        TargetFilter::Typed(TypedFilter::default().properties(vec![prop])),
+                    ],
+                },
+            },
+        },
+        comparator: Comparator::EQ,
+        rhs: QuantityExpr::Fixed { value: 0 },
+    }
 }
 
 /// Parse "no [type] are on the battlefield" → ObjectCount EQ 0.
@@ -2608,6 +3375,64 @@ fn parse_there_are_conditions(input: &str) -> OracleResult<'_, StaticCondition> 
             n,
         ),
     ))
+}
+
+/// Parse "there is a/an X card and a/an Y card in your <zone>" as two
+/// independent zone-count predicates sharing the same zone/scope suffix.
+fn parse_there_exists_compound_zone_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = alt((tag("there's "), tag("there is "))).parse(input)?;
+    let (rest, _) = parse_article(rest)?;
+    let (rest, first_card_types) = parse_single_card_type_before_and(rest)?;
+    let (rest, _) = tag(" and ").parse(rest)?;
+    let (rest, _) = parse_article(rest)?;
+    let (rest, second_card_types) = parse_single_card_type_before_zone(rest)?;
+    let (rest, _) = tag(" in ").parse(rest)?;
+    let (rest, (zone, scope)) = parse_scoped_zone_count_ref(rest)?;
+    Ok((
+        rest,
+        StaticCondition::And {
+            conditions: vec![
+                make_quantity_ge(
+                    QuantityRef::ZoneCardCount {
+                        zone: zone.clone(),
+                        card_types: first_card_types,
+                        scope: scope.clone(),
+                    },
+                    1,
+                ),
+                make_quantity_ge(
+                    QuantityRef::ZoneCardCount {
+                        zone,
+                        card_types: second_card_types,
+                        scope,
+                    },
+                    1,
+                ),
+            ],
+        },
+    ))
+}
+
+fn parse_single_card_type_before_and(input: &str) -> OracleResult<'_, Vec<TypeFilter>> {
+    let (rest, type_text) = take_until(" card and ").parse(input)?;
+    let (rest, _) = tag(" card").parse(rest)?;
+    Ok((rest, parse_zone_card_type_text(type_text)))
+}
+
+fn parse_single_card_type_before_zone(input: &str) -> OracleResult<'_, Vec<TypeFilter>> {
+    let (rest, type_text) = take_until(" card in ").parse(input)?;
+    let (rest, _) = tag(" card").parse(rest)?;
+    Ok((rest, parse_zone_card_type_text(type_text)))
+}
+
+fn parse_zone_card_type_text(type_text: &str) -> Vec<TypeFilter> {
+    let (filter, _) = parse_type_phrase(type_text.trim());
+    let mut card_types = match filter {
+        TargetFilter::Typed(TypedFilter { type_filters, .. }) => type_filters,
+        _ => vec![],
+    };
+    card_types.retain(|type_filter| *type_filter != TypeFilter::Card);
+    card_types
 }
 
 /// CR 700.2: Parse "N or more [type] cards are in your [zone]" — subject-first
@@ -2821,6 +3646,36 @@ fn parse_defending_player_comparison_conditions(input: &str) -> OracleResult<'_,
     ))
 }
 
+/// Parse "no opponent has more life than that/defending player".
+///
+/// This is the negated form of the cross-player life comparison used on attack
+/// triggers such as Guild Artisan. The referenced player is the defending
+/// player from the attack event, so the condition composes as:
+/// max(opponent life) <= defending-player life.
+fn parse_no_opponent_comparison_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("no opponent ").parse(input)?;
+    let (rest, _) = tag("has more life than ").parse(rest)?;
+    let (rest, _) = alt((tag("that player"), tag("defending player"))).parse(rest)?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::Opponent {
+                        aggregate: AggregateFunction::Max,
+                    },
+                },
+            },
+            comparator: Comparator::LE,
+            rhs: QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::DefendingPlayer,
+                },
+            },
+        },
+    ))
+}
+
 /// Parse "an opponent controls more [type] than you" → QuantityComparison.
 /// Also handles "an opponent has more life/cards in hand than you".
 ///
@@ -2994,6 +3849,11 @@ fn parse_unless_pay_condition(input: &str) -> OracleResult<'_, StaticCondition> 
         StaticCondition::UnlessPay {
             cost,
             scaling: crate::types::ability::UnlessPayScaling::Flat,
+            // CR 506.3 + CR 508.1d: Generic "unless [player] pays" condition
+            // outside the combat-tax dispatcher carries no defender scope —
+            // dispatcher-specific paths (`parse_combat_tax_body`) populate it
+            // when a "you" / "you or planeswalkers you control" tail is present.
+            defended: None,
         },
     ))
 }
@@ -3336,6 +4196,53 @@ mod tests {
     }
 
     #[test]
+    fn test_you_control_named_pair() {
+        // CR 201.2 + CR 603.4: Scepter of Empires class — "you control [type]
+        // named [Name1] and [Name2]" requires both named cards under your
+        // control, lowered to And { IsPresent(Named X1), IsPresent(Named X2) }.
+        let (rest, c) = parse_inner_condition(
+            "you control artifacts named crown of empires and throne of empires",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::And { conditions } => {
+                assert_eq!(conditions.len(), 2);
+                let names: Vec<&str> = conditions
+                    .iter()
+                    .map(|cond| match cond {
+                        StaticCondition::IsPresent {
+                            filter: Some(TargetFilter::Typed(tf)),
+                        } => tf.properties.iter().find_map(|p| match p {
+                            FilterProp::Named { name } => Some(name.as_str()),
+                            _ => None,
+                        }),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>()
+                    .expect("both conjuncts must be IsPresent of typed Named filters");
+                assert_eq!(names, vec!["crown of empires", "throne of empires"]);
+                // Both conjuncts must constrain the type to Artifact and the
+                // controller to You. Both must also include InZone(Battlefield).
+                for cond in &conditions {
+                    let StaticCondition::IsPresent {
+                        filter: Some(TargetFilter::Typed(tf)),
+                    } = cond
+                    else {
+                        panic!("expected typed IsPresent");
+                    };
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                    assert!(tf.type_filters.contains(&TypeFilter::Artifact));
+                    assert!(tf.properties.iter().any(
+                        |p| matches!(p, FilterProp::InZone { zone } if *zone == Zone::Battlefield)
+                    ));
+                }
+            }
+            other => panic!("expected And(IsPresent, IsPresent), got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_max_speed_conditions() {
         let (rest, c) = parse_inner_condition("you have max speed").unwrap();
         assert_eq!(rest, "");
@@ -3370,14 +4277,17 @@ mod tests {
                 assert_eq!(rhs, QuantityExpr::Fixed { value: 7 });
                 match lhs {
                     QuantityExpr::Ref {
-                        qty: QuantityRef::ObjectCountDistinctNames { filter },
-                    } => match filter {
-                        TargetFilter::Typed(t) => {
-                            assert_eq!(t.controller, Some(ControllerRef::You));
+                        qty: QuantityRef::ObjectCountDistinct { filter, qualities },
+                    } => {
+                        assert_eq!(qualities, vec![SharedQuality::Name]);
+                        match filter {
+                            TargetFilter::Typed(t) => {
+                                assert_eq!(t.controller, Some(ControllerRef::You));
+                            }
+                            _ => panic!("expected Typed filter, got {:?}", filter),
                         }
-                        _ => panic!("expected Typed filter, got {:?}", filter),
-                    },
-                    _ => panic!("expected ObjectCountDistinctNames, got {:?}", lhs),
+                    }
+                    _ => panic!("expected ObjectCountDistinct, got {:?}", lhs),
                 }
             }
             _ => panic!("expected QuantityComparison, got {:?}", c),
@@ -4186,6 +5096,42 @@ mod tests {
     }
 
     #[test]
+    fn test_there_exists_compound_card_types_in_graveyard() {
+        let (rest, condition) =
+            parse_inner_condition("there is an instant card and a sorcery card in your graveyard")
+                .unwrap();
+        assert_eq!(rest, "");
+        let StaticCondition::And { conditions } = condition else {
+            panic!("expected compound graveyard condition, got {condition:?}");
+        };
+        assert_eq!(conditions.len(), 2);
+        assert_zone_card_count_condition(&conditions[0], TypeFilter::Instant);
+        assert_zone_card_count_condition(&conditions[1], TypeFilter::Sorcery);
+    }
+
+    fn assert_zone_card_count_condition(condition: &StaticCondition, expected: TypeFilter) {
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::ZoneCardCount {
+                            zone,
+                            card_types,
+                            scope,
+                        },
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        } = condition
+        else {
+            panic!("expected zone card count >= 1, got {condition:?}");
+        };
+        assert_eq!(*zone, ZoneRef::Graveyard);
+        assert_eq!(*scope, CountScope::Controller);
+        assert_eq!(card_types, &vec![expected]);
+    }
+
+    #[test]
     fn test_this_card_in_exile() {
         let (rest, c) = parse_inner_condition("this card is in exile").unwrap();
         assert_eq!(rest, "");
@@ -4583,6 +5529,38 @@ mod tests {
     }
 
     #[test]
+    fn test_no_opponent_has_more_life_than_that_player() {
+        let (rest, c) =
+            parse_inner_condition("no opponent has more life than that player").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::LifeTotal {
+                                player:
+                                    PlayerScope::Opponent {
+                                        aggregate: AggregateFunction::Max,
+                                    },
+                            },
+                    },
+                comparator: Comparator::LE,
+                rhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::LifeTotal {
+                                player: PlayerScope::DefendingPlayer,
+                            },
+                    },
+            } => {}
+            other => {
+                panic!("expected OpponentLifeTotal LE DefendingPlayerLifeTotal, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
     fn test_opponent_has_at_least_n_more_life() {
         let (rest, c) =
             parse_inner_condition("an opponent has at least 5 more life than you").unwrap();
@@ -4651,7 +5629,7 @@ mod tests {
         let (rest, c) = parse_inner_condition("you pay {2}").unwrap();
         assert_eq!(rest, "");
         match c {
-            StaticCondition::UnlessPay { cost, scaling } => {
+            StaticCondition::UnlessPay { cost, scaling, .. } => {
                 assert_eq!(
                     cost,
                     ManaCost::Cost {
@@ -4964,6 +5942,28 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 0 },
             }
         );
+    }
+
+    #[test]
+    fn you_havent_cast_spell_from_hand_this_turn_keeps_origin_filter() {
+        let (rest, c) =
+            parse_inner_condition("you haven't cast a spell from your hand this turn").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::SpellsCastThisTurn {
+                                scope: CountScope::Controller,
+                                filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
+                            },
+                    },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            } => assert!(properties.contains(&FilterProp::InZone { zone: Zone::Hand })),
+            other => panic!("expected origin-filtered zero spell count, got {other:?}"),
+        }
     }
 
     #[test]
@@ -5324,6 +6324,46 @@ mod tests {
         }
     }
 
+    #[test]
+    fn source_didnt_attack_this_turn_counts_self_with_history_filter() {
+        let (rest, c) = parse_inner_condition("~ didn't attack this turn").unwrap();
+        assert_eq!(rest, "");
+        assert_source_history_absence(c, FilterProp::AttackedThisTurn);
+    }
+
+    #[test]
+    fn source_didnt_enter_this_turn_counts_self_with_history_filter() {
+        let (rest, c) =
+            parse_inner_condition("this creature didn't enter the battlefield this turn").unwrap();
+        assert_eq!(rest, "");
+        assert_source_history_absence(c, FilterProp::EnteredThisTurn);
+    }
+
+    fn assert_source_history_absence(c: StaticCondition, prop: FilterProp) {
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::And { filters },
+                            },
+                    },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            } => {
+                assert!(filters
+                    .iter()
+                    .any(|filter| matches!(filter, TargetFilter::SelfRef)));
+                assert!(filters.iter().any(|filter| matches!(
+                    filter,
+                    TargetFilter::Typed(TypedFilter { properties, .. }) if properties.contains(&prop)
+                )));
+            }
+            other => panic!("expected source history absence condition, got {other:?}"),
+        }
+    }
+
     // -- "no [type] are on the battlefield" --
 
     #[test]
@@ -5376,6 +6416,142 @@ mod tests {
                 assert_eq!(rhs, QuantityExpr::Fixed { value: 1 });
             }
             _ => panic!("expected QuantityComparison, got {c:?}"),
+        }
+    }
+
+    #[test]
+    fn test_card_put_into_your_graveyard_from_anywhere_this_turn() {
+        let (rest, c) = parse_inner_condition(
+            "a creature card was put into your graveyard from anywhere this turn",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ZoneChangeCountThisTurn {
+                                from: None,
+                                to: Some(Zone::Graveyard),
+                                filter: TargetFilter::Typed(filter),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {
+                assert!(filter.type_filters.contains(&TypeFilter::Creature));
+                assert!(filter.properties.iter().any(|property| matches!(
+                    property,
+                    FilterProp::Owned {
+                        controller: ControllerRef::You
+                    }
+                )));
+                assert!(filter
+                    .properties
+                    .iter()
+                    .any(|property| matches!(property, FilterProp::NonToken)));
+            }
+            other => {
+                panic!("expected owned creature-card graveyard zone-change count, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn test_artifact_or_creature_put_into_graveyard_from_battlefield_this_turn() {
+        let (rest, c) = parse_inner_condition(
+            "an artifact or creature was put into a graveyard from the battlefield this turn",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ZoneChangeCountThisTurn {
+                                from: Some(Zone::Battlefield),
+                                to: Some(Zone::Graveyard),
+                                filter: TargetFilter::Or { filters },
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {
+                assert_eq!(filters.len(), 2);
+            }
+            other => {
+                panic!(
+                    "expected artifact-or-creature battlefield-to-graveyard count, got {other:?}"
+                )
+            }
+        }
+    }
+
+    #[test]
+    fn test_card_left_your_graveyard_this_turn() {
+        let (rest, c) = parse_inner_condition("a card left your graveyard this turn").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ZoneChangeCountThisTurn {
+                                from: Some(Zone::Graveyard),
+                                to: None,
+                                filter: TargetFilter::Typed(filter),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {
+                assert!(filter.properties.iter().any(|property| matches!(
+                    property,
+                    FilterProp::Owned {
+                        controller: ControllerRef::You
+                    }
+                )));
+                assert!(filter
+                    .properties
+                    .iter()
+                    .any(|property| matches!(property, FilterProp::NonToken)));
+            }
+            other => panic!("expected owned-card graveyard leave count, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_permanent_put_into_your_hand_from_battlefield_this_turn() {
+        let (rest, c) = parse_inner_condition(
+            "a permanent was put into your hand from the battlefield this turn",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ZoneChangeCountThisTurn {
+                                from: Some(Zone::Battlefield),
+                                to: Some(Zone::Hand),
+                                filter: TargetFilter::Typed(filter),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {
+                assert!(filter.type_filters.contains(&TypeFilter::Permanent));
+                assert!(filter.properties.iter().any(|property| matches!(
+                    property,
+                    FilterProp::Owned {
+                        controller: ControllerRef::You
+                    }
+                )));
+            }
+            other => panic!("expected owned permanent battlefield-to-hand count, got {other:?}"),
         }
     }
 
@@ -5492,6 +6668,89 @@ mod tests {
             }
             _ => panic!("expected QuantityComparison, got {c:?}"),
         }
+    }
+
+    #[test]
+    fn test_source_you_controlled_dealt_damage_threshold_this_turn() {
+        let (rest, c) =
+            parse_inner_condition("a source you controlled dealt 5 or more damage this turn")
+                .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::DamageDealtThisTurn {
+                                source,
+                                target,
+                                aggregate: AggregateFunction::Max,
+                                group_by: Some(DamageGroupKey::SourceId),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 5 },
+            } => {
+                let TargetFilter::Typed(typed) = *source else {
+                    panic!("expected typed source filter");
+                };
+                assert_eq!(typed.controller, Some(ControllerRef::You));
+                assert_eq!(*target, TargetFilter::Any);
+            }
+            other => panic!("expected source-damage threshold quantity, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_source_dealt_damage_to_opponent_this_turn() {
+        let (rest, c) =
+            parse_inner_condition("this creature dealt damage to an opponent this turn").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::DamageDealtThisTurn {
+                                source,
+                                target,
+                                aggregate: AggregateFunction::Sum,
+                                group_by: None,
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => {
+                assert_eq!(*source, TargetFilter::SelfRef);
+                let TargetFilter::Typed(target) = *target else {
+                    panic!("expected typed opponent target");
+                };
+                assert_eq!(target.controller, Some(ControllerRef::Opponent));
+            }
+            other => panic!("expected self damage-to-opponent condition, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_source_was_dealt_damage_this_turn() {
+        let (rest, c) = parse_inner_condition("this creature was dealt damage this turn").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::DamageDealtThisTurn {
+                        source,
+                        target,
+                        aggregate: AggregateFunction::Sum,
+                        group_by: None,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } if source == Box::new(TargetFilter::Any)
+                && target == Box::new(TargetFilter::SelfRef)
+        ));
     }
 
     /// CR 601.2h + CR 603.4: Increment intervening-if parses as `Or` over two
@@ -6501,5 +7760,210 @@ mod tests {
             AggregateProperty(crate::types::ability::ObjectProperty::Toughness),
             10,
         );
+    }
+
+    /// CR 109.5: `add_owned_you_with_props` is the unified replacement for the
+    /// prior `add_owned_you` / `add_owned_you_non_token` pair. With an empty
+    /// extras slice it must produce only the `Owned { You }` tag (the bare
+    /// "owned by you" shape); with `&[FilterProp::NonToken]` it must additionally
+    /// carry the `NonToken` tag. Both `Typed` inputs and `Any` (lifted to a
+    /// fresh `Typed` filter) must follow the same uniqueness rule.
+    #[test]
+    fn add_owned_you_with_props_matches_legacy_helper_shapes() {
+        // Empty extras + Any input → fresh Typed filter with Owned only.
+        let owned_only = add_owned_you_with_props(TargetFilter::Any, &[]);
+        assert_eq!(
+            owned_only,
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Owned {
+                controller: ControllerRef::You,
+            }])),
+        );
+
+        // NonToken extras + Any input → Owned + NonToken in that order.
+        let owned_non_token = add_owned_you_with_props(TargetFilter::Any, &[FilterProp::NonToken]);
+        assert_eq!(
+            owned_non_token,
+            TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::You,
+                },
+                FilterProp::NonToken,
+            ])),
+        );
+
+        // Typed input that already carries an `Owned { Opponent }` tag must NOT
+        // gain a second `Owned` entry — variant-tag uniqueness, not value
+        // equality. This mirrors the legacy `matches!(p, FilterProp::Owned { .. })`
+        // presence check.
+        let pre_owned =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Owned {
+                controller: ControllerRef::Opponent,
+            }]));
+        let after = add_owned_you_with_props(pre_owned.clone(), &[FilterProp::NonToken]);
+        match after {
+            TargetFilter::Typed(typed) => {
+                let owned_count = typed
+                    .properties
+                    .iter()
+                    .filter(|p| matches!(p, FilterProp::Owned { .. }))
+                    .count();
+                assert_eq!(owned_count, 1, "must not duplicate Owned tag");
+                assert!(typed.properties.contains(&FilterProp::NonToken));
+            }
+            other => panic!("expected Typed, got {other:?}"),
+        }
+
+        // Non-typed/non-Any inputs (e.g., Player) must pass through unchanged
+        // — owner-tagging is meaningless on those shapes.
+        let unchanged = add_owned_you_with_props(TargetFilter::Player, &[FilterProp::NonToken]);
+        assert_eq!(unchanged, TargetFilter::Player);
+    }
+
+    /// CR 208.1 + CR 603.4 + CR 109.3: Selvala-class superlative-comparison
+    /// gate — "its power is greater than each other creature's power" must
+    /// emit a `QuantityComparison` whose RHS is an aggregate (Max, Power)
+    /// over creatures excluding the triggering object.
+    #[test]
+    fn parse_inner_condition_superlative_each_other_power_greater_than() {
+        let (rest, c) =
+            parse_inner_condition("its power is greater than each other creature's power.")
+                .unwrap();
+        assert_eq!(rest, ".");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert_eq!(comparator, Comparator::GT);
+                assert_eq!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::EventSource,
+                        },
+                    }
+                );
+                match rhs {
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::Aggregate {
+                                function,
+                                property,
+                                filter,
+                            },
+                    } => {
+                        assert_eq!(function, AggregateFunction::Max);
+                        assert_eq!(property, ObjectProperty::Power);
+                        match filter {
+                            TargetFilter::Typed(tf) => {
+                                assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+                                assert!(
+                                    tf.properties.contains(&FilterProp::OtherThanTriggerObject),
+                                    "expected OtherThanTriggerObject, got {:?}",
+                                    tf.properties
+                                );
+                            }
+                            other => panic!("expected Typed creature, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected Aggregate Max Power, got {other:?}"),
+                }
+            }
+            other => panic!("expected QuantityComparison, got {other:?}"),
+        }
+    }
+
+    /// "less than" variant: aggregate function should switch to Min.
+    #[test]
+    fn parse_inner_condition_superlative_each_other_power_less_than() {
+        let (_rest, c) =
+            parse_inner_condition("its power is less than each other creature's power.").unwrap();
+        match c {
+            StaticCondition::QuantityComparison {
+                comparator,
+                rhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Aggregate { function, .. },
+                    },
+                ..
+            } => {
+                assert_eq!(comparator, Comparator::LT);
+                assert_eq!(function, AggregateFunction::Min);
+            }
+            other => panic!("expected QuantityComparison with Aggregate, got {other:?}"),
+        }
+    }
+
+    /// "greater than or equal to" variant: comparator should be GE, aggregate Max.
+    #[test]
+    fn parse_inner_condition_superlative_each_other_ge() {
+        let (_rest, c) = parse_inner_condition(
+            "its toughness is greater than or equal to each other creature's toughness.",
+        )
+        .unwrap();
+        match c {
+            StaticCondition::QuantityComparison {
+                comparator,
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::Toughness {
+                                scope: ObjectScope::EventSource,
+                            },
+                    },
+                rhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::Aggregate {
+                                function, property, ..
+                            },
+                    },
+            } => {
+                assert_eq!(comparator, Comparator::GE);
+                assert_eq!(function, AggregateFunction::Max);
+                assert_eq!(property, ObjectProperty::Toughness);
+            }
+            other => panic!("expected QuantityComparison, got {other:?}"),
+        }
+    }
+
+    /// "it has the greatest power among" surface form — equivalent to the
+    /// inequality form but as a "has the X" predicate. Strict GT.
+    #[test]
+    fn parse_inner_condition_superlative_has_greatest_power() {
+        let (_rest, c) =
+            parse_inner_condition("it has the greatest power among creatures on the battlefield.")
+                .unwrap();
+        match c {
+            StaticCondition::QuantityComparison {
+                comparator,
+                rhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Aggregate { function, .. },
+                    },
+                ..
+            } => {
+                assert_eq!(comparator, Comparator::GT);
+                assert_eq!(function, AggregateFunction::Max);
+            }
+            other => panic!("expected QuantityComparison, got {other:?}"),
+        }
+    }
+
+    /// "it has the greatest power or is tied for greatest power among" — the
+    /// "or is tied for" tail relaxes strict GT to GE.
+    #[test]
+    fn parse_inner_condition_superlative_has_greatest_or_tied_for_greatest() {
+        let (_rest, c) = parse_inner_condition(
+            "it has the greatest power or is tied for greatest power among creatures on the battlefield.",
+        )
+        .unwrap();
+        match c {
+            StaticCondition::QuantityComparison { comparator, .. } => {
+                assert_eq!(comparator, Comparator::GE);
+            }
+            other => panic!("expected QuantityComparison, got {other:?}"),
+        }
     }
 }

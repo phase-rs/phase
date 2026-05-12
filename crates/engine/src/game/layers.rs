@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::game::arithmetic::saturating_pt_add;
 use crate::game::devotion::count_devotion;
 use crate::game::filter::{matches_target_filter, FilterContext};
@@ -109,6 +110,7 @@ pub fn prune_until_next_turn_casting_permissions(state: &mut GameState, active_p
                         player: PlayerScope::Controller,
                     },
                 granted_to,
+                ..
             } => *granted_to != active_player,
             CastingPermission::PlayFromExile { .. }
             | CastingPermission::AdventureCreature
@@ -1255,6 +1257,90 @@ fn order_by_timestamp(effects: &[&ActiveContinuousEffect]) -> Vec<ActiveContinuo
     sorted
 }
 
+/// CR 509.1b + CR 105.4 (issue #327): True when a granted `StaticMode`
+/// carries a `FilterProp::IsChosenColor` reference somewhere in its filter,
+/// requiring the granting source's chosen color to be resolved at
+/// apply-time. See `resolve_static_mode_chosen_color`.
+fn static_mode_uses_chosen_color(mode: &crate::types::statics::StaticMode) -> bool {
+    use crate::types::statics::StaticMode;
+    match mode {
+        StaticMode::CantBeBlockedBy { filter } => target_filter_uses_chosen_color(filter),
+        _ => false,
+    }
+}
+
+/// CR 509.1b + CR 105.4 (issue #327): Walk a `TargetFilter` looking for
+/// `FilterProp::IsChosenColor`. Mirrors the chosen-ref detection pattern in
+/// `effects::prevent_damage::resolve_source_filter`.
+fn target_filter_uses_chosen_color(filter: &TargetFilter) -> bool {
+    use crate::types::ability::FilterProp;
+    match filter {
+        TargetFilter::Typed(tf) => tf
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::IsChosenColor)),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(target_filter_uses_chosen_color)
+        }
+        _ => false,
+    }
+}
+
+/// CR 509.1b + CR 105.4 + CR 609.6 (issue #327): Resolve every
+/// `FilterProp::IsChosenColor` inside the static mode's filter to a concrete
+/// `FilterProp::HasColor { color }`, using the granting source's chosen
+/// color. When no chosen color is available, the IsChosenColor prop is
+/// stripped — leaving an unresolvable predicate on the recipient would make
+/// the restriction match every creature.
+fn resolve_static_mode_chosen_color(
+    mode: &crate::types::statics::StaticMode,
+    chosen_color: Option<crate::types::mana::ManaColor>,
+) -> crate::types::statics::StaticMode {
+    use crate::types::statics::StaticMode;
+    match mode {
+        StaticMode::CantBeBlockedBy { filter } => StaticMode::CantBeBlockedBy {
+            filter: resolve_chosen_color_in_filter(filter, chosen_color),
+        },
+        other => other.clone(),
+    }
+}
+
+/// CR 105.4 + CR 609.6 (issue #327): Walk a `TargetFilter` and replace every
+/// `FilterProp::IsChosenColor` with a concrete `FilterProp::HasColor` keyed
+/// to the supplied chosen color. Mirrors
+/// `effects::prevent_damage::resolve_source_filter`.
+fn resolve_chosen_color_in_filter(
+    filter: &TargetFilter,
+    chosen_color: Option<crate::types::mana::ManaColor>,
+) -> TargetFilter {
+    use crate::types::ability::FilterProp;
+    match filter {
+        TargetFilter::Typed(tf) => {
+            let mut resolved = tf.clone();
+            resolved
+                .properties
+                .retain(|p| !matches!(p, FilterProp::IsChosenColor));
+            if let Some(color) = chosen_color {
+                resolved.properties.push(FilterProp::HasColor { color });
+            }
+            TargetFilter::Typed(resolved)
+        }
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .iter()
+                .map(|f| resolve_chosen_color_in_filter(f, chosen_color))
+                .collect(),
+        },
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .iter()
+                .map(|f| resolve_chosen_color_in_filter(f, chosen_color))
+                .collect(),
+        },
+        other => other.clone(),
+    }
+}
+
 /// Apply a single continuous effect to all affected objects.
 ///
 /// CR 400.3 + CR 702.94a: The filter's `InZone` property (via
@@ -1287,8 +1373,32 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             None
         };
 
-    // Pre-read chosen color from source (avoids borrow conflict in the loop)
-    let chosen_color = if matches!(effect.modification, ContinuousModification::AddChosenColor) {
+    // Pre-read chosen color from source (avoids borrow conflict in the loop).
+    // Used by `AddChosenColor` (CR 105.3) AND by `AddKeyword` when the keyword
+    // is `HexproofFrom(ChosenColor)` / `Protection(ChosenColor)` AND by
+    // `AddStaticMode` when the static mode carries an `IsChosenColor` filter
+    // prop — CR 702.11d + CR 702.16 + CR 509.1b + CR 105.4 + CR 609.6: the
+    // granting source's chosen color must be baked into the granted modifier
+    // at apply-time, because the modifier lives on the granted creature
+    // (which has no chosen-color attribute of its own).
+    let chosen_color = if matches!(effect.modification, ContinuousModification::AddChosenColor)
+        || matches!(
+            &effect.modification,
+            ContinuousModification::AddKeyword { keyword }
+                if matches!(
+                    keyword,
+                    crate::types::keywords::Keyword::HexproofFrom(
+                        crate::types::keywords::HexproofFilter::ChosenColor,
+                    ) | crate::types::keywords::Keyword::Protection(
+                        crate::types::keywords::ProtectionTarget::ChosenColor,
+                    )
+                )
+        )
+        || matches!(
+            &effect.modification,
+            ContinuousModification::AddStaticMode { mode }
+                if static_mode_uses_chosen_color(mode)
+        ) {
         state
             .objects
             .get(&effect.source_id)
@@ -1418,8 +1528,43 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             // `Annihilator(_)`, `Cumulative Upkeep(_)`, and any other
             // parameterized keyword variant.
             ContinuousModification::AddKeyword { keyword } => {
-                if !obj.keywords.contains(keyword) {
-                    obj.keywords.push(keyword.clone());
+                // CR 702.11d + CR 702.16 + CR 609.6: When the granted keyword
+                // refers to "the chosen color" of the granting source, resolve
+                // it to the concrete color before push so the keyword is
+                // self-contained on the recipient. `chosen_color` is pre-read
+                // above when the keyword's variant requires it.
+                let resolved_keyword = match keyword {
+                    crate::types::keywords::Keyword::HexproofFrom(
+                        crate::types::keywords::HexproofFilter::ChosenColor,
+                    ) => {
+                        if let Some(color) = chosen_color {
+                            crate::types::keywords::Keyword::HexproofFrom(
+                                crate::types::keywords::HexproofFilter::Color(color),
+                            )
+                        } else {
+                            // No chosen color yet — skip the grant rather than
+                            // pushing an unresolvable variant.
+                            continue;
+                        }
+                    }
+                    crate::types::keywords::Keyword::Protection(
+                        crate::types::keywords::ProtectionTarget::ChosenColor,
+                    ) => {
+                        if let Some(color) = chosen_color {
+                            crate::types::keywords::Keyword::Protection(
+                                crate::types::keywords::ProtectionTarget::Color(color),
+                            )
+                        } else {
+                            continue;
+                        }
+                    }
+                    other => other.clone(),
+                };
+                if !obj.keywords.contains(&resolved_keyword) {
+                    obj.keywords.push(resolved_keyword.clone());
+                }
+                for trigger in KeywordTriggerInstaller::triggers_for(&resolved_keyword) {
+                    obj.trigger_definitions.push(trigger);
                 }
             }
             // Asymmetric on purpose: `RemoveKeyword` strips every keyword that
@@ -1432,6 +1577,9 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             ContinuousModification::RemoveKeyword { keyword } => {
                 obj.keywords
                     .retain(|k| std::mem::discriminant(k) != std::mem::discriminant(keyword));
+                obj.trigger_definitions.retain(|trigger| {
+                    !KeywordTriggerInstaller::trigger_matches_keyword_kind(trigger, keyword)
+                });
             }
             ContinuousModification::RemoveAllAbilities => {
                 Arc::make_mut(&mut obj.abilities).clear();
@@ -1556,7 +1704,10 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
                         .iter()
                         .any(|k| std::mem::discriminant(k) == std::mem::discriminant(&keyword))
                     {
-                        obj.keywords.push(keyword);
+                        obj.keywords.push(keyword.clone());
+                    }
+                    for trigger in KeywordTriggerInstaller::triggers_for(&keyword) {
+                        obj.trigger_definitions.push(trigger);
                     }
                 }
             }
@@ -1584,8 +1735,21 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
                 }
             }
             ContinuousModification::AddStaticMode { mode } => {
-                let def = StaticDefinition::new(mode.clone()).affected(TargetFilter::SelfRef);
-                if !obj.static_definitions.iter_all().any(|sd| sd.mode == *mode) {
+                // CR 509.1b + CR 105.4 + CR 609.6 (issue #327): When the
+                // granted static mode carries an `IsChosenColor` filter prop,
+                // resolve it to a concrete `HasColor(<chosen>)` using the
+                // granting source's chosen color. The static_def is anchored
+                // to the recipient (`affected: SelfRef`) which has no
+                // chosen-color attribute of its own; resolving at apply time
+                // bakes the granting source's choice into the live filter.
+                let resolved_mode = resolve_static_mode_chosen_color(mode, chosen_color);
+                let def =
+                    StaticDefinition::new(resolved_mode.clone()).affected(TargetFilter::SelfRef);
+                if !obj
+                    .static_definitions
+                    .iter_all()
+                    .any(|sd| sd.mode == resolved_mode)
+                {
                     obj.static_definitions.push(def);
                 }
             }
@@ -1732,6 +1896,25 @@ pub(crate) fn compute_current_copiable_values(
                 values: effect_values,
             } => {
                 values = (**effect_values).clone();
+                for trigger in state
+                    .transient_continuous_effects
+                    .iter()
+                    .filter(|tce| {
+                        tce.source_id == effect.source_id
+                            && tce.timestamp == effect.timestamp
+                            && tce.affected == effect.affected_filter
+                    })
+                    .flat_map(|tce| &tce.modifications)
+                    .filter_map(|modification| match modification {
+                        ContinuousModification::GrantTrigger { trigger } => Some(trigger),
+                        _ => None,
+                    })
+                {
+                    let triggers = Arc::make_mut(&mut values.trigger_definitions);
+                    if !triggers.iter().any(|t| t == trigger.as_ref()) {
+                        triggers.push(*trigger.clone());
+                    }
+                }
             }
             // CR 707.9b: Name overrides from "except its name is X" clauses
             // become part of the copiable values of the copy. A subsequent
@@ -1778,7 +1961,7 @@ mod tests {
         AbilityDefinition, AbilityKind, BasicLandType, ChosenSubtypeKind, ContinuousModification,
         ControllerRef, CountScope, Duration, Effect, FilterProp, GainLifePlayer, ObjectScope,
         PlayerScope, QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter,
-        TypeFilter, TypedFilter, ZoneRef,
+        TriggerCondition, TypeFilter, TypedFilter, ZoneRef,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::TransientContinuousEffect;
@@ -4781,6 +4964,7 @@ mod tests {
             .push(CastingPermission::PlayFromExile {
                 duration: Duration::UntilEndOfTurn,
                 granted_to: PlayerId(0),
+                mana_spend_permission: None,
             });
 
         prune_end_of_turn_casting_permissions(&mut state);
@@ -4801,10 +4985,12 @@ mod tests {
                 player: PlayerScope::Controller,
             },
             granted_to: PlayerId(0),
+            mana_spend_permission: None,
         });
         perms.push(CastingPermission::PlayFromExile {
             duration: Duration::Permanent,
             granted_to: PlayerId(0),
+            mana_spend_permission: None,
         });
         perms.push(CastingPermission::AdventureCreature);
 
@@ -4832,6 +5018,7 @@ mod tests {
                     player: PlayerScope::Controller,
                 },
                 granted_to: PlayerId(0),
+                mana_spend_permission: None,
             });
         state
             .objects
@@ -4843,6 +5030,7 @@ mod tests {
                     player: PlayerScope::Controller,
                 },
                 granted_to: PlayerId(1),
+                mana_spend_permission: None,
             });
 
         // Active player is P0 — only P0's permission should expire.
@@ -4871,6 +5059,7 @@ mod tests {
             .push(CastingPermission::PlayFromExile {
                 duration: Duration::UntilEndOfTurn,
                 granted_to: PlayerId(0),
+                mana_spend_permission: None,
             });
 
         prune_until_next_turn_casting_permissions(&mut state, PlayerId(0));
@@ -5675,6 +5864,228 @@ mod tests {
         );
         assert!(obj.keywords.contains(&ward_one));
         assert!(obj.keywords.contains(&ward_two));
+    }
+
+    #[test]
+    fn add_keyword_undying_installs_and_removes_synthesized_trigger() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        let source = make_creature(&mut state, "Mikaeus Stand-In", 1, 1, PlayerId(0));
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::SpecificObject { id: bear })
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Undying,
+            }]);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(def);
+
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&bear).unwrap();
+        assert!(obj.keywords.contains(&Keyword::Undying));
+        assert_eq!(obj.trigger_definitions.len(), 1);
+        let trigger = obj.trigger_definitions.first().unwrap();
+        assert!(matches!(trigger.mode, TriggerMode::ChangesZone));
+        assert_eq!(trigger.origin, Some(Zone::Battlefield));
+        assert_eq!(trigger.destination, Some(Zone::Graveyard));
+        assert!(matches!(trigger.valid_card, Some(TargetFilter::SelfRef)));
+        assert!(matches!(
+            trigger.condition,
+            Some(TriggerCondition::Not { .. })
+        ));
+
+        state.battlefield.retain(|&id| id != source);
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&bear).unwrap();
+        assert!(!obj.keywords.contains(&Keyword::Undying));
+        assert!(obj.trigger_definitions.is_empty());
+    }
+
+    #[test]
+    fn add_keyword_annihilator_installs_parameterized_attack_trigger() {
+        let mut state = setup();
+        let attacker = make_creature(&mut state, "Battle-Mace Bearer", 2, 2, PlayerId(0));
+        let source = make_creature(&mut state, "Nazgul Battle-Mace Stand-In", 1, 1, PlayerId(0));
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::SpecificObject { id: attacker })
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Annihilator(1),
+            }]);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(def);
+
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&attacker).unwrap();
+        assert!(obj.keywords.contains(&Keyword::Annihilator(1)));
+        assert_eq!(obj.trigger_definitions.len(), 1);
+        let trigger = obj.trigger_definitions.first().unwrap();
+        assert!(matches!(trigger.mode, TriggerMode::Attacks));
+        assert!(matches!(trigger.valid_card, Some(TargetFilter::SelfRef)));
+
+        let execute = trigger.execute.as_deref().expect("execute body required");
+        let Effect::Sacrifice {
+            target,
+            count,
+            min_count,
+        } = &*execute.effect
+        else {
+            panic!("annihilator execute must sacrifice permanents");
+        };
+        assert!(matches!(count, QuantityExpr::Fixed { value: 1 }));
+        assert_eq!(*min_count, 0);
+        let TargetFilter::Typed(filter) = target else {
+            panic!("annihilator target must be a typed permanent filter");
+        };
+        assert_eq!(filter.controller, Some(ControllerRef::DefendingPlayer));
+        assert!(filter
+            .type_filters
+            .iter()
+            .any(|filter| matches!(filter, TypeFilter::Permanent)));
+    }
+
+    #[test]
+    fn add_keyword_annihilator_preserves_printed_and_granted_instances() {
+        let mut state = setup();
+        let attacker = make_creature(&mut state, "Printed Annihilator", 2, 2, PlayerId(0));
+        let source = make_creature(&mut state, "Battle-Mace", 1, 1, PlayerId(0));
+        let printed = Keyword::Annihilator(1);
+        let printed_trigger = KeywordTriggerInstaller::triggers_for(&printed)
+            .pop()
+            .expect("annihilator has a trigger template");
+        {
+            let obj = state.objects.get_mut(&attacker).unwrap();
+            obj.keywords.push(printed.clone());
+            obj.base_keywords.push(printed.clone());
+            obj.trigger_definitions.push(printed_trigger.clone());
+            Arc::make_mut(&mut obj.base_trigger_definitions).push(printed_trigger);
+        }
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::SpecificObject { id: attacker })
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: printed,
+            }]);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(def);
+
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&attacker).unwrap();
+        let annihilator_triggers = obj
+            .trigger_definitions
+            .iter_all()
+            .filter(|trigger| matches!(trigger.mode, TriggerMode::Attacks))
+            .filter(|trigger| matches!(trigger.valid_card, Some(TargetFilter::SelfRef)))
+            .filter(|trigger| {
+                matches!(
+                    trigger.execute.as_deref().map(|ability| &*ability.effect),
+                    Some(Effect::Sacrifice {
+                        target: TargetFilter::Typed(filter),
+                        count: QuantityExpr::Fixed { value: 1 },
+                        ..
+                    }) if filter.controller == Some(ControllerRef::DefendingPlayer)
+                )
+            })
+            .count();
+        assert_eq!(
+            annihilator_triggers, 2,
+            "printed Annihilator 1 and granted Annihilator 1 must remain independent trigger instances"
+        );
+    }
+
+    #[test]
+    fn add_dynamic_keyword_annihilator_installs_resolved_attack_trigger() {
+        let mut state = setup();
+        let attacker = make_creature(&mut state, "Dynamic Annihilator", 2, 2, PlayerId(0));
+        let source = make_creature(&mut state, "Variable Battle-Mace", 1, 1, PlayerId(0));
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::SpecificObject { id: attacker })
+            .modifications(vec![ContinuousModification::AddDynamicKeyword {
+                kind: crate::types::keywords::DynamicKeywordKind::Annihilator,
+                value: QuantityExpr::Fixed { value: 3 },
+            }]);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(def);
+
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&attacker).unwrap();
+        assert!(obj.keywords.contains(&Keyword::Annihilator(3)));
+        let trigger = obj
+            .trigger_definitions
+            .iter_all()
+            .find(|trigger| {
+                matches!(
+                    trigger.execute.as_deref().map(|ability| &*ability.effect),
+                    Some(Effect::Sacrifice {
+                        target: TargetFilter::Typed(filter),
+                        count: QuantityExpr::Fixed { value: 3 },
+                        ..
+                    }) if filter.controller == Some(ControllerRef::DefendingPlayer)
+                )
+            })
+            .expect("dynamic Annihilator 3 should install a sacrifice trigger");
+        assert!(matches!(trigger.mode, TriggerMode::Attacks));
+        assert!(matches!(trigger.valid_card, Some(TargetFilter::SelfRef)));
+    }
+
+    #[test]
+    fn remove_keyword_undying_removes_synthesized_trigger() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        let grant_source = make_creature(&mut state, "Undying Granter", 1, 1, PlayerId(0));
+        let remove_source = make_creature(&mut state, "Undying Suppressor", 1, 1, PlayerId(0));
+        let grant = StaticDefinition::continuous()
+            .affected(TargetFilter::SpecificObject { id: bear })
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Undying,
+            }]);
+        let remove = StaticDefinition::continuous()
+            .affected(TargetFilter::SpecificObject { id: bear })
+            .modifications(vec![ContinuousModification::RemoveKeyword {
+                keyword: Keyword::Undying,
+            }]);
+        state
+            .objects
+            .get_mut(&grant_source)
+            .unwrap()
+            .static_definitions
+            .push(grant);
+        state
+            .objects
+            .get_mut(&remove_source)
+            .unwrap()
+            .static_definitions
+            .push(remove);
+
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&bear).unwrap();
+        assert!(!obj.keywords.contains(&Keyword::Undying));
+        assert!(
+            !obj.trigger_definitions.iter_all().any(|trigger| {
+                KeywordTriggerInstaller::trigger_matches_keyword_kind(trigger, &Keyword::Undying)
+            }),
+            "RemoveKeyword(Undying) must remove the synthesized dies trigger"
+        );
     }
 
     /// CR 702.16m: Multiple instances of protection from the same quality on

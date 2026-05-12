@@ -1,7 +1,11 @@
+use std::collections::HashSet;
+
 use crate::game::quantity::resolve_quantity_with_targets;
+use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::proposed_event::ProposedEvent;
 
 /// CR 701.22a: Scry N — look at top N, put any number on bottom in any order, rest on top in any order.
 ///
@@ -19,7 +23,7 @@ pub fn resolve(
 ) -> Result<(), EffectError> {
     let (scry_num, scry_player): (usize, _) = match &ability.effect {
         Effect::Scry { count, target } => (
-            resolve_quantity_with_targets(state, count, ability) as usize,
+            resolve_quantity_with_targets(state, count, ability).max(0) as usize,
             // CR 121.1 + CR 615.5 + CR 609.7: see draw.rs for rationale —
             // context-ref filters resolve via state slots, not controller.
             super::resolve_player_for_context_ref(state, ability, target),
@@ -27,39 +31,21 @@ pub fn resolve(
         _ => (1, ability.controller),
     };
 
-    let player = state
-        .players
-        .iter()
-        .find(|p| p.id == scry_player)
-        .ok_or(EffectError::PlayerNotFound)?;
-
-    let count = scry_num.min(player.library.len());
-    // CR 701.22b: If a player is instructed to scry 0, no scry event occurs.
-    if count == 0 {
-        events.push(GameEvent::EffectResolved {
-            kind: EffectKind::from(&ability.effect),
-            source_id: ability.source_id,
-        });
-        return Ok(());
-    }
-
-    events.push(GameEvent::PlayerPerformedAction {
+    let proposed = ProposedEvent::Scry {
         player_id: scry_player,
-        action: PlayerActionKind::Scry,
-    });
-
-    // Collect the top N card IDs for the player to choose from
-    let cards: Vec<_> = player
-        .library
-        .iter()
-        .take(count)
-        .copied()
-        .collect::<Vec<_>>();
-
-    state.waiting_for = WaitingFor::ScryChoice {
-        player: scry_player,
-        cards,
+        count: scry_num as u32,
+        applied: HashSet::new(),
     };
+
+    match replacement::replace_event(state, proposed, events) {
+        ReplacementResult::Execute(event) => apply_scry_after_replacement(state, event, events),
+        ReplacementResult::Prevented => {}
+        ReplacementResult::NeedsChoice(player) => {
+            state.waiting_for =
+                crate::game::replacement::replacement_choice_waiting_for(player, state);
+            return Ok(());
+        }
+    }
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
@@ -69,12 +55,57 @@ pub fn resolve(
     Ok(())
 }
 
+pub(crate) fn apply_scry_after_replacement(
+    state: &mut GameState,
+    event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+) {
+    let (player_id, count) = match event {
+        ProposedEvent::Scry {
+            player_id, count, ..
+        } => (player_id, count),
+        ProposedEvent::Draw { .. } => {
+            crate::game::effects::draw::apply_draw_after_replacement(state, event, events);
+            return;
+        }
+        _ => return,
+    };
+
+    let Some(player) = state.players.iter().find(|p| p.id == player_id) else {
+        return;
+    };
+
+    let count = (count as usize).min(player.library.len());
+    if count == 0 {
+        return;
+    }
+
+    events.push(GameEvent::PlayerPerformedAction {
+        player_id,
+        action: PlayerActionKind::Scry,
+    });
+
+    let cards: Vec<_> = player
+        .library
+        .iter()
+        .take(count)
+        .copied()
+        .collect::<Vec<_>>();
+
+    state.waiting_for = WaitingFor::ScryChoice {
+        player: player_id,
+        cards,
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr, TargetFilter};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
+    use crate::types::replacements::ReplacementEvent;
     use crate::types::zones::Zone;
 
     fn make_scry_ability(scry_num: i32) -> ResolvedAbility {
@@ -165,6 +196,51 @@ mod tests {
         let result = resolve(&mut state, &ability, &mut events);
         assert!(result.is_ok());
         // Should NOT set ScryChoice when library is empty
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    #[test]
+    fn scry_replacement_to_draw_delivers_through_resolver() {
+        let mut state = GameState::new_two_player(42);
+        for i in 0..3 {
+            create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("Card {}", i),
+                Zone::Library,
+            );
+        }
+        let source_id = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Eligeth".to_string(),
+            Zone::Battlefield,
+        );
+        let replacement = crate::types::ability::ReplacementDefinition::new(ReplacementEvent::Scry)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::EventContextAmount,
+                    },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        state
+            .objects
+            .get_mut(&source_id)
+            .expect("replacement source exists")
+            .replacement_definitions
+            .push(replacement);
+
+        let ability = make_scry_ability(2);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.players[0].hand.len(), 2);
+        assert_eq!(state.players[0].library.len(), 1);
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     }
 }

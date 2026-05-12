@@ -1,9 +1,9 @@
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
-    Duration, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
-    TypedFilter,
+    Duration, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TypedFilter,
 };
+use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{ExileLink, ExileLinkKind, GameState, WaitingFor};
 use crate::types::identifiers::{ObjectId, TrackedSetId};
@@ -158,7 +158,7 @@ pub(crate) fn execute_zone_move(
     enter_transformed: bool,
     effect_enter_tapped: bool,
     controller_override: Option<PlayerId>,
-    effect_enter_with_counters: &[(String, u32)],
+    effect_enter_with_counters: &[(CounterType, u32)],
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveResult {
     let mut proposed = ProposedEvent::zone_change(obj_id, from_zone, dest_zone, Some(source_id));
@@ -289,7 +289,7 @@ pub fn resolve(
             // u32 values up front so the zone-move pipeline carries fully-
             // resolved counts (matches the Token resolver pattern at
             // `effects/token.rs:400`).
-            let resolved_counters: Vec<(String, u32)> = enter_with_counters
+            let resolved_counters: Vec<(CounterType, u32)> = enter_with_counters
                 .iter()
                 .map(|(ct, qty)| {
                     let n =
@@ -331,32 +331,13 @@ pub fn resolve(
     let filter_controller =
         crate::game::effects::controller_for_relative_filter(ability, target_filter);
 
-    // CR 608.2c + 603.10a: Self-referential top-level triggers process the
-    // source object through the zone-change pipeline. Covers:
-    //   - `SelfRef` (the parser's `~` anaphor: "shuffle ~ into its owner's library")
-    //   - `ParentTarget` (the "it" anaphor on a top-level trigger with no
-    //     parent chain: Academy Rector, Bronzehide Lion, Loyal Cathar, etc.)
-    //   - `None` (no explicit target on an effect that still needs a subject)
-    // In all three cases, an empty `ability.targets` means "the source object".
-    // `TriggeringSource` is deliberately excluded: it resolves via
-    // `state.current_trigger_event`, not `source_id`.
-    let use_self = matches!(
-        target_filter,
-        TargetFilter::None | TargetFilter::SelfRef | TargetFilter::ParentTarget
-    ) && ability.targets.is_empty();
-    let self_ref_targets = if use_self {
-        vec![TargetRef::Object(ability.source_id)]
-    } else {
-        vec![]
-    };
-
-    let effective_targets = if self_ref_targets.is_empty() {
-        &ability.targets
-    } else {
-        &self_ref_targets
-    };
+    // CR 608.2c + 603.10a: Resolve the subject across self-ref → event-context →
+    // chosen-targets, the unified 3-tier dispatch shared by zone-change-style
+    // effects whose subject can be the source itself, an event-context
+    // referent, or a pre-selected target. See `targeting::resolved_targets`.
+    let effective_targets = crate::game::targeting::resolved_targets(ability, target_filter, state);
     let targeted_objects =
-        crate::game::effects::effect_object_targets(target_filter, effective_targets);
+        crate::game::effects::effect_object_targets(target_filter, &effective_targets);
 
     if targeted_objects.is_empty() {
         // CR 115.6: "Up to one target" — if the player chose zero targets during
@@ -485,6 +466,7 @@ pub fn resolve(
             player: filter_controller,
             cards: eligible,
             count: 1,
+            min_count: 0,
             up_to,
             source_id: ability.source_id,
             effect_kind: EffectKind::ChangeZone,
@@ -587,11 +569,12 @@ pub fn resolve_all(
     // `InAnyZone`, scan their union; otherwise fall back to the explicit `origin`
     // (or `Battlefield`). Single-zone filters (`InZone` alone) preserve legacy
     // behavior — only the multi-zone shape opts into the union scan.
-    let (origin_zones, dest_zone, target_filter) = match &ability.effect {
+    let (origin_zones, dest_zone, target_filter, enter_tapped) = match &ability.effect {
         Effect::ChangeZoneAll {
             origin,
             destination,
             target,
+            enter_tapped,
         } => {
             let extracted = target.extract_zones();
             let scan_zones = if extracted.len() > 1 {
@@ -599,7 +582,7 @@ pub fn resolve_all(
             } else {
                 vec![origin.unwrap_or(Zone::Battlefield)]
             };
-            (scan_zones, *destination, target.clone())
+            (scan_zones, *destination, target.clone(), *enter_tapped)
         }
         _ => return Err(EffectError::MissingParam("ChangeZoneAll".to_string())),
     };
@@ -727,7 +710,8 @@ pub fn resolve_all(
             .get(&obj_id)
             .map(|o| o.zone)
             .unwrap_or(origin_zone);
-        // Mass zone moves don't use enter_transformed, enter_tapped, or controller_override
+        // Mass zone moves don't use enter_transformed or controller_override;
+        // enter_tapped is carried for "return ... tapped" effects.
         match execute_zone_move(
             state,
             obj_id,
@@ -736,7 +720,7 @@ pub fn resolve_all(
             ability.source_id,
             ability.duration.as_ref(),
             false,
-            false,
+            enter_tapped,
             None,
             &[],
             events,
@@ -783,8 +767,9 @@ pub fn resolve_all(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::TargetFilter;
+    use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TargetRef};
     use crate::types::card_type::CoreType;
+    use crate::types::game_state::ZoneChangeRecord;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
 
@@ -843,6 +828,55 @@ mod tests {
         assert!(!state.players[0].hand.contains(&obj_id));
     }
 
+    #[test]
+    fn change_zone_resolves_triggering_source_from_zone_change_event() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Earthbent Land".to_string(),
+            Zone::Graveyard,
+        );
+        state.objects.get_mut(&obj_id).unwrap().controller = PlayerId(1);
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: obj_id,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                obj_id,
+                Some(Zone::Battlefield),
+                Zone::Graveyard,
+            )),
+        });
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Battlefield,
+                target: TargetFilter::TriggeringSource,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: true,
+                enter_tapped: true,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.battlefield.contains(&obj_id));
+        assert!(!state.players[1].graveyard.contains(&obj_id));
+        let obj = state.objects.get(&obj_id).unwrap();
+        assert!(obj.tapped);
+        assert_eq!(obj.controller, PlayerId(0));
+    }
+
     /// CR 122.1 + CR 614.1c — `Effect::ChangeZone.enter_with_counters` drives
     /// counter placement during the move. For a non-battlefield destination
     /// (Exile, Darigaaz / Draugr / Rayami class), counters are stamped via
@@ -870,7 +904,10 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
-                enter_with_counters: vec![("egg".to_string(), QuantityExpr::Fixed { value: 3 })],
+                enter_with_counters: vec![(
+                    CounterType::Generic("egg".to_string()),
+                    QuantityExpr::Fixed { value: 3 },
+                )],
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -1206,6 +1243,7 @@ mod tests {
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Hand,
                 target: TargetFilter::None,
+                enter_tapped: false,
             },
             vec![],
             ObjectId(100),
@@ -1252,6 +1290,7 @@ mod tests {
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
                 target: TargetFilter::Player,
+                enter_tapped: false,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(500),
@@ -1274,6 +1313,58 @@ mod tests {
             Zone::Graveyard,
             "controller's graveyard must be untouched"
         );
+    }
+
+    #[test]
+    fn change_zone_all_target_player_commander_moves_chosen_players_commander() {
+        let mut state = GameState::new_two_player(42);
+
+        let chosen_commander = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Chosen Commander".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&chosen_commander)
+            .unwrap()
+            .is_commander = true;
+
+        let controller_commander = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Controller Commander".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&controller_commander)
+            .unwrap()
+            .is_commander = true;
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: None,
+                destination: Zone::Command,
+                target: TargetFilter::Typed(TypedFilter {
+                    controller: Some(ControllerRef::You),
+                    properties: vec![FilterProp::IsCommander],
+                    ..Default::default()
+                }),
+                enter_tapped: false,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&chosen_commander].zone, Zone::Command);
+        assert_eq!(state.objects[&controller_commander].zone, Zone::Battlefield);
     }
 
     #[test]
@@ -1323,6 +1414,7 @@ mod tests {
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
                 target: TargetFilter::Player,
+                enter_tapped: false,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(500),
@@ -1353,6 +1445,7 @@ mod tests {
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
                 target: TargetFilter::Player,
+                enter_tapped: false,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(500),
@@ -1422,6 +1515,7 @@ mod tests {
                     controller: Some(crate::types::ability::ControllerRef::Opponent),
                     properties: vec![],
                 }),
+                enter_tapped: false,
             },
             vec![],
             source_id,
@@ -1521,6 +1615,7 @@ mod tests {
                 origin: Some(Zone::Exile),
                 destination: Zone::Graveyard,
                 target: TargetFilter::ExiledBySource,
+                enter_tapped: false,
             },
             vec![],
             source_id,
@@ -1872,6 +1967,7 @@ mod tests {
                         }],
                         ..Default::default()
                     }),
+                    enter_tapped: false,
                 },
                 vec![],
                 ObjectId(200),
@@ -1940,6 +2036,7 @@ mod tests {
                 Effect::Sacrifice {
                     target: TargetFilter::ParentTargetSlot { index: 0 },
                     count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                    min_count: 0,
                 },
                 vec![],
                 ObjectId(200),
@@ -2271,6 +2368,7 @@ mod tests {
                 origin: Some(Zone::Hand),
                 destination: Zone::Library,
                 target: TargetFilter::Controller,
+                enter_tapped: false,
             },
             vec![],
             ObjectId(500),
@@ -2364,6 +2462,7 @@ mod tests {
                         FilterProp::SameNameAsParentTarget,
                     ]),
                 ),
+                enter_tapped: false,
             },
             // Parent target supplies the "that name" referent.
             vec![TargetRef::Object(seed)],
@@ -2506,6 +2605,7 @@ mod tests {
                         },
                         FilterProp::SameNameAsParentTarget,
                     ])),
+                    enter_tapped: false,
                 },
                 vec![TargetRef::Object(seed)],
                 ObjectId(100),
@@ -2702,6 +2802,7 @@ mod tests {
                 target: TargetFilter::TrackedSet {
                     id: TrackedSetId(0),
                 },
+                enter_tapped: false,
             },
             vec![],
             ObjectId(100),

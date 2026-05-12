@@ -437,6 +437,35 @@ export function HostSetup({
           </label>
         )}
 
+        {/* Sandbox mode — capability flag, orthogonal to format. When enabled
+            at game creation, the host can submit debug actions and may grant
+            permission to other players. Off by default. Immutable for the
+            life of the session. */}
+        <div>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={formatConfig.allow_debug_actions}
+              onChange={(e) =>
+                setLocalFormatConfig((prev) => ({
+                  ...prev,
+                  allow_debug_actions: e.target.checked,
+                }))
+              }
+              className="accent-amber-500"
+            />
+            <span className="text-sm text-gray-300">
+              Sandbox Mode — allow debug actions
+            </span>
+          </label>
+          <p className="mt-1 pl-6 text-[11px] leading-4 text-slate-500">
+            The host can directly manipulate the game state (move cards, change
+            life, modify counters) and grant debug permission to other
+            players. Use for testing or sandbox play — not for competitive
+            matches. This setting cannot be changed once the game starts.
+          </p>
+        </div>
+
         {/* Password toggle and input */}
         <div>
           <label className="flex items-center gap-2">

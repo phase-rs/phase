@@ -9,6 +9,7 @@ use crate::types::ability::{
     CounterTransferMode, DoublePTMode, DoubleTarget, Effect, MultiTargetSpec, QuantityExpr,
     TargetFilter,
 };
+use crate::types::counter::{parse_counter_type, CounterType};
 use crate::types::mana::ManaColor;
 
 use super::super::oracle_nom::bridge::nom_on_lower;
@@ -61,7 +62,7 @@ fn is_it_pronoun(text: &str) -> bool {
 /// `(counter_type, count)` entries, the shared target, the remaining original-
 /// case text after the clause, and any multi-target spec.
 pub(super) type PutCounterChain<'a> = (
-    Vec<(String, QuantityExpr)>,
+    Vec<(CounterType, QuantityExpr)>,
     TargetFilter,
     &'a str,
     Option<MultiTargetSpec>,
@@ -83,7 +84,7 @@ pub(super) fn try_parse_put_counter_chain<'a>(
 ) -> Option<PutCounterChain<'a>> {
     let ((), after_put) = nom_on_lower(lower, lower, |i| value((), tag("put ")).parse(i))?;
     let mut remaining = after_put.trim_start();
-    let mut entries: Vec<(String, QuantityExpr)> = Vec::new();
+    let mut entries: Vec<(CounterType, QuantityExpr)> = Vec::new();
 
     loop {
         let (count_expr, rest) = parse_count_expr(remaining)?;
@@ -380,7 +381,7 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
         .parse(i)
     }) {
         return Some(Effect::RemoveCounter {
-            counter_type: String::new(),
+            counter_type: None,
             count: -1,
             target: TargetFilter::SelfRef,
         });
@@ -408,8 +409,7 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
         nom_on_lower(rest, rest, |i| {
             value((), alt((tag("counters"), tag("counter")))).parse(i)
         }) {
-        // No type specified — empty string signals "all types" to the handler.
-        (String::new(), after_cw)
+        (None, after_cw)
     } else {
         let type_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
         let raw_type = &rest[..type_end];
@@ -418,7 +418,7 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
         let ((), after_cw) = nom_on_lower(after_type, after_type, |i| {
             value((), alt((tag("counters"), tag("counter")))).parse(i)
         })?;
-        (counter_type, after_cw)
+        (Some(counter_type), after_cw)
     };
     let after_counter_word = after_counter_word.trim_start();
 
@@ -453,12 +453,8 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
 ///   the cost parser emits `mining`) collapse onto the same `Generic`
 ///   string at parse time. This makes the AST canonical without relying
 ///   on the runtime `parse_counter_type` lowercase fallback.
-pub(crate) fn normalize_counter_type(raw: &str) -> String {
-    match raw {
-        "+1/+1" => "P1P1".to_string(),
-        "-1/-1" => "M1M1".to_string(),
-        other => other.to_lowercase(),
-    }
+pub(crate) fn normalize_counter_type(raw: &str) -> CounterType {
+    parse_counter_type(raw)
 }
 
 /// Resolve a counter target from text: self-ref, pronoun, or parse_target.
@@ -844,7 +840,7 @@ mod tests {
         else {
             panic!("expected RemoveCounter, got {result:?}");
         };
-        assert!(counter_type.is_empty(), "untyped should be empty string");
+        assert_eq!(counter_type, None, "untyped should be None");
         assert_eq!(count, -1, "all = sentinel -1");
         assert!(matches!(target, TargetFilter::Typed { .. }));
     }
@@ -864,7 +860,7 @@ mod tests {
         else {
             panic!("expected RemoveCounter, got {result:?}");
         };
-        assert!(counter_type.is_empty());
+        assert_eq!(counter_type, None);
         assert_eq!(count, 1);
     }
 
@@ -883,7 +879,7 @@ mod tests {
         else {
             panic!("expected RemoveCounter, got {result:?}");
         };
-        assert!(counter_type.is_empty());
+        assert_eq!(counter_type, None);
         assert_eq!(count, 3);
     }
 
@@ -914,7 +910,7 @@ mod tests {
             else {
                 panic!("{input}: expected RemoveCounter, got {result:?}");
             };
-            assert!(counter_type.is_empty(), "{input}: counter_type empty");
+            assert_eq!(counter_type, None, "{input}: counter_type None");
             assert_eq!(count, -1, "{input}: sentinel -1 = all");
             assert!(
                 matches!(target, TargetFilter::SelfRef),
@@ -935,7 +931,7 @@ mod tests {
         else {
             panic!("expected RemoveCounter, got {result:?}");
         };
-        assert_eq!(counter_type, "P1P1");
+        assert_eq!(counter_type, Some(CounterType::Plus1Plus1));
         assert_eq!(count, 1);
     }
 
@@ -957,7 +953,7 @@ mod tests {
             panic!("expected MoveCounters, got {result:?}");
         };
         assert!(matches!(source, TargetFilter::SelfRef));
-        assert_eq!(counter_type, Some("P1P1".to_string()));
+        assert_eq!(counter_type, Some(CounterType::Plus1Plus1));
         assert_eq!(count, Some(QuantityExpr::Fixed { value: 1 }));
         assert_eq!(mode, CounterTransferMode::Move);
         assert!(matches!(target, TargetFilter::Typed { .. }));
@@ -1002,7 +998,7 @@ mod tests {
             panic!("expected MoveCounters, got {result:?}");
         };
         assert!(matches!(source, TargetFilter::Typed { .. }));
-        assert_eq!(counter_type, Some("P1P1".to_string()));
+        assert_eq!(counter_type, Some(CounterType::Plus1Plus1));
         assert_eq!(count, Some(QuantityExpr::Fixed { value: 1 }));
         assert_eq!(mode, CounterTransferMode::Move);
         assert!(matches!(target, TargetFilter::SelfRef));
@@ -1031,7 +1027,7 @@ mod tests {
         else {
             panic!("expected PutCounter, got {effect:?}");
         };
-        assert_eq!(counter_type, "P1P1");
+        assert_eq!(counter_type, CounterType::Plus1Plus1);
         assert!(
             matches!(
                 count,
@@ -1076,7 +1072,7 @@ mod tests {
         else {
             panic!("expected PutCounter, got {effect:?}");
         };
-        assert_eq!(counter_type, "P1P1");
+        assert_eq!(counter_type, CounterType::Plus1Plus1);
         assert!(
             matches!(
                 count,
@@ -1154,7 +1150,7 @@ mod tests {
         else {
             panic!("expected PutCounter, got {effect:?}");
         };
-        assert_eq!(counter_type, "P1P1");
+        assert_eq!(counter_type, CounterType::Plus1Plus1);
         // The parser resolves "cards in your hand" to the more specific
         // ZoneCardCount; either ZoneCardCount or HandSize is semantically valid.
         assert!(
@@ -1194,7 +1190,7 @@ mod tests {
             panic!("expected PutCounter, got {effect:?}");
         };
 
-        assert_eq!(counter_type, "corpse");
+        assert_eq!(counter_type, CounterType::Generic("corpse".to_string()));
         assert!(matches!(target, TargetFilter::SelfRef));
         assert!(
             rem.is_empty(),
@@ -1234,7 +1230,7 @@ mod tests {
             panic!("expected PutCounter, got {effect:?}");
         };
 
-        assert_eq!(counter_type, "charge");
+        assert_eq!(counter_type, CounterType::Generic("charge".to_string()));
         assert!(matches!(target, TargetFilter::Typed(_)));
         assert!(
             rem.is_empty(),

@@ -46,6 +46,20 @@ export interface FormatConfig {
   commander_damage_threshold: number | null;
   range_of_influence: number | null;
   team_based: boolean;
+  /**
+   * Engine-derived predicate: true when the format uses a commander card
+   * and the commander-damage state-based action (CR 903.10a / CR 704.5u).
+   * The frontend must consume this directly rather than re-listing
+   * commander-style format strings client-side.
+   */
+  uses_commander: boolean;
+  /**
+   * Sandbox capability flag: when true the server permits `GameAction.Debug(_)`
+   * from any player in the `debug_permitted` set. Off by default. Orthogonal
+   * to format — applies on top of any `GameFormat`. Immutable for the life
+   * of a session.
+   */
+  allow_debug_actions: boolean;
 }
 
 /**
@@ -98,6 +112,12 @@ export interface LobbyGame {
    * the field entirely, so treating `undefined` as falsy is what we want.
    */
   is_p2p?: boolean;
+  /**
+   * `true` when the host enabled Sandbox mode for this game (debug actions
+   * permitted under host control). Browsers render a SANDBOX badge and prompt
+   * joiners to confirm before entering.
+   */
+  is_sandbox?: boolean;
   /** Draft-specific metadata. Present when the room is a draft pod. */
   draft_metadata?: DraftLobbyMetadata | null;
 }
@@ -378,7 +398,23 @@ export interface SerializedAbility {
 export type ChooseFromZoneConstraint =
   | { type: "DistinctCardTypes"; categories: string[] };
 
+export type SearchSelectionConstraint =
+  | { type: "None" }
+  | { type: "DistinctQualities"; qualities: string[] }
+  | { type: "TotalManaValue"; comparator: string; value: number }
+  | { type: "MatchEachFilter"; filters: TargetFilter[] };
+
 // ── Game Object ──────────────────────────────────────────────────────────
+
+/**
+ * Per-permanent phasing status (mirrors Rust `PhaseStatus`).
+ * Serde output: `{ "status": "PhasedIn" }` / `{ "status": "PhasedOut", "cause": "Directly" | "Indirectly" }`.
+ * CR 702.26: phased-out permanents stay on the battlefield but are treated
+ * as though they don't exist for almost all rules queries (CR 702.26d).
+ */
+export type PhaseStatus =
+  | { status: "PhasedIn" }
+  | { status: "PhasedOut"; cause: "Directly" | "Indirectly" };
 
 export interface GameObject {
   id: ObjectId;
@@ -432,6 +468,13 @@ export interface GameObject {
    * Independent of `is_token` (which is the CR 111.1 game-rules concept).
    */
   display_source?: "Card" | "Token";
+  /**
+   * CR 702.26: Phasing status of this permanent. Absent for objects in zones
+   * where phasing doesn't apply (engine-side default is `PhasedIn`, which may
+   * be elided on the wire if the field defaults). The FE renders a sky-blue
+   * "ethereal plane" tint over phased-out permanents.
+   */
+  phase_status?: PhaseStatus;
   is_commander?: boolean;
   commander_tax?: number;
   /**
@@ -518,6 +561,7 @@ export interface Player {
    * commander or has only a colorless commander (CR 903.4f).
    */
   commander_color_identity?: ManaColor[];
+  player_counters?: Record<string, number>;
 }
 
 // ── Target Filter ───────────────────────────────────────────────────────
@@ -573,7 +617,7 @@ export interface ResolvedAbility {
 export type StackEntryKind =
   | { type: "Spell"; data: { card_id: CardId; ability?: ResolvedAbility; actual_mana_spent?: number } }
   | { type: "ActivatedAbility"; data: { source_id: ObjectId; ability: ResolvedAbility } }
-  | { type: "TriggeredAbility"; data: { source_id: ObjectId; ability: ResolvedAbility; description?: string } };
+  | { type: "TriggeredAbility"; data: { source_id: ObjectId; ability: ResolvedAbility; description?: string; source_name?: string } };
 
 export interface StackEntry {
   id: ObjectId;
@@ -666,9 +710,15 @@ export type WaitingFor =
   | { type: "Priority"; data: { player: PlayerId } }
   | {
       type: "MulliganDecision";
-      data: { player: PlayerId; mulligan_count: number; free_first_mulligan: boolean };
+      data: {
+        pending: { player: PlayerId; mulligan_count: number }[];
+        free_first_mulligan: boolean;
+      };
     }
-  | { type: "MulliganBottomCards"; data: { player: PlayerId; count: number } }
+  | {
+      type: "MulliganBottomCards";
+      data: { pending: { player: PlayerId; count: number }[] };
+    }
   | { type: "ManaPayment"; data: { player: PlayerId } }
   | { type: "ChooseXValue"; data: { player: PlayerId; max: number; pending_cast: PendingCast } }
   | { type: "PayAmountChoice"; data: { player: PlayerId; resource: PayableResource; min: number; max: number; accumulated?: number; source_id: ObjectId } }
@@ -687,7 +737,7 @@ export type WaitingFor =
   | { type: "DigChoice"; data: { player: PlayerId; cards: ObjectId[]; keep_count: number; up_to?: boolean; selectable_cards?: ObjectId[]; kept_destination?: Zone | null; rest_destination?: Zone | null } }
   | { type: "SurveilChoice"; data: { player: PlayerId; cards: ObjectId[] } }
   | { type: "RevealChoice"; data: { player: PlayerId; cards: ObjectId[]; filter: unknown; optional?: boolean } }
-  | { type: "SearchChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; reveal?: boolean } }
+  | { type: "SearchChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; reveal?: boolean; up_to?: boolean; constraint?: SearchSelectionConstraint } }
   | { type: "ChooseOneOfBranch"; data: { player: PlayerId; controller: PlayerId; source_id: ObjectId; branches: unknown[]; branch_descriptions?: string[]; parent_targets?: TargetRef[]; context?: unknown; remaining_players?: PlayerId[] } }
   | { type: "TriggerTargetSelection"; data: { player: PlayerId; target_slots: TargetSelectionSlot[]; target_constraints?: TargetSelectionConstraint[]; selection: TargetSelectionProgress; source_id?: ObjectId; description?: string } }
   | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore } }
@@ -734,6 +784,7 @@ export type WaitingFor =
   | { type: "BattleProtectorChoice"; data: { player: PlayerId; battle_id: ObjectId; candidates: PlayerId[] } }
   | { type: "TributeChoice"; data: { player: PlayerId; source_id: ObjectId; count: number } }
   | { type: "CombatTaxPayment"; data: { player: PlayerId; context: CombatTaxContext; total_cost: ManaCost; per_creature: [ObjectId, ManaCost][]; pending: CombatTaxPending } }
+  | { type: "UntapChoice"; data: { player: PlayerId; candidates: ObjectId[]; chosen_not_to_untap?: ObjectId[] } }
   | { type: "PhyrexianPayment"; data: { player: PlayerId; spell_object: ObjectId; shards: PhyrexianShard[] } }
   | { type: "AssignCombatDamage"; data: { player: PlayerId; attacker_id: ObjectId; total_damage: number; blockers: { blocker_id: ObjectId; lethal_minimum: number }[]; trample: TrampleKind | null; defending_player: PlayerId; attack_target: AttackTarget; pw_loyalty?: number; pw_controller?: PlayerId } }
   | { type: "DistributeAmong"; data: { player: PlayerId; total: number; targets: TargetRef[]; unit: DistributionUnit } }
@@ -742,6 +793,7 @@ export type WaitingFor =
       player: PlayerId;
       cards: ObjectId[];
       count: number;
+      min_count?: number;
       up_to?: boolean;
       source_id: ObjectId;
       effect_kind: string;
@@ -788,6 +840,20 @@ export type WaitingFor =
 export type LearnOption =
   | { type: "Rummage"; data: { card_id: ObjectId } }
   | { type: "Skip" };
+
+// ── Mulligan ─────────────────────────────────────────────────────────────
+
+// CR 103.5 + 103.5b: Player decision at a MulliganDecision prompt.
+//   Keep            — lock in the opening hand (CR 103.5).
+//   Mulligan        — shuffle hand back, redraw the starting hand size (CR 103.5).
+//   UseSerumPowder  — exile every card from hand including the Powder, redraw
+//                     the same number; mulligan counter unchanged (CR 103.5b
+//                     + Serum Powder Oracle text). `object_id` must reference
+//                     a card named "Serum Powder" in the actor's hand.
+export type MulliganChoice =
+  | { type: "Keep" }
+  | { type: "Mulligan" }
+  | { type: "UseSerumPowder"; data: { object_id: ObjectId } };
 
 // ── Distribution ─────────────────────────────────────────────────────────
 
@@ -869,7 +935,7 @@ export type GameAction =
   | { type: "ActivateAbility"; data: { source_id: ObjectId; ability_index: number } }
   | { type: "DeclareAttackers"; data: { attacks: [ObjectId, AttackTarget][] } }
   | { type: "DeclareBlockers"; data: { assignments: [ObjectId, ObjectId][] } }
-  | { type: "MulliganDecision"; data: { keep: boolean } }
+  | { type: "MulliganDecision"; data: { choice: MulliganChoice } }
   | { type: "ReorderHand"; data: { order: ObjectId[] } }
   | { type: "TapLandForMana"; data: { object_id: ObjectId } }
   | { type: "UntapLandForMana"; data: { object_id: ObjectId } }
@@ -914,6 +980,7 @@ export type GameAction =
   | { type: "ChooseLegend"; data: { keep: ObjectId } }
   | { type: "ChooseBattleProtector"; data: { protector: PlayerId } }
   | { type: "PayCombatTax"; data: { accept: boolean } }
+  | { type: "ChooseUntap"; data: { object_id: ObjectId; untap: boolean } }
   | { type: "HarmonizeTap"; data: { creature_id: ObjectId | null } }
   | { type: "DeclareCompanion"; data: { card_index: number | null } }
   | { type: "CompanionToHand" }
@@ -934,7 +1001,9 @@ export type GameAction =
   | { type: "SubmitPayAmount"; data: { amount: number } }
   | { type: "SubmitPhyrexianChoices"; data: { choices: ShardChoice[] } }
   | { type: "ChooseManaColor"; data: { choice: ManaChoice } }
-  | { type: "Debug"; data: DebugAction };
+  | { type: "Debug"; data: DebugAction }
+  | { type: "GrantDebugPermission"; data: { player_id: PlayerId } }
+  | { type: "RevokeDebugPermission"; data: { player_id: PlayerId } };
 
 // CR 605.3b + CR 106.1a: Shape of the prompt surfaced by WaitingFor::ChooseManaColor.
 export type ManaChoicePrompt =
@@ -1021,7 +1090,10 @@ export type GameEvent =
   | { type: "PowerToughnessChanged"; data: { object_id: ObjectId; power: number; toughness: number; power_delta: number; toughness_delta: number } }
   | { type: "RoomEntered"; data: { player_id: PlayerId; dungeon: DungeonId; room_index: number; room_name: string } }
   | { type: "DungeonCompleted"; data: { player_id: PlayerId; dungeon: DungeonId } }
-  | { type: "InitiativeTaken"; data: { player_id: PlayerId } };
+  | { type: "InitiativeTaken"; data: { player_id: PlayerId } }
+  | { type: "DebugActionUsed"; data: { player_id: PlayerId; description: string } }
+  | { type: "DebugPermissionGranted"; data: { host: PlayerId; player_id: PlayerId } }
+  | { type: "DebugPermissionRevoked"; data: { host: PlayerId; player_id: PlayerId } };
 
 // ── Game State ───────────────────────────────────────────────────────────
 
@@ -1086,9 +1158,18 @@ export interface GameState {
   next_timestamp: number;
   seat_order?: PlayerId[];
   format_config?: FormatConfig;
+  /**
+   * Players granted permission to submit `GameAction.Debug(_)` in a sandbox
+   * game. Empty in non-sandbox games. The host (PlayerId(0)) is always seeded
+   * into this set at game creation when the format flag is on.
+   */
+  debug_permitted?: PlayerId[];
   eliminated_players?: PlayerId[];
   dungeon_progress?: Record<string, { current_dungeon: DungeonId | null; current_room: number; completed: DungeonId[] }>;
   initiative?: PlayerId | null;
+  monarch?: PlayerId | null;
+  city_blessing?: PlayerId[];
+  ring_level?: Record<string, number>;
   commander_damage?: CommanderDamageEntry[];
   exile_links?: Array<{ exiled_id: ObjectId; source_id: ObjectId }>;
   match_config?: MatchConfig;

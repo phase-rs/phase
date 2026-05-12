@@ -71,29 +71,44 @@ pub fn resolve(
     };
 
     let mut attached = 0usize;
-    for resolved_target in replacement_targets(state, ability, target) {
-        match resolved_target {
-            TargetRef::Object(obj_id) => {
-                let replacement = replacement_with_ability_expiry(replacement, ability);
-                if let Some(obj) = state.objects.get_mut(&obj_id) {
-                    obj.replacement_definitions.push(replacement);
+
+    // CR 614.1a: `TargetFilter::None` is the "no per-target binding" signal —
+    // the carried replacement is self-contained (its own source/target filters
+    // already constrain when it fires) and is pushed directly to the global
+    // pending_damage_replacements. Used by triggered creation of turn-bound
+    // damage-modification replacements (Rankle and Torbran's "If a source
+    // would deal damage to a player or battle this turn..."; I Call for
+    // Slaughter's "If a source you control would deal damage this turn,
+    // it deals that much damage plus 1 instead.").
+    if matches!(target, TargetFilter::None) {
+        let replacement = replacement_with_ability_expiry(replacement, ability);
+        state.pending_damage_replacements.push(replacement);
+        attached += 1;
+    } else {
+        for resolved_target in replacement_targets(state, ability, target) {
+            match resolved_target {
+                TargetRef::Object(obj_id) => {
+                    let replacement = replacement_with_ability_expiry(replacement, ability);
+                    if let Some(obj) = state.objects.get_mut(&obj_id) {
+                        obj.replacement_definitions.push(replacement);
+                        attached += 1;
+                    }
+                }
+                TargetRef::Player(player) => {
+                    let mut replacement = replacement_with_ability_expiry(replacement, ability);
+                    if matches!(
+                        replacement.event,
+                        crate::types::replacements::ReplacementEvent::DamageDone
+                    ) && replacement.damage_target_filter.is_none()
+                    {
+                        replacement.damage_target_filter =
+                            Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
+                                player: DamageTargetPlayerScope::Specific(player),
+                            });
+                    }
+                    state.pending_damage_replacements.push(replacement);
                     attached += 1;
                 }
-            }
-            TargetRef::Player(player) => {
-                let mut replacement = replacement_with_ability_expiry(replacement, ability);
-                if matches!(
-                    replacement.event,
-                    crate::types::replacements::ReplacementEvent::DamageDone
-                ) && replacement.damage_target_filter.is_none()
-                {
-                    replacement.damage_target_filter =
-                        Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
-                            player: DamageTargetPlayerScope::Specific(player),
-                        });
-                }
-                state.pending_damage_replacements.push(replacement);
-                attached += 1;
             }
         }
     }
@@ -147,7 +162,7 @@ mod tests {
         let mut repl = ReplacementDefinition::new(ReplacementEvent::Moved)
             .valid_card(TargetFilter::SelfRef)
             .destination_zone(Zone::Graveyard);
-        repl.expires_at_eot = true;
+        repl.expiry = Some(RestrictionExpiry::EndOfTurn);
 
         let ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {
@@ -164,7 +179,10 @@ mod tests {
 
         let obj = state.objects.get(&id).unwrap();
         assert_eq!(obj.replacement_definitions.iter_all().count(), 1);
-        assert!(obj.replacement_definitions[0].expires_at_eot);
+        assert_eq!(
+            obj.replacement_definitions[0].expiry,
+            Some(RestrictionExpiry::EndOfTurn)
+        );
         assert!(events.iter().any(|e| matches!(
             e,
             GameEvent::EffectResolved {
@@ -280,5 +298,44 @@ mod tests {
             panic!("expected unmodified damage event, got {result:?}");
         };
         assert_eq!(amount, 2);
+    }
+
+    #[test]
+    fn target_filter_none_pushes_global_replacement_without_inference() {
+        // CR 614.1a: `TargetFilter::None` is the no-binding mode used by
+        // self-contained turn-bound damage-modification replacements
+        // (Rankle and Torbran, I Call for Slaughter). The resolver must
+        // push the carried replacement directly to
+        // `pending_damage_replacements` WITHOUT inferring a
+        // `damage_target_filter` from a player target — the carried
+        // replacement's own source/target/scope filters are the source
+        // of truth.
+        let mut state = GameState::new_two_player(42);
+        let replacement = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .damage_modification(DamageModification::Plus { value: 1 })
+            .damage_source_filter(TargetFilter::Typed(
+                crate::types::ability::TypedFilter::default()
+                    .controller(crate::types::ability::ControllerRef::You),
+            ));
+        let mut ability = ResolvedAbility::new(
+            Effect::AddTargetReplacement {
+                replacement: Box::new(replacement),
+                target: TargetFilter::None,
+            },
+            Vec::new(),
+            ObjectId(7),
+            PlayerId(0),
+        );
+        ability.duration = Some(Duration::UntilEndOfTurn);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.pending_damage_replacements.len(), 1);
+        let pending = &state.pending_damage_replacements[0];
+        // Critical: damage_target_filter must remain None — no per-target
+        // inference (which would scope to a specific player).
+        assert_eq!(pending.damage_target_filter, None);
+        assert_eq!(pending.expiry, Some(RestrictionExpiry::EndOfTurn));
     }
 }

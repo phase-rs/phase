@@ -165,14 +165,10 @@ fn resolve_revealing_player(
 ) -> PlayerId {
     match player_filter {
         TargetFilter::Controller => ability.controller,
-        TargetFilter::ParentTargetController => ability
-            .targets
-            .iter()
-            .find_map(|target| match target {
-                TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
-                TargetRef::Player(pid) => Some(*pid),
-            })
-            .unwrap_or(ability.controller),
+        TargetFilter::ParentTargetController => {
+            crate::game::ability_utils::parent_target_controller(ability, state)
+                .unwrap_or(ability.controller)
+        }
         _ => ability
             .targets
             .iter()

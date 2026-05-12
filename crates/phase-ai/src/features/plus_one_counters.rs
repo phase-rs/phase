@@ -1,7 +1,7 @@
 //! Plus-one counters feature — structural detection over a deck's typed AST.
 //!
 //! Parser AST verification — VERIFIED:
-//! - `Effect::AddCounter { counter_type: String, count: QuantityExpr, target }` at
+//! - `Effect::AddCounter { counter_type: CounterType, count: QuantityExpr, target }` at
 //!   `crates/engine/src/types/ability.rs:2201-2207`. CR 122.1a: +1/+1 counters add
 //!   to power and toughness.
 //! - `Effect::PutCounter { counter_type, count, target }` at `ability.rs:2425-2431`.
@@ -10,9 +10,9 @@
 //!   Mass counter placement. CR 122.1a.
 //! - `Effect::Proliferate` (unit variant) at `ability.rs:2379`. CR 701.34: proliferate
 //!   adds one counter of each kind already on chosen permanents/players.
-//! - `Keyword::EtbCounter { counter_type: String, count: u32 }` at
+//! - `Keyword::EtbCounter { counter_type: CounterType, count: u32 }` at
 //!   `crates/engine/src/types/keywords.rs:358-361`. CR 122.6a: ETB-with-counters keyword.
-//! - `Effect::Token { enter_with_counters: Vec<(String, QuantityExpr)>, .. }` at
+//! - `Effect::Token { enter_with_counters: Vec<(CounterType, QuantityExpr)>, .. }` at
 //!   `ability.rs:2167`. CR 122.6a: tokens that enter with counters.
 //! - `ReplacementDefinition { event: ReplacementEvent::AddCounter,
 //!   quantity_modification: Some(QuantityModification::{Double | Plus | Minus}), .. }`
@@ -24,9 +24,8 @@
 //!   with `counter_filter: Some(CounterTriggerFilter { counter_type: CounterType::Plus1Plus1 })`
 //!   in `TriggerDefinition`. CR 122.6 + CR 122.7: triggered payoffs for counter events.
 //!
-//! **Disambiguator**: All counter checks compare `counter_type == "P1P1"` (string
-//! from Effect side) or `counter_type == CounterType::Plus1Plus1` (typed from
-//! filter/trigger side). `-1/-1` counters (`"M1M1"`) and loyalty counters must NOT match.
+//! **Disambiguator**: All counter checks compare against
+//! `CounterType::Plus1Plus1`. `-1/-1` and loyalty counters must NOT match.
 //!
 //! No parser remediation required — counter-related abilities classify structurally
 //! using the existing typed AST.
@@ -176,7 +175,7 @@ fn compute_commitment(
 /// True if this ability places a +1/+1 counter on something.
 ///
 /// Matches `Effect::AddCounter`, `Effect::PutCounter`, and `Effect::PutCounterAll`
-/// where `counter_type == "P1P1"`. Checks the ability's full effect chain via
+/// where `counter_type == CounterType::Plus1Plus1`. Checks the ability's full effect chain via
 /// `collect_chain_effects`. Excludes loyalty counters, -1/-1 counters, lore
 /// counters, etc. CR 122.1a.
 pub(crate) fn ability_places_plus_one_counter(ability: &AbilityDefinition) -> bool {
@@ -200,7 +199,7 @@ pub(crate) fn face_etb_with_plus_one_counters(face: &engine::types::card::CardFa
     if face
         .keywords
         .iter()
-        .any(|k| matches!(k, Keyword::EtbCounter { counter_type, .. } if counter_type == "P1P1"))
+        .any(|k| matches!(k, Keyword::EtbCounter { counter_type, .. } if counter_type == &CounterType::Plus1Plus1))
     {
         return true;
     }
@@ -208,7 +207,7 @@ pub(crate) fn face_etb_with_plus_one_counters(face: &engine::types::card::CardFa
     face.abilities.iter().any(|a| {
         collect_chain_effects(a).iter().any(|e| {
             matches!(e, Effect::Token { enter_with_counters, .. }
-                if enter_with_counters.iter().any(|(ct, _)| ct == "P1P1"))
+                if enter_with_counters.iter().any(|(ct, _)| ct == &CounterType::Plus1Plus1))
         })
     })
 }
@@ -246,9 +245,9 @@ pub(crate) fn face_is_counter_payoff(face: &engine::types::card::CardFace) -> bo
 /// True if the effect places a +1/+1 counter. CR 122.1a.
 fn effect_places_plus_one_counter(e: &&Effect) -> bool {
     match e {
-        Effect::AddCounter { counter_type, .. } => counter_type == "P1P1",
-        Effect::PutCounter { counter_type, .. } => counter_type == "P1P1",
-        Effect::PutCounterAll { counter_type, .. } => counter_type == "P1P1",
+        Effect::AddCounter { counter_type, .. } => counter_type == &CounterType::Plus1Plus1,
+        Effect::PutCounter { counter_type, .. } => counter_type == &CounterType::Plus1Plus1,
+        Effect::PutCounterAll { counter_type, .. } => counter_type == &CounterType::Plus1Plus1,
         _ => false,
     }
 }
@@ -361,7 +360,7 @@ mod tests {
         TriggerDefinition, TypedFilter,
     };
     use engine::types::card::CardFace;
-    use engine::types::counter::CounterType;
+    use engine::types::counter::{parse_counter_type, CounterType};
     use engine::types::keywords::Keyword;
     use engine::types::replacements::ReplacementEvent;
     use engine::types::statics::StaticMode;
@@ -382,7 +381,7 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::AddCounter {
-                counter_type: counter_type.to_string(),
+                counter_type: parse_counter_type(counter_type),
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
             },
@@ -393,7 +392,7 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::PutCounter {
-                counter_type: counter_type.to_string(),
+                counter_type: parse_counter_type(counter_type),
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
             },
@@ -512,7 +511,7 @@ mod tests {
     fn detects_etb_with_counters_keyword() {
         let mut face = make_face("Servant of the Scale");
         face.keywords.push(Keyword::EtbCounter {
-            counter_type: "P1P1".to_string(),
+            counter_type: CounterType::Plus1Plus1,
             count: 1,
         });
         assert!(face_etb_with_plus_one_counters(&face));
@@ -535,7 +534,10 @@ mod tests {
                 enters_attacking: false,
                 supertypes: vec![],
                 static_abilities: vec![],
-                enter_with_counters: vec![("P1P1".to_string(), QuantityExpr::Fixed { value: 1 })],
+                enter_with_counters: vec![(
+                    CounterType::Plus1Plus1,
+                    QuantityExpr::Fixed { value: 1 },
+                )],
                 owner: TargetFilter::Controller,
                 attach_to: None,
             },
@@ -690,7 +692,7 @@ mod tests {
         for i in 0..4u32 {
             let mut face = make_face(&format!("ETB {i}"));
             face.keywords.push(Keyword::EtbCounter {
-                counter_type: "P1P1".to_string(),
+                counter_type: CounterType::Plus1Plus1,
                 count: 1,
             });
             deck.push(deck_entry(face, 1));

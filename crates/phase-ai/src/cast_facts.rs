@@ -444,6 +444,7 @@ mod tests {
                     target: TargetFilter::SelfRef,
                 },
             ))),
+            runtime_execute: None,
             mode: engine::types::ability::ReplacementMode::Mandatory,
             valid_card: Some(TargetFilter::SelfRef),
             description: None,
@@ -458,13 +459,13 @@ mod tests {
             token_owner_scope: None,
             valid_player: None,
             is_consumed: false,
-            expires_at_eot: false,
             expiry: None,
             redirect_target: None,
             mana_modification: None,
             mana_replacement_scope: ManaReplacementScope::Any,
             additional_token_spec: None,
             ensure_token_specs: None,
+            counter_match: None,
         });
         object.replacement_definitions.push(ReplacementDefinition {
             destination_zone: None,

@@ -9,9 +9,10 @@ use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ContinuousModification, ControllerRef,
     DamageModification, DamageTargetFilter, DamageTargetPlayerScope, Effect, ManaReplacementScope,
     QuantityExpr, QuantityModification, QuantityRef, ReplacementCondition, ReplacementDefinition,
-    ReplacementMode, TargetFilter,
+    ReplacementMode, RestrictionExpiry, TargetFilter,
 };
 use engine::types::card_type::Supertype;
+use engine::types::counter::{parse_counter_type, CounterType as EngineCounterType};
 use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
@@ -68,10 +69,10 @@ pub fn convert_as_enters(
         }
         let (condition, mode, exec) = build_replacement_exec(act, &valid_card)?;
         out.push(ReplacementDefinition {
-            expires_at_eot: false,
             expiry: None,
             event: ReplacementEvent::ChangeZone,
             execute: Some(Box::new(exec)),
+            runtime_execute: None,
             mode,
             valid_card: Some(valid_card.clone()),
             description: None,
@@ -91,6 +92,7 @@ pub fn convert_as_enters(
             mana_replacement_scope: ManaReplacementScope::Any,
             additional_token_spec: None,
             ensure_token_specs: None,
+            counter_match: None,
         });
     }
     Ok(out)
@@ -145,10 +147,10 @@ pub fn convert_replace_would_enter(
         }
         let (condition, mode, exec) = build_replacement_exec(act, &valid_card)?;
         out.push(ReplacementDefinition {
-            expires_at_eot: false,
             expiry: None,
             event: ReplacementEvent::ChangeZone,
             execute: Some(Box::new(exec)),
+            runtime_execute: None,
             mode,
             valid_card: Some(valid_card.clone()),
             description: None,
@@ -168,6 +170,7 @@ pub fn convert_replace_would_enter(
             mana_replacement_scope: ManaReplacementScope::Any,
             additional_token_spec: None,
             ensure_token_specs: None,
+            counter_match: None,
         });
     }
     Ok(out)
@@ -205,10 +208,10 @@ pub fn convert_replace_would_deal_damage(
     for act in actions {
         let modification = damage_action_to_modification(act)?;
         out.push(ReplacementDefinition {
-            expires_at_eot: false,
             expiry: None,
             event: ReplacementEvent::DamageDone,
             execute: None,
+            runtime_execute: None,
             mode: Default::default(),
             valid_card: None,
             description: None,
@@ -228,6 +231,7 @@ pub fn convert_replace_would_deal_damage(
             mana_replacement_scope: ManaReplacementScope::Any,
             additional_token_spec: None,
             ensure_token_specs: None,
+            counter_match: None,
         });
     }
     Ok(out)
@@ -574,10 +578,10 @@ pub fn convert_replace_would_draw(
             },
         );
         out.push(ReplacementDefinition {
-            expires_at_eot: false,
             expiry: None,
             event: ReplacementEvent::Draw,
             execute: Some(Box::new(exec)),
+            runtime_execute: None,
             mode: Default::default(),
             valid_card: None,
             description: None,
@@ -597,6 +601,7 @@ pub fn convert_replace_would_draw(
             mana_replacement_scope: ManaReplacementScope::Any,
             additional_token_spec: None,
             ensure_token_specs: None,
+            counter_match: None,
         });
     }
     Ok(out)
@@ -691,10 +696,10 @@ pub fn convert_replace_would_put_into_graveyard(
             },
         );
         out.push(ReplacementDefinition {
-            expires_at_eot: false,
             expiry: None,
             event: ReplacementEvent::Moved,
             execute: Some(Box::new(exec)),
+            runtime_execute: None,
             mode: Default::default(),
             valid_card: valid_card.clone(),
             description: None,
@@ -714,6 +719,7 @@ pub fn convert_replace_would_put_into_graveyard(
             mana_replacement_scope: ManaReplacementScope::Any,
             additional_token_spec: None,
             ensure_token_specs: None,
+            counter_match: None,
         });
     }
     Ok(out)
@@ -760,7 +766,7 @@ pub fn convert_create_replace_would_put_into_graveyard_until(
 
     let mut replacement = replacements.remove(0);
     replacement.valid_card = Some(TargetFilter::SelfRef);
-    replacement.expires_at_eot = true;
+    replacement.expiry = Some(RestrictionExpiry::EndOfTurn);
 
     Ok(Effect::AddTargetReplacement {
         replacement: Box::new(replacement),
@@ -907,10 +913,10 @@ pub fn convert_as_put_into_graveyard_from_anywhere(
             },
         );
         out.push(ReplacementDefinition {
-            expires_at_eot: false,
             expiry: None,
             event: ReplacementEvent::Moved,
             execute: Some(Box::new(exec)),
+            runtime_execute: None,
             mode: Default::default(),
             valid_card: Some(TargetFilter::SelfRef),
             description: None,
@@ -930,6 +936,7 @@ pub fn convert_as_put_into_graveyard_from_anywhere(
             mana_replacement_scope: ManaReplacementScope::Any,
             additional_token_spec: None,
             ensure_token_specs: None,
+            counter_match: None,
         });
     }
     Ok(out)
@@ -982,14 +989,20 @@ pub fn convert_replace_would_put_counters(
     actions: &[ReplacementActionWouldPutCounters],
 ) -> ConvResult<Vec<ReplacementDefinition>> {
     let valid_card = counter_event_to_valid_card(event)?;
+    // CR 122.1a + CR 614.1a: When the schema event names a specific counter
+    // type ("CountersOfTypeWouldBePointOnAPermanent"), restrict the
+    // replacement to that counter type so Hardened Scales (+1/+1) doesn't
+    // fire on -1/-1 counter additions and Vizier of Remedies (-1/-1)
+    // doesn't fire on +1/+1 counter additions.
+    let counter_match = counter_event_to_counter_match(event)?;
     let mut out = Vec::new();
     for act in actions {
         let modification = counter_action_to_modification(act)?;
         out.push(ReplacementDefinition {
-            expires_at_eot: false,
             expiry: None,
             event: ReplacementEvent::AddCounter,
             execute: None,
+            runtime_execute: None,
             mode: Default::default(),
             valid_card: valid_card.clone(),
             description: None,
@@ -1009,9 +1022,30 @@ pub fn convert_replace_would_put_counters(
             mana_replacement_scope: ManaReplacementScope::Any,
             additional_token_spec: None,
             ensure_token_specs: None,
+            counter_match: counter_match.clone(),
         });
     }
     Ok(out)
+}
+
+/// CR 122.1a + CR 614.1a: Map a schema `ReplacableEventWouldPutCounters` to
+/// the engine's `CounterMatch` discriminator. The schema's
+/// `CountersOfTypeWouldBePointOnAPermanent(counter, _)` carries a typed
+/// counter — translate it through the canonical
+/// `filter::counter_type_to_engine` and wrap as `CounterMatch::OfType(...)`.
+/// All other event shapes (counter-agnostic phrasings) return `None`,
+/// matching every counter type in the runtime.
+fn counter_event_to_counter_match(
+    event: &ReplacableEventWouldPutCounters,
+) -> ConvResult<Option<engine::types::counter::CounterMatch>> {
+    use ReplacableEventWouldPutCounters as E;
+    match event {
+        E::CountersOfTypeWouldBePointOnAPermanent(counter, _) => {
+            let ct = crate::convert::filter::counter_type_to_engine(counter)?;
+            Ok(Some(engine::types::counter::CounterMatch::OfType(ct)))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// CR 614.1a: Decompose a `ReplacableEventWouldPutCounters` event into a
@@ -1145,10 +1179,10 @@ pub fn convert_replace_would_gain_life(
     for act in actions {
         let modification = gain_life_action_to_modification(act)?;
         out.push(ReplacementDefinition {
-            expires_at_eot: false,
             expiry: None,
             event: ReplacementEvent::GainLife,
             execute: None,
+            runtime_execute: None,
             mode: Default::default(),
             valid_card: None,
             description: None,
@@ -1168,6 +1202,7 @@ pub fn convert_replace_would_gain_life(
             mana_replacement_scope: ManaReplacementScope::Any,
             additional_token_spec: None,
             ensure_token_specs: None,
+            counter_match: None,
         });
     }
     Ok(out)
@@ -1259,10 +1294,10 @@ fn try_build_may_cost_pair(
     };
 
     Ok(Some(ReplacementDefinition {
-        expires_at_eot: false,
         expiry: None,
         event: ReplacementEvent::ChangeZone,
         execute: execute.map(Box::new),
+        runtime_execute: None,
         mode: ReplacementMode::MayCost {
             cost: convert_enter_cost(cost)?,
             decline,
@@ -1285,6 +1320,7 @@ fn try_build_may_cost_pair(
         mana_replacement_scope: ManaReplacementScope::Any,
         additional_token_spec: None,
         ensure_token_specs: None,
+        counter_match: None,
     }))
 }
 
@@ -2462,14 +2498,16 @@ fn permanents_tag(p: &Permanents) -> String {
         .unwrap_or_else(|| "<unknown>".to_string())
 }
 
-fn counter_type_name(ct: &CounterType) -> String {
-    if let CounterType::PTCounter(p, t) = ct {
-        return format!("{p:+}/{t:+}");
-    }
-    format!("{ct:?}")
-        .strip_suffix("Counter")
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("{ct:?}"))
+fn counter_type_name(ct: &CounterType) -> EngineCounterType {
+    let raw = if let CounterType::PTCounter(p, t) = ct {
+        format!("{p:+}/{t:+}")
+    } else {
+        format!("{ct:?}")
+            .strip_suffix("Counter")
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("{ct:?}"))
+    };
+    parse_counter_type(&raw)
 }
 
 fn variant_tag(a: &ReplacementActionWouldEnter) -> String {
@@ -3049,7 +3087,7 @@ mod tests {
                 assert_eq!(target, TargetFilter::Any);
                 assert_eq!(replacement.valid_card, Some(TargetFilter::SelfRef));
                 assert_eq!(replacement.destination_zone, Some(Zone::Graveyard));
-                assert!(replacement.expires_at_eot);
+                assert_eq!(replacement.expiry, Some(RestrictionExpiry::EndOfTurn));
             }
             other => panic!("expected AddTargetReplacement, got {other:?}"),
         }
@@ -3085,7 +3123,7 @@ mod tests {
                 count,
                 target,
             } => {
-                assert_eq!(counter_type, "+1/+1");
+                assert_eq!(counter_type, &EngineCounterType::Plus1Plus1);
                 assert_eq!(target, &TargetFilter::SelfRef);
                 assert!(
                     matches!(count, QE::Ref { qty: QR::CostXPaid }),

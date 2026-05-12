@@ -31,6 +31,7 @@ use crate::types::ability::{
     ManaReplacementScope, PreventionAmount, QuantityExpr, QuantityRef, ReplacementCondition,
     ReplacementDefinition, ReplacementMode, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
+use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::mana::{ManaColor, ManaCost, ManaType};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
@@ -186,7 +187,7 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     // E.g., "If another creature would die, exile it instead." (Void Maw)
     //       "If a nontoken creature an opponent controls would die, exile it instead." (Valentin)
     //       "If a creature an opponent controls would die, exile it instead." (Vren)
-    if let Some(def) = parse_creature_die_exile_replacement(&norm_lower, &text) {
+    if let Some(def) = parse_creature_die_exile_replacement(&norm_lower, &normalized) {
         return Some(def);
     }
 
@@ -204,6 +205,14 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     // not replacement parsing. See oracle_effect.rs damage prevention disabled handler.
 
     if let Some(def) = parse_conditional_draw_replacement(&text, &lower) {
+        return Some(def);
+    }
+
+    if let Some(def) = parse_scry_count_replacement(&lower, &text) {
+        return Some(def);
+    }
+
+    if let Some(def) = parse_mill_count_replacement(&norm_lower, &text) {
         return Some(def);
     }
 
@@ -249,6 +258,17 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
             // and document that the matcher should not restrict player scope.
             // NOTE: The existing matcher restricts to controller only. For Tainted Remedy
             // ("an opponent"), we set Opponent. For "you", we leave None (controller-only).
+        }
+        // CR 614.12 + CR 614.1a: A "while [condition]" gate in the antecedent
+        // suppresses the replacement when the condition is false. Phial of
+        // Galadriel ("If you would gain life while you have 5 or less life,
+        // you gain twice that much life instead") uses this shape — without
+        // the gate, the doubler fires unconditionally. Reuses the
+        // `parse_inner_condition` building block (already used by
+        // `parse_conditional_draw_replacement`) and the
+        // `ReplacementCondition::OnlyIfQuantity` typed surface.
+        if let Some(condition) = parse_while_condition_antecedent(&lower, "would gain life") {
+            def = def.condition(condition);
         }
         return Some(def);
     }
@@ -1399,6 +1419,9 @@ fn parse_enters_with_counters(
             count_expr = qty;
         }
     }
+    if let Some(qty) = parse_enters_with_where_x_suffix(work_text) {
+        count_expr = qty;
+    }
 
     let put_counter = build_enters_counter_ability(
         counter_entries.unwrap_or_else(|| vec![(counter_type, count_expr)]),
@@ -1480,6 +1503,18 @@ fn parse_enters_with_counters(
     Some(def)
 }
 
+fn parse_enters_with_where_x_suffix(text: &str) -> Option<QuantityExpr> {
+    let (_, (_, qty_text)) = nom_primitives::split_once_on(text, ", where x is ").ok()?;
+    let trimmed = qty_text.trim().trim_end_matches('.');
+    if let Some(qty_ref) = crate::parser::oracle_quantity::parse_quantity_ref(trimmed) {
+        return Some(QuantityExpr::Ref { qty: qty_ref });
+    }
+    if let Some(qty) = crate::parser::oracle_quantity::parse_cda_quantity(trimmed) {
+        return Some(qty);
+    }
+    crate::parser::oracle_quantity::parse_event_context_quantity(trimmed)
+}
+
 fn multiply_counter_count_by_for_each(
     count_expr: QuantityExpr,
     for_each_count: QuantityExpr,
@@ -1545,7 +1580,7 @@ fn parse_for_each_convoked_creature_clause(
     ))
 }
 
-fn parse_enters_counter_entries(after_with: &str) -> Option<Vec<(String, QuantityExpr)>> {
+fn parse_enters_counter_entries(after_with: &str) -> Option<Vec<(CounterType, QuantityExpr)>> {
     let mut remaining = after_with;
     let mut entries = Vec::new();
 
@@ -1607,7 +1642,7 @@ fn parse_enters_counter_separator(input: &str) -> Option<&str> {
     Some(after_sep)
 }
 
-fn build_enters_counter_ability(entries: Vec<(String, QuantityExpr)>) -> AbilityDefinition {
+fn build_enters_counter_ability(entries: Vec<(CounterType, QuantityExpr)>) -> AbilityDefinition {
     let mut chain = entries
         .into_iter()
         .rev()
@@ -1714,8 +1749,11 @@ fn parse_whenever_you_cast_enters_with(
 
     // Counter type.
     let (rest, counter_type) = alt((
-        value("P1P1".to_string(), tag::<_, _, OracleError<'_>>("+1/+1")),
-        value("M1M1".to_string(), tag("-1/-1")),
+        value(
+            CounterType::Plus1Plus1,
+            tag::<_, _, OracleError<'_>>("+1/+1"),
+        ),
+        value(CounterType::Minus1Minus1, tag("-1/-1")),
     ))
     .parse(rest)
     .ok()?;
@@ -2035,31 +2073,23 @@ fn parse_creature_die_exile_replacement(
         prefix[..subject_end_in_prefix].trim()
     };
 
-    // Skip self-reference patterns — handled by the earlier "~ would die" check.
-    if subject_start.contains('~') {
+    let (subject_filter_text, replacement_condition) =
+        split_dealt_damage_subject_condition(subject_start).unwrap_or((subject_start, None));
+    let subject_filter_text = nom_primitives::parse_article
+        .parse(subject_filter_text)
+        .map_or(subject_filter_text, |(rest, _)| rest)
+        .trim();
+
+    // Skip self-reference subjects — handled by the earlier "~ would die" check.
+    if subject_filter_text.contains('~') {
         return None;
     }
 
     // Parse the subject filter (e.g., "another creature", "a nontoken creature an opponent controls")
-    // Also detect inline conditions like "dealt damage this turn by a source you controlled"
-    let (filter, subject_rest) = parse_type_phrase(subject_start);
-    if matches!(&filter, TargetFilter::Any) {
+    let (filter, subject_rest) = parse_type_phrase(subject_filter_text);
+    if matches!(&filter, TargetFilter::Any) || !subject_rest.trim().is_empty() {
         return None;
     }
-
-    // CR 120.1: Check for "dealt damage this turn by a source you controlled" condition.
-    let replacement_condition = if let Ok((_, _)) =
-        tag::<_, _, OracleError<'_>>("dealt damage this turn by a source you controlled")
-            .parse(subject_rest.trim())
-    {
-        Some(
-            crate::types::ability::ReplacementCondition::DealtDamageThisTurnBySourceControlledBy {
-                controller: crate::types::ability::ControllerRef::You,
-            },
-        )
-    } else {
-        None
-    };
 
     // Extract the replacement effect after "would die, " via a nom combinator.
     // CR 614.1a: Replacement effects use "instead" — both word orders are equivalent:
@@ -2148,6 +2178,60 @@ fn parse_creature_die_exile_replacement(
     Some(def)
 }
 
+fn split_dealt_damage_subject_condition(
+    input: &str,
+) -> Option<(&str, Option<ReplacementCondition>)> {
+    let (condition_text, subject) = take_until::<_, _, OracleError<'_>>(" dealt damage")
+        .parse(input)
+        .ok()?;
+    let condition = parse_dealt_damage_this_turn_source_condition(condition_text.trim())?;
+    Some((subject.trim(), Some(condition)))
+}
+
+fn parse_dealt_damage_this_turn_source_condition(input: &str) -> Option<ReplacementCondition> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("dealt damage ")
+        .parse(input)
+        .ok()?;
+    let (rest, source) = if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("by ").parse(rest) {
+        let (rest, source) = parse_damage_history_source(rest)?;
+        let (rest, _) = tag::<_, _, OracleError<'_>>(" this turn")
+            .parse(rest)
+            .ok()?;
+        (rest, source)
+    } else {
+        let (rest, _) = tag::<_, _, OracleError<'_>>("this turn by ")
+            .parse(rest)
+            .ok()?;
+        parse_damage_history_source(rest)?
+    };
+
+    rest.trim()
+        .is_empty()
+        .then_some(ReplacementCondition::DealtDamageThisTurnBySource { source })
+}
+
+fn parse_damage_history_source(input: &str) -> Option<(&str, TargetFilter)> {
+    alt((
+        value(
+            TargetFilter::SelfRef,
+            tag::<_, _, OracleError<'_>>("this creature"),
+        ),
+        value(TargetFilter::SelfRef, tag("~")),
+        value(TargetFilter::AttachedTo, tag("enchanted creature")),
+        value(
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+            alt((
+                tag::<_, _, OracleError<'_>>("a source you controlled"),
+                tag("source you controlled"),
+                tag("a source you control"),
+                tag("source you control"),
+            )),
+        ),
+    ))
+    .parse(input)
+    .ok()
+}
+
 /// CR 614.1a: Match the exile-anaphor clause in either word order, returning
 /// the continuation text after the anaphor and whether a match occurred.
 ///
@@ -2174,7 +2258,7 @@ fn parse_creature_die_exile_replacement(
 struct ExileAnaphorMatch<'a> {
     continuation: TextPair<'a>,
     matched: bool,
-    enter_with_counters: Vec<(String, QuantityExpr)>,
+    enter_with_counters: Vec<(CounterType, QuantityExpr)>,
 }
 
 fn parse_exile_anaphor_clause<'a>(input: TextPair<'a>) -> ExileAnaphorMatch<'a> {
@@ -2205,7 +2289,7 @@ fn parse_exile_anaphor_clause<'a>(input: TextPair<'a>) -> ExileAnaphorMatch<'a> 
     // Then suffix form:    "exile <anaphor> [with N counters on it] instead".
     // The body shape is unified: the `with-counters` slot is optional in both
     // word orders.
-    let parsed: nom::IResult<&str, Option<(String, QuantityExpr)>, OracleError<'_>> = alt((
+    let parsed: nom::IResult<&str, Option<(CounterType, QuantityExpr)>, OracleError<'_>> = alt((
         // Prefix: "instead exile <anaphor> [with N counter(s) on it]"
         preceded(
             tag("instead "),
@@ -2761,6 +2845,199 @@ fn extract_replacement_effect(text: &str) -> Option<String> {
     None
 }
 
+#[derive(Clone, Copy)]
+enum MillReplacementSubject {
+    You,
+    Opponent,
+}
+
+fn parse_mill_count_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
+    let ((subject, count), rest) = nom_on_lower(lower, lower, |input| {
+        let (input, _) = tag("if ").parse(input)?;
+        let (input, subject) = alt((
+            value(MillReplacementSubject::Opponent, tag("an opponent")),
+            value(MillReplacementSubject::Opponent, tag("opponent")),
+            value(MillReplacementSubject::You, tag("you")),
+        ))
+        .parse(input)?;
+        let (input, _) = tag(" would mill one or more cards, ").parse(input)?;
+        let (input, _) = alt((tag("they mill "), tag("you mill "))).parse(input)?;
+        let (input, count) = parse_mill_replacement_count.parse(input)?;
+        let (input, _) = alt((tag(" cards instead"), tag(" instead"))).parse(input)?;
+        let (input, _) = opt(char('.')).parse(input)?;
+        Ok((input, (subject, count)))
+    })?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    let mut def = ReplacementDefinition::new(ReplacementEvent::Mill)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Mill {
+                count,
+                target: TargetFilter::Controller,
+                destination: Zone::Graveyard,
+            },
+        ))
+        .description(original_text.to_string());
+
+    if matches!(subject, MillReplacementSubject::Opponent) {
+        def.valid_player = Some(ControllerRef::Opponent);
+    }
+
+    Some(def)
+}
+
+fn parse_mill_replacement_count(input: &str) -> nom::IResult<&str, QuantityExpr, OracleError<'_>> {
+    alt((
+        value(
+            QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                }),
+            },
+            tag("twice that many"),
+        ),
+        nom::combinator::map(
+            preceded(tag("that many cards plus "), nom_primitives::parse_number),
+            |value| QuantityExpr::Offset {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                }),
+                offset: value as i32,
+            },
+        ),
+        value(
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            tag("that many"),
+        ),
+    ))
+    .parse(input)
+}
+
+fn parse_scry_count_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
+    let ((effect_kind, count), rest) = nom_on_lower(lower, lower, |input| {
+        let (input, _) = tag("if you would scry ").parse(input)?;
+        let (input, _) = tag("a number of cards, ").parse(input)?;
+        let (input, effect_kind) = alt((
+            value(ScryReplacementAction::Draw, tag("draw ")),
+            value(ScryReplacementAction::Scry, tag("scry ")),
+        ))
+        .parse(input)?;
+        let (input, count) = parse_scry_replacement_count.parse(input)?;
+        let (input, _) = tag(" instead").parse(input)?;
+        let (input, _) = opt(char('.')).parse(input)?;
+        Ok((input, (effect_kind, count)))
+    })?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    let effect = match effect_kind {
+        ScryReplacementAction::Draw => Effect::Draw {
+            count,
+            target: TargetFilter::Controller,
+        },
+        ScryReplacementAction::Scry => Effect::Scry {
+            count,
+            target: TargetFilter::Controller,
+        },
+    };
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Scry)
+            .execute(AbilityDefinition::new(AbilityKind::Spell, effect))
+            .description(original_text.to_string()),
+    )
+}
+
+#[derive(Clone, Copy)]
+enum ScryReplacementAction {
+    Draw,
+    Scry,
+}
+
+fn parse_scry_replacement_count(input: &str) -> nom::IResult<&str, QuantityExpr, OracleError<'_>> {
+    alt((
+        nom::combinator::map(
+            preceded(tag("that many cards plus "), nom_primitives::parse_number),
+            |value| QuantityExpr::Offset {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                }),
+                offset: value as i32,
+            },
+        ),
+        value(
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            tag("that many cards"),
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 614.12 + CR 614.1a: Extract a "while [condition]" gate clause that
+/// appears in the antecedent of a "would [verb]" replacement (between the verb
+/// phrase and the comma terminating the antecedent), and lift it to a typed
+/// `ReplacementCondition::OnlyIfQuantity`. `verb_anchor` is the lowercase
+/// verb phrase used to locate the antecedent (e.g. "would gain life").
+///
+/// Returns `None` when the antecedent has no "while" clause, when the clause
+/// doesn't parse via `parse_inner_condition`, or when the parsed condition
+/// isn't a quantity comparison the typed surface can carry.
+///
+/// Example: "If you would gain life while you have 5 or less life, you gain
+/// twice that much life instead." → `OnlyIfQuantity { lhs: LifeTotal,
+/// comparator: LE, rhs: Fixed{5}, active_player_req: None }`.
+fn parse_while_condition_antecedent(
+    lower: &str,
+    verb_anchor: &str,
+) -> Option<ReplacementCondition> {
+    // Locate the antecedent's "while " clause: it appears between
+    // " {verb_anchor} while " and the comma terminating the antecedent.
+    // Single nom combinator chain — locate verb anchor, consume gate marker,
+    // capture condition body in one pass.
+    let (after_verb, (_, _)) = (
+        take_until::<_, _, OracleError<'_>>(verb_anchor),
+        tag::<_, _, OracleError<'_>>(verb_anchor),
+    )
+        .parse(lower)
+        .ok()?;
+    let (_, condition_text) = nom::sequence::preceded(
+        tag::<_, _, OracleError<'_>>(" while "),
+        take_until::<_, _, OracleError<'_>>(","),
+    )
+    .parse(after_verb)
+    .ok()?;
+    let (rest, condition) = parse_inner_condition(condition_text.trim()).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    // Only QuantityComparison conditions are carried by OnlyIfQuantity;
+    // other StaticCondition shapes are skipped (caller leaves the line
+    // ungated rather than misclassifying).
+    let StaticCondition::QuantityComparison {
+        lhs,
+        comparator,
+        rhs,
+    } = condition
+    else {
+        return None;
+    };
+    Some(ReplacementCondition::OnlyIfQuantity {
+        lhs,
+        comparator,
+        rhs,
+        active_player_req: None,
+    })
+}
+
 fn parse_conditional_draw_replacement(text: &str, lower: &str) -> Option<ReplacementDefinition> {
     let ((condition_len, bonus), rest) = nom_on_lower(text, lower, |input| {
         let (input, _) = tag("as long as ").parse(input)?;
@@ -3198,8 +3475,12 @@ fn token_description_to_spec(
 }
 
 /// CR 614.1a: Parse counter addition replacement effects.
-/// Handles "twice that many ... counters" (Primal Vigor, Doubling Season)
-/// and "that many plus N ... counters" (Hardened Scales, Branching Evolution).
+/// Handles "twice that many ... counters" (Primal Vigor, Doubling Season),
+/// "that many plus N ... counters" (Hardened Scales, Branching Evolution),
+/// and "that many ... counters minus N" (Vizier of Remedies). The runtime
+/// applier saturates at 0 because counters are markers per CR 122.1 — you
+/// can't put a negative number of markers on a permanent — and the
+/// -1/-1-specific P/T semantics live in CR 122.1a / CR 613.4c.
 fn parse_counter_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
     use crate::types::ability::QuantityModification;
 
@@ -3210,8 +3491,15 @@ fn parse_counter_replacement(lower: &str, original_text: &str) -> Option<Replace
         // Delegate to nom_primitives::parse_number (input already lowercase)
         let (_rem, value) = nom_primitives::parse_number.parse(rest).ok()?;
         QuantityModification::Plus { value }
+    } else if let Some(rest) = strip_after(lower, "that many minus ") {
+        // "that many minus one ... counters are put on it instead"
+        // Direct "minus" form — symmetric to the "plus" form above.
+        let (_rem, value) = nom_primitives::parse_number.parse(rest).ok()?;
+        QuantityModification::Minus { value }
     } else {
-        let rest = strip_after(lower, "that many minus ")?;
+        // Vizier of Remedies form: "that many <type> counters minus one are put on it instead".
+        // The "minus N" follows the counter-type token rather than preceding it.
+        let rest = strip_after(lower, " counters minus ")?;
         let (_rem, value) = nom_primitives::parse_number.parse(rest).ok()?;
         QuantityModification::Minus { value }
     };
@@ -3229,7 +3517,43 @@ fn parse_counter_replacement(lower: &str, original_text: &str) -> Option<Replace
         ));
     }
 
+    // CR 122.1a + CR 614.1a: When the Oracle text names a specific counter type
+    // ("+1/+1 counters", "-1/-1 counters", "loyalty counters", …), restrict the
+    // replacement to that counter type so Hardened Scales doesn't fire on -1/-1
+    // counter additions and Vizier of Remedies doesn't fire on +1/+1 counter
+    // additions. Counter-agnostic wordings ("those counters" — Doubling Season)
+    // leave `counter_match = None`, preserving the legacy any-counter behavior.
+    if let Some(ct) = extract_replacement_counter_type(lower) {
+        def = def.counter_match(CounterMatch::OfType(ct));
+    }
+
     Some(def)
+}
+
+/// CR 122.1a + CR 614.1a: Extract the counter-type token named in a counter
+/// replacement's Oracle text. Anchors on the "one or more <type> counter[s]"
+/// phrase that scopes the replaced event to a specific counter type and
+/// delegates the type token to `parse_counter_type_typed` (the single nom
+/// authority for counter type recognition). Returns `None` for counter-
+/// agnostic wordings such as Doubling Season's "if an effect would put one
+/// or more counters on a permanent you control" — in that case the
+/// replacement applies to every counter type, matching the printed behavior.
+fn extract_replacement_counter_type(lower: &str) -> Option<CounterType> {
+    // Compose nom end-to-end:
+    //   <any prefix> "one or more " <counter-type-token> " counter"[s]
+    // The leading `take_until("one or more ")` advances to the anchor without
+    // delegating to `str::find` for parsing dispatch. The trailing-noun guard
+    // (` counter` / ` counters`) prevents a counter-agnostic phrasing
+    // ("one or more counters") from accidentally consuming a recognized
+    // counter-type stem (e.g. the named-counter list contains "stun").
+    let mut combinator = (
+        take_until::<_, _, OracleError<'_>>("one or more "),
+        tag("one or more "),
+        nom_primitives::parse_counter_type_typed,
+        alt((tag(" counters"), tag(" counter"))),
+    )
+        .map(|(_, _, ct, _): (&str, &str, CounterType, &str)| ct);
+    combinator.parse(lower).ok().map(|(_rest, ct)| ct)
 }
 
 /// CR 614.1a: Parse damage redirection replacement effects.
@@ -3472,7 +3796,21 @@ fn parse_damage_prevention_replacement(
     // consumes the damage. Class members: Phyrexian Hydra, Vigor, Stormwild
     // Capridor, Hostility.
     if let Some(followup) = extract_prevention_followup(original_text) {
-        let mut followup_def = parse_effect_chain(&followup, AbilityKind::Spell);
+        // CR 608.2k: Static self-prevention replacements (Anti-Venom, Vigor,
+        // Phyrexian Hydra, Stormwild Capridor) host their followup on the
+        // shield-bearing permanent itself. Bare pronouns ("him"/"it"/"this
+        // creature"/"this enchantment") in the rider must bind to `SelfRef`
+        // so PutCounter targets the permanent, not a non-existent parent
+        // target. The rider parse runs through the standard chain pipeline
+        // with `subject: SelfRef` so `resolve_pronoun_target` returns
+        // `SelfRef` per its typed-subject carve-out.
+        let mut followup_ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            in_replacement: true,
+            ..ParseContext::default()
+        };
+        let mut followup_def =
+            parse_effect_chain_with_context(&followup, AbilityKind::Spell, &mut followup_ctx);
         // CR 615.5 + CR 609.7: `parse_target` maps "the source's controller" /
         // "that source's controller" to `ParentTargetController` (correct for
         // anaphoric "its controller" in non-prevention contexts). Inside a
@@ -3534,8 +3872,8 @@ fn rewrite_damage_recipient_to_post_replacement_target(def: &mut AbilityDefiniti
 /// CR 615.5: Strips an optional `"(when|if) damage is prevented this way, "`
 /// prelude before returning the body. The prelude restates the firing condition
 /// the replacement's `execute` hook already encodes — `Prevented` arm at
-/// `replacement.rs:2207` only stashes `post_replacement_effect` when prevention
-/// actually occurred — so the prelude is semantically a no-op and normalizes
+/// `replacement.rs:2207` only stashes `post_replacement_continuation` when
+/// prevention actually occurred — so the prelude is semantically a no-op and normalizes
 /// to a bare effect chain. Documenting this here preempts a future contributor
 /// adding a redundant "when damage is prevented" trigger arm in
 /// `oracle_trigger.rs`.
@@ -3546,8 +3884,8 @@ fn rewrite_damage_recipient_to_post_replacement_target(def: &mut AbilityDefiniti
 /// route through this helper.
 fn extract_prevention_followup(original_text: &str) -> Option<String> {
     let lower = original_text.to_lowercase();
-    let (_, after) =
-        split_once_on_lower(original_text, &lower, "prevent that damage. ").or_else(|| {
+    let (_, after) = split_once_on_lower(original_text, &lower, "prevent that damage. ")
+        .or_else(|| {
             let (_, after) = split_once_on_lower(original_text, &lower, ". ")?;
             let after_lower = after.to_lowercase();
             if nom_primitives::scan_contains(&after_lower, "prevented this way") {
@@ -3555,6 +3893,17 @@ fn extract_prevention_followup(original_text: &str) -> Option<String> {
             } else {
                 None
             }
+        })
+        // CR 615.5: Same-sentence "prevent that damage and <followup>" form
+        // (Anti-Venom, Ironscale Hydra, Jared Carthalion, Nine Lives). The
+        // four cards in this class share the structural "[gate], prevent
+        // that damage and put <count> <kind> counter[s] on <pronoun>" shape.
+        // Rewrite the connector to a sentence boundary so the followup sub-
+        // parser sees a fresh imperative chunk it can parse against.
+        .or_else(|| {
+            let (_, after_and) =
+                split_once_on_lower(original_text, &lower, "prevent that damage and ")?;
+            Some(("", after_and))
         })?;
     let trimmed = after.trim();
     if trimmed.is_empty() {
@@ -3874,6 +4223,47 @@ mod tests {
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::keywords::Keyword;
 
+    /// CR 614.12 + CR 614.1a: Phial of Galadriel — "If you would gain life
+    /// while you have 5 or less life, you gain twice that much life instead."
+    /// The `while [condition]` clause in the antecedent must lift to a typed
+    /// `ReplacementCondition::OnlyIfQuantity` so the doubler is suppressed
+    /// while the controller has more than 5 life. Issue #317 follow-up:
+    /// before this fix, the condition was silently dropped and the doubler
+    /// fired unconditionally.
+    #[test]
+    fn phial_of_galadriel_while_life_threshold_emits_only_if_quantity() {
+        let def = parse_replacement_line(
+            "If you would gain life while you have 5 or less life, you gain twice that much life instead.",
+            "Phial of Galadriel",
+        )
+        .expect("should parse as a replacement");
+        let condition = def
+            .condition
+            .as_ref()
+            .expect("while-life gate must lift to a typed ReplacementCondition");
+        match condition {
+            ReplacementCondition::OnlyIfQuantity {
+                lhs,
+                comparator,
+                rhs,
+                active_player_req,
+            } => {
+                assert_eq!(
+                    *lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::LifeTotal {
+                            player: crate::types::ability::PlayerScope::Controller,
+                        },
+                    }
+                );
+                assert_eq!(*comparator, Comparator::LE);
+                assert_eq!(*rhs, QuantityExpr::Fixed { value: 5 });
+                assert_eq!(*active_player_req, None);
+            }
+            other => panic!("expected OnlyIfQuantity, got {other:?}"),
+        }
+    }
+
     #[test]
     fn rewrite_parent_target_controller_flips_top_level_draw_target() {
         let mut def = AbilityDefinition::new(
@@ -4039,7 +4429,7 @@ mod tests {
                 assert_eq!(*destination, Zone::Battlefield);
                 assert_eq!(
                     enter_with_counters,
-                    &vec![("P1P1".to_string(), QuantityExpr::Fixed { value: 2 })]
+                    &vec![(CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 2 })]
                 );
             }
             other => panic!("expected ChangeZone, got {other:?}"),
@@ -4070,7 +4460,7 @@ mod tests {
                     qty: QuantityRef::EventContextAmount
                 },
                 target: TargetFilter::SelfRef,
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
         ));
     }
 
@@ -4092,7 +4482,7 @@ mod tests {
                     qty: QuantityRef::EventContextAmount
                 },
                 target: TargetFilter::SelfRef,
-            } if counter_type == "delay"
+            } if *counter_type == CounterType::Generic("delay".to_string())
         ));
     }
 
@@ -4172,7 +4562,7 @@ mod tests {
                 ref counter_type,
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::ParentTarget,
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
         ));
     }
 
@@ -4894,7 +5284,7 @@ mod tests {
                 ref counter_type,
                 count: QuantityExpr::Fixed { value: 12 },
                 ..
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
         ));
     }
 
@@ -4944,7 +5334,7 @@ mod tests {
                     }
                 },
                 target: TargetFilter::SelfRef,
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
                 && card_types.contains(&TypeFilter::Creature)
         ));
     }
@@ -4967,7 +5357,7 @@ mod tests {
                     ref inner,
                 },
                 target: TargetFilter::SelfRef,
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
                 && matches!(**inner, QuantityExpr::Ref { qty: QuantityRef::ConvokedCreatureCount })
         ));
     }
@@ -4990,7 +5380,7 @@ mod tests {
                     ref inner,
                 },
                 target: TargetFilter::SelfRef,
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
                 && matches!(**inner, QuantityExpr::Ref { qty: QuantityRef::ManaSpentToCast { scope: crate::types::ability::CastManaObjectScope::SelfObject, metric: crate::types::ability::CastManaSpentMetric::DistinctColors } })
         ));
     }
@@ -5012,7 +5402,7 @@ mod tests {
                     qty: QuantityRef::ManaSpentToCast { scope: crate::types::ability::CastManaObjectScope::SelfObject, metric: crate::types::ability::CastManaSpentMetric::Total },
                 },
                 target: TargetFilter::SelfRef,
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
         ));
     }
 
@@ -5033,7 +5423,7 @@ mod tests {
                     qty: QuantityRef::ManaSpentToCast { scope: crate::types::ability::CastManaObjectScope::SelfObject, metric: crate::types::ability::CastManaSpentMetric::Total },
                 },
                 target: TargetFilter::SelfRef,
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
         ));
     }
 
@@ -5054,7 +5444,7 @@ mod tests {
                     qty: QuantityRef::ManaSpentToCast { scope: crate::types::ability::CastManaObjectScope::SelfObject, metric: crate::types::ability::CastManaSpentMetric::Total },
                 },
                 target: TargetFilter::SelfRef,
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
         ));
     }
 
@@ -5067,7 +5457,12 @@ mod tests {
         .unwrap();
 
         let mut cursor = def.execute.as_deref().expect("execute ability");
-        let expected = ["P1P1", "flying", "deathtouch", "shield"];
+        let expected = [
+            CounterType::Plus1Plus1,
+            CounterType::Keyword(crate::types::keywords::KeywordKind::Flying),
+            CounterType::Keyword(crate::types::keywords::KeywordKind::Deathtouch),
+            CounterType::Generic("shield".to_string()),
+        ];
         for counter in expected {
             assert!(matches!(
                 *cursor.effect,
@@ -5075,9 +5470,9 @@ mod tests {
                     ref counter_type,
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::SelfRef,
-                } if counter_type == counter
+                } if *counter_type == counter
             ));
-            if counter == "shield" {
+            if counter == CounterType::Generic("shield".to_string()) {
                 assert!(cursor.sub_ability.is_none());
             } else {
                 cursor = cursor.sub_ability.as_deref().expect("next counter");
@@ -5101,7 +5496,7 @@ mod tests {
                 count,
                 ..
             } => {
-                assert_eq!(counter_type, "charge");
+                assert_eq!(counter_type, &CounterType::Generic("charge".to_string()));
                 assert!(
                     matches!(
                         count,
@@ -5110,6 +5505,34 @@ mod tests {
                         }
                     ),
                     "count should be CostXPaid, got {count:?}"
+                );
+            }
+            other => panic!("Expected PutCounter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enters_with_x_counters_where_x_is_life_lost_uses_quantity_binding() {
+        let def = parse_replacement_line(
+            "This creature enters with X +1/+1 counters on it, where X is the total life lost by your opponents this turn.",
+            "Cryptborn Horror",
+        )
+        .unwrap();
+        match &*def.execute.as_ref().unwrap().effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                ..
+            } => {
+                assert_eq!(counter_type, &CounterType::Plus1Plus1);
+                assert!(
+                    matches!(
+                        count,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::LifeLostThisTurn { .. },
+                        }
+                    ),
+                    "count should use LifeLostThisTurn, got {count:?}"
                 );
             }
             other => panic!("Expected PutCounter, got {other:?}"),
@@ -5131,7 +5554,7 @@ mod tests {
                 count,
                 ..
             } => {
-                assert_eq!(counter_type, "P1P1");
+                assert_eq!(counter_type, &CounterType::Plus1Plus1);
                 assert!(matches!(
                     count,
                     QuantityExpr::Ref {
@@ -5158,7 +5581,7 @@ mod tests {
                 count,
                 ..
             } => {
-                assert_eq!(counter_type, "P1P1");
+                assert_eq!(counter_type, &CounterType::Plus1Plus1);
                 match count {
                     QuantityExpr::Multiply { factor, inner } => {
                         assert_eq!(*factor, 2);
@@ -5191,7 +5614,7 @@ mod tests {
                 count,
                 ..
             } => {
-                assert_eq!(counter_type, "P1P1");
+                assert_eq!(counter_type, &CounterType::Plus1Plus1);
                 match count {
                     QuantityExpr::DivideRounded {
                         inner,
@@ -5228,7 +5651,11 @@ mod tests {
                 count,
                 ..
             } => {
-                assert_eq!(counter_type, "P1P1", "counter type should be P1P1");
+                assert_eq!(
+                    counter_type,
+                    &CounterType::Plus1Plus1,
+                    "counter type should be P1P1"
+                );
                 assert!(
                     matches!(
                         count,
@@ -5258,7 +5685,7 @@ mod tests {
                 ref counter_type,
                 count: QuantityExpr::Fixed { value: 1 },
                 ..
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
         ));
         // valid_card should filter for other creatures you control of chosen type
         match &def.valid_card {
@@ -5288,7 +5715,7 @@ mod tests {
                 ref counter_type,
                 count: QuantityExpr::Fixed { value: 1 },
                 ..
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
         ));
         match &def.valid_card {
             Some(TargetFilter::Typed(tf)) => {
@@ -5323,7 +5750,7 @@ mod tests {
                 ref counter_type,
                 count: QuantityExpr::Fixed { value: 3 },
                 ..
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
         ));
         assert_eq!(def.condition, Some(ReplacementCondition::CastViaEscape));
     }
@@ -5342,7 +5769,7 @@ mod tests {
                 ref counter_type,
                 count: QuantityExpr::Fixed { value: 1 },
                 ..
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
         ));
         assert_eq!(def.condition, Some(ReplacementCondition::CastViaEscape));
     }
@@ -5364,7 +5791,7 @@ mod tests {
                 ref counter_type,
                 count: QuantityExpr::Fixed { value: 1 },
                 ..
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
         ));
         assert!(matches!(
             def.condition,
@@ -5391,7 +5818,7 @@ mod tests {
                 ref counter_type,
                 count: QuantityExpr::Fixed { value: 2 },
                 ..
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
         ));
         // CR 702.33d + CR 702.33f: per-variant resolution is deferred, but the
         // parser keeps typed cost metadata so synthesis can map it to the card's
@@ -5423,7 +5850,7 @@ mod tests {
                     qty: QuantityRef::KickerCount
                 },
                 ..
-            } if counter_type == "P1P1"
+            } if *counter_type == CounterType::Plus1Plus1
         ));
     }
 
@@ -5520,6 +5947,46 @@ mod tests {
             }
             other => panic!("Expected Typed filter, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn creature_damaged_by_this_source_die_exile_replacement() {
+        let def = parse_replacement_line(
+            "If a creature dealt damage by this creature this turn would die, exile it instead.",
+            "Frostwielder",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Destroy);
+        assert_eq!(def.destination_zone, None);
+        assert_eq!(
+            def.condition,
+            Some(ReplacementCondition::DealtDamageThisTurnBySource {
+                source: TargetFilter::SelfRef,
+            })
+        );
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn creature_damaged_by_enchanted_source_die_exile_replacement() {
+        let def = parse_replacement_line(
+            "If a creature dealt damage by enchanted creature this turn would die, exile it instead.",
+            "Kumano's Blessing",
+        )
+        .unwrap();
+        assert_eq!(
+            def.condition,
+            Some(ReplacementCondition::DealtDamageThisTurnBySource {
+                source: TargetFilter::AttachedTo,
+            })
+        );
     }
 
     /// CR 614.1a — prefix-form `instead exile it` mirrors the suffix-form
@@ -5664,7 +6131,10 @@ mod tests {
                 assert!(matches!(target, TargetFilter::SelfRef));
                 assert_eq!(
                     enter_with_counters,
-                    &vec![("ice".to_string(), QuantityExpr::Fixed { value: 1 })]
+                    &vec![(
+                        CounterType::Generic("ice".to_string()),
+                        QuantityExpr::Fixed { value: 1 },
+                    )]
                 );
             }
             other => panic!("expected ChangeZone, got {other:?}"),
@@ -5699,7 +6169,10 @@ mod tests {
                 assert!(matches!(target, TargetFilter::SelfRef));
                 assert_eq!(
                     enter_with_counters,
-                    &vec![("egg".to_string(), QuantityExpr::Fixed { value: 3 })]
+                    &vec![(
+                        CounterType::Generic("egg".to_string()),
+                        QuantityExpr::Fixed { value: 3 },
+                    )]
                 );
             }
             other => panic!("expected ChangeZone, got {other:?}"),
@@ -6389,6 +6862,48 @@ mod tests {
     }
 
     #[test]
+    fn clone_enter_tapped_as_copy_callidus_assassin_grants_etb_trigger() {
+        let def = parse_replacement_line(
+            "Polymorphine — You may have this creature enter tapped as a copy of any creature on the battlefield, except it has \"When this creature enters, destroy up to one other target creature with the same name as this creature.\"",
+            "Callidus Assassin",
+        )
+        .unwrap();
+        let execute = def.execute.as_ref().unwrap();
+        assert!(matches!(
+            &*execute.effect,
+            Effect::Tap {
+                target: TargetFilter::SelfRef
+            }
+        ));
+        let sub = execute.sub_ability.as_ref().unwrap();
+        let Effect::BecomeCopy {
+            additional_modifications,
+            ..
+        } = &*sub.effect
+        else {
+            panic!("Expected BecomeCopy, got {:?}", sub.effect);
+        };
+        let [ContinuousModification::GrantTrigger { trigger }] =
+            additional_modifications.as_slice()
+        else {
+            panic!("expected one GrantTrigger, got {additional_modifications:?}");
+        };
+        let execute = trigger
+            .execute
+            .as_ref()
+            .expect("granted trigger must execute");
+        let Effect::Destroy { target, .. } = &*execute.effect else {
+            panic!("expected Destroy effect, got {:?}", execute.effect);
+        };
+        let TargetFilter::Typed(filter) = target else {
+            panic!("expected typed target, got {target:?}");
+        };
+        assert!(filter.type_filters.contains(&TypeFilter::Creature));
+        assert!(filter.properties.contains(&FilterProp::Another));
+        assert!(filter.properties.contains(&FilterProp::SameName));
+    }
+
+    #[test]
     fn clone_without_tapped_still_direct_become_copy() {
         // Non-tapped clone (Phantasmal Image class) must NOT compose through Tap
         let def = parse_replacement_line(
@@ -6686,6 +7201,21 @@ mod tests {
     }
 
     #[test]
+    fn counter_agnostic_one_or_more_does_not_set_counter_match() {
+        // CR 614.1a + CR 122.1: Sanity check — "if an effect would put one
+        // or more counters on a permanent you control" (Doubling Season's
+        // modern wording) must NOT be treated as type-specific. The
+        // counter-agnostic wording leaves counter_match = None so the
+        // replacement matches every counter type.
+        let def = parse_replacement_line(
+            "If an effect would put one or more counters on a permanent you control, it puts twice that many of those counters on that permanent instead.",
+            "Doubling Season",
+        )
+        .unwrap();
+        assert_eq!(def.counter_match, None);
+    }
+
+    #[test]
     fn counter_doubling_replacement_current_oracle_wording() {
         let def = parse_replacement_line(
             "If an effect would put one or more counters on a permanent you control, it puts twice that many of those counters on that permanent instead.",
@@ -6704,6 +7234,66 @@ mod tests {
                 controller: Some(ControllerRef::You),
                 ..
             })) if type_filters == vec![TypeFilter::Permanent]
+        ));
+        // CR 122.1a + CR 614.1a: Doubling Season's modern wording uses "those
+        // counters" — counter-agnostic, so no `counter_match` is set.
+        assert_eq!(def.counter_match, None);
+    }
+
+    #[test]
+    fn counter_plus_one_replacement_hardened_scales() {
+        // CR 614.1a + CR 122.1a: Hardened Scales — "+1/+1 counters" specifically.
+        let def = parse_replacement_line(
+            "If one or more +1/+1 counters would be put on a creature you control, that many plus one +1/+1 counters are put on it instead.",
+            "Hardened Scales",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::AddCounter);
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Plus { value: 1 })
+        );
+        assert_eq!(
+            def.counter_match,
+            Some(CounterMatch::OfType(CounterType::Plus1Plus1))
+        );
+        assert!(matches!(
+            def.valid_card,
+            Some(TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller: Some(ControllerRef::You),
+                ..
+            })) if type_filters == vec![TypeFilter::Creature]
+        ));
+    }
+
+    #[test]
+    fn counter_minus_one_replacement_vizier_of_remedies() {
+        // CR 614.1a + CR 122.1a: Vizier of Remedies — "-1/-1 counters"
+        // specifically. The "minus one" follows the type token in this
+        // wording (vs. Hardened Scales's "that many plus one"), so the
+        // parser falls through to the " counters minus " branch.
+        let def = parse_replacement_line(
+            "If one or more -1/-1 counters would be put on a creature you control, that many -1/-1 counters minus one are put on it instead.",
+            "Vizier of Remedies",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::AddCounter);
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Minus { value: 1 })
+        );
+        assert_eq!(
+            def.counter_match,
+            Some(CounterMatch::OfType(CounterType::Minus1Minus1))
+        );
+        assert!(matches!(
+            def.valid_card,
+            Some(TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller: Some(ControllerRef::You),
+                ..
+            })) if type_filters == vec![TypeFilter::Creature]
         ));
     }
 
@@ -7191,7 +7781,7 @@ mod tests {
         else {
             panic!("expected PutCounter, got {:?}", exec.effect);
         };
-        assert_eq!(counter_type, "P1P1");
+        assert_eq!(counter_type, &CounterType::Plus1Plus1);
         assert_eq!(target, &TargetFilter::SelfRef);
         assert_eq!(
             count,
@@ -7376,6 +7966,108 @@ mod tests {
         assert!(!super::has_except_first_draw_in_draw_step_clause(
             "except the first one you draw in each of your upkeeps"
         ));
+    }
+
+    #[test]
+    fn parses_opponent_mill_replacement_with_multiplier() {
+        let text =
+            "If an opponent would mill one or more cards, they mill twice that many cards instead.";
+        let def = parse_replacement_line(text, "Bruvac the Grandiloquent")
+            .expect("must parse mill replacement");
+
+        assert_eq!(def.event, ReplacementEvent::Mill);
+        assert_eq!(def.valid_player, Some(ControllerRef::Opponent));
+        let execute = def.execute.as_ref().expect("mill replacement must execute");
+        match &*execute.effect {
+            Effect::Mill {
+                count,
+                target,
+                destination,
+            } => {
+                assert_eq!(target, &TargetFilter::Controller);
+                assert_eq!(destination, &Zone::Graveyard);
+                assert_eq!(
+                    count,
+                    &QuantityExpr::Multiply {
+                        factor: 2,
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::EventContextAmount
+                        })
+                    }
+                );
+            }
+            other => panic!("expected Mill execute, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_opponent_mill_replacement_with_offset() {
+        let text = "If an opponent would mill one or more cards, they mill that many cards plus four instead.";
+        let def =
+            parse_replacement_line(text, "The Water Crystal").expect("must parse mill replacement");
+
+        assert_eq!(def.event, ReplacementEvent::Mill);
+        assert_eq!(def.valid_player, Some(ControllerRef::Opponent));
+        let execute = def.execute.as_ref().expect("mill replacement must execute");
+        match &*execute.effect {
+            Effect::Mill { count, .. } => assert_eq!(
+                count,
+                &QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount
+                    }),
+                    offset: 4
+                }
+            ),
+            other => panic!("expected Mill execute, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_scry_replacement_with_draw_followup() {
+        let text = "If you would scry a number of cards, draw that many cards instead.";
+        let def = parse_replacement_line(text, "Eligeth, Crossroads Augur")
+            .expect("must parse scry replacement");
+
+        assert_eq!(def.event, ReplacementEvent::Scry);
+        let execute = def.execute.as_ref().expect("scry replacement must execute");
+        match &*execute.effect {
+            Effect::Draw { count, target } => {
+                assert_eq!(target, &TargetFilter::Controller);
+                assert_eq!(
+                    count,
+                    &QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount
+                    }
+                );
+            }
+            other => panic!("expected Draw execute, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_scry_replacement_with_scry_offset_followup() {
+        let text = "If you would scry a number of cards, scry that many cards plus one instead.";
+        let def = parse_replacement_line(text, "Kenessos, Priest of Thassa")
+            .expect("must parse scry replacement");
+
+        assert_eq!(def.event, ReplacementEvent::Scry);
+        let execute = def.execute.as_ref().expect("scry replacement must execute");
+        match &*execute.effect {
+            Effect::Scry { count, target } => {
+                assert_eq!(target, &TargetFilter::Controller);
+                assert_eq!(
+                    count,
+                    &QuantityExpr::Offset {
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::EventContextAmount
+                        }),
+                        offset: 1
+                    }
+                );
+            }
+            other => panic!("expected Scry execute, got {other:?}"),
+        }
     }
 }
 

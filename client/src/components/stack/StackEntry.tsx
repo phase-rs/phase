@@ -52,7 +52,14 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
   });
 
   const sourceObj = objects?.[entry.source_id];
-  const sourceName = sourceObj?.name ?? "Unknown";
+  // Prefer the engine-pre-resolved source name on triggered abilities (so the
+  // display layer doesn't dereference ObjectId -> GameObject -> name itself).
+  // Fall back to the objects map for spells/activated entries that don't carry
+  // a captured name, and to "Unknown" for synthetic game-rule triggers whose
+  // source_id is ObjectId(0).
+  const triggerSourceName =
+    entry.kind.type === "TriggeredAbility" ? entry.kind.data.source_name : undefined;
+  const sourceName = triggerSourceName || sourceObj?.name || "Unknown";
   const imageLookup = sourceObj
     ? cardImageLookup(sourceObj)
     : { name: "", faceIndex: 0, oracleId: undefined, faceName: undefined };
@@ -65,8 +72,16 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
   });
 
   const isSpell = entry.kind.type === "Spell";
-  const abilityLabel =
-    entry.kind.type === "ActivatedAbility" ? "Activated" : "Triggered";
+  const isTriggered = entry.kind.type === "TriggeredAbility";
+  // Triggered abilities show "Triggered — From <source>" so the player can
+  // tell which permanent owns the trigger without hovering the card image.
+  // Activated abilities don't carry a pre-resolved source name (different
+  // engine path); they keep the bare "Activated" label.
+  const abilityLabel = entry.kind.type === "ActivatedAbility"
+    ? "Activated"
+    : isTriggered && triggerSourceName
+      ? `Triggered — From ${triggerSourceName}`
+      : "Triggered";
   const triggerDescription =
     entry.kind.type === "TriggeredAbility"
       ? entry.kind.data.description && renderDescription(entry.kind.data.description, sourceName)
@@ -174,8 +189,11 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
 
       {/* Ability badge overlay (non-spell entries: triggered/activated) */}
       {!isSpell && (
-        <div className="absolute inset-x-0 bottom-0 rounded-b-lg border-t border-white/10 bg-gray-900/95 px-1.5 py-1 backdrop-blur-sm">
-          <div className="pr-8 text-[9px] font-semibold text-purple-300">{abilityLabel}</div>
+        <div
+          className="absolute inset-x-0 bottom-0 rounded-b-lg border-t border-white/10 bg-gray-900/95 px-1.5 py-1 backdrop-blur-sm"
+          title={triggerDescription ? `${abilityLabel}: ${triggerDescription}` : abilityLabel}
+        >
+          <div className="truncate pr-8 text-[9px] font-semibold text-purple-300">{abilityLabel}</div>
           {triggerDescription && (
             <div className="mt-0.5 line-clamp-3 pr-6 text-[8px] leading-tight text-gray-300">
               {triggerDescription}

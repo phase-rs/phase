@@ -1,12 +1,15 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
-use nom::combinator::value;
+use nom::combinator::{map, opt, peek, value};
+use nom::multi::separated_list1;
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::super::oracle_nom::bridge::nom_on_lower;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
+use super::super::oracle_quantity;
 use super::super::oracle_target::{
     parse_mana_value_suffix, parse_shared_quality_clause, parse_target, parse_type_phrase,
 };
@@ -17,11 +20,13 @@ use super::{capitalize, scan_contains_phrase, ParseContext};
 use crate::parser::oracle_ir::ast::{SearchLibraryDetails, SeekDetails};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
-    Comparator, ControllerRef, FilterProp, ObjectScope, QuantityExpr, QuantityRef,
-    SearchSelectionConstraint, SharedQuality, SharedQualityRelation, TargetFilter, TypeFilter,
-    TypedFilter,
+    AggregateFunction, Comparator, ControllerRef, FilterProp, ObjectProperty, ObjectScope,
+    QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality, SharedQualityRelation,
+    TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
+#[cfg(test)]
+use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
 use crate::types::zones::Zone;
 
@@ -133,15 +138,13 @@ pub(super) fn parse_search_library_details(
         )
     };
 
-    // CR 608.2c + CR 701.23: "with different names" is a printed-text restriction
-    // on the chosen set, not a filter on individual library cards. Detected via a
-    // word-boundary nom scan so it composes with arbitrary preceding filter text
-    // ("for four cards with different names", "for any number of cards with
-    // different names", etc.) without enumerating per-prefix permutations.
+    // CR 608.2c + CR 701.23: "with different names" / "with different powers"
+    // and "don't share ..." are printed-text restrictions on the chosen set,
+    // not filters on individual library cards.
     let selection_constraint = if let Some(constraint) = scan_total_mana_value_constraint(lower) {
         constraint
-    } else if scan_distinct_names_clause(lower) {
-        SearchSelectionConstraint::DistinctNames
+    } else if let Some(constraint) = scan_distinct_qualities_constraint(lower) {
+        constraint
     } else {
         SearchSelectionConstraint::None
     };
@@ -158,17 +161,6 @@ pub(super) fn parse_search_library_details(
         multi_destination,
         multi_enter_tapped,
     }
-}
-
-fn parse_distinct_names_marker(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
-    value(
-        (),
-        nom::sequence::pair(
-            tag::<_, _, OracleError<'_>>("different name"),
-            nom::combinator::opt(tag::<_, _, OracleError<'_>>("s")),
-        ),
-    )
-    .parse(input)
 }
 
 fn scan_total_mana_value_constraint(lower: &str) -> Option<SearchSelectionConstraint> {
@@ -198,13 +190,157 @@ fn parse_total_mana_value_constraint(
     ))
 }
 
-/// CR 608.2c + CR 701.23: Detect the distinct-names printed-text restriction
-/// at any word boundary in the clause. Composable nom scan that matches both
-/// canonical search phrasings ("with different names", "that have different
-/// names") without committing to a fixed count/filter prefix.
-fn scan_distinct_names_clause(lower: &str) -> bool {
-    scan_preceded(lower, "with ", parse_distinct_names_marker).is_some()
-        || scan_preceded(lower, "that have ", parse_distinct_names_marker).is_some()
+/// CR 608.2c + CR 701.23: Detect selected-set distinct-quality restrictions
+/// at any word boundary in the clause. This covers both "with different names"
+/// and "that don't share a mana value, power, toughness, or card type with
+/// each other" without treating either as an individual-card filter suffix.
+fn scan_distinct_qualities_constraint(lower: &str) -> Option<SearchSelectionConstraint> {
+    scan_preceded(lower, "with different ", parse_quality_list_constraint)
+        .or_else(|| scan_preceded(lower, "that have different ", parse_quality_list_constraint))
+        .or_else(|| {
+            scan_preceded(
+                lower,
+                "that each have different ",
+                parse_quality_list_constraint,
+            )
+        })
+        .or_else(|| {
+            scan_preceded(
+                lower,
+                "that don't share ",
+                parse_each_other_quality_constraint,
+            )
+        })
+        .or_else(|| {
+            scan_preceded(
+                lower,
+                "that do not share ",
+                parse_each_other_quality_constraint,
+            )
+        })
+        .map(|(constraint, _)| constraint)
+}
+
+fn parse_quality_list_constraint(
+    input: &str,
+) -> Result<(&str, SearchSelectionConstraint), nom::Err<OracleError<'_>>> {
+    map(parse_search_selection_quality_list, |qualities| {
+        SearchSelectionConstraint::DistinctQualities { qualities }
+    })
+    .parse(input)
+}
+
+fn parse_each_other_quality_constraint(
+    input: &str,
+) -> Result<(&str, SearchSelectionConstraint), nom::Err<OracleError<'_>>> {
+    let (rest, qualities) = terminated(
+        parse_search_selection_quality_list,
+        tag::<_, _, OracleError<'_>>(" with each other"),
+    )
+    .parse(input)?;
+    Ok((
+        rest,
+        SearchSelectionConstraint::DistinctQualities { qualities },
+    ))
+}
+
+fn parse_distinct_quality_suffix(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    alt((
+        value(
+            (),
+            preceded(
+                tag::<_, _, OracleError<'_>>("with different "),
+                parse_search_selection_quality_list,
+            ),
+        ),
+        value(
+            (),
+            preceded(
+                tag("that have different "),
+                parse_search_selection_quality_list,
+            ),
+        ),
+        value(
+            (),
+            preceded(
+                tag("that each have different "),
+                parse_search_selection_quality_list,
+            ),
+        ),
+        value(
+            (),
+            preceded(
+                tag("that don't share "),
+                parse_each_other_quality_constraint,
+            ),
+        ),
+        value(
+            (),
+            preceded(
+                tag("that do not share "),
+                parse_each_other_quality_constraint,
+            ),
+        ),
+    ))
+    .parse(input)
+}
+
+fn parse_search_selection_quality_list(
+    input: &str,
+) -> Result<(&str, Vec<SharedQuality>), nom::Err<OracleError<'_>>> {
+    separated_list1(
+        parse_search_selection_quality_separator,
+        parse_search_selection_quality,
+    )
+    .parse(input)
+}
+
+fn parse_search_selection_quality_separator(
+    input: &str,
+) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>(", or "),
+            tag(", and "),
+            tag(", "),
+            tag(" or "),
+            tag(" and "),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_search_selection_quality(
+    input: &str,
+) -> Result<(&str, SharedQuality), nom::Err<OracleError<'_>>> {
+    preceded(
+        opt(alt((
+            tag::<_, _, OracleError<'_>>("a "),
+            tag::<_, _, OracleError<'_>>("an "),
+        ))),
+        alt((
+            value(
+                SharedQuality::ManaValue,
+                alt((tag("mana values"), tag("mana value"))),
+            ),
+            value(SharedQuality::Power, alt((tag("powers"), tag("power")))),
+            value(
+                SharedQuality::Toughness,
+                alt((tag("toughnesses"), tag("toughness"))),
+            ),
+            value(
+                SharedQuality::TotalPowerToughness,
+                tag("total power and toughness"),
+            ),
+            value(
+                SharedQuality::CardType,
+                alt((tag("card types"), tag("card type"))),
+            ),
+            value(SharedQuality::Name, alt((tag("names"), tag("name")))),
+        )),
+    )
+    .parse(input)
 }
 
 /// CR 701.23a + CR 107.1: Split a search filter tail on conjunction boundaries
@@ -212,19 +348,23 @@ fn scan_distinct_names_clause(lower: &str) -> bool {
 /// so each filter phrase parses independently. Returns the primary filter and
 /// a list of extra filters; the list is empty in the common single-filter case.
 ///
-/// The conjunction scan ends at the first clause-terminating comma / period
-/// (e.g., `"..., put them onto the battlefield tapped, then shuffle"`) because
-/// anything after that belongs to the destination / action chain — not to the
-/// filter expression.
+/// The conjunction scan ends at the first action-clause comma or sentence
+/// boundary (e.g., `"..., put them onto the battlefield tapped, then shuffle"`)
+/// because anything after that belongs to the destination / action chain — not
+/// to the filter expression. Serial-list commas stay in the filter region.
 fn parse_search_filter_with_extras(
     tail: &str,
     ctx: &mut ParseContext,
 ) -> (TargetFilter, Vec<TargetFilter>) {
-    // structural: not dispatch — bound the filter region at the first clause
-    // terminator (comma / period) before running the conjunction combinator,
+    // structural: not dispatch — bound the filter region at the first action
+    // clause or sentence terminator before running the conjunction combinator,
     // so `" and "` inside e.g. `"put it onto the battlefield, then ..."` can't
     // pollute the filter split.
     let filter_region = search_filter_region(tail);
+
+    if let Some(filters) = parse_each_basic_land_type_search_filters(filter_region) {
+        return filters;
+    }
 
     // Split on `" and a "` / `" and an "` / `" and basic "` at filter-region
     // boundaries only. The "and basic" branch preserves the supertype prefix so
@@ -242,68 +382,146 @@ fn parse_search_filter_with_extras(
     (primary, extras)
 }
 
-fn search_filter_region(text: &str) -> &str {
-    let filter_region_end = text
-        .find(',')
-        .or_else(|| text.find('.'))
-        .unwrap_or(text.len());
-    &text[..filter_region_end]
+fn parse_each_basic_land_type_search_filters(
+    filter_region: &str,
+) -> Option<(TargetFilter, Vec<TargetFilter>)> {
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("land card of each basic land type"),
+        tag("land cards of each basic land type"),
+    ))
+    .parse(filter_region.trim())
+    .ok()?;
+    rest.is_empty().then(|| {
+        let mut filters = ["Plains", "Island", "Swamp", "Mountain", "Forest"]
+            .into_iter()
+            .map(land_subtype_filter);
+        let primary = filters.next().expect("basic land type list is non-empty");
+        (primary, filters.collect())
+    })
 }
 
-/// Split a filter-region string (no action chain) on `" and a "` / `" and an "`
-/// / `" and basic "` conjunctions using a nom `take_until` + `alt` scan. For
-/// the "and basic" variant the supertype stays attached to the following
-/// segment by re-prepending `"basic "` to the remainder after consuming the
-/// shared `" and "` prefix. Returns a single-segment vector when no
-/// conjunction matches.
+fn land_subtype_filter(subtype: &str) -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::land().subtype(subtype.to_string()))
+}
+
+fn search_filter_region(text: &str) -> &str {
+    parse_filter_region_terminator(text).unwrap_or(text)
+}
+
+fn parse_filter_region_terminator(input: &str) -> Option<&str> {
+    [
+        ". ",
+        ".",
+        ", put ",
+        ", reveal ",
+        ", then ",
+        ", shuffle ",
+        ", exile ",
+        " and reveal ",
+        " with different names",
+        " with different powers",
+        " that have different ",
+        " that each have different ",
+        " that don't share ",
+        " that do not share ",
+    ]
+    .into_iter()
+    .filter_map(|delimiter| parse_filter_region_delimiter(input, delimiter))
+    .min_by_key(|before| before.len())
+}
+
+fn parse_filter_region_delimiter<'a>(input: &'a str, delimiter: &'static str) -> Option<&'a str> {
+    let mut scan = (
+        take_until::<_, _, OracleError<'_>>(delimiter),
+        tag(delimiter),
+    );
+    let Ok((_, (before, _))) = scan.parse(input) else {
+        return None;
+    };
+    Some(before)
+}
+
+// (nom `alt` arm that consumes the conjunction, amount pushed back onto
+// the remainder so the "basic" supertype stays on the following segment)
+#[derive(Clone, Copy)]
+enum Conjunction {
+    AndA,
+    AndAn,
+    AndBasic,
+    CommaA,
+    CommaAn,
+    CommaAndA,
+    CommaAndAn,
+    CommaBasic,
+    CommaAndBasic,
+}
+
+/// Split a filter-region string (no action chain) on article/basic
+/// conjunctions using a nom `take_until` scan. For basic variants the supertype
+/// stays attached to the following segment by re-prepending `"basic "` to the
+/// remainder after consuming the shared delimiter prefix. Returns a
+/// single-segment vector when no conjunction matches.
 fn split_filter_conjunctions(filter_region: &str) -> Vec<&str> {
-    use nom::branch::alt;
-    use nom::bytes::complete::take_until;
-    use nom::combinator::value;
-    use nom::Parser;
-
-    // (nom `alt` arm that consumes the conjunction, amount pushed back onto
-    // the remainder so the "basic" supertype stays on the following segment)
-    #[derive(Clone, Copy)]
-    enum Conjunction {
-        AndA,
-        AndAn,
-        AndBasic,
-    }
-
     let mut segments = Vec::new();
     let mut remaining = filter_region;
     loop {
-        // Scan ahead for the earliest conjunction tag. `take_until` + `alt` is
-        // the nom idiom for "find the first occurrence of any of these tags";
-        // the error branch falls through to a single-segment result.
-        let mut scan = (
-            take_until::<_, _, OracleError<'_>>(" and "),
-            alt((
-                value(Conjunction::AndA, tag(" and a ")),
-                value(Conjunction::AndAn, tag(" and an ")),
-                value(Conjunction::AndBasic, tag(" and basic ")),
-            )),
-        );
-
-        let Ok((rest, (before, conj))) = scan.parse(remaining) else {
+        let Some((rest, before, conj)) = parse_next_filter_conjunction(remaining) else {
             segments.push(remaining.trim());
             break;
         };
         segments.push(before.trim());
         remaining = match conj {
-            Conjunction::AndA | Conjunction::AndAn => rest,
+            Conjunction::AndA
+            | Conjunction::AndAn
+            | Conjunction::CommaA
+            | Conjunction::CommaAn
+            | Conjunction::CommaAndA
+            | Conjunction::CommaAndAn => rest,
             // Keep the "basic " supertype attached to the following segment.
-            // SAFETY: `rest` is a suffix of `filter_region`, so stepping back
+            // SAFETY: `rest` is a suffix of `remaining`, so stepping back
             // "basic ".len() bytes yields a well-aligned slice that begins with
             // "basic …".
-            Conjunction::AndBasic => {
-                let start = filter_region.len() - rest.len() - "basic ".len();
-                &filter_region[start..]
+            Conjunction::AndBasic | Conjunction::CommaBasic | Conjunction::CommaAndBasic => {
+                let start = remaining.len() - rest.len() - "basic ".len();
+                &remaining[start..]
             }
         };
     }
     segments
+}
+
+fn parse_next_filter_conjunction(input: &str) -> Option<(&str, &str, Conjunction)> {
+    [
+        (", and basic ", Conjunction::CommaAndBasic),
+        (", and an ", Conjunction::CommaAndAn),
+        (", and a ", Conjunction::CommaAndA),
+        (", basic ", Conjunction::CommaBasic),
+        (", an ", Conjunction::CommaAn),
+        (", a ", Conjunction::CommaA),
+        (" and basic ", Conjunction::AndBasic),
+        (" and an ", Conjunction::AndAn),
+        (" and a ", Conjunction::AndA),
+    ]
+    .into_iter()
+    .filter_map(|(delimiter, conjunction)| {
+        parse_filter_conjunction_delimiter(input, delimiter, conjunction)
+    })
+    .min_by_key(|(_, before, _)| before.len())
+}
+
+fn parse_filter_conjunction_delimiter<'a>(
+    input: &'a str,
+    delimiter: &'static str,
+    conjunction: Conjunction,
+) -> Option<(&'a str, &'a str, Conjunction)> {
+    let mut scan = (
+        take_until::<_, _, OracleError<'_>>(delimiter),
+        tag(delimiter),
+    );
+    let Ok((rest, (before, _))) = scan.parse(input) else {
+        return None;
+    };
+    Some((rest, before, conjunction))
 }
 
 /// Locate `tag_prefix` at a word boundary in `lower` and return the byte offset of
@@ -379,15 +597,20 @@ pub(super) fn parse_seek_details(lower: &str, ctx: &mut ParseContext) -> SeekDet
     };
 
     let (filter_text, from_top) = parse_seek_from_top_limit(filter_text);
+    let (filter_text, dynamic_count) = split_seek_for_each_count_suffix(filter_text)
+        .map_or((filter_text, None), |(remaining, count)| {
+            (remaining, Some(count))
+        });
 
     // Extract count: "two nonland cards" → (2, "nonland cards"); "x cards" → (X, "cards").
     // CR 107.3a + CR 601.2b: X resolves to the caster's announced value at cast time.
-    let (count, remaining) =
-        if let Ok((rest, expr)) = nom_quantity::parse_quantity_expr_number(filter_text) {
-            (expr, rest.trim_start())
-        } else {
-            (QuantityExpr::Fixed { value: 1 }, filter_text)
-        };
+    let (count, remaining) = if let Some(expr) = dynamic_count {
+        (expr, filter_text)
+    } else if let Ok((rest, expr)) = nom_quantity::parse_quantity_expr_number(filter_text) {
+        (expr, rest.trim_start())
+    } else {
+        (QuantityExpr::Fixed { value: 1 }, filter_text)
+    };
 
     // Strip leading article "a "/"an "
     let remaining = nom_primitives::parse_article
@@ -395,7 +618,7 @@ pub(super) fn parse_seek_details(lower: &str, ctx: &mut ParseContext) -> SeekDet
         .map(|(rest, _)| rest)
         .unwrap_or(remaining);
 
-    let filter = parse_search_filter(remaining, ctx);
+    let (filter, extra_filters) = parse_search_filter_with_extras(remaining, ctx);
 
     SeekDetails {
         filter,
@@ -403,7 +626,19 @@ pub(super) fn parse_seek_details(lower: &str, ctx: &mut ParseContext) -> SeekDet
         from_top,
         destination,
         enter_tapped,
+        extra_filters,
     }
+}
+
+fn split_seek_for_each_count_suffix(filter_text: &str) -> Option<(&str, QuantityExpr)> {
+    let (suffix, remaining) = take_until::<_, _, OracleError<'_>>(" for each ")
+        .parse(filter_text)
+        .ok()?;
+    let (clause, _) = tag::<_, _, OracleError<'_>>(" for each ")
+        .parse(suffix)
+        .ok()?;
+    let count = oracle_quantity::parse_for_each_clause_expr(clause.trim())?;
+    Some((remaining.trim_end(), count))
 }
 
 fn parse_seek_from_top_limit(filter_text: &str) -> (&str, Option<usize>) {
@@ -435,7 +670,11 @@ fn parse_seek_from_top_limit(filter_text: &str) -> (&str, Option<usize>) {
 /// Parse the card type filter from search text like "basic land card, ..."
 /// or "creature card with ..." into a TargetFilter.
 pub(super) fn parse_search_filter(text: &str, ctx: &mut ParseContext) -> TargetFilter {
-    let type_text = text.trim();
+    let type_text = search_filter_region(text).trim();
+
+    if let Some(filter) = parse_search_filter_color_disjunction(type_text, ctx) {
+        return filter;
+    }
 
     if let Some(filter) = parse_search_filter_disjunction(type_text, ctx) {
         return filter;
@@ -443,6 +682,12 @@ pub(super) fn parse_search_filter(text: &str, ctx: &mut ParseContext) -> TargetF
 
     if let Some(filter) = parse_search_filter_leading_property_stack(type_text, ctx) {
         return filter;
+    }
+
+    if let Ok((rest, filter)) = parse_card_with_highest_mana_value_library_filter(type_text) {
+        if rest.trim().is_empty() {
+            return filter;
+        }
     }
 
     let (parsed_filter, remainder) = parse_type_phrase(type_text);
@@ -468,6 +713,35 @@ pub(super) fn parse_search_filter(text: &str, ctx: &mut ParseContext) -> TargetF
     let (type_word, suffix_text) = split_search_type_word_and_suffix(clean);
 
     parse_search_filter_fallback(type_word, suffix_text, is_basic, ctx)
+}
+
+fn parse_search_filter_color_disjunction(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<TargetFilter> {
+    let (rest, first_color) = nom_primitives::parse_color.parse(text).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" or ").parse(rest).ok()?;
+    let (rest, second_color) = nom_primitives::parse_color.parse(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest).ok()?;
+
+    let base_filter = parse_search_filter(rest, ctx);
+    if !search_filter_has_meaningful_content(&base_filter) {
+        return None;
+    }
+
+    let filters = [first_color, second_color]
+        .into_iter()
+        .map(|color| {
+            apply_search_suffix_constraints(
+                base_filter.clone(),
+                &SearchSuffixConstraints {
+                    properties: vec![FilterProp::HasColor { color }],
+                    type_filters: Vec::new(),
+                },
+            )
+        })
+        .collect();
+    Some(TargetFilter::Or { filters })
 }
 
 fn parse_search_filter_leading_property_stack(
@@ -542,10 +816,59 @@ fn parse_search_filter_disjunction(text: &str, ctx: &mut ParseContext) -> Option
 
     let filters: Vec<TargetFilter> = segments
         .into_iter()
-        .map(|s| parse_search_filter(s, ctx))
+        .flat_map(|s| match parse_search_filter(s, ctx) {
+            TargetFilter::Or { filters } => filters,
+            filter => vec![filter],
+        })
         .filter(search_filter_has_meaningful_content)
         .collect();
-    (filters.len() >= 2).then(|| normalize_search_filter(TargetFilter::Or { filters }))
+    (filters.len() >= 2).then(|| {
+        let filter = normalize_search_filter(TargetFilter::Or { filters });
+        apply_shared_leading_search_properties(filter_region, filter)
+    })
+}
+
+fn apply_shared_leading_search_properties(
+    filter_region: &str,
+    filter: TargetFilter,
+) -> TargetFilter {
+    if !filter_region.as_bytes().contains(&b',') {
+        return filter;
+    }
+
+    let suffix = leading_search_properties(filter_region);
+    if suffix.properties.is_empty() {
+        return filter;
+    }
+
+    if search_filter_all_land_subtype_branches(&filter) {
+        apply_search_suffix_constraints(filter, &suffix)
+    } else {
+        filter
+    }
+}
+
+fn leading_search_properties(filter_region: &str) -> SearchSuffixConstraints {
+    let mut suffix = SearchSuffixConstraints::default();
+    let mut remaining = filter_region;
+    while let Ok((rest, property)) = parse_search_leading_filter_property(remaining) {
+        suffix.properties.push(property);
+        remaining = rest;
+    }
+    suffix
+}
+
+fn search_filter_all_land_subtype_branches(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed.type_filters.iter().any(|type_filter| {
+            matches!(type_filter, TypeFilter::Subtype(subtype)
+                if infer_core_type_for_subtype(subtype) == Some(CoreType::Land))
+        }),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().all(search_filter_all_land_subtype_branches)
+        }
+        _ => false,
+    }
 }
 
 /// Split a single search-filter expression on disjunctive filter boundaries:
@@ -558,14 +881,46 @@ fn parse_search_filter_disjunction(text: &str, ctx: &mut ParseContext) -> Option
 /// and canonical core unions such as `"instant or sorcery card"` on the
 /// existing suffix/type-phrase paths.
 fn split_filter_disjunctions(filter_region: &str) -> Vec<&str> {
-    #[derive(Clone, Copy)]
-    enum Disjunction {
-        OrA,
-        OrAn,
-        OrBasic,
-        AndOrA,
-        AndOrAn,
-        BareOr,
+    /// The two structural axes of a search-filter disjunction. Replaces the
+    /// flat 7-variant `Disjunction` cluster — every consumer site checks
+    /// `connector` (Or vs AndOr) and `leading` (article shape) independently,
+    /// which is what the parameterized form exposes directly.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Connector {
+        Or,
+        AndOr,
+    }
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Leading {
+        A,
+        An,
+        Basic,
+        None,
+    }
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    struct Disjunction {
+        connector: Connector,
+        leading: Leading,
+    }
+
+    // Sub-combinator that dispatches the leading-article axis on a single
+    // alt() — shared between the and/or and or scans so future leading
+    // variants (e.g., AndOrBasic) require one arm, not one per connector.
+    fn parse_leading<'a>(
+        connector: Connector,
+        connector_tag: &'static str,
+    ) -> impl Parser<&'a str, Output = Disjunction, Error = OracleError<'a>> {
+        move |i: &'a str| {
+            let (i, _) = tag::<_, _, OracleError<'a>>(connector_tag).parse(i)?;
+            let (i, leading) = alt((
+                value(Leading::A, tag::<_, _, OracleError<'a>>("a ")),
+                value(Leading::An, tag::<_, _, OracleError<'a>>("an ")),
+                value(Leading::Basic, tag::<_, _, OracleError<'a>>("basic ")),
+                value(Leading::None, tag::<_, _, OracleError<'a>>("")),
+            ))
+            .parse(i)?;
+            Ok((i, Disjunction { connector, leading }))
+        }
     }
 
     let mut segments = Vec::new();
@@ -573,22 +928,14 @@ fn split_filter_disjunctions(filter_region: &str) -> Vec<&str> {
     loop {
         let mut and_or_scan = (
             take_until::<_, _, OracleError<'_>>(" and/or "),
-            alt((
-                value(Disjunction::AndOrA, tag(" and/or a ")),
-                value(Disjunction::AndOrAn, tag(" and/or an ")),
-            )),
+            parse_leading(Connector::AndOr, " and/or "),
         );
         let parsed = if let Ok(found) = and_or_scan.parse(remaining) {
             Some(found)
         } else {
             let mut or_scan = (
                 take_until::<_, _, OracleError<'_>>(" or "),
-                alt((
-                    value(Disjunction::OrA, tag(" or a ")),
-                    value(Disjunction::OrAn, tag(" or an ")),
-                    value(Disjunction::OrBasic, tag(" or basic ")),
-                    value(Disjunction::BareOr, tag(" or ")),
-                )),
+                parse_leading(Connector::Or, " or "),
             );
             or_scan.parse(remaining).ok()
         };
@@ -598,7 +945,11 @@ fn split_filter_disjunctions(filter_region: &str) -> Vec<&str> {
             break;
         };
 
-        if matches!(disjunction, Disjunction::BareOr)
+        // Bare " or " gates: only fires with no article, and the right side
+        // must look like a card-bearing alternative for the current grammar
+        // (otherwise comparator suffixes "or less" would split incorrectly).
+        if disjunction.connector == Connector::Or
+            && disjunction.leading == Leading::None
             && !bare_search_disjunction_allowed(before.trim(), rest.trim_start())
         {
             if segments.is_empty() {
@@ -608,17 +959,29 @@ fn split_filter_disjunctions(filter_region: &str) -> Vec<&str> {
             break;
         }
 
-        segments.push(before.trim());
-        remaining = match disjunction {
-            Disjunction::OrA
-            | Disjunction::OrAn
-            | Disjunction::AndOrA
-            | Disjunction::AndOrAn
-            | Disjunction::BareOr => rest,
-            Disjunction::OrBasic => {
-                let start = filter_region.len() - rest.len() - "basic ".len();
-                &filter_region[start..]
+        // Bare " and/or " gate: a comma in the left segment indicates an
+        // enumeration ("X, Y, and/or Z") that the upstream split has already
+        // mishandled — bail rather than over-split.
+        if disjunction.connector == Connector::AndOr
+            && disjunction.leading == Leading::None
+            && before.as_bytes().contains(&b',')
+        // structural: not dispatch (comma presence check)
+        {
+            if segments.is_empty() {
+                return vec![filter_region.trim()];
             }
+            segments.push(remaining.trim());
+            break;
+        }
+
+        segments.push(before.trim());
+        remaining = if disjunction.leading == Leading::Basic {
+            // "basic" is a supertype, not an article — recover it into the
+            // right segment so the type-phrase parser sees "basic <type>".
+            let start = filter_region.len() - rest.len() - "basic ".len();
+            &filter_region[start..]
+        } else {
+            rest
         };
     }
 
@@ -1118,6 +1481,127 @@ fn parse_that_object_mana_value(input: &str) -> Result<(&str, ()), nom::Err<Orac
     Ok((rest, ()))
 }
 
+fn parse_chosen_name_reference_suffix(
+    input: &str,
+) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    let (rest, _) = alt((
+        tag("which have the same name as the chosen "),
+        tag("which has the same name as the chosen "),
+        tag("that have the same name as the chosen "),
+        tag("that has the same name as the chosen "),
+        tag("with the same name as the chosen "),
+    ))
+    .parse(input)?;
+    let (rest, _) =
+        take_till1::<_, _, OracleError<'_>>(|c: char| c == ',' || c == '.').parse(rest)?;
+    Ok((rest, ()))
+}
+
+fn parse_not_named_suffix(input: &str) -> Result<(&str, FilterProp), nom::Err<OracleError<'_>>> {
+    let (rest, _) = tag("not named ").parse(input)?;
+    let (after_name, name) = if let Ok((after_name, (name, _))) = (
+        take_until::<_, _, OracleError<'_>>(" that "),
+        peek(tag::<_, _, OracleError<'_>>(" that ")),
+    )
+        .parse(rest)
+    {
+        (after_name, name)
+    } else {
+        take_till1::<_, _, OracleError<'_>>(|c: char| c == ',' || c == '.').parse(rest)?
+    };
+
+    Ok((
+        after_name,
+        FilterProp::SharesQuality {
+            quality: SharedQuality::Name,
+            reference: Some(Box::new(TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::Named {
+                    name: name.trim().to_string(),
+                }]),
+            ))),
+            relation: SharedQualityRelation::DoesNotShare,
+        },
+    ))
+}
+
+fn parse_same_total_power_toughness_suffix(
+    input: &str,
+) -> Result<(&str, FilterProp), nom::Err<OracleError<'_>>> {
+    let (rest, _) = tag("with the same total power and toughness").parse(input)?;
+    Ok((
+        rest,
+        FilterProp::SharesQuality {
+            quality: SharedQuality::TotalPowerToughness,
+            reference: Some(Box::new(TargetFilter::TriggeringSource)),
+            relation: SharedQualityRelation::Shares,
+        },
+    ))
+}
+
+fn parse_highest_mana_value_library_suffix(
+    input: &str,
+) -> Result<(&str, Vec<FilterProp>), nom::Err<OracleError<'_>>> {
+    let (rest, _) = tag("with the highest mana value among cards in your library with mana value ")
+        .parse(input)?;
+    let (rest, threshold) = if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>("x or less, where x is ").parse(rest)
+    {
+        let qty = crate::parser::oracle_quantity::parse_quantity_ref(rest)
+            .ok_or_else(|| nom::Err::Error(OracleError::new(rest, nom::error::ErrorKind::Fail)))?;
+        ("", QuantityExpr::Ref { qty })
+    } else {
+        let (rest, _) = tag("less than or equal to ").parse(rest)?;
+        let qty = crate::parser::oracle_quantity::parse_quantity_ref(rest)
+            .ok_or_else(|| nom::Err::Error(OracleError::new(rest, nom::error::ErrorKind::Fail)))?;
+        ("", QuantityExpr::Ref { qty })
+    };
+
+    let eligible_filter = TargetFilter::Typed(
+        TypedFilter::card()
+            .controller(ControllerRef::You)
+            .properties(vec![
+                FilterProp::InZone {
+                    zone: Zone::Library,
+                },
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: threshold.clone(),
+                },
+            ]),
+    );
+
+    Ok((
+        rest,
+        vec![
+            FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: threshold,
+            },
+            FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Aggregate {
+                        function: AggregateFunction::Max,
+                        property: ObjectProperty::ManaValue,
+                        filter: eligible_filter,
+                    },
+                },
+            },
+        ],
+    ))
+}
+
+fn parse_card_with_highest_mana_value_library_filter(
+    input: &str,
+) -> Result<(&str, TargetFilter), nom::Err<OracleError<'_>>> {
+    let (rest, _) = tag("card ").parse(input)?;
+    let (rest, properties) = parse_highest_mana_value_library_suffix(rest)?;
+    Ok((
+        rest,
+        TargetFilter::Typed(TypedFilter::card().properties(properties)),
+    ))
+}
+
 fn object_scope_for_linked_reference(reference: &TargetFilter) -> Option<ObjectScope> {
     match reference {
         TargetFilter::CostPaidObject => Some(ObjectScope::CostPaidObject),
@@ -1241,6 +1725,35 @@ fn add_default_battlefield_zone(filter: TargetFilter) -> TargetFilter {
     }
 }
 
+/// CR 701.23a: Parse a possessive-scoped zone phrase (`"your library"`,
+/// `"an opponent's library"`, etc.) into the typed `(Zone, ControllerRef)`
+/// pair the engine consumes. Composes from `tag()` arms over the connector
+/// × zone axes so future graveyard / hand variants add a single combinator
+/// arm rather than a new sibling on every consumer.
+fn parse_possessive_zone(
+    input: &str,
+) -> nom::IResult<&str, (Zone, ControllerRef), OracleError<'_>> {
+    alt((
+        value(
+            (Zone::Library, ControllerRef::You),
+            tag::<_, _, OracleError<'_>>("your library"),
+        ),
+        value(
+            (Zone::Library, ControllerRef::Opponent),
+            tag("an opponent's library"),
+        ),
+        value(
+            (Zone::Library, ControllerRef::Opponent),
+            tag("target opponent's library"),
+        ),
+        value(
+            (Zone::Library, ControllerRef::Opponent),
+            tag("opponent's library"),
+        ),
+    ))
+    .parse(input)
+}
+
 /// Parse property suffixes from search filter text ("with mana value ...", "with a different name ...").
 /// Reuses the existing suffix parsers from oracle_target.
 fn parse_search_filter_suffixes(
@@ -1353,6 +1866,18 @@ fn parse_search_filter_suffixes(
             continue;
         }
 
+        if let Ok((rest, prop)) = parse_not_named_suffix(remaining) {
+            suffix.properties.push(prop);
+            remaining = rest.trim_start();
+            continue;
+        }
+
+        if let Ok((rest, _)) = parse_chosen_name_reference_suffix(remaining) {
+            suffix.properties.push(FilterProp::SameNameAsParentTarget);
+            remaining = rest.trim_start();
+            continue;
+        }
+
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("with the same name").parse(remaining) {
             suffix.properties.push(FilterProp::SameNameAsParentTarget);
             remaining = rest.trim_start();
@@ -1363,6 +1888,31 @@ fn parse_search_filter_suffixes(
             suffix
                 .properties
                 .push(FilterProp::IsChosenLandOrNonlandKind);
+            remaining = rest.trim_start();
+            continue;
+        }
+
+        // CR 205.3m + CR 701.23a: "of the most prevalent creature type in
+        // <possessive zone>". Parameterized over `(Zone, ControllerRef)` so
+        // future opponent's-library / graveyard variants reuse this slot
+        // instead of spawning a sibling tag arm per phrasing.
+        if let Ok((rest, (zone, scope))) = preceded(
+            tag::<_, _, OracleError<'_>>("of the most prevalent creature type in "),
+            parse_possessive_zone,
+        )
+        .parse(remaining)
+        {
+            suffix
+                .properties
+                .push(FilterProp::MostPrevalentCreatureTypeIn { zone, scope });
+            remaining = rest.trim_start();
+            continue;
+        }
+
+        // CR 608.2c: distinct-quality suffixes constrain the chosen set, not
+        // individual cards. The constraint is already encoded upstream via
+        // `scan_distinct_qualities_constraint`; this arm only consumes the marker.
+        if let Ok((rest, _)) = parse_distinct_quality_suffix(remaining) {
             remaining = rest.trim_start();
             continue;
         }
@@ -1380,22 +1930,15 @@ fn parse_search_filter_suffixes(
             continue;
         }
 
-        // CR 608.2c: distinct-names suffixes constrain the chosen set, not
-        // individual cards. The constraint is already encoded upstream via
-        // `scan_distinct_names_clause`; this arm only consumes the marker.
-        if let Ok((rest, _)) = alt((
-            nom::sequence::preceded(
-                tag::<_, _, OracleError<'_>>("with "),
-                parse_distinct_names_marker,
-            ),
-            nom::sequence::preceded(
-                tag::<_, _, OracleError<'_>>("that have "),
-                parse_distinct_names_marker,
-            ),
-        ))
-        .parse(remaining)
-        {
+        if let Ok((rest, prop)) = parse_same_total_power_toughness_suffix(remaining) {
             remaining = rest.trim_start();
+            suffix.properties.push(prop);
+            continue;
+        }
+
+        if let Ok((rest, props)) = parse_highest_mana_value_library_suffix(remaining) {
+            remaining = rest.trim_start();
+            suffix.properties.extend(props);
             continue;
         }
 
@@ -1593,8 +2136,8 @@ pub(super) fn parse_search_destination(lower: &str) -> Zone {
 mod tests {
     use super::*;
     use crate::types::ability::{Comparator, QuantityRef, SharedQuality, SharedQualityRelation};
-    use crate::types::keywords::Keyword;
-    use crate::types::mana::ManaCost;
+    use crate::types::keywords::{Keyword, KeywordKind};
+    use crate::types::mana::{ManaColor, ManaCost};
 
     #[test]
     fn search_target_opponent_library() {
@@ -1933,10 +2476,13 @@ mod tests {
             panic!("expected Typed filter, got {filter:?}");
         };
         assert!(typed.type_filters.contains(&TypeFilter::Creature));
-        assert!(typed
-            .properties
-            .iter()
-            .any(|property| matches!(property, FilterProp::Colorless)));
+        assert!(typed.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::ColorCount {
+                comparator: Comparator::EQ,
+                count: 0,
+            }
+        )));
         assert!(typed.properties.iter().any(|property| matches!(
             property,
             FilterProp::Cmc {
@@ -2024,6 +2570,49 @@ mod tests {
     }
 
     #[test]
+    fn parse_search_filter_handles_keyword_kind_suffix() {
+        let mut ctx = ParseContext::default();
+        let filter = parse_search_filter("card with augment, reveal it", &mut ctx);
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::HasKeywordKind {
+                value: KeywordKind::Augment
+            }
+        )));
+        assert!(ctx.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn parse_search_filter_keeps_unimplemented_combine_after_augment_visible() {
+        use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+
+        let mut ctx = ParseContext::default();
+        let filter = parse_search_filter(
+            "card with augment and combine it with target host you control",
+            &mut ctx,
+        );
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::HasKeywordKind {
+                value: KeywordKind::Augment
+            }
+        )));
+        assert!(
+            ctx.diagnostics
+                .iter()
+                .any(|d| matches!(d, OracleDiagnostic::TargetFallback { text, .. } if text == "combine it with target host you control")),
+            "combine continuation should remain visible until runtime combine is implemented: {:?}",
+            ctx.diagnostics
+        );
+    }
+
+    #[test]
     fn parse_search_filter_handles_zero_or_one_mana_cost() {
         let filter = parse_search_filter(
             "artifact card with mana cost {0} or {1}, put it onto the battlefield",
@@ -2070,10 +2659,13 @@ mod tests {
             panic!("expected Typed filter, got {filter:?}");
         };
         assert!(typed.type_filters.contains(&TypeFilter::Card));
-        assert!(typed
-            .properties
-            .iter()
-            .any(|property| matches!(property, FilterProp::Multicolored)));
+        assert!(typed.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::ColorCount {
+                comparator: Comparator::GE,
+                count: 2,
+            }
+        )));
     }
 
     #[test]
@@ -2131,6 +2723,39 @@ mod tests {
             .properties
             .iter()
             .any(|property| matches!(property, FilterProp::HasColor { .. })));
+    }
+
+    #[test]
+    fn search_filter_color_disjunction_shares_type_and_suffixes() {
+        let filter = parse_search_filter(
+            "red or white instant card with mana value 4 or less",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected Or filter, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2);
+
+        for (filter, expected_color) in filters.iter().zip([
+            crate::types::mana::ManaColor::Red,
+            crate::types::mana::ManaColor::White,
+        ]) {
+            let TargetFilter::Typed(typed) = filter else {
+                panic!("expected typed branch, got {filter:?}");
+            };
+            assert!(typed.type_filters.contains(&TypeFilter::Instant));
+            assert!(typed
+                .properties
+                .iter()
+                .any(|property| matches!(property, FilterProp::HasColor { color } if *color == expected_color)));
+            assert!(typed.properties.iter().any(|property| matches!(
+                property,
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Fixed { value: 4 }
+                }
+            )));
+        }
     }
 
     #[test]
@@ -2233,6 +2858,36 @@ mod tests {
     }
 
     #[test]
+    fn parse_search_filter_handles_bare_and_or_subtype_variant() {
+        let mut ctx = ParseContext::default();
+        let filter = parse_search_filter(
+            "basic land cards and/or town cards with different names",
+            &mut ctx,
+        );
+        assert!(ctx.diagnostics.is_empty());
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected Or filter, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2);
+
+        let TargetFilter::Typed(basic_land) = &filters[0] else {
+            panic!("expected typed basic land branch, got {:?}", filters[0]);
+        };
+        assert!(basic_land.type_filters.contains(&TypeFilter::Land));
+        assert!(basic_land.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::HasSupertype {
+                value: Supertype::Basic
+            }
+        )));
+
+        let TargetFilter::Typed(town) = &filters[1] else {
+            panic!("expected typed Town branch, got {:?}", filters[1]);
+        };
+        assert_eq!(town.get_subtype(), Some("Town"));
+    }
+
+    #[test]
     fn parse_search_filter_handles_trailing_subtype_card() {
         let filter =
             parse_search_filter("spider hero card, reveal it", &mut ParseContext::default());
@@ -2297,6 +2952,32 @@ mod tests {
                 value: crate::types::card_type::Supertype::Basic
             }
         )));
+    }
+
+    #[test]
+    fn parse_search_filter_applies_shared_basic_to_land_subtype_list() {
+        let filter = parse_search_filter(
+            "basic swamp, forest, or island card",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected Or filter, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 3);
+
+        for (filter, subtype) in filters.iter().zip(["Swamp", "Forest", "Island"]) {
+            let TargetFilter::Typed(typed) = filter else {
+                panic!("expected typed {subtype} branch, got {filter:?}");
+            };
+            assert!(typed.type_filters.contains(&TypeFilter::Land));
+            assert_eq!(typed.get_subtype(), Some(subtype));
+            assert!(typed.properties.iter().any(|property| matches!(
+                property,
+                FilterProp::HasSupertype {
+                    value: Supertype::Basic
+                }
+            )));
+        }
     }
 
     #[test]
@@ -2481,6 +3162,54 @@ mod tests {
                 reference: Some(reference),
                 relation: SharedQualityRelation::Shares,
             } if matches!(reference.as_ref(), TargetFilter::CostPaidObject)
+        )));
+    }
+
+    #[test]
+    fn parse_search_filter_same_name_as_chosen_object() {
+        let mut ctx = ParseContext::default();
+        let filter = parse_search_filter(
+            "basic land cards which have the same name as the chosen land",
+            &mut ctx,
+        );
+        assert!(ctx.diagnostics.is_empty());
+        let TargetFilter::Typed(filter) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(filter.type_filters.contains(&TypeFilter::Land));
+        assert!(filter
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::SameNameAsParentTarget)));
+    }
+
+    #[test]
+    fn parse_search_filter_not_named_preserves_trailing_distinct_names_suffix() {
+        let mut ctx = ParseContext::default();
+        let filter = parse_search_filter(
+            "dragon cards not named tiamat that each have different names",
+            &mut ctx,
+        );
+        assert!(ctx.diagnostics.is_empty());
+        let TargetFilter::Typed(filter) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(filter.type_filters.iter().any(
+            |type_filter| matches!(type_filter, TypeFilter::Subtype(subtype) if subtype == "Dragon")
+        ));
+        assert!(filter.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::Name,
+                reference: Some(reference),
+                relation: SharedQualityRelation::DoesNotShare,
+            } if matches!(
+                reference.as_ref(),
+                TargetFilter::Typed(TypedFilter {
+                    properties,
+                    ..
+                }) if properties.iter().any(|property| matches!(property, FilterProp::Named { name } if name == "tiamat"))
+            )
         )));
     }
 
@@ -2672,6 +3401,50 @@ mod tests {
         }
     }
 
+    /// CR 701.23a + CR 107.1: Lotuslight Dancers-style serial filters —
+    /// "a black card, a green card, and a blue card" — are three independent
+    /// search filters, not one black filter with swallowed comma text.
+    #[test]
+    fn search_serial_color_filters_extracts_all_colors() {
+        let details = parse_search_library_details(
+            "search your library for a black card, a green card, and a blue card. put those cards into your graveyard, then shuffle",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(details.extra_filters.len(), 2);
+        assert_filter_has_color(&details.filter, ManaColor::Black);
+        assert_filter_has_color(&details.extra_filters[0], ManaColor::Green);
+        assert_filter_has_color(&details.extra_filters[1], ManaColor::Blue);
+        assert_eq!(details.multi_destination, Zone::Graveyard);
+    }
+
+    /// CR 701.23a + CR 205.3i: "a land card of each basic land type" is a
+    /// multi-filter search: one land card with each of the five basic land
+    /// subtypes. It reuses the existing chained `SearchLibrary` lowering path
+    /// used by "a Forest card and a Plains card" instead of adding a special
+    /// resolver.
+    #[test]
+    fn search_land_card_of_each_basic_land_type_extracts_five_filters() {
+        let details = parse_search_library_details(
+            "search your library for a land card of each basic land type, put those cards onto the battlefield, then shuffle",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(details.extra_filters.len(), 4);
+        for (filter, subtype) in [&details.filter]
+            .into_iter()
+            .chain(details.extra_filters.iter())
+            .zip(["Plains", "Island", "Swamp", "Mountain", "Forest"])
+        {
+            match filter {
+                TargetFilter::Typed(typed) => {
+                    assert!(typed.type_filters.contains(&TypeFilter::Land));
+                    assert_eq!(typed.get_subtype(), Some(subtype));
+                }
+                other => panic!("expected typed land filter for {subtype}, got {other:?}"),
+            }
+        }
+        assert_eq!(details.multi_destination, Zone::Battlefield);
+    }
+
     /// Regression: single-filter search ("a creature card") still lowers to
     /// `extra_filters = []` and does not spuriously match the dual-search path.
     #[test]
@@ -2683,9 +3456,21 @@ mod tests {
         assert!(details.extra_filters.is_empty());
     }
 
+    fn assert_filter_has_color(filter: &TargetFilter, expected: ManaColor) {
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.properties.iter().any(
+                |property| matches!(property, FilterProp::HasColor { color } if *color == expected)
+            ),
+            "expected {expected:?} color filter, got {tf:?}"
+        );
+    }
+
     /// CR 608.2c + CR 701.23: Gifts Ungiven — "search your library for up to
     /// four cards with different names". The "with different names" clause
-    /// must surface as `SearchSelectionConstraint::DistinctNames` rather than
+    /// must surface as `SearchSelectionConstraint::DistinctQualities` rather than
     /// silently degrading the per-card filter.
     #[test]
     fn search_with_different_names_emits_distinct_names_constraint() {
@@ -2695,7 +3480,9 @@ mod tests {
         );
         assert_eq!(
             details.selection_constraint,
-            SearchSelectionConstraint::DistinctNames
+            SearchSelectionConstraint::DistinctQualities {
+                qualities: vec![SharedQuality::Name],
+            }
         );
         assert!(details.up_to);
         assert_eq!(details.count, QuantityExpr::Fixed { value: 4 });
@@ -2709,10 +3496,234 @@ mod tests {
         );
         assert_eq!(
             details.selection_constraint,
-            SearchSelectionConstraint::DistinctNames
+            SearchSelectionConstraint::DistinctQualities {
+                qualities: vec![SharedQuality::Name],
+            }
         );
         assert!(details.up_to);
         assert_eq!(details.count, QuantityExpr::Fixed { value: 5 });
+    }
+
+    #[test]
+    fn search_that_each_have_different_names_emits_distinct_names_constraint() {
+        let details = parse_search_library_details(
+            "search your library for up to five dragon cards that each have different names, reveal them, put them into your hand, then shuffle",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(
+            details.selection_constraint,
+            SearchSelectionConstraint::DistinctQualities {
+                qualities: vec![SharedQuality::Name],
+            }
+        );
+        assert!(details.up_to);
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 5 });
+    }
+
+    #[test]
+    fn search_with_different_powers_emits_distinct_quality_constraint() {
+        let mut ctx = ParseContext::default();
+        let details = parse_search_library_details(
+            "search your library for up to four creature cards with different powers and reveal them",
+            &mut ctx,
+        );
+        assert_eq!(
+            details.selection_constraint,
+            SearchSelectionConstraint::DistinctQualities {
+                qualities: vec![SharedQuality::Power],
+            }
+        );
+        assert!(ctx.diagnostics.iter().all(|diagnostic| !matches!(
+            diagnostic,
+            OracleDiagnostic::TargetFallback { context, .. }
+                if context == "search-filter-suffix unmatched"
+        )));
+    }
+
+    #[test]
+    fn search_that_dont_share_quality_list_emits_distinct_quality_constraint() {
+        let mut ctx = ParseContext::default();
+        let details = parse_search_library_details(
+            "search your library for up to four cards that don't share a mana value, power, toughness, or card type with each other",
+            &mut ctx,
+        );
+        assert_eq!(
+            details.selection_constraint,
+            SearchSelectionConstraint::DistinctQualities {
+                qualities: vec![
+                    SharedQuality::ManaValue,
+                    SharedQuality::Power,
+                    SharedQuality::Toughness,
+                    SharedQuality::CardType,
+                ],
+            }
+        );
+        assert_eq!(details.filter, TargetFilter::Typed(TypedFilter::card()));
+        assert!(ctx.diagnostics.iter().all(|diagnostic| !matches!(
+            diagnostic,
+            OracleDiagnostic::TargetFallback { context, .. }
+                if context == "search-filter-suffix unmatched"
+        )));
+    }
+
+    #[test]
+    fn search_same_total_power_toughness_emits_trigger_source_quality_filter() {
+        let mut ctx = ParseContext::default();
+        let details = parse_search_library_details(
+            "search your library for a creature card with the same total power and toughness",
+            &mut ctx,
+        );
+        let TargetFilter::Typed(filter) = details.filter else {
+            panic!("expected typed filter, got {:?}", details.filter);
+        };
+        assert!(matches!(
+            filter.type_filters.as_slice(),
+            [TypeFilter::Creature]
+        ));
+        assert!(filter.properties.iter().any(|prop| matches!(
+            prop,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::TotalPowerToughness,
+                reference: Some(reference),
+                relation: SharedQualityRelation::Shares,
+            } if matches!(reference.as_ref(), TargetFilter::TriggeringSource)
+        )));
+        assert!(ctx.diagnostics.iter().all(|diagnostic| !matches!(
+            diagnostic,
+            OracleDiagnostic::TargetFallback { context, .. }
+                if context == "search-filter-suffix unmatched"
+        )));
+    }
+
+    #[test]
+    fn seek_most_prevalent_creature_type_emits_library_prevalence_filter() {
+        let mut ctx = ParseContext::default();
+        let details = parse_seek_details(
+            "seek a creature card of the most prevalent creature type in your library",
+            &mut ctx,
+        );
+        let TargetFilter::Typed(filter) = details.filter else {
+            panic!("expected typed filter, got {:?}", details.filter);
+        };
+        assert!(matches!(
+            filter.type_filters.as_slice(),
+            [TypeFilter::Creature]
+        ));
+        assert!(filter
+            .properties
+            .contains(&FilterProp::MostPrevalentCreatureTypeIn {
+                zone: Zone::Library,
+                scope: ControllerRef::You,
+            }));
+        assert!(ctx.diagnostics.iter().all(|diagnostic| !matches!(
+            diagnostic,
+            OracleDiagnostic::TargetFallback { context, .. }
+                if context == "search-filter-suffix unmatched"
+        )));
+    }
+
+    /// CR 205.3m + CR 701.23a: L1 lift regression — opponent-scoped
+    /// possessive must dispatch into the same parameterized filter without
+    /// spawning a new variant. The test pins the (Zone, ControllerRef) axis
+    /// combination proving the parser composes both scopes from one
+    /// combinator.
+    #[test]
+    fn seek_most_prevalent_creature_type_in_opponents_library_uses_opponent_scope() {
+        let mut ctx = ParseContext::default();
+        let details = parse_seek_details(
+            "seek a creature card of the most prevalent creature type in an opponent's library",
+            &mut ctx,
+        );
+        let TargetFilter::Typed(filter) = details.filter else {
+            panic!("expected typed filter, got {:?}", details.filter);
+        };
+        assert!(filter
+            .properties
+            .contains(&FilterProp::MostPrevalentCreatureTypeIn {
+                zone: Zone::Library,
+                scope: ControllerRef::Opponent,
+            }));
+    }
+
+    #[test]
+    fn seek_highest_mana_value_under_life_gained_threshold_emits_aggregate_filter() {
+        let mut ctx = ParseContext::default();
+        let details = parse_seek_details(
+            "seek a card with the highest mana value among cards in your library with mana value less than or equal to the amount of life you gained this turn",
+            &mut ctx,
+        );
+        let TargetFilter::Typed(filter) = details.filter else {
+            panic!("expected typed filter, got {:?}", details.filter);
+        };
+        assert!(filter.properties.iter().any(|prop| matches!(
+            prop,
+            FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeGainedThisTurn { .. },
+                },
+            }
+        )));
+        assert!(filter.properties.iter().any(|prop| matches!(
+            prop,
+            FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Aggregate {
+                        function: AggregateFunction::Max,
+                        property: ObjectProperty::ManaValue,
+                        ..
+                    },
+                },
+            }
+        )));
+        assert!(ctx.diagnostics.iter().all(|diagnostic| !matches!(
+            diagnostic,
+            OracleDiagnostic::TargetFallback { context, .. }
+                if context == "search-filter-suffix unmatched"
+        )));
+    }
+
+    #[test]
+    fn seek_highest_mana_value_under_counter_threshold_emits_source_counter_filter() {
+        let mut ctx = ParseContext::default();
+        let details = parse_seek_details(
+            "seek a card with the highest mana value among cards in your library with mana value x or less, where x is the number of charge counters on ~",
+            &mut ctx,
+        );
+        let TargetFilter::Typed(filter) = details.filter else {
+            panic!("expected typed filter, got {:?}", details.filter);
+        };
+        assert!(filter.properties.iter().any(|prop| matches!(
+            prop,
+            FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: Some(counter_type),
+                    },
+                },
+            } if *counter_type == CounterType::Generic("charge".to_string())
+        )));
+        assert!(filter.properties.iter().any(|prop| matches!(
+            prop,
+            FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Aggregate {
+                        function: AggregateFunction::Max,
+                        property: ObjectProperty::ManaValue,
+                        ..
+                    },
+                },
+            }
+        )));
+        assert!(ctx.diagnostics.iter().all(|diagnostic| !matches!(
+            diagnostic,
+            OracleDiagnostic::TargetFallback { context, .. }
+                if context == "search-filter-suffix unmatched"
+        )));
     }
 
     #[test]
@@ -2754,5 +3765,114 @@ mod tests {
             details.selection_constraint,
             SearchSelectionConstraint::None
         );
+    }
+
+    // M6 regression: each old `Disjunction` variant maps to an observable
+    // split outcome from `split_filter_disjunctions`. Covers all 7 cluster
+    // members through their observable split behavior, proving the
+    // parameterized `connector × leading` axis combination still drives the
+    // same segmentation. Bare " or " requires a card-bearing right side
+    // (covered by `bare_search_disjunction_allowed`); bare " and/or " runs
+    // unconditionally.
+
+    // M6 regression: each old `Disjunction` variant maps to an observable
+    // split outcome from `split_filter_disjunctions`. The leading article is
+    // consumed by the connector parser (matching the legacy tag form) so the
+    // right segment is the article-less remainder; only the `Basic` axis
+    // recovers the supertype word into the right segment for downstream
+    // type-phrase parsing.
+
+    #[test]
+    fn split_disjunction_or_a_recovers_article_less_right_segment() {
+        // Old Disjunction::OrA → Or × A
+        let segments = split_filter_disjunctions("creature card or a noncreature card");
+        assert_eq!(segments, vec!["creature card", "noncreature card"]);
+    }
+
+    #[test]
+    fn split_disjunction_or_an_recovers_article_less_right_segment() {
+        // Old Disjunction::OrAn → Or × An
+        let segments = split_filter_disjunctions("creature card or an artifact card");
+        assert_eq!(segments, vec!["creature card", "artifact card"]);
+    }
+
+    #[test]
+    fn split_disjunction_or_basic_recovers_basic_into_right_segment() {
+        // Old Disjunction::OrBasic → Or × Basic — "basic" must stay on the
+        // right segment so the type-phrase parser sees "basic <type>".
+        let segments = split_filter_disjunctions("Mountain or basic Forest card");
+        assert_eq!(segments, vec!["Mountain", "basic Forest card"]);
+    }
+
+    #[test]
+    fn split_disjunction_and_or_a_recovers_article_less_right_segment() {
+        // Old Disjunction::AndOrA → AndOr × A
+        let segments = split_filter_disjunctions("creature card and/or a sorcery card");
+        assert_eq!(segments, vec!["creature card", "sorcery card"]);
+    }
+
+    #[test]
+    fn split_disjunction_and_or_an_recovers_article_less_right_segment() {
+        // Old Disjunction::AndOrAn → AndOr × An
+        let segments = split_filter_disjunctions("creature card and/or an artifact card");
+        assert_eq!(segments, vec!["creature card", "artifact card"]);
+    }
+
+    #[test]
+    fn split_disjunction_and_or_bare_recovers_left_and_right_segments() {
+        // Old Disjunction::AndOrBare → AndOr × None
+        let segments = split_filter_disjunctions("creatures and/or planeswalkers");
+        assert_eq!(segments, vec!["creatures", "planeswalkers"]);
+    }
+
+    #[test]
+    fn split_disjunction_bare_or_with_card_bearing_right_splits_segments() {
+        // Old Disjunction::BareOr → Or × None (gated by
+        // `bare_search_disjunction_allowed` — right must look like a card).
+        let segments = split_filter_disjunctions("Mountain or Cave card");
+        assert_eq!(segments, vec!["Mountain", "Cave card"]);
+    }
+
+    /// M7 backward-compat: a serialized JSON snapshot using the legacy
+    /// `ObjectCountDistinctNames` tag (single `filter` field, no `qualities`)
+    /// must deserialize to the new parameterized `ObjectCountDistinct` shape
+    /// with `qualities = vec![SharedQuality::Name]`. Mirrors Batch 5's
+    /// approach for forward-compatible enum lifts.
+    #[test]
+    fn legacy_object_count_distinct_names_json_deserializes_with_default_qualities() {
+        let legacy_json = serde_json::json!({
+            "type": "ObjectCountDistinctNames",
+            "filter": { "type": "Any" }
+        });
+        let qty: QuantityRef =
+            serde_json::from_value(legacy_json).expect("legacy tag deserializes");
+        match qty {
+            QuantityRef::ObjectCountDistinct {
+                filter: _,
+                qualities,
+            } => {
+                assert_eq!(qualities, vec![SharedQuality::Name]);
+            }
+            other => panic!("expected ObjectCountDistinct, got {other:?}"),
+        }
+    }
+
+    /// M7 backward-compat: legacy `MostPrevalentCreatureTypeInLibrary` tag
+    /// deserializes to the new parameterized variant with default
+    /// `zone = Library` and `scope = You`.
+    #[test]
+    fn legacy_most_prevalent_creature_type_json_deserializes_with_default_axes() {
+        let legacy_json = serde_json::json!({
+            "type": "MostPrevalentCreatureTypeInLibrary"
+        });
+        let prop: FilterProp =
+            serde_json::from_value(legacy_json).expect("legacy tag deserializes");
+        match prop {
+            FilterProp::MostPrevalentCreatureTypeIn { zone, scope } => {
+                assert_eq!(zone, Zone::Library);
+                assert_eq!(scope, ControllerRef::You);
+            }
+            other => panic!("expected MostPrevalentCreatureTypeIn, got {other:?}"),
+        }
     }
 }

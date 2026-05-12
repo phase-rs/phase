@@ -7,6 +7,7 @@ use engine::game::zones::create_object;
 use engine::types::ability::{AbilityCost, Effect, QuantityExpr, ResolvedAbility, TargetFilter};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
+use engine::types::counter::CounterType;
 use engine::types::events::{BendingType, GameEvent};
 use engine::types::game_state::{CastingVariant, ConvokeMode, GameState, PendingCast, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
@@ -885,6 +886,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
             condition: None,
             trigger_event: None,
             description: None,
+            source_name: String::new(),
         },
     };
     stack::push_to_stack(&mut state, entry, &mut vec![]);
@@ -1034,7 +1036,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
         let landfall_execute = engine::types::ability::AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::PutCounter {
-                counter_type: "quest".to_string(),
+                counter_type: CounterType::Generic("quest".to_string()),
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,
             },
@@ -1043,7 +1045,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
             engine::types::ability::AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::PutCounter {
-                    counter_type: "P1P1".to_string(),
+                    counter_type: CounterType::Plus1Plus1,
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Typed(
                         engine::types::ability::TypedFilter::creature()
@@ -1056,7 +1058,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::CountersOn {
                         scope: engine::types::ability::ObjectScope::Source,
-                        counter_type: Some("quest".to_string()),
+                        counter_type: Some(CounterType::Generic("quest".to_string())),
                     },
                 },
                 comparator: Comparator::GE,
@@ -1112,7 +1114,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
             .execute(engine::types::ability::AbilityDefinition::new(
                 engine::types::ability::AbilityKind::Spell,
                 Effect::PutCounter {
-                    counter_type: "P1P1".to_string(),
+                    counter_type: CounterType::Plus1Plus1,
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::SelfRef,
                 },
@@ -1246,6 +1248,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
             condition: None,
             trigger_event: None,
             description: None,
+            source_name: String::new(),
         },
     };
     stack::push_to_stack(&mut state, entry, &mut vec![]);
@@ -1394,7 +1397,7 @@ fn test_earthbender_landfall_trigger_resolves_without_hang() {
         let landfall_execute = engine::types::ability::AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::PutCounter {
-                counter_type: "quest".to_string(),
+                counter_type: CounterType::Generic("quest".to_string()),
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,
             },
@@ -1403,7 +1406,7 @@ fn test_earthbender_landfall_trigger_resolves_without_hang() {
             engine::types::ability::AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::PutCounter {
-                    counter_type: "P1P1".to_string(),
+                    counter_type: CounterType::Plus1Plus1,
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Typed(
                         engine::types::ability::TypedFilter::creature()
@@ -1415,7 +1418,7 @@ fn test_earthbender_landfall_trigger_resolves_without_hang() {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::CountersOn {
                         scope: engine::types::ability::ObjectScope::Source,
-                        counter_type: Some("quest".to_string()),
+                        counter_type: Some(CounterType::Generic("quest".to_string())),
                     },
                 },
                 comparator: Comparator::GE,
@@ -1600,7 +1603,7 @@ fn test_ai_passes_priority_on_earthbender_landfall() {
         let landfall_execute = engine::types::ability::AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::PutCounter {
-                counter_type: "quest".to_string(),
+                counter_type: CounterType::Generic("quest".to_string()),
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,
             },
@@ -1609,7 +1612,7 @@ fn test_ai_passes_priority_on_earthbender_landfall() {
             engine::types::ability::AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::PutCounter {
-                    counter_type: "P1P1".to_string(),
+                    counter_type: CounterType::Plus1Plus1,
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Typed(
                         engine::types::ability::TypedFilter::creature()
@@ -1621,7 +1624,7 @@ fn test_ai_passes_priority_on_earthbender_landfall() {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::CountersOn {
                         scope: engine::types::ability::ObjectScope::Source,
-                        counter_type: Some("quest".to_string()),
+                        counter_type: Some(CounterType::Generic("quest".to_string())),
                     },
                 },
                 comparator: Comparator::GE,
@@ -1895,4 +1898,559 @@ fn plain_shock_land_etb_still_prompts_for_life_payment() {
         state.pending_replacement.is_some(),
         "pending_replacement must be populated for the player's choice"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Earthbend dies-or-exiled return: GitHub issue #313
+// ---------------------------------------------------------------------------
+//
+// CR 603.7c + CR 614.7: After `earthbend N` resolves, the targeted land becomes
+// a 0/0 creature with haste plus a delayed triggered ability:
+// "When it dies or is exiled, return it to the battlefield tapped." The user
+// reported that an earthbended land taking lethal damage went straight to the
+// graveyard without returning. These tests pin down the dies-or-exiled →
+// return-tapped runtime contract end-to-end so the regression cannot recur.
+
+/// Build the parser-equivalent `Earthbend N` ability tree (Animate → PutCounter
+/// → CreateDelayedTrigger(WhenDiesOrExiled → ChangeZone tapped)). Mirrors
+/// `try_parse_earthbend_clause` in `parser/oracle_effect/mod.rs` — keeping the
+/// shape identical here means a regression in the parser surface (e.g.,
+/// `enter_tapped` flipped to `false`) is also caught by these tests.
+fn build_earthbend_ability(
+    source_id: ObjectId,
+    target_land: ObjectId,
+    controller: PlayerId,
+    counter_count: i32,
+) -> ResolvedAbility {
+    use engine::types::ability::TypeFilter;
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, ControllerRef, DelayedTriggerCondition, TargetRef,
+        TypedFilter,
+    };
+
+    // Inner delayed-trigger payload — an `AbilityDefinition` per the
+    // `Effect::CreateDelayedTrigger.effect: Box<AbilityDefinition>` contract.
+    let return_effect_def = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChangeZone {
+            origin: None,
+            destination: Zone::Battlefield,
+            target: TargetFilter::TriggeringSource,
+            owner_library: false,
+            enter_transformed: false,
+            under_your_control: true,
+            enter_tapped: true,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+        },
+    );
+
+    let register_bending = ResolvedAbility::new(
+        Effect::RegisterBending {
+            kind: BendingType::Earth,
+        },
+        vec![],
+        source_id,
+        controller,
+    );
+
+    let mut delayed_return = ResolvedAbility::new(
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::WhenDiesOrExiled {
+                filter: TargetFilter::ParentTarget,
+            },
+            effect: Box::new(return_effect_def),
+            uses_tracked_set: false,
+        },
+        vec![],
+        source_id,
+        controller,
+    );
+    delayed_return.sub_ability = Some(Box::new(register_bending));
+
+    let mut put_counters = ResolvedAbility::new(
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed {
+                value: counter_count,
+            },
+            target: TargetFilter::ParentTarget,
+        },
+        vec![],
+        source_id,
+        controller,
+    );
+    put_counters.sub_ability = Some(Box::new(delayed_return));
+
+    let animate_target = TargetFilter::Typed(TypedFilter {
+        type_filters: vec![TypeFilter::Land],
+        controller: Some(ControllerRef::You),
+        properties: vec![],
+    });
+
+    let mut animate = ResolvedAbility::new(
+        Effect::Animate {
+            power: Some(0),
+            toughness: Some(0),
+            types: vec!["Creature".to_string()],
+            remove_types: vec![],
+            target: animate_target,
+            keywords: vec![Keyword::Haste],
+        },
+        vec![TargetRef::Object(target_land)],
+        source_id,
+        controller,
+    );
+    animate.sub_ability = Some(Box::new(put_counters));
+    animate
+}
+
+/// Resolve an Earthbend ability against a land already on the battlefield by
+/// pushing it onto the stack as a sorcery and passing both players' priority
+/// so the engine drives the full resolution pipeline (Animate → PutCounter →
+/// CreateDelayedTrigger). Returns once the stack is empty.
+fn cast_synthetic_earthbend(
+    state: &mut GameState,
+    earthbend_ability: ResolvedAbility,
+    source_id: ObjectId,
+    controller: PlayerId,
+) {
+    use engine::game::engine::apply_as_current;
+    use engine::game::stack;
+    use engine::types::game_state::{StackEntry, StackEntryKind};
+
+    let entry_id = ObjectId(state.next_object_id);
+    state.next_object_id += 1;
+    let entry = StackEntry {
+        id: entry_id,
+        source_id,
+        controller,
+        kind: StackEntryKind::TriggeredAbility {
+            source_id,
+            ability: Box::new(earthbend_ability),
+            condition: None,
+            trigger_event: None,
+            description: None,
+            source_name: String::new(),
+        },
+    };
+    stack::push_to_stack(state, entry, &mut vec![]);
+
+    // Both players pass — trigger resolves: Animate + PutCounter + CreateDelayedTrigger.
+    apply_as_current(state, GameAction::PassPriority).expect("P0 pass");
+    apply_as_current(state, GameAction::PassPriority).expect("P1 pass");
+}
+
+/// CR 603.7c + CR 614.7 + Issue #313: An earthbended land that takes lethal
+/// damage (SBA-driven death) must return to the battlefield tapped via the
+/// delayed "when it dies or is exiled" trigger, not stay in the graveyard.
+#[test]
+fn earthbended_land_returns_tapped_after_lethal_damage() {
+    use engine::game::engine::apply_as_current;
+    use engine::types::card_type::Supertype;
+
+    let mut scenario = GameScenario::default();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut runner = scenario.build();
+
+    // Target land — basic Mountain.
+    let land_id = create_object(
+        runner.state_mut(),
+        CardId(2),
+        P0,
+        "Mountain".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = runner.state_mut().objects.get_mut(&land_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.card_types.supertypes.push(Supertype::Basic);
+        obj.base_card_types = obj.card_types.clone();
+        obj.entered_battlefield_turn = Some(1);
+    }
+
+    // Source object for Earthbend (the spell/ability that earthbended the land).
+    let source_id = create_object(
+        runner.state_mut(),
+        CardId(1),
+        P0,
+        "Earthbending Lesson".to_string(),
+        Zone::Battlefield,
+    );
+
+    let ability = build_earthbend_ability(source_id, land_id, P0, 4);
+    cast_synthetic_earthbend(runner.state_mut(), ability, source_id, P0);
+
+    // Sanity: the land is now a 0/0 creature with 4 +1/+1 counters and a delayed
+    // trigger registered. (Layers may be dirty — force evaluation by querying.)
+    engine::game::layers::evaluate_layers(runner.state_mut());
+    let land = &runner.state().objects[&land_id];
+    assert!(
+        land.card_types.core_types.contains(&CoreType::Creature),
+        "Land should be a creature after earthbend"
+    );
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        1,
+        "Earthbend should register exactly one delayed trigger (dies-or-exiled return)"
+    );
+
+    // Mark lethal damage so SBA destroys the now-creature land (0/0 base + 4 P1P1
+    // counters = 4/4; deal 4 damage → toughness 4 with 4 marked = lethal).
+    {
+        let obj = runner.state_mut().objects.get_mut(&land_id).unwrap();
+        obj.damage_marked = 4;
+    }
+
+    // Pass priority — engine triggers SBA, which destroys the land. The delayed
+    // "when it dies or is exiled" trigger then fires and returns it tapped.
+    apply_as_current(runner.state_mut(), GameAction::PassPriority).expect("P0 pass");
+
+    // Drive to stack-empty so the return trigger resolves.
+    let mut safety = 0;
+    while !runner.state().stack.is_empty() && safety < 30 {
+        let _ = apply_as_current(runner.state_mut(), GameAction::PassPriority);
+        safety += 1;
+    }
+
+    let land_after = runner
+        .state()
+        .objects
+        .get(&land_id)
+        .expect("land must still exist as an object");
+
+    // Bug repro: pre-fix this assertion fails — the land sits in the graveyard.
+    assert_eq!(
+        land_after.zone,
+        Zone::Battlefield,
+        "Earthbended land must return to the battlefield after dying (issue #313); was in {:?}",
+        land_after.zone
+    );
+    assert!(
+        land_after.tapped,
+        "Returned land must be tapped (CR 614.1: \"return it to the battlefield tapped\")"
+    );
+
+    // The delayed trigger is one-shot — must be cleared after firing.
+    assert!(
+        runner.state().delayed_triggers.is_empty(),
+        "One-shot dies-or-exiled trigger must be removed after firing, got {} remaining",
+        runner.state().delayed_triggers.len()
+    );
+}
+
+/// CR 603.7c: The same delayed trigger must also fire on exile (not just death).
+/// An animated land bounced into exile by, e.g., Path to Exile, must come back
+/// tapped — the trigger watches `Battlefield → Graveyard | Exile`. Exile is
+/// driven via `Effect::Bounce { destination: Exile }` (the canonical exile
+/// pathway for permanents-to-exile) so the resulting `ZoneChanged` event reaches
+/// the engine's delayed-trigger pipeline.
+#[test]
+fn earthbended_land_returns_tapped_after_exile() {
+    use engine::game::engine::apply_as_current;
+    use engine::game::stack;
+    use engine::types::ability::TargetRef;
+    use engine::types::card_type::Supertype;
+    use engine::types::game_state::{StackEntry, StackEntryKind};
+
+    let mut scenario = GameScenario::default();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut runner = scenario.build();
+
+    let land_id = create_object(
+        runner.state_mut(),
+        CardId(2),
+        P0,
+        "Forest".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = runner.state_mut().objects.get_mut(&land_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.card_types.supertypes.push(Supertype::Basic);
+        obj.base_card_types = obj.card_types.clone();
+        obj.entered_battlefield_turn = Some(1);
+    }
+
+    let source_id = create_object(
+        runner.state_mut(),
+        CardId(1),
+        P0,
+        "Earthbending Student".to_string(),
+        Zone::Battlefield,
+    );
+
+    let ability = build_earthbend_ability(source_id, land_id, P0, 2);
+    cast_synthetic_earthbend(runner.state_mut(), ability, source_id, P0);
+
+    // Push an exile-the-land triggered ability onto the stack via Effect::Bounce
+    // (the engine's primary battlefield→other-zone primitive). Goes through the
+    // standard priority-resolution pipeline so the resulting `ZoneChanged
+    // { from: Battlefield, to: Exile }` event reaches the delayed-trigger checker.
+    let exile_source = create_object(
+        runner.state_mut(),
+        CardId(99),
+        P0,
+        "Path to Exile (synthetic)".to_string(),
+        Zone::Battlefield,
+    );
+    let exile_ability = ResolvedAbility::new(
+        Effect::ChangeZoneAll {
+            origin: Some(Zone::Battlefield),
+            destination: Zone::Exile,
+            target: TargetFilter::SpecificObject { id: land_id },
+            enter_tapped: false,
+        },
+        vec![TargetRef::Object(land_id)],
+        exile_source,
+        P0,
+    );
+    let entry_id = ObjectId(runner.state().next_object_id);
+    runner.state_mut().next_object_id += 1;
+    let entry = StackEntry {
+        id: entry_id,
+        source_id: exile_source,
+        controller: P0,
+        kind: StackEntryKind::TriggeredAbility {
+            source_id: exile_source,
+            ability: Box::new(exile_ability),
+            condition: None,
+            trigger_event: None,
+            description: None,
+            source_name: String::new(),
+        },
+    };
+    stack::push_to_stack(runner.state_mut(), entry, &mut vec![]);
+
+    let mut safety = 0;
+    while !runner.state().stack.is_empty() && safety < 30 {
+        let _ = apply_as_current(runner.state_mut(), GameAction::PassPriority);
+        safety += 1;
+    }
+
+    let land_after = &runner.state().objects[&land_id];
+    assert_eq!(
+        land_after.zone,
+        Zone::Battlefield,
+        "Exiled earthbended land must return to the battlefield (CR 603.7c: \"dies or is exiled\"); was in {:?}",
+        land_after.zone
+    );
+    assert!(
+        land_after.tapped,
+        "Returned land must be tapped after exile-and-return"
+    );
+}
+
+/// End-to-end card-data test: cast the real parsed `Earthbending Lesson` from
+/// hand on a basic Mountain, then send the now-creature land to the graveyard
+/// via lethal damage. Verifies the full parser → cast → resolve → SBA →
+/// delayed-trigger → return-tapped pipeline against the actual exported AST.
+/// This is the closest analog to what the user reported in #313.
+#[test]
+fn earthbending_lesson_returned_tapped_after_dies_e2e() {
+    use std::path::Path;
+    use std::sync::OnceLock;
+
+    use engine::database::card_db::CardDatabase;
+    use engine::game::engine::apply_as_current;
+    use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::card_type::Supertype;
+
+    fn load_db() -> Option<&'static CardDatabase> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
+        if !path.exists() {
+            return None;
+        }
+        static DB: OnceLock<CardDatabase> = OnceLock::new();
+        Some(DB.get_or_init(|| CardDatabase::from_export(&path).expect("export should load")))
+    }
+
+    let Some(db) = load_db() else {
+        return;
+    };
+
+    let mut scenario = GameScenario::default();
+    scenario.at_phase(Phase::PreCombatMain);
+    let lesson_id = scenario.add_real_card(P0, "Earthbending Lesson", Zone::Hand, db);
+    let mountain_id = scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db);
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    // Pay the cost: {3}{G} — give P0 the mana to cast.
+    let dummy = ObjectId(0);
+    {
+        let pool = &mut runner
+            .state_mut()
+            .players
+            .iter_mut()
+            .find(|p| p.id == P0)
+            .unwrap()
+            .mana_pool;
+        for _ in 0..3 {
+            pool.add(ManaUnit::new(ManaType::Colorless, dummy, false, vec![]));
+        }
+        pool.add(ManaUnit::new(ManaType::Green, dummy, false, vec![]));
+    }
+
+    // Make sure the Mountain is set up as a basic land (rehydrate may not have).
+    {
+        let obj = runner.state_mut().objects.get_mut(&mountain_id).unwrap();
+        if !obj.card_types.core_types.contains(&CoreType::Land) {
+            obj.card_types.core_types.push(CoreType::Land);
+        }
+        if !obj.card_types.supertypes.contains(&Supertype::Basic) {
+            obj.card_types.supertypes.push(Supertype::Basic);
+        }
+        obj.base_card_types = obj.card_types.clone();
+        obj.entered_battlefield_turn = Some(1);
+    }
+
+    let card_id = runner.state().objects[&lesson_id].card_id;
+    apply_as_current(
+        runner.state_mut(),
+        GameAction::CastSpell {
+            object_id: lesson_id,
+            card_id,
+            targets: vec![mountain_id],
+        },
+    )
+    .expect("cast Earthbending Lesson");
+
+    // Drive priority until the spell + any chain resolve and stack is empty.
+    let mut safety = 0;
+    while !runner.state().stack.is_empty() && safety < 30 {
+        let _ = apply_as_current(runner.state_mut(), GameAction::PassPriority);
+        safety += 1;
+    }
+
+    // The Mountain is now a 4/4 creature (0/0 base + 4 +1/+1 counters) with haste.
+    engine::game::layers::evaluate_layers(runner.state_mut());
+    {
+        let m = &runner.state().objects[&mountain_id];
+        assert!(
+            m.card_types.core_types.contains(&CoreType::Creature),
+            "Mountain should be a creature post-Earthbend (got types {:?})",
+            m.card_types.core_types
+        );
+    }
+    assert_eq!(
+        runner.state().delayed_triggers.len(),
+        1,
+        "Earthbend resolution must register exactly one dies-or-exiled delayed trigger"
+    );
+
+    // Apply lethal damage and pass priority — SBA destroys, trigger fires, return.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&mountain_id)
+        .unwrap()
+        .damage_marked = 4;
+    let mut safety = 0;
+    while safety < 30 {
+        let _ = apply_as_current(runner.state_mut(), GameAction::PassPriority);
+        if runner.state().stack.is_empty()
+            && runner.state().delayed_triggers.is_empty()
+            && runner.state().objects[&mountain_id].zone == Zone::Battlefield
+        {
+            break;
+        }
+        safety += 1;
+    }
+
+    let m = &runner.state().objects[&mountain_id];
+    assert_eq!(
+        m.zone,
+        Zone::Battlefield,
+        "Earthbending Lesson dies-or-exiled return: real card #313 — Mountain must be back on the battlefield, was in {:?}",
+        m.zone
+    );
+    assert!(
+        m.tapped,
+        "Earthbending Lesson dies-or-exiled return: real card #313 — Mountain must be tapped"
+    );
+}
+
+/// Building-block test: Earthbend resolution must register the delayed
+/// dies-or-exiled trigger on the controller's `state.delayed_triggers` queue
+/// with the filter bound to the targeted land's specific ObjectId. This
+/// pins the parser → resolver contract that powers issue #313's fix.
+#[test]
+fn earthbend_registers_dies_or_exiled_delayed_trigger_on_target() {
+    use engine::types::ability::{DelayedTriggerCondition, TargetFilter};
+    use engine::types::card_type::Supertype;
+
+    let mut scenario = GameScenario::default();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut runner = scenario.build();
+
+    let land_id = create_object(
+        runner.state_mut(),
+        CardId(2),
+        P0,
+        "Plains".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = runner.state_mut().objects.get_mut(&land_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.card_types.supertypes.push(Supertype::Basic);
+        obj.base_card_types = obj.card_types.clone();
+        obj.entered_battlefield_turn = Some(1);
+    }
+
+    let source_id = create_object(
+        runner.state_mut(),
+        CardId(1),
+        P0,
+        "Toph Earthbending Master".to_string(),
+        Zone::Battlefield,
+    );
+
+    let ability = build_earthbend_ability(source_id, land_id, P0, 3);
+    cast_synthetic_earthbend(runner.state_mut(), ability, source_id, P0);
+
+    // The delayed trigger must be present, conditioned on `WhenDiesOrExiled` for
+    // the specific animated land (parser binds `ParentTarget` → SpecificObject
+    // at delayed-trigger creation time per `bind_contextual_filter_to_condition`).
+    assert_eq!(runner.state().delayed_triggers.len(), 1);
+    let trigger = &runner.state().delayed_triggers[0];
+    match &trigger.condition {
+        DelayedTriggerCondition::WhenDiesOrExiled { filter } => match filter {
+            TargetFilter::SpecificObject { id } => assert_eq!(*id, land_id),
+            other => panic!(
+                "Expected SpecificObject filter bound to land_id, got {:?}",
+                other
+            ),
+        },
+        other => panic!("Expected WhenDiesOrExiled condition, got {:?}", other),
+    }
+    assert!(
+        trigger.one_shot,
+        "Dies-or-exiled return is one-shot — must fire once and be removed"
+    );
+    assert_eq!(trigger.controller, P0);
+
+    // Inner effect must be ChangeZone(destination=Battlefield, enter_tapped=true,
+    // under_your_control=true) — this is the actual return-tapped behavior.
+    match &trigger.ability.effect {
+        Effect::ChangeZone {
+            destination,
+            enter_tapped,
+            under_your_control,
+            ..
+        } => {
+            assert_eq!(*destination, Zone::Battlefield);
+            assert!(
+                *enter_tapped,
+                "Inner ChangeZone must carry enter_tapped=true"
+            );
+            assert!(
+                *under_your_control,
+                "Inner ChangeZone must carry under_your_control=true (returns under earthbender's control)"
+            );
+        }
+        other => panic!("Expected ChangeZone return effect, got {:?}", other),
+    }
 }

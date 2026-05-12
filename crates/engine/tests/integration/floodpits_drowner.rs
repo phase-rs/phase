@@ -52,7 +52,7 @@ fn etb_tap_and_stun_counter() {
     // This is what the parser produces for the ETB trigger execute
     let sub_resolved = ResolvedAbility::new(
         Effect::PutCounter {
-            counter_type: "stun".to_string(),
+            counter_type: CounterType::Stun,
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::ParentTarget,
         },

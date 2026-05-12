@@ -4,7 +4,7 @@
 //! All parser branches import from this single location (Phase 50, D-01).
 
 use super::diagnostic::OracleDiagnostic;
-use crate::types::ability::{ControllerRef, QuantityRef, TargetFilter};
+use crate::types::ability::{ControllerRef, QuantityRef, TargetFilter, TargetSelectionMode};
 
 /// Unified parsing context — threaded through all parser branches for
 /// pronoun/reference resolution ("it", "that creature", "that many").
@@ -36,6 +36,11 @@ pub(crate) struct ParseContext {
     /// CR 109.4 + CR 115.1: Relative-player scope for "that player controls"
     /// resolution inside trigger effects. Replaces thread-local oracle_target_scope.
     pub relative_player_scope: Option<ControllerRef>,
+    /// CR 115.1 + CR 701.9b: Target selection mode for the most recent target
+    /// phrase parsed via `parse_target_with_ctx`. The chunk loop in
+    /// `parse_effect_chain_ir` snapshots this into the produced `ClauseIr` and
+    /// resets it to `Chosen` for the next chunk so the marker is per-clause.
+    pub target_selection_mode: TargetSelectionMode,
 }
 
 impl ParseContext {
@@ -49,6 +54,11 @@ impl ParseContext {
 
     /// Push a diagnostic (replaces oracle_warnings::push_diagnostic).
     pub fn push_diagnostic(&mut self, d: OracleDiagnostic) {
+        if matches!(d, OracleDiagnostic::TargetFallback { .. })
+            && self.diagnostics.iter().any(|existing| existing == &d)
+        {
+            return;
+        }
         self.diagnostics.push(d);
     }
 
@@ -65,5 +75,43 @@ impl ParseContext {
         let result = f(self);
         self.relative_player_scope = prev;
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn target_fallback_diagnostics_are_idempotent() {
+        let mut ctx = ParseContext::default();
+        let diagnostic = OracleDiagnostic::TargetFallback {
+            context: "search-filter-suffix unmatched".into(),
+            text: "with an unsupported clause".into(),
+            line_index: 0,
+        };
+
+        ctx.push_diagnostic(diagnostic.clone());
+        ctx.push_diagnostic(diagnostic);
+
+        assert_eq!(ctx.diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn distinct_target_fallback_diagnostics_are_preserved() {
+        let mut ctx = ParseContext::default();
+
+        ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
+            context: "search-filter-suffix unmatched".into(),
+            text: "first clause".into(),
+            line_index: 0,
+        });
+        ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
+            context: "search-filter-suffix unmatched".into(),
+            text: "second clause".into(),
+            line_index: 0,
+        });
+
+        assert_eq!(ctx.diagnostics.len(), 2);
     }
 }

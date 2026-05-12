@@ -145,6 +145,8 @@ function defaultSeatState(playerCount: number, formatConfig?: FormatConfig): Sea
       commander_damage_threshold: null,
       range_of_influence: null,
       team_based: false,
+      uses_commander: false,
+      allow_debug_actions: false,
     },
     gameStarted: false,
   };

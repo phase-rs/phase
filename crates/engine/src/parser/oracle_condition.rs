@@ -9,8 +9,9 @@ use nom::Parser;
 
 use super::oracle_nom::condition as nom_condition;
 use super::oracle_nom::primitives as nom_primitives;
+use super::oracle_target::parse_type_phrase;
 use crate::types::ability::{
-    Comparator, ControllerRef, ParsedCondition, PlayerFilter, PlayerScope, QuantityRef,
+    Comparator, ControllerRef, FilterProp, ParsedCondition, PlayerFilter, PlayerScope, QuantityRef,
     StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
@@ -102,6 +103,14 @@ fn parse_condition_text(text: &str) -> Option<ParsedCondition> {
 
     // Event-based conditions: structured nom matching for event phrases.
     if let Some(condition) = parse_event_condition(text) {
+        return Some(condition);
+    }
+
+    // CR 601.3d + CR 608.2c: "it targets a [filter]" — gates a casting permission
+    // (typically "as though it had flash") on the spell-being-cast's chosen targets.
+    // The pronoun `it` here refers to the in-flight spell (Timely Ward — "you may
+    // cast this spell as though it had flash if it targets a commander").
+    if let Some(condition) = parse_spell_targets_filter(text) {
         return Some(condition);
     }
 
@@ -575,6 +584,9 @@ fn parse_event_condition(text: &str) -> Option<ParsedCondition> {
 
     // "an opponent [verb phrase]" — prefix dispatch
     if let Ok((verb_phrase, _)) = tag::<_, _, OracleError<'_>>("an opponent ").parse(text) {
+        if let Some(condition) = parse_opponent_had_entered_this_turn(verb_phrase) {
+            return Some(condition);
+        }
         if let Ok((_, condition)) = parse_opponent_event(verb_phrase) {
             return Some(condition);
         }
@@ -722,6 +734,44 @@ fn parse_you_cast_spell_this_turn(text: &str) -> nom::IResult<&str, TargetFilter
     };
     let (rest, _) = tag(" spell this turn").parse(rest)?;
     Ok((rest, filter))
+}
+
+fn parse_opponent_had_entered_this_turn(verb_phrase: &str) -> Option<ParsedCondition> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("had ")
+        .parse(verb_phrase)
+        .ok()?;
+    parse_had_entered_this_turn(rest, ControllerRef::Opponent)
+}
+
+fn parse_had_entered_this_turn(text: &str, controller: ControllerRef) -> Option<ParsedCondition> {
+    let suffix = "enter the battlefield under their control this turn";
+    let (count, type_and_suffix) =
+        if let Some((count, after_count)) = super::oracle_util::parse_number(text) {
+            if let Ok((after_or_more, _)) =
+                tag::<_, _, OracleError<'_>>("or more ").parse(after_count.trim_start())
+            {
+                (count, after_or_more)
+            } else {
+                (1, text)
+            }
+        } else {
+            (1, text)
+        };
+    let (rest, type_text) = take_until::<_, _, OracleError<'_>>(suffix)
+        .parse(type_and_suffix)
+        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(suffix).parse(rest).ok()?;
+    if !rest.is_empty() {
+        return None;
+    }
+    let (mut filter, _) = parse_type_phrase(type_text.trim());
+    if let TargetFilter::Typed(typed) = &mut filter {
+        typed.controller = Some(controller);
+        typed.properties.push(FilterProp::InZone {
+            zone: Zone::Battlefield,
+        });
+    }
+    Some(ParsedCondition::BattlefieldEntriesThisTurn { filter, count })
 }
 
 /// "an opponent [verb phrase]" → typed condition
@@ -991,6 +1041,57 @@ fn parse_you_control_subtype_count(text: &str) -> Option<(usize, String)> {
 
     let subtype = normalized.trim_end_matches('s').trim().to_string();
     Some((minimum, subtype))
+}
+
+/// CR 601.3d + CR 608.2c: Parse `"it targets a <type_phrase>"` (or `"it targets <type_phrase>"`)
+/// into a `ParsedCondition::SpellTargetsFilter` whose filter is derived from
+/// `parse_type_phrase`. The pronoun `it` refers to the spell being cast — this
+/// condition gates target-dependent casting permissions ("you may cast this spell
+/// as though it had flash if it targets a commander" — Timely Ward). The trailing
+/// remainder returned by `parse_type_phrase` must be empty for the parse to
+/// succeed; otherwise we'd silently truncate qualifying clauses that the filter
+/// layer hasn't absorbed.
+fn parse_spell_targets_filter(text: &str) -> Option<ParsedCondition> {
+    let rest = alt((
+        tag::<_, _, OracleError<'_>>("it targets a "),
+        tag("it targets an "),
+        tag("it targets "),
+    ))
+    .parse(text)
+    .ok()?
+    .0;
+    // CR 903.3: Bare "commander" / "commanders" without a possessive or
+    // controller suffix is not lifted by `parse_type_phrase` (which expects
+    // type words) or by the possessive arms of `parse_target` (which require
+    // "your" / "their" / a trailing controller-suffix). Recognize it here
+    // explicitly so "it targets a commander" maps to the `IsCommander`
+    // FilterProp without forcing a controller scope. Timely Ward, Skullbriar's
+    // sponsors, etc., all reach this arm.
+    if let Ok((after, _)) =
+        alt((tag::<_, _, OracleError<'_>>("commanders"), tag("commander"))).parse(rest)
+    {
+        if after.trim().is_empty() {
+            return Some(ParsedCondition::SpellTargetsFilter {
+                filter: TargetFilter::Typed(TypedFilter {
+                    properties: vec![FilterProp::IsCommander],
+                    ..Default::default()
+                }),
+            });
+        }
+    }
+    let (filter, remainder) = parse_type_phrase(rest);
+    if !remainder.trim().is_empty() {
+        return None;
+    }
+    // `parse_type_phrase` falls back to `TargetFilter::Any` when no type word
+    // matched. A bare "it targets a frob" must not silently widen the gate to
+    // "any target"; refuse the parse instead so the casting permission is not
+    // emitted (strictly safe — the spell stays sorcery-speed until the
+    // predicate is recognized).
+    if matches!(filter, TargetFilter::Any | TargetFilter::None) {
+        return None;
+    }
+    Some(ParsedCondition::SpellTargetsFilter { filter })
 }
 
 fn capitalize_condition_word(text: &str) -> String {
@@ -1313,6 +1414,55 @@ mod tests {
     fn unrecognized_returns_none() {
         assert_eq!(
             parse_restriction_condition("something completely unknown"),
+            None,
+        );
+    }
+
+    #[test]
+    fn it_targets_a_commander_parses_to_spell_targets_filter() {
+        // CR 601.3d + CR 903.3: Timely Ward — "if it targets a commander" gates
+        // the flash permission against the spell-being-cast's chosen targets.
+        let parsed = parse_restriction_condition("it targets a commander")
+            .expect("should parse the target-commander predicate");
+        match parsed {
+            ParsedCondition::SpellTargetsFilter {
+                filter: TargetFilter::Typed(filter),
+            } => {
+                assert!(filter.properties.contains(&FilterProp::IsCommander));
+                assert!(
+                    filter.controller.is_none(),
+                    "bare 'commander' has no controller scope, got {:?}",
+                    filter.controller
+                );
+            }
+            other => panic!("expected SpellTargetsFilter(IsCommander), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn it_targets_a_creature_parses_to_spell_targets_filter() {
+        // CR 601.3d + CR 608.2c: hypothetical "as though it had flash if it targets
+        // a creature" — verifies the helper composes with `parse_type_phrase` for
+        // ordinary core types, not just the commander special case.
+        let parsed = parse_restriction_condition("it targets a creature")
+            .expect("should parse the target-creature predicate");
+        match parsed {
+            ParsedCondition::SpellTargetsFilter {
+                filter: TargetFilter::Typed(filter),
+            } => {
+                assert!(filter.type_filters.contains(&TypeFilter::Creature));
+            }
+            other => panic!("expected SpellTargetsFilter(Creature), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn it_targets_unknown_returns_none() {
+        // CR 601.3d: predicate that doesn't lift to a typed filter must not be
+        // emitted — fail-loud (return None) so the caller leaves the casting
+        // permission off rather than fail-silent with `TargetFilter::Any`.
+        assert_eq!(
+            parse_restriction_condition("it targets a frob the wobble"),
             None,
         );
     }

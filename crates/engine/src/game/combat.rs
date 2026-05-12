@@ -817,26 +817,26 @@ pub fn validate_blockers_for_player(
 /// decline branch (which removes taxed creatures from the declaration).
 pub fn compute_combat_tax(
     state: &GameState,
-    creature_ids: &[ObjectId],
+    creatures: &[(ObjectId, Option<AttackTarget>)],
     context: crate::types::game_state::CombatTaxContext,
 ) -> Option<(
     crate::types::mana::ManaCost,
     Vec<(ObjectId, crate::types::mana::ManaCost)>,
 )> {
-    use crate::types::ability::{StaticCondition, UnlessPayScaling};
+    use crate::types::ability::UnlessPayScaling;
     use crate::types::game_state::CombatTaxContext;
     use crate::types::mana::ManaCost;
 
-    if creature_ids.is_empty() {
+    if creatures.is_empty() {
         return None;
     }
 
     // Pre-collect the affected creature count for scaling — used by
     // PerAffectedCreature (count of declared creatures this static touches) so
     // the arithmetic is order-independent.
-    let mut per_creature: Vec<(ObjectId, ManaCost)> = creature_ids
+    let mut per_creature: Vec<(ObjectId, ManaCost)> = creatures
         .iter()
-        .map(|&id| (id, ManaCost::zero()))
+        .map(|&(id, _)| (id, ManaCost::zero()))
         .collect();
     let mut any_tax = false;
 
@@ -873,28 +873,51 @@ pub fn compute_combat_tax(
             if !mode_matches {
                 continue;
             }
-            let Some(StaticCondition::UnlessPay {
-                cost: base_cost,
-                scaling,
-            }) = def.condition.as_ref()
-            else {
+            // CR 611.3a + CR 118.12a: The combat-tax payload may live directly
+            // on `def.condition` (Ghostly Prison) or nested inside an
+            // `And { conditions }` paired with a gating predicate
+            // (Archangel of Tithes — `And { [Not(SourceIsTapped),
+            // UnlessPay {..}] }`). `extract_combat_tax_payload` walks the
+            // tree, returning `None` when no payload exists OR when a paired
+            // gating conjunct evaluates to `false` (the tax is dormant).
+            let Some((base_cost, scaling, defended)) = def.condition.as_ref().and_then(|cond| {
+                extract_combat_tax_payload(cond, state, source_obj.controller, source_id)
+            }) else {
                 continue;
             };
 
             // For each declared creature, determine if this static's affected filter matches.
+            // CR 506.3 + CR 508.1d: When `defended` is set, also require the
+            // declared `AttackTarget` to match the filter, scoped to the
+            // static's source controller. This prevents Propaganda from taxing
+            // attacks made against players OTHER than its controller (#302),
+            // and allows Archangel of Tithes' "you or planeswalkers you
+            // control" to match attacks against either the defender or one
+            // of their planeswalkers.
             let mut affected_ids: Vec<ObjectId> = Vec::new();
             let ctx = FilterContext::from_source(state, source_id);
-            for &cid in creature_ids {
+            for (cid, attack_target) in creatures {
                 let creature_matches = match &def.affected {
-                    Some(filter) => matches_target_filter(state, cid, filter, &ctx),
+                    Some(filter) => matches_target_filter(state, *cid, filter, &ctx),
                     // No affected filter — treat as "applies to all taxed creatures",
                     // matching the behavior of `check_static_ability` when `affected`
                     // is None.
                     None => true,
                 };
-                if creature_matches {
-                    affected_ids.push(cid);
+                if !creature_matches {
+                    continue;
                 }
+                if let Some(filter) = defended {
+                    if !attack_target_matches_defended_scope(
+                        state,
+                        attack_target.as_ref(),
+                        filter,
+                        source_obj.controller,
+                    ) {
+                        continue;
+                    }
+                }
+                affected_ids.push(*cid);
             }
             if affected_ids.is_empty() {
                 continue;
@@ -1022,6 +1045,10 @@ pub fn compute_combat_tax(
 }
 
 /// CR 508.1d + CR 508.1h: Specialization of `compute_combat_tax` for the attack step.
+///
+/// Carries `AttackTarget` per attacker so the runtime can enforce
+/// `StaticCondition::UnlessPay { defended, .. }` — Propaganda must only tax
+/// attacks against its controller, not attacks against other opponents (CR 506.3).
 pub fn compute_attack_tax(
     state: &GameState,
     attacks: &[(ObjectId, AttackTarget)],
@@ -1029,15 +1056,19 @@ pub fn compute_attack_tax(
     crate::types::mana::ManaCost,
     Vec<(ObjectId, crate::types::mana::ManaCost)>,
 )> {
-    let ids: Vec<ObjectId> = attacks.iter().map(|(id, _)| *id).collect();
+    let pairs: Vec<(ObjectId, Option<AttackTarget>)> =
+        attacks.iter().map(|(id, t)| (*id, Some(*t))).collect();
     compute_combat_tax(
         state,
-        &ids,
+        &pairs,
         crate::types::game_state::CombatTaxContext::Attacking,
     )
 }
 
 /// CR 509.1c + CR 509.1d: Specialization of `compute_combat_tax` for the block step.
+///
+/// Block-side restrictions never carry a defender scope (the parser drops any
+/// scope tail for `CantBlock`), so `attack_target` is uniformly `None` here.
 pub fn compute_block_tax(
     state: &GameState,
     assignments: &[(ObjectId, ObjectId)],
@@ -1045,12 +1076,106 @@ pub fn compute_block_tax(
     crate::types::mana::ManaCost,
     Vec<(ObjectId, crate::types::mana::ManaCost)>,
 )> {
-    let ids: Vec<ObjectId> = assignments.iter().map(|(b, _)| *b).collect();
+    let pairs: Vec<(ObjectId, Option<AttackTarget>)> =
+        assignments.iter().map(|(b, _)| (*b, None)).collect();
     compute_combat_tax(
         state,
-        &ids,
+        &pairs,
         crate::types::game_state::CombatTaxContext::Blocking,
     )
+}
+
+/// CR 611.3a + CR 118.12a: Walk a `StaticCondition` tree to find an embedded
+/// `UnlessPay` payload, evaluating any AND-paired gating conjuncts via
+/// `evaluate_condition`. Returns the payload only when the gate is satisfied
+/// (so Archangel of Tithes' tax is dormant while it's tapped). Returns the
+/// first `UnlessPay` found in left-to-right order; the parser only emits one
+/// per static.
+fn extract_combat_tax_payload<'a>(
+    cond: &'a crate::types::ability::StaticCondition,
+    state: &GameState,
+    controller: PlayerId,
+    source_id: ObjectId,
+) -> Option<(
+    &'a crate::types::mana::ManaCost,
+    &'a crate::types::ability::UnlessPayScaling,
+    Option<&'a crate::types::triggers::AttackTargetFilter>,
+)> {
+    use crate::types::ability::StaticCondition;
+    match cond {
+        StaticCondition::UnlessPay {
+            cost,
+            scaling,
+            defended,
+        } => Some((cost, scaling, defended.as_ref())),
+        StaticCondition::And { conditions } => {
+            // CR 611.3a: Find the first UnlessPay payload, then verify every
+            // non-UnlessPay sibling evaluates to true. If any non-payload gate
+            // fails, the tax is dormant. Sibling UnlessPays are NOT treated as
+            // gates (layers::evaluate_condition returns `false` for UnlessPay
+            // by design — that would always make the tax dormant). The parser
+            // does not produce multi-UnlessPay siblings today; if it ever does,
+            // this code uses the first and ignores the rest, which is a
+            // conservative under-count rather than an incorrect dormancy.
+            let payload_idx = conditions
+                .iter()
+                .position(|c| matches!(c, StaticCondition::UnlessPay { .. }))?;
+            for (i, sibling) in conditions.iter().enumerate() {
+                if i == payload_idx {
+                    continue;
+                }
+                if matches!(sibling, StaticCondition::UnlessPay { .. }) {
+                    continue;
+                }
+                if !crate::game::layers::evaluate_condition(state, sibling, controller, source_id) {
+                    return None;
+                }
+            }
+            extract_combat_tax_payload(&conditions[payload_idx], state, controller, source_id)
+        }
+        _ => None,
+    }
+}
+
+/// CR 506.3 + CR 508.1d: Match a declared `AttackTarget` against the
+/// `defended` scope on a combat-tax static, scoped to the static's source
+/// controller. Returns `false` when:
+/// - The static has a `defended` filter but the attacker has no `AttackTarget`
+///   (block-side computation passes `None`; defended only applies to attacks).
+/// - The `AttackTarget` is a player who is NOT the source controller.
+/// - The `AttackTarget` is a planeswalker / battle whose controller is NOT
+///   the source controller (planeswalker scope only).
+/// - The filter is `Player` and the target is a planeswalker / battle (or vice versa).
+fn attack_target_matches_defended_scope(
+    state: &GameState,
+    attack_target: Option<&AttackTarget>,
+    filter: &crate::types::triggers::AttackTargetFilter,
+    source_controller: PlayerId,
+) -> bool {
+    use crate::types::triggers::AttackTargetFilter;
+    let Some(target) = attack_target else {
+        // Block-side: defender filter is meaningless; treat as no-match.
+        return false;
+    };
+    let permanent_controller =
+        |id: ObjectId| -> Option<PlayerId> { state.objects.get(&id).map(|obj| obj.controller) };
+    match (filter, target) {
+        (AttackTargetFilter::Player, AttackTarget::Player(p)) => *p == source_controller,
+        (AttackTargetFilter::Planeswalker, AttackTarget::Planeswalker(pw_id)) => {
+            permanent_controller(*pw_id) == Some(source_controller)
+        }
+        (AttackTargetFilter::PlayerOrPlaneswalker, AttackTarget::Player(p)) => {
+            *p == source_controller
+        }
+        (AttackTargetFilter::PlayerOrPlaneswalker, AttackTarget::Planeswalker(pw_id)) => {
+            permanent_controller(*pw_id) == Some(source_controller)
+        }
+        (AttackTargetFilter::Battle, AttackTarget::Battle(b_id)) => {
+            permanent_controller(*b_id) == Some(source_controller)
+        }
+        // Cross-type mismatches: filter requires Player, target is Planeswalker, etc.
+        _ => false,
+    }
 }
 
 /// Declare attackers: validate, tap (unless vigilance), populate CombatState, emit event.
@@ -1091,7 +1216,8 @@ pub fn declare_attackers(
                 },
             );
         // CR 701.15b: Goaded creatures must attack each combat if able.
-        let is_goaded = !obj.goaded_by.is_empty();
+        let goading_players = goading_players_for_creature(state, obj_id);
+        let is_goaded = !goading_players.is_empty();
         if !has_must_attack && !is_goaded {
             continue;
         }
@@ -1207,18 +1333,16 @@ pub fn declare_attackers(
 
     for (attacker_id, target) in attacks {
         if let AttackTarget::Player(defending_pid) = target {
-            let Some(obj) = state.objects.get(attacker_id) else {
-                continue;
-            };
-            if obj.goaded_by.is_empty() {
+            let goading_players = goading_players_for_creature(state, *attacker_id);
+            if goading_players.is_empty() {
                 continue;
             }
             // Check if this creature is attacking a goading player
-            if obj.goaded_by.contains(defending_pid) {
+            if goading_players.contains(defending_pid) {
                 // CR 701.15b: Check if there's at least one non-goading opponent
                 let has_non_goading_target = non_eliminated_opponents
                     .iter()
-                    .any(|pid| !obj.goaded_by.contains(pid));
+                    .any(|pid| !goading_players.contains(pid));
                 if has_non_goading_target {
                     return Err(format!(
                         "{:?} is goaded by {:?} and must attack a different player if able (CR 701.15b)",
@@ -1315,6 +1439,29 @@ pub fn declare_attackers(
     super::restrictions::record_attackers_declared(state, attacker_count);
 
     Ok(())
+}
+
+fn goading_players_for_creature(state: &GameState, creature_id: ObjectId) -> HashSet<PlayerId> {
+    let mut players = state
+        .objects
+        .get(&creature_id)
+        .map(|obj| obj.goaded_by.clone())
+        .unwrap_or_default();
+
+    for (source, def) in super::functioning_abilities::battlefield_active_statics(state) {
+        if def.mode != StaticMode::Goaded {
+            continue;
+        }
+        let Some(affected) = &def.affected else {
+            continue;
+        };
+        let ctx = FilterContext::from_source(state, source.id);
+        if matches_target_filter(state, creature_id, affected, &ctx) {
+            players.insert(source.controller);
+        }
+    }
+
+    players
 }
 
 /// Declare blockers: validate, populate CombatState, emit event, auto-order by ObjectId.
@@ -2640,6 +2787,98 @@ mod tests {
         assert!(!can_block_pair(&state, blocker, attacker));
     }
 
+    /// CR 509.1b + CR 105.4 + CR 609.6 (issue #327): Skrelv-class — when a
+    /// creature is granted `CantBeBlockedBy { IsChosenColor }` via a
+    /// transient continuous effect whose source has a `ChosenAttribute::Color`,
+    /// the layer system resolves IsChosenColor → HasColor(<chosen>) at
+    /// apply-time. A blocker whose colors contain the chosen color is
+    /// prohibited; a blocker of a different color is allowed.
+    ///
+    /// Exercises the full apply-time pipeline: a granting source (Skrelv
+    /// stand-in) with `ChosenAttribute::Color(Red)`, an
+    /// `AddStaticMode { CantBeBlockedBy { IsChosenColor } }` transient
+    /// continuous effect aimed at the granted creature, and
+    /// `evaluate_layers` running the resolver. The runtime block check
+    /// then reads the post-resolution filter via
+    /// `block_restriction_statics_against`.
+    #[test]
+    fn granted_cant_be_blocked_by_chosen_color_resolves_at_apply_time() {
+        use crate::types::ability::{
+            ChosenAttribute, ContinuousModification, Duration, FilterProp, TargetFilter,
+            TypedFilter,
+        };
+        use crate::types::mana::ManaColor;
+        use crate::types::statics::StaticMode;
+
+        let mut state = setup();
+        let source = create_creature(&mut state, PlayerId(0), "Granting Source", 1, 1);
+        let granted = create_creature(&mut state, PlayerId(0), "Target Creature", 2, 2);
+        let red_blocker = create_creature(&mut state, PlayerId(1), "Red Bear", 2, 2);
+        let blue_blocker = create_creature(&mut state, PlayerId(1), "Blue Wizard", 2, 2);
+        state
+            .objects
+            .get_mut(&red_blocker)
+            .unwrap()
+            .color
+            .push(ManaColor::Red);
+        state
+            .objects
+            .get_mut(&blue_blocker)
+            .unwrap()
+            .color
+            .push(ManaColor::Blue);
+
+        // Persist the chosen color on the granting source — this is what the
+        // `Choose a color` resolver stores on the activating permanent.
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::Color(ManaColor::Red));
+
+        // Register the transient continuous effect that grants
+        // `AddStaticMode { CantBeBlockedBy { IsChosenColor } }` to the target.
+        // This is exactly what `effect::resolve` produces when Skrelv's third
+        // sub-ability resolves on its chosen creature target.
+        let unresolved_mode = StaticMode::CantBeBlockedBy {
+            filter: TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::IsChosenColor]),
+            ),
+        };
+        state.add_transient_continuous_effect(
+            source,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: granted },
+            vec![ContinuousModification::AddStaticMode {
+                mode: unresolved_mode,
+            }],
+            None,
+        );
+
+        // Run the layer system. The `AddStaticMode` arm in
+        // `apply_continuous_effect` resolves IsChosenColor → HasColor(Red)
+        // using the source's chosen_attributes and pushes the resolved
+        // static_def onto the granted creature.
+        crate::game::layers::evaluate_layers(&mut state);
+
+        // Red blocker matches the chosen color → block is illegal.
+        assert!(
+            validate_blockers(&state, &[(red_blocker, granted)]).is_err(),
+            "red blocker should be prohibited (chosen color = red)"
+        );
+        assert!(
+            !can_block_pair(&state, red_blocker, granted),
+            "red blocker should not be able to block"
+        );
+        // Blue blocker does NOT match — block is legal.
+        assert!(
+            can_block_pair(&state, blue_blocker, granted),
+            "blue blocker should be able to block (color differs from chosen)"
+        );
+    }
+
     /// CR 509.1b + CR 303.4: An Aura-granted `CantBeBlockedBy` (e.g., Snake
     /// Cult Initiation, Pemmin's Aura-class) must propagate to the enchanted
     /// creature, with the inner blocker filter resolved against the Aura's
@@ -3465,6 +3704,50 @@ mod tests {
     }
 
     #[test]
+    fn static_goaded_enforces_source_controller_attack_restriction() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.phase = crate::types::phase::Phase::DeclareAttackers;
+        let goaded = create_creature(&mut state, PlayerId(0), "Goaded Bear", 2, 2);
+        let source = create_creature(&mut state, PlayerId(1), "Goad Aura", 0, 1);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::Goaded).affected(
+                    crate::types::ability::TargetFilter::Typed(
+                        crate::types::ability::TypedFilter::creature()
+                            .controller(crate::types::ability::ControllerRef::Opponent),
+                    ),
+                ),
+            );
+
+        let omitted = declare_attackers(&mut state, &[], &mut vec![]);
+        assert!(omitted.is_err());
+        assert!(omitted.unwrap_err().contains("goaded"));
+
+        let attacks_goading_player = declare_attackers(
+            &mut state,
+            &[(goaded, AttackTarget::Player(PlayerId(1)))],
+            &mut vec![],
+        );
+        assert!(attacks_goading_player.is_err());
+        assert!(attacks_goading_player
+            .unwrap_err()
+            .contains("must attack a different player"));
+
+        let attacks_other_player = declare_attackers(
+            &mut state,
+            &[(goaded, AttackTarget::Player(PlayerId(2)))],
+            &mut vec![],
+        );
+        assert!(attacks_other_player.is_ok());
+    }
+
+    #[test]
     fn goad_enforcement_tapped_creature_exempt() {
         let mut state = setup_combat_phase();
         let goaded = create_goaded_creature(&mut state, PlayerId(0), PlayerId(1));
@@ -3588,6 +3871,11 @@ mod tests {
         def.condition = Some(StaticCondition::UnlessPay {
             cost: ManaCost::generic(2),
             scaling: UnlessPayScaling::PerAffectedCreature,
+            // CR 506.3: Ghostly Prison — "Creatures can't attack you unless..."
+            // Tax applies only to attacks targeting the prison's controller
+            // (CR 506.3 enumerates the legal attack target types: a player, a
+            // planeswalker, or a battle).
+            defended: Some(crate::types::triggers::AttackTargetFilter::Player),
         });
         obj.static_definitions.push(def);
         id
@@ -3658,6 +3946,8 @@ mod tests {
                     counter_type: None,
                 },
             },
+            // CR 506.3: Nils — "...can't attack you or planeswalkers you control..."
+            defended: Some(crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker),
         });
         nils_obj.static_definitions.push(def);
 
@@ -3781,6 +4071,9 @@ mod tests {
                 generic: 0,
             },
             scaling: UnlessPayScaling::PerAffectedCreature,
+            // CR 506.3: Norn's Annex — "Creatures can't attack you or
+            // planeswalkers you control unless..."
+            defended: Some(crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker),
         });
         annex_obj.static_definitions.push(def);
 
@@ -3799,6 +4092,133 @@ mod tests {
         assert!(
             per_creature.iter().all(|(_, c)| c.mana_value() == 1),
             "each attacker pays one {{W/P}}"
+        );
+    }
+
+    /// CR 506.3 + CR 508.1d: Propaganda multiplayer regression (issue #302).
+    /// Three-player game: A controls Propaganda; B attacks C (NOT A). The tax
+    /// must NOT apply because C is not the static's controller. Pre-fix, the
+    /// tax incorrectly fired against any opponent-attacker. The `defended`
+    /// filter scopes the tax to attacks on A.
+    #[test]
+    fn compute_attack_tax_propaganda_only_taxes_attacks_against_controller() {
+        use crate::types::ability::{
+            ControllerRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
+            TypedFilter, UnlessPayScaling,
+        };
+        use crate::types::format::FormatConfig;
+        use crate::types::statics::StaticMode;
+
+        // Three players: A=PlayerId(0), B=PlayerId(1), C=PlayerId(2). B is active.
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(1);
+
+        // Player A controls Propaganda.
+        let next_card_id = CardId(state.next_object_id);
+        let propaganda = create_object(
+            &mut state,
+            next_card_id,
+            PlayerId(0),
+            "Propaganda".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        let prop_obj = state.objects.get_mut(&propaganda).unwrap();
+        prop_obj.card_types.core_types.push(CoreType::Enchantment);
+        let mut def = StaticDefinition::new(StaticMode::CantAttack)
+            .affected(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: Some(ControllerRef::Opponent),
+                properties: vec![],
+            }))
+            .description("Propaganda".to_string());
+        def.condition = Some(StaticCondition::UnlessPay {
+            cost: crate::types::mana::ManaCost::generic(2),
+            scaling: UnlessPayScaling::PerAffectedCreature,
+            defended: Some(crate::types::triggers::AttackTargetFilter::Player),
+        });
+        prop_obj.static_definitions.push(def);
+
+        // Player B has a creature; declares attack on player C (not A).
+        let attacker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+
+        // Attack against C (PlayerId(2)). Propaganda's defender is A
+        // (PlayerId(0)) — must NOT tax.
+        let attacks_on_c = vec![(attacker, AttackTarget::Player(PlayerId(2)))];
+        assert!(
+            compute_attack_tax(&state, &attacks_on_c).is_none(),
+            "Propaganda must not tax attacks against players other than its controller (#302)",
+        );
+
+        // Sanity: attacking A DOES trigger the tax.
+        let attacks_on_a = vec![(attacker, AttackTarget::Player(PlayerId(0)))];
+        let (total, _) = compute_attack_tax(&state, &attacks_on_a)
+            .expect("Propaganda must tax attacks against its controller");
+        assert_eq!(total.mana_value(), 2, "Propaganda taxes {{2}} per attacker");
+    }
+
+    /// CR 506.3 + CR 611.3a + CR 118.12a: Archangel of Tithes — when untapped,
+    /// opponents pay {1} per attacker against the controller or their
+    /// planeswalkers. When tapped, the gating condition fails, so the tax
+    /// is dormant. Regression for issue #309 (tax not enforced).
+    #[test]
+    fn compute_attack_tax_archangel_of_tithes_gated_by_untapped() {
+        use crate::types::ability::{
+            ControllerRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
+            TypedFilter, UnlessPayScaling,
+        };
+        use crate::types::statics::StaticMode;
+
+        let mut state = setup();
+        // Player B (PlayerId(1)) controls Archangel of Tithes.
+        let next_card_id = CardId(state.next_object_id);
+        let archangel = create_object(
+            &mut state,
+            next_card_id,
+            PlayerId(1),
+            "Archangel of Tithes".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        let ang_obj = state.objects.get_mut(&archangel).unwrap();
+        ang_obj.card_types.core_types.push(CoreType::Creature);
+        let mut def = StaticDefinition::new(StaticMode::CantAttack)
+            .affected(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: Some(ControllerRef::Opponent),
+                properties: vec![],
+            }))
+            .description("Archangel of Tithes attack tax".to_string());
+        def.condition = Some(StaticCondition::And {
+            conditions: vec![
+                // CR 611.2b: gate — only active while untapped.
+                StaticCondition::Not {
+                    condition: Box::new(StaticCondition::SourceIsTapped),
+                },
+                StaticCondition::UnlessPay {
+                    cost: crate::types::mana::ManaCost::generic(1),
+                    scaling: UnlessPayScaling::PerAffectedCreature,
+                    defended: Some(
+                        crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker,
+                    ),
+                },
+            ],
+        });
+        ang_obj.static_definitions.push(def);
+
+        // Player A (PlayerId(0)) attacks Player B with one creature.
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let attacks = vec![(attacker, AttackTarget::Player(PlayerId(1)))];
+
+        // Untapped → tax applies.
+        let (total, _) = compute_attack_tax(&state, &attacks)
+            .expect("Archangel of Tithes must tax attacks while untapped (#309)");
+        assert_eq!(total.mana_value(), 1, "Archangel taxes {{1}} per attacker");
+
+        // Tap the Archangel → gate fails, tax becomes dormant.
+        state.objects.get_mut(&archangel).unwrap().tapped = true;
+        assert!(
+            compute_attack_tax(&state, &attacks).is_none(),
+            "tapped Archangel must not enforce its tax",
         );
     }
 

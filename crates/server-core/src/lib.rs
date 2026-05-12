@@ -20,4 +20,7 @@ pub use protocol::{
     SeatMutation, SeatView, ServerMessage,
 };
 pub use reconnect::ReconnectManager;
-pub use session::{acting_player, generate_game_code, generate_player_token, SessionManager};
+pub use session::{
+    acting_player, acting_players, generate_game_code, generate_player_token, is_acting,
+    SessionManager,
+};

@@ -281,7 +281,7 @@ export function DeckList({
       )}
 
       {/* Format legality & coverage */}
-      {compatibility && (
+      {compatibility && (compatibility.format_legality || (compatibility.coverage && compatibility.coverage.unsupported_cards.length > 0)) && (
         <div className="mb-3 space-y-2 border-b border-white/8 pb-3">
           {compatibility.format_legality && (
             <div>
@@ -302,27 +302,19 @@ export function DeckList({
               </div>
             </div>
           )}
-          {compatibility.coverage && (
+          {compatibility.coverage && compatibility.coverage.unsupported_cards.length > 0 && (
             <div>
               <div className="mb-1 text-[10px] uppercase tracking-wider text-gray-500">Engine Coverage</div>
               <div className="flex items-center gap-2">
                 <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-gray-700">
                   <div
-                    className={`h-full rounded-full ${
-                      compatibility.coverage.unsupported_cards.length === 0
-                        ? "bg-emerald-500"
-                        : "bg-orange-500"
-                    }`}
+                    className="h-full rounded-full bg-orange-500"
                     style={{ width: `${compatibility.coverage.total_unique > 0 ? (compatibility.coverage.supported_unique / compatibility.coverage.total_unique) * 100 : 0}%` }}
                   />
                 </div>
                 <span
                   className="shrink-0 text-[10px] text-gray-400"
-                  title={
-                    compatibility.coverage.unsupported_cards.length === 0
-                      ? "All cards fully supported"
-                      : `Unsupported:\n${compatibility.coverage.unsupported_cards.map((c) => `${c.name}: ${c.gaps.join(", ")}`).join("\n")}`
-                  }
+                  title={`Unsupported:\n${compatibility.coverage.unsupported_cards.map((c) => `${c.name}: ${c.gaps.join(", ")}`).join("\n")}`}
                 >
                   {compatibility.coverage.supported_unique}/{compatibility.coverage.total_unique}
                 </span>

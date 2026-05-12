@@ -10,6 +10,7 @@ use engine::types::ability::{
     DevotionColors, FilterProp, ObjectProperty, PlayerFilter, PlayerScope, QuantityExpr,
     QuantityRef, RoundingMode, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
+use engine::types::counter::{parse_counter_type, CounterType as EngineCounterType};
 use engine::types::player::PlayerCounterKind;
 use engine::types::zones::Zone;
 
@@ -341,15 +342,17 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
         ),
 
         // CR 201.2 + CR 603.4: "the number of [permanents] with different
-        // names" → ObjectCountDistinctNames. Other GroupFilter variants
+        // names" → ObjectCountDistinct[Name]. Other GroupFilter variants
         // (DifferentControllers, SameToughness, …) lack a dedicated primitive
         // and strict-fail.
         GameNumber::NumGroupPermanents(filter, group) => {
             use crate::schema::types::GroupFilter;
+            use engine::types::ability::SharedQuality;
             match group {
                 GroupFilter::DifferentNames => QuantityExpr::Ref {
-                    qty: QuantityRef::ObjectCountDistinctNames {
+                    qty: QuantityRef::ObjectCountDistinct {
                         filter: convert_permanents(filter)?,
+                        qualities: vec![SharedQuality::Name],
                     },
                 },
                 other => {
@@ -422,7 +425,7 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
         // (across all matching objects) → CountersOnObjects.
         GameNumber::NumCountersOfTypeOnPermanents(counter_type, filter) => QuantityExpr::Ref {
             qty: QuantityRef::CountersOnObjects {
-                counter_type: Some(counter_type_string(counter_type)),
+                counter_type: Some(counter_type_value(counter_type)),
                 filter: convert_permanents(filter)?,
             },
         },
@@ -889,7 +892,7 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
         GameNumber::NumCountersOfTypeOnDeadPermanent(counter_type) => QuantityExpr::Ref {
             qty: QuantityRef::CountersOn {
                 scope: engine::types::ability::ObjectScope::Target,
-                counter_type: Some(counter_type_string(counter_type)),
+                counter_type: Some(counter_type_value(counter_type)),
             },
         },
 
@@ -1157,7 +1160,7 @@ fn counters_of_type_on_permanent_ref(
     counter_type: &CounterType,
     perm: &Permanent,
 ) -> ConvResult<QuantityRef> {
-    let counter_type = Some(counter_type_string(counter_type));
+    let counter_type = Some(counter_type_value(counter_type));
     match perm {
         Permanent::ThisPermanent | Permanent::Self_It => Ok(QuantityRef::CountersOn {
             scope: engine::types::ability::ObjectScope::Source,
@@ -1246,12 +1249,8 @@ fn players_to_player_filter(players: &Players) -> Option<PlayerFilter> {
     }
 }
 
-/// Render a CounterType as the engine's stringly-typed counter identifier.
-/// Engine convention (parser/oracle_effect/counter.rs::normalize_counter_type)
-/// uses "P1P1" / "M1M1" for +1/+1 and -1/-1 counters; everything else is the
-/// PascalCase variant name with the trailing "Counter" stripped.
-fn counter_type_string(ct: &CounterType) -> String {
-    match ct {
+fn counter_type_value(ct: &CounterType) -> EngineCounterType {
+    let raw = match ct {
         CounterType::PTCounter(1, 1) => "P1P1".to_string(),
         CounterType::PTCounter(-1, -1) => "M1M1".to_string(),
         CounterType::PTCounter(p, t) => format!("{p:+}/{t:+}"),
@@ -1259,7 +1258,8 @@ fn counter_type_string(ct: &CounterType) -> String {
             .strip_suffix("Counter")
             .map(str::to_string)
             .unwrap_or_else(|| format!("{other:?}")),
-    }
+    };
+    parse_counter_type(&raw)
 }
 
 fn player_gap(idiom: &'static str, p: &Player) -> ConversionGap {

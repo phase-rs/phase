@@ -1303,7 +1303,9 @@ async fn broadcast_game_started(
         let (legal_actions, spell_costs_all, by_object_all) =
             engine_legal_actions_full(&session.state);
         let auto_pass = engine_auto_pass(&session.state, &legal_actions);
-        let actor = server_core::acting_player(&session.state);
+        // CR 103.5: For simultaneous mulligan, every pending player is an
+        // "actor" who must receive their own legal-actions payload.
+        let actors = server_core::acting_players(&session.state);
         let player_names = session.display_names.clone();
 
         let player_messages = (0..session.player_count)
@@ -1321,7 +1323,7 @@ async fn broadcast_game_started(
                             Some(name.clone())
                         }
                     });
-                let is_actor = actor == Some(player);
+                let is_actor = actors.contains(&player);
                 let derived = derive_views(&filtered);
                 (
                     player,
@@ -1381,11 +1383,14 @@ async fn broadcast_game_started(
             spell_costs,
             legal_actions_by_object,
         ) = result;
-        let actor = {
+        // CR 103.5: For simultaneous-decision states, every pending player is
+        // an actor — use the set rather than a single representative.
+        let actors: Vec<PlayerId> = {
             let mgr = state.lock().await;
             mgr.sessions
                 .get(game_code)
-                .and_then(|session| server_core::acting_player(&session.state))
+                .map(|session| server_core::acting_players(&session.state))
+                .unwrap_or_default()
         };
         let filtered_states: Vec<(PlayerId, GameState)> = (0..player_count)
             .map(PlayerId)
@@ -1396,7 +1401,7 @@ async fn broadcast_game_started(
         if let Some(players) = conns.get(game_code) {
             for (pid, pstate) in &filtered_states {
                 if let Some(sender) = players.get(pid) {
-                    let is_actor = actor == Some(*pid);
+                    let is_actor = actors.contains(pid);
                     let _ = sender.send(ServerMessage::StateUpdate {
                         state: pstate.clone(),
                         events: events.clone(),
@@ -1608,11 +1613,12 @@ async fn handle_client_message(
                         let (legal_actions, spell_costs_all, by_object_all) =
                             engine_legal_actions_full(&session.state);
                         let auto_pass = engine_auto_pass(&session.state, &legal_actions);
-                        let actor = server_core::acting_player(&session.state);
+                        // CR 103.5: simultaneous mulligan — use actor set.
+                        let actors = server_core::acting_players(&session.state);
                         let player_names = session.display_names.clone();
 
                         // Send GameStarted to the joiner
-                        let is_joiner_actor = actor == Some(joiner);
+                        let is_joiner_actor = actors.contains(&joiner);
                         let joiner_legals = if is_joiner_actor {
                             legal_actions.clone()
                         } else {
@@ -1648,7 +1654,7 @@ async fn handle_client_message(
                             if pid != joiner {
                                 let p_state =
                                     server_core::filter_state_for_player(&session.state, pid);
-                                let is_actor = actor == Some(pid);
+                                let is_actor = actors.contains(&pid);
                                 let p_legals = if is_actor {
                                     legal_actions.clone()
                                 } else {
@@ -1731,7 +1737,8 @@ async fn handle_client_message(
                             None => vec![],
                         };
                         let session = mgr.sessions.get(&game_code).unwrap();
-                        let actor = server_core::acting_player(&session.state);
+                        // CR 103.5: simultaneous-decision states require an actor set.
+                        let actor = server_core::acting_players(&session.state);
                         let eliminated = session.state.eliminated_players.clone();
                         let player_count = session.player_count;
                         let game_over_winner = match &session.state.waiting_for {
@@ -1802,31 +1809,28 @@ async fn handle_client_message(
                         if let Some(players) = conns.get(&game_code) {
                             for (pid, pstate) in &filtered_states {
                                 if let Some(s) = players.get(pid) {
-                                    let player_legals =
-                                        if ai_results.is_empty() && actor == Some(*pid) {
-                                            legal_actions.clone()
-                                        } else {
-                                            // AI will act next — don't send legal actions yet
-                                            vec![]
-                                        };
-                                    let p_auto_pass =
-                                        if ai_results.is_empty() && actor == Some(*pid) {
-                                            auto_pass_rec
-                                        } else {
-                                            false
-                                        };
-                                    let p_spell_costs =
-                                        if ai_results.is_empty() && actor == Some(*pid) {
-                                            spell_costs.clone()
-                                        } else {
-                                            HashMap::new()
-                                        };
-                                    let p_by_object =
-                                        if ai_results.is_empty() && actor == Some(*pid) {
-                                            legal_actions_by_object.clone()
-                                        } else {
-                                            HashMap::new()
-                                        };
+                                    let is_actor = actor.contains(pid);
+                                    let player_legals = if ai_results.is_empty() && is_actor {
+                                        legal_actions.clone()
+                                    } else {
+                                        // AI will act next — don't send legal actions yet
+                                        vec![]
+                                    };
+                                    let p_auto_pass = if ai_results.is_empty() && is_actor {
+                                        auto_pass_rec
+                                    } else {
+                                        false
+                                    };
+                                    let p_spell_costs = if ai_results.is_empty() && is_actor {
+                                        spell_costs.clone()
+                                    } else {
+                                        HashMap::new()
+                                    };
+                                    let p_by_object = if ai_results.is_empty() && is_actor {
+                                        legal_actions_by_object.clone()
+                                    } else {
+                                        HashMap::new()
+                                    };
                                     let _ = s.send(ServerMessage::StateUpdate {
                                         state: pstate.clone(),
                                         events: events.clone(),
@@ -1869,22 +1873,23 @@ async fn handle_client_message(
                         if let Some(players) = conns.get(&game_code) {
                             for (pid, pstate) in &ai_filtered {
                                 if let Some(s) = players.get(pid) {
-                                    let player_legals = if is_last && actor == Some(*pid) {
+                                    let is_actor = actor.contains(pid);
+                                    let player_legals = if is_last && is_actor {
                                         ai_legal.clone()
                                     } else {
                                         vec![]
                                     };
-                                    let p_auto_pass = if is_last && actor == Some(*pid) {
+                                    let p_auto_pass = if is_last && is_actor {
                                         *ai_auto_pass
                                     } else {
                                         false
                                     };
-                                    let p_spell_costs = if is_last && actor == Some(*pid) {
+                                    let p_spell_costs = if is_last && is_actor {
                                         ai_spell_costs.clone()
                                     } else {
                                         HashMap::new()
                                     };
-                                    let p_by_object = if is_last && actor == Some(*pid) {
+                                    let p_by_object = if is_last && is_actor {
                                         ai_by_object.clone()
                                     } else {
                                         HashMap::new()
@@ -1987,8 +1992,8 @@ async fn handle_client_message(
                             let (legal_actions_all, spell_costs_all, by_object_all) =
                                 engine_legal_actions_full(&session.state);
                             let auto_pass = engine_auto_pass(&session.state, &legal_actions_all);
-                            let actor = server_core::acting_player(&session.state);
-                            let is_actor = actor == Some(player);
+                            // CR 103.5: simultaneous-decision states require actor-set check.
+                            let is_actor = server_core::is_acting(&session.state, player);
                             let player_legals = if is_actor { legal_actions_all } else { vec![] };
 
                             let derived_reconnect = derive_views(&filtered_state);
@@ -2096,13 +2101,13 @@ async fn handle_client_message(
                             spell_costs,
                             legal_actions_by_object,
                         ) = result;
-                        let actor = {
+                        // CR 103.5: actor-set membership for simultaneous mulligan.
+                        let is_actor = {
                             let mgr = state.lock().await;
                             let session = mgr.sessions.get(&game_code).unwrap();
-                            server_core::acting_player(&session.state)
+                            server_core::is_acting(&session.state, player)
                         };
                         let filtered = server_core::filter_state_for_player(&raw_state, player);
-                        let is_actor = actor == Some(player);
                         let player_legals = if is_actor { legal_actions } else { vec![] };
                         let derived = derive_views(&filtered);
                         let _ = tx.send(ServerMessage::StateUpdate {
@@ -2447,10 +2452,9 @@ async fn handle_client_message(
                     let (legal_actions, spell_costs_all, by_object_all) =
                         engine_legal_actions_full(&session.state);
                     let auto_pass = engine_auto_pass(&session.state, &legal_actions);
-                    let actor = server_core::acting_player(&session.state);
+                    // CR 103.5: actor-set membership for simultaneous mulligan.
+                    let is_actor = server_core::is_acting(&session.state, PlayerId(0));
                     let player_names = session.display_names.clone();
-
-                    let is_actor = actor == Some(PlayerId(0));
                     let host_legals = if is_actor { legal_actions } else { vec![] };
                     let host_state =
                         server_core::filter_state_for_player(&session.state, PlayerId(0));
@@ -2520,14 +2524,14 @@ async fn handle_client_message(
                         spell_costs,
                         legal_actions_by_object,
                     ) = result;
-                    let actor = {
+                    // CR 103.5: actor-set membership.
+                    let is_actor = {
                         let mgr = state.lock().await;
                         let session = mgr.sessions.get(&game_code).unwrap();
-                        server_core::acting_player(&session.state)
+                        server_core::is_acting(&session.state, PlayerId(0))
                     };
                     let filtered = server_core::filter_state_for_player(&raw_state, PlayerId(0));
                     {
-                        let is_actor = actor == Some(PlayerId(0));
                         let player_legals = if is_actor { legal_actions } else { vec![] };
                         let derived = derive_views(&filtered);
                         let _ = tx.send(ServerMessage::StateUpdate {

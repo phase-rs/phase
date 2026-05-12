@@ -23,7 +23,7 @@ use crate::types::ability::{
     TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
-use crate::types::counter::CounterMatch;
+use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
@@ -350,6 +350,8 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
             value(AbilityCondition::WhenYouDo, tag("when you do, ")),
             value(AbilityCondition::IfAPlayerDoes, tag("if a player does, ")),
             value(AbilityCondition::IfAPlayerDoes, tag("if they do, ")),
+            value(AbilityCondition::IfYouDo, tag("if that player does, ")),
+            value(AbilityCondition::IfYouDo, tag("if the player does, ")),
             value(
                 AbilityCondition::Not {
                     condition: Box::new(AbilityCondition::IfYouDo),
@@ -536,17 +538,21 @@ fn parse_its_a_type_condition(condition_text: &str) -> Option<AbilityCondition> 
     ))
 }
 
+/// CR 614.1a + CR 608.2c: Parse a target-anaphoric color check used as the
+/// gating condition of an "instead" override. Composes three orthogonal axes:
+///
+///   - subject: `it`, `that creature`, `that permanent`, `that card`
+///   - tense: present (`is`/`'s`) → current state, past (`was`) → LKI
+///   - polarity: positive (`is`/`was`) vs. negative (`isn't`/`wasn't`/`is not`/`was not`)
+///
+/// Past-tense forms set `use_lki: true` per CR 400.7 so the runtime evaluates
+/// the LKI snapshot rather than the current object state (matters when the
+/// parent sub_ability already moved the target before the check runs).
 fn parse_target_color_condition(
     input: &str,
 ) -> super::super::oracle_nom::error::OracleResult<'_, AbilityCondition> {
-    let (rest, negated) = alt((
-        value(false, alt((tag("it's "), tag("it is ")))),
-        value(
-            true,
-            alt((tag("it isn't "), tag("it's not "), tag("it is not "))),
-        ),
-    ))
-    .parse(input)?;
+    let (rest, _) = parse_target_anaphoric_subject(input)?;
+    let (rest, (negated, use_lki)) = parse_target_anaphoric_tense_polarity(rest)?;
     let (rest, color) = nom_primitives::parse_color(rest)?;
     Ok((
         rest,
@@ -555,11 +561,60 @@ fn parse_target_color_condition(
                 filter: TargetFilter::Typed(
                     TypedFilter::default().properties(vec![FilterProp::HasColor { color }]),
                 ),
-                use_lki: false,
+                use_lki,
             },
             negated,
         ),
     ))
+}
+
+/// Consume a target-anaphoric noun phrase used as the subject of an "instead"
+/// gating condition. `it` is a special pronoun case (the only one that
+/// contracts to `it's`); the noun-phrase forms always take a space before
+/// their verb. Returns `()` because the subject identity is preserved by
+/// `TargetMatchesFilter` resolving against the parent target.
+fn parse_target_anaphoric_subject(
+    input: &str,
+) -> super::super::oracle_nom::error::OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>("it"),
+            tag("that creature"),
+            tag("that permanent"),
+            tag("that card"),
+        )),
+    )
+    .parse(input)
+}
+
+/// Consume the verb portion (tense + polarity) following a target-anaphoric
+/// subject. Returns `(negated, use_lki)`:
+///
+///   - `is` / `'s` → present, positive
+///   - `is not` / `'s not` / `isn't` → present, negated
+///   - `was` → past, positive
+///   - `was not` / `wasn't` → past, negated
+///
+/// Past-tense forms (CR 400.7) require LKI evaluation. Listed longest-first
+/// so `is not` wins over `is`.
+fn parse_target_anaphoric_tense_polarity(
+    input: &str,
+) -> super::super::oracle_nom::error::OracleResult<'_, (bool, bool)> {
+    alt((
+        // Negated past — must precede positive past
+        value((true, true), alt((tag(" wasn't "), tag(" was not ")))),
+        // Positive past
+        value((false, true), tag(" was ")),
+        // Negated present — must precede positive present
+        value(
+            (true, false),
+            alt((tag(" isn't "), tag("'s not "), tag(" is not "))),
+        ),
+        // Positive present
+        value((false, false), alt((tag("'s "), tag(" is ")))),
+    ))
+    .parse(input)
 }
 
 fn parse_target_color_condition_text(text: &str) -> Option<AbilityCondition> {
@@ -699,7 +754,7 @@ pub(super) fn strip_target_keyword_instead(text: &str) -> (Option<AbilityConditi
     (None, text.to_string())
 }
 
-fn parse_counter_threshold(text: &str) -> Option<(Comparator, i32, String, usize)> {
+fn parse_counter_threshold(text: &str) -> Option<(Comparator, i32, CounterType, usize)> {
     let original_len = text.len();
 
     fn parse_counter_on_suffix(after_type: &str) -> Option<&str> {
@@ -744,7 +799,7 @@ fn parse_counter_threshold(text: &str) -> Option<(Comparator, i32, String, usize
 fn build_counter_condition(
     comparator: Comparator,
     threshold: i32,
-    counter_type: String,
+    counter_type: CounterType,
 ) -> AbilityCondition {
     AbilityCondition::QuantityCheck {
         lhs: QuantityExpr::Ref {
@@ -1334,6 +1389,28 @@ pub(super) fn try_parse_generic_instead_clause(
     kind: AbilityKind,
     ctx: &mut ParseContext,
 ) -> Option<AbilityDefinition> {
+    // Forward form: "If <cond>, [body] instead." — split on the leading "If, "
+    // and strip a trailing/leading "instead" from the body.
+    if let Some((cond_text, effect_text)) = split_forward_instead_clause(text) {
+        return build_instead_def(cond_text, effect_text, kind, ctx);
+    }
+
+    // CR 614.1a + CR 608.2c: Inverted form — "[body] instead if <cond>." (e.g.
+    // Scepter of Empires). Same semantic as the forward form but with the
+    // condition trailing the override body. The chunk-level mid-text
+    // `" instead if "` boundary mirrors the line-level `strip_instead_suffix`
+    // in `oracle.rs` but operates on a single chunk inside the chain loop.
+    if let Some((cond_text, effect_text)) = split_inverted_instead_clause(text) {
+        return build_instead_def(cond_text, effect_text, kind, ctx);
+    }
+
+    None
+}
+
+/// Forward instead form: "If <cond>, [body] instead." Returns the trimmed
+/// `(condition_text, effect_text)` if the leading-conditional + trailing-or-
+/// leading "instead" structure matches. Returns None otherwise.
+fn split_forward_instead_clause(text: &str) -> Option<(String, String)> {
     let (condition_fragment, raw_body) = split_leading_conditional(text)?;
     let condition_lower = condition_fragment.to_lowercase();
     let cond_text = nom_on_lower(&condition_fragment, &condition_lower, |i| {
@@ -1341,25 +1418,56 @@ pub(super) fn try_parse_generic_instead_clause(
     })
     .map(|((), rest)| rest)
     .unwrap_or(&condition_fragment)
-    .trim();
+    .trim()
+    .to_string();
 
     let trimmed_body = raw_body.trim_end_matches('.').trim();
     let trimmed_lower = trimmed_body.to_lowercase();
     let effect_text = if let Some(stripped) = trimmed_body.strip_suffix(" instead") {
-        stripped.trim()
+        stripped.trim().to_string()
     } else if let Some((_, rest)) = nom_on_lower(trimmed_body, &trimmed_lower, |i| {
         value((), tag("instead ")).parse(i)
     }) {
-        rest.trim()
+        rest.trim().to_string()
     } else {
         return None;
     };
 
-    let condition = try_nom_condition_as_ability_condition(cond_text, ctx)
-        .or_else(|| parse_condition_text(cond_text))
-        .or_else(|| parse_control_count_as_ability_condition(cond_text))?;
+    Some((cond_text, effect_text))
+}
 
-    let instead_def = parse_effect_chain(effect_text, kind);
+/// Inverted instead form: "[body] instead if <cond>." Returns the trimmed
+/// `(condition_text, effect_text)` if the chunk contains the mid-text
+/// `" instead if "` boundary. Returns None otherwise. The body must be
+/// non-empty after stripping "instead"; the condition is the suffix.
+fn split_inverted_instead_clause(text: &str) -> Option<(String, String)> {
+    let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
+    let (before, after) = tp.rsplit_around(" instead if ")?;
+    let effect_text = before.original.trim().trim_end_matches('.').trim();
+    let cond_text = after.original.trim().trim_end_matches('.').trim();
+    if effect_text.is_empty() || cond_text.is_empty() {
+        return None;
+    }
+    Some((cond_text.to_string(), effect_text.to_string()))
+}
+
+/// Shared assembly: build an `AbilityDefinition` for an instead override.
+/// Tries the three condition parsers in priority order; bails if none match
+/// (so the chunk can fall through to other dispatch paths). Wraps the result
+/// in `ConditionInstead` per CR 608.2c and rewrites cost-paid-object quantity
+/// references when needed.
+fn build_instead_def(
+    cond_text: String,
+    effect_text: String,
+    kind: AbilityKind,
+    ctx: &mut ParseContext,
+) -> Option<AbilityDefinition> {
+    let condition = try_nom_condition_as_ability_condition(&cond_text, ctx)
+        .or_else(|| parse_condition_text(&cond_text))
+        .or_else(|| parse_control_count_as_ability_condition(&cond_text))?;
+
+    let instead_def = parse_effect_chain(&effect_text, kind);
     let mut result = instead_def;
     result.condition = Some(AbilityCondition::ConditionInstead {
         inner: Box::new(condition),
@@ -1691,7 +1799,7 @@ fn static_condition_to_ability_condition(
                 qty: match counters {
                     CounterMatch::OfType(ct) => QuantityRef::CountersOn {
                         scope: ObjectScope::Source,
-                        counter_type: Some(ct.as_str().to_string()),
+                        counter_type: Some(ct.clone()),
                     },
                     CounterMatch::Any => QuantityRef::CountersOn {
                         scope: ObjectScope::Source,
@@ -1748,6 +1856,10 @@ pub(super) fn try_nom_condition_as_ability_condition(
     }
 
     if let Some(condition) = parse_cost_paid_object_matches_filter_condition(lower.as_str()) {
+        return Some(condition);
+    }
+
+    if let Some(condition) = parse_previous_effect_excess_damage_condition(lower.as_str()) {
         return Some(condition);
     }
 
@@ -2018,6 +2130,15 @@ fn parse_you_controlled_parent_target_condition(lower: &str) -> Option<AbilityCo
 }
 
 fn parse_cost_paid_object_matches_filter_condition(lower: &str) -> Option<AbilityCondition> {
+    if let Some(condition) = parse_cost_paid_object_subject_verb_form(lower) {
+        return Some(condition);
+    }
+    parse_cost_paid_object_definite_noun_form(lower)
+}
+
+/// Subject-verb form: "you sacrificed/exiled/discarded a [type] this way".
+/// Only checks the type of the cost-paid object (no property predicate).
+fn parse_cost_paid_object_subject_verb_form(lower: &str) -> Option<AbilityCondition> {
     let (rest, _) = alt((
         tag::<_, _, OracleError<'_>>("you sacrificed "),
         tag("you exiled "),
@@ -2047,6 +2168,156 @@ fn parse_cost_paid_object_matches_filter_condition(lower: &str) -> Option<Abilit
     })
 }
 
+/// CR 117.1 + CR 400.7j + CR 608.2k: Definite-noun form — "the [verb]ed
+/// [noun] was [property]". Used by override-instead conditions that check a
+/// property of the object paid as cost (not just its type). The `was`/`is`
+/// tense agrees with the cost-paid-object snapshot's LKI.
+///
+/// Examples (Stormscale Anarch class / Surtland Flinger):
+///   "the discarded card was multicolored"
+///   "the sacrificed creature was a Giant"
+///   "the exiled creature was a Spirit"
+///
+/// Composes three orthogonal axes:
+///   - verb participle: `discarded` / `sacrificed` / `exiled`
+///   - noun: `card` / `creature` / `permanent` / etc. — driven by
+///     [`parse_cost_paid_object_noun_prefix`] and added to `type_filters` so
+///     the runtime check matches both the noun and the property.
+///   - property predicate: a color-set property (multicolored/monocolored/
+///     colorless/named color) OR a type-or-subtype match ("a Giant",
+///     "a creature", "an artifact"). Color predicates land in `properties`;
+///     type/subtype predicates extend `type_filters`.
+fn parse_cost_paid_object_definite_noun_form(lower: &str) -> Option<AbilityCondition> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("the ").parse(lower).ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("discarded "),
+        tag("sacrificed "),
+        tag("exiled "),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, noun_filter) = parse_cost_paid_object_noun_prefix(rest)?;
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("was "), tag("is ")))
+        .parse(rest)
+        .ok()?;
+    let predicate = parse_cost_paid_object_predicate(rest)?;
+
+    let mut typed = TypedFilter::new(noun_filter);
+    match predicate {
+        CostPaidPredicate::Color(prop) => {
+            typed = typed.properties(vec![prop]);
+        }
+        CostPaidPredicate::TypeMatch(tf) => {
+            typed = typed.with_type(tf);
+        }
+    }
+    Some(AbilityCondition::CostPaidObjectMatchesFilter {
+        filter: TargetFilter::Typed(typed),
+    })
+}
+
+/// Predicate result for a definite-noun form's property clause. Color-set
+/// predicates land on `TypedFilter::properties`; type-or-subtype predicates
+/// land on `TypedFilter::type_filters` so the conjunction reflects both the
+/// noun ("creature") and the typed match ("a Giant"). See
+/// [`parse_cost_paid_object_definite_noun_form`].
+enum CostPaidPredicate {
+    Color(FilterProp),
+    TypeMatch(TypeFilter),
+}
+
+/// Non-consuming variant of [`parse_cost_paid_object_type_filter`]: matches a
+/// leading noun word (with the trailing space) and returns `(rest, TypeFilter)`.
+/// Used by the definite-noun form to bind the noun into the resulting filter.
+///
+/// Subtypes are intentionally excluded here — the noun position takes a
+/// permanent/card category word; subtype matching belongs in the predicate
+/// position ("the sacrificed creature was a Giant", not "the sacrificed Giant
+/// was …").
+fn parse_cost_paid_object_noun_prefix(input: &str) -> Option<(&str, TypeFilter)> {
+    alt((
+        value(
+            TypeFilter::Creature,
+            tag::<_, _, OracleError<'_>>("creature "),
+        ),
+        value(TypeFilter::Artifact, tag("artifact ")),
+        value(TypeFilter::Enchantment, tag("enchantment ")),
+        value(TypeFilter::Land, tag("land ")),
+        value(TypeFilter::Planeswalker, tag("planeswalker ")),
+        value(TypeFilter::Permanent, tag("permanent ")),
+        value(TypeFilter::Card, tag("card ")),
+    ))
+    .parse(input)
+    .ok()
+}
+
+/// Parse a definite-noun-form predicate after the `was/is` connector. Tries
+/// the color-set predicate first (orthogonal property axis) and falls back to
+/// a type/subtype match introduced by the article `a`/`an` (CR 205).
+fn parse_cost_paid_object_predicate(rest: &str) -> Option<CostPaidPredicate> {
+    if let Some(prop) = parse_color_property_predicate(rest) {
+        return Some(CostPaidPredicate::Color(prop));
+    }
+    parse_article_type_predicate(rest).map(CostPaidPredicate::TypeMatch)
+}
+
+/// Parse an `a [type]` / `an [type]` predicate where `[type]` is any noun the
+/// cost-paid-object machinery understands (creature, artifact, planeswalker,
+/// …) or a subtype (Giant, Spirit, Goblin, …). Returns the matched
+/// `TypeFilter` if the entire predicate is consumed.
+fn parse_article_type_predicate(rest: &str) -> Option<TypeFilter> {
+    let trimmed = rest.trim().trim_end_matches('.').trim();
+    let (after_article, _) = alt((
+        tag::<_, _, OracleError<'_>>("a "),
+        tag::<_, _, OracleError<'_>>("an "),
+    ))
+    .parse(trimmed)
+    .ok()?;
+    parse_cost_paid_object_type_filter(after_article)
+}
+
+/// CR 105.2: Parse a color-set property predicate as a `FilterProp`. Covers
+/// "multicolored" (>= 2 colors), "monocolored" (exactly 1), "colorless"
+/// (zero), and named colors (`white`/`blue`/`black`/`red`/`green`).
+fn parse_color_property_predicate(input: &str) -> Option<FilterProp> {
+    let trimmed = input.trim().trim_end_matches('.').trim();
+    if let Ok((rest, prop)) = alt((
+        value(
+            FilterProp::ColorCount {
+                comparator: Comparator::GE,
+                count: 2,
+            },
+            tag::<_, _, OracleError<'_>>("multicolored"),
+        ),
+        value(
+            FilterProp::ColorCount {
+                comparator: Comparator::EQ,
+                count: 1,
+            },
+            tag("monocolored"),
+        ),
+        value(
+            FilterProp::ColorCount {
+                comparator: Comparator::EQ,
+                count: 0,
+            },
+            tag("colorless"),
+        ),
+    ))
+    .parse(trimmed)
+    {
+        if rest.trim().is_empty() {
+            return Some(prop);
+        }
+    }
+    if let Ok((rest, color)) = nom_primitives::parse_color.parse(trimmed) {
+        if rest.trim().is_empty() {
+            return Some(FilterProp::HasColor { color });
+        }
+    }
+    None
+}
+
 fn parse_cost_paid_object_type_filter(text: &str) -> Option<TypeFilter> {
     all_consuming(alt((
         value(
@@ -2064,6 +2335,25 @@ fn parse_cost_paid_object_type_filter(text: &str) -> Option<TypeFilter> {
     .ok()
     .map(|(_, filter)| filter)
     .or_else(|| parse_subtype(text).map(|(subtype, _)| TypeFilter::Subtype(subtype)))
+}
+
+fn parse_previous_effect_excess_damage_condition(lower: &str) -> Option<AbilityCondition> {
+    all_consuming((
+        alt((
+            tag::<_, _, OracleError<'_>>("the creature the opponent controls"),
+            tag("that creature"),
+            tag("that permanent"),
+            tag("a creature"),
+            tag("a permanent"),
+        )),
+        tag(" is dealt excess damage this way"),
+    ))
+    .parse(lower)
+    .ok()?;
+    Some(AbilityCondition::PreviousEffectAmount {
+        comparator: Comparator::GT,
+        rhs: QuantityExpr::Fixed { value: 0 },
+    })
 }
 
 fn parse_zone_change_object_matches_filter_condition(lower: &str) -> Option<AbilityCondition> {
@@ -2687,7 +2977,7 @@ mod tests {
                     },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 2 },
-            } => assert_eq!(counter_type, "P1P1"),
+            } => assert_eq!(counter_type, CounterType::Plus1Plus1),
             other => panic!("unexpected bridged condition: {other:?}"),
         }
     }

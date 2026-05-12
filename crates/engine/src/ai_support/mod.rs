@@ -42,8 +42,22 @@ pub fn validated_candidate_actions(state: &GameState) -> Vec<CandidateAction> {
 }
 
 fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
-    let Some(acting_player) = state.waiting_for.acting_player() else {
-        return true;
+    // CR 103.5: For simultaneous-decision states (MulliganDecision,
+    // MulliganBottomCards) `acting_player()` is None when multiple players
+    // are pending. The Priority-branch check below only fires for the
+    // Priority variant, so we substitute the first pending player as a
+    // representative — the downstream mulligan/bottom dispatch is
+    // already validated by `invalid_action_for_state`.
+    let acting_player = match state.waiting_for.acting_player() {
+        Some(p) => p,
+        None => {
+            let players = state.waiting_for.acting_players();
+            if let Some(&first) = players.first() {
+                first
+            } else {
+                return true;
+            }
+        }
     };
 
     match (&state.waiting_for, action) {
@@ -177,12 +191,19 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         (WaitingFor::PayAmountChoice { min, max, .. }, GameAction::SubmitPayAmount { amount }) => {
             *amount < *min || *amount > *max
         }
-        (WaitingFor::MulliganBottomCards { player, count }, GameAction::SelectCards { cards }) => {
-            selection_mismatch(
-                cards,
-                &state.players[player.0 as usize].hand,
-                Some((*count).into()),
-            )
+        // CR 103.5: SelectCards is invalid if (a) no pending entry exists for
+        // any player whose hand contains all the selected cards, or (b) the
+        // count doesn't match the pending entry's owed bottom count. Because
+        // the actor identity is carried via authorization upstream, this filter
+        // only validates the count against any pending entry whose hand fits.
+        (WaitingFor::MulliganBottomCards { pending }, GameAction::SelectCards { cards }) => {
+            pending.iter().all(|entry| {
+                selection_mismatch(
+                    cards,
+                    &state.players[entry.player.0 as usize].hand,
+                    Some(entry.count.into()),
+                )
+            })
         }
         (
             WaitingFor::ScryChoice { player: _, cards },
@@ -600,7 +621,11 @@ pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
 /// P2P multiplayer host broadcasts a filtered state + legal-actions payload
 /// per guest; only the acting guest needs a populated legal-actions map.
 pub fn legal_actions_for_viewer(state: &GameState, viewer: PlayerId) -> LegalActionsFull {
-    if state.waiting_for.acting_player() == Some(viewer) {
+    // CR 103.5: For simultaneous-decision states (MulliganDecision,
+    // MulliganBottomCards), every pending player has a legal action set. Use
+    // `acting_players()` so guests in a multiplayer mulligan can see and
+    // submit their own decisions concurrently.
+    if state.waiting_for.acting_players().contains(&viewer) {
         legal_actions_full(state)
     } else {
         (Vec::new(), HashMap::new(), HashMap::new())
@@ -628,6 +653,13 @@ fn activatable_object_mana_actions(state: &GameState) -> Vec<GameAction> {
         return Vec::new();
     };
 
+    activatable_object_mana_actions_for_player(state, player)
+}
+
+pub(super) fn activatable_object_mana_actions_for_player(
+    state: &GameState,
+    player: PlayerId,
+) -> Vec<GameAction> {
     let mut actions = Vec::new();
     for &obj_id in &state.battlefield {
         let Some(obj) = state.objects.get(&obj_id) else {
@@ -700,8 +732,8 @@ mod tests {
     };
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction,
-        ResolvedAbility, UnlessCost,
+        AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, ManaContribution,
+        ManaProduction, QuantityExpr, ResolvedAbility, TargetFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -1028,6 +1060,124 @@ mod tests {
     }
 
     #[test]
+    fn legal_actions_by_object_exposes_filter_land_with_payable_mana_sub_cost() {
+        let mut state = setup_priority();
+        create_land(&mut state, "Forest", &["Forest"]);
+        let skycloud = create_land(&mut state, "Skycloud Expanse", &[]);
+        Arc::make_mut(&mut state.objects.get_mut(&skycloud).unwrap().abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::White, ManaColor::Blue],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::generic(1),
+                    },
+                    AbilityCost::Tap,
+                ],
+            }),
+        );
+
+        let (_, _, grouped) = legal_actions_full(&state);
+
+        assert!(
+            bucket_has(
+                &grouped,
+                skycloud,
+                &GameAction::ActivateAbility {
+                    source_id: skycloud,
+                    ability_index: 0,
+                },
+            ),
+            "Skycloud Expanse should be manually activatable when another mana source can pay its {{1}} cost",
+        );
+    }
+
+    #[test]
+    fn legal_actions_by_object_exposes_no_tap_sacrifice_mana_abilities() {
+        let mut state = setup_priority();
+        let altar = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Phyrexian Altar".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&altar).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.tapped = true;
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::AnyOneColor {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            color_options: vec![
+                                ManaColor::White,
+                                ManaColor::Blue,
+                                ManaColor::Black,
+                                ManaColor::Red,
+                                ManaColor::Green,
+                            ],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Sacrifice {
+                    target: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You),
+                    ),
+                    count: 1,
+                }),
+            );
+        }
+
+        let creature = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let (flat, _, grouped) = legal_actions_full(&state);
+
+        assert!(bucket_has(
+            &grouped,
+            altar,
+            &GameAction::ActivateAbility {
+                source_id: altar,
+                ability_index: 0,
+            },
+        ));
+        assert!(!flat.iter().any(
+            |action| matches!(action, GameAction::ActivateAbility { source_id, .. } if *source_id == altar)
+        ));
+    }
+
+    #[test]
     fn legal_actions_by_object_exposes_mana_actions_during_payment_states() {
         for (waiting_for, needs_pending_cast) in [
             (
@@ -1046,7 +1196,7 @@ mod tests {
             (
                 WaitingFor::UnlessPayment {
                     player: PlayerId(0),
-                    cost: UnlessCost::Fixed {
+                    cost: AbilityCost::Mana {
                         cost: ManaCost::generic(1),
                     },
                     pending_effect: Box::new(empty_effect(ObjectId(0))),

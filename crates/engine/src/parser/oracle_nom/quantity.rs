@@ -13,7 +13,7 @@ use nom::Parser;
 
 use super::context::ParseContext;
 use super::error::OracleResult;
-use super::primitives::{parse_counter_type_typed, parse_number};
+use super::primitives::{parse_article, parse_counter_type_typed, parse_number};
 use super::target::parse_type_filter_word;
 use crate::parser::oracle_target::{parse_shared_quality_clause, parse_type_phrase};
 use crate::parser::oracle_util::parse_subtype;
@@ -540,15 +540,17 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
             QuantityRef::DungeonsCompleted,
             tag("dungeons you've completed"),
         ),
-        // CR 202.2 + CR 601.2h: "the number of colors of mana spent to cast it"
-        // (Wildgrowth Archaic and the cousin-card family).
-        value(
-            QuantityRef::ManaSpentToCast {
-                scope: crate::types::ability::CastManaObjectScope::SelfObject,
-                metric: crate::types::ability::CastManaSpentMetric::DistinctColors,
-            },
-            tag("colors of mana spent to cast it"),
-        ),
+        // CR 202.2 + CR 601.2h: "the number of colors of mana spent to cast
+        // <self>" / "the amount of mana spent to cast <self>" / "the amount of
+        // mana from <source> spent to cast <self>". Delegates to the shared
+        // `parse_mana_spent_to_cast_ref` combinator that backs the "for each"
+        // path so all three metrics (DistinctColors, Total, FromSource) and
+        // every self-subject anaphor (`it`, `this spell`, `this creature`,
+        // `this permanent`, `them`, `~`) are covered. Class: Converge
+        // (Painful Truths, Bring to Light, Radiant Flames), Sunburst, and
+        // related "X is the number of colors of mana spent to cast this spell"
+        // riders.
+        parse_mana_spent_to_cast_ref,
         parse_number_of_object_name_words_tail,
         parse_number_of_object_colors_tail,
     )))
@@ -1023,6 +1025,22 @@ fn parse_life_lost_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         ),
         value(
             QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Sum,
+                },
+            },
+            tag("the total life lost by your opponents this turn"),
+        ),
+        value(
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Sum,
+                },
+            },
+            tag("total life lost by your opponents this turn"),
+        ),
+        value(
+            QuantityRef::LifeLostThisTurn {
                 player: PlayerScope::Controller,
             },
             tag("total life you lost this turn"),
@@ -1489,7 +1507,7 @@ fn parse_for_each_clause_ref_with_they_controller(
         parse_for_each_recipient_shared_quality,
         parse_for_each_battlefield_type,
         parse_for_each_commander_cast_count,
-        parse_for_each_mana_spent,
+        parse_mana_spent_to_cast_ref,
         parse_for_each_controlled_type,
     )))
     .parse(input)
@@ -1579,11 +1597,24 @@ fn inject_controller(filter: TargetFilter, controller: ControllerRef) -> TargetF
     }
 }
 
-/// CR 601.2h + CR 202.2: Parse "color[s] of mana spent to cast <self>" and
-/// "mana spent to cast <self>" after "for each" into self-scoped cast-spend
-/// quantities. Used by Converge token creation and Sunburst/ETB-counter
-/// cousins.
-fn parse_for_each_mana_spent(input: &str) -> OracleResult<'_, QuantityRef> {
+/// CR 601.2h + CR 202.2: Parse a self-scoped mana-spent-to-cast reference in
+/// any of three metrics:
+///
+/// - `DistinctColors` — "color[s] of mana spent to cast <self>" (Converge,
+///   Sunburst class).
+/// - `FromSource { source_filter }` — "mana from <source-filter> [that was]
+///   spent to cast <self>" (Treasure/Cave/artifact-source cousins).
+/// - `Total` — bare "mana spent to cast <self>" (Wildgrowth Archaic family,
+///   Molten Note).
+///
+/// Recognized self-subjects come from `parse_mana_spent_self_subject`: `it`,
+/// `this spell`, `this creature`, `this permanent`, `them`, `~`.
+///
+/// The same combinator is used both after "for each" (where the input has
+/// already had the "for each " prefix stripped) and after "the number of"
+/// (where the input has had "the number of " stripped) — the trailing surface
+/// form is identical in both contexts, so a single combinator suffices.
+fn parse_mana_spent_to_cast_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     if let Ok((rest, _)) = pair(tag::<_, _, OracleError<'_>>("color"), opt(tag("s"))).parse(input) {
         let (rest, _) = tag(" of mana spent to cast ").parse(rest)?;
         let (rest, _) = parse_mana_spent_self_subject(rest)?;
@@ -1676,6 +1707,14 @@ pub fn parse_counter_added_this_turn_for_each(input: &str) -> OracleResult<'_, Q
 /// creature this turn" and the generic-counter sibling "you put a counter on a
 /// permanent this turn" into the shared counter-history quantity.
 pub fn parse_counter_added_this_turn_condition(input: &str) -> OracleResult<'_, QuantityRef> {
+    alt((
+        parse_counter_added_this_turn_condition_active,
+        parse_counter_added_this_turn_condition_passive,
+    ))
+    .parse(input)
+}
+
+fn parse_counter_added_this_turn_condition_active(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = alt((tag("you put "), tag("you've put "))).parse(input)?;
     let (rest, _) = alt((tag("one or more "), tag("a "))).parse(rest)?;
     let (rest, counters) =
@@ -1687,6 +1726,22 @@ pub fn parse_counter_added_this_turn_condition(input: &str) -> OracleResult<'_, 
         rest,
         QuantityRef::CounterAddedThisTurn {
             actor: CountScope::Controller,
+            counters,
+            target,
+        },
+    ))
+}
+
+fn parse_counter_added_this_turn_condition_passive(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = parse_article(input)?;
+    let (rest, counters) = parse_typed_counter_match(rest)?;
+    let (rest, _) = tag(" was put on ").parse(rest)?;
+    let (rest, target) = parse_counter_added_target(rest)?;
+    let (rest, _) = tag(" this turn").parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::CounterAddedThisTurn {
+            actor: CountScope::All,
             counters,
             target,
         },
@@ -1715,6 +1770,8 @@ fn parse_counter_added_target(input: &str) -> OracleResult<'_, TargetFilter> {
         value(
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
             alt((
+                tag("creature under your control"),
+                tag("creature you control"),
                 tag("creatures under your control"),
                 tag("creatures you control"),
             )),
@@ -1726,6 +1783,8 @@ fn parse_counter_added_target(input: &str) -> OracleResult<'_, TargetFilter> {
         value(
             TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
             alt((
+                tag("permanent under your control"),
+                tag("permanent you control"),
                 tag("permanents under your control"),
                 tag("permanents you control"),
             )),
@@ -2239,6 +2298,7 @@ fn parse_player_counter_possessor(input: &str) -> OracleResult<'_, CountScope> {
     alt((
         value(CountScope::Controller, tag("you have")),
         value(CountScope::Opponents, tag("each opponent has")),
+        value(CountScope::Opponents, tag("your opponents have")),
         value(CountScope::All, tag("each player has")),
     ))
     .parse(input)
@@ -2551,6 +2611,64 @@ mod tests {
         }
     }
 
+    /// CR 202.2 + CR 601.2h + CR 207.2c: GitHub #307 — Painful Truths bug.
+    /// "the number of colors of mana spent to cast this spell" is the canonical
+    /// Converge ability-word phrase. It must produce
+    /// `ManaSpentToCast { metric: DistinctColors }` so that the where-X rewriter
+    /// rebinds the bare `Variable("X")` count in `Draw`/`LoseLife`/etc. to the
+    /// actual distinct-color count of the cast. Before the fix, the dispatcher
+    /// only matched the `it` subject and fell back to an empty `ObjectCount`
+    /// when the spell text used `this spell`, causing X to resolve to the
+    /// battlefield permanent count (~30 in the late game).
+    #[test]
+    fn parse_quantity_ref_the_number_of_colors_of_mana_spent_to_cast_this_spell() {
+        for input in [
+            "the number of colors of mana spent to cast this spell",
+            "the number of colors of mana spent to cast it",
+            "the number of colors of mana spent to cast this creature",
+            "the number of colors of mana spent to cast this permanent",
+            "the number of colors of mana spent to cast them",
+            "the number of color of mana spent to cast this spell",
+            "the number of colors of mana spent to cast ~",
+        ] {
+            let (rest, q) =
+                parse_quantity_ref(input).unwrap_or_else(|_| panic!("failed to parse {input:?}"));
+            assert_eq!(rest, "", "leftover input for {input:?}");
+            assert_eq!(
+                q,
+                QuantityRef::ManaSpentToCast {
+                    scope: CastManaObjectScope::SelfObject,
+                    metric: CastManaSpentMetric::DistinctColors,
+                },
+                "wrong ref for {input:?}"
+            );
+        }
+    }
+
+    /// CR 601.2h: Bare "the number of mana spent to cast …" → `Total` metric.
+    /// Less common than the colors form but covered by the same combinator —
+    /// the `parse_mana_spent_to_cast_ref` shared between the for-each and
+    /// number-of dispatch paths handles all three metrics uniformly.
+    #[test]
+    fn parse_quantity_ref_the_number_of_mana_spent_to_cast_self_subjects() {
+        for input in [
+            "the number of mana spent to cast this spell",
+            "the number of mana spent to cast it",
+        ] {
+            let (rest, q) =
+                parse_quantity_ref(input).unwrap_or_else(|_| panic!("failed to parse {input:?}"));
+            assert_eq!(rest, "", "leftover input for {input:?}");
+            assert_eq!(
+                q,
+                QuantityRef::ManaSpentToCast {
+                    scope: CastManaObjectScope::SelfObject,
+                    metric: CastManaSpentMetric::Total,
+                },
+                "wrong ref for {input:?}"
+            );
+        }
+    }
+
     #[test]
     fn parse_counter_added_condition_accepts_typed_creature_target() {
         let (rest, q) = parse_counter_added_this_turn_condition(
@@ -2566,6 +2684,27 @@ mod tests {
                     crate::types::counter::CounterType::Plus1Plus1,
                 ),
                 target: TargetFilter::Typed(TypedFilter::creature()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_counter_added_condition_accepts_passive_owned_permanent_target() {
+        let (rest, q) = parse_counter_added_this_turn_condition(
+            "a +1/+1 counter was put on a permanent under your control this turn",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::CounterAddedThisTurn {
+                actor: CountScope::All,
+                counters: crate::types::counter::CounterMatch::OfType(
+                    crate::types::counter::CounterType::Plus1Plus1,
+                ),
+                target: TargetFilter::Typed(
+                    TypedFilter::permanent().controller(ControllerRef::You)
+                ),
             }
         );
     }
@@ -2801,6 +2940,19 @@ mod tests {
                 scope: CountScope::Controller,
             }
         );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_quantity_ref_total_life_lost_by_opponents() {
+        let (rest, q) =
+            parse_quantity_ref("the total life lost by your opponents this turn").unwrap();
+        assert!(matches!(
+            q,
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Opponent { .. }
+            }
+        ));
         assert_eq!(rest, "");
     }
 
@@ -4032,6 +4184,11 @@ mod tests {
             (
                 "rad counters each opponent has",
                 PlayerCounterKind::Rad,
+                CountScope::Opponents,
+            ),
+            (
+                "poison counter your opponents have",
+                PlayerCounterKind::Poison,
                 CountScope::Opponents,
             ),
         ];

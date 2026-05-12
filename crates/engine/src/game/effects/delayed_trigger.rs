@@ -2,6 +2,8 @@ use crate::types::ability::{
     DelayedTriggerCondition, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter,
     TargetRef,
 };
+#[cfg(test)]
+use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{DelayedTrigger, GameState};
 use crate::types::identifiers::TrackedSetId;
@@ -54,6 +56,7 @@ pub fn resolve(
             .filter(|(_, objects)| !objects.is_empty())
             .max_by_key(|(id, _)| id.0)
         {
+            bind_tracked_set_to_condition(&mut condition, real_id);
             bind_tracked_set_to_effect(&mut delayed_effect, real_id);
         }
     }
@@ -66,7 +69,7 @@ pub fn resolve(
     // token-creating effects (CR 603.7c: a delayed trigger refers to a
     // particular object even if later events change it).
     let snapshot_targets = if super::effect_refs_parent_target(&delayed_effect) {
-        ability.targets.clone()
+        parent_target_snapshot(state, ability)
     } else if effect_references_last_created(&delayed_effect)
         && !state.last_created_token_ids.is_empty()
     {
@@ -106,6 +109,20 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+fn parent_target_snapshot(state: &GameState, ability: &ResolvedAbility) -> Vec<TargetRef> {
+    if !ability.targets.is_empty() {
+        return ability.targets.clone();
+    }
+
+    crate::game::targeting::resolve_event_context_target(
+        state,
+        &TargetFilter::TriggeringSource,
+        ability.source_id,
+    )
+    .map(|target| vec![target])
+    .unwrap_or_default()
 }
 
 /// CR 701.36a + CR 603.7c: Walk an effect (and any nested sub-ability
@@ -148,6 +165,27 @@ fn bind_contextual_filter_to_condition(
     }
 }
 
+fn bind_tracked_set_to_condition(condition: &mut DelayedTriggerCondition, real_id: TrackedSetId) {
+    let filter = match condition {
+        DelayedTriggerCondition::WhenDies { filter }
+        | DelayedTriggerCondition::WhenLeavesPlayFiltered { filter }
+        | DelayedTriggerCondition::WhenEntersBattlefield { filter }
+        | DelayedTriggerCondition::WhenDiesOrExiled { filter } => filter,
+        _ => return,
+    };
+
+    if matches!(
+        filter,
+        TargetFilter::ParentTarget
+            | TargetFilter::Any
+            | TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            }
+    ) {
+        *filter = TargetFilter::TrackedSet { id: real_id };
+    }
+}
+
 /// Bind a tracked set to an effect's target filter, resolve origin zone,
 /// and upgrade ChangeZone → ChangeZoneAll if needed.
 ///
@@ -180,6 +218,7 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
                 origin: Some(Zone::Exile),
                 destination: *destination,
                 target: TargetFilter::TrackedSet { id: real_id },
+                enter_tapped: false,
             };
         }
         _ => {}
@@ -231,6 +270,56 @@ mod tests {
     }
 
     #[test]
+    fn parent_target_snapshots_triggering_zone_change_object() {
+        let mut state = GameState::new_two_player(42);
+        let dead_creature = ObjectId(10);
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: dead_creature,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(crate::types::game_state::ZoneChangeRecord::test_minimal(
+                dead_creature,
+                Some(Zone::Battlefield),
+                Zone::Graveyard,
+            )),
+        });
+
+        let effect_def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(effect_def),
+                uses_tracked_set: false,
+            },
+            vec![],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.delayed_triggers[0].ability.targets,
+            vec![TargetRef::Object(dead_creature)]
+        );
+    }
+
+    #[test]
     fn uses_tracked_set_binds_to_change_zone_all() {
         use crate::types::identifiers::TrackedSetId;
 
@@ -247,6 +336,7 @@ mod tests {
                 origin: Some(Zone::Exile),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
+                enter_tapped: false,
             },
         );
         let ability = ResolvedAbility::new(
@@ -328,6 +418,7 @@ mod tests {
                 origin,
                 destination,
                 target,
+                ..
             } => {
                 assert_eq!(*origin, Some(Zone::Exile));
                 assert_eq!(*destination, Zone::Battlefield);
@@ -340,6 +431,50 @@ mod tests {
             }
             other => panic!("Expected ChangeZoneAll, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn uses_tracked_set_binds_zone_change_condition_filter() {
+        use crate::types::identifiers::TrackedSetId;
+
+        let mut state = GameState::new_two_player(42);
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(1), vec![ObjectId(10)]);
+        state.next_tracked_set_id = 2;
+
+        let effect_def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::TriggeringSource,
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WhenEntersBattlefield {
+                    filter: TargetFilter::ParentTarget,
+                },
+                effect: Box::new(effect_def),
+                uses_tracked_set: true,
+            },
+            vec![],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).expect("resolve must succeed");
+        assert_eq!(
+            state.delayed_triggers[0].condition,
+            DelayedTriggerCondition::WhenEntersBattlefield {
+                filter: TargetFilter::TrackedSet {
+                    id: TrackedSetId(1)
+                },
+            },
+            "tracked-set delayed trigger conditions must match only the captured objects"
+        );
     }
 
     /// CR 505.1 + CR 603.7a: `AtNextPhaseForPlayer` player field is emitted

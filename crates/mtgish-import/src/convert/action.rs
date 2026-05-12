@@ -11,9 +11,10 @@ use engine::types::ability::{
     ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect,
     GainLifePlayer, LibraryPosition, ManaProduction, ManaSpendRestriction,
     ModalSelectionConstraint, MultiTargetSpec, PaymentCost, PlayerFilter, PlayerScope, PtValue,
-    QuantityExpr, QuantityRef, SearchSelectionConstraint, StaticDefinition, TargetFilter,
-    TriggerDefinition, TypedFilter,
+    QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality, StaticDefinition,
+    TargetFilter, TriggerDefinition, TypedFilter,
 };
+use engine::types::counter::{parse_counter_type, CounterType as EngineCounterType};
 use engine::types::game_state::DistributionUnit;
 use engine::types::mana::ManaCost;
 use engine::types::player::PlayerId;
@@ -314,6 +315,12 @@ fn rewrite_bound_x_in_ability_cost(cost: &mut AbilityCost, binding: &QuantityExp
         | AbilityCost::Discard { count: amount, .. } => {
             rewrite_bound_x_in_quantity_expr(amount, binding)
         }
+        // CR 118.4 + CR 107.3c: Dynamic-generic mana costs carry their X via
+        // `quantity` and need the same X-binding rewrite as the per-amount
+        // variants above.
+        AbilityCost::ManaDynamic { quantity } => {
+            rewrite_bound_x_in_quantity_expr(quantity, binding)
+        }
         AbilityCost::Composite { costs } => costs
             .iter_mut()
             .map(|cost| rewrite_bound_x_in_ability_cost(cost, binding))
@@ -329,6 +336,7 @@ fn rewrite_bound_x_in_ability_cost(cost: &mut AbilityCost, binding: &QuantityExp
         | AbilityCost::RemoveCounter { .. }
         | AbilityCost::PayEnergy { .. }
         | AbilityCost::ReturnToHand { .. }
+        | AbilityCost::Unattach
         | AbilityCost::Mill { .. }
         | AbilityCost::Exert
         | AbilityCost::Blight { .. }
@@ -1143,7 +1151,7 @@ fn convert_targeted_distributed(
                     target,
                 }],
                 multi_target,
-                distribute: DistributionUnit::Counters(counter_type),
+                distribute: DistributionUnit::Counters(counter_type.as_str().to_string()),
             })
         }
         Action::SpellDealsDistributedDamage(source) => {
@@ -2625,7 +2633,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             target: convert_permanent(target)?,
         },
         Action::RemoveACounterOfTypeFromPermanent(ct, target) => Effect::RemoveCounter {
-            counter_type: counter_type_name(ct),
+            counter_type: Some(counter_type_name(ct)),
             count: 1,
             target: convert_permanent(target)?,
         },
@@ -2701,6 +2709,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         Action::SacrificeAPermanent(filter) => Effect::Sacrifice {
             target: convert_permanents(filter)?,
             count: QuantityExpr::Fixed { value: 1 },
+            min_count: 0,
         },
         // CR 701.21a: "Sacrifice N <filter>" — N may be a literal or any
         // dynamic quantity (Variable, ObjectCount, etc.). Lowers onto the
@@ -2708,13 +2717,13 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         Action::SacrificeNumberPermanents(n, filter) => Effect::Sacrifice {
             target: convert_permanents(filter)?,
             count: quantity::convert(n)?,
+            min_count: 0,
         },
 
         // CR 701.27: Counter spell.
         Action::CounterSpell(_spell) => Effect::Counter {
             target: TargetFilter::StackSpell,
             source_static: None,
-            unless_payment: None,
         },
 
         // CR 800.4 / CR 110.2: Gain control.
@@ -3016,6 +3025,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         Action::SacrificePermanent(p) => Effect::Sacrifice {
             target: convert_permanent(p)?,
             count: QuantityExpr::Fixed { value: 1 },
+            min_count: 0,
         },
 
         // CR 701.13 + CR 400.7: Exile a single targeted card from a
@@ -4744,17 +4754,17 @@ fn bind_filter_controller(
     })
 }
 
-/// Render a `CounterType` as the engine's string identifier. Engine stores
-/// counters as freeform strings; we use the schema's variant name (PascalCase)
-/// for everything except the special PT counters which encode the +N/+M.
-pub(crate) fn counter_type_name(ct: &CounterType) -> String {
-    if let CounterType::PTCounter(p, t) = ct {
-        return format!("{p:+}/{t:+}");
-    }
-    format!("{ct:?}")
-        .strip_suffix("Counter")
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("{ct:?}"))
+/// Convert an mtgish `CounterType` into the engine's canonical counter type.
+pub(crate) fn counter_type_name(ct: &CounterType) -> EngineCounterType {
+    let raw = if let CounterType::PTCounter(p, t) = ct {
+        format!("{p:+}/{t:+}")
+    } else {
+        format!("{ct:?}")
+            .strip_suffix("Counter")
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("{ct:?}"))
+    };
+    parse_counter_type(&raw)
 }
 
 fn amass_subtype_name(subtype: &CreatureType) -> String {
@@ -5131,9 +5141,14 @@ fn apply_player_target(effect: Effect, target_filter: TargetFilter) -> ConvResul
         // Keep the existing sacrifice effect and bind the permanent filter's
         // controller axis to `ControllerRef::TargetPlayer`; runtime sacrifice
         // resolution reads the announced player from `ability.targets`.
-        Effect::Sacrifice { target, count } => Effect::Sacrifice {
+        Effect::Sacrifice {
+            target,
+            count,
+            min_count,
+        } => Effect::Sacrifice {
             target: bind_sacrifice_filter_to_target_player(target, target_filter)?,
             count,
+            min_count,
         },
         // CR 701.20a + CR 115.2: "Target player reveals the top N cards
         // of their library."
@@ -5864,7 +5879,9 @@ fn convert_multi_filter_search_library(
 
 fn group_filter_to_search_constraint(group: &GroupFilter) -> ConvResult<SearchSelectionConstraint> {
     match group {
-        GroupFilter::DifferentNames => Ok(SearchSelectionConstraint::DistinctNames),
+        GroupFilter::DifferentNames => Ok(SearchSelectionConstraint::DistinctQualities {
+            qualities: vec![SharedQuality::Name],
+        }),
         other => Err(ConversionGap::EnginePrerequisiteMissing {
             engine_type: "SearchSelectionConstraint",
             needed_variant: format!("GroupFilter::{}", group_filter_tag(other)),
@@ -5904,7 +5921,7 @@ struct EnterReplacements {
     /// CR 508.4: Object enters tapped and attacking.
     enters_attacking: bool,
     /// CR 122.1 + CR 614.12: Counters placed as the object enters.
-    enter_with_counters: Vec<(String, QuantityExpr)>,
+    enter_with_counters: Vec<(EngineCounterType, QuantityExpr)>,
 }
 
 /// CR 614.12: Decode the `Vec<ReplacementActionWouldEnter>` accompanying a
@@ -6573,9 +6590,13 @@ mod tests {
             Effect::SearchLibrary {
                 count: QuantityExpr::UpTo { .. },
                 reveal: true,
-                selection_constraint: SearchSelectionConstraint::DistinctNames,
+                selection_constraint,
                 ..
-            }
+            } if matches!(
+                selection_constraint,
+                SearchSelectionConstraint::DistinctQualities { qualities }
+                    if matches!(qualities.as_slice(), [SharedQuality::Name])
+            )
         ));
         assert!(matches!(
             &effects[1],
@@ -6836,7 +6857,7 @@ mod tests {
         ))
         .unwrap();
 
-        let Effect::Sacrifice { target, count } = effect else {
+        let Effect::Sacrifice { target, count, .. } = effect else {
             panic!("expected Sacrifice");
         };
         assert_eq!(count, QuantityExpr::Fixed { value: 1 });
@@ -6898,7 +6919,10 @@ mod tests {
         };
         assert_eq!(
             enter_with_counters,
-            vec![("+1/+1".to_string(), QuantityExpr::Fixed { value: 2 })]
+            vec![(
+                EngineCounterType::Plus1Plus1,
+                QuantityExpr::Fixed { value: 2 }
+            )]
         );
     }
 
@@ -7086,7 +7110,7 @@ mod tests {
         else {
             panic!("expected PutCounter, got {:?}", ability.effect);
         };
-        assert_eq!(counter_type, "+1/+1");
+        assert_eq!(counter_type, &EngineCounterType::Plus1Plus1);
         assert_eq!(*count, QuantityExpr::Fixed { value: 4 });
     }
 }

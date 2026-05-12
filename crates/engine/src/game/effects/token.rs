@@ -14,6 +14,7 @@ use crate::types::ability::{
     TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CardType, CoreType, Supertype};
+use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{DelayedTrigger, GameState};
 use crate::types::identifiers::CardId;
@@ -399,7 +400,7 @@ pub fn resolve(
 
     // CR 122.6a: Resolve ETB counter quantities before proposing — the event
     // carries fully-resolved counts, not quantity expressions.
-    let resolved_etb_counters: Vec<(String, u32)> = etb_counters
+    let resolved_etb_counters: Vec<(CounterType, u32)> = etb_counters
         .iter()
         .map(|(ct, qty)| {
             let n = resolve_quantity_with_targets(state, qty, ability).max(0) as u32;
@@ -480,7 +481,7 @@ fn build_token_spec(
     tapped: bool,
     enters_attacking: bool,
     static_abilities: Vec<crate::types::ability::StaticDefinition>,
-    enter_with_counters: Vec<(String, u32)>,
+    enter_with_counters: Vec<(CounterType, u32)>,
     ability: &ResolvedAbility,
     state: &GameState,
 ) -> crate::types::proposed_event::TokenSpec {
@@ -629,14 +630,13 @@ pub fn apply_create_token_after_replacement(
         }
 
         // CR 122.6a: Place counters on the token as it enters the battlefield.
-        for (counter_type_str, counter_count) in &spec.enter_with_counters {
+        for (counter_type, counter_count) in &spec.enter_with_counters {
             if *counter_count > 0 {
-                let ct = crate::types::counter::parse_counter_type(counter_type_str);
                 super::counters::add_counter_with_replacement(
                     state,
                     owner,
                     obj_id,
-                    ct,
+                    counter_type.clone(),
                     *counter_count,
                     events,
                 );
@@ -687,6 +687,7 @@ pub fn apply_create_token_after_replacement(
                     Effect::Sacrifice {
                         target: TargetFilter::Any,
                         count: QuantityExpr::Fixed { value: 1 },
+                        min_count: 0,
                     },
                     vec![TargetRef::Object(obj_id)],
                     spec.source_id,
@@ -1118,7 +1119,7 @@ fn young_hero_role_statics() -> Vec<StaticDefinition> {
     let put_counter = AbilityDefinition::new(
         AbilityKind::Database,
         Effect::PutCounter {
-            counter_type: "P1P1".to_string(),
+            counter_type: CounterType::Plus1Plus1,
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
         },
@@ -2143,7 +2144,7 @@ mod tests {
         else {
             panic!("execute effect must be PutCounter, got {:?}", exec.effect);
         };
-        assert_eq!(counter_type, "P1P1");
+        assert_eq!(counter_type, &CounterType::Plus1Plus1);
         assert!(matches!(count, QuantityExpr::Fixed { value: 1 }));
         assert!(matches!(target, TargetFilter::SelfRef));
     }

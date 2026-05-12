@@ -60,9 +60,9 @@ function resolveAiSeatBindings(
 
 let avatarGeneration = 0;
 
-function setupRandomAvatars(playerCount: number) {
+function setupRandomAvatars(playerCount: number, seed: string) {
   const generation = ++avatarGeneration;
-  const avatars = assignRandomAvatars(playerCount);
+  const avatars = assignRandomAvatars(playerCount, seed);
   const names = new Map<number, string>();
   names.set(0, "You");
   for (let i = 1; i < avatars.length; i++) {
@@ -359,7 +359,7 @@ export function GameProvider({
     const isP2P = mode === "p2p-host" || mode === "p2p-join";
     if (!isOnline && !isP2P) {
       if (mode === "ai") {
-        setupRandomAvatars(playerCount ?? 2);
+        setupRandomAvatars(playerCount ?? 2, gameId);
       } else {
         useMultiplayerStore.setState({ playerNames: new Map(), playerAvatars: new Map() });
       }

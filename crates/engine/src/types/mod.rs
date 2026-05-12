@@ -22,11 +22,11 @@ pub mod triggers;
 pub mod zones;
 
 pub use ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, BasicLandType, ChosenAttribute,
-    ChosenSubtypeKind, ContinuousModification, ControllerRef, Duration, Effect, EffectError,
-    FilterProp, ManaProduction, ManaSpendRestriction, Parity, PtValue, ReplacementDefinition,
-    ResolvedAbility, StaticCondition, StaticDefinition, TargetFilter, TargetRef, TriggerCondition,
-    TriggerDefinition, TypeFilter, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AdditionalCost, BasicLandType,
+    ChosenAttribute, ChosenSubtypeKind, ContinuousModification, ControllerRef, Duration, Effect,
+    EffectError, FilterProp, ManaProduction, ManaSpendRestriction, Parity, PtValue,
+    ReplacementDefinition, ResolvedAbility, StaticCondition, StaticDefinition, TargetFilter,
+    TargetRef, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
 };
 pub use actions::GameAction;
 pub use card::{CardFace, CardLayout, CardRules, Rarity};

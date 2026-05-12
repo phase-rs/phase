@@ -274,7 +274,6 @@ mod tests {
             Effect::Counter {
                 target: engine::types::ability::TargetFilter::Any,
                 source_static: None,
-                unless_payment: None,
             },
         ));
         oid

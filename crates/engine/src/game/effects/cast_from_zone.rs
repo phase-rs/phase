@@ -77,10 +77,21 @@ pub fn resolve(
         //   - otherwise → `ExileWithAltCost { mana_cost }` (Nashi-style "you
         //     may play one of those cards" with normal mana payment).
         if let Some(obj) = state.objects.get_mut(&obj_id) {
+            // CR 611.2a + CR 118.9: The cast-from-zone effect is granted by an
+            // ability whose controller is the player allowed to cast the
+            // exiled card. Without this binding, an `ExileWithAltCost` on a
+            // card owned by another player would fall back to the
+            // `obj.owner == player` rule in `has_exile_cast_permission` and
+            // surface the cast option to the wrong player. Jeleva, Nephalia's
+            // Scourge exiles cards from each opponent's library on ETB; the
+            // attack trigger's cast permission must be scoped to Jeleva's
+            // controller, not to each card's owner.
+            let granted_to = Some(ability.controller);
             let permission = if let Some(cost) = alt_ability_cost.clone() {
                 CastingPermission::ExileWithAltAbilityCost {
                     cost,
                     constraint: None,
+                    granted_to,
                 }
             } else {
                 let cost = if without_paying {
@@ -92,6 +103,7 @@ pub fn resolve(
                     cost,
                     cast_transformed,
                     constraint: None,
+                    granted_to,
                 }
             };
             obj.casting_permissions.push(permission);

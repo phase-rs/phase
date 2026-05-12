@@ -503,7 +503,6 @@ fn translate_counter(params: &ForgeParams) -> Result<Effect, ForgeTranslateError
     Ok(Effect::Counter {
         target,
         source_static: None,
-        unless_payment: None,
     })
 }
 

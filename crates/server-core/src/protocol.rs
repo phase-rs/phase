@@ -87,6 +87,11 @@ pub struct LobbyGame {
     /// time. This field is populated by the server, never by clients.
     #[serde(default)]
     pub is_p2p: bool,
+    /// True when the host enabled Sandbox mode for this game. Populated by
+    /// the publisher from `format_config.allow_debug_actions`. Lobby UIs
+    /// render a SANDBOX badge and prompt joiners to confirm.
+    #[serde(default)]
+    pub is_sandbox: bool,
     /// When present, this lobby entry is a draft pod rather than a
     /// constructed-play room. Contains set code and draft kind so the
     /// lobby UI can badge the row appropriately.
@@ -780,6 +785,7 @@ mod tests {
                 format: None,
                 room_name: None,
                 is_p2p: false,
+                is_sandbox: false,
                 draft_metadata: None,
             }],
         };
@@ -811,6 +817,7 @@ mod tests {
                 format: None,
                 room_name: None,
                 is_p2p: true,
+                is_sandbox: false,
                 draft_metadata: None,
             },
         };
@@ -840,6 +847,7 @@ mod tests {
                 format: Some(GameFormat::Commander),
                 room_name: Some("Board-wipe special".to_string()),
                 is_p2p: false,
+                is_sandbox: false,
                 draft_metadata: None,
             },
         };
@@ -1124,6 +1132,7 @@ mod tests {
             format: Some(GameFormat::Commander),
             room_name: Some("Spellslingers".to_string()),
             is_p2p: true,
+            is_sandbox: false,
             draft_metadata: None,
         };
         let json = serde_json::to_string(&game).unwrap();

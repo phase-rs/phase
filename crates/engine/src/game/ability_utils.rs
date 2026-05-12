@@ -3,6 +3,8 @@ use crate::types::ability::{
     ModalSelectionCondition, ModalSelectionConstraint, QuantityExpr, QuantityRef, ResolvedAbility,
     SpellContext, TargetChoiceTiming, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
+#[cfg(test)]
+use crate::types::counter::CounterType;
 use crate::types::game_state::{
     GameState, TargetSelectionConstraint, TargetSelectionProgress, TargetSelectionSlot,
 };
@@ -21,8 +23,21 @@ pub fn build_resolved_from_def(
     source_id: ObjectId,
     controller: PlayerId,
 ) -> ResolvedAbility {
+    build_resolved_from_def_with_targets(def, source_id, controller, Vec::new())
+}
+
+/// CR 113.1a + CR 608.2c: Build a resolved ability from its definition while
+/// supplying the already selected root targets. Sub-abilities intentionally
+/// start without targets so `resolve_ability_chain` can apply the standard
+/// parent-target propagation rules.
+pub fn build_resolved_from_def_with_targets(
+    def: &AbilityDefinition,
+    source_id: ObjectId,
+    controller: PlayerId,
+    targets: Vec<TargetRef>,
+) -> ResolvedAbility {
     let mut resolved =
-        ResolvedAbility::new(*def.effect.clone(), Vec::new(), source_id, controller).kind(def.kind);
+        ResolvedAbility::new(*def.effect.clone(), targets, source_id, controller).kind(def.kind);
     if let Some(sub) = &def.sub_ability {
         resolved = resolved.sub_ability(build_resolved_from_def(sub, source_id, controller));
     }
@@ -47,7 +62,70 @@ pub fn build_resolved_from_def(
     resolved.forward_result = def.forward_result;
     resolved.unless_pay = def.unless_pay.clone();
     resolved.player_scope = def.player_scope;
+    // CR 115.1 + CR 701.9b: Carry the parser-stamped target selection mode
+    // through to the resolved ability so target-selection sites can short-circuit
+    // `WaitingFor::TargetSelection` for `Random` abilities.
+    resolved.target_selection_mode = def.target_selection_mode;
     resolved
+}
+
+/// CR 608.2c + CR 608.2e: Apply an "instead" swap from a sub-ability override
+/// onto a parent `ResolvedAbility`. Produces a new `ResolvedAbility` whose
+/// **identity / runtime context** comes from the parent (controller, source,
+/// already-announced targets, kicker context, chosen-X, etc.) but whose
+/// **effect-shape fields** come from the sub (effect, player_scope, optional,
+/// description, repeat_for, …).
+///
+/// This is the single authority for instead-swap semantics. Adding a sibling
+/// instead-shape (kicker / target-keyword / condition-instead) goes through
+/// here so no field is silently dropped on the swap. Mirrors the lesson from
+/// commit `4475b1939` where partial clones on the casting path silently
+/// dropped `player_scope`.
+///
+/// Fields from `sub`: effect, duration, sub_ability, else_ability,
+/// player_scope, optional, optional_for, optional_targeting, multi_target,
+/// target_choice_timing, description, repeat_for, forward_result, unless_pay,
+/// distribution, target_selection_mode.
+///
+/// Fields preserved from `parent`: controller, source_id, kind, context,
+/// original_controller, scoped_player, targets, chosen_x, cost_paid_object,
+/// ability_index, may_trigger_origin.
+///
+/// `condition` is intentionally **cleared** — the override sub's own
+/// `ConditionInstead { inner }` (or AdditionalCostPaidInstead, etc.) has
+/// already been evaluated by the caller; the inner condition encodes all
+/// resolution checks (CR 608.2c).
+pub(crate) fn apply_instead_swap(
+    parent: &ResolvedAbility,
+    sub: &ResolvedAbility,
+) -> ResolvedAbility {
+    let mut overridden = parent.clone();
+    overridden.effect = sub.effect.clone();
+    overridden.duration = sub.duration.clone();
+    // CR 608.2c: The override sub is consumed; its own sub_ability becomes the
+    // new chain tail. The else_ability mirrors that chain.
+    overridden.sub_ability = sub.sub_ability.clone();
+    overridden.else_ability = sub.else_ability.clone();
+    // CR 608.2c: "Instead" semantics replace the entire effect clause. The
+    // ConditionInstead inner condition already encodes all resolution checks
+    // (e.g., Revolt + MV ≤ 4 via And). The parent's base condition (e.g.,
+    // MV ≤ 2) is superseded — it only applies when the swap does NOT fire.
+    overridden.condition = None;
+    // CR 608.2 + CR 608.2c: Effect-shape fields belong to the swapped effect,
+    // not the parent.
+    overridden.player_scope = sub.player_scope;
+    overridden.optional = sub.optional;
+    overridden.optional_for = sub.optional_for;
+    overridden.optional_targeting = sub.optional_targeting;
+    overridden.multi_target = sub.multi_target.clone();
+    overridden.target_choice_timing = sub.target_choice_timing;
+    overridden.description = sub.description.clone();
+    overridden.repeat_for = sub.repeat_for.clone();
+    overridden.forward_result = sub.forward_result;
+    overridden.unless_pay = sub.unless_pay.clone();
+    overridden.distribution = sub.distribution.clone();
+    overridden.target_selection_mode = sub.target_selection_mode;
+    overridden
 }
 
 /// CR 700.2: For modal spells/abilities, build a chained resolved ability from the
@@ -122,6 +200,36 @@ pub fn build_target_slots(
     let mut slots = Vec::new();
     collect_target_slots(state, ability, &mut slots)?;
     Ok(slots)
+}
+
+/// CR 109.4 + CR 608.2c: Resolve the controller of an ability's first parent target.
+///
+/// This is the canonical lookup for `ControllerRef::ParentTargetController` and
+/// `TargetFilter::ParentTargetController` — used by sub-effects whose subject is
+/// "its controller" / "that creature's controller" relative to a previously
+/// chosen target. Returns the player target directly, or the controller of an
+/// object target (CR 109.4 — controller of an object), in target-list order.
+/// Returns `None` if the ability has no targets.
+pub fn parent_target_controller(ability: &ResolvedAbility, state: &GameState) -> Option<PlayerId> {
+    ability.targets.iter().find_map(|t| match t {
+        TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
+        TargetRef::Player(pid) => Some(*pid),
+    })
+}
+
+/// CR 108.3 + CR 608.2c: Resolve the owner of an ability's first parent target.
+///
+/// Mirrors `parent_target_controller` but returns the *owner* of an object target
+/// per CR 108.3 (owner is the player who started the game with the card in their
+/// deck). Used by `TargetFilter::ParentTargetOwner` for "its owner" anaphors —
+/// e.g., Enslave's "enchanted creature deals 1 damage to its owner" once a
+/// parent-target slot has been bound. Returns `None` if the ability has no
+/// targets or the targeted object no longer exists.
+pub fn parent_target_owner(ability: &ResolvedAbility, state: &GameState) -> Option<PlayerId> {
+    ability.targets.iter().find_map(|t| match t {
+        TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.owner),
+        TargetRef::Player(pid) => Some(*pid),
+    })
 }
 
 pub fn target_constraints_from_modal(modal: &ModalChoice) -> Vec<TargetSelectionConstraint> {
@@ -449,6 +557,72 @@ pub fn has_legal_target_assignment_for_ability(
     has_legal_completion_with_specs(state, ability, &specs, target_slots, constraints, 0, &[])
 }
 
+/// CR 115.1 + CR 701.9b: Resolve a `Random`-mode ability's target slots by
+/// uniformly choosing from each slot's legal-target set using the engine's
+/// seeded RNG (`state.rng`). The game (not the controller) makes the selection;
+/// no `WaitingFor::TargetSelection` is emitted. Used by casting/activation
+/// dispatchers to short-circuit target prompting for "random target X" cards
+/// (Goblin Polka Band, Orcish Catapult, Power Struggle, etc.).
+///
+/// Determinism: uses `state.rng` (`ChaCha20Rng`, seeded per game), so given the
+/// same RNG state and legal-target set, the same target is chosen on every run.
+/// This preserves replay/test reproducibility.
+///
+/// Errors out if any slot has no legal target — the caller has already verified
+/// `target_slots.is_empty()` does not hold.
+///
+/// Limitation (out of scope for the H1 audit fix): when an ability has a
+/// `multi_target` spec ("any number of random target creatures") the slot
+/// builder produces one slot per max-target. This helper picks one random
+/// target per slot, effectively choosing `max` targets. A future enhancement
+/// would prompt the controller for the count N first, then pick N random
+/// targets — but the current single-slot single-pick behaviour matches
+/// Mana-Clash-style cards and the audit's primary bug (silent strip).
+pub fn random_select_targets_for_ability(
+    state: &mut GameState,
+    target_slots: &[TargetSelectionSlot],
+    constraints: &[TargetSelectionConstraint],
+) -> Result<Vec<TargetRef>, EngineError> {
+    use rand::seq::IndexedRandom; // rand 0.9: `choose` on `[T]` lives here.
+
+    let mut chosen: Vec<TargetRef> = Vec::with_capacity(target_slots.len());
+    for slot in target_slots {
+        // CR 115.3: The same target can't be chosen multiple times for one
+        // instance of "target". The interactive `legal_targets_for_slot`
+        // enforces this by filtering already-selected targets from each
+        // subsequent slot's legal pool; mirror that filter here so the random
+        // picker honours the same uniqueness rule.
+        let candidate_targets: Vec<TargetRef> = slot
+            .legal_targets
+            .iter()
+            .filter(|t| !chosen.contains(t))
+            .cloned()
+            .collect();
+        if candidate_targets.is_empty() {
+            // CR 115.6: A spell or ability that requires targets may allow zero
+            // targets to be chosen only when the slot is optional. For random
+            // selection there is no controller to skip, so an empty legal-target
+            // set (after CR 115.3 uniqueness filtering) cannot be satisfied
+            // unless the slot is optional.
+            if slot.optional {
+                continue;
+            }
+            return Err(EngineError::ActionNotAllowed(
+                "No legal targets available for random selection".to_string(),
+            ));
+        }
+        let pick = candidate_targets.choose(&mut state.rng).cloned().ok_or(
+            EngineError::ActionNotAllowed("Random selection failed to draw a target".to_string()),
+        )?;
+        chosen.push(pick);
+    }
+    // Multi-slot constraints (e.g., DifferentTargetPlayers) — reuse the same
+    // validator the controller-choice path uses so random selection respects
+    // every constraint declared on the ability.
+    validate_target_constraints(&chosen, constraints)?;
+    Ok(chosen)
+}
+
 /// CR 608.2b: When resolving, check that targets are still legal. If all targets are illegal,
 /// the spell or ability doesn't resolve.
 pub fn validate_selected_targets(
@@ -769,6 +943,7 @@ fn collect_target_slots(
         }
     }
     if defers_sub_ability_target_selection(&ability.effect) {
+        collect_target_slots_after_deferred_effect(state, ability.sub_ability.as_deref(), slots)?;
         return Ok(());
     }
     if let Some(sub_ability) = ability.sub_ability.as_deref() {
@@ -989,6 +1164,11 @@ fn collect_target_slot_specs(
         }
     }
     if defers_sub_ability_target_selection(&ability.effect) {
+        collect_target_slot_specs_after_deferred_effect(
+            state,
+            ability.sub_ability.as_deref(),
+            specs,
+        );
         return;
     }
     if let Some(sub_ability) = ability.sub_ability.as_deref() {
@@ -1212,6 +1392,7 @@ fn defers_conditional_target_selection(sub: &ResolvedAbility) -> bool {
         &sub.condition,
         Some(AbilityCondition::WhenYouDo)
             | Some(AbilityCondition::QuantityCheck { .. })
+            | Some(AbilityCondition::PreviousEffectAmount { .. })
             | Some(AbilityCondition::AdditionalCostPaidInstead)
     ) || sub.target_choice_timing == TargetChoiceTiming::Resolution
 }
@@ -1227,6 +1408,53 @@ fn defers_sub_ability_target_selection(effect: &Effect) -> bool {
             | Effect::RevealHand { .. }
             | Effect::Choose { .. }
     )
+}
+
+fn skips_stack_targets_after_deferred_effect(effect: &Effect) -> bool {
+    matches!(effect, Effect::ChangeZone { .. } | Effect::Shuffle { .. })
+}
+
+fn collect_target_slots_after_deferred_effect(
+    state: &GameState,
+    sub_ability: Option<&ResolvedAbility>,
+    slots: &mut Vec<TargetSelectionSlot>,
+) -> Result<(), EngineError> {
+    let Some(sub_ability) = sub_ability else {
+        return Ok(());
+    };
+    if defers_conditional_target_selection(sub_ability) {
+        return Ok(());
+    }
+    if skips_stack_targets_after_deferred_effect(&sub_ability.effect) {
+        return collect_target_slots_after_deferred_effect(
+            state,
+            sub_ability.sub_ability.as_deref(),
+            slots,
+        );
+    }
+    collect_target_slots(state, sub_ability, slots)
+}
+
+fn collect_target_slot_specs_after_deferred_effect(
+    state: &GameState,
+    sub_ability: Option<&ResolvedAbility>,
+    specs: &mut Vec<TargetSlotSpec>,
+) {
+    let Some(sub_ability) = sub_ability else {
+        return;
+    };
+    if defers_conditional_target_selection(sub_ability) {
+        return;
+    }
+    if skips_stack_targets_after_deferred_effect(&sub_ability.effect) {
+        collect_target_slot_specs_after_deferred_effect(
+            state,
+            sub_ability.sub_ability.as_deref(),
+            specs,
+        );
+        return;
+    }
+    collect_target_slot_specs(state, sub_ability, specs);
 }
 
 fn build_target_assignments(
@@ -1788,6 +2016,12 @@ fn assign_targets_recursive(
             }
         }
         if defers_sub_ability_target_selection(&ability.effect) {
+            assign_targets_after_deferred_effect(
+                state,
+                ability.sub_ability.as_deref_mut(),
+                targets,
+                next_target,
+            )?;
             return Ok(());
         }
         if let Some(sub_ability) = ability.sub_ability.as_mut() {
@@ -1813,6 +2047,12 @@ fn assign_targets_recursive(
             }
         }
         if defers_sub_ability_target_selection(&ability.effect) {
+            assign_targets_after_deferred_effect(
+                state,
+                ability.sub_ability.as_deref_mut(),
+                targets,
+                next_target,
+            )?;
             return Ok(());
         }
         if let Some(sub_ability) = ability.sub_ability.as_mut() {
@@ -1883,6 +2123,12 @@ fn assign_targets_recursive(
         }
     }
     if defers_sub_ability_target_selection(&ability.effect) {
+        assign_targets_after_deferred_effect(
+            state,
+            ability.sub_ability.as_deref_mut(),
+            targets,
+            next_target,
+        )?;
         return Ok(());
     }
     if let Some(sub_ability) = ability.sub_ability.as_mut() {
@@ -1933,6 +2179,11 @@ fn assign_selected_slots_recursive(
             }
         }
         if defers_sub_ability_target_selection(&ability.effect) {
+            assign_selected_slots_after_deferred_effect(
+                ability.sub_ability.as_deref_mut(),
+                selected_slots,
+                next_slot,
+            )?;
             return Ok(());
         }
         if let Some(sub_ability) = ability.sub_ability.as_mut() {
@@ -1965,6 +2216,11 @@ fn assign_selected_slots_recursive(
             }
         }
         if defers_sub_ability_target_selection(&ability.effect) {
+            assign_selected_slots_after_deferred_effect(
+                ability.sub_ability.as_deref_mut(),
+                selected_slots,
+                next_slot,
+            )?;
             return Ok(());
         }
         if let Some(sub_ability) = ability.sub_ability.as_mut() {
@@ -2042,6 +2298,11 @@ fn assign_selected_slots_recursive(
         }
     }
     if defers_sub_ability_target_selection(&ability.effect) {
+        assign_selected_slots_after_deferred_effect(
+            ability.sub_ability.as_deref_mut(),
+            selected_slots,
+            next_slot,
+        )?;
         return Ok(());
     }
     if let Some(sub_ability) = ability.sub_ability.as_mut() {
@@ -2051,6 +2312,50 @@ fn assign_selected_slots_recursive(
         assign_selected_slots_recursive(sub_ability, selected_slots, next_slot)?;
     }
     Ok(())
+}
+
+fn assign_targets_after_deferred_effect(
+    state: &GameState,
+    sub_ability: Option<&mut ResolvedAbility>,
+    targets: &[TargetRef],
+    next_target: &mut usize,
+) -> Result<(), EngineError> {
+    let Some(sub_ability) = sub_ability else {
+        return Ok(());
+    };
+    if defers_conditional_target_selection(sub_ability) {
+        return Ok(());
+    }
+    if skips_stack_targets_after_deferred_effect(&sub_ability.effect) {
+        return assign_targets_after_deferred_effect(
+            state,
+            sub_ability.sub_ability.as_deref_mut(),
+            targets,
+            next_target,
+        );
+    }
+    assign_targets_recursive(state, sub_ability, targets, next_target)
+}
+
+fn assign_selected_slots_after_deferred_effect(
+    sub_ability: Option<&mut ResolvedAbility>,
+    selected_slots: &[Option<TargetRef>],
+    next_slot: &mut usize,
+) -> Result<(), EngineError> {
+    let Some(sub_ability) = sub_ability else {
+        return Ok(());
+    };
+    if defers_conditional_target_selection(sub_ability) {
+        return Ok(());
+    }
+    if skips_stack_targets_after_deferred_effect(&sub_ability.effect) {
+        return assign_selected_slots_after_deferred_effect(
+            sub_ability.sub_ability.as_deref_mut(),
+            selected_slots,
+            next_slot,
+        );
+    }
+    assign_selected_slots_recursive(sub_ability, selected_slots, next_slot)
 }
 
 /// CR 115.3: Validate targeting constraints — e.g., different target players must be distinct.
@@ -2109,12 +2414,25 @@ fn chain_has_target_sink(ability: &ResolvedAbility) -> bool {
         return true;
     }
     if defers_sub_ability_target_selection(&ability.effect) {
-        return false;
+        return chain_has_target_sink_after_deferred_effect(ability.sub_ability.as_deref());
     }
     ability
         .sub_ability
         .as_deref()
         .is_some_and(chain_has_target_sink)
+}
+
+fn chain_has_target_sink_after_deferred_effect(sub_ability: Option<&ResolvedAbility>) -> bool {
+    let Some(sub_ability) = sub_ability else {
+        return false;
+    };
+    if defers_conditional_target_selection(sub_ability) {
+        return false;
+    }
+    if skips_stack_targets_after_deferred_effect(&sub_ability.effect) {
+        return chain_has_target_sink_after_deferred_effect(sub_ability.sub_ability.as_deref());
+    }
+    chain_has_target_sink(sub_ability)
 }
 
 fn minimum_targets_in_chain(ability: &ResolvedAbility) -> usize {
@@ -2179,7 +2497,7 @@ fn minimum_targets_in_chain(ability: &ResolvedAbility) -> usize {
     let current = attach_targets + move_counter_targets + player_companion + current;
 
     let rest = if defers_sub_ability_target_selection(&ability.effect) {
-        0
+        minimum_targets_after_deferred_effect(ability.sub_ability.as_deref())
     } else {
         ability
             .sub_ability
@@ -2189,6 +2507,19 @@ fn minimum_targets_in_chain(ability: &ResolvedAbility) -> usize {
     };
 
     current + rest
+}
+
+fn minimum_targets_after_deferred_effect(sub_ability: Option<&ResolvedAbility>) -> usize {
+    let Some(sub_ability) = sub_ability else {
+        return 0;
+    };
+    if defers_conditional_target_selection(sub_ability) {
+        return 0;
+    }
+    if skips_stack_targets_after_deferred_effect(&sub_ability.effect) {
+        return minimum_targets_after_deferred_effect(sub_ability.sub_ability.as_deref());
+    }
+    minimum_targets_in_chain(sub_ability)
 }
 
 /// CR 700.2a: The controller of a modal spell or activated ability chooses the mode(s)
@@ -2291,9 +2622,10 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityKind, CounterTransferMode, Duration, Effect, FilterProp, ModalChoice,
-        ModalSelectionConstraint, PtValue, QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
-        TypedFilter, UnlessCost, UnlessPayModifier,
+        AbilityCost, AbilityKind, CounterTransferMode, Duration, Effect, FilterProp, ModalChoice,
+        ModalSelectionConstraint, MultiTargetSpec, PtValue, QuantityExpr, QuantityRef,
+        SearchSelectionConstraint, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        UnlessPayModifier,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{GameState, TargetSelectionConstraint, TargetSelectionSlot};
@@ -2366,10 +2698,107 @@ mod tests {
         assert!(matches!(draw_node.effect, Effect::Draw { .. }));
     }
 
+    /// Issue #310: `apply_instead_swap` must preserve every effect-shape
+    /// field from the sub (player_scope, optional, multi_target, …) and every
+    /// runtime-context field from the parent (controller, targets,
+    /// chosen_x, …). Pre-fix the swap site in `effects/mod.rs` hand-rolled a
+    /// partial clone that silently dropped `sub.player_scope` — same shape
+    /// as the casting-path bug fixed by commit 4475b1939.
+    #[test]
+    fn apply_instead_swap_preserves_sub_player_scope_and_optional() {
+        let parent = ResolvedAbility::new(
+            Effect::Mill {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                destination: crate::types::zones::Zone::Graveyard,
+            },
+            vec![TargetRef::Player(PlayerId(0))],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        // Parent has no player_scope; sub has player_scope=Opponent — the
+        // bug-class scenario. Pre-fix: swap silently dropped player_scope.
+        let mut sub = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        sub.player_scope = Some(crate::types::ability::PlayerFilter::Opponent);
+        sub.optional = true;
+        sub.description = Some("override description".to_string());
+
+        let swapped = apply_instead_swap(&parent, &sub);
+
+        // Effect-shape fields come from sub.
+        assert!(
+            matches!(swapped.effect, Effect::Draw { .. }),
+            "swap must adopt sub's effect"
+        );
+        assert_eq!(
+            swapped.player_scope,
+            Some(crate::types::ability::PlayerFilter::Opponent),
+            "swap must preserve sub.player_scope (issue #310)"
+        );
+        assert!(swapped.optional, "swap must preserve sub.optional");
+        assert_eq!(swapped.description.as_deref(), Some("override description"));
+        // Identity / runtime-context fields come from parent.
+        assert_eq!(
+            swapped.controller,
+            PlayerId(0),
+            "swap must preserve parent.controller"
+        );
+        assert_eq!(
+            swapped.source_id,
+            ObjectId(10),
+            "swap must preserve parent.source_id"
+        );
+        assert_eq!(
+            swapped.targets,
+            vec![TargetRef::Player(PlayerId(0))],
+            "swap must preserve parent.targets (announced before resolution)"
+        );
+        // The parent's condition was carrying the "instead" gate which has
+        // already been evaluated; swap clears it.
+        assert!(
+            swapped.condition.is_none(),
+            "swap must clear parent.condition (CR 608.2c)"
+        );
+    }
+
+    /// Issue #310: spell-cast and ability-activate paths now delegate to
+    /// `build_resolved_from_def` so `player_scope` survives end-to-end. Pin
+    /// that contract so accidental partial-clone regressions in casting
+    /// surface here too.
+    #[test]
+    fn build_resolved_from_def_preserves_player_scope() {
+        let def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Mill {
+                count: QuantityExpr::Fixed { value: 4 },
+                target: TargetFilter::Controller,
+                destination: crate::types::zones::Zone::Graveyard,
+            },
+        )
+        .player_scope(crate::types::ability::PlayerFilter::Opponent);
+
+        let resolved = build_resolved_from_def(&def, ObjectId(1), PlayerId(0));
+        assert_eq!(
+            resolved.player_scope,
+            Some(crate::types::ability::PlayerFilter::Opponent),
+            "player_scope must survive build_resolved_from_def — issue #310",
+        );
+    }
+
     #[test]
     fn build_resolved_from_def_preserves_unless_pay_modifier() {
         let modifier = UnlessPayModifier {
-            cost: UnlessCost::PayLife { amount: 2 },
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
             payer: TargetFilter::ParentTargetController,
         };
         let def = AbilityDefinition::new(
@@ -2562,6 +2991,123 @@ mod tests {
             vec![p_b],
             "DamageAll should get target 1 (the second player slot)"
         );
+    }
+
+    #[test]
+    fn search_library_collects_later_independent_stack_targets() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Fertilid's Favor".to_string(),
+            Zone::Stack,
+        );
+        let artifact = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Target artifact".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&artifact)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let mut put_counters = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                        TargetFilter::Typed(TypedFilter::creature()),
+                    ],
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        put_counters.multi_target = Some(MultiTargetSpec::fixed(0, 1));
+
+        let shuffle = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::Player,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(put_counters);
+        let put_land = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: true,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(shuffle);
+        let mut ability = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Typed(TypedFilter::land()),
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: Some(TargetFilter::Player),
+                selection_constraint: SearchSelectionConstraint::None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(put_land);
+
+        let slots = build_target_slots(&state, &ability).unwrap();
+
+        assert_eq!(slots.len(), 2);
+        assert!(!slots[0].optional, "target player is required");
+        assert!(slots[0]
+            .legal_targets
+            .contains(&TargetRef::Player(PlayerId(0))));
+        assert!(
+            slots[1].optional,
+            "up to one artifact or creature is optional"
+        );
+        assert!(slots[1]
+            .legal_targets
+            .contains(&TargetRef::Object(artifact)));
+
+        assign_selected_slots_in_chain(
+            &mut ability,
+            &[
+                Some(TargetRef::Player(PlayerId(0))),
+                Some(TargetRef::Object(artifact)),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(ability.targets, vec![TargetRef::Player(PlayerId(0))]);
+        let counter_step = ability
+            .sub_ability
+            .as_deref()
+            .and_then(|change_zone| change_zone.sub_ability.as_deref())
+            .and_then(|shuffle| shuffle.sub_ability.as_deref())
+            .expect("counter continuation must exist");
+        assert_eq!(counter_step.targets, vec![TargetRef::Object(artifact)]);
     }
 
     #[test]
@@ -3383,7 +3929,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::PutCounterAll {
-                counter_type: "P1P1".to_string(),
+                counter_type: CounterType::Plus1Plus1,
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Typed(
                     TypedFilter::creature().controller(ControllerRef::TargetPlayer),
@@ -3454,6 +4000,7 @@ mod tests {
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
                 target: TargetFilter::Player,
+                enter_tapped: false,
             },
             vec![],
             ObjectId(900),
@@ -3814,7 +4361,7 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::PutCounter {
-                counter_type: "P1P1".to_string(),
+                counter_type: CounterType::Plus1Plus1,
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Typed(TypedFilter::creature()),
             },
@@ -3993,7 +4540,7 @@ mod tests {
     fn assign_selected_slots_collects_multi_target_choices() {
         let mut ability = ResolvedAbility::new(
             Effect::PutCounter {
-                counter_type: "P1P1".to_string(),
+                counter_type: CounterType::Plus1Plus1,
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Typed(TypedFilter::creature()),
             },
@@ -4018,6 +4565,221 @@ mod tests {
                 TargetRef::Object(ObjectId(1)),
                 TargetRef::Object(ObjectId(2))
             ]
+        );
+    }
+
+    /// CR 115.1 + CR 701.9b: A `Random`-mode target slot resolves to one of the
+    /// legal targets without prompting the controller. With a seeded RNG, the
+    /// result is deterministic across runs (replay/test reproducibility).
+    #[test]
+    fn random_select_targets_picks_one_of_legal_targets() {
+        let mut state = GameState::new_two_player(42);
+        let slot = TargetSelectionSlot {
+            legal_targets: vec![
+                TargetRef::Object(ObjectId(7)),
+                TargetRef::Object(ObjectId(11)),
+            ],
+            optional: false,
+        };
+        let chosen =
+            random_select_targets_for_ability(&mut state, std::slice::from_ref(&slot), &[])
+                .expect("random selection succeeds when legal targets exist");
+        assert_eq!(chosen.len(), 1);
+        assert!(slot.legal_targets.contains(&chosen[0]));
+    }
+
+    /// CR 115.1 + CR 701.9b: Determinism check — two independent runs with the
+    /// same seeded RNG state and the same legal-target set must pick the same
+    /// target. This guarantees replays and recorded games behave identically.
+    #[test]
+    fn random_select_targets_is_deterministic_under_seeded_rng() {
+        let slot = TargetSelectionSlot {
+            legal_targets: vec![
+                TargetRef::Object(ObjectId(3)),
+                TargetRef::Object(ObjectId(5)),
+                TargetRef::Object(ObjectId(8)),
+            ],
+            optional: false,
+        };
+        let mut state_a = GameState::new_two_player(1234);
+        let mut state_b = GameState::new_two_player(1234);
+        let pick_a =
+            random_select_targets_for_ability(&mut state_a, std::slice::from_ref(&slot), &[])
+                .expect("seeded RNG run a");
+        let pick_b =
+            random_select_targets_for_ability(&mut state_b, std::slice::from_ref(&slot), &[])
+                .expect("seeded RNG run b");
+        assert_eq!(pick_a, pick_b, "same seed must yield same target");
+    }
+
+    /// CR 115.1 + CR 701.9b: A `Random`-mode slot with no legal targets fails
+    /// (parallel to the controller-choice "no legal targets" case, except the
+    /// game is the actor — there is no controller to skip the slot).
+    #[test]
+    fn random_select_targets_errors_when_no_legal_targets() {
+        let mut state = GameState::new_two_player(42);
+        let slot = TargetSelectionSlot {
+            legal_targets: vec![],
+            optional: false,
+        };
+        let result = random_select_targets_for_ability(&mut state, &[slot], &[]);
+        assert!(result.is_err(), "empty legal-target set must error");
+    }
+
+    /// CR 115.6: Optional `Random`-mode slots with empty legal-target sets are
+    /// skipped without producing a target — same shape as the controller-choice
+    /// optional path.
+    #[test]
+    fn random_select_targets_skips_optional_empty_slot() {
+        let mut state = GameState::new_two_player(42);
+        let slot = TargetSelectionSlot {
+            legal_targets: vec![],
+            optional: true,
+        };
+        let chosen = random_select_targets_for_ability(&mut state, &[slot], &[])
+            .expect("optional empty slot resolves to empty selection");
+        assert!(chosen.is_empty());
+    }
+
+    /// CR 115.1 + CR 701.9b: Multi-slot `Random`-mode resolves each slot
+    /// independently from `state.rng`. With two distinct legal targets per
+    /// slot, the chain produces two picks that each lie in their slot's
+    /// legal-target set.
+    #[test]
+    fn random_select_targets_resolves_each_slot_independently() {
+        let mut state = GameState::new_two_player(42);
+        let slot_a = TargetSelectionSlot {
+            legal_targets: vec![
+                TargetRef::Object(ObjectId(1)),
+                TargetRef::Object(ObjectId(2)),
+            ],
+            optional: false,
+        };
+        let slot_b = TargetSelectionSlot {
+            legal_targets: vec![
+                TargetRef::Object(ObjectId(10)),
+                TargetRef::Object(ObjectId(20)),
+            ],
+            optional: false,
+        };
+        let chosen =
+            random_select_targets_for_ability(&mut state, &[slot_a.clone(), slot_b.clone()], &[])
+                .expect("multi-slot random selection succeeds");
+        assert_eq!(chosen.len(), 2);
+        assert!(slot_a.legal_targets.contains(&chosen[0]));
+        assert!(slot_b.legal_targets.contains(&chosen[1]));
+    }
+
+    /// CR 115.3: Multi-slot random selection must not pick the same target
+    /// twice across slots — the random helper filters previously-chosen
+    /// targets from each subsequent slot's pool, mirroring the interactive
+    /// `legal_targets_for_slot` filter.
+    #[test]
+    fn random_select_targets_does_not_repeat_across_slots() {
+        let mut state = GameState::new_two_player(42);
+        // Two slots with the same single legal target — the second slot must
+        // either fail (required) or yield no pick (optional).
+        let shared = TargetRef::Object(ObjectId(99));
+        let slot_required = TargetSelectionSlot {
+            legal_targets: vec![shared.clone()],
+            optional: false,
+        };
+        let slot_optional = TargetSelectionSlot {
+            legal_targets: vec![shared.clone()],
+            optional: true,
+        };
+        // Required + required: second slot has no remaining legal target → error.
+        let err = random_select_targets_for_ability(
+            &mut state,
+            &[slot_required.clone(), slot_required.clone()],
+            &[],
+        );
+        assert!(
+            err.is_err(),
+            "duplicate-only legal set must not violate CR 115.3"
+        );
+
+        // Required + optional: optional slot yields no extra pick (skipped).
+        let chosen =
+            random_select_targets_for_ability(&mut state, &[slot_required, slot_optional], &[])
+                .expect("required + optional resolves with one target");
+        assert_eq!(chosen, vec![shared]);
+    }
+
+    /// CR 115.1: `build_resolved_from_def` propagates `target_selection_mode`
+    /// from `AbilityDefinition` to `ResolvedAbility` so the runtime branch in
+    /// `casting_targets` can route to the random path.
+    #[test]
+    fn build_resolved_from_def_carries_target_selection_mode() {
+        use crate::types::ability::TargetSelectionMode;
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                damage_source: None,
+            },
+        );
+        def.target_selection_mode = TargetSelectionMode::Random;
+        let resolved = build_resolved_from_def(&def, ObjectId(1), PlayerId(0));
+        assert!(matches!(
+            resolved.target_selection_mode,
+            TargetSelectionMode::Random
+        ));
+    }
+
+    fn make_simple_ability(targets: Vec<TargetRef>, source: ObjectId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            targets,
+            source,
+            PlayerId(0),
+        )
+    }
+
+    /// CR 109.4 + CR 608.2c: A Player target's controller IS the player itself.
+    #[test]
+    fn parent_target_controller_returns_player_for_player_target() {
+        let state = GameState::new_two_player(42);
+        let ability = make_simple_ability(vec![TargetRef::Player(PlayerId(1))], ObjectId(0));
+        assert_eq!(
+            parent_target_controller(&ability, &state),
+            Some(PlayerId(1)),
+            "Player target should resolve to that player"
+        );
+    }
+
+    /// CR 109.4: An Object target's parent controller is the object's controller.
+    #[test]
+    fn parent_target_controller_returns_object_controller_for_object_target() {
+        let mut state = GameState::new_two_player(42);
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Test Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = make_simple_ability(vec![TargetRef::Object(creature)], ObjectId(0));
+        assert_eq!(
+            parent_target_controller(&ability, &state),
+            Some(PlayerId(1)),
+            "Object target should resolve to that object's controller"
+        );
+    }
+
+    /// An ability with no targets has no parent target — returns None.
+    #[test]
+    fn parent_target_controller_returns_none_for_empty_targets() {
+        let state = GameState::new_two_player(42);
+        let ability = make_simple_ability(vec![], ObjectId(0));
+        assert_eq!(
+            parent_target_controller(&ability, &state),
+            None,
+            "An ability with no targets has no parent target controller"
         );
     }
 }

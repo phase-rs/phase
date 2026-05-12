@@ -353,6 +353,8 @@ const TWO_HEADED_GIANT_DEFAULT: FormatConfig = {
   commander_damage_threshold: null,
   range_of_influence: null,
   team_based: true,
+  uses_commander: false,
+  allow_debug_actions: false,
 };
 
 export const FORMAT_DEFAULTS: Record<GameFormat, FormatConfig> = {

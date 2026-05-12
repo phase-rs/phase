@@ -1,9 +1,6 @@
-use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
-};
+use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::identifiers::ObjectId;
 
 /// CR 701.20: Reveal a specific object to all players.
 ///
@@ -34,20 +31,14 @@ pub fn resolve(
         _ => TargetFilter::SelfRef,
     };
 
-    let object_ids: Vec<ObjectId> = ability
-        .targets
-        .iter()
-        .filter_map(|t| match t {
-            TargetRef::Object(id) => Some(*id),
-            _ => None,
-        })
-        .collect();
-
-    let object_ids = if object_ids.is_empty() && matches!(target, TargetFilter::SelfRef) {
-        vec![ability.source_id]
-    } else {
-        object_ids
-    };
+    // CR 608.2c + 603.10a: Delegate to the unified 3-tier dispatch so a
+    // chained `Reveal { target: SelfRef }` sub-ability resolves to the source
+    // object regardless of `ability.targets` (issue #323 class — without the
+    // SelfRef short-circuit, chain target propagation in
+    // `effects::mod.rs::resolve_ability_chain` would inherit the parent's
+    // targets and reveal the wrong object).
+    let effective_targets = crate::game::targeting::resolved_targets(ability, &target, state);
+    let object_ids = crate::game::effects::effect_object_targets(&target, &effective_targets);
 
     if !object_ids.is_empty() {
         let card_names: Vec<String> = object_ids
@@ -74,6 +65,7 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::TargetRef;
     use crate::types::identifiers::CardId;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -114,6 +106,57 @@ mod tests {
         assert_eq!(player, PlayerId(0));
         assert_eq!(card_ids, vec![obj]);
         assert_eq!(card_names, vec!["Nexus of Fate".to_string()]);
+    }
+
+    /// CR 608.2c (issue #323 class): a chained `Reveal { target: SelfRef }`
+    /// sub-ability must reveal the source object even when chain target
+    /// propagation in `effects::mod.rs::resolve_ability_chain` injected the
+    /// parent's targets into `ability.targets`. Pre-fix the resolver checked
+    /// `object_ids.is_empty() && SelfRef` locally; a propagated parent target
+    /// would route through the chosen-targets branch and reveal the wrong
+    /// object.
+    #[test]
+    fn reveal_selfref_overrides_propagated_parent_targets() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Library,
+        );
+        let other = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Other".to_string(),
+            Zone::Library,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::Reveal {
+                target: TargetFilter::SelfRef,
+            },
+            // Simulate chain target propagation from a parent that targeted
+            // `other`. SelfRef must override and reveal the source instead.
+            vec![TargetRef::Object(other)],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let revealed = events.iter().find_map(|e| match e {
+            GameEvent::CardsRevealed { card_ids, .. } => Some(card_ids.clone()),
+            _ => None,
+        });
+        let card_ids = revealed.expect("CardsRevealed emitted");
+        assert_eq!(
+            card_ids,
+            vec![source],
+            "SelfRef reveal must reveal the source, not the propagated parent target"
+        );
     }
 
     #[test]

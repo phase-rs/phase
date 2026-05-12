@@ -2,7 +2,7 @@ use crate::game::filter;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
     ContinuousModification, DoublePTMode, Duration, Effect, EffectError, EffectKind, PtValue,
-    ResolvedAbility, TargetFilter, TargetRef,
+    ResolvedAbility, TargetFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -28,23 +28,15 @@ pub fn resolve(
     let dur = ability.duration.clone().unwrap_or(Duration::UntilEndOfTurn);
     let target_filter = crate::game::effects::resolved_object_filter(ability, target_filter);
 
-    // SelfRef with no explicit targets means pump the source object itself.
-    let ids: Vec<ObjectId> =
-        if matches!(target_filter, TargetFilter::SelfRef) && ability.targets.is_empty() {
-            vec![ability.source_id]
-        } else {
-            ability
-                .targets
-                .iter()
-                .filter_map(|t| {
-                    if let TargetRef::Object(id) = t {
-                        Some(*id)
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
+    // CR 608.2c + 603.10a: Delegate target resolution to the unified 3-tier
+    // dispatch (`resolved_targets`), matching `bounce` / `change_zone`. This
+    // routes `SelfRef` through the post-#323 short-circuit so chained
+    // `Pump { target: SelfRef }` sub-abilities resolve to the source object
+    // rather than inheriting the parent's targets via chain propagation in
+    // `effects::mod.rs::resolve_ability_chain`.
+    let effective_targets =
+        crate::game::targeting::resolved_targets(ability, &target_filter, state);
+    let ids = crate::game::effects::effect_object_targets(&target_filter, &effective_targets);
 
     let modifications = pt_modifications(power, toughness, state, ability);
 
@@ -136,22 +128,11 @@ pub fn resolve_double_pt(
 
     let dur = ability.duration.clone().unwrap_or(Duration::UntilEndOfTurn);
 
-    let ids: Vec<ObjectId> =
-        if matches!(target_filter, TargetFilter::SelfRef) && ability.targets.is_empty() {
-            vec![ability.source_id]
-        } else {
-            ability
-                .targets
-                .iter()
-                .filter_map(|t| {
-                    if let TargetRef::Object(id) = t {
-                        Some(*id)
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
+    // CR 608.2c + 603.10a: Same 3-tier dispatch as `pump.resolve` — `SelfRef`
+    // short-circuits to `ability.source_id` so chained
+    // `DoublePT { target: SelfRef }` sub-abilities don't inherit parent targets.
+    let effective_targets = crate::game::targeting::resolved_targets(ability, target_filter, state);
+    let ids = crate::game::effects::effect_object_targets(target_filter, &effective_targets);
 
     for obj_id in ids {
         let modifications = double_modifications(state, obj_id, mode)?;
@@ -294,7 +275,7 @@ mod tests {
     use super::*;
     use crate::game::layers::evaluate_layers;
     use crate::game::zones::create_object;
-    use crate::types::ability::{PtValue, TargetFilter, TypedFilter};
+    use crate::types::ability::{PtValue, TargetFilter, TargetRef, TypedFilter};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -424,6 +405,87 @@ mod tests {
 
         assert_eq!(state.objects[&swiftspear].power, Some(2));
         assert_eq!(state.objects[&swiftspear].toughness, Some(3));
+    }
+
+    /// CR 608.2c (issue #323 class): a chained `Pump { target: SelfRef }`
+    /// sub-ability must pump the source object even when chain target
+    /// propagation in `effects::mod.rs::resolve_ability_chain` injected the
+    /// parent's targets into `ability.targets`. Pre-fix the resolver checked
+    /// `SelfRef && ability.targets.is_empty()` locally, so a propagated parent
+    /// target would route through the `ability.targets` branch and pump the
+    /// wrong creature. Post-fix the resolver delegates to `resolved_targets`,
+    /// which short-circuits `SelfRef` to `[source_id]` unconditionally.
+    #[test]
+    fn pump_selfref_overrides_propagated_parent_targets() {
+        let mut state = GameState::new_two_player(42);
+        let source = make_creature(&mut state, "Source", 2, 2, PlayerId(0));
+        let other = make_creature(&mut state, "Other", 3, 3, PlayerId(0));
+
+        let ability = ResolvedAbility::new(
+            Effect::Pump {
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
+                target: TargetFilter::SelfRef,
+            },
+            // Simulate chain target propagation from a parent that targeted
+            // `other`. SelfRef must override this and pump the source instead.
+            vec![TargetRef::Object(other)],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        assert_eq!(
+            state.objects[&source].power,
+            Some(3),
+            "SelfRef pump must apply to source even with propagated parent targets"
+        );
+        assert_eq!(state.objects[&source].toughness, Some(3));
+        assert_eq!(
+            state.objects[&other].power,
+            Some(3),
+            "propagated parent target must NOT be pumped by SelfRef sub-ability"
+        );
+        assert_eq!(state.objects[&other].toughness, Some(3));
+    }
+
+    /// CR 701.10c (issue #323 class): chained `DoublePT { target: SelfRef }`
+    /// sub-ability must double the source object's P/T even when chain target
+    /// propagation injected the parent's targets.
+    #[test]
+    fn double_pt_selfref_overrides_propagated_parent_targets() {
+        let mut state = GameState::new_two_player(42);
+        let source = make_creature(&mut state, "Source", 2, 2, PlayerId(0));
+        let other = make_creature(&mut state, "Other", 3, 3, PlayerId(0));
+
+        let ability = ResolvedAbility::new(
+            Effect::DoublePT {
+                mode: DoublePTMode::PowerAndToughness,
+                target: TargetFilter::SelfRef,
+            },
+            vec![TargetRef::Object(other)],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_double_pt(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        assert_eq!(
+            state.objects[&source].power,
+            Some(4),
+            "SelfRef double_pt must apply to source"
+        );
+        assert_eq!(state.objects[&source].toughness, Some(4));
+        assert_eq!(
+            state.objects[&other].power,
+            Some(3),
+            "propagated parent target must NOT be doubled"
+        );
     }
 
     /// Verify pump survives layer recalculation — the original bug.

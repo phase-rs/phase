@@ -1,5 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 204
 expression: "&ir"
 ---
 {
@@ -98,7 +99,12 @@ expression: "&ir"
               "affected": {
                 "type": "SelfRef"
               },
-              "modifications": [],
+              "modifications": [
+                {
+                  "type": "AddStaticMode",
+                  "mode": "CantBeBlocked"
+                }
+              ],
               "condition": null,
               "affected_zone": null,
               "effect_zone": null,

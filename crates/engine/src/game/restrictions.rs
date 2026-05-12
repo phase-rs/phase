@@ -1,15 +1,17 @@
 use crate::game::game_object::GameObject;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, ActivationRestriction, CastingRestriction, ParsedCondition,
-    QuantityExpr, SpellCastingOptionKind,
+    AbilityCost, AbilityDefinition, AbilityTag, ActivationRestriction, CastingRestriction,
+    ControllerRef, FilterProp, ParsedCondition, QuantityExpr, SpellCastingOptionKind, TargetFilter,
+    TypeFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
-use crate::types::game_state::CastingVariant;
+use crate::types::game_state::{BattlefieldEntryRecord, CastingVariant};
 use crate::types::keywords::Keyword;
-use crate::types::mana::ManaCost;
+use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
+use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 use crate::types::SpellCastRecord;
 
@@ -136,10 +138,24 @@ pub fn add_mana_cost(base: &ManaCost, extra: &ManaCost) -> ManaCost {
 
 /// CR 601.2i: Once the steps of casting a spell are complete, the spell becomes cast.
 /// Records per-player and per-turn spell casting history for restriction checking.
+/// CR 601.2a: Every cast spell has a from-zone, but the broader `GameObject`
+/// surface (`obj.cast_from_zone`) carries an `Option<Zone>` because non-cast
+/// objects (tokens, emblems) lack one. Tests that exercise this helper without
+/// having gone through the cast pipeline default the missing zone to
+/// `Zone::Hand` — the canonical fallback used elsewhere by `SpellCastRecord`.
 pub fn record_spell_cast(
     state: &mut crate::types::game_state::GameState,
     player: PlayerId,
     obj: &GameObject,
+) {
+    record_spell_cast_from_zone(state, player, obj, obj.cast_from_zone.unwrap_or(Zone::Hand));
+}
+
+pub fn record_spell_cast_from_zone(
+    state: &mut crate::types::game_state::GameState,
+    player: PlayerId,
+    obj: &GameObject,
+    from_zone: Zone,
 ) {
     state.spells_cast_this_turn = state.spells_cast_this_turn.saturating_add(1);
     *state.spells_cast_this_game.entry(player).or_insert(0) += 1;
@@ -159,6 +175,7 @@ pub fn record_spell_cast(
             // trigger-filter evaluation (e.g. "your first spell with {X} in its
             // mana cost each turn") does not need to re-examine the spell object.
             has_x_in_cost: crate::game::casting_costs::cost_has_x(&obj.mana_cost),
+            from_zone,
         });
 }
 
@@ -234,9 +251,88 @@ pub fn record_battlefield_entry(
         core_types: obj.card_types.core_types.clone(),
         subtypes: obj.card_types.subtypes.clone(),
         supertypes: obj.card_types.supertypes.clone(),
+        colors: obj.color.clone(),
         controller: obj.controller,
     };
     state.battlefield_entries_this_turn.push(record);
+}
+
+fn entry_controller_matches(
+    controller: &ControllerRef,
+    record_controller: PlayerId,
+    player: PlayerId,
+) -> bool {
+    match controller {
+        ControllerRef::You => record_controller == player,
+        ControllerRef::Opponent => record_controller != player,
+        _ => false,
+    }
+}
+
+fn entry_type_filter_matches(record: &BattlefieldEntryRecord, type_filter: &TypeFilter) -> bool {
+    match type_filter {
+        TypeFilter::Creature => record.core_types.contains(&CoreType::Creature),
+        TypeFilter::Land => record.core_types.contains(&CoreType::Land),
+        TypeFilter::Artifact => record.core_types.contains(&CoreType::Artifact),
+        TypeFilter::Enchantment => record.core_types.contains(&CoreType::Enchantment),
+        TypeFilter::Planeswalker => record.core_types.contains(&CoreType::Planeswalker),
+        TypeFilter::Battle => record.core_types.contains(&CoreType::Battle),
+        TypeFilter::Permanent => record.core_types.iter().any(|core| {
+            matches!(
+                core,
+                CoreType::Artifact
+                    | CoreType::Battle
+                    | CoreType::Creature
+                    | CoreType::Enchantment
+                    | CoreType::Land
+                    | CoreType::Planeswalker
+            )
+        }),
+        TypeFilter::Card | TypeFilter::Any => true,
+        TypeFilter::Non(inner) => !entry_type_filter_matches(record, inner),
+        TypeFilter::Subtype(subtype) => record
+            .subtypes
+            .iter()
+            .any(|record_subtype| record_subtype.eq_ignore_ascii_case(subtype)),
+        TypeFilter::AnyOf(filters) => filters
+            .iter()
+            .any(|inner| entry_type_filter_matches(record, inner)),
+        _ => false,
+    }
+}
+
+fn entry_color_matches(record: &BattlefieldEntryRecord, color: &ManaColor) -> bool {
+    record.colors.iter().any(|entry_color| entry_color == color)
+}
+
+fn battlefield_entry_matches_filter(
+    record: &BattlefieldEntryRecord,
+    filter: &TargetFilter,
+    player: PlayerId,
+) -> bool {
+    match filter {
+        TargetFilter::Any => true,
+        TargetFilter::Typed(typed) => {
+            if let Some(controller) = &typed.controller {
+                if !entry_controller_matches(controller, record.controller, player) {
+                    return false;
+                }
+            }
+            if !typed
+                .type_filters
+                .iter()
+                .all(|type_filter| entry_type_filter_matches(record, type_filter))
+            {
+                return false;
+            }
+            typed.properties.iter().all(|prop| match prop {
+                FilterProp::HasColor { color } => entry_color_matches(record, color),
+                FilterProp::InZone { zone } => *zone == Zone::Battlefield,
+                _ => false,
+            })
+        }
+        _ => false,
+    }
 }
 
 /// CR 400.7: Record a zone-change snapshot for data-driven condition queries.
@@ -346,6 +442,108 @@ pub fn record_ability_activation(
     *state.activated_abilities_this_game.entry(key).or_insert(0) += 1;
 }
 
+/// CR 702.142b: Compute the effective per-turn activation limit for an ability.
+/// Normally `OnlyOnceEachTurn` means limit = 1, but `ModifyActivationLimit` statics
+/// can override this for abilities matching a keyword tag (e.g., boast).
+fn effective_activation_limit(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+) -> u32 {
+    // Check if the ability at this index has a keyword tag
+    let ability_tag = state
+        .objects
+        .get(&source_id)
+        .and_then(|obj| obj.abilities.get(ability_index))
+        .and_then(|def| def.ability_tag);
+    let Some(tag) = ability_tag else {
+        return 1; // No tag → default once-per-turn
+    };
+    let keyword = match tag {
+        AbilityTag::Boast => "boast",
+    };
+    // Scan battlefield for ModifyActivationLimit statics that affect this keyword
+    let mut limit: u32 = 1;
+    for (bf_obj, static_def) in
+        crate::game::functioning_abilities::battlefield_active_statics(state)
+    {
+        if bf_obj.controller != player {
+            continue;
+        }
+        if let StaticMode::ModifyActivationLimit {
+            keyword: ref kw,
+            new_limit,
+        } = static_def.mode
+        {
+            if kw == keyword {
+                // Check if the source object is affected by this static
+                if static_def.affected.as_ref().is_some_and(|filter| {
+                    super::filter::matches_target_filter(
+                        state,
+                        source_id,
+                        filter,
+                        &super::filter::FilterContext::from_source_with_controller(
+                            bf_obj.id,
+                            bf_obj.controller,
+                        ),
+                    )
+                }) {
+                    limit = limit.max(u32::from(new_limit));
+                }
+            }
+        }
+    }
+    limit
+}
+
+fn has_activate_as_instant_permission(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+) -> bool {
+    let Some(ability) = state
+        .objects
+        .get(&source_id)
+        .and_then(|obj| obj.abilities.get(ability_index))
+    else {
+        return false;
+    };
+    let cost_categories = ability.cost_categories();
+    if cost_categories.is_empty() {
+        return false;
+    }
+
+    crate::game::functioning_abilities::battlefield_active_statics(state).any(
+        |(static_source, def)| {
+            if static_source.controller != player {
+                return false;
+            }
+            let StaticMode::ActivateAsInstant {
+                cost_category: permitted_category,
+            } = def.mode
+            else {
+                return false;
+            };
+            if !cost_categories.contains(&permitted_category) {
+                return false;
+            }
+            def.affected.as_ref().is_some_and(|filter| {
+                super::filter::matches_target_filter(
+                    state,
+                    source_id,
+                    filter,
+                    &super::filter::FilterContext::from_source_with_controller(
+                        static_source.id,
+                        static_source.controller,
+                    ),
+                )
+            })
+        },
+    )
+}
+
 fn activation_restriction_applies(
     state: &crate::types::game_state::GameState,
     player: PlayerId,
@@ -357,7 +555,10 @@ fn activation_restriction_applies(
 
     match restriction {
         // CR 602.5d: "Activate only as a sorcery" means the player must follow sorcery timing rules.
-        ActivationRestriction::AsSorcery => is_sorcery_speed_window(state, player),
+        ActivationRestriction::AsSorcery => {
+            is_sorcery_speed_window(state, player)
+                || has_activate_as_instant_permission(state, player, source_id, ability_index)
+        }
         ActivationRestriction::AsInstant => true,
         // CR 702.62a: "If you could begin to cast this card by putting it onto the
         // stack from your hand" — defer to the underlying card type's natural
@@ -385,13 +586,15 @@ fn activation_restriction_applies(
         ActivationRestriction::BeforeAttackersDeclared => is_before_attackers_declared(state),
         ActivationRestriction::BeforeCombatDamage => is_before_combat_damage(state.phase),
         // CR 602.5b: Per-turn activation limit tracked via ability activation counter.
+        // CR 702.142b: ModifyActivationLimit statics may raise the limit for tagged abilities.
         ActivationRestriction::OnlyOnceEachTurn => {
-            state
+            let current_count = state
                 .activated_abilities_this_turn
                 .get(&key)
                 .copied()
-                .unwrap_or(0)
-                == 0
+                .unwrap_or(0);
+            let limit = effective_activation_limit(state, player, source_id, ability_index);
+            current_count < limit
         }
         // CR 602.5b: Per-game activation limit.
         ActivationRestriction::OnlyOnce => {
@@ -811,6 +1014,14 @@ pub(crate) fn evaluate_condition(
             .battlefield_entries_this_turn
             .iter()
             .any(|r| r.core_types.contains(&CoreType::Artifact) && r.controller == player),
+        ParsedCondition::BattlefieldEntriesThisTurn { filter, count } => {
+            state
+                .battlefield_entries_this_turn
+                .iter()
+                .filter(|record| battlefield_entry_matches_filter(record, filter, player))
+                .count() as u32
+                >= *count
+        }
         ParsedCondition::CardsLeftYourGraveyardThisTurnAtLeast { count } => {
             state
                 .zone_changes_this_turn
@@ -827,6 +1038,19 @@ pub(crate) fn evaluate_condition(
         // CR 702.131c: The city's blessing is a player designation that effects
         // and restrictions may identify.
         ParsedCondition::HasCityBlessing => state.city_blessing.contains(&player),
+        // CR 601.3d + CR 608.2c: "if it targets a [filter]" — gates a casting
+        // permission on the chosen targets of the in-flight spell. Read from
+        // `state.pending_cast.ability.targets` when targets have been committed.
+        // Before target selection (announcement-time check by `flash_timing_cost`),
+        // `pending_cast` is `None` for the candidate-generation pass and the
+        // committed targets are absent during the cast-announcement check —
+        // both cases evaluate to `true` so the cast may be announced and proceed
+        // to target selection. Final validation runs at
+        // `finish_pending_cast_cost_or_pay` against the now-committed targets,
+        // where this same evaluator returns the authoritative answer.
+        ParsedCondition::SpellTargetsFilter { filter } => {
+            spell_targets_filter(state, source_id, filter)
+        }
         // CR 601.3 / CR 602.5: Compound restriction — all inner conditions must be true.
         ParsedCondition::And { conditions } => conditions
             .iter()
@@ -840,6 +1064,130 @@ pub(crate) fn evaluate_condition(
             !evaluate_condition(state, player, source_id, condition)
         }
     }
+}
+
+/// CR 601.3d + CR 608.2c: Evaluate `SpellTargetsFilter` against the in-flight
+/// spell's chosen targets, if any are committed.
+///
+/// Returns:
+/// - `true` when targets have not yet been chosen (the cast may proceed to
+///   target selection; final validation runs at finalize).
+/// - `true` when at least one committed object target satisfies `filter`.
+/// - `false` only when targets have been chosen AND none of them match.
+///
+/// Target lookup priority:
+/// 1. `state.pending_cast` — set during the mid-cast WaitingFor::TargetSelection
+///    and post-target validation gate. Read its `ability.targets`.
+/// 2. The top of the stack — once `finalize_cast` has installed the spell with
+///    its `ResolvedAbility`, the targets live on the stack entry.
+///
+/// Final validation in `finish_pending_cast_cost_or_pay` calls
+/// `target_dependent_flash_permission_satisfied` directly with the now-committed
+/// `ResolvedAbility` so it does not depend on `state.pending_cast` being
+/// installed at that exact instant.
+fn spell_targets_filter(
+    state: &crate::types::game_state::GameState,
+    source_id: ObjectId,
+    filter: &crate::types::ability::TargetFilter,
+) -> bool {
+    use crate::types::ability::TargetRef;
+    // Prefer the in-flight pending cast when it matches the source, else fall
+    // through to the stack: a spell whose ResolvedAbility carries committed
+    // targets is the authoritative source post-announcement. An unrelated
+    // pending cast (different `object_id`) is not relevant — keep walking.
+    let targets: Option<Vec<TargetRef>> = state
+        .pending_cast
+        .as_ref()
+        .filter(|pending| pending.object_id == source_id)
+        .map(|pending| super::ability_utils::flatten_targets_in_chain(&pending.ability))
+        .or_else(|| {
+            state
+                .stack
+                .iter()
+                .rev()
+                .find(|entry| entry.id == source_id)
+                .and_then(|entry| match &entry.kind {
+                    crate::types::game_state::StackEntryKind::Spell {
+                        ability: Some(resolved),
+                        ..
+                    } => Some(super::ability_utils::flatten_targets_in_chain(resolved)),
+                    _ => None,
+                })
+        });
+    let Some(targets) = targets else {
+        // Neither a matching pending cast nor a stack entry: the source is
+        // pre-announcement (the candidate-generator pass `flash_timing_cost`
+        // runs against). Defer the verdict to finalize.
+        return true;
+    };
+    if targets.is_empty() {
+        // CR 601.2c: pre-target-selection — defer the verdict to finalize.
+        return true;
+    }
+    let ctx = super::filter::FilterContext::from_source(state, source_id);
+    targets.iter().any(|target| match target {
+        crate::types::ability::TargetRef::Object(object_id) => {
+            super::filter::matches_target_filter(state, *object_id, filter, &ctx)
+        }
+        crate::types::ability::TargetRef::Player(_) => false,
+    })
+}
+
+/// CR 601.3d + CR 702.8a: Validate, post-target, that every target-dependent
+/// flash permission on the cast object is satisfied by the chosen targets in
+/// `ability`. Returns `Ok(())` when each `AsThoughHadFlash` option whose
+/// `condition` is a `SpellTargetsFilter` either does not gate this cast or
+/// passes against the targets.
+///
+/// Called at `finish_pending_cast_cost_or_pay` after `assign_targets_in_chain`
+/// has committed the player's choices. If a target-dependent flash permission
+/// authorized the cast (i.e., the cast is outside the sorcery-speed window via
+/// `cast_timing_permission == AsThoughHadFlash`) AND no flash permission's
+/// condition currently passes, the cast is illegal under CR 601.3d and must be
+/// aborted.
+pub(crate) fn target_dependent_flash_permission_satisfied(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    ability: &crate::types::ability::ResolvedAbility,
+) -> bool {
+    use crate::types::ability::{ParsedCondition, SpellCastingOptionKind, TargetRef};
+    let Some(obj) = state.objects.get(&object_id) else {
+        return true;
+    };
+    // CR 702.8a: A real Flash keyword (printed or granted via continuous effect)
+    // authorizes instant-speed casting independent of any conditional flash
+    // option. If the spell has Flash, the cast is legal regardless of any
+    // `AsThoughHadFlash` option's condition.
+    let has_real_flash = super::casting::effective_spell_keyword_kinds(state, player, object_id)
+        .contains(&crate::types::keywords::KeywordKind::Flash);
+    if has_real_flash {
+        return true;
+    }
+    let targets = super::ability_utils::flatten_targets_in_chain(ability);
+    let ctx = super::filter::FilterContext::from_source(state, object_id);
+    let evaluate_target_filter = |filter: &crate::types::ability::TargetFilter| -> bool {
+        targets.iter().any(|t| match t {
+            TargetRef::Object(id) => super::filter::matches_target_filter(state, *id, filter, &ctx),
+            TargetRef::Player(_) => false,
+        })
+    };
+    // CR 601.3d: For each AsThoughHadFlash option whose condition is
+    // target-dependent, re-evaluate now (we couldn't at announcement). For
+    // unconditional options or options with a non-target-dependent condition
+    // (e.g. "if you control a Faerie"), defer to the announcement-time check
+    // performed by `flash_timing_cost`: that check already gated the cast on
+    // entry, and re-running it here would over-strictly reject casts where the
+    // game state changed mid-cast (an unusual but possible edge case the rules
+    // do not require us to police a second time).
+    obj.casting_options
+        .iter()
+        .filter(|o| o.kind == SpellCastingOptionKind::AsThoughHadFlash)
+        .any(|option| match option.condition.as_ref() {
+            None => true,
+            Some(ParsedCondition::SpellTargetsFilter { filter }) => evaluate_target_filter(filter),
+            Some(_other_non_target_condition) => true,
+        })
 }
 
 /// CR 307.1: Sorcery-speed timing — main phase, stack empty, active player has priority.
@@ -1138,6 +1486,38 @@ mod tests {
     }
 
     #[test]
+    fn battlefield_entry_history_condition_survives_object_leaving() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        state
+            .battlefield_entries_this_turn
+            .push(BattlefieldEntryRecord {
+                object_id: ObjectId(99),
+                name: "Green Creature".to_string(),
+                core_types: vec![CoreType::Creature],
+                subtypes: vec![],
+                supertypes: vec![],
+                colors: vec![ManaColor::Green],
+                controller: PlayerId(1),
+            });
+        let mut filter = crate::types::ability::TypedFilter::creature();
+        filter.controller = Some(ControllerRef::Opponent);
+        filter.properties.push(FilterProp::HasColor {
+            color: ManaColor::Green,
+        });
+        let condition = ParsedCondition::BattlefieldEntriesThisTurn {
+            filter: TargetFilter::Typed(filter),
+            count: 1,
+        };
+
+        assert!(evaluate_condition(
+            &state,
+            PlayerId(0),
+            ObjectId(10),
+            &condition
+        ));
+    }
+
+    #[test]
     fn evaluates_you_control_creature_with_flying_condition() {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
         let bird = create_object(
@@ -1366,6 +1746,7 @@ mod tests {
                 colors: Vec::new(),
                 mana_value: 1,
                 has_x_in_cost: false,
+                from_zone: Zone::Hand,
             }],
         );
 
@@ -1397,6 +1778,7 @@ mod tests {
                     colors: Vec::new(),
                     mana_value: 1,
                     has_x_in_cost: false,
+                    from_zone: Zone::Hand,
                 },
                 crate::types::game_state::SpellCastRecord {
                     core_types: vec![CoreType::Sorcery],
@@ -1406,6 +1788,7 @@ mod tests {
                     colors: Vec::new(),
                     mana_value: 2,
                     has_x_in_cost: false,
+                    from_zone: Zone::Hand,
                 },
                 crate::types::game_state::SpellCastRecord {
                     core_types: vec![CoreType::Instant],
@@ -1415,6 +1798,7 @@ mod tests {
                     colors: Vec::new(),
                     mana_value: 3,
                     has_x_in_cost: false,
+                    from_zone: Zone::Hand,
                 },
             ],
         );
@@ -1588,5 +1972,185 @@ mod tests {
             CastingVariant::Normal
         )
         .is_ok());
+    }
+
+    /// CR 601.3d + CR 903.3 + CR 702.8a — Timely Ward class.
+    ///
+    /// Builds a spell with `SpellCastingOption::as_though_had_flash().condition(
+    /// SpellTargetsFilter { IsCommander })` and verifies the post-target gate:
+    /// - targets containing a commander → permission satisfied (cast legal)
+    /// - targets without a commander → permission unsatisfied (cast illegal)
+    /// - real Flash keyword on the spell → permission satisfied regardless
+    ///   (printed Flash trumps the conditional flash option per CR 702.8a)
+    #[test]
+    fn target_dependent_flash_permission_satisfied_against_commander_target() {
+        use crate::game::game_object::GameObject;
+        use crate::types::ability::{
+            FilterProp, ParsedCondition, ResolvedAbility, SpellCastingOption, TargetFilter,
+            TargetRef, TypedFilter,
+        };
+
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+
+        // Caster: PlayerId(0). Opponent: PlayerId(1).
+        let caster = PlayerId(0);
+        let opponent = PlayerId(1);
+
+        // Spell (Timely Ward stand-in) in caster's hand.
+        let mut spell = GameObject::new(
+            ObjectId(10),
+            CardId(10),
+            caster,
+            "Timely Ward".to_string(),
+            Zone::Hand,
+        );
+        spell.card_types.core_types.push(CoreType::Enchantment);
+        spell
+            .casting_options
+            .push(SpellCastingOption::as_though_had_flash().condition(
+                ParsedCondition::SpellTargetsFilter {
+                    filter: TargetFilter::Typed(TypedFilter {
+                        properties: vec![FilterProp::IsCommander],
+                        ..Default::default()
+                    }),
+                },
+            ));
+        state.objects.insert(spell.id, spell);
+
+        // Commander creature controlled by the opponent, on the battlefield.
+        let commander = create_object(
+            &mut state,
+            CardId(20),
+            opponent,
+            "Some Commander".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&commander).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.is_commander = true;
+        }
+
+        // Non-commander creature for the negative case.
+        let plain = create_object(
+            &mut state,
+            CardId(21),
+            opponent,
+            "Ordinary Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&plain).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+
+        let ability_with_commander = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            vec![TargetRef::Object(commander)],
+            ObjectId(10),
+            caster,
+        );
+        let ability_with_plain = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            vec![TargetRef::Object(plain)],
+            ObjectId(10),
+            caster,
+        );
+
+        assert!(
+            target_dependent_flash_permission_satisfied(
+                &state,
+                caster,
+                ObjectId(10),
+                &ability_with_commander
+            ),
+            "casting at instant speed targeting a commander must satisfy the flash condition"
+        );
+        assert!(
+            !target_dependent_flash_permission_satisfied(
+                &state,
+                caster,
+                ObjectId(10),
+                &ability_with_plain
+            ),
+            "casting at instant speed targeting a non-commander must FAIL the flash condition"
+        );
+    }
+
+    /// CR 702.8a: A real Flash keyword on the spell short-circuits the
+    /// target-dependent flash permission check — printed Flash authorizes
+    /// instant-speed casting irrespective of any `AsThoughHadFlash` option's
+    /// condition.
+    #[test]
+    fn real_flash_keyword_overrides_target_dependent_flash_condition() {
+        use crate::game::game_object::GameObject;
+        use crate::types::ability::{
+            FilterProp, ParsedCondition, ResolvedAbility, SpellCastingOption, TargetFilter,
+            TargetRef, TypedFilter,
+        };
+        use crate::types::keywords::Keyword;
+
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let caster = PlayerId(0);
+        let opponent = PlayerId(1);
+
+        let mut spell = GameObject::new(
+            ObjectId(10),
+            CardId(10),
+            caster,
+            "Hypothetical With Both".to_string(),
+            Zone::Hand,
+        );
+        spell.card_types.core_types.push(CoreType::Enchantment);
+        spell.keywords.push(Keyword::Flash);
+        spell
+            .casting_options
+            .push(SpellCastingOption::as_though_had_flash().condition(
+                ParsedCondition::SpellTargetsFilter {
+                    filter: TargetFilter::Typed(TypedFilter {
+                        properties: vec![FilterProp::IsCommander],
+                        ..Default::default()
+                    }),
+                },
+            ));
+        state.objects.insert(spell.id, spell);
+
+        // A non-commander target — the conditional flash option's filter would
+        // FAIL against this target, but the printed Flash keyword should
+        // independently authorize the cast.
+        let plain = create_object(
+            &mut state,
+            CardId(21),
+            opponent,
+            "Ordinary Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&plain)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            vec![TargetRef::Object(plain)],
+            ObjectId(10),
+            caster,
+        );
+        assert!(
+            target_dependent_flash_permission_satisfied(&state, caster, ObjectId(10), &ability),
+            "printed Flash keyword must short-circuit the target-dependent flash check"
+        );
     }
 }

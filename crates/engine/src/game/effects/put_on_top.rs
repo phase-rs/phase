@@ -2,7 +2,6 @@ use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::zones;
 use crate::types::ability::{
     Effect, EffectError, EffectKind, LibraryPosition, QuantityExpr, ResolvedAbility, TargetFilter,
-    TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
@@ -35,30 +34,15 @@ pub fn resolve(
         ),
     };
 
-    // CR 608.2c + 603.10a: An anaphoric "it" / "~" in a top-level trigger effect
-    // has no parent target to inherit from — it refers to the source object.
-    // `TriggeringSource` is deliberately excluded: it resolves via
-    // `state.current_trigger_event`, not the ability source.
-    let use_self = matches!(
-        target_filter,
-        TargetFilter::None | TargetFilter::SelfRef | TargetFilter::ParentTarget
-    ) && ability.targets.is_empty();
-
-    let collected_targets: Vec<crate::types::identifiers::ObjectId> = if use_self {
-        vec![ability.source_id]
-    } else {
-        ability
-            .targets
-            .iter()
-            .filter_map(|t| {
-                if let TargetRef::Object(id) = t {
-                    Some(*id)
-                } else {
-                    None
-                }
-            })
-            .collect()
-    };
+    // CR 608.2c + 603.10a: Delegate to the unified 3-tier dispatch
+    // (`resolved_targets`). `SelfRef` always resolves to the source object;
+    // `None` / `ParentTarget` fall back to the source only when
+    // `ability.targets` is empty (the LTB self-return shape — Avenging Angel).
+    // This is the post-#323 SelfRef short-circuit applied uniformly.
+    let effective_targets =
+        crate::game::targeting::resolved_targets(ability, &target_filter, state);
+    let collected_targets =
+        crate::game::effects::effect_object_targets(&target_filter, &effective_targets);
 
     // CR 115.1 + CR 400.2: When the filter specifies a private zone (hand/library)
     // and no targets were pre-selected during casting (because the Oracle text does
@@ -95,6 +79,7 @@ pub fn resolve(
                     player: ability.controller,
                     cards: eligible,
                     count: expected.min(eligible_count),
+                    min_count: 0,
                     up_to: false,
                     source_id: ability.source_id,
                     effect_kind: EffectKind::PutAtLibraryPosition,
@@ -159,7 +144,7 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{Effect, ResolvedAbility, TargetFilter};
+    use crate::types::ability::{Effect, ResolvedAbility, TargetFilter, TargetRef};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -201,6 +186,57 @@ mod tests {
         // id2 should now be at library[0] (top)
         assert_eq!(state.players[0].library[0], id2);
         assert_eq!(state.objects[&id2].zone, Zone::Library);
+    }
+
+    /// CR 608.2c (issue #323 class): a chained
+    /// `PutAtLibraryPosition { target: SelfRef }` sub-ability must put the
+    /// source object on top of its owner's library even when chain target
+    /// propagation in `effects::mod.rs::resolve_ability_chain` injected the
+    /// parent's targets into `ability.targets`. Pre-fix this resolver
+    /// collapsed `SelfRef | None | ParentTarget` into the
+    /// `ability.targets.is_empty()` gate, so a propagated parent target would
+    /// route through the chosen-targets branch and put the wrong object on
+    /// top.
+    #[test]
+    fn put_on_top_selfref_overrides_propagated_parent_targets() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Graveyard,
+        );
+        let other = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Other".to_string(),
+            Zone::Library,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::SelfRef,
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
+            },
+            // Simulate chain target propagation from a parent that targeted
+            // `other`. SelfRef must override and put the source on top.
+            vec![TargetRef::Object(other)],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = vec![];
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.players[0].library[0], source,
+            "SelfRef sub-ability must put the SOURCE on top, \
+             not the propagated parent target"
+        );
+        assert_eq!(state.objects[&source].zone, Zone::Library);
     }
 
     #[test]

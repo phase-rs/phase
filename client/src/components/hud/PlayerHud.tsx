@@ -1,6 +1,7 @@
 import { useCallback } from "react";
 
 import { usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
+import { usePlayerDesignations } from "../../hooks/usePlayerDesignations.ts";
 import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getPlayerDisplayName, useMultiplayerStore } from "../../stores/multiplayerStore.ts";
@@ -8,7 +9,7 @@ import { ScoreBadge } from "../draft/ScoreBadge.tsx";
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { PhaseIndicatorLeft, PhaseIndicatorRight } from "../controls/PhaseStopBar.tsx";
-import { CounterBadge, StatusBadge } from "./HudBadges.tsx";
+import { CityBlessingBadge, CounterBadge, DungeonBadge, InitiativeBadge, MonarchBadge, StatusBadge } from "./HudBadges.tsx";
 import { HudPlate } from "./HudPlate.tsx";
 
 export function PlayerHud() {
@@ -16,6 +17,8 @@ export function PlayerHud() {
   const isMyTurn = useGameStore((s) => s.gameState?.active_player === playerId);
   const speed = useGameStore((s) => s.gameState?.players[playerId]?.speed ?? 0);
   const poisonCounters = useGameStore((s) => s.gameState?.players[playerId]?.poison_counters ?? 0);
+  const radCounters = useGameStore((s) => s.gameState?.players[playerId]?.player_counters?.Rad ?? 0);
+  const designations = usePlayerDesignations(playerId);
   const isPhasedOut = useGameStore(
     (s) => s.gameState?.players[playerId]?.status?.type === "PhasedOut",
   );
@@ -66,8 +69,17 @@ export function PlayerHud() {
         trailing={
           <>
             {showMatchScore && matchScore ? <ScoreBadge score={matchScore} player={0} /> : null}
+            {designations.isMonarch ? <MonarchBadge /> : null}
+            {designations.hasInitiative ? <InitiativeBadge /> : null}
+            {designations.hasCityBlessing ? <CityBlessingBadge /> : null}
+            {designations.activeDungeon ? (
+              <DungeonBadge dungeonName={designations.activeDungeon} roomIndex={designations.currentRoom} />
+            ) : null}
             {isPhasedOut ? <StatusBadge label="Phased Out" tone="neutral" /> : null}
+            {designations.ringLevel > 0 ? <CounterBadge kind="ring" value={designations.ringLevel} /> : null}
+            {designations.energy > 0 ? <CounterBadge kind="energy" value={designations.energy} /> : null}
             {poisonCounters > 0 ? <CounterBadge kind="poison" value={poisonCounters} /> : null}
+            {radCounters > 0 ? <CounterBadge kind="rad" value={radCounters} /> : null}
             {speed > 0 ? <CounterBadge kind="speed" value={speed} /> : null}
           </>
         }

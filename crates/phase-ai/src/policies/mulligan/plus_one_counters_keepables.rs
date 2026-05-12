@@ -9,6 +9,8 @@
 //! — the baseline `KeepablesByLandCount` policy is the sole voice for those decks.
 
 use engine::types::card_type::CoreType;
+#[cfg(test)]
+use engine::types::counter::CounterType;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
 
@@ -172,7 +174,7 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::AddCounter {
-                counter_type: "P1P1".to_string(),
+                counter_type: CounterType::Plus1Plus1,
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
             },

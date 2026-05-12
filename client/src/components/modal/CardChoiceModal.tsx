@@ -118,6 +118,24 @@ function canAssignDistinctCardTypes(
   return assign(0);
 }
 
+function searchChoiceSubtitle(data: SearchChoice["data"]): string {
+  const countText = data.up_to ? `up to ${data.count}` : `${data.count}`;
+  const cardText = `card${data.count > 1 ? "s" : ""}`;
+  const constraint = data.constraint;
+
+  if (constraint?.type === "MatchEachFilter") {
+    return `Choose ${countText} ${cardText} matching the listed search requirements`;
+  }
+  if (constraint?.type === "DistinctQualities") {
+    return `Choose ${countText} ${cardText} with distinct qualities`;
+  }
+  if (constraint?.type === "TotalManaValue") {
+    return `Choose ${countText} ${cardText} within the mana value limit`;
+  }
+
+  return `Choose ${countText} ${cardText}`;
+}
+
 /**
  * Generic card choice modal for Scry, Dig, Surveil, Reveal, Search, and NamedChoice.
  * Renders based on the WaitingFor type.
@@ -693,6 +711,10 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
   const objects = useGameStore((s) => s.gameState?.objects);
   const hoverProps = useInspectHoverProps();
   const [selectedSet, setSelectedSet] = useState<Set<ObjectId>>(new Set());
+  const countValid = data.up_to
+    ? selectedSet.size <= data.count
+    : selectedSet.size === data.count;
+  const subtitle = searchChoiceSubtitle(data);
 
   useEffect(() => {
     setSelectedSet(new Set());
@@ -714,21 +736,21 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
   );
 
   const handleConfirm = useCallback(() => {
-    if (selectedSet.size === data.count) {
+    if (countValid) {
       dispatch({
         type: "SelectCards",
         data: { cards: Array.from(selectedSet) },
       });
     }
-  }, [dispatch, selectedSet, data.count]);
+  }, [countValid, dispatch, selectedSet]);
 
   if (!objects) return null;
 
   return (
     <ChoiceOverlay
       title="Search Library"
-      subtitle={`Choose ${data.count} card${data.count > 1 ? "s" : ""}`}
-      footer={<ConfirmButton onClick={handleConfirm} disabled={selectedSet.size !== data.count} />}
+      subtitle={subtitle}
+      footer={<ConfirmButton onClick={handleConfirm} disabled={!countValid} />}
     >
       <ScrollableCardStrip>
         {data.cards.map((id, index) => {
@@ -878,6 +900,7 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
   const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
   const isSacrifice = data.zone === "Battlefield";
   const isUpTo = data.up_to === true;
+  const minCount = data.min_count ?? 0;
 
   const toggleSelect = useCallback(
     (id: ObjectId) => {
@@ -903,16 +926,22 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
 
   if (!objects) return null;
 
-  const isReady = isUpTo ? selected.size <= data.count : selected.size === data.count;
+  const isReady = isUpTo
+    ? selected.size >= minCount && selected.size <= data.count
+    : selected.size === data.count;
   const title = isSacrifice ? "Sacrifice" : "Put onto Battlefield";
   const subtitle = isSacrifice
     ? isUpTo
-      ? `Choose up to ${data.count} permanent${data.count > 1 ? "s" : ""} to sacrifice`
+      ? minCount > 0
+        ? `Choose ${minCount}-${data.count} permanent${data.count > 1 ? "s" : ""} to sacrifice`
+        : `Choose up to ${data.count} permanent${data.count > 1 ? "s" : ""} to sacrifice`
       : `Choose ${data.count} permanent${data.count > 1 ? "s" : ""} to sacrifice`
     : isUpTo
-      ? `Choose up to ${data.count} card${data.count > 1 ? "s" : ""} to put onto the battlefield`
+      ? minCount > 0
+        ? `Choose ${minCount}-${data.count} card${data.count > 1 ? "s" : ""} to put onto the battlefield`
+        : `Choose up to ${data.count} card${data.count > 1 ? "s" : ""} to put onto the battlefield`
       : `Choose ${data.count} card${data.count > 1 ? "s" : ""} to put onto the battlefield`;
-  const actionLabel = selected.size === 0 && isUpTo
+  const actionLabel = selected.size === 0 && isUpTo && minCount === 0
     ? (isSacrifice ? "Skip" : "Decline")
     : `${isSacrifice ? "Confirm" : "Put"} (${selected.size}/${data.count})`;
   const ringClass = isSacrifice ? "ring-red-400/80" : "ring-emerald-400/80";

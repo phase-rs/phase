@@ -48,6 +48,9 @@ function createGameState(overrides: Partial<GameState> = {}): GameState {
       commander_damage_threshold: 21,
       range_of_influence: null,
       team_based: false,
+      uses_commander: true,
+
+      allow_debug_actions: false,
     },
     eliminated_players: [],
     ...overrides,
@@ -150,6 +153,9 @@ describe("OpponentHud", () => {
         commander_damage_threshold: null,
         range_of_influence: null,
         team_based: false,
+        uses_commander: false,
+
+        allow_debug_actions: false,
       },
     });
 

@@ -203,6 +203,10 @@ impl LobbyManager {
             format: meta.format_config.as_ref().map(|fc| fc.format),
             room_name: meta.room_name.clone(),
             is_p2p: !meta.host_peer_id.is_empty(),
+            is_sandbox: meta
+                .format_config
+                .as_ref()
+                .is_some_and(|fc| fc.allow_debug_actions),
             draft_metadata: meta.draft_metadata.clone(),
         }
     }

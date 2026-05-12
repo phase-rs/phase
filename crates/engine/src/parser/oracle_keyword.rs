@@ -14,7 +14,8 @@ use super::oracle_quantity::parse_cda_quantity;
 use super::oracle_target::parse_type_phrase;
 use super::oracle_util::strip_reminder_text;
 use crate::types::ability::{
-    AbilityCost, AdditionalCost, ControllerRef, QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
+    AbilityCost, AdditionalCost, ControllerRef, Effect, QuantityExpr, TargetFilter, TypeFilter,
+    TypedFilter,
 };
 use crate::types::keywords::{BuybackCost, CyclingCost, FlashbackCost, Keyword, WardCost};
 
@@ -655,6 +656,15 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
         }
     }
 
+    // CR 702.120a: Escalate with em-dash cost — covers non-mana costs such as
+    // Collective Effort's "Escalate—Tap an untapped creature you control."
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("escalate\u{2014}").parse(text) {
+        let cost = normalize_escalate_cost(parse_oracle_cost(rest));
+        if !matches!(cost, AbilityCost::Unimplemented { .. }) {
+            return Some(Keyword::Escalate(cost));
+        }
+    }
+
     // CR 702.74a: "hideaway N" — parameterized keyword.
     // Delegates to nom combinator for number parsing.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("hideaway ").parse(text) {
@@ -758,6 +768,21 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
         return None;
     }
     Some(parsed)
+}
+
+fn normalize_escalate_cost(cost: AbilityCost) -> AbilityCost {
+    match cost {
+        AbilityCost::EffectCost { effect } => match *effect {
+            Effect::Tap { target } => AbilityCost::TapCreatures {
+                count: 1,
+                filter: target,
+            },
+            effect => AbilityCost::EffectCost {
+                effect: Box::new(effect),
+            },
+        },
+        other => other,
+    }
 }
 
 /// Get a lowercase display name for a keyword variant.
@@ -953,6 +978,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Champion(_) => "champion".to_string(),
         Keyword::Training => "training".to_string(),
         Keyword::Assist => "assist".to_string(),
+        Keyword::Augment => "augment".to_string(),
         Keyword::Aftermath => "aftermath".to_string(),
         Keyword::JumpStart => "jump-start".to_string(),
         Keyword::Cipher => "cipher".to_string(),
@@ -1095,6 +1121,7 @@ pub(crate) fn is_keyword_cost_line(lower: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::AbilityCost;
     use crate::types::mana::ManaCost;
 
     #[test]
@@ -1792,6 +1819,17 @@ mod tests {
         let Keyword::Flashback(FlashbackCost::Mana(_)) = kw else {
             panic!("expected FlashbackCost::Mana, got {:?}", kw);
         };
+    }
+
+    /// CR 702.120a: Escalate accepts any additional-cost shape, not just mana.
+    #[test]
+    fn parse_keyword_from_oracle_escalate_tap_creature_cost() {
+        let kw = parse_keyword_from_oracle("escalate\u{2014}tap an untapped creature you control")
+            .unwrap();
+        let Keyword::Escalate(AbilityCost::TapCreatures { count, .. }) = kw else {
+            panic!("expected Escalate(TapCreatures), got {:?}", kw);
+        };
+        assert_eq!(count, 1);
     }
 
     /// CR 303.4a + CR 702.5: "Enchant creature, land, or planeswalker"

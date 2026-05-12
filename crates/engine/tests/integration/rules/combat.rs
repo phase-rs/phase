@@ -723,3 +723,235 @@ fn norns_annex_decline_drops_taxed_attackers() {
         "declined attacker stays untapped"
     );
 }
+
+// ---------------------------------------------------------------------------
+// CR 508.1d + CR 508.1h + CR 611.3a + CR 118.12a: Archangel of Tithes (#309)
+// and Propaganda multiplayer (#302) — end-to-end regression coverage.
+//
+// These integration tests exercise the full DeclareAttackers → CombatTaxPayment
+// → PayCombatTax pipeline using the real parsed Oracle text for each card.
+// Unit-level coverage of `compute_attack_tax` lives in
+// `crates/engine/src/game/combat.rs`; these tests verify wiring between the
+// parser, runtime, and waiting-for state machine.
+// ---------------------------------------------------------------------------
+
+/// Build an Archangel of Tithes with both verified Oracle statics attached.
+///
+/// Verified Oracle text (client/public/card-data.json, 2026-05-10):
+/// > Flying
+/// > As long as this creature is untapped, creatures can't attack you or
+/// > planeswalkers you control unless their controller pays {1} for each of
+/// > those creatures.
+/// > As long as this creature is attacking, creatures can't block unless their
+/// > controller pays {1} for each of those creatures.
+fn add_archangel_of_tithes(scenario: &mut GameScenario, player: PlayerId) -> ObjectId {
+    let attack_tax = parse_static_line(
+        "As long as this creature is untapped, creatures can't attack you or planeswalkers you control unless their controller pays {1} for each of those creatures.",
+    )
+    .expect("Archangel of Tithes attack-tax static should parse");
+    let block_tax = parse_static_line(
+        "As long as this creature is attacking, creatures can't block unless their controller pays {1} for each of those creatures.",
+    )
+    .expect("Archangel of Tithes block-tax static should parse");
+    let mut builder = scenario.add_creature(player, "Archangel of Tithes", 3, 5);
+    builder.with_static_definition(attack_tax);
+    builder.with_static_definition(block_tax);
+    builder.id()
+}
+
+/// CR 508.1d + CR 508.1h + CR 118.12a: Issue #309 regression — Archangel of
+/// Tithes' first static taxes opponent attacks against its controller while it
+/// is untapped. Engine must pause with a `CombatTaxPayment` of `{1}` per
+/// attacker, scoped to attacks against the Archangel's controller.
+#[test]
+fn archangel_of_tithes_untapped_taxes_opponent_attacks() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // P1 controls an untapped Archangel of Tithes.
+    let _archangel = add_archangel_of_tithes(&mut scenario, P1);
+    // P0 (active player) attacks P1 with a single bear.
+    let attacker = scenario.add_creature(P0, "Bear", 2, 2).id();
+    let mut runner = scenario.build();
+    runner.pass_both_players();
+
+    let attacks = vec![(attacker, AttackTarget::Player(P1))];
+    runner
+        .act(GameAction::DeclareAttackers { attacks })
+        .expect("DeclareAttackers should pause with CombatTaxPayment (#309)");
+
+    match &runner.state().waiting_for {
+        WaitingFor::CombatTaxPayment {
+            player,
+            context,
+            total_cost,
+            per_creature,
+            ..
+        } => {
+            assert_eq!(*player, P0, "active player owes the tax");
+            assert!(matches!(context, CombatTaxContext::Attacking));
+            assert_eq!(total_cost.mana_value(), 1, "{{1}} per attacker");
+            assert_eq!(per_creature.len(), 1);
+        }
+        other => panic!("expected CombatTaxPayment, got {other:?}"),
+    }
+}
+
+/// CR 611.3a + CR 118.12a: Tapped Archangel of Tithes' attack-tax gate
+/// (`Not(SourceIsTapped)`) fails, so the tax is dormant and the attack
+/// proceeds without pausing. Mirrors the unit test
+/// `compute_attack_tax_archangel_of_tithes_gated_by_untapped` at the
+/// integration level.
+#[test]
+fn archangel_of_tithes_tapped_does_not_tax() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let archangel = add_archangel_of_tithes(&mut scenario, P1);
+    let attacker = scenario.add_creature(P0, "Bear", 2, 2).id();
+    let mut runner = scenario.build();
+    // Tap the Archangel — gate fails, tax is dormant. The state mutation must
+    // happen on the runner (post-build) so the tap survives any builder-side
+    // re-derivation.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&archangel)
+        .unwrap()
+        .tapped = true;
+    runner.pass_both_players();
+
+    let attacks = vec![(attacker, AttackTarget::Player(P1))];
+    runner
+        .act(GameAction::DeclareAttackers { attacks })
+        .expect("DeclareAttackers should succeed without tax pause");
+
+    // Attack proceeds directly — no CombatTaxPayment pause.
+    let state = runner.state();
+    assert!(
+        !matches!(state.waiting_for, WaitingFor::CombatTaxPayment { .. }),
+        "tapped Archangel must not pause for tax, got {:?}",
+        state.waiting_for
+    );
+    assert!(state.combat.is_some());
+    assert_eq!(state.combat.as_ref().unwrap().attackers.len(), 1);
+}
+
+/// CR 109.5 + CR 508.1d: "you" on Archangel of Tithes refers to its
+/// controller, and the static's `Opponent` affected filter excludes that
+/// controller's own creatures. The Archangel's controller can attack their
+/// own opponent without paying the tax.
+#[test]
+fn archangel_of_tithes_controller_can_attack_own_creatures_without_tax() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // P0 (active player) controls an untapped Archangel of Tithes AND a Bear.
+    let _archangel = add_archangel_of_tithes(&mut scenario, P0);
+    let bear = scenario.add_creature(P0, "Bear", 2, 2).id();
+    let mut runner = scenario.build();
+    runner.pass_both_players();
+
+    // P0 attacks P1 with their own Bear. The Archangel's tax is scoped to
+    // creatures controlled by *opponents of the Archangel's controller* — the
+    // Bear is controlled by the Archangel's controller, so no tax.
+    let attacks = vec![(bear, AttackTarget::Player(P1))];
+    runner
+        .act(GameAction::DeclareAttackers { attacks })
+        .expect("Owner of Archangel should attack without paying their own tax");
+
+    let state = runner.state();
+    assert!(
+        !matches!(state.waiting_for, WaitingFor::CombatTaxPayment { .. }),
+        "controller's own attack must not pause for tax, got {:?}",
+        state.waiting_for
+    );
+    assert!(state.combat.is_some());
+    assert_eq!(state.combat.as_ref().unwrap().attackers.len(), 1);
+}
+
+/// Build a Propaganda with its verified Oracle static attached.
+///
+/// Verified Oracle text (client/public/card-data.json, 2026-05-10):
+/// > Creatures can't attack you unless their controller pays {2} for each
+/// > creature they control that's attacking you.
+fn add_propaganda(scenario: &mut GameScenario, player: PlayerId) -> ObjectId {
+    let def = parse_static_line(
+        "Creatures can't attack you unless their controller pays {2} for each creature they control that's attacking you.",
+    )
+    .expect("Propaganda should parse");
+    let mut builder = scenario.add_creature(player, "Propaganda", 2, 2);
+    builder.with_static_definition(def);
+    builder.id()
+}
+
+/// Build a 3-player scenario where P1 is the active attacker, Propaganda is on
+/// `propaganda_owner`'s battlefield, and P1 controls a single Bear ready to
+/// attack. The runner is parked in `WaitingFor::DeclareAttackers` so
+/// `GameAction::DeclareAttackers` fires immediately.
+fn build_3p_propaganda_scenario(propaganda_owner: PlayerId) -> (GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    let _propaganda = add_propaganda(&mut scenario, propaganda_owner);
+    let attacker = scenario.add_creature(P1, "Bear", 2, 2).id();
+    let mut runner = scenario.build();
+    // Active attacker is P1; jump straight into the declare-attackers waiting
+    // state so the test exercises only the tax pause path. The valid_*
+    // collections are advisory legality hints; the engine re-validates on
+    // submission via `validate_attackers`.
+    let state = runner.state_mut();
+    state.active_player = P1;
+    state.priority_player = P1;
+    state.phase = Phase::DeclareAttackers;
+    state.turn_number = 2;
+    state.waiting_for = WaitingFor::DeclareAttackers {
+        player: P1,
+        valid_attacker_ids: vec![attacker],
+        valid_attack_targets: vec![AttackTarget::Player(P0), AttackTarget::Player(PlayerId(2))],
+    };
+    (runner, attacker)
+}
+
+/// CR 508.1d + CR 109.5: Issue #302 regression — in a 3-player game, Player A
+/// controls Propaganda, Player B (active) attacks Player C. Propaganda's
+/// `defended` filter (its own controller, Player A) does NOT match Player C,
+/// so the tax must NOT fire.
+#[test]
+fn propaganda_does_not_tax_attacks_against_other_opponents_3p() {
+    const P2: PlayerId = PlayerId(2);
+
+    let (mut runner, attacker) = build_3p_propaganda_scenario(P0);
+
+    let attacks = vec![(attacker, AttackTarget::Player(P2))];
+    runner
+        .act(GameAction::DeclareAttackers { attacks })
+        .expect("DeclareAttackers against P2 must not pause for P0's Propaganda (#302)");
+
+    let state = runner.state();
+    assert!(
+        !matches!(state.waiting_for, WaitingFor::CombatTaxPayment { .. }),
+        "Propaganda must not tax attacks against players other than its controller (#302), got {:?}",
+        state.waiting_for
+    );
+    assert!(state.combat.is_some());
+    assert_eq!(state.combat.as_ref().unwrap().attackers.len(), 1);
+}
+
+/// CR 508.1d + CR 508.1h: Sanity companion to #302 — in the same 3-player
+/// setup, when Player B attacks Player A (Propaganda's controller), the tax
+/// DOES fire and the engine pauses with `CombatTaxPayment` of `{2}`.
+#[test]
+fn propaganda_taxes_attacks_against_its_controller_3p() {
+    let (mut runner, attacker) = build_3p_propaganda_scenario(P0);
+
+    let attacks = vec![(attacker, AttackTarget::Player(P0))];
+    runner
+        .act(GameAction::DeclareAttackers { attacks })
+        .expect("DeclareAttackers against P0 must pause with CombatTaxPayment");
+
+    match &runner.state().waiting_for {
+        WaitingFor::CombatTaxPayment {
+            player, total_cost, ..
+        } => {
+            assert_eq!(*player, P1, "attacker (P1) owes the tax");
+            assert_eq!(total_cost.mana_value(), 2, "{{2}} per attacker");
+        }
+        other => panic!("expected CombatTaxPayment, got {other:?}"),
+    }
+}

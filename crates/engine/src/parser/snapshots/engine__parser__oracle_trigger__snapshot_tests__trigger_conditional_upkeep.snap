@@ -1,5 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_trigger.rs
+assertion_line: 13811
 expression: def
 ---
 {
@@ -55,7 +56,12 @@ expression: def
             "Creature"
           ],
           "controller": "You",
-          "properties": []
+          "properties": [
+            {
+              "type": "InZone",
+              "zone": "Battlefield"
+            }
+          ]
         }
       }
     },

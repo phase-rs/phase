@@ -3,26 +3,48 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::mana::ManaCost;
-use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 
 use super::ability_utils::{
     assign_targets_in_chain, auto_select_targets_for_ability, begin_target_selection_for_ability,
-    build_target_slots, flatten_targets_in_chain,
+    build_target_slots, flatten_targets_in_chain, random_select_targets_for_ability,
 };
 use super::casting::emit_targeting_events;
 use super::engine::EngineError;
 use super::stack;
 
-use crate::types::ability::ResolvedAbility;
+use crate::types::ability::{AbilityCost, ResolvedAbility};
 
-/// CR 306.5d + CR 606.3: Loyalty abilities may only be activated once per turn,
-/// during the controller's main phase with empty stack.
+/// CR 306.5d + CR 606.3: Loyalty abilities may only be activated once per turn.
 /// CR 606.1: Loyalty abilities are activated abilities with a loyalty symbol in their cost.
 pub fn can_activate_loyalty(
     state: &GameState,
     planeswalker_id: ObjectId,
     player: PlayerId,
+) -> bool {
+    let Some(obj) = state.objects.get(&planeswalker_id) else {
+        return false;
+    };
+    obj.abilities
+        .iter()
+        .enumerate()
+        .any(|(ability_index, ability)| {
+            matches!(ability.cost, Some(AbilityCost::Loyalty { .. }))
+                && can_activate_loyalty_ability(state, planeswalker_id, player, ability_index)
+        })
+}
+
+/// CR 306.5d + CR 606.3: Loyalty-specific gate for a concrete loyalty ability.
+///
+/// Timing is intentionally delegated to the shared activation restriction system:
+/// normal loyalty abilities carry `ActivationRestriction::AsSorcery`, while static
+/// permissions such as The Wandering Emperor's same-turn effect may override that
+/// restriction to instant timing.
+pub fn can_activate_loyalty_ability(
+    state: &GameState,
+    planeswalker_id: ObjectId,
+    player: PlayerId,
+    ability_index: usize,
 ) -> bool {
     let obj = match state.objects.get(&planeswalker_id) {
         Some(o) => o,
@@ -45,18 +67,21 @@ pub fn can_activate_loyalty(
         return false;
     }
 
-    // CR 606.3: Sorcery speed — main phase, empty stack, active player has priority.
-    if !matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain) {
+    let Some(ability) = obj.abilities.get(ability_index) else {
         return false;
-    }
-    if !state.stack.is_empty() {
-        return false;
-    }
-    if state.active_player != player {
+    };
+    if !matches!(ability.cost, Some(AbilityCost::Loyalty { .. })) {
         return false;
     }
 
-    true
+    super::restrictions::check_activation_restrictions(
+        state,
+        player,
+        planeswalker_id,
+        ability_index,
+        &ability.activation_restrictions,
+    )
+    .is_ok()
 }
 
 /// CR 606.2: Activate a planeswalker loyalty ability.
@@ -71,7 +96,7 @@ pub fn handle_activate_loyalty(
     ability_index: usize,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    if !can_activate_loyalty(state, pw_id, player) {
+    if !can_activate_loyalty_ability(state, pw_id, player, ability_index) {
         return Err(EngineError::ActionNotAllowed(
             "Cannot activate loyalty ability".to_string(),
         ));
@@ -107,9 +132,23 @@ pub fn handle_activate_loyalty(
     // If this ability requires targets, prompt for selection first.
     let target_slots = build_target_slots(state, &resolved)?;
     if !target_slots.is_empty() {
-        if let Some(targets) =
+        // CR 115.1 + CR 701.9b: Random-target loyalty abilities — game picks via
+        // `state.rng`. Routes through finalize_loyalty_activation just like the
+        // controller-choice degenerate path.
+        let resolved_targets = if matches!(
+            resolved.target_selection_mode,
+            crate::types::ability::TargetSelectionMode::Random
+        ) {
+            Some(random_select_targets_for_ability(
+                state,
+                &target_slots,
+                &[],
+            )?)
+        } else {
             auto_select_targets_for_ability(state, &resolved, &target_slots, &[])?
-        {
+        };
+
+        if let Some(targets) = resolved_targets {
             let mut resolved = resolved;
             assign_targets_in_chain(state, &mut resolved, &targets)?;
             return Ok(finalize_loyalty_activation(
@@ -247,12 +286,13 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter,
-        TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, Effect, QuantityExpr,
+        TargetFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::CastingVariant;
     use crate::types::identifiers::CardId;
+    use crate::types::phase::Phase;
     use crate::types::zones::Zone;
 
     fn setup() -> GameState {
@@ -269,9 +309,15 @@ mod tests {
 
     /// Create a loyalty ability with the given cost and effect.
     fn make_loyalty_ability(loyalty_amount: i32, effect: Effect) -> AbilityDefinition {
-        AbilityDefinition::new(AbilityKind::Activated, effect).cost(AbilityCost::Loyalty {
-            amount: loyalty_amount,
-        })
+        let mut ability =
+            AbilityDefinition::new(AbilityKind::Activated, effect).cost(AbilityCost::Loyalty {
+                amount: loyalty_amount,
+            });
+        ability = ability.sorcery_speed();
+        ability
+            .activation_restrictions
+            .push(ActivationRestriction::OnlyOnceEachTurn);
+        ability
     }
 
     fn create_planeswalker(

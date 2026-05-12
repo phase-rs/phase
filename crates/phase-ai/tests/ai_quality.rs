@@ -492,7 +492,6 @@ fn counterspell_entry(count: u32) -> DeckEntry {
                 Effect::Counter {
                     target: TargetFilter::Any,
                     source_static: None,
-                    unless_payment: None,
                 },
             )],
             ..Default::default()

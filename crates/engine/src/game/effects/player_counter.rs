@@ -213,6 +213,7 @@ mod tests {
             forward_result: false,
             unless_pay: None,
             distribution: None,
+            target_selection_mode: crate::types::ability::TargetSelectionMode::Chosen,
         }
     }
 
@@ -346,6 +347,7 @@ mod tests {
             forward_result: false,
             unless_pay: None,
             distribution: None,
+            target_selection_mode: crate::types::ability::TargetSelectionMode::Chosen,
         }
     }
 

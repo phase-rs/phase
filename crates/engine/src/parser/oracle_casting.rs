@@ -144,9 +144,15 @@ fn parse_self_flash_option(
     }
 
     if let Ok((condition_text, _)) = tag::<_, _, OracleError<'_>>("if ").parse(rest) {
-        if let Some(parsed) = parse_restriction_condition(condition_text.trim()) {
-            option = option.condition(parsed);
-        }
+        // CR 601.3d: A target-dependent flash permission ("if it targets a commander")
+        // must NOT degrade to an unconditional permission when the predicate is not
+        // recognized — that would let the spell be cast at instant speed against any
+        // target, strictly more permissive than the printed text. Refuse to emit the
+        // option entirely so the spell stays sorcery-speed; the SwallowedClause /
+        // Condition_If swallow detector then flags the dropped clause for the parser
+        // gap-finder rather than fail-silently authorizing an over-permissive cast.
+        let parsed = parse_restriction_condition(condition_text.trim())?;
+        option = option.condition(parsed);
         return Some(option);
     }
 
@@ -171,9 +177,17 @@ fn parse_self_alternative_cost_option(
     if let Some((cost_text, trailing_if)) = extract_rather_than_pay_alt_cost(body, body_lower) {
         let mut option = SpellCastingOption::alternative_cost(parse_oracle_cost(cost_text));
         if let Some(condition_text) = trailing_if {
-            if let Some(parsed) = parse_restriction_condition(condition_text) {
-                option = option.condition(parsed);
-            }
+            // CR 118.9 + CR 601.3d: A conditional alternative cost must NOT be
+            // emitted unconditionally when the if-clause predicate is not
+            // recognized — that would let the player pay the alt-cost
+            // (typically cheaper or zero-mana) without the gating condition
+            // holding, strictly more permissive than the printed text. Refuse
+            // to emit the option entirely so the spell may only be cast at its
+            // printed cost; the SwallowedClause / Condition_If swallow detector
+            // then flags the unparsed predicate for the parser gap-finder
+            // rather than fail-silently authorizing an over-permissive cast.
+            let parsed = parse_restriction_condition(condition_text)?;
+            option = option.condition(parsed);
         }
         return Some(option);
     }
@@ -443,7 +457,9 @@ fn scan_timing_restrictions(text: &str) -> Vec<CastingRestriction> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{ParsedCondition, QuantityExpr, TargetFilter};
+    use crate::types::ability::{
+        ControllerRef, FilterProp, ParsedCondition, QuantityExpr, TargetFilter, TypeFilter,
+    };
     use crate::types::mana::ManaCost;
     use crate::types::zones::Zone;
 
@@ -948,6 +964,44 @@ mod tests {
     }
 
     #[test]
+    fn alt_cost_opponent_had_artifact_enter_condition() {
+        let option = parse_spell_casting_option_line(
+            "If an opponent had an artifact enter the battlefield under their control this turn, you may pay {1}{G} rather than pay this spell's mana cost.",
+            "Baloth Cage Trap",
+        )
+        .expect("trap alt-cost should parse");
+        match option.condition {
+            Some(ParsedCondition::BattlefieldEntriesThisTurn {
+                filter: TargetFilter::Typed(filter),
+                count: 1,
+            }) => {
+                assert_eq!(filter.controller, Some(ControllerRef::Opponent));
+                assert!(filter.type_filters.contains(&TypeFilter::Artifact));
+            }
+            other => panic!("expected opponent artifact entry condition, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn alt_cost_opponent_had_two_lands_enter_condition() {
+        let option = parse_spell_casting_option_line(
+            "If an opponent had two or more lands enter the battlefield under their control this turn, you may pay {3}{R}{R} rather than pay this spell's mana cost.",
+            "Lavaball Trap",
+        )
+        .expect("trap alt-cost should parse");
+        match option.condition {
+            Some(ParsedCondition::BattlefieldEntriesThisTurn {
+                filter: TargetFilter::Typed(filter),
+                count: 2,
+            }) => {
+                assert_eq!(filter.controller, Some(ControllerRef::Opponent));
+                assert!(filter.type_filters.contains(&TypeFilter::Land));
+            }
+            other => panic!("expected opponent land entry condition, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn alt_cost_pay_mana_composite_regression_unchanged() {
         // Force of Will shape — composite cost via " and " split.
         let option = parse_spell_casting_option_line(
@@ -966,22 +1020,62 @@ mod tests {
     }
 
     #[test]
-    fn alt_cost_trailing_if_condition_does_not_drop_cost() {
+    fn alt_cost_trailing_if_condition_drops_option_when_predicate_unrecognized() {
         // Blasphemous Edict — only card in dataset with trailing "if [condition]" suffix.
-        // The mana cost {B} must still parse cleanly even with a trailing if-clause.
-        // (The condition itself, "there are thirteen or more creatures on the battlefield",
-        // is currently outside `parse_restriction_condition`'s recognized patterns; that's
-        // a separate parser gap and pre-existed this fix — see card-data.json's existing
-        // `condition: null` on Blasphemous Edict's casting_options.)
+        // CR 118.9 + CR 601.3d: when the if-clause predicate cannot be parsed into a
+        // typed `ParsedCondition`, the alt-cost option is dropped entirely so the spell
+        // may only be cast at its printed cost. Strictly-safe degradation: a fail-silent
+        // unconditional alt-cost emission would let the player pay {B} regardless of
+        // the 13-creature threshold — strictly more permissive than the printed text.
+        // The unrecognized predicate is surfaced by the SwallowedClause / Condition_If
+        // detector for the parser gap-finder.
         let option = parse_spell_casting_option_line(
             "You may pay {B} rather than pay this spell's mana cost if there are thirteen or more creatures on the battlefield.",
             "Blasphemous Edict",
+        );
+        assert!(
+            option.is_none(),
+            "unrecognized if-clause must drop the alt-cost option entirely, got: {option:?}"
+        );
+    }
+
+    #[test]
+    fn spell_flash_option_targets_commander_condition_attaches() {
+        // CR 601.3d + CR 702.8a: "as though it had flash if it targets a commander"
+        // — Timely Ward class. The if-clause must populate the option's `condition`
+        // slot with a typed `SpellTargetsFilter` rather than being dropped.
+        let option = parse_spell_casting_option_line(
+            "You may cast this spell as though it had flash if it targets a commander.",
+            "Timely Ward",
         )
-        .expect("alt-cost should parse even when trailing-if condition is unrecognized");
+        .expect("flash-conditional should parse");
         assert!(matches!(
             option.kind,
-            crate::types::ability::SpellCastingOptionKind::AlternativeCost
+            crate::types::ability::SpellCastingOptionKind::AsThoughHadFlash
         ));
-        assert!(matches!(option.cost, Some(AbilityCost::Mana { .. })));
+        match option.condition {
+            Some(ParsedCondition::SpellTargetsFilter {
+                filter: TargetFilter::Typed(ref f),
+            }) => {
+                assert!(f.properties.contains(&FilterProp::IsCommander));
+            }
+            other => panic!("expected SpellTargetsFilter(IsCommander), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn spell_flash_option_unrecognized_if_clause_drops_option() {
+        // CR 601.3d: when the if-clause predicate cannot be parsed, the flash option
+        // is dropped so the spell stays sorcery-speed. A fail-silent unconditional
+        // flash emission would let the player cast at instant speed regardless of
+        // the printed gating condition — strictly more permissive than the text.
+        let option = parse_spell_casting_option_line(
+            "You may cast this spell as though it had flash if frob is wobble.",
+            "Imaginary Card",
+        );
+        assert!(
+            option.is_none(),
+            "unrecognized if-clause must drop the flash option, got: {option:?}"
+        );
     }
 }

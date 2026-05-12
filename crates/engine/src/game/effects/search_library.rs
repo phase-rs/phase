@@ -2,9 +2,10 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::static_abilities::prohibition_scope_matches_player;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, SearchSelectionConstraint, TargetFilter,
-    TargetRef,
+    Effect, EffectError, EffectKind, ResolvedAbility, SearchSelectionConstraint, SharedQuality,
+    TargetFilter, TargetRef,
 };
+use crate::types::card_type::is_land_subtype;
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::player::PlayerId;
@@ -103,16 +104,9 @@ pub fn selection_satisfies_constraint(
 ) -> bool {
     match constraint {
         SearchSelectionConstraint::None => true,
-        SearchSelectionConstraint::DistinctNames => {
-            let mut seen = std::collections::HashSet::new();
-            chosen.iter().all(|id| match state.objects.get(id) {
-                // CR 201.2: Two cards "have the same name" iff their card-name
-                // strings match. Compare on the canonical printed name held by
-                // the GameObject; absent objects (defensive) fail the check.
-                Some(obj) => seen.insert(obj.name.as_str()),
-                None => false,
-            })
-        }
+        SearchSelectionConstraint::DistinctQualities { qualities } => qualities
+            .iter()
+            .all(|quality| selection_has_distinct_quality(state, chosen, quality)),
         SearchSelectionConstraint::TotalManaValue { comparator, value } => {
             let mut total = 0;
             for id in chosen {
@@ -123,7 +117,133 @@ pub fn selection_satisfies_constraint(
             }
             comparator.evaluate(total, *value)
         }
+        SearchSelectionConstraint::MatchEachFilter { filters } => {
+            selection_matches_each_filter(state, chosen, filters)
+        }
     }
+}
+
+fn selection_matches_each_filter(
+    state: &GameState,
+    chosen: &[crate::types::identifiers::ObjectId],
+    filters: &[TargetFilter],
+) -> bool {
+    if chosen.len() != filters.len() {
+        return false;
+    }
+    let mut used = vec![false; chosen.len()];
+    assign_filter_slot(state, chosen, filters, &mut used, 0)
+}
+
+fn assign_filter_slot(
+    state: &GameState,
+    chosen: &[crate::types::identifiers::ObjectId],
+    filters: &[TargetFilter],
+    used: &mut [bool],
+    filter_idx: usize,
+) -> bool {
+    if filter_idx == filters.len() {
+        return true;
+    }
+
+    let filter_ctx = FilterContext::neutral();
+    chosen.iter().enumerate().any(|(card_idx, card_id)| {
+        if used[card_idx]
+            || !matches_target_filter(state, *card_id, &filters[filter_idx], &filter_ctx)
+        {
+            return false;
+        }
+        used[card_idx] = true;
+        let matched = assign_filter_slot(state, chosen, filters, used, filter_idx + 1);
+        used[card_idx] = false;
+        matched
+    })
+}
+
+fn selection_has_distinct_quality(
+    state: &GameState,
+    chosen: &[crate::types::identifiers::ObjectId],
+    quality: &SharedQuality,
+) -> bool {
+    match quality {
+        SharedQuality::Name => {
+            let mut seen = std::collections::HashSet::new();
+            chosen.iter().all(|id| match state.objects.get(id) {
+                // CR 201.2b: searched cards have different names only if each
+                // has a name and no two objects in the group have a name in common.
+                Some(obj) if !obj.name.is_empty() => seen.insert(obj.name.as_str()),
+                _ => false,
+            })
+        }
+        SharedQuality::ManaValue => {
+            let mut seen = std::collections::HashSet::new();
+            chosen.iter().all(|id| match state.objects.get(id) {
+                Some(obj) => seen.insert(obj.mana_cost.mana_value()),
+                None => false,
+            })
+        }
+        SharedQuality::Power => {
+            let mut seen = std::collections::HashSet::new();
+            chosen.iter().all(|id| match state.objects.get(id) {
+                Some(obj) => obj.power.is_none_or(|power| seen.insert(power)),
+                None => false,
+            })
+        }
+        SharedQuality::Toughness => {
+            let mut seen = std::collections::HashSet::new();
+            chosen.iter().all(|id| match state.objects.get(id) {
+                Some(obj) => obj.toughness.is_none_or(|toughness| seen.insert(toughness)),
+                None => false,
+            })
+        }
+        SharedQuality::TotalPowerToughness => {
+            let mut seen = std::collections::HashSet::new();
+            chosen.iter().all(|id| match state.objects.get(id) {
+                Some(obj) => obj
+                    .power
+                    .zip(obj.toughness)
+                    .is_none_or(|(power, toughness)| seen.insert(power + toughness)),
+                None => false,
+            })
+        }
+        SharedQuality::CardType => {
+            let mut seen = std::collections::HashSet::new();
+            chosen.iter().all(|id| match state.objects.get(id) {
+                Some(obj) => obj
+                    .card_types
+                    .core_types
+                    .iter()
+                    .all(|card_type| seen.insert(*card_type)),
+                None => false,
+            })
+        }
+        SharedQuality::CreatureType => {
+            distinct_string_sets(state, chosen, |obj| obj.card_types.subtypes.clone())
+        }
+        SharedQuality::Color => distinct_string_sets(state, chosen, |obj| {
+            obj.color.iter().map(|color| format!("{color:?}")).collect()
+        }),
+        SharedQuality::LandType => distinct_string_sets(state, chosen, |obj| {
+            obj.card_types
+                .subtypes
+                .iter()
+                .filter(|subtype| is_land_subtype(subtype))
+                .cloned()
+                .collect()
+        }),
+    }
+}
+
+fn distinct_string_sets(
+    state: &GameState,
+    chosen: &[crate::types::identifiers::ObjectId],
+    values: impl Fn(&crate::game::game_object::GameObject) -> Vec<String>,
+) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    chosen.iter().all(|id| match state.objects.get(id) {
+        Some(obj) => values(obj).into_iter().all(|value| seen.insert(value)),
+        None => false,
+    })
 }
 
 /// CR 701.23a + CR 401.2: Search a library — look through it, find card(s) matching criteria, then shuffle.
@@ -257,7 +377,7 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{Comparator, QuantityExpr, TypedFilter};
+    use crate::types::ability::{Comparator, FilterProp, QuantityExpr, QuantityRef, TypedFilter};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -904,12 +1024,167 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn distinct_quality_selection_constraint_checks_power() {
+        let mut state = GameState::new_two_player(42);
+        let bear = add_library_creature(&mut state, 1, PlayerId(0), "Bear");
+        let hound = add_library_creature(&mut state, 2, PlayerId(0), "Hound");
+        let drake = add_library_creature(&mut state, 3, PlayerId(0), "Drake");
+        state.objects.get_mut(&bear).unwrap().power = Some(2);
+        state.objects.get_mut(&hound).unwrap().power = Some(2);
+        state.objects.get_mut(&drake).unwrap().power = Some(3);
+        let constraint = SearchSelectionConstraint::DistinctQualities {
+            qualities: vec![SharedQuality::Power],
+        };
+
+        assert!(selection_satisfies_constraint(
+            &state,
+            &[bear, drake],
+            &constraint
+        ));
+        assert!(!selection_satisfies_constraint(
+            &state,
+            &[bear, hound],
+            &constraint
+        ));
+    }
+
+    #[test]
+    fn distinct_quality_selection_constraint_checks_multiple_qualities() {
+        let mut state = GameState::new_two_player(42);
+        let artifact_creature = add_library_creature(&mut state, 1, PlayerId(0), "Construct");
+        let sorcery = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Spell".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&artifact_creature).unwrap();
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.mana_cost = crate::types::mana::ManaCost::generic(2);
+            obj.card_types.core_types.push(CoreType::Artifact);
+        }
+        {
+            let obj = state.objects.get_mut(&sorcery).unwrap();
+            obj.power = Some(3);
+            obj.toughness = Some(3);
+            obj.mana_cost = crate::types::mana::ManaCost::generic(3);
+            obj.card_types.core_types = vec![CoreType::Sorcery];
+        }
+        let constraint = SearchSelectionConstraint::DistinctQualities {
+            qualities: vec![
+                SharedQuality::ManaValue,
+                SharedQuality::Power,
+                SharedQuality::Toughness,
+                SharedQuality::CardType,
+            ],
+        };
+
+        assert!(selection_satisfies_constraint(
+            &state,
+            &[artifact_creature, sorcery],
+            &constraint
+        ));
+
+        state.objects.get_mut(&sorcery).unwrap().power = Some(2);
+        assert!(!selection_satisfies_constraint(
+            &state,
+            &[artifact_creature, sorcery],
+            &constraint
+        ));
+    }
+
+    #[test]
+    fn distinct_quality_selection_constraint_allows_missing_power_toughness() {
+        let mut state = GameState::new_two_player(42);
+        let creature = add_library_creature(&mut state, 1, PlayerId(0), "Construct");
+        let instant = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Spell".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.card_types.core_types.push(CoreType::Artifact);
+        }
+        state
+            .objects
+            .get_mut(&instant)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Instant];
+        let constraint = SearchSelectionConstraint::DistinctQualities {
+            qualities: vec![
+                SharedQuality::Power,
+                SharedQuality::Toughness,
+                SharedQuality::CardType,
+            ],
+        };
+
+        assert!(selection_satisfies_constraint(
+            &state,
+            &[creature, instant],
+            &constraint
+        ));
+    }
+
+    #[test]
+    fn match_each_filter_selection_constraint_requires_distinct_assignments() {
+        let mut state = GameState::new_two_player(42);
+        let black_green = add_library_creature(&mut state, 1, PlayerId(0), "Golgari");
+        let blue = add_library_creature(&mut state, 2, PlayerId(0), "Drake");
+        let colorless = add_library_creature(&mut state, 3, PlayerId(0), "Construct");
+        {
+            let obj = state.objects.get_mut(&black_green).unwrap();
+            obj.color = vec![
+                crate::types::mana::ManaColor::Black,
+                crate::types::mana::ManaColor::Green,
+            ];
+        }
+        state.objects.get_mut(&blue).unwrap().color = vec![crate::types::mana::ManaColor::Blue];
+
+        let color_filter = |color| {
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![],
+                controller: None,
+                properties: vec![FilterProp::HasColor { color }],
+            })
+        };
+        let constraint = SearchSelectionConstraint::MatchEachFilter {
+            filters: vec![
+                color_filter(crate::types::mana::ManaColor::Black),
+                color_filter(crate::types::mana::ManaColor::Green),
+                color_filter(crate::types::mana::ManaColor::Blue),
+            ],
+        };
+
+        assert!(!selection_satisfies_constraint(
+            &state,
+            &[black_green, blue, colorless],
+            &constraint
+        ));
+
+        let green = add_library_creature(&mut state, 4, PlayerId(0), "Elf");
+        state.objects.get_mut(&green).unwrap().color = vec![crate::types::mana::ManaColor::Green];
+        assert!(selection_satisfies_constraint(
+            &state,
+            &[black_green, green, blue],
+            &constraint
+        ));
+    }
+
     /// CR 107.3a + CR 601.2b: Nature's Rhythm — search for a creature card with mana
     /// value X or less. With X=4, only CMC-≤-4 creatures should be selectable,
     /// regardless of what's in the library.
     #[test]
     fn natures_rhythm_x_mana_value_restricts_search_targets() {
-        use crate::types::ability::{FilterProp, QuantityExpr, QuantityRef};
         let mut state = GameState::new_two_player(42);
         let cmc2 = add_library_creature_with_cmc(&mut state, 1, PlayerId(0), "Small", 2);
         let cmc4 = add_library_creature_with_cmc(&mut state, 2, PlayerId(0), "Mid", 4);

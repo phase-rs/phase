@@ -4,9 +4,9 @@ use std::collections::HashMap;
 use crate::game::filter;
 use crate::game::speed::has_max_speed;
 use crate::types::ability::{
-    AbilityCondition, AbilityKind, ControllerRef, Effect, EffectError, EffectKind, FilterProp,
-    PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility, SharedQuality, SharedQualityRelation,
-    TargetFilter, TargetRef, UnlessCost,
+    AbilityCondition, AbilityCost, AbilityKind, ControllerRef, Effect, EffectError, EffectKind,
+    FilterProp, PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility, SharedQuality,
+    SharedQualityRelation, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -93,6 +93,7 @@ pub mod proliferate;
 pub mod pump;
 pub mod put_on_top;
 pub mod put_on_top_or_bottom;
+pub mod rad_counters;
 pub mod regenerate;
 pub mod register_bending;
 pub mod remove_from_combat;
@@ -155,6 +156,17 @@ pub(crate) fn effect_object_targets(
     }
 }
 
+pub(crate) fn target_filter_controller_scope(filter: &TargetFilter) -> Option<ControllerRef> {
+    match filter {
+        TargetFilter::Typed(tf) => tf.controller.clone(),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().find_map(target_filter_controller_scope)
+        }
+        TargetFilter::Not { filter } => target_filter_controller_scope(filter),
+        _ => None,
+    }
+}
+
 fn matches_player_scope(
     state: &GameState,
     player: PlayerId,
@@ -203,6 +215,15 @@ fn matches_player_scope(
                         .last_zone_changed_ids
                         .iter()
                         .any(|id| state.objects.get(id).is_some_and(|obj| obj.owner == p.id)),
+                    // CR 608.2c + CR 701.38: Match each player who cast a
+                    // vote for `choices[choice_index]` in the most recent
+                    // vote of the current top-level resolution. Mirrors the
+                    // `ZoneChangedThisWay` arm — a transient ledger
+                    // (`last_vote_ballots`) is consulted directly.
+                    PlayerFilter::VotedFor { choice_index } => state
+                        .last_vote_ballots
+                        .iter()
+                        .any(|(voter, idx)| *voter == p.id && *idx == *choice_index),
                     PlayerFilter::PerformedActionThisWay { relation, action } => {
                         crate::game::players::matches_relation(p.id, controller, *relation)
                             && crate::game::players::performed_action_this_way(state, p.id, *action)
@@ -454,6 +475,17 @@ pub(super) fn resolve_optional_effect_decision(
 }
 
 fn is_player_scope_local_continuation(parent: &Effect, child: &Effect) -> bool {
+    // CR 109.5 + CR 608.2c: Compound-subject distribution — when the parent
+    // and child effects of a player_scope-tagged ability both reference an
+    // iteration-bound recipient (`OriginalController` or `ScopedPlayer`), the
+    // pair is the parser-emitted "you and that player each <body>" chain
+    // (Master of Ceremonies). Both halves must run inside the SAME scoped
+    // iteration (so their recipients rebind together) — never detached as the
+    // unscoped tail. Detecting via recipient filter rather than effect kind
+    // keeps the rule generic across body families (Token, Draw, etc.).
+    if effect_has_iteration_bound_recipient(parent) && effect_has_iteration_bound_recipient(child) {
+        return true;
+    }
     matches!(
         (parent, child),
         (
@@ -470,6 +502,25 @@ fn is_player_scope_local_continuation(parent: &Effect, child: &Effect) -> bool {
                 },
                 Effect::Shuffle { .. }
             )
+    )
+}
+
+/// CR 109.5 + CR 115.10: Detect that an effect's recipient is bound to the
+/// surrounding `player_scope` iteration — either `OriginalController` (CR
+/// 109.5: the printed ability controller, fixed) or `ScopedPlayer` (CR
+/// 115.10: the per-iteration acting player). Used to keep parser-distributed
+/// compound-subject chains inside the scoped template.
+fn effect_has_iteration_bound_recipient(effect: &Effect) -> bool {
+    let recipient = match effect {
+        Effect::Token { owner, .. } => owner,
+        Effect::Draw { target, .. }
+        | Effect::Discard { target, .. }
+        | Effect::Mill { target, .. } => target,
+        _ => return false,
+    };
+    matches!(
+        recipient,
+        TargetFilter::OriginalController | TargetFilter::ScopedPlayer
     )
 }
 
@@ -726,6 +777,7 @@ pub fn resolve_effect(
             venture::resolve_venture_into(state, ability, *dungeon, events)
         }
         Effect::TakeTheInitiative => venture::resolve_take_initiative(state, ability, events),
+        Effect::ProcessRadCounters => rad_counters::resolve(state, ability, events),
         Effect::Conjure { .. } => conjure::resolve(state, ability, events),
         Effect::ChooseOneOf { .. } => choose_one_of::resolve(state, ability, events),
         Effect::Unimplemented { name, .. } => {
@@ -822,6 +874,19 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
             return true;
         }
     }
+    if let Effect::GenericEffect {
+        static_abilities, ..
+    } = effect
+    {
+        if static_abilities.iter().any(|static_def| {
+            static_def
+                .affected
+                .as_ref()
+                .is_some_and(filter_references_tracked_set)
+        }) {
+            return true;
+        }
+    }
     false
 }
 
@@ -859,6 +924,54 @@ fn effect_uses_implicit_tracked_set_targets(effect: &Effect) -> bool {
     )
 }
 
+fn affected_objects_from_events(effect: &Effect, events: &[GameEvent]) -> Vec<ObjectId> {
+    match effect {
+        Effect::Destroy { .. } | Effect::DestroyAll { .. } => events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::CreatureDestroyed { object_id } => Some(*object_id),
+                _ => None,
+            })
+            .collect(),
+        Effect::AddCounter { .. }
+        | Effect::PutCounter { .. }
+        | Effect::PutCounterAll { .. }
+        | Effect::MultiplyCounter { .. }
+        | Effect::MoveCounters { .. } => events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::CounterAdded { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .collect(),
+        _ => {
+            let dest_zone = match effect {
+                Effect::ChangeZone { destination, .. }
+                | Effect::ChangeZoneAll { destination, .. } => Some(*destination),
+                Effect::ExileTop { .. } => Some(crate::types::zones::Zone::Exile),
+                // CR 400.7 + CR 611.2c: Mass-bounce destination defaults to
+                // Hand; downstream "those creatures" / "for each of those
+                // permanents" tracking must filter by the actual landing zone.
+                Effect::BounceAll { destination, .. } => {
+                    Some(destination.unwrap_or(crate::types::zones::Zone::Hand))
+                }
+                _ => None,
+            };
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::ZoneChanged { object_id, to, .. }
+                        if dest_zone.is_none_or(|d| *to == d) =>
+                    {
+                        Some(*object_id)
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+}
+
 /// CR 603.7 + CR 109.5: Returns `true` when the effect resolves an acting
 /// subject relative to the parent target — i.e., any effect-target slot
 /// reachable via [`effect_target_filter`] contains
@@ -886,7 +999,9 @@ fn effect_refs_parent_target(effect: &Effect) -> bool {
 /// detected wherever it appears (`Or { filters: [..., ParentTargetController, ...] }`).
 fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::ParentTargetController | TargetFilter::ParentTarget => true,
+        TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::ParentTarget => true,
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             filters.iter().any(filter_refs_parent_target)
         }
@@ -1005,6 +1120,16 @@ pub(crate) fn resolve_player_for_context_ref(
     if matches!(target_filter, TargetFilter::Controller) {
         return ability.controller;
     }
+    // CR 109.5: `OriginalController` resolves the player who put the spell or
+    // ability on the stack, even when a surrounding `player_scope` iteration
+    // (e.g., `PlayerFilter::VotedFor` for Master of Ceremonies) has rebound
+    // `ability.controller` to an iterated voter. Mirrors the quantity-layer
+    // behavior in `resolve_quantity_with_targets`. Used by parser-level
+    // distribution of compound subjects ("you and that player each Y") so the
+    // first half ("you") consistently fires for the printed ability controller.
+    if matches!(target_filter, TargetFilter::OriginalController) {
+        return ability.original_controller.unwrap_or(ability.controller);
+    }
     // CR 115.1d: `ParentTargetController` resolves the controller of the parent
     // ability's targeted object. In a spell-resolution chain (no
     // `current_trigger_event` set, so `resolve_event_context_target` returns
@@ -1017,10 +1142,22 @@ pub(crate) fn resolve_player_for_context_ref(
     // an actual triggered context (where the helper at `targeting.rs:265`
     // succeeds) wins over chain inheritance.
     if matches!(target_filter, TargetFilter::ParentTargetController) {
-        if let Some(player) = ability.targets.iter().find_map(|target| match target {
-            TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
-            TargetRef::Player(player) => Some(*player),
-        }) {
+        if let Some(player) = crate::game::ability_utils::parent_target_controller(ability, state) {
+            return player;
+        }
+    }
+    // CR 108.3 + CR 608.2c: `ParentTargetOwner` mirrors `ParentTargetController`
+    // for the owner-axis ("its owner" anaphor). Resolves through
+    // `parent_target_owner` (parent target's owner), then via the unified
+    // event-context resolver (which falls back to the source's AttachedTo
+    // host for Aura phase triggers like Enslave).
+    if matches!(target_filter, TargetFilter::ParentTargetOwner) {
+        if let Some(player) = crate::game::ability_utils::parent_target_owner(ability, state) {
+            return player;
+        }
+        if let Some(player) =
+            crate::game::targeting::resolve_effect_player_ref(state, ability, target_filter)
+        {
             return player;
         }
     }
@@ -1040,6 +1177,17 @@ fn optional_prompt_player(state: &GameState, ability: &ResolvedAbility) -> Playe
             crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
         {
             return player;
+        }
+    }
+    if let Effect::Sacrifice { target, .. } = &ability.effect {
+        if target_filter_controller_scope(target) == Some(ControllerRef::ParentTargetController) {
+            if let Some(player) = crate::game::targeting::resolve_effect_player_ref(
+                state,
+                ability,
+                &TargetFilter::ParentTargetController,
+            ) {
+                return player;
+            }
         }
     }
 
@@ -1160,14 +1308,39 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
     }
 }
 
-fn previous_effect_amount_from_events(effect: &Effect, events: &[GameEvent]) -> Option<i32> {
-    let amount = match effect {
+fn previous_effect_amount_from_events(
+    ability: &ResolvedAbility,
+    events: &[GameEvent],
+) -> Option<i32> {
+    let amount = match &ability.effect {
         Effect::DealDamage { .. } | Effect::DamageAll { .. } | Effect::DamageEachPlayer { .. } => {
             events
                 .iter()
                 .filter_map(|event| match event {
                     GameEvent::DamageDealt { amount, .. } => {
                         Some(crate::game::arithmetic::u32_to_i32_saturating(*amount))
+                    }
+                    _ => None,
+                })
+                .sum()
+        }
+        Effect::Fight { .. } => {
+            let fight_target = ability.targets.iter().find_map(|target| match target {
+                TargetRef::Object(id) => Some(*id),
+                _ => None,
+            });
+            events
+                .iter()
+                .filter_map(|event| match (event, fight_target) {
+                    (
+                        GameEvent::DamageDealt {
+                            target: TargetRef::Object(id),
+                            excess,
+                            ..
+                        },
+                        Some(fight_target),
+                    ) if *id == fight_target => {
+                        Some(crate::game::arithmetic::u32_to_i32_saturating(*excess))
                     }
                     _ => None,
                 })
@@ -1235,6 +1408,11 @@ pub fn resolve_ability_chain(
     if depth == 0 {
         state.last_revealed_ids.clear();
         state.last_zone_changed_ids.clear();
+        // CR 608.2c + CR 701.38: Per-resolution ballot ledger; populated by
+        // `vote::resolve_tally` and read by `PlayerFilter::VotedFor`. Clear
+        // alongside `last_zone_changed_ids` so cross-resolution leakage is
+        // impossible.
+        state.last_vote_ballots = crate::im::Vector::new();
         state.last_effect_amount = None;
         state.last_effect_counts_by_player.clear();
         state.exiled_from_hand_this_resolution = 0;
@@ -1250,7 +1428,12 @@ pub fn resolve_ability_chain(
     }
 
     // BeginGame abilities are handled by mulligan setup, not normal stack resolution.
+    // CR 103.5b: Mulligan-time abilities (Serum Powder, No-Regrets Egret) likewise never
+    // resolve through the stack — their runtime path lives in `mulligan.rs`.
     if matches!(ability.kind, AbilityKind::BeginGame) && !state.resolving_begin_game_abilities {
+        return Ok(());
+    }
+    if matches!(ability.kind, AbilityKind::Mulligan) {
         return Ok(());
     }
 
@@ -1305,20 +1488,14 @@ pub fn resolve_ability_chain(
             false
         };
         if should_swap {
-            let mut overridden = ability.clone();
-            overridden.effect = sub.effect.clone();
-            if let Some(ref sub_duration) = sub.duration {
-                overridden.duration = Some(sub_duration.clone());
-            }
-            // CR 608.2c: "Instead" semantics replace the entire effect clause.
-            // The ConditionInstead inner condition already encodes all resolution
-            // checks (e.g., Revolt + MV ≤ 4 via And). The parent's base condition
-            // (e.g., MV ≤ 2) is superseded — it only applies when the swap does NOT fire.
-            overridden.condition = None;
-            // The override sub is consumed; its own sub_ability becomes the new chain tail.
-            overridden.sub_ability = sub.sub_ability.clone();
-            overridden.else_ability = sub.else_ability.clone();
-            Cow::Owned(overridden)
+            // CR 608.2c + CR 608.2e: Single-authority swap helper preserves
+            // every effect-shape field on the sub (player_scope, optional,
+            // multi_target, repeat_for, …) and every runtime-context field on
+            // the parent (controller, targets, chosen_x, …). See
+            // `ability_utils::apply_instead_swap` for the full field map.
+            // Issue #310: a hand-rolled clone here previously dropped
+            // `sub.player_scope`.
+            Cow::Owned(super::ability_utils::apply_instead_swap(ability, sub))
         } else {
             Cow::Borrowed(ability)
         }
@@ -1384,7 +1561,7 @@ pub fn resolve_ability_chain(
             state.last_effect_amount = state.last_effect_count;
             state.last_effect_counts_by_player = counts_by_player;
         } else if let Some(amount) =
-            previous_effect_amount_from_events(&scoped_template.effect, scoped_events)
+            previous_effect_amount_from_events(&scoped_template, scoped_events)
         {
             state.last_effect_amount = Some(amount);
         }
@@ -1469,63 +1646,64 @@ pub fn resolve_ability_chain(
         return Ok(());
     }
 
-    // CR 118.12: "Effect unless [player] pays {cost}" — tax trigger modifier.
+    // CR 118.12 + CR 118.12a: "Effect unless [player] pays {cost}" —
+    // intercepted here for both tax triggers and counter-target-spell unless
+    // costs. Post-fold, the cost is the unified `AbilityCost` taxonomy.
     if let Some(ref unless_pay) = ability.unless_pay {
         if let Some(payer) = resolve_unless_payer(state, ability, &unless_pay.payer) {
-            // CR 702.21a: Non-mana costs (PayLife, DiscardCard, Sacrifice) bypass
-            // mana resolution — pass through to UnlessPayment directly.
-            match &unless_pay.cost {
-                UnlessCost::PayLife { .. }
-                | UnlessCost::DiscardCard { .. }
-                | UnlessCost::Sacrifice { .. }
-                | UnlessCost::ReturnToHand { .. } => {
-                    let mut pending = ability.clone();
-                    pending.unless_pay = None;
-                    state.waiting_for = WaitingFor::UnlessPayment {
-                        player: payer,
-                        cost: unless_pay.cost.clone(),
-                        pending_effect: Box::new(pending),
-                        trigger_event: state.current_trigger_event.clone(),
-                        effect_description: ability.description.clone(),
-                    };
-                    return Ok(());
-                }
-                _ => {}
-            }
+            // CR 118.4 + CR 107.3c: Resolve a dynamic-generic mana cost into a
+            // fixed `Mana { cost }` BEFORE entering the prompt — the runtime
+            // payment site only handles static AbilityCost variants.
             let resolved_cost = match &unless_pay.cost {
-                UnlessCost::Fixed { cost } => cost.clone(),
-                UnlessCost::DynamicGeneric { quantity } => {
+                AbilityCost::ManaDynamic { quantity } => {
+                    // CR 107.1b: Read the caster-chosen X via the ability's
+                    // resolution context.
                     let amount = crate::game::quantity::resolve_quantity(
                         state,
                         quantity,
                         ability.controller,
                         ability.source_id,
                     );
-                    ManaCost::generic(amount.max(0) as u32)
+                    AbilityCost::Mana {
+                        cost: ManaCost::generic(amount.max(0) as u32),
+                    }
                 }
-                // Non-mana costs handled above.
-                UnlessCost::PayLife { .. }
-                | UnlessCost::DiscardCard { .. }
-                | UnlessCost::Sacrifice { .. }
-                | UnlessCost::ReturnToHand { .. } => unreachable!(),
+                other => other.clone(),
             };
-            // CR 118.5: If the cost is {0}, the player is considered to have paid.
-            if resolved_cost != ManaCost::zero() {
-                // Strip unless_pay from the pending effect to prevent re-prompting.
+            // CR 118.5 + CR 118.12a: Zero-mana unless cost short-circuit.
+            // Pre-fold (2026-05-09 audit) the counter and tax/trigger paths
+            // had divergent behavior here:
+            //   - The counter-specific resolver treated `{0}` as "the
+            //     spell-controller paid; the spell survives" (per CR 118.5,
+            //     "players can always pay 0"). This matches the player's
+            //     real-world choice to always pay 0.
+            //   - The generic tax-trigger path fell through and executed the
+            //     effect anyway (no opt-out offered).
+            // The fold preserves both behaviors verbatim to keep this batch
+            // strictly architectural; harmonizing them is tracked separately.
+            if matches!(&resolved_cost, AbilityCost::Mana { cost } if *cost == ManaCost::zero()) {
+                if matches!(ability.effect, Effect::Counter { .. }) {
+                    // Counter is prevented — spell survives.
+                    events.push(GameEvent::EffectResolved {
+                        kind: EffectKind::Counter,
+                        source_id: ability.source_id,
+                    });
+                    return Ok(());
+                }
+                // Non-counter unless-modified effects: pre-fold behavior was
+                // to fall through and execute the effect.
+            } else {
                 let mut pending = ability.clone();
                 pending.unless_pay = None;
                 state.waiting_for = WaitingFor::UnlessPayment {
                     player: payer,
-                    cost: UnlessCost::Fixed {
-                        cost: resolved_cost,
-                    },
+                    cost: resolved_cost,
                     pending_effect: Box::new(pending),
                     trigger_event: state.current_trigger_event.clone(),
                     effect_description: ability.description.clone(),
                 };
                 return Ok(());
             }
-            // Cost is {0} — fall through and execute the effect normally.
         }
     }
 
@@ -1693,9 +1871,7 @@ pub fn resolve_ability_chain(
     // counters and also deals damage, but "damage dealt this way" must read only
     // `DamageDealt`; Coalition Relic's "counter removed this way" must read only
     // `CounterRemoved`.
-    if let Some(amount) =
-        previous_effect_amount_from_events(&ability.effect, &events[events_before..])
-    {
+    if let Some(amount) = previous_effect_amount_from_events(ability, &events[events_before..]) {
         state.last_effect_amount = Some(amount);
     }
 
@@ -1730,41 +1906,11 @@ pub fn resolve_ability_chain(
     //     when destruction actually completes — regeneration shields (CR 701.8c)
     //     and indestructible (CR 702.12b) creatures never produce the event,
     //     so the set correctly contains only creatures *destroyed this way*.
+    //   - Counter-adding effects → `CounterAdded` (CR 122.1), so "those
+    //     creatures" after a mass counter instruction means the permanents that
+    //     actually received counters.
     if next_sub_needs_tracked_set(ability) {
-        let affected_ids: Vec<ObjectId> = match &ability.effect {
-            Effect::Destroy { .. } | Effect::DestroyAll { .. } => events[events_before..]
-                .iter()
-                .filter_map(|e| match e {
-                    GameEvent::CreatureDestroyed { object_id } => Some(*object_id),
-                    _ => None,
-                })
-                .collect(),
-            _ => {
-                let dest_zone = match &ability.effect {
-                    Effect::ChangeZone { destination, .. }
-                    | Effect::ChangeZoneAll { destination, .. } => Some(*destination),
-                    Effect::ExileTop { .. } => Some(crate::types::zones::Zone::Exile),
-                    // CR 400.7 + CR 611.2c: Mass-bounce destination defaults to
-                    // Hand; downstream "those creatures" / "for each of those
-                    // permanents" tracking must filter by the actual landing zone.
-                    Effect::BounceAll { destination, .. } => {
-                        Some(destination.unwrap_or(crate::types::zones::Zone::Hand))
-                    }
-                    _ => None,
-                };
-                events[events_before..]
-                    .iter()
-                    .filter_map(|e| match e {
-                        GameEvent::ZoneChanged { object_id, to, .. }
-                            if dest_zone.is_none_or(|d| *to == d) =>
-                        {
-                            Some(*object_id)
-                        }
-                        _ => None,
-                    })
-                    .collect()
-            }
-        };
+        let affected_ids = affected_objects_from_events(&ability.effect, &events[events_before..]);
         // CR 603.7 + CR 608.2c: Chain unification. If an ancestor in this
         // resolution chain already published a tracked set, extend that set
         // with the current publish so compound zone-changing effects
@@ -1786,9 +1932,25 @@ pub fn resolve_ability_chain(
         }
     }
 
-    // ExileFromTopUntil handles its own sub_ability chain internally (injecting the
-    // hit card as a target), so skip the outer chain to avoid double-execution.
+    // ExileFromTopUntil handles its own sub_ability chain internally for both
+    // `UntilCondition` arms — `NextMatches` injects the hit card as the
+    // sub-ability's target; `CumulativeThreshold` runs the sub-chain with the
+    // original target list intact so it can address the per-resolution exile
+    // links via `TargetFilter::ExiledBySource`. Either way, skip the outer
+    // chain to avoid double-execution.
     if matches!(ability.effect, Effect::ExileFromTopUntil { .. }) {
+        return Ok(());
+    }
+
+    // CR 615.5: `PreventDamage` with a chained sub-ability installs the sub
+    // as the shield's `runtime_execute` continuation — it runs once per fired
+    // damage prevention event (Gatta and Luzzu's "prevent that damage and put
+    // that many +1/+1 counters on it"). The outer chain walker must NOT also
+    // resolve the sub-ability inline, or the rider would fire twice (once
+    // immediately when the shield is installed, and again from each
+    // post-replacement continuation). The shield is the single authority for
+    // the rider's execution lifecycle.
+    if matches!(ability.effect, Effect::PreventDamage { .. }) && ability.sub_ability.is_some() {
         return Ok(());
     }
 
@@ -1919,6 +2081,33 @@ pub fn resolve_ability_chain(
                 let target_slots = crate::game::ability_utils::build_target_slots(state, sub)
                     .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
                 if !target_slots.is_empty() {
+                    // CR 115.1 + CR 701.9b: Random-mode reflexive triggers (WhenYouDo /
+                    // QuantityCheck) auto-resolve via the seeded RNG. Same shape as
+                    // casting/activation: no `WaitingFor::TriggerTargetSelection` is
+                    // emitted; the chosen targets are assigned and the resolution
+                    // continues inline.
+                    if matches!(
+                        sub.target_selection_mode,
+                        crate::types::ability::TargetSelectionMode::Random
+                    ) {
+                        let chosen = crate::game::ability_utils::random_select_targets_for_ability(
+                            state,
+                            &target_slots,
+                            &[],
+                        )
+                        .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
+                        let mut reflexive = sub.as_ref().clone();
+                        reflexive.context = ability.context.clone();
+                        crate::game::ability_utils::assign_targets_in_chain(
+                            state,
+                            &mut reflexive,
+                            &chosen,
+                        )
+                        .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
+                        resolve_ability_chain(state, &reflexive, events, depth + 1)?;
+                        return Ok(());
+                    }
+
                     // Compute selection first — if this fails (no legal targets for a
                     // required slot), we skip the reflexive trigger cleanly without
                     // leaving an orphaned pending_trigger.
@@ -2170,10 +2359,25 @@ fn evaluate_condition(
             );
             comparator.evaluate(l, r)
         }
+        AbilityCondition::PreviousEffectAmount { comparator, rhs } => {
+            let l = state.last_effect_amount.unwrap_or(0);
+            let r = crate::game::quantity::resolve_quantity(
+                state,
+                rhs,
+                ability.controller,
+                ability.source_id,
+            );
+            comparator.evaluate(l, r)
+        }
         AbilityCondition::CastDuringPhase { phases } => ability
             .context
             .cast_phase
             .is_some_and(|cast_phase| phases.contains(&cast_phase)),
+        AbilityCondition::CastTimingPermission { permission } => state
+            .objects
+            .get(&ability.source_id)
+            .map(|obj| obj.cast_timing_permission == Some((*permission, state.turn_number)))
+            .unwrap_or(false),
         // CR 601.2h + CR 608.2c: Spend-color riders read the resolving spell
         // object's recorded mana payment. Spell copies with no mana paid
         // naturally fail because their tally is empty.
@@ -2397,9 +2601,37 @@ fn resolve_unless_payer(
                     GameEvent::PlayerPerformedAction { player_id, .. } => Some(*player_id),
                     _ => None,
                 })
+                // CR 702.21a: Fall back to broader event-context resolution
+                // (handles `BecomesTarget` for ward, etc.) when the narrow
+                // matches above don't apply.
+                .or_else(|| {
+                    crate::game::targeting::resolve_event_context_target(
+                        state,
+                        payer,
+                        ability.source_id,
+                    )
+                    .and_then(|target| match target {
+                        TargetRef::Player(p) => Some(p),
+                        _ => None,
+                    })
+                })
         }
         TargetFilter::Controller => Some(state.active_player),
-        TargetFilter::ParentTargetController => {
+        // CR 702.21a + CR 603.7c: Ward firing on `BecomesTarget` produces a
+        // counter ability whose unless-payer is the controller of the
+        // offending spell — resolved via the trigger event's source object.
+        TargetFilter::TriggeringSpellController => {
+            crate::game::targeting::resolve_event_context_target(state, payer, ability.source_id)
+                .and_then(|target| match target {
+                    TargetRef::Player(p) => Some(p),
+                    _ => None,
+                })
+        }
+        // CR 118.12 + CR 608.2c: "Counter target spell unless its controller
+        // pays {X}" (Mana Leak) — `ParentTargetController` reads the
+        // controller of the targeted spell (the parent ability's first
+        // target), which `resolve_effect_player_ref` looks up via the stack.
+        TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner => {
             crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
         }
         _ => None,
@@ -2527,10 +2759,10 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, ControllerRef,
-        DelayedTriggerCondition, Duration, FilterProp, GainLifePlayer, PlayerFilter, PlayerScope,
-        PtValue, QuantityExpr, QuantityRef, SpellContext, TargetFilter, TargetRef, TypeFilter,
-        TypedFilter,
+        AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission,
+        ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration, FilterProp,
+        GainLifePlayer, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
+        SpellContext, StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
@@ -2540,6 +2772,7 @@ mod tests {
         MayTriggerOrigin,
     };
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
+    use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
     use crate::types::mana::ManaCost;
     use crate::types::phase::Phase;
@@ -3335,6 +3568,7 @@ mod tests {
                     origin: Some(Zone::Battlefield),
                     destination: Zone::Hand,
                     target: TargetFilter::Any,
+                    enter_tapped: false,
                 },
                 vec![],
                 ObjectId(900),
@@ -3377,6 +3611,103 @@ mod tests {
             .filter(|o| o.name == "Treasure")
             .count();
         assert_eq!(treasures0, 0, "Empty chain must mint zero tokens");
+    }
+
+    #[test]
+    fn put_counter_all_publishes_countered_objects_for_tracked_set_followup() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Elspeth".to_string(),
+            Zone::Battlefield,
+        );
+        let first = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Soldier A".to_string(),
+            Zone::Battlefield,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Soldier B".to_string(),
+            Zone::Battlefield,
+        );
+        let opponent = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Opponent Soldier".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [first, second, opponent] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let flying = StaticDefinition::continuous()
+            .affected(TargetFilter::TrackedSet {
+                id: TrackedSetId(0),
+            })
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }]);
+        let followup = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![flying],
+                duration: Some(Duration::UntilNextTurnOf {
+                    player: PlayerScope::Controller,
+                }),
+                target: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::PutCounterAll {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(followup);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        for id in [first, second] {
+            assert_eq!(
+                state.objects[&id]
+                    .counters
+                    .get(&CounterType::Plus1Plus1)
+                    .copied(),
+                Some(1)
+            );
+            assert!(state
+                .transient_continuous_effects
+                .iter()
+                .any(|effect| effect.affected == TargetFilter::SpecificObject { id }));
+        }
+        assert!(!state.objects[&opponent]
+            .counters
+            .contains_key(&CounterType::Plus1Plus1));
+        assert!(!state
+            .transient_continuous_effects
+            .iter()
+            .any(|effect| effect.affected == TargetFilter::SpecificObject { id: opponent }));
     }
 
     #[test]
@@ -3487,6 +3818,7 @@ mod tests {
                             },
                         ],
                     },
+                    enter_tapped: false,
                 },
                 vec![],
                 ObjectId(900),
@@ -3498,6 +3830,7 @@ mod tests {
                         cost: ManaCost::generic(2),
                         cast_transformed: false,
                         constraint: None,
+                        granted_to: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -3572,6 +3905,7 @@ mod tests {
                             },
                         ],
                     },
+                    enter_tapped: false,
                 },
                 vec![],
                 ObjectId(901),
@@ -3583,6 +3917,7 @@ mod tests {
                         cost: ManaCost::generic(2),
                         cast_transformed: false,
                         constraint: None,
+                        granted_to: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -3631,6 +3966,7 @@ mod tests {
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+                enter_tapped: false,
             },
             vec![],
             ObjectId(902),
@@ -3642,6 +3978,7 @@ mod tests {
                     cost: ManaCost::generic(2),
                     cast_transformed: false,
                     constraint: None,
+                    granted_to: None,
                 },
                 target: TargetFilter::TrackedSet {
                     id: TrackedSetId(0),
@@ -4621,6 +4958,83 @@ mod tests {
     }
 
     #[test]
+    fn resolve_ability_chain_player_scope_opponent_sacrifice_uses_scoped_controller() {
+        let mut state = GameState::new_two_player(42);
+        let own = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Own Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let opp_a = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(1),
+            "Opp Creature A".to_string(),
+            Zone::Battlefield,
+        );
+        let opp_b = create_object(
+            &mut state,
+            CardId(21),
+            PlayerId(1),
+            "Opp Creature B".to_string(),
+            Zone::Battlefield,
+        );
+        let opp_c = create_object(
+            &mut state,
+            CardId(22),
+            PlayerId(1),
+            "Opp Creature C".to_string(),
+            Zone::Battlefield,
+        );
+        let opp_d = create_object(
+            &mut state,
+            CardId(23),
+            PlayerId(1),
+            "Opp Creature D".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [own, opp_a, opp_b, opp_c, opp_d] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                count: QuantityExpr::Fixed { value: 3 },
+                min_count: 0,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::Opponent);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice { player, cards, .. } => {
+                assert_eq!(*player, PlayerId(1));
+                assert_eq!(cards.len(), 4);
+                assert!(cards.contains(&opp_a));
+                assert!(cards.contains(&opp_b));
+                assert!(cards.contains(&opp_c));
+                assert!(cards.contains(&opp_d));
+                assert!(!cards.contains(&own));
+            }
+            other => panic!("expected EffectZoneChoice, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn player_scope_runs_unscoped_tail_once_after_scoped_iterations() {
         let mut state = GameState::new(FormatConfig::standard(), 3, 42);
         create_object(
@@ -5184,6 +5598,114 @@ mod tests {
         // Both players owned zone-changed objects, so both draw
         assert_eq!(state.players[0].hand.len(), 1, "player 0 should have drawn");
         assert_eq!(state.players[1].hand.len(), 1, "player 1 should have drawn");
+    }
+
+    /// CR 608.2c + CR 701.38: `PlayerFilter::VotedFor { choice_index }`
+    /// matches only players whose ballot in `state.last_vote_ballots`
+    /// has the recorded choice index. Mirrors the ZoneChangedThisWay shape.
+    #[test]
+    fn voted_for_filter_matches_only_recorded_choosers() {
+        let mut state = GameState::new_two_player(42);
+
+        // Library cards for both players so Draw has something to do.
+        create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Lib A".to_string(),
+            Zone::Library,
+        );
+        create_object(
+            &mut state,
+            CardId(21),
+            PlayerId(1),
+            "Lib B".to_string(),
+            Zone::Library,
+        );
+
+        // Seed the ballot ledger: P0 voted for choice 0, P1 voted for choice 1.
+        state.last_vote_ballots = crate::im::Vector::new();
+        state.last_vote_ballots.push_back((PlayerId(0), 0));
+        state.last_vote_ballots.push_back((PlayerId(1), 1));
+
+        // Effect with player_scope = VotedFor { 0 } — only P0 should resolve.
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::VotedFor { choice_index: 0 });
+
+        let mut events = Vec::new();
+        // depth=1 so the chain entry doesn't clear last_vote_ballots.
+        resolve_ability_chain(&mut state, &ability, &mut events, 1).unwrap();
+
+        assert_eq!(state.players[0].hand.len(), 1, "P0 voted for 0 — draws");
+        assert_eq!(
+            state.players[1].hand.len(),
+            0,
+            "P1 voted for 1 — does NOT draw under VotedFor {{ 0 }}"
+        );
+    }
+
+    /// CR 608.2c + CR 701.38: `last_vote_ballots` is cleared at chain depth 0,
+    /// so a `VotedFor` filter evaluated in a fresh top-level resolution
+    /// matches no players (no ballots recorded yet).
+    #[test]
+    fn voted_for_filter_clears_at_chain_boundary() {
+        let mut state = GameState::new_two_player(42);
+
+        // Library cards so Draw can resolve.
+        create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Lib A".to_string(),
+            Zone::Library,
+        );
+        create_object(
+            &mut state,
+            CardId(21),
+            PlayerId(1),
+            "Lib B".to_string(),
+            Zone::Library,
+        );
+
+        // Seed ballot ledger from a "previous" vote.
+        state.last_vote_ballots = crate::im::Vector::new();
+        state.last_vote_ballots.push_back((PlayerId(0), 0));
+        state.last_vote_ballots.push_back((PlayerId(1), 0));
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::VotedFor { choice_index: 0 });
+
+        let mut events = Vec::new();
+        // depth=0 — top-level resolution clears last_vote_ballots before the
+        // player_scope expansion runs, so no player matches.
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(
+            state.players[0].hand.len(),
+            0,
+            "P0 should not draw — ledger cleared at chain depth 0"
+        );
+        assert_eq!(
+            state.players[1].hand.len(),
+            0,
+            "P1 should not draw — ledger cleared at chain depth 0"
+        );
     }
 
     /// CR 608.2c + CR 109.5: "for each opponent who searched their library
@@ -6022,6 +6544,7 @@ mod tests {
                         player: PlayerScope::Controller,
                     },
                     granted_to: PlayerId(0),
+                    mana_spend_permission: None,
                 },
                 target: TargetFilter::TrackedSet {
                     id: TrackedSetId(0),

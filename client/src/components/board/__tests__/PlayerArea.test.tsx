@@ -87,6 +87,9 @@ function createGameState(overrides: Partial<GameState> = {}): GameState {
       commander_damage_threshold: 21,
       range_of_influence: null,
       team_based: false,
+      uses_commander: true,
+
+      allow_debug_actions: false,
     },
     command_zone: [commander.id],
     commander_damage: [],

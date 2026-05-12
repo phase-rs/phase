@@ -696,6 +696,10 @@ mod tests {
         def.condition = Some(StaticCondition::UnlessPay {
             cost,
             scaling: UnlessPayScaling::PerAffectedCreature,
+            // CR 506.3: Defender scope — these test fixtures simulate
+            // Ghostly-Prison-class statics that defend the controller. Match
+            // the Oracle text "Creatures can't attack you...".
+            defended: Some(crate::types::triggers::AttackTargetFilter::Player),
         });
         obj.static_definitions.push(def);
         id

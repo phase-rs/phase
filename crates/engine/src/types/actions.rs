@@ -32,6 +32,29 @@ pub enum CastChoice {
     Decline,
 }
 
+/// CR 103.5 + Serum Powder Oracle text: Player decision at a `MulliganDecision`
+/// prompt. The three branches correspond to the three actions a player can take
+/// while still pending in the mulligan-decision phase:
+/// - `Keep` — lock in the current opening hand (CR 103.5).
+/// - `Mulligan` — shuffle the hand back, redraw the starting hand size, and
+///   remain pending (CR 103.5).
+/// - `UseSerumPowder` — exile every card in hand and redraw the same number,
+///   without taking a mulligan and without incrementing the mulligan counter.
+///   Only available when `object_id` references a card named "Serum Powder" in
+///   the actor's hand (CR 103.5b and Serum Powder Oracle text). The player
+///   remains pending and may keep, mulligan, or use another Serum Powder next.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum MulliganChoice {
+    Keep,
+    Mulligan,
+    /// CR 103.5b: A "you could mulligan" action. `object_id` is the Serum
+    /// Powder being used; it goes to exile with the rest of the hand.
+    UseSerumPowder {
+        object_id: ObjectId,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, strum::IntoStaticStr)]
 #[serde(tag = "type", content = "data")]
 pub enum GameAction {
@@ -63,8 +86,16 @@ pub enum GameAction {
     DeclareBlockers {
         assignments: Vec<(ObjectId, ObjectId)>,
     },
+    /// CR 502.3: Choose whether a permanent with "You may choose not to untap"
+    /// untaps during the active player's untap step.
+    ChooseUntap {
+        object_id: ObjectId,
+        untap: bool,
+    },
+    /// CR 103.5 + 103.5b: A player's decision at a `WaitingFor::MulliganDecision`
+    /// prompt. See [`MulliganChoice`] for the three branches.
     MulliganDecision {
-        keep: bool,
+        choice: MulliganChoice,
     },
     /// CR 402.3: A player may arrange their hand in any convenient fashion at any time.
     /// Hand order has no game-rules significance for mainline gameplay, so
@@ -433,6 +464,20 @@ pub enum GameAction {
     /// Gated on `GameState::debug_mode`. Rejected in multiplayer at both the
     /// WASM and server-core layers.
     Debug(DebugAction),
+    /// Sandbox-only host action: grant a player permission to submit
+    /// `GameAction::Debug(_)`. The host's seat (PlayerId(0)) cannot grant
+    /// in a non-sandbox game (gated server-side on
+    /// `format_config.allow_debug_actions`). Only the host can submit this
+    /// (server-side check). Bypasses `WaitingFor` like Concede.
+    GrantDebugPermission {
+        player_id: PlayerId,
+    },
+    /// Sandbox-only host action: revoke a player's debug permission. The
+    /// host cannot revoke their own permission (server-side check). Only
+    /// the host can submit this.
+    RevokeDebugPermission {
+        player_id: PlayerId,
+    },
     /// CR 104.3a: A player may concede the game at any time. That player leaves the game.
     /// CR 800.4a: When a player leaves a multiplayer game, all objects owned by that player
     /// leave the game and all spells/abilities controlled by that player cease to exist.
@@ -567,6 +612,136 @@ pub enum DebugAction {
     },
 }
 
+impl DebugAction {
+    /// Human-readable description of this debug action, used by the sandbox
+    /// audit log so all players see what an authorized debugger did. Engine
+    /// owns the wording so the FE remains a pure display layer.
+    pub fn describe(&self, state: &super::game_state::GameState) -> String {
+        let obj = |id: ObjectId| -> String {
+            state
+                .objects
+                .get(&id)
+                .map(|o| o.name.clone())
+                .or_else(|| state.lki_cache.get(&id).map(|l| l.name.clone()))
+                .unwrap_or_else(|| format!("#{}", id.0))
+        };
+        let player_label = |id: PlayerId| -> String {
+            state
+                .log_player_names
+                .get(id.0 as usize)
+                .filter(|n| !n.is_empty())
+                .cloned()
+                .unwrap_or_else(|| format!("Player {}", id.0 + 1))
+        };
+        match self {
+            DebugAction::MoveToZone {
+                object_id, to_zone, ..
+            } => format!("MoveToZone ({} → {:?})", obj(*object_id), to_zone),
+            DebugAction::CreateCard {
+                card_name,
+                owner,
+                zone,
+            } => format!(
+                "CreateCard ({} for {} in {:?})",
+                card_name,
+                player_label(*owner),
+                zone
+            ),
+            DebugAction::RemoveObject { object_id } => {
+                format!("RemoveObject ({})", obj(*object_id))
+            }
+            DebugAction::DrawCards { player_id, count } => {
+                format!("DrawCards ({} draws {})", player_label(*player_id), count)
+            }
+            DebugAction::Mill { player_id, count } => {
+                format!("Mill ({} mills {})", player_label(*player_id), count)
+            }
+            DebugAction::ShuffleLibrary { player_id } => {
+                format!("ShuffleLibrary ({})", player_label(*player_id))
+            }
+            DebugAction::SetBasePowerToughness {
+                object_id,
+                power,
+                toughness,
+            } => format!(
+                "SetBasePowerToughness ({} → {:?}/{:?})",
+                obj(*object_id),
+                power,
+                toughness
+            ),
+            DebugAction::ModifyCounters {
+                object_id,
+                counter_type,
+                delta,
+            } => format!(
+                "ModifyCounters ({:+} {:?} counters on {})",
+                delta,
+                counter_type,
+                obj(*object_id)
+            ),
+            DebugAction::SetTapped { object_id, tapped } => format!(
+                "SetTapped ({} → {})",
+                obj(*object_id),
+                if *tapped { "tapped" } else { "untapped" }
+            ),
+            DebugAction::SetController {
+                object_id,
+                controller,
+            } => format!(
+                "SetController ({} → {})",
+                obj(*object_id),
+                player_label(*controller)
+            ),
+            DebugAction::SetSummoningSickness { object_id, sick } => format!(
+                "SetSummoningSickness ({} → {})",
+                obj(*object_id),
+                if *sick { "sick" } else { "not sick" }
+            ),
+            DebugAction::SetFaceState {
+                object_id,
+                face_down,
+                transformed,
+                flipped,
+            } => format!(
+                "SetFaceState ({}, face_down={:?}, transformed={:?}, flipped={:?})",
+                obj(*object_id),
+                face_down,
+                transformed,
+                flipped
+            ),
+            DebugAction::Attach {
+                object_id,
+                target_id,
+            } => format!("Attach ({} → {})", obj(*object_id), obj(*target_id)),
+            DebugAction::Detach { object_id } => format!("Detach ({})", obj(*object_id)),
+            DebugAction::GrantKeyword { object_id, keyword } => {
+                format!("GrantKeyword ({} gains {:?})", obj(*object_id), keyword)
+            }
+            DebugAction::RemoveKeyword { object_id, keyword } => {
+                format!("RemoveKeyword ({} loses {:?})", obj(*object_id), keyword)
+            }
+            DebugAction::SetLife { player_id, life } => {
+                format!("SetLife ({} → {})", player_label(*player_id), life)
+            }
+            DebugAction::AddMana { player_id, mana } => {
+                format!("AddMana ({} gains {:?})", player_label(*player_id), mana)
+            }
+            DebugAction::SetPhase {
+                phase,
+                active_player,
+            } => format!(
+                "SetPhase ({:?} for {})",
+                phase,
+                player_label(*active_player)
+            ),
+            DebugAction::RunStateBasedActions => "RunStateBasedActions".to_string(),
+            DebugAction::CreateToken { owner, name, .. } => {
+                format!("CreateToken ({} for {})", name, player_label(*owner))
+            }
+        }
+    }
+}
+
 impl GameAction {
     /// Returns the enum variant name as a static string (e.g., `"CastSpell"`, `"PassPriority"`).
     /// Useful for structured logging without the full `Debug` representation.
@@ -627,6 +802,7 @@ impl GameAction {
             GameAction::TurnFaceUp { object_id } => Some(*object_id),
             GameAction::ChooseRingBearer { target } => Some(*target),
             GameAction::ChooseDamageSource { source } => Some(*source),
+            GameAction::ChooseUntap { object_id, .. } => Some(*object_id),
             GameAction::TapForConvoke { object_id, .. } => Some(*object_id),
             GameAction::ChooseLegend { keep } => Some(*keep),
             GameAction::CastPreparedCopy { source } => Some(*source),
@@ -683,7 +859,9 @@ impl GameAction {
             | GameAction::PayManaAbilityMana { .. }
             | GameAction::PassParadigmOffer
             | GameAction::Concede { .. }
-            | GameAction::Debug(_) => None,
+            | GameAction::Debug(_)
+            | GameAction::GrantDebugPermission { .. }
+            | GameAction::RevokeDebugPermission { .. } => None,
         }
     }
 }
@@ -727,7 +905,9 @@ mod tests {
 
     #[test]
     fn mulligan_decision_roundtrips() {
-        let action = GameAction::MulliganDecision { keep: true };
+        let action = GameAction::MulliganDecision {
+            choice: MulliganChoice::Keep,
+        };
         let serialized = serde_json::to_string(&action).unwrap();
         let deserialized: GameAction = serde_json::from_str(&serialized).unwrap();
         assert_eq!(action, deserialized);
@@ -880,7 +1060,12 @@ mod tests {
             (GameAction::ChooseLegend { keep: oid }, Some(oid)),
             // Non-permanent actions return None.
             (GameAction::PassPriority, None),
-            (GameAction::MulliganDecision { keep: true }, None),
+            (
+                GameAction::MulliganDecision {
+                    choice: MulliganChoice::Keep,
+                },
+                None,
+            ),
             (GameAction::CancelCast, None),
             (GameAction::CompanionToHand, None),
             (GameAction::CancelAutoPass, None),

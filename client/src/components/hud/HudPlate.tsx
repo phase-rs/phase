@@ -1,6 +1,7 @@
 import type { CSSProperties, ReactNode } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 
+import { AvatarHoverPreview } from "./AvatarHoverPreview.tsx";
 import { UnderAttackOverlay } from "./UnderAttackOverlay.tsx";
 
 type HudTone = "neutral" | "emerald" | "rose" | "cyan" | "amber";
@@ -151,7 +152,10 @@ function HudAvatar({
   seatColor?: string;
 }) {
   return (
-    <div
+    <AvatarHoverPreview
+      avatarUrl={avatarUrl}
+      label={label}
+      seatColor={seatColor}
       className="relative h-12 w-10 shrink-0 overflow-hidden rounded-lg border border-white/15 bg-slate-950 shadow-[0_10px_24px_rgba(0,0,0,0.35)] lg:h-14 lg:w-12"
       style={seatColor ? {
         borderColor: `${seatColor}cc`,
@@ -164,6 +168,6 @@ function HudAvatar({
         className="h-full w-full object-cover"
       />
       <div className="absolute inset-0 bg-gradient-to-b from-white/12 via-transparent to-black/32" />
-    </div>
+    </AvatarHoverPreview>
   );
 }

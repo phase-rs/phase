@@ -14,19 +14,20 @@ pub fn resolve_tap(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // CR 701.26a: `Effect::Tap { target: SelfRef }` with no collected targets
-    // means tap the source itself (the "tap ~" idiom). SelfRef is a
-    // context-ref — not surfaced as a target slot and not auto-resolved by the
-    // event-context resolver — so this resolver must expand it. Mirrors the
-    // pump resolver's SelfRef shortcut.
+    // CR 701.26a + CR 608.2c: `Effect::Tap { target: SelfRef }` is the
+    // "tap ~" idiom — the printed-name anaphor that always refers to the
+    // source object regardless of `ability.targets`. Short-circuit BEFORE
+    // the chosen-targets fallback so chained `Tap { target: SelfRef }`
+    // sub-abilities don't inherit the parent's targets via chain
+    // propagation in `effects::mod.rs::resolve_ability_chain` (issue #323
+    // class).
     let self_targets;
-    let targets: &[TargetRef] = if ability.targets.is_empty()
-        && matches!(
-            &ability.effect,
-            Effect::Tap {
-                target: TargetFilter::SelfRef
-            }
-        ) {
+    let targets: &[TargetRef] = if matches!(
+        &ability.effect,
+        Effect::Tap {
+            target: TargetFilter::SelfRef
+        }
+    ) {
         self_targets = [TargetRef::Object(ability.source_id)];
         &self_targets
     } else {
@@ -77,21 +78,22 @@ pub fn resolve_untap(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // CR 701.26b: `Effect::Untap { target: SelfRef }` with no collected targets
-    // means untap the source itself (the "untap ~" idiom). SelfRef is a
-    // context-ref — not surfaced as a target slot and not auto-resolved by the
-    // event-context resolver — so this resolver must expand it. This is the
-    // runtime path for trigger shapes like Ragost's "At the beginning of each
-    // end step, if you gained life this turn, untap ~" (CR 603.4
-    // intervening-if + CR 514 end step).
+    // CR 701.26b + CR 608.2c: `Effect::Untap { target: SelfRef }` is the
+    // "untap ~" idiom — the printed-name anaphor that always refers to the
+    // source object regardless of `ability.targets`. Short-circuit BEFORE
+    // the chosen-targets fallback so chained `Untap { target: SelfRef }`
+    // sub-abilities don't inherit the parent's targets via chain
+    // propagation in `effects::mod.rs::resolve_ability_chain` (issue #323
+    // class). Runtime path for trigger shapes like Ragost's "At the
+    // beginning of each end step, if you gained life this turn, untap ~"
+    // (CR 603.4 intervening-if + CR 514 end step).
     let self_targets;
-    let targets: &[TargetRef] = if ability.targets.is_empty()
-        && matches!(
-            &ability.effect,
-            Effect::Untap {
-                target: TargetFilter::SelfRef
-            }
-        ) {
+    let targets: &[TargetRef] = if matches!(
+        &ability.effect,
+        Effect::Untap {
+            target: TargetFilter::SelfRef
+        }
+    ) {
         self_targets = [TargetRef::Object(ability.source_id)];
         &self_targets
     } else {

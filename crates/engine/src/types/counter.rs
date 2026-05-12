@@ -105,6 +105,22 @@ pub enum CounterMatch {
     OfType(CounterType),
 }
 
+impl CounterMatch {
+    /// CR 122.1: Boolean predicate — does this matcher accept a counter of
+    /// the given type? `Any` accepts every type; `OfType(t)` accepts only
+    /// counters of `t`. Predicates that need to *sum* counter quantities
+    /// (rather than test a single type) should match on the variants
+    /// directly because the `Any` case sums across all entries on an
+    /// object — this helper is for the boolean axis only.
+    #[inline]
+    pub fn matches(&self, counter_type: &CounterType) -> bool {
+        match self {
+            CounterMatch::Any => true,
+            CounterMatch::OfType(expected) => expected == counter_type,
+        }
+    }
+}
+
 pub fn parse_counter_type(text: &str) -> CounterType {
     let trimmed = text.trim().trim_end_matches(" counter").trim();
     match trimmed {

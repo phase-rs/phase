@@ -18,18 +18,18 @@
 //!   life total; in other words, the player loses that much life." Paying life IS
 //!   losing life, so the deduction routes through
 //!   [`effects::life::apply_damage_life_loss`] which runs the replacement pipeline.
-//! - **CR 119.4b** — Players can always pay 0 life, even under CantLoseLife.
+//! - **CR 119.4b** — Players can always pay 0 life, even under a pay-life prohibition.
 //! - **CR 119.8** — "A cost that involves having that player pay life can't be paid."
 
 use crate::game::effects::life::{apply_damage_life_loss, ReplacementDeferred};
-use crate::game::static_abilities::player_has_cant_lose_life;
+use crate::game::static_abilities::{player_cant_pay_life_as_cost, player_has_cant_lose_life};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::player::PlayerId;
 
 /// Outcome of attempting to pay life as a cost.
 ///
-/// CR 119.4b: Paying 0 life always succeeds — even under `CantLoseLife` — and
+/// CR 119.4b: Paying 0 life always succeeds — even under a prohibition — and
 /// is represented by `Paid { amount: 0 }`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PayLifeCostResult {
@@ -37,8 +37,8 @@ pub enum PayLifeCostResult {
     Paid { amount: u32 },
     /// CR 118.3: Player's life total is below `amount` — cost can't be paid.
     InsufficientLife,
-    /// CR 119.8: Player has `CantLoseLife` — cost can't be paid.
-    LockedCantLoseLife,
+    /// CR 119.8 / CR 118.3: A static prohibition makes the cost unpayable.
+    Prohibited,
 }
 
 impl PayLifeCostResult {
@@ -47,25 +47,26 @@ impl PayLifeCostResult {
         matches!(self, PayLifeCostResult::Paid { .. })
     }
 
-    /// Returns `true` if the cost was NOT paid (insufficient life or locked).
+    /// Returns `true` if the cost was NOT paid (insufficient life or prohibited).
     pub fn is_unpayable(self) -> bool {
         !self.is_paid()
     }
 }
 
 /// CR 107.4f + CR 118.3 + CR 119.8: How many Phyrexian 2-life payments can this
-/// player afford, given their current life total and CantLoseLife status?
+/// player afford, given their current life total and pay-life prohibition status?
 ///
 /// Threaded into [`crate::game::mana_payment::can_pay_for_spell`] so Phyrexian
 /// shards without an available mana option are only treated as payable when the
 /// player has the life budget to cover them.
 ///
-/// Returns 0 under CantLoseLife (CR 119.8) or when the player isn't found.
+/// Returns 0 under CantLoseLife (CR 119.8), direct can't-pay-life statics, or
+/// when the player isn't found.
 /// Otherwise floor-divides current life by 2 (CR 118.3: must have the resource
 /// to pay fully).
 pub fn max_phyrexian_life_payments(state: &GameState, player: PlayerId) -> u32 {
-    // CR 119.8: A cost that involves paying life can't be paid while locked.
-    if player_has_cant_lose_life(state, player) {
+    // CR 119.8 / CR 118.3: A cost that involves paying life can't be paid while prohibited.
+    if player_has_cant_lose_life(state, player) || player_cant_pay_life_as_cost(state, player) {
         return 0;
     }
     state
@@ -78,10 +79,11 @@ pub fn max_phyrexian_life_payments(state: &GameState, player: PlayerId) -> u32 {
 
 /// CR 118.3 + CR 119.4b + CR 119.8: Pure predicate — can this player pay `amount` life?
 ///
-/// Used by pre-validation paths (`can_activate_ability_now`, Defiler offer filtering,
-/// legal-action generation) to avoid presenting an unpayable cost to the player.
+/// General cost-resource predicate. Cast/activation validation that must also
+/// honor direct "can't pay life" statics uses
+/// [`can_pay_life_cast_or_activation_cost`].
 pub fn can_pay_life_cost(state: &GameState, player: PlayerId, amount: u32) -> bool {
-    // CR 119.4b: 0 life is always payable, even under CantLoseLife.
+    // CR 119.4b: 0 life is always payable, even under pay-life prohibitions.
     if amount == 0 {
         return true;
     }
@@ -107,7 +109,7 @@ pub fn can_pay_life_cost(state: &GameState, player: PlayerId, amount: u32) -> bo
 /// responsible for translating an unpayable result into the appropriate
 /// failure signal for their context (cost-payment flag, `EngineError`, etc.).
 ///
-/// Defense in depth: the lock check happens here AND inside
+/// Defense in depth: the prohibition check happens here AND inside
 /// `apply_damage_life_loss`. This module is also called from pre-validation
 /// paths which may not have reached the executor yet, so checking at the cost
 /// boundary keeps the result enum accurate.
@@ -124,7 +126,7 @@ pub fn pay_life_as_cost(
 
     // CR 119.8: Lock → cost can't be paid.
     if player_has_cant_lose_life(state, player) {
-        return PayLifeCostResult::LockedCantLoseLife;
+        return PayLifeCostResult::Prohibited;
     }
 
     // CR 118.3: Resource check — must have enough life.
@@ -156,13 +158,38 @@ pub fn pay_life_as_cost(
     }
 }
 
+/// CR 118.3 + CR 119.4b + CR 601.2h + CR 602.2b: Can this player pay `amount`
+/// life specifically as a spell-casting or activation cost?
+pub fn can_pay_life_cast_or_activation_cost(
+    state: &GameState,
+    player: PlayerId,
+    amount: u32,
+) -> bool {
+    can_pay_life_cost(state, player, amount)
+        && (amount == 0 || !player_cant_pay_life_as_cost(state, player))
+}
+
+/// CR 118.3 + CR 119.4b + CR 601.2h + CR 602.2b: Pay life specifically as a
+/// spell-casting or activation cost, applying direct "can't pay life" statics.
+pub fn pay_life_as_cast_or_activation_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    amount: u32,
+    events: &mut Vec<GameEvent>,
+) -> PayLifeCostResult {
+    if amount > 0 && player_cant_pay_life_as_cost(state, player) {
+        return PayLifeCostResult::Prohibited;
+    }
+    pay_life_as_cost(state, player, amount, events)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{ControllerRef, StaticDefinition, TargetFilter, TypedFilter};
     use crate::types::identifiers::CardId;
-    use crate::types::statics::StaticMode;
+    use crate::types::statics::{CostPaymentProhibition, ProhibitionScope, StaticMode};
     use crate::types::zones::Zone;
 
     fn add_cant_lose_life_permanent(state: &mut GameState, owner: PlayerId) {
@@ -178,6 +205,25 @@ mod tests {
                 TypedFilter::default().controller(ControllerRef::You),
             )),
         );
+    }
+
+    fn add_cant_pay_life_permanent(state: &mut GameState, owner: PlayerId) {
+        let id = create_object(
+            state,
+            CardId(901),
+            owner,
+            "Cost Lock".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CantPayCost {
+                who: ProhibitionScope::AllPlayers,
+                cost: CostPaymentProhibition::PayLife,
+            }));
     }
 
     /// CR 119.4b: Paying 0 life always succeeds, even under CantLoseLife.
@@ -225,16 +271,38 @@ mod tests {
 
     /// CR 119.8: CantLoseLife → cost can't be paid; life total unchanged.
     #[test]
-    fn pay_life_locked_returns_locked() {
+    fn pay_life_locked_returns_prohibited() {
         let mut state = GameState::new_two_player(42);
         add_cant_lose_life_permanent(&mut state, PlayerId(0));
         let mut events = Vec::new();
 
         let result = pay_life_as_cost(&mut state, PlayerId(0), 3, &mut events);
 
-        assert_eq!(result, PayLifeCostResult::LockedCantLoseLife);
+        assert_eq!(result, PayLifeCostResult::Prohibited);
         assert_eq!(state.players[0].life, 20);
         assert!(events.is_empty());
+    }
+
+    /// CR 118.3 + CR 119.4b: "can't pay life" is cost-scoped and rejects
+    /// positive life payments without being modeled as CantLoseLife.
+    #[test]
+    fn pay_life_cost_prohibition_returns_prohibited() {
+        let mut state = GameState::new_two_player(42);
+        add_cant_pay_life_permanent(&mut state, PlayerId(0));
+        let mut events = Vec::new();
+
+        let result = pay_life_as_cast_or_activation_cost(&mut state, PlayerId(0), 3, &mut events);
+
+        assert_eq!(result, PayLifeCostResult::Prohibited);
+        assert_eq!(state.players[0].life, 20);
+        assert!(events.is_empty());
+        assert!(can_pay_life_cost(&state, PlayerId(0), 1));
+        assert!(can_pay_life_cast_or_activation_cost(&state, PlayerId(0), 0));
+        assert!(!can_pay_life_cast_or_activation_cost(
+            &state,
+            PlayerId(0),
+            1
+        ));
     }
 
     /// CR 119.4b: `can_pay_life_cost` returns true for 0 even under lock.

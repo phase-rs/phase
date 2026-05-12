@@ -21,6 +21,13 @@ pub(super) fn run_post_action_pipeline(
     // Scan for triggers BEFORE SBAs so that objects still on the battlefield
     // (e.g., a creature that just took lethal damage) are found by the scan.
     // This follows the same pattern as process_combat_damage_triggers in combat_damage.rs.
+    //
+    // CR 614.12a + CR 707.9: Mid-entry `CopyTargetChoice` deferral happens at
+    // the producer site (`apply_pending_post_replacement_effect`), which both
+    // emits the entering object's `ZoneChanged` and decides whether to pause
+    // for a copy choice. By the time the pipeline reaches this trigger scan,
+    // events that should be deferred have already been moved into
+    // `state.deferred_entry_events` for replay by `handle_copy_target_choice`.
     if !skip_trigger_scan {
         let filtered_events: Vec<_> = events
             .iter()

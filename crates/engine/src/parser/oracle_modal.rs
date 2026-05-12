@@ -10,7 +10,7 @@ use crate::types::ability::{
     ModalSelectionConstraint,
 };
 
-use super::oracle::find_activated_colon;
+use super::oracle::{find_activated_colon, strip_activated_constraints};
 use super::oracle_effect::{parse_effect_chain, parse_effect_chain_with_context};
 use super::oracle_ir::context::ParseContext;
 use super::oracle_nom::condition as nom_condition;
@@ -35,12 +35,14 @@ pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(Oracle
     if let Some(colon_pos) = find_activated_colon(&line) {
         let cost_text = line[..colon_pos].trim();
         let effect_text = line[colon_pos + 1..].trim();
-        if let Some(header) = parse_modal_header_ast(effect_text) {
+        let (effect_text, constraints) = strip_activated_constraints(effect_text);
+        if let Some(header) = parse_modal_header_ast(&effect_text) {
             return Some((
                 OracleBlockAst::ActivatedModal {
                     cost_text: cost_text.to_string(),
                     header,
                     modes,
+                    constraints,
                 },
                 next,
             ));
@@ -428,9 +430,14 @@ pub(crate) fn lower_oracle_block(
             cost_text,
             header,
             modes,
+            constraints,
         } => {
-            let def = build_modal_ability(AbilityKind::Activated, &header, &modes)
+            let mut def = build_modal_ability(AbilityKind::Activated, &header, &modes)
                 .cost(parse_oracle_cost(&cost_text));
+            if constraints.sorcery_speed() {
+                def.sorcery_speed = true;
+            }
+            def.activation_restrictions = constraints.restrictions;
             result.abilities.push(def);
         }
         OracleBlockAst::Modal { header, modes } => {

@@ -7,7 +7,7 @@ use crate::types::ability::{TargetFilter, TypedFilter};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
-use crate::types::statics::{ProhibitionScope, StaticMode};
+use crate::types::statics::{CostPaymentProhibition, ProhibitionScope, StaticMode};
 
 /// Handler function type for static ability modes.
 /// Receives the `StaticMode` variant the handler was registered under.
@@ -128,6 +128,9 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     registry.insert(StaticMode::CantUntap, handle_rule_mod);
     // CR 509.1c: MustBeBlocked — this creature must be blocked if able.
     registry.insert(StaticMode::MustBeBlocked, handle_rule_mod);
+    // CR 701.15b: Goaded — this creature must attack and avoid the goading
+    // player if able. Runtime enforcement lives in combat.rs.
+    registry.insert(StaticMode::Goaded, handle_rule_mod);
     registry.insert(StaticMode::CantAttackAlone, handle_rule_mod);
     registry.insert(StaticMode::CantBlockAlone, handle_rule_mod);
     registry.insert(StaticMode::MayLookAtTopOfLibrary, handle_rule_mod);
@@ -579,6 +582,55 @@ pub fn player_has_cant_lose_life(state: &GameState, player_id: PlayerId) -> bool
     )
 }
 
+/// CR 118.3 + CR 119.4b + CR 601.2h + CR 602.2b: Check whether a static
+/// ability prohibits `player_id` from paying life as a cost.
+///
+/// This is cost-scoped and deliberately separate from `CantLoseLife`, which
+/// also prevents damage/life-loss events. Paying 0 life remains legal under
+/// CR 119.4b and is handled by callers before consulting this predicate.
+pub fn player_cant_pay_life_as_cost(state: &GameState, player_id: PlayerId) -> bool {
+    battlefield_active_statics(state).any(|(source_obj, def)| {
+        matches!(
+            &def.mode,
+            StaticMode::CantPayCost {
+                who,
+                cost: CostPaymentProhibition::PayLife,
+            } if prohibition_scope_matches_player(who, player_id, source_obj.id, state)
+        )
+    })
+}
+
+/// CR 118.3 + CR 601.2h + CR 602.2b: Check whether a static ability prohibits
+/// `player_id` from sacrificing `object_id` as a cost.
+///
+/// The object filter is evaluated per candidate permanent so broad costs like
+/// "sacrifice a permanent" can still be paid with legal objects outside the
+/// prohibited filter (for Yasharn, lands remain legal).
+pub fn player_cant_sacrifice_as_cost(
+    state: &GameState,
+    player_id: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    battlefield_active_statics(state).any(|(source_obj, def)| {
+        let StaticMode::CantPayCost {
+            who,
+            cost: CostPaymentProhibition::Sacrifice { filter },
+        } = &def.mode
+        else {
+            return false;
+        };
+        if !prohibition_scope_matches_player(who, player_id, source_obj.id, state) {
+            return false;
+        }
+        matches_target_filter(
+            state,
+            object_id,
+            filter,
+            &FilterContext::from_source(state, source_obj.id),
+        )
+    })
+}
+
 /// CR 702.16j: Check if a player has active "protection from everything".
 ///
 /// Scans `state.transient_continuous_effects` for effects whose `affected`
@@ -734,6 +786,7 @@ pub(crate) fn static_filter_matches(
                         // parser never emits this variant for static filters.
                         crate::types::ability::ControllerRef::ScopedPlayer => false,
                         crate::types::ability::ControllerRef::TargetPlayer => false,
+                        crate::types::ability::ControllerRef::ParentTargetController => false,
                         crate::types::ability::ControllerRef::DefendingPlayer => false,
                     };
                 }

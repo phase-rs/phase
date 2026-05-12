@@ -3,7 +3,7 @@
 //! Replaces the Forge-style string filter parsing with typed enum matching.
 //! All filter logic works against the TargetFilter enum hierarchy from types/ability.rs.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::game::combat;
 use crate::game::game_object::GameObject;
@@ -97,6 +97,17 @@ pub struct FilterContext<'a> {
 }
 
 impl<'a> FilterContext<'a> {
+    /// Context-free object matching. Use only for constraints whose filters are
+    /// printed object qualities rather than source/controller-relative clauses.
+    pub fn neutral() -> Self {
+        Self {
+            source_id: ObjectId(0),
+            source_controller: None,
+            ability: None,
+            recipient_id: None,
+        }
+    }
+
     /// Bare context: source object known, controller derived from state.
     /// Use when no activating ability is in scope (combat restrictions, layer
     /// predicates, passive trigger condition checks).
@@ -193,6 +204,9 @@ fn controller_ref_player(
                 TargetRef::Object(_) => None,
             })
         }),
+        ControllerRef::ParentTargetController => {
+            ability.and_then(|a| crate::game::ability_utils::parent_target_controller(a, state))
+        }
         ControllerRef::DefendingPlayer => {
             crate::game::combat::defending_player_for_attacker(state, source_id)
         }
@@ -429,8 +443,10 @@ fn filter_inner_for_object(
     match filter {
         TargetFilter::None => false,
         TargetFilter::Any => true,
-        TargetFilter::Player => false,       // Players are not objects
-        TargetFilter::Controller => false,   // Controller is a player, not an object
+        TargetFilter::Player => false,     // Players are not objects
+        TargetFilter::Controller => false, // Controller is a player, not an object
+        // CR 109.5: OriginalController is a player reference, not an object.
+        TargetFilter::OriginalController => false,
         TargetFilter::ScopedPlayer => false, // ScopedPlayer is a player, not an object
         TargetFilter::SelfRef => object_id == source_id,
         TargetFilter::Typed(TypedFilter {
@@ -475,6 +491,15 @@ fn filter_inner_for_object(
                                 TargetRef::Player(pid) => Some(*pid),
                                 TargetRef::Object(_) => None,
                             })
+                        });
+                        match target_player {
+                            Some(pid) if pid == obj.controller => {}
+                            _ => return false,
+                        }
+                    }
+                    ControllerRef::ParentTargetController => {
+                        let target_player = ability.and_then(|a| {
+                            crate::game::ability_utils::parent_target_controller(a, state)
                         });
                         match target_player {
                             Some(pid) if pid == obj.controller => {}
@@ -610,14 +635,21 @@ fn filter_inner_for_object(
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
         | TargetFilter::DefendingPlayer => false,
-        // ParentTarget/ParentTargetController/PostReplacementSourceController resolve
-        // at resolution time, not via object matching.
+        // ParentTarget/ParentTargetController/ParentTargetOwner/PostReplacementSourceController
+        // resolve at resolution time, not via object matching. ParentTargetOwner
+        // mirrors ParentTargetController for the player-axis side of CR 108.3 vs CR 109.4.
         TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget => false,
-        // "card with the chosen name" — match against source's ChosenAttribute::CardName.
+        // CR 201.2 + CR 602.5: "card with the chosen name" — match against source's
+        // ChosenAttribute::CardName. The chosen name comes from a player UI prompt;
+        // the comparison must mirror the spell-cast prohibition path
+        // (`cant_cast_filter_matches`) which uses `eq_ignore_ascii_case`. Without
+        // parity, Pithing Needle's activation-prohibition leg would silently miss
+        // names that differ only by casing from the player's typed input.
         TargetFilter::HasChosenName => {
             let chosen_name = state.objects.get(&source_id).and_then(|obj| {
                 obj.chosen_attributes.iter().find_map(|a| match a {
@@ -625,7 +657,7 @@ fn filter_inner_for_object(
                     _ => None,
                 })
             });
-            chosen_name.is_some_and(|name| obj.name == name)
+            chosen_name.is_some_and(|name| obj.name.eq_ignore_ascii_case(name))
         }
         // CR 609.7a: "the chosen source" — match the ObjectId selected by
         // the prior damage-source choice while its continuation resolves.
@@ -694,6 +726,8 @@ fn zone_change_filter_inner(
         TargetFilter::Any => true,
         TargetFilter::Player => false,
         TargetFilter::Controller => false,
+        // CR 109.5: OriginalController is a player reference, not an object.
+        TargetFilter::OriginalController => false,
         TargetFilter::ScopedPlayer => false,
         TargetFilter::SelfRef => record.object_id == source_id,
         TargetFilter::Typed(TypedFilter {
@@ -729,6 +763,15 @@ fn zone_change_filter_inner(
                                 TargetRef::Player(pid) => Some(*pid),
                                 TargetRef::Object(_) => None,
                             })
+                        });
+                        match target_player {
+                            Some(pid) if pid == record.controller => {}
+                            _ => return false,
+                        }
+                    }
+                    ControllerRef::ParentTargetController => {
+                        let target_player = ability.and_then(|a| {
+                            crate::game::ability_utils::parent_target_controller(a, state)
                         });
                         match target_player {
                             Some(pid) if pid == record.controller => {}
@@ -780,6 +823,8 @@ fn zone_change_filter_inner(
         // SpecificPlayer scopes to players, not objects — a zone-change record
         // is always an object transition.
         TargetFilter::SpecificPlayer { .. } => false,
+        // CR 201.2: Zone-change record path mirrors the live-object path —
+        // case-insensitive comparison matches the player UI prompt's input.
         TargetFilter::HasChosenName => {
             let chosen_name = state.objects.get(&source_id).and_then(|obj| {
                 obj.chosen_attributes.iter().find_map(|a| match a {
@@ -787,7 +832,7 @@ fn zone_change_filter_inner(
                     _ => None,
                 })
             });
-            chosen_name.is_some_and(|name| record.name == name)
+            chosen_name.is_some_and(|name| record.name.eq_ignore_ascii_case(name))
         }
         TargetFilter::ChosenDamageSource => false,
         TargetFilter::Named { name } => record.name == *name,
@@ -817,6 +862,7 @@ fn zone_change_filter_inner(
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::DefendingPlayer
@@ -987,6 +1033,7 @@ pub fn spell_record_matches_filter(
                     // target). Fail closed — this combination should not be
                     // produced by the parser.
                     ControllerRef::TargetPlayer => return false,
+                    ControllerRef::ParentTargetController => return false,
                     ControllerRef::DefendingPlayer => return false,
                 }
             }
@@ -1010,6 +1057,7 @@ pub fn spell_record_matches_filter(
         TargetFilter::None
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::OriginalController
         | TargetFilter::ScopedPlayer
         | TargetFilter::SelfRef
         | TargetFilter::StackAbility
@@ -1029,6 +1077,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::DefendingPlayer
@@ -1132,6 +1181,7 @@ fn spell_cast_record_from_object(spell_obj: &GameObject) -> SpellCastRecord {
         colors: spell_obj.color.clone(),
         mana_value: spell_obj.mana_cost.mana_value(),
         has_x_in_cost: crate::game::casting_costs::cost_has_x(&spell_obj.mana_cost),
+        from_zone: spell_obj.zone,
     }
 }
 
@@ -1166,6 +1216,7 @@ fn spell_object_matches_filter_inner(
                     // CR 109.4: Target-player scope is undefined for spell-cast
                     // history (no ability context). Fail closed.
                     ControllerRef::TargetPlayer => return false,
+                    ControllerRef::ParentTargetController => return false,
                     ControllerRef::DefendingPlayer => return false,
                     _ => {}
                 }
@@ -1211,6 +1262,7 @@ fn spell_object_matches_filter_inner(
         TargetFilter::None
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::OriginalController
         | TargetFilter::ScopedPlayer
         | TargetFilter::SelfRef
         | TargetFilter::StackAbility
@@ -1230,6 +1282,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::DefendingPlayer
@@ -1282,6 +1335,7 @@ fn spell_object_matches_property(
                     )
                 })
         }),
+        FilterProp::MostPrevalentCreatureTypeIn { .. } => false,
         FilterProp::IsChosenColor => context.is_some_and(|context| {
             context
                 .state
@@ -1377,9 +1431,9 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
                 || record.core_types.contains(&CoreType::Artifact)
                 || record.subtypes.iter().any(|s| s == "Saga")
         }
-        FilterProp::Multicolored => record.colors.len() > 1,
-        // CR 105.2c: Colorless objects have no color.
-        FilterProp::Colorless => record.colors.is_empty(),
+        FilterProp::ColorCount { comparator, count } => {
+            comparator.evaluate(record.colors.len() as i32, i32::from(*count))
+        }
         FilterProp::Cmc { comparator, value } => match value {
             QuantityExpr::Fixed { value: v } => comparator.evaluate(record.mana_value as i32, *v),
             _ => {
@@ -1409,6 +1463,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // for this snapshot shape.
         FilterProp::Token => false,
         FilterProp::NonToken => true,
+        FilterProp::InZone { zone: required } => record.from_zone == *required,
         // All remaining props require on-battlefield or stack state unavailable from a snapshot.
         FilterProp::Attacking
         | FilterProp::AttackingController
@@ -1419,7 +1474,6 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::Untapped
         | FilterProp::CountersGE { .. }
         | FilterProp::HasAnyCounter
-        | FilterProp::InZone { .. }
         | FilterProp::Owned { .. }
         | FilterProp::Foretold
         | FilterProp::EnchantedBy
@@ -1436,6 +1490,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::ToughnessGE { .. }
         | FilterProp::PowerGTSource
         | FilterProp::IsChosenCreatureType
+        | FilterProp::MostPrevalentCreatureTypeIn { .. }
         | FilterProp::IsChosenColor
         | FilterProp::IsChosenCardType
         | FilterProp::IsChosenLandOrNonlandKind
@@ -1450,6 +1505,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::SharesQuality { .. }
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::EnteredThisTurn
+        | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn
         | FilterProp::BlockedThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
@@ -1746,6 +1802,9 @@ fn matches_filter_prop(
                     }
                     (Some(ControllerRef::ScopedPlayer), Some(pid)) => perm.controller == pid,
                     (Some(ControllerRef::TargetPlayer), Some(pid)) => perm.controller == pid,
+                    (Some(ControllerRef::ParentTargetController), Some(pid)) => {
+                        perm.controller == pid
+                    }
                     (Some(ControllerRef::DefendingPlayer), Some(pid)) => perm.controller == pid,
                     (Some(_), None) => false,
                     (None, _) => true,
@@ -1773,6 +1832,10 @@ fn matches_filter_prop(
                         TargetRef::Object(_) => None,
                     })
                 })
+                .is_some_and(|pid| pid == obj.owner),
+            ControllerRef::ParentTargetController => source
+                .ability
+                .and_then(|a| crate::game::ability_utils::parent_target_controller(a, state))
                 .is_some_and(|pid| pid == obj.owner),
             ControllerRef::DefendingPlayer => {
                 crate::game::combat::defending_player_for_attacker(state, source.id)
@@ -1937,9 +2000,9 @@ fn matches_filter_prop(
                 .unwrap_or(0);
             obj.power.unwrap_or(0) > source_power
         }
-        FilterProp::Multicolored => obj.color.len() > 1,
-        // CR 105.2c: Colorless objects have no color.
-        FilterProp::Colorless => obj.color.is_empty(),
+        FilterProp::ColorCount { comparator, count } => {
+            comparator.evaluate(obj.color.len() as i32, i32::from(*count))
+        }
         FilterProp::HasSupertype { value } => obj.card_types.supertypes.contains(value),
         // CR 205.4b: Object does NOT have this color.
         FilterProp::NotColor { color } => !obj.color.contains(color),
@@ -1953,6 +2016,26 @@ fn matches_filter_prop(
                 .any(|s| s.eq_ignore_ascii_case(chosen)),
             None => false,
         },
+        // CR 205.3m + CR 701.23a: Object's creature type ties for highest count
+        // among creature cards in the named player's named zone. Scope picks
+        // the player whose zone is inspected; `Opponent` falls back to the
+        // candidate object's owner (search-context invariant — the candidate
+        // already lives in the inspected zone, so its owner IS that player).
+        FilterProp::MostPrevalentCreatureTypeIn { zone, scope } => {
+            let owner =
+                controller_ref_player(state, source.id, source.controller, source.ability, scope)
+                    .unwrap_or(obj.owner);
+            most_prevalent_creature_types_in_zone(state, owner, *zone)
+                .into_iter()
+                .any(|creature_type| {
+                    subtype_matches_with_changeling(
+                        &creature_type,
+                        &obj.card_types.subtypes,
+                        &obj.keywords,
+                        &state.all_creature_types,
+                    )
+                })
+        }
         // CR 105.4: Match objects whose colors include the source's chosen color.
         // Used for "of the chosen color" (Hall of Triumph, Prismatic Strands).
         FilterProp::IsChosenColor => source
@@ -2059,10 +2142,25 @@ fn matches_filter_prop(
                 }
             }
         }
-        // CR 510.1: Object was dealt damage this turn (damage_marked persists until cleanup).
-        FilterProp::WasDealtDamageThisTurn => obj.damage_marked > 0,
+        // CR 120.6 + CR 120.9: "Was dealt damage this turn" is a historical fact,
+        // not a query against current marked damage. CR 120.6 removes marked damage
+        // when a permanent regenerates and during the cleanup step, so reading
+        // `damage_marked` would silently lose the fact for any creature that had
+        // regenerated. The damage-event history (CR 120.9 establishes "dealt damage"
+        // as the per-source historical record) is the authoritative source.
+        FilterProp::WasDealtDamageThisTurn => state
+            .damage_dealt_this_turn
+            .iter()
+            .any(|record| matches!(record.target, TargetRef::Object(id) if id == object_id)),
         // CR 400.7: Object entered the battlefield this turn.
         FilterProp::EnteredThisTurn => obj.entered_battlefield_turn == Some(state.turn_number),
+        FilterProp::ZoneChangedThisTurn { from, to } => {
+            state.zone_changes_this_turn.iter().any(|record| {
+                record.object_id == object_id
+                    && from.is_none_or(|zone| record.from_zone == Some(zone))
+                    && to.is_none_or(|zone| record.to_zone == zone)
+            })
+        }
         // CR 508.1a: Creature was declared as an attacker this turn.
         FilterProp::AttackedThisTurn => state.creatures_attacked_this_turn.contains(&object_id),
         // CR 509.1a: Creature was declared as a blocker this turn.
@@ -2173,8 +2271,9 @@ fn zone_change_record_matches_property(
         // CR 105.1 / CR 202.2: Color membership on the event-time object.
         FilterProp::HasColor { color } => record.colors.contains(color),
         FilterProp::NotColor { color } => !record.colors.contains(color),
-        FilterProp::Multicolored => record.colors.len() > 1,
-        FilterProp::Colorless => record.colors.is_empty(),
+        FilterProp::ColorCount { comparator, count } => {
+            comparator.evaluate(record.colors.len() as i32, i32::from(*count))
+        }
         // CR 208.1 / CR 107.2: `toughness > power` comparison on the snapshot.
         FilterProp::ToughnessGTPower => record.toughness.unwrap_or(0) > record.power.unwrap_or(0),
         // CR 111.1: Token identity as of the zone change. Token-ness is a
@@ -2218,6 +2317,10 @@ fn zone_change_record_matches_property(
                     })
                 })
                 .is_some_and(|pid| pid == record.owner),
+            ControllerRef::ParentTargetController => source
+                .ability
+                .and_then(|a| crate::game::ability_utils::parent_target_controller(a, state))
+                .is_some_and(|pid| pid == record.owner),
             ControllerRef::DefendingPlayer => {
                 crate::game::combat::defending_player_for_attacker(state, source.id)
                     .is_some_and(|pid| pid == record.owner)
@@ -2230,6 +2333,7 @@ fn zone_change_record_matches_property(
                 .iter()
                 .any(|candidate| candidate.eq_ignore_ascii_case(chosen))
         }),
+        FilterProp::MostPrevalentCreatureTypeIn { .. } => false,
         // CR 509.1b: Power comparison against the live source.
         FilterProp::PowerGTSource => {
             let source_power = state
@@ -2337,6 +2441,7 @@ fn zone_change_record_matches_property(
         | FilterProp::SharesQuality { .. }
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::EnteredThisTurn
+        | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::TargetsOnly { .. }
         | FilterProp::Targets { .. }
         // CR 107.3 + CR 202.1: X-in-cost is a spell-cast-time predicate; it has no
@@ -2382,6 +2487,10 @@ fn attachment_controller_matches(
                 })
             })
             .is_some_and(|pid| pid == attachment_controller),
+        Some(ControllerRef::ParentTargetController) => source
+            .ability
+            .and_then(|a| crate::game::ability_utils::parent_target_controller(a, state))
+            .is_some_and(|pid| pid == attachment_controller),
         Some(ControllerRef::DefendingPlayer) => {
             combat::defending_player_for_attacker(state, source.id)
                 .is_some_and(|pid| pid == attachment_controller)
@@ -2415,25 +2524,46 @@ fn is_land_type(subtype: &str) -> bool {
         .any(|land_type| subtype.eq_ignore_ascii_case(land_type))
 }
 
+struct SharedQualitySource<'a> {
+    name: &'a str,
+    power: Option<i32>,
+    toughness: Option<i32>,
+    mana_value: u32,
+    core_types: &'a [CoreType],
+    subtypes: &'a [String],
+    colors: &'a [ManaColor],
+    keywords: &'a [Keyword],
+}
+
 fn shared_quality_values(
-    name: &str,
-    core_types: &[CoreType],
-    subtypes: &[String],
-    colors: &[ManaColor],
-    keywords: &[Keyword],
+    source: SharedQualitySource<'_>,
     quality: &SharedQuality,
     all_creature_types: &[String],
 ) -> HashSet<String> {
     match quality {
         SharedQuality::Name => {
-            if name.is_empty() {
+            if source.name.is_empty() {
                 HashSet::new()
             } else {
-                HashSet::from([name.to_ascii_lowercase()])
+                HashSet::from([source.name.to_ascii_lowercase()])
             }
         }
+        SharedQuality::ManaValue => HashSet::from([source.mana_value.to_string()]),
+        SharedQuality::Power => source
+            .power
+            .map_or_else(HashSet::new, |value| HashSet::from([value.to_string()])),
+        SharedQuality::Toughness => source
+            .toughness
+            .map_or_else(HashSet::new, |value| HashSet::from([value.to_string()])),
+        SharedQuality::TotalPowerToughness => source
+            .power
+            .zip(source.toughness)
+            .map_or_else(HashSet::new, |(power, toughness)| {
+                HashSet::from([(power + toughness).to_string()])
+            }),
         SharedQuality::CreatureType => {
-            if keywords
+            if source
+                .keywords
                 .iter()
                 .any(|keyword| matches!(keyword, Keyword::Changeling))
             {
@@ -2443,7 +2573,8 @@ fn shared_quality_values(
                     .collect();
             }
 
-            subtypes
+            source
+                .subtypes
                 .iter()
                 .filter(|subtype| {
                     all_creature_types
@@ -2453,20 +2584,35 @@ fn shared_quality_values(
                 .map(|subtype| subtype.to_ascii_lowercase())
                 .collect()
         }
-        SharedQuality::Color => colors
+        SharedQuality::Color => source
+            .colors
             .iter()
             .map(|color| format!("{color:?}").to_ascii_lowercase())
             .collect(),
-        SharedQuality::CardType => core_types
+        SharedQuality::CardType => source
+            .core_types
             .iter()
             .map(|card_type| format!("{card_type:?}").to_ascii_lowercase())
             .collect(),
-        SharedQuality::LandType => subtypes
+        SharedQuality::LandType => source
+            .subtypes
             .iter()
             .filter(|subtype| is_land_type(subtype))
             .map(|subtype| subtype.to_ascii_lowercase())
             .collect(),
     }
+}
+
+/// CR 201.2 + CR 603.4: Public re-export of the per-object quality extractor.
+/// Used by the `QuantityRef::ObjectCountDistinct` resolver so the
+/// count-expression side and the constraint side share one vocabulary for
+/// `SharedQuality` value semantics.
+pub fn object_shared_quality_values_public(
+    obj: &GameObject,
+    quality: &SharedQuality,
+    all_creature_types: &[String],
+) -> HashSet<String> {
+    object_shared_quality_values(obj, quality, all_creature_types)
 }
 
 fn object_shared_quality_values(
@@ -2475,11 +2621,16 @@ fn object_shared_quality_values(
     all_creature_types: &[String],
 ) -> HashSet<String> {
     shared_quality_values(
-        &obj.name,
-        &obj.card_types.core_types,
-        &obj.card_types.subtypes,
-        &obj.color,
-        &obj.keywords,
+        SharedQualitySource {
+            name: &obj.name,
+            power: obj.power,
+            toughness: obj.toughness,
+            mana_value: obj.mana_cost.mana_value(),
+            core_types: &obj.card_types.core_types,
+            subtypes: &obj.card_types.subtypes,
+            colors: &obj.color,
+            keywords: &obj.keywords,
+        },
         quality,
         all_creature_types,
     )
@@ -2491,11 +2642,16 @@ fn lki_shared_quality_values(
     all_creature_types: &[String],
 ) -> HashSet<String> {
     shared_quality_values(
-        &lki.name,
-        &lki.card_types,
-        &lki.subtypes,
-        &lki.colors,
-        &lki.keywords,
+        SharedQualitySource {
+            name: &lki.name,
+            power: lki.power,
+            toughness: lki.toughness,
+            mana_value: lki.mana_value,
+            core_types: &lki.card_types,
+            subtypes: &lki.subtypes,
+            colors: &lki.colors,
+            keywords: &lki.keywords,
+        },
         quality,
         all_creature_types,
     )
@@ -2596,6 +2752,59 @@ fn object_shares_quality_with_reference_filter(
                 object_shares_quality_values(obj, quality, &values, &state.all_creature_types)
             })
     })
+}
+
+/// CR 205.3m + CR 701.23a: Compute the creature subtypes tied for highest
+/// occurrence among creature cards in `owner`'s `zone`. CR 205.3m defines
+/// the creature-subtype set being counted. A `Changeling` (CR 702.73a)
+/// creature counts toward every creature type, matching how the keyword
+/// interacts with subtype-counting effects on resolution.
+///
+/// Owner semantics are correct for hidden zones (library, hand) and
+/// graveyard/exile per CR 400 (zones are owned by players). Battlefield
+/// emission, if/when added, would need an explicit controller axis since
+/// owner ≠ controller for stolen permanents.
+fn most_prevalent_creature_types_in_zone(
+    state: &GameState,
+    owner: PlayerId,
+    zone: Zone,
+) -> HashSet<String> {
+    let object_ids = crate::game::targeting::zone_object_ids(state, zone);
+    let mut counts: HashMap<String, u32> = HashMap::new();
+    for object_id in object_ids {
+        let Some(obj) = state.objects.get(&object_id) else {
+            continue;
+        };
+        if obj.owner != owner {
+            continue;
+        }
+        if !obj.card_types.core_types.contains(&CoreType::Creature) {
+            continue;
+        }
+        if obj.keywords.contains(&Keyword::Changeling) {
+            for creature_type in &state.all_creature_types {
+                *counts
+                    .entry(creature_type.to_ascii_lowercase())
+                    .or_insert(0) += 1;
+            }
+            continue;
+        }
+        for subtype in &obj.card_types.subtypes {
+            if state
+                .all_creature_types
+                .iter()
+                .any(|creature_type| creature_type.eq_ignore_ascii_case(subtype))
+            {
+                *counts.entry(subtype.to_ascii_lowercase()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let max_count = counts.values().copied().max().unwrap_or(0);
+    counts
+        .into_iter()
+        .filter_map(|(creature_type, count)| (count == max_count).then_some(creature_type))
+        .collect()
 }
 
 /// CR 608.2b: Validate that all targeted objects share at least one value of the named quality.
@@ -2720,6 +2929,9 @@ pub fn player_matches_target_filter(
         TargetFilter::Any | TargetFilter::Player => true,
         TargetFilter::SelfRef => false, // SelfRef refers to objects, not players
         TargetFilter::Controller => source_controller == Some(player_id),
+        // CR 109.5: Without ability context, OriginalController is indistinguishable
+        // from Controller — both refer to the source controller in this matcher.
+        TargetFilter::OriginalController => source_controller == Some(player_id),
         TargetFilter::ScopedPlayer => false,
         TargetFilter::Typed(ref tf) if tf.type_filters.is_empty() => match &tf.controller {
             Some(ControllerRef::You) => source_controller == Some(player_id),
@@ -2729,6 +2941,7 @@ pub fn player_matches_target_filter(
             // a filter without ability context. Fail closed (mirrors the pattern
             // established at filter.rs:526–569 for spell-record filters).
             Some(ControllerRef::TargetPlayer) => false,
+            Some(ControllerRef::ParentTargetController) => false,
             Some(ControllerRef::DefendingPlayer) => false,
             None => true,
         },
@@ -2751,8 +2964,8 @@ mod tests {
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, AggregateFunction, AttachmentKind, ChosenAttribute,
         Comparator, ControllerRef, Effect, FilterProp, ManaContribution, ManaProduction,
-        PlayerScope, QuantityExpr, QuantityRef, ReplacementDefinition, StaticDefinition,
-        TargetFilter, TriggerDefinition,
+        PlayerScope, QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility,
+        StaticDefinition, TargetFilter, TargetRef, TriggerDefinition,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::events::GameEvent;
@@ -2914,6 +3127,47 @@ mod tests {
         assert!(matches_target_filter(&state, bird, &filter, bird));
     }
 
+    /// CR 120.6 + CR 120.9 (audit H2): "Was dealt damage this turn" must consult
+    /// the damage-event history, not `damage_marked`. Per CR 120.6 marked damage
+    /// is removed when the permanent regenerates, but the historical fact (CR 120.9)
+    /// survives — so a creature that was dealt damage and then regenerated must
+    /// still be a legal target for "destroy target creature that was dealt damage
+    /// this turn" (Fatal Blow). The pre-fix implementation read `damage_marked`
+    /// and silently lost the fact.
+    #[test]
+    fn was_dealt_damage_this_turn_survives_regeneration() {
+        use crate::types::game_state::DamageRecord;
+
+        let mut state = setup();
+        let creature = add_creature(&mut state, PlayerId(0), "Wall of Resistance");
+        let damage_source = add_creature(&mut state, PlayerId(1), "Goblin Piker");
+
+        // Push the historical record, then simulate regeneration (CR 120.6:
+        // "All damage marked on a permanent is removed when it regenerates").
+        state.damage_dealt_this_turn.push(DamageRecord {
+            source_id: damage_source,
+            source_controller: PlayerId(1),
+            target: TargetRef::Object(creature),
+            amount: 2,
+            is_combat: true,
+        });
+        state.objects.get_mut(&creature).unwrap().damage_marked = 0;
+
+        let filter = TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::WasDealtDamageThisTurn]),
+        );
+        assert!(
+            matches_target_filter(&state, creature, &filter, creature),
+            "Fatal Blow target must remain legal after the creature regenerates"
+        );
+
+        // Negative control: an undamaged creature does not match.
+        let untouched = add_creature(&mut state, PlayerId(0), "Grizzly Bears");
+        assert!(!matches_target_filter(
+            &state, untouched, &filter, untouched
+        ));
+    }
+
     #[test]
     fn spell_record_matches_qualified_filter() {
         let record = SpellCastRecord {
@@ -2924,6 +3178,7 @@ mod tests {
             colors: vec![ManaColor::Blue],
             mana_value: 3,
             has_x_in_cost: false,
+            from_zone: Zone::Hand,
         };
         let filter = TargetFilter::Typed(
             TypedFilter::creature()
@@ -2962,9 +3217,11 @@ mod tests {
             colors: vec![],
             mana_value: 3,
             has_x_in_cost: true,
+            from_zone: Zone::Hand,
         };
         let non_x_record = SpellCastRecord {
             has_x_in_cost: false,
+            from_zone: Zone::Hand,
             ..x_record.clone()
         };
         let filter = TargetFilter::Typed(
@@ -2978,6 +3235,39 @@ mod tests {
             !spell_record_matches_filter(&non_x_record, &filter, PlayerId(0), &[]),
             "record without X in cost must NOT match HasXInManaCost filter"
         );
+    }
+
+    #[test]
+    fn spell_record_matches_cast_origin_zone_filter() {
+        let hand_record = SpellCastRecord {
+            core_types: vec![CoreType::Creature],
+            supertypes: vec![],
+            subtypes: vec![],
+            keywords: vec![],
+            colors: vec![],
+            mana_value: 2,
+            has_x_in_cost: false,
+            from_zone: Zone::Hand,
+        };
+        let exile_record = SpellCastRecord {
+            from_zone: Zone::Exile,
+            ..hand_record.clone()
+        };
+        let filter = TargetFilter::Typed(
+            TypedFilter::default().properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
+        );
+        assert!(spell_record_matches_filter(
+            &hand_record,
+            &filter,
+            PlayerId(0),
+            &[]
+        ));
+        assert!(!spell_record_matches_filter(
+            &exile_record,
+            &filter,
+            PlayerId(0),
+            &[]
+        ));
     }
 
     #[test]
@@ -3722,6 +4012,54 @@ mod tests {
     }
 
     #[test]
+    fn most_prevalent_creature_type_in_library_matches_highest_count_type() {
+        let mut state = setup();
+        state.all_creature_types = vec!["Elf".to_string(), "Goblin".to_string()];
+
+        let goblin_one = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Goblin One".to_string(),
+            Zone::Library,
+        );
+        let goblin_two = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Goblin Two".to_string(),
+            Zone::Library,
+        );
+        let elf = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Elf".to_string(),
+            Zone::Library,
+        );
+        for (id, subtype) in [(goblin_one, "Goblin"), (goblin_two, "Goblin"), (elf, "Elf")] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push(subtype.to_string());
+        }
+
+        let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::MostPrevalentCreatureTypeIn {
+                zone: Zone::Library,
+                scope: ControllerRef::You,
+            },
+        ]));
+
+        assert!(matches_target_filter(
+            &state, goblin_one, &filter, goblin_one
+        ));
+        assert!(matches_target_filter(
+            &state, goblin_two, &filter, goblin_two
+        ));
+        assert!(!matches_target_filter(&state, elf, &filter, elf));
+    }
+
+    #[test]
     fn shares_quality_creature_type_fails_with_no_shared_subtype() {
         let mut state = setup();
         state.all_creature_types = vec!["Elf".to_string(), "Goblin".to_string()];
@@ -3802,6 +4140,60 @@ mod tests {
 
         assert!(matches_target_filter(&state, blue, &filter, source));
         assert!(!matches_target_filter(&state, red, &filter, source));
+    }
+
+    #[test]
+    fn shares_total_power_toughness_with_parent_target_matches_per_object() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Wild Pair");
+        let entered = add_creature(&mut state, PlayerId(0), "Entered Creature");
+        {
+            let obj = state.objects.get_mut(&entered).unwrap();
+            obj.power = Some(2);
+            obj.toughness = Some(3);
+        }
+        let matching = add_creature(&mut state, PlayerId(0), "Matching Creature");
+        {
+            let obj = state.objects.get_mut(&matching).unwrap();
+            obj.power = Some(4);
+            obj.toughness = Some(1);
+        }
+        let nonmatching = add_creature(&mut state, PlayerId(0), "Nonmatching Creature");
+        {
+            let obj = state.objects.get_mut(&nonmatching).unwrap();
+            obj.power = Some(3);
+            obj.toughness = Some(3);
+        }
+        let ability = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: None,
+                selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
+            },
+            vec![TargetRef::Object(entered)],
+            source,
+            PlayerId(0),
+        );
+        let ctx = FilterContext::from_ability(&ability);
+        let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::SharesQuality {
+                quality: SharedQuality::TotalPowerToughness,
+                reference: Some(Box::new(TargetFilter::ParentTarget)),
+                relation: SharedQualityRelation::Shares,
+            },
+        ]));
+
+        assert!(super::matches_target_filter(
+            &state, matching, &filter, &ctx
+        ));
+        assert!(!super::matches_target_filter(
+            &state,
+            nonmatching,
+            &filter,
+            &ctx
+        ));
     }
 
     #[test]
@@ -4281,6 +4673,32 @@ mod tests {
         assert!(!matches_target_filter(
             &state,
             growth,
+            &TargetFilter::HasChosenName,
+            source,
+        ));
+    }
+
+    /// CR 201.2: HasChosenName must compare names case-insensitively to
+    /// match the spell-cast prohibition path (`cant_cast_filter_matches`).
+    /// Without parity Pithing Needle would silently miss target sources whose
+    /// name differs from the player UI prompt only by casing.
+    #[test]
+    fn has_chosen_name_matches_case_insensitively() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Sorcerer");
+        let bolt = add_creature(&mut state, PlayerId(0), "Lightning Bolt");
+
+        // Player typed all-lowercase — must still match the printed name "Lightning Bolt".
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::CardName("lightning bolt".to_string()));
+
+        assert!(matches_target_filter(
+            &state,
+            bolt,
             &TargetFilter::HasChosenName,
             source,
         ));
@@ -5592,6 +6010,7 @@ mod tests {
                 colors: Vec::new(),
                 mana_value: 0,
                 has_x_in_cost: false,
+                from_zone: Zone::Hand,
             }
         };
 
@@ -5914,6 +6333,65 @@ mod tests {
         ));
     }
 
+    /// CR 400.7 + CR 700.4: A live object can be selected by same-turn zone
+    /// history phrases like "cards in your graveyard that were put there from
+    /// the battlefield this turn".
+    #[test]
+    fn zone_changed_this_turn_matches_live_object_history() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        let card = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Salvage Target".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&card)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        state
+            .zone_changes_this_turn
+            .push(ZoneChangeRecord::test_minimal(
+                card,
+                Some(Zone::Battlefield),
+                Zone::Graveyard,
+            ));
+
+        let filter = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Artifact)
+                .controller(ControllerRef::You)
+                .properties(vec![
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                    FilterProp::ZoneChangedThisTurn {
+                        from: Some(Zone::Battlefield),
+                        to: Some(Zone::Graveyard),
+                    },
+                ]),
+        );
+        assert!(matches_target_filter(&state, card, &filter, source));
+
+        let wrong_destination =
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(vec![
+                FilterProp::ZoneChangedThisTurn {
+                    from: Some(Zone::Battlefield),
+                    to: Some(Zone::Exile),
+                },
+            ]));
+        assert!(!matches_target_filter(
+            &state,
+            card,
+            &wrong_destination,
+            source
+        ));
+    }
+
     /// CR 702.73a: Stack cascade (Ur-Dragon ReduceCost). Spell-record snapshots
     /// must honour Changeling — `Subtype: Dragon` matches Mistform Ultimus on
     /// the stack via `spell_record_matches_filter`.
@@ -5928,6 +6406,7 @@ mod tests {
             colors: vec![],
             mana_value: 7,
             has_x_in_cost: false,
+            from_zone: Zone::Hand,
         };
         let dragon_filter = make_subtype_filter("Dragon");
         let plains_filter = make_subtype_filter("Plains");

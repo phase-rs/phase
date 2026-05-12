@@ -363,7 +363,8 @@ fn redundancy_delta(
         // die this turn, exile it instead"). Its value depends on whether the
         // target later triggers the replacement event — no static redundancy
         // signal available.
-        | Effect::AddTargetReplacement { .. } => None,
+        | Effect::AddTargetReplacement { .. }
+        | Effect::ProcessRadCounters => None,
     }
 }
 

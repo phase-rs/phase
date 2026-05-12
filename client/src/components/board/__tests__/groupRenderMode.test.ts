@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { GroupedPermanent } from "../../../viewmodel/battlefieldProps.ts";
 import {
-  getCreatureGroupRenderMode,
+  getGroupRenderMode,
   visibleCardSlotCount,
   visibleStaggerCount,
 } from "../groupRenderMode.ts";
@@ -16,43 +16,38 @@ function group(count: number): GroupedPermanent {
   };
 }
 
-describe("getCreatureGroupRenderMode", () => {
-  it("keeps one creature as a single card", () => {
-    expect(getCreatureGroupRenderMode(group(1), "creatures", {
+describe("getGroupRenderMode", () => {
+  it("keeps one permanent as a single card", () => {
+    expect(getGroupRenderMode(group(1), {
       manualExpanded: false,
       containsCommittedAttackerDuringBlockers: false,
     })).toBe("single");
   });
 
-  it("keeps two to four matching creatures staggered", () => {
+  it("keeps two to four matching permanents staggered", () => {
     for (const count of [2, 3, 4]) {
-      expect(getCreatureGroupRenderMode(group(count), "creatures", {
+      expect(getGroupRenderMode(group(count), {
         manualExpanded: false,
         containsCommittedAttackerDuringBlockers: false,
       })).toBe("staggered");
     }
   });
 
-  it("collapses five or more matching creatures", () => {
-    expect(getCreatureGroupRenderMode(group(5), "creatures", {
-      manualExpanded: false,
-      containsCommittedAttackerDuringBlockers: false,
-    })).toBe("collapsed");
-  });
-
-  it("does not collapse non-creature rows", () => {
-    expect(getCreatureGroupRenderMode(group(8), "lands", {
-      manualExpanded: false,
-      containsCommittedAttackerDuringBlockers: false,
-    })).toBe("staggered");
+  it("collapses five or more matching permanents", () => {
+    for (const count of [5, 8, 20]) {
+      expect(getGroupRenderMode(group(count), {
+        manualExpanded: false,
+        containsCommittedAttackerDuringBlockers: false,
+      })).toBe("collapsed");
+    }
   });
 
   it("lets manual expansion and committed attackers win over collapsed mode", () => {
-    expect(getCreatureGroupRenderMode(group(5), "creatures", {
+    expect(getGroupRenderMode(group(5), {
       manualExpanded: true,
       containsCommittedAttackerDuringBlockers: false,
     })).toBe("expanded");
-    expect(getCreatureGroupRenderMode(group(5), "creatures", {
+    expect(getGroupRenderMode(group(5), {
       manualExpanded: false,
       containsCommittedAttackerDuringBlockers: true,
     })).toBe("expanded");

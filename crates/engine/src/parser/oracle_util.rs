@@ -312,6 +312,7 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
                 2i32,
                 nom::bytes::complete::tag::<_, _, OracleError<'_>>("twice "),
             ),
+            nom::combinator::value(2i32, nom::bytes::complete::tag("two times ")),
             nom::combinator::value(3i32, nom::bytes::complete::tag("three times ")),
         ))
         .parse(i)
@@ -797,6 +798,7 @@ const SUBTYPES: &[&str] = &[
     "Halfling",
     "Hamster",
     "Harpy",
+    "Head",
     "Hellion",
     "Hippo",
     "Hippogriff",
@@ -2121,6 +2123,24 @@ mod tests {
             other => panic!("expected Multiply, got {other:?}"),
         }
         assert_eq!(rest, "stun counters");
+    }
+
+    #[test]
+    fn parse_count_expr_two_times_x() {
+        let (qty, rest) = parse_count_expr("two times X life").unwrap();
+        match qty {
+            QuantityExpr::Multiply { factor, inner } => {
+                assert_eq!(factor, 2);
+                assert!(matches!(
+                    *inner,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { .. }
+                    }
+                ));
+            }
+            other => panic!("expected Multiply, got {other:?}"),
+        }
+        assert_eq!(rest, "life");
     }
 
     #[test]

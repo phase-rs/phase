@@ -54,6 +54,26 @@ fn register_transient_effect(
 ) {
     let modifications = snapshot_transient_modifications(state, ability, &static_def.modifications);
 
+    // CR 608.2c (issue #323 class): SelfRef is the printed-name anaphor and
+    // always refers to the source object regardless of `ability.targets`.
+    // Short-circuit BEFORE the chosen-targets branch so chained Effect
+    // sub-abilities with `target: SelfRef` don't inherit the parent's targets
+    // via chain propagation in `effects::mod.rs::resolve_ability_chain`.
+    let resolved_filter = target_filter.or(static_def.affected.as_ref());
+    if matches!(resolved_filter, Some(TargetFilter::SelfRef)) {
+        state.add_transient_continuous_effect(
+            ability.source_id,
+            ability.controller,
+            duration.clone(),
+            TargetFilter::SpecificObject {
+                id: ability.source_id,
+            },
+            modifications,
+            static_def.condition.clone(),
+        );
+        return;
+    }
+
     // Targeted effects: register one transient effect per target object
     if !ability.targets.is_empty() {
         for target in &ability.targets {
@@ -71,20 +91,8 @@ fn register_transient_effect(
         return;
     }
 
-    // Non-targeted: resolve the affected filter
-    match target_filter.or(static_def.affected.as_ref()) {
-        Some(TargetFilter::SelfRef) => {
-            state.add_transient_continuous_effect(
-                ability.source_id,
-                ability.controller,
-                duration.clone(),
-                TargetFilter::SpecificObject {
-                    id: ability.source_id,
-                },
-                modifications.clone(),
-                static_def.condition.clone(),
-            );
-        }
+    // Non-targeted: resolve the affected filter (SelfRef handled above).
+    match resolved_filter {
         // CR 113.10 + CR 702.16j: Player-scoped affected filter — register the
         // transient effect bound to the ability's controller (a player) via
         // SpecificPlayer. Queried by player_has_protection_from_everything

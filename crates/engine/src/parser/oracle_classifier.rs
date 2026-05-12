@@ -166,6 +166,7 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     "power and toughness are each equal to",
     "must be blocked",
     "can't gain life",
+    "can't pay life",
     "can't win the game",
     "can't lose the game",
     "don't lose the game",
@@ -190,6 +191,7 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     "can't draw cards",
     "can cast spells only during",
     "activated abilities can't be activated",
+    "to cast spells or activate abilities",
     // CR 602.5 + CR 603.2a: Clarion/Karn-class global filter-scoped activation prohibition.
     // The "of ..." infix between "abilities" and "can't be activated" blocks the contiguous
     // scan above; recognize the dispatched prefix separately so parse_static_line is reached.

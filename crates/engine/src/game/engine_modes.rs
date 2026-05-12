@@ -6,7 +6,8 @@ use crate::types::mana::ManaCost;
 use super::ability_utils::{
     assign_targets_in_chain, auto_select_targets_for_ability, begin_target_selection_for_ability,
     build_chained_resolved, build_target_slots, flatten_targets_in_chain,
-    record_modal_mode_choices, target_constraints_from_modal, validate_modal_indices,
+    random_select_targets_for_ability, record_modal_mode_choices, target_constraints_from_modal,
+    validate_modal_indices,
 };
 use super::casting;
 use super::engine::EngineError;
@@ -99,9 +100,23 @@ fn handle_activated_mode_choice(
     let target_constraints = target_constraints_from_modal(&modal);
 
     if !target_slots.is_empty() {
-        if let Some(targets) =
+        // CR 115.1 + CR 701.9b: Random-target modal activated abilities — the
+        // game picks each target via `state.rng`. Same auto-resolve shape as the
+        // controller-choice degenerate path; routes to push without prompting.
+        let resolved_targets = if matches!(
+            resolved.target_selection_mode,
+            crate::types::ability::TargetSelectionMode::Random
+        ) {
+            Some(random_select_targets_for_ability(
+                state,
+                &target_slots,
+                &target_constraints,
+            )?)
+        } else {
             auto_select_targets_for_ability(state, &resolved, &target_slots, &target_constraints)?
-        {
+        };
+
+        if let Some(targets) = resolved_targets {
             let mut resolved = resolved;
             assign_targets_in_chain(state, &mut resolved, &targets)?;
 
@@ -192,6 +207,10 @@ fn handle_activated_mode_choice(
     }
 
     events.push(GameEvent::AbilityActivated { source_id });
+    // CR 702.142b: Emit additional event when a boast ability is activated.
+    if let Some(index) = ability_index {
+        super::casting_targets::emit_boast_event_if_tagged(state, source_id, index, player, events);
+    }
     state.priority_passes.clear();
     state.priority_pass_count = 0;
     Ok(WaitingFor::Priority { player })
@@ -229,12 +248,27 @@ fn handle_triggered_mode_choice(
     trigger.mode_abilities.clear();
 
     if !target_slots.is_empty() {
-        if let Some(targets) = auto_select_targets_for_ability(
-            state,
-            &trigger.ability,
-            &target_slots,
-            &target_constraints,
-        )? {
+        // CR 115.1 + CR 701.9b: Random-target triggered abilities — game picks
+        // via `state.rng` instead of prompting the controller.
+        let resolved_targets = if matches!(
+            trigger.ability.target_selection_mode,
+            crate::types::ability::TargetSelectionMode::Random
+        ) {
+            Some(random_select_targets_for_ability(
+                state,
+                &target_slots,
+                &target_constraints,
+            )?)
+        } else {
+            auto_select_targets_for_ability(
+                state,
+                &trigger.ability,
+                &target_slots,
+                &target_constraints,
+            )?
+        };
+
+        if let Some(targets) = resolved_targets {
             let mut resolved = trigger.ability.clone();
             assign_targets_in_chain(state, &mut resolved, &targets)?;
             engine_stack::finalize_trigger_target_selection(state, trigger, resolved, events);

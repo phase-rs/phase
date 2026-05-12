@@ -194,9 +194,13 @@ fn build_fight_damage_node(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{Effect, TargetFilter};
+    use crate::types::ability::{
+        AbilityCondition, Comparator, Effect, ManaContribution, ManaProduction, QuantityExpr,
+        QuantityRef, TargetFilter,
+    };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::mana::{ManaColor, ManaType};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -269,6 +273,78 @@ mod tests {
             .filter(|e| matches!(e, GameEvent::DamageDealt { .. }))
             .collect();
         assert_eq!(damage_events.len(), 2);
+    }
+
+    #[test]
+    fn fight_threads_target_excess_damage_to_followup_quantity() {
+        let mut state = GameState::new_two_player(42);
+        let bear = make_creature(&mut state, PlayerId(0), "Bear", 3, 3);
+        let wall = make_creature(&mut state, PlayerId(1), "Wall", 0, 2);
+        let mut ability = make_fight_ability(bear, wall);
+        let mut mana = ResolvedAbility::new(
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    },
+                    color_options: vec![ManaColor::Red],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+            vec![],
+            bear,
+            PlayerId(0),
+        );
+        mana.condition = Some(AbilityCondition::PreviousEffectAmount {
+            comparator: Comparator::GT,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        });
+        ability.sub_ability = Some(Box::new(mana));
+
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 1);
+    }
+
+    #[test]
+    fn fight_excess_damage_followup_condition_rejects_zero_excess() {
+        let mut state = GameState::new_two_player(42);
+        let bear = make_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let wall = make_creature(&mut state, PlayerId(1), "Wall", 0, 3);
+        let mut ability = make_fight_ability(bear, wall);
+        let mut mana = ResolvedAbility::new(
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    },
+                    color_options: vec![ManaColor::Red],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+            vec![],
+            bear,
+            PlayerId(0),
+        );
+        mana.condition = Some(AbilityCondition::PreviousEffectAmount {
+            comparator: Comparator::GT,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        });
+        ability.sub_ability = Some(Box::new(mana));
+
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 0);
     }
 
     #[test]

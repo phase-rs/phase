@@ -16,10 +16,37 @@ import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
 import { DRAG_PLAY_THRESHOLD } from "../../hooks/useDragToCast.ts";
 import { computeHandInsertionSlot } from "./handInsertionSlot.ts";
 
+// Horizontal overlap between adjacent hand cards. Negative margin pulls each
+// card leftward over the previous one. Tightens continuously as the hand grows
+// so a Commander-sized hand (up to ~20 cards) still fits on screen.
 function getHandOverlap(handSize: number): string {
   if (handSize <= 5) return "calc(var(--card-w) * -0.25)";
   if (handSize <= 7) return "calc(var(--card-w) * -0.45)";
-  return "calc(var(--card-w) * -0.6)";
+  // For 8+ cards: target total width ≈ 4× card width.
+  // First card occupies 1w; remaining (n-1) each contribute (1 + overlap)w.
+  // (n-1)(1 + overlap) = 3  =>  overlap = 3/(n-1) - 1, clamped to [-0.85, -0.6].
+  const overlap = Math.max(-0.85, Math.min(-0.6, 3 / (handSize - 1) - 1));
+  return `calc(var(--card-w) * ${overlap})`;
+}
+
+// Per-card rotation in degrees. Total fan span is clamped to ±18° regardless of
+// hand size, so the bigger the hand the more upright each card sits.
+function getCardRotation(index: number, handSize: number): number {
+  if (handSize <= 1) return 0;
+  const center = (handSize - 1) / 2;
+  // Cap per-card delta at 6° (preserves look for small hands), otherwise
+  // distribute a 36° total fan across the hand.
+  const delta = Math.min(6, 36 / (handSize - 1));
+  return (index - center) * delta;
+}
+
+// Quadratic arc lift coefficient. Scales down as the hand grows so the parabola
+// stays inside the hand band instead of pushing edge cards off-screen.
+function getArcCoefficient(handSize: number): number {
+  if (handSize <= 7) return 6;
+  // Keep max arc lift (at the edges) roughly constant at ~54px.
+  const maxDist = (handSize - 1) / 2;
+  return 54 / (maxDist * maxDist);
 }
 
 export function PlayerHand() {
@@ -208,8 +235,6 @@ export function PlayerHand() {
     .map((id) => objects[id])
     .filter((obj) => obj && obj.id !== pendingObjectId);
 
-  const center = (handObjects.length - 1) / 2;
-
   return (
     <div
       ref={handContainerRef}
@@ -225,7 +250,7 @@ export function PlayerHand() {
     >
       <AnimatePresence>
         {handObjects.map((obj, i) => {
-          const rotation = (i - center) * 6;
+          const rotation = getCardRotation(i, handObjects.length);
           const isPlayable = hasPriority && playableObjectIds.has(Number(obj.id));
 
           return (
@@ -331,9 +356,10 @@ const HandCard = memo(function HandCard({
       : "opacity-60"
     : "";
 
-  // Quadratic arc: cards further from center drop more, forming a natural parabola
+  // Quadratic arc: cards further from center drop more, forming a natural parabola.
+  // Coefficient scales down with hand size so edge cards don't fly off-screen.
   const distFromCenter = Math.abs(index - (handSize - 1) / 2);
-  const arcOffset = distFromCenter * distFromCenter * 6;
+  const arcOffset = distFromCenter * distFromCenter * getArcCoefficient(handSize);
 
   return (
     <motion.div

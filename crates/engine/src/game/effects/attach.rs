@@ -161,6 +161,28 @@ pub fn attach_to_player(state: &mut GameState, attachment_id: ObjectId, target_p
     state.layers_dirty = true;
 }
 
+/// CR 701.3d: Move an Equipment away from the object it is equipping while it
+/// remains on the battlefield. This is the single graph update primitive for
+/// explicit unattach costs and effects.
+pub(crate) fn unattach(state: &mut GameState, attachment_id: ObjectId) {
+    let Some(old_target_id) = state
+        .objects
+        .get(&attachment_id)
+        .and_then(|obj| obj.attached_to)
+        .and_then(|target| target.as_object())
+    else {
+        return;
+    };
+
+    if let Some(old_target) = state.objects.get_mut(&old_target_id) {
+        old_target.attachments.retain(|&id| id != attachment_id);
+    }
+    if let Some(attachment) = state.objects.get_mut(&attachment_id) {
+        attachment.attached_to = None;
+    }
+    state.layers_dirty = true;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

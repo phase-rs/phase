@@ -430,6 +430,14 @@ pub enum GameEvent {
         source_id: ObjectId,
     },
 
+    /// CR 702.142b: A boast ability was activated. Emitted alongside AbilityActivated
+    /// when the activated ability has `ability_tag == Some(AbilityTag::Boast)`.
+    /// Enables "whenever you activate a boast ability" triggers.
+    BoastAbilityActivated {
+        player_id: PlayerId,
+        source_id: ObjectId,
+    },
+
     /// CR 702.110: A creature exploited another creature (sacrificed via exploit ETB).
     CreatureExploited {
         exploiter: ObjectId,
@@ -499,6 +507,24 @@ pub enum GameEvent {
         controller: PlayerId,
         source_id: ObjectId,
         exiled_count: u32,
+    },
+    /// Sandbox audit log: a player with debug permission submitted a
+    /// `GameAction::Debug(_)`. `description` is the engine-authored summary
+    /// from `DebugAction::describe`; the FE renders it verbatim.
+    DebugActionUsed {
+        player_id: PlayerId,
+        description: String,
+    },
+    /// Sandbox audit log: the host granted a player permission to submit
+    /// `GameAction::Debug(_)`.
+    DebugPermissionGranted {
+        host: PlayerId,
+        player_id: PlayerId,
+    },
+    /// Sandbox audit log: the host revoked a player's debug permission.
+    DebugPermissionRevoked {
+        host: PlayerId,
+        player_id: PlayerId,
     },
 }
 

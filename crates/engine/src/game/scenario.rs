@@ -1131,6 +1131,7 @@ impl GameRunner {
             WaitingFor::TargetSelection { .. } => "TargetSelection",
             WaitingFor::DeclareAttackers { .. } => "DeclareAttackers",
             WaitingFor::DeclareBlockers { .. } => "DeclareBlockers",
+            WaitingFor::UntapChoice { .. } => "UntapChoice",
             WaitingFor::GameOver { .. } => "GameOver",
             WaitingFor::ReplacementChoice { .. } => "ReplacementChoice",
             WaitingFor::CopyTargetChoice { .. } => "CopyTargetChoice",

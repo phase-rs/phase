@@ -97,6 +97,31 @@ fn lifelink_first_strike_gains_life_in_first_step() {
     );
 }
 
+/// CR 702.15b + CR 702.4b: Lifelink + double strike — controller gains life in
+/// both first-strike and regular damage steps. Regression coverage for GH #324.
+#[test]
+fn lifelink_double_strike_credits_in_both_steps() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker_id = {
+        let mut b = scenario.add_creature(P0, "Mirran Crusader", 2, 2);
+        b.lifelink().double_strike();
+        b.id()
+    };
+    let mut runner = scenario.build();
+
+    // Unblocked: 2 damage in first-strike step + 2 damage in regular step.
+    run_combat(&mut runner, vec![attacker_id], vec![]);
+
+    // CR 702.15b: 4 total damage dealt across both steps → 4 life gained.
+    assert_eq!(
+        runner.life(P0),
+        24,
+        "Lifelink + double strike should credit life in both damage steps"
+    );
+    assert_eq!(runner.life(P1), 16, "Defender takes 4 damage total");
+}
+
 /// CR 702.9a + CR 702.3a: Flying blocked only by flying or reach
 #[test]
 fn flying_cannot_be_blocked_by_ground_creature() {

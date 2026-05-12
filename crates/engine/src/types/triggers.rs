@@ -197,6 +197,8 @@ pub enum TriggerMode {
     CycledOrDiscarded,
     /// CR 702.49a: Triggers when a player activates a ninjutsu-family ability.
     NinjutsuActivated,
+    /// CR 702.142b: Triggers when a player activates a boast ability.
+    BoastAbilityActivated,
     /// CR 702.100: Evolve trigger — when a creature enters with greater power/toughness.
     Evolved,
     /// CR 701.44: Triggers when a creature explores.
@@ -447,6 +449,7 @@ impl FromStr for TriggerMode {
             "Mutates" => TriggerMode::Mutates,
             "NewGame" => TriggerMode::NewGame,
             "NinjutsuActivated" => TriggerMode::NinjutsuActivated,
+            "BoastAbilityActivated" => TriggerMode::BoastAbilityActivated,
             "PayCumulativeUpkeep" => TriggerMode::PayCumulativeUpkeep,
             "PayEcho" => TriggerMode::PayEcho,
             "PayLife" => TriggerMode::PayLife,
@@ -706,6 +709,7 @@ mod tests {
             "Mutates",
             "NewGame",
             "NinjutsuActivated",
+            "BoastAbilityActivated",
             "PayCumulativeUpkeep",
             "PayEcho",
             "PayLife",

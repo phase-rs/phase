@@ -98,6 +98,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         GameEvent::SpellCast { .. }
         | GameEvent::AbilityActivated { .. }
         | GameEvent::NinjutsuActivated { .. }
+        | GameEvent::BoastAbilityActivated { .. }
         | GameEvent::StackPushed { .. }
         | GameEvent::StackResolved { .. }
         | GameEvent::SpellCountered { .. } => LogCategory::Stack,
@@ -192,6 +193,10 @@ fn categorize(event: &GameEvent) -> LogCategory {
         GameEvent::CombatTaxPaid { .. } | GameEvent::CombatTaxDeclined { .. } => {
             LogCategory::Combat
         }
+
+        GameEvent::DebugActionUsed { .. }
+        | GameEvent::DebugPermissionGranted { .. }
+        | GameEvent::DebugPermissionRevoked { .. } => LogCategory::Special,
     }
 }
 
@@ -244,6 +249,15 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         } => vec![
             player_seg(state, *player_id),
             text(" activates ninjutsu: "),
+            card_seg(state, *source_id),
+        ],
+
+        GameEvent::BoastAbilityActivated {
+            player_id,
+            source_id,
+        } => vec![
+            player_seg(state, *player_id),
+            text(" activates boast: "),
             card_seg(state, *source_id),
         ],
 
@@ -883,6 +897,25 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(" cascaded but found no eligible card ("),
             num(*exiled_count as i32),
             text(" cards exiled)"),
+        ],
+
+        GameEvent::DebugActionUsed {
+            player_id,
+            description,
+        } => vec![
+            player_seg(state, *player_id),
+            text(" used debug: "),
+            text(description),
+        ],
+        GameEvent::DebugPermissionGranted { host, player_id } => vec![
+            player_seg(state, *host),
+            text(" granted debug actions to "),
+            player_seg(state, *player_id),
+        ],
+        GameEvent::DebugPermissionRevoked { host, player_id } => vec![
+            player_seg(state, *host),
+            text(" revoked debug actions from "),
+            player_seg(state, *player_id),
         ],
     }
 }

@@ -19,6 +19,18 @@ use crate::schema::types::{
     Permanent, Permanents, PlaneswalkerType, Player, Players, SuperType,
 };
 
+fn color_count_prop(comparator: Comparator, count: u8) -> FilterProp {
+    FilterProp::ColorCount { comparator, count }
+}
+
+fn colorless_prop() -> FilterProp {
+    color_count_prop(Comparator::EQ, 0)
+}
+
+fn multicolored_prop() -> FilterProp {
+    color_count_prop(Comparator::GE, 2)
+}
+
 /// Translate a `Permanents` filter to an engine `TargetFilter`. Returns
 /// `Err(MalformedIdiom)` for shapes we don't yet support, so callers can
 /// degrade gracefully (the keyword arm in turn fails the rule).
@@ -192,9 +204,9 @@ pub fn convert(p: &Permanents) -> ConvResult<TargetFilter> {
         Permanents::IsNonToken => prop_filter(FilterProp::NonToken),
 
         // CR 105.2c: colorless filter.
-        Permanents::IsColorless => prop_filter(FilterProp::Colorless),
-        // CR 105.1: multicolored — has 2+ colors.
-        Permanents::IsMulticolored => prop_filter(FilterProp::Multicolored),
+        Permanents::IsColorless => prop_filter(colorless_prop()),
+        // CR 105.2b: multicolored — has 2+ colors.
+        Permanents::IsMulticolored => prop_filter(multicolored_prop()),
 
         // CR 700.9: "modified" — has counters, is equipped, or enchanted by
         // an Aura its controller controls.
@@ -904,11 +916,11 @@ pub(crate) fn spells_to_filter(s: &crate::schema::types::Spells) -> ConvResult<T
                 }
             },
             S::IsColorless => {
-                TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Colorless]))
+                TargetFilter::Typed(TypedFilter::default().properties(vec![colorless_prop()]))
             }
-            S::IsMulticolored => TargetFilter::Typed(
-                TypedFilter::default().properties(vec![FilterProp::Multicolored]),
-            ),
+            S::IsMulticolored => {
+                TargetFilter::Typed(TypedFilter::default().properties(vec![multicolored_prop()]))
+            }
             // CR 700.6: "historic" — legendary, artifact, or Saga.
             S::IsHistoric => {
                 TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Historic]))
@@ -1132,11 +1144,11 @@ pub(crate) fn cards_in_graveyard_to_filter(
                 }
             },
             C::IsColorless => {
-                TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Colorless]))
+                TargetFilter::Typed(TypedFilter::default().properties(vec![colorless_prop()]))
             }
-            C::IsMulticolored => TargetFilter::Typed(
-                TypedFilter::default().properties(vec![FilterProp::Multicolored]),
-            ),
+            C::IsMulticolored => {
+                TargetFilter::Typed(TypedFilter::default().properties(vec![multicolored_prop()]))
+            }
             C::IsHistoric => {
                 TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Historic]))
             }
@@ -1323,11 +1335,11 @@ pub(crate) fn cards_to_filter(c: &crate::schema::types::Cards) -> ConvResult<Tar
                 }
             },
             C::IsColorless => {
-                TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Colorless]))
+                TargetFilter::Typed(TypedFilter::default().properties(vec![colorless_prop()]))
             }
-            C::IsMulticolored => TargetFilter::Typed(
-                TypedFilter::default().properties(vec![FilterProp::Multicolored]),
-            ),
+            C::IsMulticolored => {
+                TargetFilter::Typed(TypedFilter::default().properties(vec![multicolored_prop()]))
+            }
 
             // CR 700.6: "historic" — legendary, artifact, or Saga.
             C::IsHistoric => {

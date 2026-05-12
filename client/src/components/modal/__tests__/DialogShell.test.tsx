@@ -57,7 +57,7 @@ describe("DialogShell", () => {
 
   it("shows the peek button when rendered inside DialogHost", () => {
     useGameStore.setState({
-      waitingFor: { type: "ModeChoice", data: {} } as never,
+      waitingFor: { type: "ModeChoice", data: { player: 0 } } as never,
     });
     render(
       <DialogHost>

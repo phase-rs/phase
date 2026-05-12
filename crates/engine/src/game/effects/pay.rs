@@ -1,4 +1,4 @@
-use crate::game::life_costs::{pay_life_as_cost, PayLifeCostResult};
+use crate::game::life_costs::{can_pay_life_cost, pay_life_as_cost, PayLifeCostResult};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::speed::{effective_speed, set_speed};
 use crate::game::targeting::resolve_effect_player_ref;
@@ -83,7 +83,7 @@ pub fn resolve(
             let amount = u32::try_from(amount.max(0)).unwrap_or(0);
             match pay_life_as_cost(state, payer, amount, events) {
                 PayLifeCostResult::Paid { .. } => {}
-                PayLifeCostResult::InsufficientLife | PayLifeCostResult::LockedCantLoseLife => {
+                PayLifeCostResult::InsufficientLife | PayLifeCostResult::Prohibited => {
                     state.cost_payment_failed_flag = true;
                 }
             }
@@ -166,6 +166,59 @@ fn resolve_ability_cost_payment(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     match cost {
+        AbilityCost::Mana { cost: mana_cost } => {
+            if !casting::can_pay_cost_after_auto_tap(state, payer, ability.source_id, mana_cost) {
+                state.cost_payment_failed_flag = true;
+                return Ok(());
+            }
+            let _ = casting::pay_unless_cost(state, payer, mana_cost, events);
+        }
+        AbilityCost::PayLife { amount } => {
+            let amount = resolve_quantity_with_targets(state, amount, ability);
+            let amount = u32::try_from(amount.max(0)).unwrap_or(0);
+            match pay_life_as_cost(state, payer, amount, events) {
+                PayLifeCostResult::Paid { .. } => {}
+                PayLifeCostResult::InsufficientLife | PayLifeCostResult::Prohibited => {
+                    state.cost_payment_failed_flag = true;
+                }
+            }
+        }
+        // CR 107.14: Remove the indicated number of energy counters from `payer`.
+        // Mirrors the pattern in `PaymentCost::Energy` above.
+        AbilityCost::PayEnergy { amount } => {
+            let can_pay = state
+                .players
+                .iter()
+                .find(|p| p.id == payer)
+                .is_some_and(|p| p.energy >= *amount);
+            if can_pay {
+                if let Some(p) = state.players.iter_mut().find(|p| p.id == payer) {
+                    p.energy -= *amount;
+                    events.push(GameEvent::EnergyChanged {
+                        player: payer,
+                        delta: -(*amount as i32),
+                    });
+                }
+            } else {
+                state.cost_payment_failed_flag = true;
+            }
+        }
+        AbilityCost::Composite { costs } => {
+            if !costs
+                .iter()
+                .all(|cost| can_pay_resolution_ability_cost(state, ability, payer, cost))
+            {
+                state.cost_payment_failed_flag = true;
+                return Ok(());
+            }
+            for cost in costs {
+                let prior_waiting_for = state.waiting_for.clone();
+                resolve_ability_cost_payment(state, ability, payer, cost, events)?;
+                if state.cost_payment_failed_flag || state.waiting_for != prior_waiting_for {
+                    break;
+                }
+            }
+        }
         AbilityCost::Discard {
             count,
             filter,
@@ -220,6 +273,99 @@ fn resolve_ability_cost_payment(
         }
     }
     Ok(())
+}
+
+/// CR 118.3: A player can't pay a cost without having the necessary resources
+/// to pay it fully. Returns whether `payer` could pay `cost` right now, used
+/// as the pre-flight check inside a `Composite` so the resolver can fail fast
+/// before mutating state. Exhaustive over `AbilityCost` (no wildcard arm) so
+/// any future variant forces a deliberate decision here.
+fn can_pay_resolution_ability_cost(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    payer: PlayerId,
+    cost: &AbilityCost,
+) -> bool {
+    match cost {
+        AbilityCost::Mana { cost: mana_cost } => {
+            casting::can_pay_cost_after_auto_tap(state, payer, ability.source_id, mana_cost)
+        }
+        // CR 118.4 + CR 107.3c: Resolve the dynamic generic to a concrete
+        // amount, then check mana payability. Dynamic-generic ability costs
+        // appear primarily in unless-pay contexts; activation paths normally
+        // pre-resolve to `Mana { cost }` upstream.
+        AbilityCost::ManaDynamic { quantity } => {
+            let amount = resolve_quantity_with_targets(state, quantity, ability);
+            let mana = crate::types::mana::ManaCost::generic(amount.max(0) as u32);
+            casting::can_pay_cost_after_auto_tap(state, payer, ability.source_id, &mana)
+        }
+        // CR 119.4: Pay life requires the player's life total to be at least the
+        // payment amount (and no CantLoseLife lock).
+        AbilityCost::PayLife { amount } => {
+            let amount = resolve_quantity_with_targets(state, amount, ability);
+            let amount = u32::try_from(amount.max(0)).unwrap_or(0);
+            can_pay_life_cost(state, payer, amount)
+        }
+        // CR 107.14: Pay {E} requires that many energy counters.
+        AbilityCost::PayEnergy { amount } => state
+            .players
+            .iter()
+            .find(|p| p.id == payer)
+            .is_some_and(|p| p.energy >= *amount),
+        // CR 702.179f: Pay speed requires that much current speed.
+        AbilityCost::PaySpeed { amount } => {
+            let amount = resolve_quantity_with_targets(state, amount, ability);
+            let amount = u8::try_from(amount.max(0)).unwrap_or(u8::MAX);
+            crate::game::speed::effective_speed(state, payer) >= amount
+        }
+        // CR 701.9: Discard requires `count` eligible cards in the payer's hand
+        // (matching `filter` if present). `random` and `self_ref` do not affect
+        // affordability — random discard still needs the card count, and a
+        // self-ref discard requires the source to be in hand. Defer those
+        // shape-specific checks until commitment time.
+        AbilityCost::Discard {
+            count,
+            filter,
+            random: _,
+            self_ref: _,
+        } => {
+            let count = u32::try_from(resolve_quantity_with_targets(state, count, ability).max(0))
+                .unwrap_or(0) as usize;
+            let eligible = casting::find_eligible_discard_targets(
+                state,
+                payer,
+                ability.source_id,
+                filter.as_ref(),
+            );
+            eligible.len() >= count
+        }
+        // CR 117 + CR 118.3: Composite is payable iff every sub-cost is payable.
+        AbilityCost::Composite { costs } => costs
+            .iter()
+            .all(|cost| can_pay_resolution_ability_cost(state, ability, payer, cost)),
+        // Variants below are not yet supported as resolution-time costs.
+        // The matching arms in `resolve_ability_cost_payment` return
+        // `EffectError::InvalidParam`; refusing here is the conservative
+        // affordability answer (treat as "can't pay" → effect proceeds).
+        AbilityCost::Tap
+        | AbilityCost::Untap
+        | AbilityCost::Unattach
+        | AbilityCost::Loyalty { .. }
+        | AbilityCost::Sacrifice { .. }
+        | AbilityCost::Exile { .. }
+        | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::TapCreatures { .. }
+        | AbilityCost::RemoveCounter { .. }
+        | AbilityCost::ReturnToHand { .. }
+        | AbilityCost::Mill { .. }
+        | AbilityCost::Exert
+        | AbilityCost::Blight { .. }
+        | AbilityCost::Reveal { .. }
+        | AbilityCost::Waterbend { .. }
+        | AbilityCost::NinjutsuFamily { .. }
+        | AbilityCost::EffectCost { .. }
+        | AbilityCost::Unimplemented { .. } => false,
+    }
 }
 
 fn mana_x_shard_count(cost: &ManaCost) -> u32 {
@@ -335,6 +481,140 @@ mod tests {
         assert!(result.is_ok());
         assert!(state.cost_payment_failed_flag);
         assert_eq!(state.players[0].life, 2); // No change
+    }
+
+    #[test]
+    fn composite_mana_and_life_payment_pays_both_costs() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 20;
+        state.players[0].mana_pool.add(ManaUnit {
+            color: ManaType::Colorless,
+            source_id: ObjectId(0),
+            snow: false,
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+        });
+        let ability = make_ability(Effect::PayCost {
+            cost: PaymentCost::AbilityCost {
+                cost: AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::Cost {
+                                shards: vec![],
+                                generic: 1,
+                            },
+                        },
+                        AbilityCost::PayLife {
+                            amount: QuantityExpr::Fixed { value: 3 },
+                        },
+                    ],
+                },
+            },
+            payer: TargetFilter::Controller,
+        });
+        let mut events = Vec::new();
+        let result = resolve(&mut state, &ability, &mut events);
+        assert!(result.is_ok());
+        assert!(!state.cost_payment_failed_flag);
+        assert_eq!(state.players[0].mana_pool.mana.len(), 0);
+        assert_eq!(state.players[0].life, 17);
+    }
+
+    #[test]
+    fn composite_mana_and_life_payment_prechecks_before_mutating() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 2;
+        state.players[0].mana_pool.add(ManaUnit {
+            color: ManaType::Colorless,
+            source_id: ObjectId(0),
+            snow: false,
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+        });
+        let ability = make_ability(Effect::PayCost {
+            cost: PaymentCost::AbilityCost {
+                cost: AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::Cost {
+                                shards: vec![],
+                                generic: 1,
+                            },
+                        },
+                        AbilityCost::PayLife {
+                            amount: QuantityExpr::Fixed { value: 3 },
+                        },
+                    ],
+                },
+            },
+            payer: TargetFilter::Controller,
+        });
+        let mut events = Vec::new();
+        let result = resolve(&mut state, &ability, &mut events);
+        assert!(result.is_ok());
+        assert!(state.cost_payment_failed_flag);
+        assert_eq!(state.players[0].mana_pool.mana.len(), 1);
+        assert_eq!(state.players[0].life, 2);
+    }
+
+    /// CR 118.3 + CR 119.4 + CR 107.14: Composite of `PayLife` and `PayEnergy`.
+    /// Pre-H3 fix: `can_pay_resolution_ability_cost` had a `_ => false` arm that
+    /// silently rejected `PayEnergy`, causing the composite to fail even when
+    /// the player had both 1 life and 1 energy.
+    #[test]
+    fn composite_life_and_energy_payment_pays_both_costs() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 5;
+        state.players[0].energy = 3;
+        let ability = make_ability(Effect::PayCost {
+            cost: PaymentCost::AbilityCost {
+                cost: AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::PayLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                        },
+                        AbilityCost::PayEnergy { amount: 1 },
+                    ],
+                },
+            },
+            payer: TargetFilter::Controller,
+        });
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert!(!state.cost_payment_failed_flag);
+        assert_eq!(state.players[0].life, 4);
+        assert_eq!(state.players[0].energy, 2);
+    }
+
+    /// CR 118.3: Composite of `PayLife` + `PayEnergy` fails when the energy
+    /// component is unaffordable, and the pre-flight check prevents the life
+    /// portion from being committed (no partial payment).
+    #[test]
+    fn composite_life_and_energy_payment_fails_when_energy_insufficient() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 5;
+        state.players[0].energy = 0;
+        let ability = make_ability(Effect::PayCost {
+            cost: PaymentCost::AbilityCost {
+                cost: AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::PayLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                        },
+                        AbilityCost::PayEnergy { amount: 1 },
+                    ],
+                },
+            },
+            payer: TargetFilter::Controller,
+        });
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert!(state.cost_payment_failed_flag);
+        // CR 118.3: pre-flight rejected the composite — life total is unchanged.
+        assert_eq!(state.players[0].life, 5);
+        assert_eq!(state.players[0].energy, 0);
     }
 
     #[test]

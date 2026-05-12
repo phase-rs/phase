@@ -182,6 +182,7 @@ pub(crate) fn handle_choice(
                 pending.ability,
                 &pending.cost,
                 pending.casting_variant,
+                pending.cast_timing_permission,
                 pending.distribute,
                 pending.origin_zone,
                 events,

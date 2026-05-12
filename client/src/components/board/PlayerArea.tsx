@@ -81,7 +81,7 @@ export function PlayerArea({
   }
 
   const player = gameState.players[playerId];
-  const isCommander = gameState.format_config?.format === "Commander";
+  const isCommander = gameState.format_config?.uses_commander === true;
   const isEliminated = player?.is_eliminated ?? false;
   // CR 702.26-style player phasing: while phased out, dim the player area
   // to mirror the engine-side exclusion (targeting/damage/attack/SBA). Use
@@ -179,7 +179,7 @@ export function PlayerArea({
   return (
     <div
       className={`relative flex min-h-0 min-w-0 flex-1 overflow-visible ${
-        isEliminated || isPhasedOut ? "opacity-40 grayscale" : ""
+        isEliminated ? "opacity-40 grayscale" : isPhasedOut ? "opacity-70" : ""
       }`}
       data-testid={`player-area-${playerId}`}
       data-phased-out={isPhasedOut ? "true" : undefined}
@@ -223,13 +223,20 @@ export function PlayerArea({
           </span>
         </div>
       )}
-      {/* Phased-out badge (CR 702.26-style player phasing) */}
+      {/* Phased-out tint overlay + badge (CR 702.26-style player phasing).
+          Translucent blue evokes the "ethereal plane" reading of phasing and
+          is a stronger signal than dim-alone, which overlaps with tap/grayed
+          states. `pointer-events-none` preserves card hover/click semantics —
+          interactivity gating is an engine concern, not a visual one. */}
       {isPhasedOut && !isEliminated && (
-        <div className="absolute inset-0 z-30 flex items-center justify-center pointer-events-none">
-          <span className="rounded-lg bg-indigo-900/80 px-4 py-2 text-lg font-bold text-indigo-200">
-            Phased Out
-          </span>
-        </div>
+        <>
+          <div className="absolute inset-0 z-20 bg-sky-500/25 mix-blend-screen pointer-events-none" />
+          <div className="absolute inset-0 z-30 flex items-center justify-center pointer-events-none">
+            <span className="rounded-lg bg-indigo-900/80 px-4 py-2 text-lg font-bold text-indigo-200">
+              Phased Out
+            </span>
+          </div>
+        </>
       )}
     </div>
   );

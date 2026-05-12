@@ -1,3 +1,5 @@
+import type { DungeonId } from "../../adapter/types.ts";
+
 interface StatusBadgeProps {
   label: string;
   value?: number | string;
@@ -23,7 +25,96 @@ export function StatusBadge({
   );
 }
 
-type CounterBadgeKind = "poison" | "speed";
+export function MonarchBadge() {
+  return (
+    <span
+      role="img"
+      aria-label="Monarch"
+      title="The Monarch — draws an extra card at end of turn"
+      className="relative inline-flex h-6 min-w-6 shrink-0 items-center justify-center overflow-hidden rounded-full px-1 text-[12px] leading-none ring-1 bg-amber-400 ring-amber-200/80 shadow-[0_0_14px_rgba(251,191,36,0.55)]"
+    >
+      <span
+        aria-hidden
+        className="absolute inset-0 rounded-full bg-[radial-gradient(circle_at_30%_24%,rgba(255,255,255,0.95)_0_10%,transparent_12%),radial-gradient(circle_at_68%_30%,rgba(254,243,199,0.95)_0_7%,transparent_9%),radial-gradient(circle_at_38%_74%,rgba(180,83,9,0.7)_0_11%,transparent_13%),linear-gradient(135deg,#fffbeb_0%,#fcd34d_36%,#b45309_72%,#451a03_100%)]"
+      />
+      <span
+        aria-hidden
+        className="absolute -bottom-1 left-1/2 h-3 w-5 -translate-x-1/2 rounded-[45%] bg-amber-950/30 blur-[1px]"
+      />
+      <span className="relative drop-shadow-[0_1px_1px_rgba(0,0,0,0.45)]">👑</span>
+    </span>
+  );
+}
+
+export function InitiativeBadge() {
+  return (
+    <span
+      role="img"
+      aria-label="Initiative"
+      title="Has the Initiative — ventures into Undercity at start of upkeep"
+      className="relative inline-flex h-6 min-w-6 shrink-0 items-center justify-center overflow-hidden rounded-full px-1 text-[12px] leading-none ring-1 bg-cyan-500 ring-cyan-200/80 shadow-[0_0_14px_rgba(34,211,238,0.55)]"
+    >
+      <span
+        aria-hidden
+        className="absolute inset-0 rounded-full bg-[radial-gradient(circle_at_30%_24%,rgba(255,255,255,0.95)_0_10%,transparent_12%),radial-gradient(circle_at_68%_30%,rgba(207,250,254,0.95)_0_7%,transparent_9%),radial-gradient(circle_at_38%_74%,rgba(14,116,144,0.7)_0_11%,transparent_13%),linear-gradient(135deg,#ecfeff_0%,#67e8f9_36%,#0e7490_72%,#083344_100%)]"
+      />
+      <span
+        aria-hidden
+        className="absolute -bottom-1 left-1/2 h-3 w-5 -translate-x-1/2 rounded-[45%] bg-cyan-950/30 blur-[1px]"
+      />
+      <span className="relative drop-shadow-[0_1px_1px_rgba(0,0,0,0.5)]">🛡</span>
+    </span>
+  );
+}
+
+export function CityBlessingBadge() {
+  return (
+    <span
+      role="img"
+      aria-label="City's Blessing"
+      title="City's Blessing — controls ten or more permanents (Ascend)"
+      className="relative inline-flex h-6 min-w-6 shrink-0 items-center justify-center overflow-hidden rounded-full px-1 text-[12px] leading-none ring-1 bg-yellow-400 ring-yellow-200/80 shadow-[0_0_14px_rgba(250,204,21,0.6)]"
+    >
+      <span
+        aria-hidden
+        className="absolute inset-0 rounded-full bg-[radial-gradient(circle_at_50%_40%,rgba(255,255,255,0.95)_0_18%,transparent_22%),radial-gradient(circle_at_50%_50%,rgba(254,240,138,0.85)_0_36%,transparent_42%),linear-gradient(135deg,#fefce8_0%,#fde047_36%,#ca8a04_72%,#422006_100%)]"
+      />
+      <span className="relative drop-shadow-[0_1px_1px_rgba(0,0,0,0.4)]">☀</span>
+    </span>
+  );
+}
+
+interface DungeonBadgeProps {
+  dungeonName: DungeonId;
+  roomIndex: number;
+}
+
+const DUNGEON_DISPLAY_NAMES: Record<DungeonId, string> = {
+  LostMineOfPhandelver: "Lost Mine",
+  DungeonOfTheMadMage: "Mad Mage",
+  TombOfAnnihilation: "Tomb",
+  Undercity: "Undercity",
+  BaldursGateWilderness: "Baldur's Gate",
+};
+
+export function DungeonBadge({ dungeonName, roomIndex }: DungeonBadgeProps) {
+  const display = DUNGEON_DISPLAY_NAMES[dungeonName];
+  const room = roomIndex + 1;
+  return (
+    <span
+      role="img"
+      aria-label={`Venturing in ${display}, room ${room}`}
+      title={`Venturing in ${display} — room ${room}`}
+      className="relative inline-flex h-6 shrink-0 items-center gap-1 overflow-hidden rounded-full bg-violet-500/85 px-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-violet-50 ring-1 ring-violet-300/70 shadow-[0_0_12px_rgba(139,92,246,0.45)]"
+    >
+      <span aria-hidden className="text-[12px] leading-none drop-shadow-[0_1px_1px_rgba(0,0,0,0.5)]">🏰</span>
+      <span className="relative truncate">{display}</span>
+      <span className="relative tabular-nums text-white">{room}</span>
+    </span>
+  );
+}
+
+type CounterBadgeKind = "poison" | "speed" | "rad" | "energy" | "ring";
 
 interface CounterBadgeProps {
   kind: CounterBadgeKind;
@@ -31,21 +122,14 @@ interface CounterBadgeProps {
 }
 
 export function CounterBadge({ kind, value }: CounterBadgeProps) {
-  const isPoison = kind === "poison";
-  const label = isPoison
-    ? `${value} poison counter${value === 1 ? "" : "s"}`
-    : `Speed ${value}`;
-  const title = isPoison ? `Poison counters: ${value}` : `Speed: ${value}`;
-  const urgent = isPoison && value >= 8;
-
-  if (isPoison) {
+  if (kind === "poison") {
     return (
       <span
         role="img"
-        aria-label={label}
-        title={title}
+        aria-label={`${value} poison counter${value === 1 ? "" : "s"}`}
+        title={`Poison counters: ${value}`}
         className={`relative inline-flex h-6 min-w-6 shrink-0 items-center justify-center overflow-hidden rounded-full px-1 text-[11px] font-black leading-none tabular-nums text-lime-950 ring-1 ${
-          urgent
+          value >= 8
             ? "bg-lime-300 ring-lime-100 shadow-[0_0_16px_rgba(217,249,157,0.55)]"
             : "bg-lime-400 ring-lime-200/70 shadow-[0_0_12px_rgba(190,242,100,0.34)]"
         }`}
@@ -63,11 +147,70 @@ export function CounterBadge({ kind, value }: CounterBadgeProps) {
     );
   }
 
+  if (kind === "energy") {
+    return (
+      <span
+        role="img"
+        aria-label={`${value} energy counter${value === 1 ? "" : "s"}`}
+        title={`Energy: ${value}`}
+        className="relative inline-flex h-6 min-w-6 shrink-0 items-center justify-center gap-px overflow-hidden rounded-full px-1 text-[11px] font-black leading-none tabular-nums text-cyan-950 ring-1 bg-cyan-300 ring-cyan-100 shadow-[0_0_12px_rgba(103,232,249,0.5)]"
+      >
+        <span
+          aria-hidden
+          className="absolute inset-0 rounded-full bg-[radial-gradient(circle_at_30%_24%,rgba(255,255,255,0.95)_0_9%,transparent_11%),radial-gradient(circle_at_68%_30%,rgba(207,250,254,0.9)_0_7%,transparent_9%),radial-gradient(circle_at_38%_74%,rgba(8,145,178,0.7)_0_11%,transparent_13%),linear-gradient(135deg,#ecfeff_0%,#67e8f9_36%,#0891b2_72%,#083344_100%)]"
+        />
+        <span className="relative">⚡{value}</span>
+      </span>
+    );
+  }
+
+  if (kind === "ring") {
+    return (
+      <span
+        role="img"
+        aria-label={`The Ring tempts you (level ${value})`}
+        title={`The Ring tempts you — level ${value}`}
+        className="relative inline-flex h-6 min-w-6 shrink-0 items-center justify-center gap-px overflow-hidden rounded-full px-1 text-[11px] font-black leading-none tabular-nums text-amber-950 ring-1 bg-yellow-600 ring-yellow-300/70 shadow-[0_0_12px_rgba(202,138,4,0.55)]"
+      >
+        <span
+          aria-hidden
+          className="absolute inset-0 rounded-full bg-[radial-gradient(circle_at_50%_50%,transparent_0_30%,rgba(0,0,0,0.45)_32%,transparent_38%),linear-gradient(135deg,#fde68a_0%,#d97706_45%,#78350f_100%)]"
+        />
+        <span className="relative drop-shadow-[0_1px_1px_rgba(0,0,0,0.6)]">{value}</span>
+      </span>
+    );
+  }
+
+  if (kind === "rad") {
+    return (
+      <span
+        role="img"
+        aria-label={`${value} rad counter${value === 1 ? "" : "s"}`}
+        title={`Rad counters: ${value}`}
+        className={`relative inline-flex h-6 min-w-6 shrink-0 items-center justify-center gap-px overflow-hidden rounded-full px-1 text-[11px] font-black leading-none tabular-nums text-amber-950 ring-1 ${
+          value >= 8
+            ? "bg-amber-300 ring-amber-100 shadow-[0_0_16px_rgba(252,211,77,0.55)]"
+            : "bg-amber-500 ring-amber-300/70 shadow-[0_0_12px_rgba(245,158,11,0.4)]"
+        }`}
+      >
+        <span
+          aria-hidden
+          className="absolute inset-0 rounded-full bg-[radial-gradient(circle_at_30%_24%,rgba(255,255,255,0.85)_0_9%,transparent_11%),radial-gradient(circle_at_68%_30%,rgba(254,243,199,0.9)_0_7%,transparent_9%),radial-gradient(circle_at_38%_74%,rgba(217,119,6,0.72)_0_11%,transparent_13%),linear-gradient(135deg,#fffbeb_0%,#fbbf24_36%,#b45309_72%,#451a03_100%)]"
+        />
+        <span
+          aria-hidden
+          className="absolute -bottom-1 left-1/2 h-3 w-5 -translate-x-1/2 rounded-[45%] bg-amber-950/28 blur-[1px]"
+        />
+        <span className="relative">☢{value}</span>
+      </span>
+    );
+  }
+
   return (
     <span
       role="img"
-      aria-label={label}
-      title={title}
+      aria-label={`Speed ${value}`}
+      title={`Speed: ${value}`}
       className="relative inline-flex h-6 min-w-6 shrink-0 items-center justify-center overflow-hidden rounded-[6px] px-1 text-[11px] font-black leading-none tabular-nums text-white ring-1 ring-slate-100/60 shadow-[0_0_10px_rgba(226,232,240,0.22)]"
     >
       <span

@@ -108,6 +108,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::Saddles => match_saddles,
         TriggerMode::SaddlesOrCrews => match_saddles_or_crews,
         TriggerMode::NinjutsuActivated => match_ninjutsu_activated,
+        TriggerMode::BoastAbilityActivated => match_boast_ability_activated,
         TriggerMode::Firebend => match_firebend,
         TriggerMode::Airbend => match_airbend,
         TriggerMode::Earthbend => match_earthbend,
@@ -417,6 +418,11 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
 
     // CR 702.49a: Ninjutsu activation trigger
     r.insert(TriggerMode::NinjutsuActivated, match_ninjutsu_activated);
+    // CR 702.142b: Boast ability activation trigger
+    r.insert(
+        TriggerMode::BoastAbilityActivated,
+        match_boast_ability_activated,
+    );
 
     // Avatar crossover: bending trigger matchers
     r.insert(TriggerMode::Firebend, match_firebend);
@@ -516,6 +522,8 @@ pub(super) fn target_filter_matches_object(
         TargetFilter::None => false,
         TargetFilter::Player => false,
         TargetFilter::Controller => false,
+        // CR 109.5: OriginalController is a player reference, not an object.
+        TargetFilter::OriginalController => false,
         TargetFilter::ScopedPlayer => false,
         // SpecificPlayer scopes to a player, not an object — never matches an object.
         TargetFilter::SpecificPlayer { .. } => false,
@@ -527,6 +535,7 @@ pub(super) fn target_filter_matches_object(
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::StackAbility
@@ -2109,6 +2118,27 @@ pub(super) fn match_ninjutsu_activated(
 ) -> bool {
     if let GameEvent::NinjutsuActivated { player_id, .. } = event {
         // Fire when the ninjutsu was activated by the trigger source's controller
+        state
+            .objects
+            .get(&source_id)
+            .map(|obj| obj.controller == *player_id)
+            .unwrap_or(false)
+    } else {
+        false
+    }
+}
+
+/// CR 702.142b: Matches when a player activates a boast ability.
+/// The trigger fires for the controller of the trigger source when they activate
+/// any ability tagged as Boast.
+pub(super) fn match_boast_ability_activated(
+    event: &GameEvent,
+    _trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::BoastAbilityActivated { player_id, .. } = event {
+        // Fire when the boast ability was activated by the trigger source's controller
         state
             .objects
             .get(&source_id)
@@ -5386,5 +5416,166 @@ mod tests {
             creatures: vec![ObjectId(7)],
         };
         assert!(!match_crews(&wrong_event, &trigger, source, &state));
+    }
+
+    /// Issue #311 — Undead Alchemist class. The matcher must consult
+    /// `valid_card.controller` together with `origin` so the trigger fires
+    /// only when an opponent's creature card moves from library to graveyard
+    /// (CR 109.5 + CR 603.6c). The user-reported softlock was the source's
+    /// own death (Battlefield → Graveyard, controller=You) erroneously
+    /// firing this trigger.
+    #[test]
+    fn changes_zone_undead_alchemist_excludes_self_battlefield_death() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(311),
+            PlayerId(0),
+            "Undead Alchemist".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut trigger = make_trigger(TriggerMode::ChangesZone);
+        trigger.origin = Some(Zone::Library);
+        trigger.destination = Some(Zone::Graveyard);
+        trigger.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::Opponent),
+        ));
+
+        // (a) Source's OWN death (Battlefield → Graveyard, controller=You)
+        //     MUST NOT fire. This is the symptom the user reported.
+        let self_dying = GameEvent::ZoneChanged {
+            object_id: source,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord {
+                core_types: vec![CoreType::Creature],
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                ..ZoneChangeRecord::test_minimal(source, Some(Zone::Battlefield), Zone::Graveyard)
+            }),
+        };
+        assert!(
+            !match_changes_zone(&self_dying, &trigger, source, &state),
+            "trigger must not fire on the source's own battlefield death"
+        );
+
+        // (b) The controller's OWN creature being milled (Library → Graveyard,
+        //     controller=You) MUST NOT fire (valid_card.controller=Opponent).
+        let own_milled = ObjectId(100);
+        let own_milled_event = GameEvent::ZoneChanged {
+            object_id: own_milled,
+            from: Some(Zone::Library),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord {
+                core_types: vec![CoreType::Creature],
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                ..ZoneChangeRecord::test_minimal(own_milled, Some(Zone::Library), Zone::Graveyard)
+            }),
+        };
+        assert!(
+            !match_changes_zone(&own_milled_event, &trigger, source, &state),
+            "trigger must not fire on the controller's own milled creature"
+        );
+
+        // (c) An opponent's creature dying (Battlefield → Graveyard,
+        //     controller=Opponent) MUST NOT fire because the origin is
+        //     restricted to Library.
+        let opp_dying = ObjectId(101);
+        let opp_dying_event = GameEvent::ZoneChanged {
+            object_id: opp_dying,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord {
+                core_types: vec![CoreType::Creature],
+                controller: PlayerId(1),
+                owner: PlayerId(1),
+                ..ZoneChangeRecord::test_minimal(
+                    opp_dying,
+                    Some(Zone::Battlefield),
+                    Zone::Graveyard,
+                )
+            }),
+        };
+        assert!(
+            !match_changes_zone(&opp_dying_event, &trigger, source, &state),
+            "trigger must not fire when origin is Battlefield, not Library"
+        );
+
+        // (d) An opponent's creature card being milled (Library → Graveyard,
+        //     controller=Opponent) — the intended firing condition.
+        let opp_milled = ObjectId(102);
+        let opp_milled_event = GameEvent::ZoneChanged {
+            object_id: opp_milled,
+            from: Some(Zone::Library),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord {
+                core_types: vec![CoreType::Creature],
+                controller: PlayerId(1),
+                owner: PlayerId(1),
+                ..ZoneChangeRecord::test_minimal(opp_milled, Some(Zone::Library), Zone::Graveyard)
+            }),
+        };
+        assert!(
+            match_changes_zone(&opp_milled_event, &trigger, source, &state),
+            "trigger must fire when an opponent's creature card is milled"
+        );
+    }
+
+    /// Issue #311 end-to-end: parse the Undead Alchemist trigger line and
+    /// confirm the parsed `TriggerDefinition` rejects the source's own
+    /// battlefield death. Tightens the regression net by exercising the
+    /// parse → match pipeline together rather than the matcher in isolation.
+    #[test]
+    fn undead_alchemist_parsed_trigger_rejects_self_death_end_to_end() {
+        let trigger = parse_trigger_line(
+            "Whenever a creature card is put into an opponent's graveyard from their library, exile that card.",
+            "Undead Alchemist",
+        );
+
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(311),
+            PlayerId(0),
+            "Undead Alchemist".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Self-death: source going from Battlefield → Graveyard, controller=You.
+        let self_dying = GameEvent::ZoneChanged {
+            object_id: source,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord {
+                core_types: vec![CoreType::Creature],
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                ..ZoneChangeRecord::test_minimal(source, Some(Zone::Battlefield), Zone::Graveyard)
+            }),
+        };
+        assert!(
+            !match_changes_zone(&self_dying, &trigger, source, &state),
+            "parsed Undead Alchemist trigger must not fire on its own death"
+        );
+
+        // Opponent's creature milled (Library → Graveyard, controller=Opponent) — fires.
+        let opp_milled = ObjectId(102);
+        let opp_milled_event = GameEvent::ZoneChanged {
+            object_id: opp_milled,
+            from: Some(Zone::Library),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord {
+                core_types: vec![CoreType::Creature],
+                controller: PlayerId(1),
+                owner: PlayerId(1),
+                ..ZoneChangeRecord::test_minimal(opp_milled, Some(Zone::Library), Zone::Graveyard)
+            }),
+        };
+        assert!(
+            match_changes_zone(&opp_milled_event, &trigger, source, &state),
+            "parsed Undead Alchemist trigger must fire when an opponent's creature is milled"
+        );
     }
 }

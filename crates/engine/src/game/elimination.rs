@@ -48,12 +48,69 @@ pub fn eliminate_player(state: &mut GameState, player: PlayerId, events: &mut Ve
     // deadlock waiting on a player who has left. Skip when the game just ended
     // (`GameOver` is terminal) or the waiting player is still alive.
     if !matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+        // CR 103.5: For simultaneous mulligan states, prune eliminated players
+        // from the pending list. If the list becomes empty, advance the flow
+        // by emitting MulliganStarted-equivalent transition state.
+        prune_mulligan_pending(state, events);
+
         if let Some(waiting_pid) = state.waiting_for.acting_player() {
             if !players::is_alive(state, waiting_pid) {
                 let next = players::next_player(state, waiting_pid);
                 state.waiting_for = WaitingFor::Priority { player: next };
             }
         }
+    }
+}
+
+/// CR 103.5 + CR 800.4a: Prune eliminated players from in-flight mulligan
+/// pending lists. If pruning empties the decision phase, transition to the
+/// bottoms phase (or finish mulligans). If it empties the bottoms phase,
+/// finish mulligans directly.
+fn prune_mulligan_pending(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    // CR 800.4a: Drop any final-mulligan-count entries for players who have
+    // been eliminated. Symmetric with the pending-list pruning below so
+    // enter_bottom_phase never sees stale entries for dead players.
+    let alive: std::collections::HashSet<PlayerId> = state
+        .final_mulligan_counts
+        .keys()
+        .copied()
+        .filter(|pid| players::is_alive(state, *pid))
+        .collect();
+    state
+        .final_mulligan_counts
+        .retain(|pid, _| alive.contains(pid));
+
+    match state.waiting_for.clone() {
+        WaitingFor::MulliganDecision {
+            pending,
+            free_first_mulligan,
+        } => {
+            let alive: Vec<_> = pending
+                .into_iter()
+                .filter(|e| players::is_alive(state, e.player))
+                .collect();
+            if alive.is_empty() {
+                state.waiting_for = super::mulligan::enter_bottom_phase_public(state, events);
+            } else {
+                state.waiting_for = WaitingFor::MulliganDecision {
+                    pending: alive,
+                    free_first_mulligan,
+                };
+            }
+        }
+        WaitingFor::MulliganBottomCards { pending } => {
+            let alive: Vec<_> = pending
+                .into_iter()
+                .filter(|e| players::is_alive(state, e.player))
+                .collect();
+            if alive.is_empty() {
+                state.final_mulligan_counts.clear();
+                state.waiting_for = super::mulligan::finish_mulligans_public(state, events);
+            } else {
+                state.waiting_for = WaitingFor::MulliganBottomCards { pending: alive };
+            }
+        }
+        _ => {}
     }
 }
 

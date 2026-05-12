@@ -4,8 +4,9 @@ use crate::game::quantity::resolve_quantity;
 use crate::game::{targeting, zones};
 use crate::types::ability::{
     ContinuousModification, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter,
-    TargetRef,
 };
+#[cfg(test)]
+use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::{CardId, ObjectId};
@@ -68,13 +69,6 @@ pub fn resolve(
     // Zone-eligibility: unlike `Bounce` / `ChangeZone`, `CopyTokenOf` reads
     // copiable values via `compute_current_copiable_values`, which is
     // zone-agnostic — so a source in the graveyard is fine.
-    let use_self = source_filter.is_none()
-        && matches!(
-            target_filter,
-            TargetFilter::None | TargetFilter::SelfRef | TargetFilter::ParentTarget
-        )
-        && ability.targets.is_empty();
-
     let copy_source_ids: Vec<ObjectId> = if let Some(source_filter) = source_filter {
         let zones = {
             let explicit_zones = source_filter.extract_zones();
@@ -90,8 +84,6 @@ pub fn resolve(
             .flat_map(|zone| targeting::zone_object_ids(state, zone))
             .filter(|id| matches_target_filter(state, *id, source_filter, &filter_ctx))
             .collect()
-    } else if use_self {
-        vec![ability.source_id]
     } else if matches!(target_filter, TargetFilter::CostPaidObject) {
         ability
             .cost_paid_object
@@ -101,14 +93,17 @@ pub fn resolve(
                 EffectError::MissingParam("CopyTokenOf requires a cost-paid object".to_string())
             })?
     } else {
-        let ids: Vec<ObjectId> = ability
-            .targets
-            .iter()
-            .filter_map(|t| match t {
-                TargetRef::Object(id) => Some(*id),
-                _ => None,
-            })
-            .collect();
+        // CR 608.2c + 603.10a: Delegate to the unified 3-tier dispatch so
+        // `SelfRef` always resolves to the source object (the LTB
+        // self-trigger shape — Vaultborn Tyrant, Ochre Jelly), and
+        // `None` / `ParentTarget` fall back to source only when
+        // `ability.targets` is empty. Without this, a chained
+        // `CopyTokenOf { target: SelfRef }` sub-ability would inherit the
+        // parent's targets via chain propagation in
+        // `effects::mod.rs::resolve_ability_chain` (issue #323 class).
+        let effective_targets =
+            crate::game::targeting::resolved_targets(ability, target_filter, state);
+        let ids = crate::game::effects::effect_object_targets(target_filter, &effective_targets);
         if ids.is_empty() {
             return Err(EffectError::MissingParam(
                 "CopyTokenOf requires a target".to_string(),
@@ -346,9 +341,13 @@ fn apply_token_modifications(
                 if !gate_passes {
                     continue;
                 }
-                let ct = crate::types::counter::parse_counter_type(counter_type);
                 super::counters::add_counter_with_replacement(
-                    state, controller, token_id, ct, n, events,
+                    state,
+                    controller,
+                    token_id,
+                    counter_type.clone(),
+                    n,
+                    events,
                 );
             }
             // CR 707.9b: Name override applied at copy time.
@@ -1034,7 +1033,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
                 additional_modifications: vec![ContinuousModification::AddCounterOnEnter {
-                    counter_type: "P1P1".to_string(),
+                    counter_type: CounterType::Plus1Plus1,
                     count: QuantityExpr::Fixed { value: 1 },
                     if_type: None,
                 }],
@@ -1099,7 +1098,7 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
                 additional_modifications: vec![ContinuousModification::AddCounterOnEnter {
-                    counter_type: "P1P1".to_string(),
+                    counter_type: CounterType::Plus1Plus1,
                     count: QuantityExpr::Fixed { value: 1 },
                     if_type: Some(CoreType::Creature),
                 }],

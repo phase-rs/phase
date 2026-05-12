@@ -27,9 +27,17 @@ pub fn resolve(
         _ => return Err(EffectError::MissingParam("permission".to_string())),
     };
 
-    let target_ids: Vec<_> = if ability.targets.is_empty() {
+    // CR 608.2c (issue #323 class): `SelfRef` always resolves to the source
+    // object regardless of `ability.targets`. Short-circuit BEFORE the
+    // chosen-targets fallback so chained
+    // `GrantCastingPermission { target: SelfRef }` sub-abilities don't
+    // inherit the parent's targets via chain propagation in
+    // `effects::mod.rs::resolve_ability_chain`.
+    let target_ids: Vec<_> = if matches!(target_filter, TargetFilter::SelfRef) {
+        vec![ability.source_id]
+    } else if ability.targets.is_empty() {
         match target_filter {
-            TargetFilter::SelfRef | TargetFilter::Any | TargetFilter::None => {
+            TargetFilter::Any | TargetFilter::None => {
                 vec![ability.source_id]
             }
             TargetFilter::TrackedSet {
@@ -101,6 +109,31 @@ pub fn resolve(
             if let CastingPermission::PlayFromExile { granted_to, .. } = &mut granted {
                 *granted_to = granted_to_pid;
             }
+            // CR 611.2a + CR 118.9: Bind `granted_to` for `ExileWithAltCost` and
+            // `ExileWithAltAbilityCost` to the resolved grantee. Without this
+            // step, an Airbender owned by the controller of the airbended card
+            // would grant a permission whose `has_exile_cast_permission` check
+            // falls back to `obj.owner == player` — which happens to coincide
+            // for Airbending today but breaks the moment an
+            // attack-trigger-style grant exiles cards from each opponent's
+            // library (Jeleva, Nephalia's Scourge) and grants the cast
+            // permission to its controller, not to each card's owner. Only
+            // overwrite parser-emitted `None` placeholders so call sites that
+            // computed a specific PlayerId (e.g., Discover/Cascade WaitingFor
+            // continuations) keep their existing binding.
+            match &mut granted {
+                CastingPermission::ExileWithAltCost {
+                    granted_to: granted_to @ None,
+                    ..
+                }
+                | CastingPermission::ExileWithAltAbilityCost {
+                    granted_to: granted_to @ None,
+                    ..
+                } => {
+                    *granted_to = Some(granted_to_pid);
+                }
+                _ => {}
+            }
             // CR 702.170a + CR 702.170d: `Plotted { turn_plotted }` is stamped
             // at grant-resolution time from `state.turn_number`, mirroring how
             // `PlayFromExile { granted_to }` is bound to a concrete `PlayerId`
@@ -153,6 +186,7 @@ mod tests {
                         player: PlayerScope::Controller,
                     },
                     granted_to: PlayerId(0),
+                    mana_spend_permission: None,
                 },
                 target: TargetFilter::Any,
                 grantee: PermissionGrantee::AbilityController,
@@ -201,6 +235,7 @@ mod tests {
                         player: PlayerScope::Controller,
                     },
                     granted_to: PlayerId(0),
+                    mana_spend_permission: None,
                 },
                 target: TargetFilter::Any,
                 grantee: PermissionGrantee::ObjectOwner,
@@ -248,6 +283,7 @@ mod tests {
                         player: PlayerScope::Controller,
                     },
                     granted_to: PlayerId(0),
+                    mana_spend_permission: None,
                 },
                 target: TargetFilter::Any,
                 grantee: PermissionGrantee::ParentTargetController,

@@ -153,6 +153,7 @@ use crate::types::ability::{
     SearchSelectionConstraint, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
+use crate::types::counter::CounterType;
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -203,7 +204,7 @@ pub fn room_effects(
         (DungeonId::LostMineOfPhandelver, 3) => (
             simple(
                 Effect::AddCounter {
-                    counter_type: "+1/+1".to_string(),
+                    counter_type: CounterType::Plus1Plus1,
                     count: fixed(1),
                     target: TargetFilter::Typed(
                         TypedFilter::creature().controller(ControllerRef::You),
@@ -344,6 +345,7 @@ pub fn room_effects(
                         // Placeholder — rewritten to ability.controller at
                         // grant time by `grant_permission::resolve`.
                         granted_to: crate::types::player::PlayerId(0),
+                        mana_spend_permission: None,
                     },
                     target: TargetFilter::Any,
                     grantee: Default::default(),
@@ -416,6 +418,7 @@ pub fn room_effects(
                 Effect::Sacrifice {
                     target: TargetFilter::Typed(TypedFilter::creature()),
                     count: QuantityExpr::Fixed { value: 1 },
+                    min_count: 0,
                 },
                 source_id,
                 controller,
@@ -491,7 +494,7 @@ pub fn room_effects(
         (DungeonId::Undercity, 1) => (
             simple(
                 Effect::AddCounter {
-                    counter_type: "+1/+1".to_string(),
+                    counter_type: CounterType::Plus1Plus1,
                     count: fixed(2),
                     target: TargetFilter::Typed(TypedFilter::creature()),
                 },
@@ -624,6 +627,7 @@ pub fn room_effects(
                 Effect::Sacrifice {
                     target: TargetFilter::Any,
                     count: QuantityExpr::Fixed { value: 1 },
+                    min_count: 0,
                 },
                 source_id,
                 controller,

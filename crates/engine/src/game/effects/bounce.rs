@@ -1,55 +1,80 @@
 use crate::game::zones;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef, TypedFilter,
+    ControllerRef, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+    TypedFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::zones::Zone;
 
-/// CR 400.6: Zone change — permanent moves from battlefield to its owner's hand.
+fn filter_uses_scoped_player(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(filter) => filter.controller == Some(ControllerRef::ScopedPlayer),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(filter_uses_scoped_player)
+        }
+        TargetFilter::Not { filter } => filter_uses_scoped_player(filter),
+        _ => false,
+    }
+}
+
+/// CR 400.6: Zone change — return target object to the destination zone
+/// (default: its owner's hand).
 ///
 /// Also handles LTB self-return triggers (CR 603.10) such as Rancor: when the
 /// trigger resolves, the source is already in its owner's graveyard, so the
 /// resolver must accept graveyard as a valid from-zone in addition to the
 /// battlefield.
+///
+/// Honors `Effect::Bounce.destination` symmetrically with `BounceAll` below.
+/// Today's parser always emits `destination: None` (the canonical "return ...
+/// to ... hand" Oracle phrasing); the explicit unwrap default keeps the field
+/// meaningful so future parser branches that target other zones (e.g., library
+/// top) don't need a separate resolver. CR 608.2c makes the printed destination
+/// part of the effect's instructions — silently ignoring a non-null destination
+/// would be a rules bug.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // Determine targets using typed Effect::Bounce target field.
-    // CR 608.2c + 603.10: An anaphoric "it" in a top-level trigger effect (e.g.,
-    // Rancor's "return it to its owner's hand") has no parent target to inherit
-    // from — it refers to the source object itself. `SelfRef` collapses to the
-    // same thing. `TriggeringSource` is deliberately excluded: it resolves via
-    // `state.current_trigger_event`, and conflating it with the ability source
-    // would be wrong for "Whenever a creature dies, return it ..." patterns
-    // where the source is the ability's host, not the triggering object.
-    let use_self = match &ability.effect {
-        Effect::Bounce { target, .. } => {
-            matches!(
-                target,
-                TargetFilter::None | TargetFilter::SelfRef | TargetFilter::ParentTarget
-            ) && ability.targets.is_empty()
-        }
-        _ => false,
+    // CR 608.2c + 603.10: Delegate target resolution to the unified
+    // 3-tier dispatch (`resolved_targets`) so this resolver picks up the
+    // same self-ref / event-context / chosen-targets handling that ChangeZone
+    // and other zone-change resolvers use. `resolved_targets` short-circuits
+    // `SelfRef` to `ability.source_id` regardless of `ability.targets` — this
+    // is what makes chained "Exile ~"-style sub-abilities (Treasured Find,
+    // Arc Blade, etc.) target the source object rather than inheriting the
+    // parent's chosen targets via the chain target-propagation in
+    // `effects::mod.rs`.
+    let (target_filter, destination) = match &ability.effect {
+        Effect::Bounce {
+            target,
+            destination,
+        } => (
+            target,
+            // CR 608.2c: Default to owner's hand — mirrors `BounceAll`'s
+            // `destination.unwrap_or(Zone::Hand)` and the canonical Oracle
+            // phrasing "return ... to ... hand". Honoring the field makes
+            // `Effect::Bounce` symmetric with `Effect::BounceAll` so future
+            // parser branches that route through `Bounce` with non-`Hand`
+            // destinations don't need a separate resolver.
+            destination.unwrap_or(Zone::Hand),
+        ),
+        _ => (&TargetFilter::None, Zone::Hand),
     };
 
-    let targets: Vec<_> = if use_self {
-        vec![ability.source_id]
-    } else {
-        ability
-            .targets
-            .iter()
-            .filter_map(|t| {
-                if let TargetRef::Object(id) = t {
-                    Some(*id)
-                } else {
-                    None
-                }
-            })
-            .collect()
-    };
+    let effective_targets = crate::game::targeting::resolved_targets(ability, target_filter, state);
+    let targets: Vec<_> = effective_targets
+        .iter()
+        .filter_map(|t| {
+            if let TargetRef::Object(id) = t {
+                Some(*id)
+            } else {
+                None
+            }
+        })
+        .collect();
 
     for obj_id in targets {
         // CR 114.5: Emblems cannot be bounced
@@ -58,12 +83,13 @@ pub fn resolve(
         }
 
         // CR 400.3 + CR 603.10: Bounce moves the object from its current zone to
-        // its owner's hand. Battlefield is the usual case; graveyard covers LTB
-        // self-return triggers (Rancor class) where the source has already moved
-        // to the graveyard by the time the trigger resolves.
+        // the destination zone. Battlefield is the usual case; graveyard covers
+        // both LTB self-return triggers (Rancor class) and explicit
+        // graveyard-targeted return spells (Treasured Find class — `Card` typed
+        // filter scoped to graveyard via `InZone` property).
         let current_zone = state.objects.get(&obj_id).map(|o| o.zone);
         if matches!(current_zone, Some(Zone::Battlefield | Zone::Graveyard)) {
-            zones::move_to_zone(state, obj_id, Zone::Hand, events);
+            zones::move_to_zone(state, obj_id, destination, events);
         }
     }
 
@@ -91,12 +117,17 @@ pub fn resolve_all(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (target_filter, destination) = match &ability.effect {
+    let (target_filter, destination, count_expr) = match &ability.effect {
         Effect::BounceAll {
             target,
             destination,
-        } => (target.clone(), destination.unwrap_or(Zone::Hand)),
-        _ => (TargetFilter::None, Zone::Hand),
+            count,
+        } => (
+            target.clone(),
+            destination.unwrap_or(Zone::Hand),
+            count.as_ref(),
+        ),
+        _ => (TargetFilter::None, Zone::Hand, None),
     };
 
     // CR 701.3 + CR 611.2c: A `TargetFilter::None` lands here when the parser
@@ -111,6 +142,25 @@ pub fn resolve_all(
     } else {
         crate::game::effects::resolved_object_filter(ability, &target_filter)
     };
+    let scoped_ability;
+    let ability = if filter_uses_scoped_player(&effective_filter) && ability.scoped_player.is_none()
+    {
+        if let Some(player) = ability.targets.iter().find_map(|target| match target {
+            TargetRef::Player(player) => Some(*player),
+            TargetRef::Object(_) => None,
+        }) {
+            scoped_ability = {
+                let mut scoped = ability.clone();
+                scoped.set_scoped_player_recursive(player);
+                scoped
+            };
+            &scoped_ability
+        } else {
+            ability
+        }
+    } else {
+        ability
+    };
 
     // CR 107.3a + CR 601.2b: Filter evaluation runs in the ability's
     // resolution context (controller, target slots already filled).
@@ -124,7 +174,40 @@ pub fn resolve_all(
         .copied()
         .collect();
 
-    for obj_id in matching {
+    if let Some(count_expr) = count_expr {
+        let count = crate::game::quantity::resolve_quantity_with_targets(state, count_expr, ability)
+            .max(0) as usize;
+        if count == 0 {
+            state.last_effect_count = Some(0);
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+            });
+            return Ok(());
+        }
+
+        if matching.len() > count {
+            state.waiting_for = crate::types::game_state::WaitingFor::EffectZoneChoice {
+                player: ability.controller,
+                cards: matching,
+                count,
+                min_count: count,
+                up_to: false,
+                source_id: ability.source_id,
+                effect_kind: EffectKind::BounceAll,
+                zone: Zone::Battlefield,
+                destination: Some(destination),
+                enter_tapped: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enters_attacking: false,
+                owner_library: false,
+            };
+            return Ok(());
+        }
+    }
+
+    for &obj_id in &matching {
         // CR 400.3 + CR 400.7: Move each matching permanent to the
         // destination zone. The single-bounce resolver runs the same
         // `zones::move_to_zone` primitive — no replacement-pipeline detour
@@ -136,6 +219,7 @@ pub fn resolve_all(
         }
     }
 
+    state.last_effect_count = Some(matching.len() as i32);
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
@@ -240,6 +324,74 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    /// CR 608.2c: Single-target `Bounce` honors `destination`, mirroring
+    /// `BounceAll`. `Some(Zone::Library)` covers hypothetical "return target
+    /// creature to the top of its owner's library" patterns; the resolver
+    /// shape is destination-agnostic so future parser branches can route
+    /// through it without forking the resolver.
+    #[test]
+    fn test_bounce_destination_override_routes_to_specified_zone() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::Bounce {
+                target: TargetFilter::Any,
+                destination: Some(Zone::Library),
+            },
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(!state.battlefield.contains(&obj_id));
+        assert!(
+            state.players[0].library.contains(&obj_id),
+            "destination=Some(Library) must route to the library, not the hand"
+        );
+        assert!(!state.players[0].hand.contains(&obj_id));
+    }
+
+    /// CR 608.2c default: `destination: None` resolves to `Zone::Hand` — the
+    /// canonical Oracle phrasing "return ... to ... hand". Building-block
+    /// regression: every parser-emitted `Effect::Bounce` carries `None` today,
+    /// so this default underpins the entire bounce corpus.
+    #[test]
+    fn test_bounce_default_destination_is_hand() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::Bounce {
+                target: TargetFilter::Any,
+                destination: None,
+            },
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.players[1].hand.contains(&obj_id));
     }
 
     /// CR 603.10 / Rancor class: LTB self-return triggers fire after the source
@@ -429,6 +581,7 @@ mod tests {
             Effect::BounceAll {
                 target: creature_filter,
                 destination: None,
+                count: None,
             },
             vec![],
             ObjectId(999),
@@ -491,6 +644,7 @@ mod tests {
                     properties: vec![],
                 }),
                 destination: Some(Zone::Library),
+                count: None,
             },
             vec![],
             ObjectId(999),
@@ -506,5 +660,84 @@ mod tests {
             "bear moved to library when destination override is set"
         );
         assert!(!state.players[0].hand.contains(&bear));
+    }
+
+    #[test]
+    fn counted_bounce_all_prompts_controller_for_subset() {
+        use crate::types::ability::{ControllerRef, QuantityExpr, QuantityRef};
+
+        let mut state = GameState::new_two_player(42);
+        let opp_bear = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Opponent Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let opp_dragon = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Dragon".to_string(),
+            Zone::Battlefield,
+        );
+        let own_elf = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Controller Elf".to_string(),
+            Zone::Battlefield,
+        );
+
+        for id in [opp_bear, opp_dragon, own_elf] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            let card_type = crate::types::card_type::CardType {
+                core_types: vec![CoreType::Creature],
+                ..Default::default()
+            };
+            obj.card_types = card_type.clone();
+            obj.base_card_types = card_type;
+        }
+
+        let target =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::ScopedPlayer));
+        let ability = ResolvedAbility::new(
+            Effect::BounceAll {
+                target: target.clone(),
+                destination: None,
+                count: Some(QuantityExpr::DivideRounded {
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter: target },
+                    }),
+                    divisor: 2,
+                    rounding: crate::types::ability::RoundingMode::Up,
+                }),
+            },
+            vec![crate::types::ability::TargetRef::Player(PlayerId(1))],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        match state.waiting_for {
+            crate::types::game_state::WaitingFor::EffectZoneChoice {
+                player,
+                count,
+                cards,
+                effect_kind: EffectKind::BounceAll,
+                zone: Zone::Battlefield,
+                destination: Some(Zone::Hand),
+                ..
+            } => {
+                assert_eq!(player, PlayerId(0));
+                assert_eq!(count, 1);
+                assert!(cards.contains(&opp_bear));
+                assert!(cards.contains(&opp_dragon));
+                assert!(!cards.contains(&own_elf));
+            }
+            ref other => panic!("expected BounceAll EffectZoneChoice, got {other:?}"),
+        }
     }
 }

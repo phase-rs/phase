@@ -4,6 +4,7 @@ import { motion, useReducedMotion } from "framer-motion";
 
 import type { PlayerId } from "../../adapter/types.ts";
 import { usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
+import { usePlayerDesignations } from "../../hooks/usePlayerDesignations.ts";
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getOpponentDisplayName, useMultiplayerStore } from "../../stores/multiplayerStore.ts";
@@ -13,7 +14,8 @@ import { partitionByType } from "../../viewmodel/battlefieldProps.ts";
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { ScoreBadge } from "../draft/ScoreBadge.tsx";
-import { CounterBadge, StatusBadge } from "./HudBadges.tsx";
+import { CityBlessingBadge, CounterBadge, DungeonBadge, InitiativeBadge, MonarchBadge, StatusBadge } from "./HudBadges.tsx";
+import { AvatarHoverPreview } from "./AvatarHoverPreview.tsx";
 import { HudPlate } from "./HudPlate.tsx";
 import { IncomingAttackersPopover } from "./IncomingAttackersPopover.tsx";
 import { KickConfirmDialog } from "./KickConfirmDialog.tsx";
@@ -139,6 +141,8 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
   const primaryOpponentAvatarUrl = useMultiplayerStore(
     (s) => s.playerAvatars.get(primaryOpponentId) ?? null,
   );
+  // Always-called hook (rules-of-hooks) — used only on the 1v1 branch below.
+  const primaryOpponentDesignations = usePlayerDesignations(primaryOpponentId);
 
   if (!isMultiplayer) {
     // 1v1: single opponent pill (existing design)
@@ -148,6 +152,8 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
     const opponentCompanion = gameState?.players[opponentId]?.companion;
     const opponentSpeed = gameState?.players[opponentId]?.speed ?? 0;
     const opponentPoisonCounters = gameState?.players[opponentId]?.poison_counters ?? 0;
+    const opponentRadCounters = gameState?.players[opponentId]?.player_counters?.Rad ?? 0;
+    const opponentDesignations = primaryOpponentDesignations;
     const isDisconnected = isOnline && disconnectedPlayers.has(opponentId);
     const isOpponentPhasedOut =
       gameState?.players[opponentId]?.status?.type === "PhasedOut";
@@ -178,11 +184,20 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
           underAttack={isOpponentUnderAttack}
           avatarUrl={opponentAvatarUrl}
           onClick={isValidTarget ? () => handlePlayerTarget(opponentId) : undefined}
-          trailing={matchScore || opponentPoisonCounters > 0 || opponentSpeed > 0 || opponentCompanion || isOnline || isOpponentPhasedOut ? (
+          trailing={matchScore || opponentDesignations.hasAny || opponentPoisonCounters > 0 || opponentRadCounters > 0 || opponentSpeed > 0 || opponentCompanion || isOnline || isOpponentPhasedOut ? (
             <>
               {matchScore ? <ScoreBadge score={matchScore} player={1} /> : null}
+              {opponentDesignations.isMonarch ? <MonarchBadge /> : null}
+              {opponentDesignations.hasInitiative ? <InitiativeBadge /> : null}
+              {opponentDesignations.hasCityBlessing ? <CityBlessingBadge /> : null}
+              {opponentDesignations.activeDungeon ? (
+                <DungeonBadge dungeonName={opponentDesignations.activeDungeon} roomIndex={opponentDesignations.currentRoom} />
+              ) : null}
               {isOpponentPhasedOut ? <StatusBadge label="Phased Out" tone="neutral" /> : null}
+              {opponentDesignations.ringLevel > 0 ? <CounterBadge kind="ring" value={opponentDesignations.ringLevel} /> : null}
+              {opponentDesignations.energy > 0 ? <CounterBadge kind="energy" value={opponentDesignations.energy} /> : null}
               {opponentPoisonCounters > 0 ? <CounterBadge kind="poison" value={opponentPoisonCounters} /> : null}
+              {opponentRadCounters > 0 ? <CounterBadge kind="rad" value={opponentRadCounters} /> : null}
               {opponentSpeed > 0 ? <CounterBadge kind="speed" value={opponentSpeed} /> : null}
               {opponentCompanion ? <StatusBadge label="Companion" /> : null}
               {isOnline ? <ConnectionDotInline disconnected={isDisconnected} /> : null}
@@ -363,11 +378,15 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
     };
   }, [gameState, playerId]);
 
+  // Hoisted above the early return (rules-of-hooks).
+  const designations = usePlayerDesignations(playerId);
+
   if (!player) return null;
 
   const handCount = player.hand.length;
   const speed = player.speed ?? 0;
   const poisonCounters = player.poison_counters;
+  const radCounters = player.player_counters?.Rad ?? 0;
   const isPhasedOut = player.status?.type === "PhasedOut";
 
   const label = ally ? "Ally" : getOpponentDisplayName(playerId);
@@ -448,7 +467,16 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
           <span className={`text-sm font-semibold ${isTheirTurn ? "text-rose-200" : ally ? "text-emerald-200" : isFocused ? "text-amber-100" : "text-slate-100"}`}>
             {player.life}
           </span>
+          {designations.isMonarch ? <MonarchBadge /> : null}
+          {designations.hasInitiative ? <InitiativeBadge /> : null}
+          {designations.hasCityBlessing ? <CityBlessingBadge /> : null}
+          {designations.activeDungeon ? (
+            <DungeonBadge dungeonName={designations.activeDungeon} roomIndex={designations.currentRoom} />
+          ) : null}
+          {designations.ringLevel > 0 ? <CounterBadge kind="ring" value={designations.ringLevel} /> : null}
+          {designations.energy > 0 ? <CounterBadge kind="energy" value={designations.energy} /> : null}
           {poisonCounters > 0 ? <CounterBadge kind="poison" value={poisonCounters} /> : null}
+          {radCounters > 0 ? <CounterBadge kind="rad" value={radCounters} /> : null}
           {speed > 0 ? <CounterBadge kind="speed" value={speed} /> : null}
           {isOnline && <ConnectionDotInline disconnected={isDisconnected} />}
         </div>
@@ -534,7 +562,10 @@ function OpponentAvatar({
   seatColor: string;
 }) {
   return (
-    <div
+    <AvatarHoverPreview
+      avatarUrl={avatarUrl}
+      label={label}
+      seatColor={seatColor}
       className="relative h-10 w-9 shrink-0 overflow-hidden rounded-lg border border-white/15 bg-slate-950 shadow-[0_8px_18px_rgba(0,0,0,0.32)]"
       style={{
         borderColor: `${seatColor}cc`,
@@ -543,7 +574,7 @@ function OpponentAvatar({
     >
       <img src={avatarUrl} alt={label} className="h-full w-full object-cover" />
       <div className="absolute inset-0 bg-gradient-to-b from-white/12 via-transparent to-black/35" />
-    </div>
+    </AvatarHoverPreview>
   );
 }
 

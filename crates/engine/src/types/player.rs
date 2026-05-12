@@ -236,6 +236,25 @@ impl Player {
         }
     }
 
+    /// CR 122.3: Remove counters of a given type from this player.
+    /// Saturates at zero. Removes the map key when count reaches 0
+    /// so `skip_serializing_if = "HashMap::is_empty"` stays clean.
+    pub fn remove_player_counters(&mut self, kind: &PlayerCounterKind, count: u32) {
+        match kind {
+            PlayerCounterKind::Poison => {
+                self.poison_counters = self.poison_counters.saturating_sub(count);
+            }
+            _ => {
+                if let Some(val) = self.player_counters.get_mut(kind) {
+                    *val = val.saturating_sub(count);
+                    if *val == 0 {
+                        self.player_counters.remove(kind);
+                    }
+                }
+            }
+        }
+    }
+
     /// True when this player is phased in (the normal state).
     pub fn is_phased_in(&self) -> bool {
         self.status.is_phased_in()

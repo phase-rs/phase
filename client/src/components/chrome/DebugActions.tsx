@@ -2,12 +2,15 @@ import { useState } from "react";
 
 import type { DebugAction } from "../../adapter/types";
 import { useGameDispatch } from "../../hooks/useGameDispatch";
+import { usePlayerId } from "../../hooks/usePlayerId";
+import { useGameStore } from "../../stores/gameStore";
 import { useUiStore } from "../../stores/uiStore";
 import { StatusMessage } from "./debugFields";
 import { DebugCreateActions } from "./DebugCreateActions";
 import { DebugFlowActions } from "./DebugFlowActions";
 import { DebugObjectActions } from "./DebugObjectActions";
 import { DebugPlayerActions } from "./DebugPlayerActions";
+import { GrantDebugPermissionPanel } from "./GrantDebugPermissionPanel";
 
 type Category = "player" | "object" | "flow" | "create";
 
@@ -24,6 +27,18 @@ export function DebugActions() {
   const dispatch = useGameDispatch();
   const debugInteractionMode = useUiStore((s) => s.debugInteractionMode);
   const toggleDebugInteractionMode = useUiStore((s) => s.toggleDebugInteractionMode);
+  const localPlayerId = usePlayerId();
+  // Single-player / AI / local games leave `debug_permitted` empty, in which
+  // case `debug_mode` itself is the engine gate and the panel renders as
+  // before. In a multiplayer sandbox the set is populated and only members
+  // see the action tabs.
+  const debugPermitted = useGameStore((s) => s.gameState?.debug_permitted);
+  const allowDebug = useGameStore(
+    (s) => s.gameState?.format_config?.allow_debug_actions === true,
+  );
+  const isHost = localPlayerId === 0;
+  const hasPermission =
+    !debugPermitted || debugPermitted.length === 0 || debugPermitted.includes(localPlayerId);
 
   const handleDispatch = async (action: DebugAction) => {
     setStatus(null);
@@ -35,8 +50,18 @@ export function DebugActions() {
     }
   };
 
+  if (!hasPermission) {
+    return (
+      <div className="px-2 py-3 text-xs text-gray-500">
+        Debug actions are disabled for this seat. The host can grant
+        permission from their own Debug panel.
+      </div>
+    );
+  }
+
   return (
     <div>
+      {allowDebug && isHost && <GrantDebugPermissionPanel />}
       <div className="mb-1 flex items-center justify-between">
         <h3 className="font-mono text-xs font-bold uppercase tracking-wider text-gray-500">
           Debug Actions

@@ -46,7 +46,7 @@ expression: def
   "condition": null,
   "unless_pay": {
     "cost": {
-      "type": "Fixed",
+      "type": "Mana",
       "cost": {
         "type": "Cost",
         "shards": [],

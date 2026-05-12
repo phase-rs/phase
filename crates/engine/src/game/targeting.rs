@@ -90,6 +90,7 @@ pub fn find_legal_targets(
                     // Fail closed.
                     Some(ControllerRef::ScopedPlayer) => false,
                     Some(ControllerRef::TargetPlayer) => false,
+                    Some(ControllerRef::ParentTargetController) => false,
                     Some(ControllerRef::DefendingPlayer) => false,
                     None => true,
                 };
@@ -262,6 +263,15 @@ pub fn resolve_event_context_target(
         | TargetFilter::PostReplacementDamageTarget => {
             resolve_event_context_target_for_event_or_state(state, filter, source_id, None)
         }
+        // CR 108.3 + CR 608.2c: `ParentTargetOwner` may fall back to the source's
+        // AttachedTo host (Enslave's "enchanted creature deals 1 damage to its
+        // owner" — phase trigger has no event source). Allow the no-event path so
+        // the AttachedTo branch in the inner resolver runs even when no trigger
+        // event is active.
+        TargetFilter::ParentTargetOwner => {
+            let event = state.current_trigger_event.as_ref();
+            resolve_event_context_target_for_event_or_state(state, filter, source_id, event)
+        }
         _ => {
             let event = state.current_trigger_event.as_ref()?;
             resolve_event_context_target_for_event_or_state(state, filter, source_id, Some(event))
@@ -294,6 +304,58 @@ pub fn resolve_event_context_targets(
         })
         .filter(|target| seen.insert(target.clone()))
         .collect()
+}
+
+/// CR 608.2c + CR 603.10a: Resolve the effective targets for a resolving
+/// ability across the three Oracle-text target sources, in priority order:
+///
+/// 1. **Self-reference**: `TargetFilter::SelfRef` always resolves to the
+///    source object itself, regardless of `ability.targets`. This is the
+///    parser's `~` anaphor — "Exile Treasured Find", "Sacrifice Arc Blade",
+///    "When ~ enters, ..." — and it is semantically distinct from the
+///    parent's chosen target. When a chained sub-ability's filter is
+///    `SelfRef`, the chain target propagation in `effects::mod.rs` may have
+///    injected the parent's targets into `ability.targets`; the `SelfRef`
+///    semantic must override that injection (issue #323 — Treasured Find's
+///    "Exile ~" was self-exiling whichever object the parent bounce had
+///    targeted instead of the spell itself).
+/// 2. **None / ParentTarget fallback**: when these filters appear and
+///    `ability.targets` is empty, the subject is the source object (the
+///    "it" anaphor on top-level LTB triggers — Rancor, Spirit Loop). When
+///    `ability.targets` is non-empty, `ParentTarget` semantically inherits
+///    the parent's chosen targets, so fall through to tier 3.
+/// 3. **Event context**: filters like `TriggeringSource`, `DefendingPlayer`,
+///    `AttachedTo` resolve from `state.current_trigger_event` without
+///    requiring player selection (CR 603.7c).
+/// 4. **Pre-selected targets**: the ability's chosen targets from CR 601.2c
+///    casting / CR 603.3d trigger placement.
+///
+/// Returns the targets from the first non-empty tier, owning the result so
+/// callers don't need to branch over which tier resolved.
+pub fn resolved_targets(
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+    state: &GameState,
+) -> Vec<TargetRef> {
+    // CR 608.2c: SelfRef is the printed-name anaphor (`~`) — its referent is
+    // the source object itself, never a chosen target. Must short-circuit
+    // before the `ability.targets` fallback so chained "Exile ~" sub-abilities
+    // don't accidentally inherit the parent's targets via the chain target
+    // propagation in `effects::mod.rs::resolve_chain`.
+    if matches!(target_filter, TargetFilter::SelfRef) {
+        return vec![TargetRef::Object(ability.source_id)];
+    }
+    let use_self = matches!(
+        target_filter,
+        TargetFilter::None | TargetFilter::ParentTarget
+    ) && ability.targets.is_empty();
+    if use_self {
+        return vec![TargetRef::Object(ability.source_id)];
+    }
+    if let Some(target) = resolve_event_context_target(state, target_filter, ability.source_id) {
+        return vec![target];
+    }
+    ability.targets.clone()
 }
 
 pub(crate) fn resolve_event_context_target_for_event_or_state(
@@ -346,6 +408,32 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
             let controller = state.objects.get(&source_obj_id)?.controller;
             Some(TargetRef::Player(controller))
         }
+        // CR 108.3 + CR 608.2c: `ParentTargetOwner` mirrors `ParentTargetController`
+        // but returns the *owner* of the resolved object. When no trigger event
+        // supplies a source object (Enslave's phase trigger), fall back to the
+        // ability source's AttachedTo host — the Aura/Equipment context where
+        // "its owner" anaphorically refers to the equipped/enchanted permanent.
+        TargetFilter::ParentTargetOwner => {
+            if let Some(event) = event {
+                if let Some(source_obj_id) = extract_source_from_event(event) {
+                    if let Some(owner) = state.objects.get(&source_obj_id).map(|o| o.owner) {
+                        return Some(TargetRef::Player(owner));
+                    }
+                }
+            }
+            // CR 301.5 + CR 303.4: Aura/Equipment fallback — the source's
+            // attached host is the implicit "it" subject of the sentence.
+            let host = state.objects.get(&source_id)?.attached_to?;
+            match host {
+                crate::game::game_object::AttachTarget::Object(id) => state
+                    .objects
+                    .get(&id)
+                    .map(|obj| TargetRef::Player(obj.owner)),
+                crate::game::game_object::AttachTarget::Player(player) => {
+                    Some(TargetRef::Player(player))
+                }
+            }
+        }
         // CR 615.5 + CR 609.7: "the source's controller" / "that source's
         // controller" inside a prevention follow-up resolves to the controller
         // of the prevented event's damage source. Stashed by the prevention
@@ -375,6 +463,11 @@ pub fn resolve_effect_player_ref(
 ) -> Option<PlayerId> {
     match filter {
         TargetFilter::Controller => Some(ability.scoped_player.unwrap_or(ability.controller)),
+        // CR 109.5: The ability's original controller — fixed even when
+        // `player_scope` iteration has rebound `ability.controller`.
+        TargetFilter::OriginalController => {
+            Some(ability.original_controller.unwrap_or(ability.controller))
+        }
         TargetFilter::ScopedPlayer => ability.scoped_player,
         TargetFilter::Player => ability.targets.iter().find_map(|target| match target {
             TargetRef::Player(player) => Some(*player),
@@ -400,6 +493,20 @@ pub fn resolve_effect_player_ref(
                     }
                 })
             }),
+        // CR 108.3 + CR 608.2c: Parent target's *owner* — mirrors the controller
+        // path above, but resolves through `parent_target_owner` and falls back
+        // to the event-context resolver (which itself may fall back to the
+        // source's AttachedTo host for Aura phase triggers).
+        TargetFilter::ParentTargetOwner => {
+            crate::game::ability_utils::parent_target_owner(ability, state).or_else(|| {
+                resolve_event_context_target(state, filter, ability.source_id).and_then(|target| {
+                    match target {
+                        TargetRef::Player(player) => Some(player),
+                        TargetRef::Object(id) => state.objects.get(&id).map(|obj| obj.owner),
+                    }
+                })
+            })
+        }
         _ => resolve_event_context_target(state, filter, ability.source_id).and_then(|target| {
             match target {
                 TargetRef::Player(player) => Some(player),
@@ -451,6 +558,14 @@ pub(crate) fn extract_player_from_event(
     use crate::types::events::GameEvent;
     match event {
         GameEvent::LifeChanged { player_id, .. } => Some(*player_id),
+        // CR 106.4 + CR 605.1b: `ManaAdded` carries the player whose pool gained
+        // the mana — equivalently, the player who tapped the source for mana.
+        // For TapsForMana triggers (Fertile Ground / Wild Growth / Utopia Sprawl
+        // and the wider "its controller adds…" Aura class), this is the
+        // enchanted land's controller, which `PlayerFilter::TriggeringPlayer`
+        // rebinds as the resolving ability's controller so the bonus mana
+        // routes to the tapper even when the Aura is opponent-controlled.
+        GameEvent::ManaAdded { player_id, .. } => Some(*player_id),
         GameEvent::CardsDrawn { player_id, .. } => Some(*player_id),
         GameEvent::CardDrawn { player_id, .. } => Some(*player_id),
         GameEvent::Discarded { player_id, .. } => Some(*player_id),
@@ -736,6 +851,17 @@ fn hexproof_filter_matches(
         HexproofFilter::Quality(quality) => {
             crate::game::keywords::source_matches_quality(source_obj, quality)
         }
+        // CR 702.11d + CR 702.16 + CR 609.6: `ChosenColor` is normally
+        // resolved to a concrete `Color(_)` at layer application time (see
+        // `layers::apply_continuous_effect`). The intrinsic variant arm
+        // remains for cards whose printed text resolves "the chosen color" on
+        // the same object that chose it — mirrors
+        // `source_matches_protection_target` for `ProtectionTarget::ChosenColor`.
+        HexproofFilter::ChosenColor => state
+            .objects
+            .get(&source_id)
+            .and_then(|src| src.chosen_color())
+            .is_some_and(|color| source_obj.color.contains(&color)),
     }
 }
 
@@ -1889,6 +2015,106 @@ mod tests {
             !targets.contains(&TargetRef::Player(PlayerId(1))),
             "protected opponent must not be a legal target, got {:?}",
             targets
+        );
+    }
+
+    fn make_resolved_with_targets(
+        targets: Vec<TargetRef>,
+        source: ObjectId,
+    ) -> crate::types::ability::ResolvedAbility {
+        crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Draw {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            targets,
+            source,
+            PlayerId(0),
+        )
+    }
+
+    /// CR 608.2c + 603.10a: Tier 1 — `SelfRef` with empty `ability.targets`
+    /// resolves to the source object (the parser's `~` anaphor).
+    #[test]
+    fn resolved_targets_self_ref_with_empty_targets_returns_source() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = make_resolved_with_targets(vec![], source);
+        let result = resolved_targets(&ability, &TargetFilter::SelfRef, &state);
+        assert_eq!(
+            result,
+            vec![TargetRef::Object(source)],
+            "SelfRef + empty targets should resolve to source object"
+        );
+    }
+
+    /// CR 506.2: Tier 2 — event-context filters like `DefendingPlayer` resolve
+    /// from game state (here, `state.combat.attackers`) without consuming
+    /// `ability.targets`. Verifies the helper routes through the event-context
+    /// tier when it applies and returns its target.
+    #[test]
+    fn resolved_targets_event_context_resolves_from_combat_state() {
+        use crate::game::combat::{AttackTarget, AttackerInfo};
+        let (mut state, _c0, c1) = setup_with_creatures();
+        // Mark c1 as attacking player 0 so DefendingPlayer resolves to player 0.
+        let combat = state.combat.get_or_insert_with(Default::default);
+        combat.attackers.push(AttackerInfo::new(
+            c1,
+            AttackTarget::Player(PlayerId(0)),
+            PlayerId(0),
+        ));
+        let ability = make_resolved_with_targets(vec![], c1);
+        let result = resolved_targets(&ability, &TargetFilter::DefendingPlayer, &state);
+        assert_eq!(
+            result,
+            vec![TargetRef::Player(PlayerId(0))],
+            "DefendingPlayer should resolve to the attacked player"
+        );
+    }
+
+    /// CR 608.2c (issue #323): `SelfRef` always resolves to the source object,
+    /// even when `ability.targets` is non-empty. The chained "Exile ~"
+    /// sub-ability of cards like Treasured Find / Arc Blade gets its
+    /// `targets` populated by the chain target-propagation in
+    /// `effects::mod.rs::resolve_chain` (it copies the parent's targets when
+    /// the sub's targets are empty). Without the SelfRef short-circuit, the
+    /// sub-ability would target the parent's chosen object instead of the
+    /// source, exiling the wrong thing.
+    #[test]
+    fn resolved_targets_self_ref_overrides_propagated_parent_targets() {
+        let (mut state, c0, c1) = setup_with_creatures();
+        // Source = c0; ability.targets = [c1] (simulating the parent's chosen
+        // bounce target propagated into the sub-ability via the chain
+        // target-propagation in effects::mod.rs).
+        let ability = make_resolved_with_targets(vec![TargetRef::Object(c1)], c0);
+        let result = resolved_targets(&ability, &TargetFilter::SelfRef, &state);
+        assert_eq!(
+            result,
+            vec![TargetRef::Object(c0)],
+            "SelfRef must always resolve to source, not the propagated parent target"
+        );
+        // Suppress unused-variable warning when setup_with_creatures changes.
+        let _ = &mut state;
+    }
+
+    /// CR 601.2c: Tier 3 — when neither self-ref nor event-context applies,
+    /// fall through to the ability's pre-selected targets.
+    #[test]
+    fn resolved_targets_falls_back_to_ability_targets() {
+        let (state, _c0, c1) = setup_with_creatures();
+        // Use `Any` filter (not self-ref-eligible) and supply a chosen target.
+        let ability = make_resolved_with_targets(vec![TargetRef::Object(c1)], c1);
+        let result = resolved_targets(&ability, &TargetFilter::Any, &state);
+        assert_eq!(
+            result,
+            vec![TargetRef::Object(c1)],
+            "Should fall through to ability.targets when no other tier applies"
         );
     }
 }

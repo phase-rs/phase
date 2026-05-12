@@ -18,6 +18,15 @@ jq '.["card name"] | {abilities: [.abilities[]? | select(.effect.type == "Unimpl
 
 # Single card debug
 cargo run --bin oracle-gen -- data --filter "card name"
+
+# Active cluster trackers (open thematic workstreams) — see Cluster Tracking with Sub-Issues below
+gh issue list --repo phase-rs/phase --label "collector" --state open
+
+# View a tracker and its sub-issues
+gh issue view <N> --repo phase-rs/phase --json subIssues,title,body
+
+# Browse closed trackers (retrospective archive)
+gh issue list --repo phase-rs/phase --label "collector" --state closed --limit 50 --json number,title,closedAt
 ```
 
 ## GitHub Issue Workflow
@@ -39,17 +48,172 @@ gh issue close <N> --repo phase-rs/phase --comment "Verified in gameplay. Closin
 gh issue edit <N> --repo phase-rs/phase --remove-label "status:needs-runtime-verify" --add-label "status:verified"
 ```
 
-### Mandatory Post-Fix Review Gate
+### Mandatory Post-Fix Review Gate — Isolated Reviewer Required
 
-Every code fix made during bug triage must run the implementation review command before the fix is committed, marked fixed, or described as complete:
+Every code fix made during bug triage must pass an **isolated reviewer agent's** application of `.claude/commands/review-impl.md` before the fix is committed, marked fixed, or described as complete.
+
+**Self-review by the implementing agent is NOT sufficient.** Multiple commits during the 2026-05-11 bug-triage rounds passed implementer self-review but had real issues caught only by a fresh-context reviewer (CR hallucinations, tests bypassing the pipeline they claim to exercise, predicate-narrowness latent bugs, missing CR sub-parts that don't exist). Implementers rationalize their own choices; fresh-context reviewers do not.
+
+How to apply:
 
 ```bash
-cat .claude/commands/review-impl.md
+# After the implementer ships a commit:
+git log --oneline -1   # capture the SHA
+
+# Spawn an isolated code-quality-reviewer agent (NOT the implementer) with:
+#   - the commit SHA
+#   - the review charter from .claude/commands/review-impl.md
+#   - explicit "you have not seen the implementation" framing
 ```
 
-Then apply the review checklist in `.claude/commands/review-impl.md` to the uncommitted diff. This is a required regression gate, not an optional cleanup pass. The review must look for missing sibling coverage, overly broad parser/runtime semantics, weak tests, hidden state leaks, rules-correctness gaps, and card-specific fixes that should have been modeled as reusable building blocks.
+The reviewer must read the diff (`git show <sha>`) with fresh context and apply the `/review-impl` checklist. Required focus areas:
 
-If the review finds a gap, fix it immediately, rerun the relevant targeted tests, and run the review gate again. Do not transition GitHub issues to `fixed-unreleased`, `needs-runtime-verify`, `verified`, or closed until this review is clean.
+- Missing sibling coverage / parameterization smells
+- Overly broad parser or runtime semantics
+- **CR annotation correctness** (mandatory grep-verification — see next section)
+- **Test rigor** (runtime tests must drive the engine pipeline — see Runtime Test Discipline below)
+- Hidden state leaks
+- Card-specific fixes that should have been modeled as reusable building blocks
+
+If the reviewer flags issues:
+- Send them back to the implementer via `SendMessage` (if still alive) for inline fix in a follow-up commit
+- Re-spawn isolated review on the fixup commit's diff
+- Repeat until the review is clean (typically 1-2 rounds in practice)
+
+Do NOT transition GitHub issues to `fixed-unreleased`, `needs-runtime-verify`, `verified`, or closed until the isolated review is clean.
+
+### CR Annotation Verification — Mandatory Grep-Proof
+
+Every CR (Comprehensive Rules) number written into engine code MUST be grep-verified against `docs/MagicCompRules.txt` before the annotation is committed. This is non-negotiable — CR hallucinations have been a recurring failure mode across multiple keyword-synthesis commits.
+
+Documented hallucinations from the 2026-05-11 session:
+- `CR 702.93b` and `CR 702.79b` for Undying/Persist multi-instance — **subparts do not exist** (both keywords have only subpart `a`)
+- `CR 701.16b` for sacrifice "as many as possible" — **subpart does not exist** AND **701.16 is Investigate, not Sacrifice** (701.21 is the sacrifice rule)
+- `CR 702.122` for Fabricate — **wrong rule number** (702.122 is Crew; Fabricate is 702.123)
+- `CR 702.85` for Annihilator — **wrong rule number** (702.85 is Cascade; Annihilator is 702.86)
+- `CR 609.3` for optional triggered abilities — **wrong rule** (609.3 is partial-execution; 603.5 is the optional-trigger rule)
+- `CR 608.2b` proposed as substitute for "as many as possible" — **wrong rule** (608.2b is target legality re-checking; 609.3 is the correct rule for "do as much as possible")
+
+The pattern: LLMs infer-by-analogy that subparts like `X.Yb` SHOULD exist describing some edge case (multi-instance redundancy, fast-path partial-execution, etc.). They frequently don't. The comp rules are sparsely structured; many keyword rules have only subpart `a`.
+
+**Before writing any CR annotation:**
+
+```bash
+grep -n "^<rule_number>" docs/MagicCompRules.txt
+```
+
+**Briefs given to implementer agents must include**:
+
+1. An explicit list of grep commands for every CR likely to be cited
+2. The acceptance criterion: "Paste the grep output line for every CR cite in your final report"
+3. The session memory pointer: `feedback_cr_subpart_hallucination.md`
+
+**Briefs given to isolated reviewer agents must include**:
+
+1. The full list of past hallucination patterns (above) to specifically check for
+2. The acceptance criterion: "Grep-verify every CR annotation in the diff. Any cite you cannot find at the cited line is a BLOCKER."
+
+**Safe-default citation patterns**:
+
+| Scenario | Citation |
+|----------|----------|
+| Multi-instance keyword redundancy | `CR 113.2c` (objects function with all their abilities) + absence of explicit redundancy clause analogous to CR 702.2f (deathtouch) / CR 702.9c (flying) |
+| Optional triggered abilities ("you may") | `CR 603.5` (NOT `CR 609.3`) |
+| Sacrifice action mechanic | `CR 701.21a` (NOT `CR 701.16` — that's Investigate) |
+| "Do as many as possible" partial execution | `CR 609.3` |
+| Target legality at resolution | `CR 608.2b` |
+| Defending player (per-attacker, not aggregate) | `CR 508.5 / 508.5a` (NOT `CR 506.3d` — that's a specific creature-ETB scenario) |
+| LKI for dies-trigger conditions | `CR 603.10a` (leaves-the-battlefield look-back) + `CR 400.7` (LKI semantics) |
+| As-enters replacement timing | `CR 614.1c` |
+| Counters lost on zone change | `CR 122.2` |
+
+If you find a cite the implementer wrote that isn't in this table or in `MagicCompRules.txt`, treat it as a hallucination until proven otherwise.
+
+### Runtime Test Discipline — Drive the Pipeline
+
+Runtime tests for synthesized definitions (replacements, triggers, effects) **MUST drive the engine through the pipeline the synthesis is consumed by**. Tests that pre-construct expected state — bypassing the pipeline — prove nothing about pipeline correctness; they pass for the wrong reasons.
+
+Documented anti-patterns from the 2026-05-11 session:
+- **Fabricate runtime tests** injected `GameEvent::ZoneChanged` directly into `process_triggers`, bypassing cast → stack → resolve → ETB-replacement-window. Filed #357 to retrofit real end-to-end tests.
+- **Modular `etb_replacement_starts_object_with_n_p1p1_counters`** directly inserted counters into `obj.counters` via a helper, bypassing the synthesized `ReplacementEvent::Moved` entirely. Test asserted both the replacement's shape AND the helper's manual mutation — proving consistency between two things the implementer wrote, not that the engine fires the replacement.
+- **Modular `dies_transfers_modified_counter_count_after_hardened_scales`** manually mutated `obj.counters = 2` before death, never installing a Hardened Scales replacement. Proved LKI captures the live count, but NOT that Hardened Scales interacts correctly with Modular's ETB.
+- **Modular `in_multiplayer_can_target_opponents_artifact_creature`** used `GameState::new_two_player`, not 3+ players. The name overpromised multiplayer-correctness.
+
+The decision rule:
+
+| Test type | What it asserts | What it proves |
+|-----------|----------------|----------------|
+| **SHAPE test** | The synthesized `ReplacementDefinition` / `TriggerDefinition` has the expected fields (correct event, valid_card, execute body) | The AST emitter produces the right structure. Valuable but limited. |
+| **RUNTIME test** | After driving the engine through the relevant action (`move_to_zone`, `cast_spell`, `process_triggers` triggered by a real action, SBA resolution), the observable game state matches expectations | The engine pipeline consumes the synthesis correctly. The only kind of test that proves integration. |
+
+**Rules for runtime tests**:
+
+1. Identify the pipeline entry point you're testing (e.g., `move_to_zone(obj_id, Battlefield)` for ETB replacements; `state.declare_attackers(...)` for attack triggers).
+2. Install the synthesized definition on the relevant `CardFace` / `GameObject` BEFORE driving the engine.
+3. Drive the engine through the entry point — let it produce the observable state.
+4. Assert against state the engine produced. Do NOT manually mutate `obj.counters`, `obj.tapped`, `obj.controller`, etc. to satisfy preconditions the engine should have produced.
+
+**Specific anti-patterns to reject in review**:
+
+- Helper functions that insert game-state values to satisfy a precondition the engine should have produced
+- "Multiplayer" tests using a 2-player `GameState`
+- Trigger tests calling `process_triggers(SyntheticEvent)` directly instead of producing the event via the game action that should emit it
+- Replacement tests asserting the replacement's shape and assuming that proves the engine fires it
+- LKI tests mutating the live counter map then asserting LKI reads it — proves the LKI cache reads from the live map, NOT that LKI captured pre-death state
+
+When the pipeline-driving harness doesn't exist yet, **build it as part of the work** (per the No Default Deferral rule below). Cascade synthesis has such a harness; mirror it. Do not split "real tests" into a follow-up issue when the harness can be built in the same commit.
+
+Session memory pointer: `feedback_runtime_tests_must_drive_pipeline.md`.
+
+### No Default Deferral — Build the Missing Infrastructure
+
+When a card bug requires a missing engine primitive (new enum variant, parser combinator, runtime resolver case, LKI plumbing, target filter, etc.), **build the primitive as part of the fix**. Use the reported card as the validating consumer. Do NOT file a deferred follow-up issue and ship a half-fix.
+
+Deferral is reserved for genuinely massive work:
+- Multi-day rewrites cross-cutting through stack / SBA / replacement pipelines
+- Architectural primitives that need their own RFC (e.g., Soulbond pair-binding, DSK Rooms door-unlock)
+- Work that requires user-facing UI design decisions
+
+A few hundred LOC of typed plumbing in the engine crate is NOT deferral-worthy. Examples from the 2026-05-11 session where the agent (correctly) built infrastructure instead of deferring:
+
+- #353 Undying/Persist: investigated whether LKI plumbing existed for dies-trigger counter inspection. It did (`apply_zone_exit_cleanup` snapshots counters into `LKISnapshot.counters`). Zero new infrastructure needed.
+- #351 Modular: discovered `resolve_counters_on_scope::Source` had a CR-correctness bug (live-state short-circuit bypassing LKI). Fixed it as part of the Modular work rather than filing as a separate ticket.
+- #352 Annihilator: needed "defending player for this attack" target wiring. Reused existing `ControllerRef::DefendingPlayer` (verified by tracing through `combat::defending_player_for_attacker`). Zero new variants.
+
+What gets filed as a separate issue:
+- Architectural design choices that affect multiple keywords/cards uniformly (e.g., #359 KeywordTriggerInstaller registry — affects all build-time-synthesized triggered keywords)
+- Pre-existing bugs in unrelated files discovered during review (file as a cleanup ticket; don't expand the current commit's scope into other modules)
+- Pi-round-class refactors lifting stringly-typed AST fields to typed enums (e.g., #364 CounterType Π-8 lift)
+
+**In briefs to implementer agents, include**:
+
+> If your work requires a missing primitive, enum variant, parser combinator, or runtime path: **build it as part of this commit**. Use the reported card as the validating consumer. Defer ONLY if the work is genuinely multi-day cross-cutting (and explain why in your report).
+
+Session memory pointer: `feedback_no_default_deferral.md`.
+
+### Multi-Agent Safe Staging
+
+When other engine-implementer agents are running concurrently on shared files (especially `crates/engine/src/database/synthesis.rs`, `types/ability.rs`, parser modules), **never use `git add <file>` for surgical edits** — it sweeps any concurrent in-progress edits into your commit, polluting the audit trail.
+
+Surgical staging options:
+
+```bash
+# Interactive hunk selection
+git add -p crates/engine/src/database/synthesis.rs
+
+# Non-interactive: write the patch and apply through the index
+git diff crates/engine/src/database/synthesis.rs > /tmp/my-edit.patch
+# (manually trim /tmp/my-edit.patch to only your hunks)
+git apply --cached /tmp/my-edit.patch
+```
+
+If a `git add <file>` collision happens anyway:
+
+1. Don't `git reset --hard` — preserves working-tree but reset can race with concurrent file writes
+2. Do `git commit --amend -m "<honest message describing both swept-in changes>"` to update the commit narrative
+3. SendMessage the other agent so it knows part of its work landed in your commit and to trust `git diff HEAD` for what remains to commit
+
+Documented collision from 2026-05-11: a small Fabricate-timing comment annotation (#358) staged via `git add crates/engine/src/database/synthesis.rs` swept the #353 Undying/Persist agent's in-progress synthesis scaffold into the same commit. Recovery: amended commit message to honestly describe both changes; agent finished its remaining work (tests + registration) in a follow-up commit.
 
 ### GitHub Comment Standard
 
@@ -68,6 +232,122 @@ needs-triage → confirmed → in-progress → fixed-unreleased → needs-runtim
                          → duplicate → closed
 ```
 
+## Cluster Tracking with Sub-Issues
+
+**Principle**: priority labels are perpetual buckets (queryable, auto-clean as issues close). Sub-issue trackers are *thematic workstreams with finite lifespans*. Trackers capture grouping rationale and ordering; they do NOT replace labels.
+
+### Decision rule
+
+Run at session end on newly filed issues, and at session start on the unclustered `status:confirmed` backlog (rate-limited: at most once per session).
+
+1. Standalone issue? → labels only.
+2. 2 related? → labels only; reassess at 3.
+3. 3+ with a one-paragraph rationale **beyond what labels say** AND a finite end state? → tracker.
+4. No finite end ("all P1 work", "all engine bugs")? → label query, not a tracker.
+
+### When NOT to file (anti-patterns)
+
+- **Singletons** — labels only.
+- **Label-queryable groups** — `priority:p1-* + area:engine` is a CLI query, not a tracker.
+- **Perpetual tier buckets** — NEVER invent `tier:1` / `tier:2` labels or "Tier N" parent issues. Tier is relative; trackers are durable; the mismatch creates name drift.
+- **Cross-tracker membership** — one parent per child is an API constraint. Pick the dominant theme (see Tiebreaker below).
+- **Invented label families** — NEVER invent `cluster:*`, `theme:*`, or other grouping labels. Structural label families are FIXED: `priority`, `area`, `mechanic`, `source`, `resolution`, `special`, `status`. Clustering is expressed through sub-issue parentage on a `collector`-labelled tracker, period.
+- **Deferral mechanism** — filing a sub-issue under a tracker is NOT a substitute for building missing infrastructure during the originating fix (see *No Default Deferral* above). Trackers organize work that is legitimately separate (architectural follow-ups discovered post-commit, RFC-class items, Π-round refactors), not in-scope plumbing punted to "later."
+
+### Tracker format
+
+```
+Title:  Cluster: <theme> (<scope>)
+Label:  collector
+Body uses fixed H2 headings (machine-extractable):
+
+  ## Rationale   — 1 paragraph; why grouped beyond what labels already say
+  ## Ordering    — 1 line per child if non-obvious
+  ## Children    — auto-rendered by GitHub when sub-issues are attached
+```
+
+### Lifecycle commands
+
+```bash
+# Create a tracker
+gh issue create --repo phase-rs/phase --label "collector" \
+  --title "Cluster: <theme> (<scope>)" \
+  --body "..."
+
+# Attach a child — API requires the REST id integer, NOT the issue number, NOT the node_id.
+# Use -F (typed field) — NOT -f (raw string). The -f form will fail with
+#   "Invalid property /sub_issue_id: \"<id>\" is not of type `integer`" (HTTP 422)
+CHILD_ID=$(gh api repos/phase-rs/phase/issues/<child_number> --jq .id)
+gh api -X POST repos/phase-rs/phase/issues/<parent_number>/sub_issues \
+  -F sub_issue_id=$CHILD_ID
+
+# Inspect a tracker + children
+gh issue view <parent_number> --repo phase-rs/phase --json subIssues,title,body
+```
+
+Reference: https://docs.github.com/en/rest/issues/sub-issues
+
+### Session integration
+
+**Session start**: list open trackers and work in this order:
+
+1. Trackers with any `priority:p0-softlock` child
+2. Then trackers older than 30 days (force-resolution pressure)
+3. Then trackers with the fewest remaining open children (closeout bias)
+
+After picking from open trackers, scan the unclustered `status:confirmed` backlog **once per session** for new thematic groupings of 3+ passing the decision rule. File retroactive trackers and attach matching issues. Do NOT re-scan on every tool call.
+
+**Session end**: review newly filed issues. Any 3+ with a shared theme passing the decision rule → file tracker + attach children. Singletons stay unattached.
+
+**Closure is MANUAL.** GitHub does NOT auto-close parents when sub-issues close. When the last active child closes, manually close the tracker with a brief retrospective comment summarizing the cluster outcome and any reusable primitives produced (e.g., "5 shipped, 1 RFC-deferred (#367). Reusable primitives: LKI snapshot for dies-trigger inspection, ChangeZone.enter_with_counters."). That comment IS the retrospective archive future agents will read.
+
+**Dissolution**: keep a tracker open if any active child remains AND its rationale still applies. Do NOT close a tracker just because count is 1 — a tracker with a single open RFC child remains structurally useful as the cluster → follow-up link.
+
+**Exhausted-cluster rule**: when all children are closed but more theme work is expected (e.g., Tier 1 keyword cluster closes and Tier 2 keywords are next), close the existing tracker with its retrospective comment and file a NEW tracker for the next batch. NEVER repurpose a closed-theme tracker as a perpetual queue — that violates the finite-end principle and merges history with active work.
+
+**Split rule**: when a tracker grows past ~10 children with diverging themes, file two new trackers, reparent the children, and close the original with `resolution:split` and a comment pointing at the two replacements.
+
+**Merge rule**: NEVER retroactively merge two open trackers. Each closed tracker is its retrospective archive. For genuinely converging themes, file a new forward-only tracker; cross-reference both originals in its Rationale.
+
+**Cross-cluster tiebreaker** (when a child fits two themes): pick the tracker whose Rationale more specifically predicts the fix shape. A "build-time synthesis" tracker beats a generic "Π-round refactor" tracker for a keyword bug because the synthesis tracker scopes the fix. If genuinely co-equal, prefer the tracker closing sooner so the child doesn't outlive its parent.
+
+### Worked example
+
+**Cluster: Keyword Synthesis (Tier 1, May 2026)** — CLOSED. Children: #346, #351, #352, #353, #354, #355 (all closed; #355 spawned RFC #367).
+
+```
+## Rationale
+Build-time synthesis pattern for highest-ROI keywords. Each child shares the
+synthesis.rs entry point and primitives (LKI snapshot, ReplacementEvent::Moved
++ PutCounter, ChangeZone.enter_with_counters, ControllerRef::DefendingPlayer).
+Cluster end: all keywords shipped or deferred to RFC.
+
+## Ordering
+Fabricate (baseline synthesis pattern) → dies-trigger family (Modular,
+Undying/Persist, Bloodthirst) → per-attacker family (Annihilator) →
+cross-cutting pair-binding (Soulbond, deferred to RFC #367).
+```
+
+**Cluster: Architectural Follow-ups from Keyword Synthesis** — OPEN. Open children: #357, #359, #364, #367. Closed: #358.
+
+```
+## Rationale
+Cross-cutting follow-ups discovered during the Tier 1 keyword cluster: LKI
+symmetry, CounterType Π-lift, end-to-end ETB-pipeline testing harness,
+KeywordTriggerInstaller registry. Each is too cross-cutting to land inline
+with the originating fix, but smaller than the RFC threshold. Cluster end:
+all follow-ups landed or escalated.
+
+## Ordering
+#359 registry first (front-load — unblocks future keyword work), then #357
+E2E test harness, then #364 Π-lift (waits for #359), then #367 RFC pickup.
+```
+
+### Cross-references
+
+- `feedback_no_default_deferral.md` — trackers do not park in-scope work; build the primitive inline as part of the fix.
+- GitHub sub-issues REST API: https://docs.github.com/en/rest/issues/sub-issues
+
 ## Resync Workflow (periodic maintenance)
 
 Run this after parser/engine changes to update triage state:
@@ -85,6 +365,8 @@ Compare the new cross-reference against open GitHub issues. Parser coverage is o
 - If the bug was a parser gap → inspect the reported ability and verify the typed AST/IR represents the reported semantics. Close only after that targeted semantic check passes.
 - If the bug was a runtime issue → do not mark fixed from parser coverage. Inspect the relevant runtime code and preferably add/run a reproduction test. Transition only after targeted evidence exists.
 
+Also at this step: audit open `collector` trackers. When a resync pass closes children of an open tracker, evaluate the tracker against the dissolution / exhausted-cluster rules in *Cluster Tracking with Sub-Issues* and manually close or split as appropriate. Tracker state otherwise drifts: children close, parents stay open with no remaining work.
+
 ### Step 4: Fetch new Discord messages
 ```bash
 bun scripts/sync-bug-reports.ts fetch
@@ -95,6 +377,21 @@ If new messages exist, re-run extract → triage → render and review new items
 ```bash
 bun scripts/sync-bug-reports.ts render
 ```
+
+## Oracle Text Sourcing — MANDATORY
+
+**Every Oracle text reference in a GitHub issue, comment, or triage note MUST be copied verbatim from `client/public/card-data.json`.** Never quote Oracle text from memory, the user's Discord message, Scryfall, or training data. The card database is the only authoritative source — using anything else risks filing issues against the wrong card text and wasting fix cycles.
+
+```bash
+# REQUIRED before quoting Oracle text in any issue body or comment:
+jq -r '.["card name"] | .oracle_text' client/public/card-data.json
+```
+
+If `oracle_text` is `null` or the card key is missing, do NOT guess — flag the card-data lookup failure in the issue and stop. A missing entry is itself a bug worth reporting (likely a card-data pipeline gap).
+
+When filing or updating an issue, include an explicit **Oracle text (verified from `client/public/card-data.json`)** section quoting the text you looked up. This makes the verification visible to reviewers and prevents downstream agents from re-introducing wrong text.
+
+If you discover an existing issue references wrong Oracle text, fix it as part of the next triage pass — wrong card text in an issue is worse than no quote, because it sends fixers chasing the wrong semantics.
 
 ## Investigating Whether a Bug Is Fixed
 
@@ -156,4 +453,4 @@ Before calling any bug fixed, run the mandatory post-fix review gate above. Regr
 | mechanic | triggered-abilities, mana, combat, tokens, costs, zone-change, continuous-effects, keyword, replacement-effects, counters, layers, attachments, modal, search, card-data-regen, ai-policy, targeting | Subsystem |
 | source | discord, github, playtesting | Provenance |
 | resolution | split, merged, upstream, cant-reproduce, by-design | Closure reason |
-| special | collector | Omnibus issue marker |
+| special | collector | Sub-issue tracker for a thematic cluster of 3+ related issues. Open trackers represent active workstreams; closed trackers are retrospective archive. See *Cluster Tracking with Sub-Issues* for the decision rule and lifecycle. |

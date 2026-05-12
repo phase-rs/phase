@@ -1,34 +1,52 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
-use crate::game::zones;
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
+use crate::game::quantity::resolve_quantity;
+use crate::types::ability::{
+    Effect, EffectError, EffectKind, ObjectProperty, ResolvedAbility, TargetRef, UntilCondition,
+};
 use crate::types::events::GameEvent;
-use crate::types::game_state::{ExileLink, ExileLinkKind, GameState};
+use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::zones::Zone;
 
-/// CR 701.57a + CR 702.85a: Exile cards from the top of the controller's library
-/// one at a time until a card matching the filter is found. Models the
-/// Discover (701.57a) / Cascade (702.85a) "exile from top until match" loop
-/// generalized over an arbitrary hit filter. The hit card's ObjectId is
-/// injected as a target into the sub_ability chain.
+/// CR 701.13 + CR 701.17a: Exile cards from the top of the acting player's
+/// library one at a time until the typed `until` predicate is satisfied.
 ///
-/// If the library is exhausted without a match, the sub_ability chain is skipped.
-/// Miss cards remain in exile (specific cleanup is the sub_ability's responsibility).
+/// The `UntilCondition` axis selects between two stop-condition families:
 ///
-/// CR 400.7 + CR 406.6: Each exiled card is recorded in `state.exile_links` with
-/// `ExileLinkKind::TrackedBySource` so downstream effects can reference "cards
-/// exiled this way" via `TargetFilter::ExiledBySource` (Etali, Primal Conqueror's
-/// "you may cast any number of spells from among the nonland cards exiled this
-/// way" — the same per-resolution exile-link channel that Skyclave Apparition
-/// and the linked-owner family already consume).
+/// * `NextMatches(filter)` — Etali / Cascade / Discover-shape (CR 701.57a /
+///   CR 702.85a). The just-exiled card is checked against the filter; the loop
+///   ends on the first match. The hit `ObjectId` is injected into the
+///   sub_ability chain as a target so downstream "cast that card" / "put it
+///   onto the battlefield" sub-effects can address it.
+///
+/// * `CumulativeThreshold { property, comparator, threshold }` — Tasha's
+///   Hideous Laughter / Dream Harvest / Improvisation Capstone (CR 202.3 +
+///   CR 107.3e). Every exiled card contributes `property` (mana value /
+///   power / toughness) to a running sum; the loop ends as soon as the
+///   comparator vs the threshold is satisfied. No hit card is injected — the
+///   sub_ability chain (if any) sees the per-resolution exile-link channel
+///   via `TargetFilter::ExiledBySource` (Improvisation Capstone's "you may
+///   cast any number of spells from among them").
+///
+/// In both modes:
+///
+/// * If the library is exhausted without satisfying the predicate, every card
+///   in the library is exiled and the loop terminates naturally. For
+///   `NextMatches`, the sub_ability chain is skipped (no hit to inject). For
+///   `CumulativeThreshold`, the sub_ability chain still runs because the
+///   per-resolution exile links are independently meaningful.
+///
+/// * CR 400.7 + CR 406.6: Each exiled card is recorded in `state.exile_links`
+///   with `ExileLinkKind::TrackedBySource` so downstream effects can reference
+///   "cards exiled this way" via `TargetFilter::ExiledBySource`.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let filter = match &ability.effect {
-        Effect::ExileFromTopUntil { filter } => filter,
-        _ => return Err(EffectError::MissingParam("filter".to_string())),
+    let until = match &ability.effect {
+        Effect::ExileFromTopUntil { until } => until,
+        _ => return Err(EffectError::MissingParam("until".to_string())),
     };
 
     let acting_player = ability.scoped_player.unwrap_or(ability.controller);
@@ -40,34 +58,75 @@ pub fn resolve(
 
     // Snapshot library (top = index 0) to iterate without borrow conflicts.
     let library: Vec<ObjectId> = player.library.iter().copied().collect();
-    let mut hit_id: Option<ObjectId> = None;
 
     // CR 107.3a + CR 601.2b: ability-context evaluation so dynamic thresholds
     // resolve against the resolving ability's `chosen_x`.
     let ctx = FilterContext::from_ability(ability);
 
+    // For `CumulativeThreshold`, resolve the threshold once up-front so X /
+    // dynamic refs read from the same context the ability is resolving in.
+    let threshold_value: Option<i32> = match until {
+        UntilCondition::NextMatches { .. } => None,
+        UntilCondition::CumulativeThreshold { threshold, .. } => Some(resolve_quantity(
+            state,
+            threshold,
+            ability.controller,
+            ability.source_id,
+        )),
+    };
+
+    let mut hit_id: Option<ObjectId> = None;
+    let mut cumulative: i32 = 0;
+
     for &obj_id in &library {
-        // CR 701.57a / 702.85a: Exile each card one at a time, checking the
-        // hit filter after each exile so the loop terminates as soon as a
-        // matching card is found.
-        zones::move_to_zone(state, obj_id, Zone::Exile, events);
+        // CR 701.13a: Exile the card through the shared zone-change pipeline so
+        // replacement effects, exile links, and zone bookkeeping stay identical
+        // to `Effect::ChangeZone`.
+        match super::change_zone::execute_zone_move(
+            state,
+            obj_id,
+            Zone::Library,
+            Zone::Exile,
+            ability.source_id,
+            ability.duration.as_ref(),
+            false,
+            false,
+            None,
+            &[],
+            events,
+        ) {
+            super::change_zone::ZoneMoveResult::Done => {}
+            super::change_zone::ZoneMoveResult::NeedsChoice(player) => {
+                state.waiting_for =
+                    crate::game::replacement::replacement_choice_waiting_for(player, state);
+                return Ok(());
+            }
+        }
 
-        // CR 400.7 + CR 406.6: Link the exiled card to the resolving source so
-        // `TargetFilter::ExiledBySource` (Etali) and the per-resolution-tracking
-        // family of filters (`OwnersOfCardsExiledBySource`, `CardsExiledBySource`)
-        // see this exile event. Pruned automatically when the source leaves
-        // play; matches the link kind used by `change_zone::move_object_to_zone`
-        // for non-duration exiles.
-        state.exile_links.push(ExileLink {
-            exiled_id: obj_id,
-            source_id: ability.source_id,
-            kind: ExileLinkKind::TrackedBySource,
-        });
-
-        // Check if the just-exiled card matches the hit filter.
-        if matches_target_filter(state, obj_id, filter, &ctx) {
-            hit_id = Some(obj_id);
-            break;
+        match until {
+            UntilCondition::NextMatches { filter } => {
+                // CR 701.57a / 702.85a: Stop on the first card matching the
+                // filter; expose it to the sub_ability chain.
+                if matches_target_filter(state, obj_id, filter, &ctx) {
+                    hit_id = Some(obj_id);
+                    break;
+                }
+            }
+            UntilCondition::CumulativeThreshold {
+                property,
+                comparator,
+                ..
+            } => {
+                // CR 202.3 + CR 107.3e: Add this card's contribution and stop
+                // once the running sum satisfies the comparator vs threshold.
+                cumulative = cumulative.saturating_add(extract_property(state, obj_id, *property));
+                if comparator.evaluate(
+                    cumulative,
+                    threshold_value.expect("threshold resolved for cumulative branch"),
+                ) {
+                    break;
+                }
+            }
         }
     }
 
@@ -76,18 +135,52 @@ pub fn resolve(
         source_id: ability.source_id,
     });
 
-    // CR 400.7: An object that moves from one zone to another becomes a new object.
-    // If a hit was found and there is a sub_ability, resolve it with the hit card as target.
-    if let (Some(hit), Some(ref sub)) = (hit_id, &ability.sub_ability) {
-        let mut sub_clone = sub.as_ref().clone();
-        sub_clone.targets = vec![TargetRef::Object(hit)];
-        sub_clone.context = ability.context.clone();
-        // Resolve the sub_ability chain directly — return early so the caller's
-        // resolve_ability_chain does not double-chain the sub_ability.
-        super::resolve_ability_chain(state, &sub_clone, events, 1)?;
+    // CR 400.7: An object that moves from one zone to another becomes a new
+    // object. Sub-ability chaining differs per stop-condition kind:
+    //
+    // * NextMatches: inject the hit card as the sub-ability's target so
+    //   "cast that card" / "you may put it onto the battlefield" address the
+    //   right object. If no hit was found, the sub_ability is skipped.
+    //
+    // * CumulativeThreshold: there is no single hit card. The sub_ability
+    //   chain (if any) reads from `TargetFilter::ExiledBySource` to address
+    //   the whole exiled set (Improvisation Capstone, Dream Harvest). Run it
+    //   with the original target list intact.
+    if let Some(ref sub) = ability.sub_ability {
+        match until {
+            UntilCondition::NextMatches { .. } => {
+                if let Some(hit) = hit_id {
+                    let mut sub_clone = sub.as_ref().clone();
+                    sub_clone.targets = vec![TargetRef::Object(hit)];
+                    sub_clone.context = ability.context.clone();
+                    super::resolve_ability_chain(state, &sub_clone, events, 1)?;
+                }
+            }
+            UntilCondition::CumulativeThreshold { .. } => {
+                let mut sub_clone = sub.as_ref().clone();
+                sub_clone.context = ability.context.clone();
+                super::resolve_ability_chain(state, &sub_clone, events, 1)?;
+            }
+        }
     }
 
     Ok(())
+}
+
+/// CR 202.3 / CR 208 / CR 209: Look up the requested measurable property of an
+/// exiled object. Mirrors the per-property dispatch used by
+/// `quantity::resolve_quantity`'s aggregate-of-objects branch so both
+/// callers compute the same number for the same card.
+fn extract_property(state: &GameState, obj_id: ObjectId, property: ObjectProperty) -> i32 {
+    let Some(obj) = state.objects.get(&obj_id) else {
+        return 0;
+    };
+    match property {
+        ObjectProperty::Power => obj.power.unwrap_or(0),
+        // CR 202.3e: `mana_value()` excludes X (treats X as 0 outside the stack).
+        ObjectProperty::ManaValue => i32::try_from(obj.mana_cost.mana_value()).unwrap_or(i32::MAX),
+        ObjectProperty::Toughness => obj.toughness.unwrap_or(0),
+    }
 }
 
 #[cfg(test)]
@@ -95,12 +188,15 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        PlayerFilter, QuantityExpr, ResolvedAbility, TargetFilter, TypeFilter, TypedFilter,
+        AbilityDefinition, AbilityKind, Comparator, PlayerFilter, QuantityExpr,
+        ReplacementDefinition, ResolvedAbility, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
     use crate::types::identifiers::CardId;
+    use crate::types::mana::ManaCost;
     use crate::types::player::PlayerId;
+    use crate::types::replacements::ReplacementEvent;
 
     /// Helper: set up a card in a player's library with the given core type.
     fn add_library_card(
@@ -149,7 +245,9 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ExileFromTopUntil {
-                filter: nonland_filter(),
+                until: UntilCondition::NextMatches {
+                    filter: nonland_filter(),
+                },
             },
             vec![],
             source,
@@ -208,7 +306,9 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::ExileFromTopUntil {
-                filter: nonland_filter(),
+                until: UntilCondition::NextMatches {
+                    filter: nonland_filter(),
+                },
             },
             vec![],
             source,
@@ -226,6 +326,70 @@ mod tests {
         );
         assert_eq!(state.objects.get(&faced_land).unwrap().zone, Zone::Exile);
         assert_eq!(state.objects.get(&faced_hit).unwrap().zone, Zone::Exile);
+    }
+
+    #[test]
+    fn exile_from_top_until_routes_each_move_through_replacement_pipeline() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Replacement Source".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.replacement_definitions.push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChangeZone {
+                            origin: None,
+                            destination: Zone::Graveyard,
+                            target: TargetFilter::Any,
+                            owner_library: false,
+                            enter_transformed: false,
+                            under_your_control: false,
+                            enter_tapped: false,
+                            enters_attacking: false,
+                            up_to: false,
+                            enter_with_counters: vec![],
+                        },
+                    ))
+                    .destination_zone(Zone::Exile),
+            );
+        }
+
+        let hit = add_library_card(&mut state, PlayerId(0), "Bear", false);
+        state.players[0].library = crate::im::vector![hit];
+
+        let ability = ResolvedAbility::new(
+            Effect::ExileFromTopUntil {
+                until: UntilCondition::NextMatches {
+                    filter: nonland_filter(),
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects[&hit].zone,
+            Zone::Graveyard,
+            "Moved replacement should redirect the top-card exile"
+        );
+        assert!(
+            state.players[0].graveyard.contains(&hit),
+            "redirected card should be tracked in graveyard"
+        );
+        assert!(
+            !state.exile.contains(&hit),
+            "redirected card must not remain in exile"
+        );
     }
 
     /// CR 608.2 + CR 701.57a + CR 702.85a: Etali-shape — `player_scope: All`
@@ -266,7 +430,9 @@ mod tests {
         // is exercised by the same path Etali's runtime uses.
         let mut wrapped = ResolvedAbility::new(
             Effect::ExileFromTopUntil {
-                filter: nonland_filter(),
+                until: UntilCondition::NextMatches {
+                    filter: nonland_filter(),
+                },
             },
             vec![],
             source,
@@ -381,6 +547,264 @@ mod tests {
         assert!(
             !tokens.iter().any(|(owner, _)| *owner == PlayerId(0)),
             "Akroan controller should not own any of the tokens"
+        );
+    }
+
+    /// Helper: add a card to a player's library with a specific generic mana
+    /// value contribution (CR 202.3 — generic only, no shards, so mana value
+    /// equals `generic_cost`).
+    fn add_library_card_with_mv(
+        state: &mut GameState,
+        owner: PlayerId,
+        name: &str,
+        generic_cost: u32,
+    ) -> ObjectId {
+        let card_id = CardId(state.next_object_id);
+        let id = create_object(state, card_id, owner, name.to_string(), Zone::Library);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.mana_cost = ManaCost::generic(generic_cost);
+        id
+    }
+
+    /// CR 202.3 + CR 107.3e: Tasha's Hideous Laughter mainline — exile from
+    /// the top of an opponent's library until the cumulative mana value of
+    /// the exiled cards reaches 20. Library has cards summing to exactly 20
+    /// across the first three cards; the fourth card must remain in library.
+    #[test]
+    fn cumulative_threshold_stops_when_running_sum_reaches_threshold() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Tasha's Hideous Laughter".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Mana values 8 + 7 + 5 = 20 (≥ 20 reached on third); fourth (4) untouched.
+        let c1 = add_library_card_with_mv(&mut state, PlayerId(0), "Eight", 8);
+        let c2 = add_library_card_with_mv(&mut state, PlayerId(0), "Seven", 7);
+        let c3 = add_library_card_with_mv(&mut state, PlayerId(0), "Five", 5);
+        let c4 = add_library_card_with_mv(&mut state, PlayerId(0), "Four", 4);
+        state.players[0].library = crate::im::vector![c1, c2, c3, c4];
+
+        let ability = ResolvedAbility::new(
+            Effect::ExileFromTopUntil {
+                until: UntilCondition::CumulativeThreshold {
+                    property: ObjectProperty::ManaValue,
+                    comparator: Comparator::GE,
+                    threshold: QuantityExpr::Fixed { value: 20 },
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        for &id in &[c1, c2, c3] {
+            assert_eq!(
+                state.objects.get(&id).unwrap().zone,
+                Zone::Exile,
+                "card with cumulative-MV contribution should be exiled"
+            );
+        }
+        assert_eq!(
+            state.objects.get(&c4).unwrap().zone,
+            Zone::Library,
+            "card after the threshold was reached should remain in the library"
+        );
+    }
+
+    /// CR 202.3 + CR 107.3e: When the library cannot reach the threshold even
+    /// after exiling every card, the loop terminates naturally with the entire
+    /// library exiled. Tasha's Hideous Laughter against a small deck.
+    #[test]
+    fn cumulative_threshold_exhausts_library_when_threshold_unreachable() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Tasha's Hideous Laughter".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Total MV = 1 + 2 = 3; threshold 20 unreachable.
+        let c1 = add_library_card_with_mv(&mut state, PlayerId(0), "One", 1);
+        let c2 = add_library_card_with_mv(&mut state, PlayerId(0), "Two", 2);
+        state.players[0].library = crate::im::vector![c1, c2];
+
+        let ability = ResolvedAbility::new(
+            Effect::ExileFromTopUntil {
+                until: UntilCondition::CumulativeThreshold {
+                    property: ObjectProperty::ManaValue,
+                    comparator: Comparator::GE,
+                    threshold: QuantityExpr::Fixed { value: 20 },
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.players[0].library.is_empty(),
+            "library should be fully exiled when threshold is unreachable"
+        );
+        for &id in &[c1, c2] {
+            assert_eq!(state.objects.get(&id).unwrap().zone, Zone::Exile);
+        }
+    }
+
+    /// CR 608.2 + CR 202.3: Tasha multiplayer — `player_scope: Opponent`
+    /// drives per-opponent iteration; each opponent independently exiles from
+    /// their own library until that player's running cumulative mana value
+    /// satisfies the threshold. One opponent's accumulated value must not
+    /// affect another's.
+    #[test]
+    fn cumulative_threshold_each_opponent_resolves_independently() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Tasha's Hideous Laughter".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Opponent 1 hits threshold on the second card (10 + 10 = 20).
+        let p1_a = add_library_card_with_mv(&mut state, PlayerId(1), "P1 Ten A", 10);
+        let p1_b = add_library_card_with_mv(&mut state, PlayerId(1), "P1 Ten B", 10);
+        let p1_unreached = add_library_card_with_mv(&mut state, PlayerId(1), "P1 Six", 6);
+        state.players[1].library = crate::im::vector![p1_a, p1_b, p1_unreached];
+
+        // Opponent 2 hits threshold on the third card (8 + 8 + 8 = 24 ≥ 20).
+        let p2_a = add_library_card_with_mv(&mut state, PlayerId(2), "P2 Eight A", 8);
+        let p2_b = add_library_card_with_mv(&mut state, PlayerId(2), "P2 Eight B", 8);
+        let p2_c = add_library_card_with_mv(&mut state, PlayerId(2), "P2 Eight C", 8);
+        let p2_unreached = add_library_card_with_mv(&mut state, PlayerId(2), "P2 Two", 2);
+        state.players[2].library = crate::im::vector![p2_a, p2_b, p2_c, p2_unreached];
+
+        // Controller (PlayerId(0)) library must be untouched.
+        let p0_card = add_library_card_with_mv(&mut state, PlayerId(0), "P0 One", 1);
+        state.players[0].library = crate::im::vector![p0_card];
+
+        let mut wrapped = ResolvedAbility::new(
+            Effect::ExileFromTopUntil {
+                until: UntilCondition::CumulativeThreshold {
+                    property: ObjectProperty::ManaValue,
+                    comparator: Comparator::GE,
+                    threshold: QuantityExpr::Fixed { value: 20 },
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        wrapped.player_scope = Some(PlayerFilter::Opponent);
+
+        let mut events = Vec::new();
+        super::super::resolve_ability_chain(&mut state, &wrapped, &mut events, 0).unwrap();
+
+        // Controller library untouched.
+        assert_eq!(
+            state.objects.get(&p0_card).unwrap().zone,
+            Zone::Library,
+            "controller library must not be exiled"
+        );
+
+        // Opponent 1: first two exiled, third remains.
+        assert_eq!(state.objects.get(&p1_a).unwrap().zone, Zone::Exile);
+        assert_eq!(state.objects.get(&p1_b).unwrap().zone, Zone::Exile);
+        assert_eq!(
+            state.objects.get(&p1_unreached).unwrap().zone,
+            Zone::Library,
+            "opponent 1's third card should remain — independent threshold"
+        );
+
+        // Opponent 2: first three exiled, fourth remains.
+        assert_eq!(state.objects.get(&p2_a).unwrap().zone, Zone::Exile);
+        assert_eq!(state.objects.get(&p2_b).unwrap().zone, Zone::Exile);
+        assert_eq!(state.objects.get(&p2_c).unwrap().zone, Zone::Exile);
+        assert_eq!(
+            state.objects.get(&p2_unreached).unwrap().zone,
+            Zone::Library,
+            "opponent 2's fourth card should remain — independent threshold"
+        );
+    }
+
+    /// Cumulative-threshold sub-ability dispatch: in the `CumulativeThreshold`
+    /// arm there is no single hit card, but the resolver must still run the
+    /// sub_ability chain (with the original target list intact) so that
+    /// follow-up sentences like Improvisation Capstone's "You may cast any
+    /// number of spells from among them" reach their resolver. The
+    /// `EffectKind::EffectResolved` event for the sub-ability is the
+    /// observable signal that the chain ran.
+    #[test]
+    fn cumulative_threshold_runs_sub_ability_chain() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Improvisation Capstone".to_string(),
+            Zone::Battlefield,
+        );
+
+        let c1 = add_library_card_with_mv(&mut state, PlayerId(0), "Two", 2);
+        let c2 = add_library_card_with_mv(&mut state, PlayerId(0), "Two B", 2);
+        state.players[0].library = crate::im::vector![c1, c2];
+
+        // Sub-ability is a trivial Scry 1 — easy to detect by EffectResolved
+        // kind because it doesn't depend on target legality.
+        let sub = ResolvedAbility::new(
+            Effect::Scry {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::ExileFromTopUntil {
+                until: UntilCondition::CumulativeThreshold {
+                    property: ObjectProperty::ManaValue,
+                    comparator: Comparator::GE,
+                    threshold: QuantityExpr::Fixed { value: 4 },
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.sub_ability = Some(Box::new(sub));
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Both cards exiled (2 + 2 = 4 ≥ 4).
+        assert_eq!(state.objects.get(&c1).unwrap().zone, Zone::Exile);
+        assert_eq!(state.objects.get(&c2).unwrap().zone, Zone::Exile);
+
+        // Sub-ability ran — there should be a Scry resolution event.
+        let sub_kinds: Vec<EffectKind> = events
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::EffectResolved { kind, .. } => Some(*kind),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            sub_kinds.contains(&EffectKind::Scry),
+            "sub_ability (Scry) must run for CumulativeThreshold even though no hit card was injected; got events kinds {sub_kinds:?}"
         );
     }
 }

@@ -2,6 +2,8 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, ChoiceValue, CostPaidObjectSnapshot, Effect, ManaProduction,
     ResolvedAbility, TargetFilter,
 };
+#[cfg(test)]
+use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     GameState, ManaAbilityResume, ManaChoice, ManaChoiceContext, ManaChoicePrompt,
@@ -789,21 +791,34 @@ fn advance_mana_ability_activation(
         }
     }
 
-    // CR 605.3a + CR 601.2h + CR 107.4e: Resolve the mana sub-cost payment before
-    // producing any mana or prompting for output choices. If the cost has hybrid
-    // shards (CR 107.4e) with more than one legal color assignment given the
-    // current pool, surface `PayManaAbilityMana` so the player picks. Unambiguous
-    // plans auto-pay.
+    // CR 605.3a + CR 602.2b + CR 601.2g-h + CR 107.4e: Resolve the mana
+    // sub-cost payment before producing any mana or prompting for output
+    // choices. If the current pool already offers multiple hybrid assignments,
+    // surface `PayManaAbilityMana` so the player picks. If the pool cannot
+    // cover the sub-cost yet, fall through to the real payment site, which may
+    // activate other mana abilities while paying this activation cost (CR
+    // 117.1d / CR 118.2).
     if pending.chosen_mana_payment.is_none() {
         if let Some(sub_cost) = mana_sub_cost_of(&ability_def.cost) {
             let pool = &state.players[pending.player.0 as usize].mana_pool;
             let plans = enumerate_hybrid_payment_plans(pool, sub_cost);
             match plans.len() {
-                0 => {
+                0 if {
+                    let excluded_sources = std::collections::HashSet::from([pending.source_id]);
+                    !super::casting::can_pay_ability_mana_cost_after_auto_tap_excluding(
+                        state,
+                        pending.player,
+                        pending.source_id,
+                        sub_cost,
+                        &excluded_sources,
+                    )
+                } =>
+                {
                     return Err(EngineError::ActionNotAllowed(
                         "Cannot pay mana cost for mana ability".to_string(),
                     ));
                 }
+                0 => {}
                 1 => {
                     let mut updated = pending;
                     updated.chosen_mana_payment = Some(plans.into_iter().next().unwrap());
@@ -1291,6 +1306,13 @@ where
                         target: TargetFilter::SelfRef,
                         ..
                     } => {
+                        if super::static_abilities::player_cant_sacrifice_as_cost(
+                            state, player, source_id,
+                        ) {
+                            return Err(EngineError::ActionNotAllowed(
+                                "Cannot sacrifice this permanent as a cost".to_string(),
+                            ));
+                        }
                         let _ = sacrifice::sacrifice_permanent(state, source_id, player, events)?;
                     }
                     AbilityCost::Sacrifice { target, count } => {
@@ -1322,11 +1344,10 @@ where
                         counter_type,
                         target: None,
                     } => {
-                        let counter_kind = crate::types::counter::parse_counter_type(counter_type);
                         super::effects::counters::remove_counter_with_replacement(
                             state,
                             source_id,
-                            counter_kind,
+                            counter_type.clone(),
                             *count,
                             events,
                         );
@@ -1374,9 +1395,9 @@ fn pay_life_cost(
     // CR 118.3 + CR 119.4 + CR 119.8: Delegate to the single-authority helper
     // so mana-ability life costs honor the replacement pipeline and the
     // CantLoseLife lock identically to every other pay-life path.
-    match life_costs::pay_life_as_cost(state, player, amount, events) {
+    match life_costs::pay_life_as_cast_or_activation_cost(state, player, amount, events) {
         PayLifeCostResult::Paid { .. } => Ok(()),
-        PayLifeCostResult::InsufficientLife | PayLifeCostResult::LockedCantLoseLife => Err(
+        PayLifeCostResult::InsufficientLife | PayLifeCostResult::Prohibited => Err(
             EngineError::ActionNotAllowed("Cannot pay life cost for mana ability".to_string()),
         ),
     }
@@ -1542,11 +1563,11 @@ fn mana_type_to_single_shard(color: ManaType) -> crate::types::mana::ManaCostSha
     }
 }
 
-/// CR 605.3a + CR 601.2h: Debit a mana sub-cost from the activator's pool.
-/// If `hybrid_plan` is provided, hybrid shards are pinned to those colors;
-/// otherwise `pay_cost` auto-decides via the standard casting rules. An
-/// `InsufficientMana` error surfaces as `ActionNotAllowed` so the UI can
-/// recover cleanly (the pre-activation gate should have prevented this).
+/// CR 605.3a + CR 602.2b + CR 601.2g-h: Pay a mana sub-cost for an activated
+/// mana ability. If `hybrid_plan` is provided, hybrid shards are pinned to the
+/// colors chosen by `PayManaAbilityMana` and debited from the current pool.
+/// Otherwise, use the shared activation mana-payment building block so the
+/// player may activate other mana abilities while paying this activation cost.
 fn pay_mana_sub_cost(
     state: &mut GameState,
     source_id: ObjectId,
@@ -1555,6 +1576,18 @@ fn pay_mana_sub_cost(
     hybrid_plan: Option<&[ManaType]>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
+    if hybrid_plan.is_none() {
+        let excluded_sources = std::collections::HashSet::from([source_id]);
+        return super::casting::pay_ability_mana_cost_excluding(
+            state,
+            player,
+            source_id,
+            cost,
+            events,
+            &excluded_sources,
+        );
+    }
+
     // CR 106.6: The mana sub-cost of a mana ability is paid as part of an
     // ability activation — spend-restrictions must be evaluated through
     // `allows_activation` (via `PaymentContext::Activation`), not through the
@@ -1887,6 +1920,11 @@ fn sacrifice_selected_permanent_for_mana_cost(
             "Selected permanent does not match the sacrifice cost filter".to_string(),
         ));
     }
+    if super::static_abilities::player_cant_sacrifice_as_cost(state, player, chosen_id) {
+        return Err(EngineError::ActionNotAllowed(
+            "Selected permanent cannot be sacrificed as a cost".to_string(),
+        ));
+    }
     match sacrifice::sacrifice_permanent(state, chosen_id, player, events)? {
         sacrifice::SacrificeOutcome::Complete => Ok(()),
         sacrifice::SacrificeOutcome::NeedsReplacementChoice(_) => Ok(()),
@@ -1917,7 +1955,7 @@ fn resume_waiting_for(player: PlayerId, resume: ManaAbilityResume) -> WaitingFor
             effect_description,
         } => WaitingFor::UnlessPayment {
             player,
-            cost,
+            cost: *cost,
             pending_effect,
             trigger_event,
             effect_description,
@@ -1935,13 +1973,13 @@ mod tests {
         AbilityCondition, AbilityCost, AbilityKind, ContinuousModification, ControllerRef,
         DevotionColors, Duration, Effect, LinkedExileScope, ManaContribution, ManaProduction,
         MultiTargetSpec, PlayerScope, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter,
-        TypedFilter,
+        TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{ExileLink, ExileLinkKind};
     use crate::types::identifiers::CardId;
-    use crate::types::mana::{ManaColor, ManaCostShard, ManaType};
-    use crate::types::statics::StaticMode;
+    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType};
+    use crate::types::statics::{CostPaymentProhibition, ProhibitionScope, StaticMode};
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
 
@@ -3970,6 +4008,93 @@ mod tests {
     }
 
     #[test]
+    fn fixed_filter_land_activates_by_tapping_other_mana_source_for_sub_cost() {
+        // CR 117.1d + CR 118.2 + CR 602.2b + CR 605.3a: A mana ability with a
+        // mana activation cost may activate other mana abilities while paying
+        // that cost. Skycloud Expanse class: "{1}, {T}: Add {W}{U}."
+        let mut state = GameState::new_two_player(42);
+        let forest = create_object(
+            &mut state,
+            CardId(501),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&forest).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Forest".to_string());
+        }
+        let skycloud = create_object(
+            &mut state,
+            CardId(502),
+            PlayerId(0),
+            "Skycloud Expanse".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![ManaColor::White, ManaColor::Blue],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+                AbilityCost::Tap,
+            ],
+        });
+        {
+            let obj = state.objects.get_mut(&skycloud).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            Arc::make_mut(&mut obj.abilities).push(ability.clone());
+        }
+
+        assert!(can_activate_mana_ability_now(
+            &state,
+            PlayerId(0),
+            skycloud,
+            0,
+            &ability,
+        ));
+
+        let mut events = Vec::new();
+        let waiting = activate_mana_ability(
+            &mut state,
+            skycloud,
+            PlayerId(0),
+            0,
+            &ability,
+            &mut events,
+            ManaAbilityResume::Priority,
+            None,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            waiting,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
+        assert!(state.objects.get(&forest).unwrap().tapped);
+        assert!(state.objects.get(&skycloud).unwrap().tapped);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 0);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::White), 1);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Blue), 1);
+        assert_eq!(state.players[0].mana_pool.total(), 2);
+    }
+
+    #[test]
     fn filter_land_prompts_for_ambiguous_hybrid_mana_payment() {
         // CR 107.4e + CR 601.2h: Pool has one {U} and one {B}. Both color
         // assignments for the {U/B} hybrid are legal, so the engine pauses
@@ -4318,7 +4443,7 @@ mod tests {
                 AbilityCost::Tap,
                 AbilityCost::RemoveCounter {
                     count: 1,
-                    counter_type: "mining".to_string(),
+                    counter_type: CounterType::Generic("mining".to_string()),
                     target: None,
                 },
             ],
@@ -4415,6 +4540,81 @@ mod tests {
         assert!(
             !can_activate_mana_ability_now(&state, player, land, 0, &def),
             "Gemstone Mine must not be activatable when it has no mining counters"
+        );
+    }
+
+    #[test]
+    fn cabal_coffers_pays_generic_taps_and_counts_swamps() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let coffers = create_object(
+            &mut state,
+            CardId(9001),
+            player,
+            "Cabal Coffers".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(
+                                TypedFilter::new(TypeFilter::Subtype("Swamp".to_string()))
+                                    .controller(ControllerRef::You),
+                            ),
+                        },
+                    },
+                    color_options: vec![ManaColor::Black],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: Vec::new(),
+                grants: Vec::new(),
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(2),
+                },
+                AbilityCost::Tap,
+            ],
+        });
+        Arc::make_mut(&mut state.objects.get_mut(&coffers).unwrap().abilities)
+            .push(ability.clone());
+
+        for idx in 0..3 {
+            let swamp = create_object(
+                &mut state,
+                CardId(9010 + idx),
+                player,
+                "Swamp".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&swamp).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Swamp".to_string());
+        }
+        seed_pool_with(&mut state, player, ManaType::Black, 2);
+
+        assert!(
+            can_activate_mana_ability_now(&state, player, coffers, 0, &ability),
+            "Cabal Coffers must be activatable with two mana available"
+        );
+
+        let mut events = Vec::new();
+        resolve_mana_ability(&mut state, coffers, player, &ability, &mut events, None)
+            .expect("Cabal Coffers activation must pay {2}, tap, and add mana");
+
+        assert!(state.objects.get(&coffers).unwrap().tapped);
+        assert_eq!(
+            state.players[player.0 as usize]
+                .mana_pool
+                .count_color(ManaType::Black),
+            3
         );
     }
 
@@ -4834,6 +5034,75 @@ mod tests {
         ));
         assert_eq!(state.objects.get(&creature).unwrap().zone, Zone::Graveyard);
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Black), 1);
+    }
+
+    #[test]
+    fn sacrifice_mana_cost_rejects_prohibited_selected_permanent() {
+        let mut state = GameState::new_two_player(42);
+        let altar = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Phyrexian Altar".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = make_phyrexian_altar_ability();
+        Arc::make_mut(&mut state.objects.get_mut(&altar).unwrap().abilities).push(ability);
+
+        let creature = spawn_creature_with_cost(
+            &mut state,
+            PlayerId(0),
+            "Grizzly Bears",
+            ManaCost::generic(2),
+        );
+        let lock = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Cost Lock".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&lock)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CantPayCost {
+                who: ProhibitionScope::AllPlayers,
+                cost: CostPaymentProhibition::Sacrifice {
+                    filter: TargetFilter::Typed(TypedFilter::creature()),
+                },
+            }));
+
+        let pending = PendingManaAbility {
+            player: PlayerId(0),
+            source_id: altar,
+            ability_index: 0,
+            color_override: Some(ProductionOverride::SingleColor(ManaType::Black)),
+            resume: ManaAbilityResume::Priority,
+            chosen_tappers: Vec::new(),
+            chosen_discards: Vec::new(),
+            chosen_mana_payment: None,
+            chosen_exiled_battlefield: Vec::new(),
+            chosen_sacrificed_battlefield: Vec::new(),
+            cost_paid_object: None,
+        };
+
+        let result = handle_sacrifice_for_mana_ability(
+            &mut state,
+            1,
+            &[creature],
+            &pending,
+            &[creature],
+            &mut Vec::new(),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            state.objects.get(&creature).unwrap().zone,
+            Zone::Battlefield
+        );
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Black), 0);
     }
 
     #[test]

@@ -157,6 +157,16 @@ pub const ORDERING_MANIFEST: &[((&str, &str), OrderingClass)] = &[
         ("ChooseFromZoneConstraint", "categories"),
         OrderingClass::SetEquivalent,
     ),
+    // Search selection qualities are conjunctive constraints on the chosen set;
+    // their order does not change legality.
+    (
+        ("SearchSelectionConstraint", "qualities"),
+        OrderingClass::SetEquivalent,
+    ),
+    (
+        ("SearchSelectionConstraint", "filters"),
+        OrderingClass::SetEquivalent,
+    ),
     // ----- ChoiceType / mana production -----
     // Player-facing string options. The player picks one; order is the
     // display order in the prompt UI. Treat as positional so the diff
@@ -183,6 +193,13 @@ pub const ORDERING_MANIFEST: &[((&str, &str), OrderingClass)] = &[
     // ----- QuantityRef devotion colors -----
     (("QuantityRef", "colors"), OrderingClass::SetEquivalent),
     (("QuantityRef", "card_types"), OrderingClass::SetEquivalent),
+    // ----- QuantityRef ObjectCountDistinct dedup-key set -----
+    // CR 201.2: `qualities` is the set of shared characteristics used to
+    // deduplicate counted objects (e.g. `[Name]` for "different names",
+    // `[ManaValue]` for "different mana values"). The order of qualities
+    // doesn't change which objects coincide — it's a multiset key — so
+    // diffs can ignore ordering safely.
+    (("QuantityRef", "qualities"), OrderingClass::SetEquivalent),
     // ----- StaticCondition.colors / nested condition list -----
     (("StaticCondition", "colors"), OrderingClass::SetEquivalent),
     (

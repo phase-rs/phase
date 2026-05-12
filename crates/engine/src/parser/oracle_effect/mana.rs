@@ -592,13 +592,25 @@ pub(super) fn parse_colorless_mana_production(text: &str) -> Option<(QuantityExp
     }
 }
 
-/// Parse a count prefix for mana amounts: "X ", "x ", or an English/digit number.
+/// Parse a count prefix for mana amounts: "that much", "that many", "X", or
+/// an English/digit number.
 ///
 /// Uses nom combinators for the "X"/"x" prefix matching, falling back to
 /// `oracle_util::parse_number` for English words and digits.
 pub(super) fn parse_mana_count_prefix(text: &str) -> Option<(QuantityExpr, &str)> {
     let trimmed = text.trim_start();
     let lower = trimmed.to_lowercase();
+
+    if let Some((_, rest)) = nom_on_lower(trimmed, &lower, |i| {
+        value((), alt((tag("that much "), tag("that many ")))).parse(i)
+    }) {
+        return Some((
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            rest.trim_start(),
+        ));
+    }
 
     // Try "x " via nom (case-insensitive via lowercase)
     if let Some((_, rest)) = nom_on_lower(trimmed, &lower, |i| value((), tag("x ")).parse(i)) {

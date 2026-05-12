@@ -306,7 +306,7 @@ const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onC
               Unknown {compatibility.unknown_cards.length}
             </span>
           )}
-          {coverage && (() => {
+          {coverage && coverage.supported_unique < coverage.total_unique && (() => {
             const { supported_unique, total_unique, unsupported_cards } = coverage;
             const pct = total_unique > 0 ? (supported_unique / total_unique) * 100 : 0;
             const barColor =

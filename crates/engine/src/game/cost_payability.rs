@@ -20,7 +20,6 @@ use crate::types::ability::{AbilityCost, TargetFilter};
 use crate::types::ability::{FilterProp, TypedFilter};
 use crate::types::card_type::CoreType;
 use crate::types::identifiers::ObjectId;
-use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 use crate::types::GameState;
@@ -28,12 +27,14 @@ use crate::types::GameState;
 use super::filter::{matches_target_filter, FilterContext};
 
 impl AbilityCost {
-    /// CR 605.3a + CR 605.3b + CR 601.2h: Payability gate for ACTIVATED MANA
-    /// ABILITIES specifically. Unlike [`is_payable`] (which defers mana
-    /// affordability to the casting-time `ManaPayment` step per CR 601.2g),
-    /// mana abilities resolve immediately and their mana sub-cost must be
-    /// debited from the pool at activation — so pool affordability is checked
-    /// here. All other cost kinds delegate to [`is_payable`] with no change.
+    /// CR 605.3a + CR 602.2b + CR 601.2g-h: Payability gate for ACTIVATED
+    /// MANA ABILITIES specifically. Unlike [`is_payable`] (which defers mana
+    /// affordability to the normal spell/ability payment step), a mana ability
+    /// resolves immediately after its activation cost is paid. If that cost
+    /// includes mana, CR 117.1d and CR 118.2 still allow activating other mana
+    /// abilities while paying it, so affordability is checked through the
+    /// activation mana-payment building block rather than requiring mana to
+    /// already be floating.
     pub fn is_payable_for_mana_ability(
         &self,
         state: &GameState,
@@ -41,7 +42,16 @@ impl AbilityCost {
         source: ObjectId,
     ) -> bool {
         match self {
-            AbilityCost::Mana { cost } => mana_cost_payable_from_pool(state, player, cost),
+            AbilityCost::Mana { cost } => {
+                let excluded_sources = std::collections::HashSet::from([source]);
+                super::casting::can_pay_ability_mana_cost_after_auto_tap_excluding(
+                    state,
+                    player,
+                    source,
+                    cost,
+                    &excluded_sources,
+                )
+            }
             AbilityCost::Composite { costs } => costs
                 .iter()
                 .all(|c| c.is_payable_for_mana_ability(state, player, source)),
@@ -87,7 +97,10 @@ impl AbilityCost {
                     return state
                         .objects
                         .get(&source)
-                        .is_some_and(|o| o.zone == Zone::Battlefield);
+                        .is_some_and(|o| o.zone == Zone::Battlefield)
+                        && !super::static_abilities::player_cant_sacrifice_as_cost(
+                            state, player, source,
+                        );
                 }
                 super::casting::find_eligible_sacrifice_targets(state, player, source, target).len()
                     >= *count as usize
@@ -99,7 +112,7 @@ impl AbilityCost {
             AbilityCost::PayLife { amount } => {
                 let resolved =
                     super::quantity::resolve_quantity(state, amount, player, source).max(0) as u32;
-                super::life_costs::can_pay_life_cost(state, player, resolved)
+                super::life_costs::can_pay_life_cast_or_activation_cost(state, player, resolved)
             }
             // CR 601.2b: Discard requires a choice of card from hand.
             // For `self_ref`, the source card itself must still be in hand.
@@ -192,22 +205,19 @@ impl AbilityCost {
                 count,
                 counter_type,
                 target,
-            } => {
-                let counter_kind = crate::types::counter::parse_counter_type(counter_type);
-                match target {
-                    None => counter_on_object(state, source, &counter_kind) >= *count,
-                    Some(tf) => {
-                        let ctx = FilterContext::from_source(state, source);
-                        state.battlefield.iter().any(|&id| {
-                            state.objects.get(&id).is_some_and(|o| {
-                                o.controller == player
-                                    && matches_target_filter(state, id, tf, &ctx)
-                                    && counter_on_object(state, id, &counter_kind) >= *count
-                            })
+            } => match target {
+                None => counter_on_object(state, source, counter_type) >= *count,
+                Some(tf) => {
+                    let ctx = FilterContext::from_source(state, source);
+                    state.battlefield.iter().any(|&id| {
+                        state.objects.get(&id).is_some_and(|o| {
+                            o.controller == player
+                                && matches_target_filter(state, id, tf, &ctx)
+                                && counter_on_object(state, id, counter_type) >= *count
                         })
-                    }
+                    })
                 }
-            }
+            },
             // CR 107.14: A player can pay {E} only if they have enough energy.
             AbilityCost::PayEnergy { amount } => state
                 .players
@@ -223,8 +233,14 @@ impl AbilityCost {
                 resolved <= current
             }
             // CR 601.2b: Returning N permanents to hand requires N permanents
-            // controlled by player matching filter.
-            AbilityCost::ReturnToHand { count, filter } => {
+            // controlled by player matching filter. The `from_zone` axis is
+            // only consumed by the unless-payment path, never by activation
+            // costs — the standard battlefield-source check is correct here.
+            AbilityCost::ReturnToHand {
+                count,
+                filter,
+                from_zone: _,
+            } => {
                 super::casting::find_eligible_return_to_hand_targets(
                     state,
                     player,
@@ -234,6 +250,18 @@ impl AbilityCost {
                 .len()
                     >= *count as usize
             }
+            // CR 701.3d: An explicit unattach cost is payable only while the
+            // source is an attached battlefield permanent controlled by player.
+            AbilityCost::Unattach => state.objects.get(&source).is_some_and(|obj| {
+                obj.zone == Zone::Battlefield
+                    && obj.controller == player
+                    && obj
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|subtype| subtype == "Equipment")
+                    && obj.attached_to.is_some()
+            }),
             // CR 701.13b: A player can mill fewer than N cards if their library
             // has fewer than N; the cost is always payable.
             AbilityCost::Mill { .. } => true,
@@ -296,19 +324,14 @@ impl AbilityCost {
             // CR 601.2b: Unimplemented costs are conservatively treated as payable
             // so the existing `Unimplemented` fallback paths are not further gated.
             AbilityCost::Unimplemented { .. } => true,
+            // CR 118.4 + CR 107.3c: Dynamic-generic mana primarily appears in
+            // unless-pay contexts. The activation-time payability check
+            // resolves the quantity to a fixed amount and treats the cost as
+            // mana — same as `AbilityCost::Mana { .. }` (whose mana
+            // affordability is delegated to CR 601.2g per the comment above).
+            AbilityCost::ManaDynamic { .. } => true,
         }
     }
-}
-
-/// CR 601.2h + CR 605.3a: Check whether `cost` can be paid from `player`'s
-/// current mana pool. This is the single authority for mana-ability mana
-/// payability — auto-tap is NOT considered (mana abilities activate at
-/// instant speed without chaining into other mana abilities, CR 605.3c).
-fn mana_cost_payable_from_pool(state: &GameState, player: PlayerId, cost: &ManaCost) -> bool {
-    let Some(p) = state.players.get(player.0 as usize) else {
-        return false;
-    };
-    super::mana_payment::can_pay(&p.mana_pool, cost)
 }
 
 /// Count objects in `zone` controlled by `player` that match `filter`

@@ -293,7 +293,10 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
-                enter_with_counters: vec![("P1P1".to_string(), QuantityExpr::Fixed { value: 2 })],
+                enter_with_counters: vec![(
+                    CounterType::Plus1Plus1,
+                    QuantityExpr::Fixed { value: 2 },
+                )],
             },
         )));
         replacement

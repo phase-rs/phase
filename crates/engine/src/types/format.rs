@@ -81,6 +81,19 @@ pub struct FormatConfig {
     pub commander_damage_threshold: Option<u8>,
     pub range_of_influence: Option<u8>,
     pub team_based: bool,
+    /// Engine-derived predicate: true when the format uses a commander card
+    /// and the commander-damage state-based action (CR 903.10a / CR 704.5u).
+    /// Covers Commander, Duel Commander, Pauper Commander, Brawl, and
+    /// Historic Brawl. The frontend consumes this directly — it must never
+    /// re-list commander-style formats client-side.
+    pub uses_commander: bool,
+    /// Capability flag: when true, the server (and other transport gates)
+    /// permit `GameAction::Debug(_)` from any player in this session. Off by
+    /// default. Orthogonal to format — a sandbox Commander game plays
+    /// exactly like a normal Commander game with one additional permission.
+    /// Immutable for the life of the session.
+    #[serde(default)]
+    pub allow_debug_actions: bool,
 }
 
 impl GameFormat {
@@ -144,6 +157,24 @@ impl GameFormat {
             GameFormat::Commander
                 | GameFormat::PauperCommander
                 | GameFormat::DuelCommander
+                | GameFormat::Brawl
+                | GameFormat::HistoricBrawl,
+        )
+    }
+
+    /// Whether this format uses a commander card and the commander-damage
+    /// state-based action (CR 903.10a / CR 704.5u). True for Commander, Duel
+    /// Commander, Pauper Commander, Brawl, and Historic Brawl — every format
+    /// whose `FormatConfig` has both `command_zone: true` and a non-`None`
+    /// `commander_damage_threshold`. The frontend consumes the derived
+    /// `FormatConfig::uses_commander` field rather than re-listing the
+    /// commander-style variants client-side.
+    pub fn uses_commander(self) -> bool {
+        matches!(
+            self,
+            GameFormat::Commander
+                | GameFormat::DuelCommander
+                | GameFormat::PauperCommander
                 | GameFormat::Brawl
                 | GameFormat::HistoricBrawl,
         )
@@ -315,6 +346,8 @@ impl FormatConfig {
             commander_damage_threshold: None,
             range_of_influence: None,
             team_based: false,
+            uses_commander: false,
+            allow_debug_actions: false,
         }
     }
 
@@ -330,6 +363,8 @@ impl FormatConfig {
             commander_damage_threshold: Some(21),
             range_of_influence: None,
             team_based: false,
+            uses_commander: true,
+            allow_debug_actions: false,
         }
     }
 
@@ -424,6 +459,8 @@ impl FormatConfig {
             commander_damage_threshold: Some(21),
             range_of_influence: None,
             team_based: false,
+            uses_commander: true,
+            allow_debug_actions: false,
         }
     }
 
@@ -447,6 +484,8 @@ impl FormatConfig {
             commander_damage_threshold: None,
             range_of_influence: None,
             team_based: false,
+            uses_commander: false,
+            allow_debug_actions: false,
         }
     }
 
@@ -464,6 +503,8 @@ impl FormatConfig {
             commander_damage_threshold: None,
             range_of_influence: None,
             team_based: false,
+            uses_commander: false,
+            allow_debug_actions: false,
         }
     }
 
@@ -479,7 +520,17 @@ impl FormatConfig {
             commander_damage_threshold: None,
             range_of_influence: None,
             team_based: true,
+            uses_commander: false,
+            allow_debug_actions: false,
         }
+    }
+
+    /// Return a copy of this config with the sandbox capability enabled.
+    /// Pure data transform; the resulting config is otherwise identical and
+    /// keeps the same `GameFormat`, deck/seat/life rules, etc. Idempotent.
+    pub fn with_sandbox(mut self) -> Self {
+        self.allow_debug_actions = true;
+        self
     }
 
     /// Default `FormatConfig` for a given `GameFormat`. Used by callers that
@@ -673,6 +724,32 @@ mod tests {
             FormatConfig::for_format(GameFormat::Limited),
             FormatConfig::limited()
         );
+    }
+
+    #[test]
+    fn uses_commander_matches_default_config_and_threshold() {
+        // The `GameFormat::uses_commander()` predicate, the derived
+        // `FormatConfig::uses_commander` field, and the existence of a
+        // commander-damage threshold must all agree for every variant.
+        for meta in GameFormat::registry() {
+            let expected = meta.format.uses_commander();
+            assert_eq!(
+                meta.default_config.uses_commander, expected,
+                "{:?}: registry default disagrees with predicate",
+                meta.format
+            );
+            assert_eq!(
+                meta.default_config.commander_damage_threshold.is_some(),
+                expected,
+                "{:?}: commander_damage_threshold presence must match uses_commander",
+                meta.format
+            );
+        }
+        // Variants not in the user-facing registry still respect the invariant.
+        for format in [GameFormat::TwoHeadedGiant, GameFormat::Limited] {
+            let config = FormatConfig::for_format(format);
+            assert_eq!(config.uses_commander, format.uses_commander());
+        }
     }
 
     #[test]

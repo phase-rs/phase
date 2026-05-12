@@ -1,15 +1,19 @@
-use crate::types::ability::{Effect, ModalChoice, QuantityExpr, TargetRef};
+use crate::types::ability::{
+    AbilityCost, AbilityTag, AdditionalCost, Effect, ModalChoice, QuantityExpr, TargetRef,
+    TargetSelectionMode,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor};
 use crate::types::identifiers::ObjectId;
+use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
 
 use super::ability_utils::{
     assign_selected_slots_in_chain, assign_targets_in_chain, auto_select_targets_for_ability,
     begin_target_selection_for_ability, build_chained_resolved, build_target_slots,
-    choose_target_for_ability, flatten_targets_in_chain, validate_modal_indices,
-    validate_selected_targets_for_ability, TargetSelectionAdvance,
+    choose_target_for_ability, flatten_targets_in_chain, random_select_targets_for_ability,
+    validate_modal_indices, validate_selected_targets_for_ability, TargetSelectionAdvance,
 };
 use super::casting::{emit_targeting_events, pay_ability_cost};
 use super::casting_costs::finish_pending_cast_cost_or_pay;
@@ -48,6 +52,10 @@ pub(crate) fn handle_select_modes(
     // zero as identity, so a cast-without-paying path (`pending.cost == zero`) yields exactly
     // the additional costs — alternative-cost permissions never waive them.
     let total_cost = compute_modal_total_cost(&pending.cost, &modal, &indices);
+    let mut pending = pending;
+    if let Some(cost) = escalate_cost_for_selected_modes(state, player, &pending, indices.len()) {
+        pending.additional_cost_flow = Some(AdditionalCost::Required(cost));
+    }
 
     // Get the card's abilities to build combined resolved ability from chosen modes
     let obj = state
@@ -67,6 +75,25 @@ pub(crate) fn handle_select_modes(
 
     let target_slots = build_target_slots(state, &resolved)?;
     if !target_slots.is_empty() {
+        // CR 115.1 + CR 701.9b: For abilities marked `Random`, the game (not the
+        // controller) selects targets uniformly from each slot's legal-target set.
+        // No `WaitingFor::TargetSelection` is emitted — the choice is made now
+        // using the seeded engine RNG. Checked before the auto-select degenerate
+        // path so multi-target-legal random spells (where there's a choice to
+        // make but the *controller* doesn't make it) take this branch.
+        if matches!(resolved.target_selection_mode, TargetSelectionMode::Random) {
+            let targets = random_select_targets_for_ability(
+                state,
+                &target_slots,
+                &pending.target_constraints,
+            )?;
+            let mut resolved = resolved;
+            assign_targets_in_chain(state, &mut resolved, &targets)?;
+            return finish_pending_cast_cost_or_pay(
+                state, player, pending, resolved, total_cost, events,
+            );
+        }
+
         if let Some(targets) = auto_select_targets_for_ability(
             state,
             &resolved,
@@ -209,6 +236,8 @@ pub(crate) fn handle_select_targets(
         events.push(GameEvent::AbilityActivated {
             source_id: pending.object_id,
         });
+        // CR 702.142b: Emit additional event when a boast ability is activated.
+        emit_boast_event_if_tagged(state, pending.object_id, ability_index, player, events);
         state.priority_passes.clear();
         state.priority_pass_count = 0;
         return Ok(WaitingFor::Priority { player });
@@ -297,6 +326,8 @@ pub(crate) fn handle_choose_target(
                 events.push(GameEvent::AbilityActivated {
                     source_id: pending.object_id,
                 });
+                // CR 702.142b: Emit additional event when a boast ability is activated.
+                emit_boast_event_if_tagged(state, pending.object_id, ability_index, player, events);
                 state.priority_passes.clear();
                 state.priority_pass_count = 0;
                 return Ok(WaitingFor::Priority { player });
@@ -338,6 +369,37 @@ pub(crate) fn compute_modal_total_cost(
     total
 }
 
+fn escalate_cost_for_selected_modes(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    selected_mode_count: usize,
+) -> Option<AbilityCost> {
+    let additional_modes = selected_mode_count.checked_sub(1)?;
+    if additional_modes == 0 {
+        return None;
+    }
+
+    let cost = super::casting::effective_spell_keywords(state, player, pending.object_id)
+        .into_iter()
+        .find_map(|keyword| match keyword {
+            Keyword::Escalate(cost) => Some(cost),
+            _ => None,
+        })?;
+
+    Some(repeat_escalate_cost(cost, additional_modes))
+}
+
+fn repeat_escalate_cost(cost: AbilityCost, count: usize) -> AbilityCost {
+    if count == 1 {
+        cost
+    } else {
+        AbilityCost::Composite {
+            costs: vec![cost; count],
+        }
+    }
+}
+
 /// CR 601.2d: Extract a fixed distribution total from an effect's amount field.
 /// Returns `None` if the amount depends on X or other runtime values (deferred to post-payment).
 fn extract_fixed_distribution_total(effect: &Effect) -> Option<u32> {
@@ -355,6 +417,28 @@ fn extract_fixed_distribution_total(effect: &Effect) -> Option<u32> {
             ..
         } => Some(*value as u32),
         _ => None,
+    }
+}
+
+/// CR 702.142b: If the activated ability at `ability_index` on the source object
+/// has `ability_tag == Some(AbilityTag::Boast)`, emit a `BoastAbilityActivated` event.
+pub(crate) fn emit_boast_event_if_tagged(
+    state: &GameState,
+    source_id: ObjectId,
+    ability_index: usize,
+    player: PlayerId,
+    events: &mut Vec<GameEvent>,
+) {
+    let is_boast = state
+        .objects
+        .get(&source_id)
+        .and_then(|obj| obj.abilities.get(ability_index))
+        .is_some_and(|def| def.ability_tag == Some(AbilityTag::Boast));
+    if is_boast {
+        events.push(GameEvent::BoastAbilityActivated {
+            player_id: player,
+            source_id,
+        });
     }
 }
 
@@ -436,5 +520,33 @@ mod tests {
             compute_modal_total_cost(&base, &modal, &[0, 1]),
             ManaCost::generic(2),
         );
+    }
+
+    /// CR 702.120a: Escalate cost is paid once per mode chosen beyond the first.
+    /// Single repetition returns the cost unwrapped; multi repetition wraps in
+    /// `Composite` so each repeat is paid sequentially.
+    #[test]
+    fn repeat_escalate_cost_wraps_in_composite_for_multiple_extra_modes() {
+        let cost = AbilityCost::Mana {
+            cost: ManaCost::generic(1),
+        };
+
+        // One extra mode (2 modes selected): no Composite wrapper.
+        assert!(matches!(
+            repeat_escalate_cost(cost.clone(), 1),
+            AbilityCost::Mana { .. }
+        ));
+
+        // Two extra modes (3 modes selected): Composite with two clones.
+        match repeat_escalate_cost(cost.clone(), 2) {
+            AbilityCost::Composite { costs } => assert_eq!(costs.len(), 2),
+            other => panic!("expected Composite, got {other:?}"),
+        }
+
+        // Three extra modes (4 modes selected): Composite with three clones.
+        match repeat_escalate_cost(cost, 3) {
+            AbilityCost::Composite { costs } => assert_eq!(costs.len(), 3),
+            other => panic!("expected Composite, got {other:?}"),
+        }
     }
 }

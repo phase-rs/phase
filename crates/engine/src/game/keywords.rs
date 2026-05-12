@@ -444,15 +444,31 @@ fn apply_ability_cost_reduction(
         if let StaticMode::ReduceAbilityCost {
             ref keyword,
             amount,
+            ref dynamic_count,
             ..
         } = static_def.mode
         {
             if keyword == ability_keyword {
+                // CR 601.2f: When dynamic_count is present, the total reduction is
+                // amount * resolve_quantity(dynamic_count). E.g., "cost {1} less for each Dragon".
+                let multiplier = dynamic_count.as_ref().map_or(1u32, |qty_ref| {
+                    let expr = crate::types::ability::QuantityExpr::Ref {
+                        qty: qty_ref.clone(),
+                    };
+                    crate::game::quantity::resolve_quantity(
+                        state,
+                        &expr,
+                        bf_obj.controller,
+                        bf_obj.id,
+                    )
+                    .max(0) as u32
+                });
+                let total_reduction = amount.saturating_mul(multiplier);
                 if let ManaCost::Cost {
                     ref mut generic, ..
                 } = cost
                 {
-                    *generic = generic.saturating_sub(amount);
+                    *generic = generic.saturating_sub(total_reduction);
                 }
             }
         }
