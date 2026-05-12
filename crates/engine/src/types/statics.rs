@@ -742,6 +742,11 @@ pub enum StaticMode {
     /// player's normal untap, scanning the battlefield for this variant on
     /// permanents whose controller != active_player.
     UntapsDuringEachOtherPlayersUntapStep,
+    /// CR 707.10 + CR 614.1a: Twinning Staff class — when this permanent's
+    /// controller would copy a spell one or more times, they instead copy it
+    /// that many times plus one additional time. Applied in
+    /// `copy_spell.rs::resolve` after each initial copy is created.
+    CopySpellAmplifier,
     /// Fallback for unrecognized static mode strings.
     Other(String),
 }
@@ -973,6 +978,7 @@ impl fmt::Display for StaticMode {
             StaticMode::UntapsDuringEachOtherPlayersUntapStep => {
                 write!(f, "UntapsDuringEachOtherPlayersUntapStep")
             }
+            StaticMode::CopySpellAmplifier => write!(f, "CopySpellAmplifier"),
             // Fallback
             StaticMode::Other(s) => write!(f, "{s}"),
         }
@@ -1193,6 +1199,7 @@ impl FromStr for StaticMode {
             "UntapsDuringEachOtherPlayersUntapStep" => {
                 StaticMode::UntapsDuringEachOtherPlayersUntapStep
             }
+            "CopySpellAmplifier" => StaticMode::CopySpellAmplifier,
             // CR 701.38d: "While voting, you may vote an additional time."
             "GrantsExtraVote" => StaticMode::GrantsExtraVote,
             // Parameterized
