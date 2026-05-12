@@ -11,6 +11,7 @@ import {
   type AiDeckSelection,
 } from "../../stores/preferencesStore";
 import type { DeckArchetype } from "../../services/engineRuntime";
+import { BracketFilter } from "./BracketFilter";
 
 interface Props {
   selectedFormat?: GameFormat;
@@ -79,6 +80,8 @@ export function AiOpponentConfig({
   const setArchetypeFilter = usePreferencesStore((s) => s.setAiArchetypeFilter);
   const coverageFloor = usePreferencesStore((s) => s.aiCoverageFloor);
   const setCoverageFloor = usePreferencesStore((s) => s.setAiCoverageFloor);
+  const bracketFilter = usePreferencesStore((s) => s.aiBracketFilter);
+  const setBracketFilter = usePreferencesStore((s) => s.setAiBracketFilter);
 
   // Keep the persisted seat list in sync with the setup page's player count.
   useEffect(() => {
@@ -101,9 +104,13 @@ export function AiOpponentConfig({
       if (archetypeFilter !== "Any" && d.archetype && d.archetype !== archetypeFilter) {
         return false;
       }
+      if (bracketFilter.length > 0 && selectedFormat === "Commander") {
+        if (d.bracket === null) return false;             // untagged excluded
+        if (!bracketFilter.includes(d.bracket)) return false;
+      }
       return true;
     });
-  }, [candidates, coverageFloor, archetypeFilter]);
+  }, [candidates, coverageFloor, archetypeFilter, bracketFilter, selectedFormat]);
 
   // Render exactly `opponentCount` panels regardless of how many slots the
   // store currently holds — the effect above will catch the store up on the
@@ -206,6 +213,16 @@ export function AiOpponentConfig({
             Exclude decks below this engine-support threshold
           </span>
         </label>
+
+        {selectedFormat === "Commander" && (
+          <div className="flex flex-col gap-1">
+            <span className="text-xs text-slate-400">Bracket</span>
+            <BracketFilter selected={bracketFilter} onChange={setBracketFilter} />
+            <span className="text-[10px] text-slate-500">
+              Random AI picks from these brackets. Untagged decks are excluded when filtering.
+            </span>
+          </div>
+        )}
       </div>
     </div>
   );
