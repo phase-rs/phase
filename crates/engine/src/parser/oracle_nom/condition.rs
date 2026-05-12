@@ -55,6 +55,7 @@ fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondit
         parse_source_state_conditions,
         parse_player_state_conditions,
         parse_you_have_conditions,
+        parse_that_player_has_conditions,
         parse_compound_control_presence,
         parse_filter_have_total_property,
         parse_control_conditions,
@@ -536,33 +537,18 @@ fn parse_this_type_entered_this_turn(input: &str) -> OracleResult<'_, StaticCond
 
 /// CR 208.1: Parse source power/toughness comparison conditions.
 ///
-/// Handles "its power is N or less/greater", "~ has power N or greater",
-/// and equivalent enchanted/equipped creature patterns.
-/// Used for "as long as enchanted creature's power is 3 or less" etc.
+/// Two grammar forms compose through a shared comparator suffix:
+/// - Possessive subject + linking verb: `its power is N`,
+///   `enchanted creature's toughness is N`, `equipped creature's power is N`.
+/// - Source subject + `has`: `~ has power N`, `this creature has toughness N`,
+///   etc. — every subject accepted by `parse_source_subject`.
+///
+/// The `~ has power N` form is the canonical templating used by intervening-if
+/// continuations such as "Then if ~ has power 7 or greater, …" (Cloud,
+/// Ex-SOLDIER). Without it, those clauses silently swallow the condition and
+/// the gated sub-ability fires unconditionally.
 fn parse_source_power_toughness_condition(input: &str) -> OracleResult<'_, StaticCondition> {
-    // Subject: "its ", "~ has ", "enchanted creature's ", "equipped creature's "
-    let (rest, _) = alt((
-        tag("its "),
-        tag("enchanted creature's "),
-        tag("equipped creature's "),
-    ))
-    .parse(input)?;
-    // Property: "power " or "toughness "
-    let (rest, qty) = alt((
-        value(
-            QuantityRef::Power {
-                scope: crate::types::ability::ObjectScope::Source,
-            },
-            tag("power is "),
-        ),
-        value(
-            QuantityRef::Toughness {
-                scope: crate::types::ability::ObjectScope::Source,
-            },
-            tag("toughness is "),
-        ),
-    ))
-    .parse(rest)?;
+    let (rest, qty) = alt((parse_possessive_property, parse_subject_has_property)).parse(input)?;
     let (rest, n) = parse_number(rest)?;
     // Comparator: "or less" / "or greater"
     let (rest, comparator) = alt((
@@ -580,6 +566,93 @@ fn parse_source_power_toughness_condition(input: &str) -> OracleResult<'_, Stati
     ))
 }
 
+/// Possessive-subject form: `<possessive> <property> is `, leaving the threshold
+/// number on the remaining input.
+fn parse_possessive_property(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = alt((
+        tag("its "),
+        tag("enchanted creature's "),
+        tag("equipped creature's "),
+    ))
+    .parse(input)?;
+    alt((
+        value(
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
+            tag("power is "),
+        ),
+        value(
+            QuantityRef::Toughness {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
+            tag("toughness is "),
+        ),
+    ))
+    .parse(rest)
+}
+
+/// Source-subject form: `<subject> has <property> `, leaving the threshold
+/// number on the remaining input. Reuses `parse_source_subject` so every
+/// canonical source phrasing (`~`, `this creature`, `this permanent`, …,
+/// `enchanted creature`, `equipped creature`) composes identically.
+fn parse_subject_has_property(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = parse_source_subject(input)?;
+    let (rest, _) = tag("has ").parse(rest)?;
+    alt((
+        value(
+            QuantityRef::Power {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
+            tag("power "),
+        ),
+        value(
+            QuantityRef::Toughness {
+                scope: crate::types::ability::ObjectScope::Source,
+            },
+            tag("toughness "),
+        ),
+    ))
+    .parse(rest)
+}
+
+/// Parse hand-size predicates after a `<subject> has ` prefix has been
+/// consumed. Returns `Some(condition)` on match.
+///
+/// Shared by "you have ..." and "that player has ..." dispatchers — the only
+/// axis that varies is the `PlayerScope` of the resulting `HandSize` ref, so
+/// the suffixes themselves compose cleanly with any subject. Also accepts
+/// the canonical "their hand" form for plural-friendly readings.
+fn parse_hand_size_predicate(rest: &str, player: PlayerScope) -> Option<(&str, StaticCondition)> {
+    // "no cards in hand" → HandSize EQ 0
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("no cards in hand").parse(rest) {
+        return Some((
+            rest,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize { player },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            },
+        ));
+    }
+
+    // "N or more cards in hand" → HandSize GE N
+    let (after_n, n) = parse_number(rest).ok()?;
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" or more cards in hand").parse(after_n) {
+        return Some((rest, make_quantity_ge(QuantityRef::HandSize { player }, n)));
+    }
+    // "N or fewer cards in hand" → HandSize LE N
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" or fewer cards in hand").parse(after_n) {
+        return Some((
+            rest,
+            make_quantity_comparison(QuantityRef::HandSize { player }, Comparator::LE, n),
+        ));
+    }
+    None
+}
+
 /// Parse "you have" quantity conditions: hand size, graveyard size, life.
 ///
 /// Composable: "you have " + threshold/absence + quantity suffix.
@@ -588,20 +661,9 @@ fn parse_source_power_toughness_condition(input: &str) -> OracleResult<'_, Stati
 fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("you have ").parse(input)?;
 
-    // "you have no cards in hand" → HandSize EQ 0
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("no cards in hand").parse(rest) {
-        return Ok((
-            rest,
-            StaticCondition::QuantityComparison {
-                lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::HandSize {
-                        player: PlayerScope::Controller,
-                    },
-                },
-                comparator: Comparator::EQ,
-                rhs: QuantityExpr::Fixed { value: 0 },
-            },
-        ));
+    // Hand-size predicates compose for any player scope; "you have" → Controller.
+    if let Some((rest, cond)) = parse_hand_size_predicate(rest, PlayerScope::Controller) {
+        return Ok((rest, cond));
     }
 
     // "you have exactly N life" → LifeTotal EQ N
@@ -620,21 +682,9 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
         ));
     }
 
-    // "you have N or more [quantity-suffix]"
+    // "you have N or more [you-only quantity-suffix]"
     let (rest, n) = parse_number(rest)?;
 
-    // Try each quantity suffix
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" or more cards in hand").parse(rest) {
-        return Ok((
-            rest,
-            make_quantity_ge(
-                QuantityRef::HandSize {
-                    player: PlayerScope::Controller,
-                },
-                n,
-            ),
-        ));
-    }
     if let Ok((rest, _)) =
         tag::<_, _, OracleError<'_>>(" or more cards in your graveyard").parse(rest)
     {
@@ -664,20 +714,36 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
             ),
         ));
     }
-    // "you have N or fewer cards in hand" → HandSize LE N
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" or fewer cards in hand").parse(rest) {
-        return Ok((
-            rest,
-            make_quantity_comparison(
-                QuantityRef::HandSize {
-                    player: PlayerScope::Controller,
-                },
-                Comparator::LE,
-                n,
-            ),
-        ));
-    }
 
+    Err(nom::Err::Error(nom::error::Error::new(
+        input,
+        nom::error::ErrorKind::Fail,
+    )))
+}
+
+/// Parse "that player has" / "that opponent has" quantity conditions.
+///
+/// CR 500.2 + CR 603.4 + CR 603.7c: "that player" inside a Phase trigger's
+/// intervening-if binds to the player whose phase fired the trigger. The
+/// resulting `PlayerScope::ScopedPlayer` is bound to the active player at
+/// trigger fire time (see `triggers::build_triggered_ability`) and threaded
+/// into trigger-condition quantity resolution
+/// (`quantity::resolve_quantity_for_trigger_check`).
+///
+/// Currently covers the hand-size suffix family used by Ghirapur Orrery and
+/// related "if that player has no cards in hand" / "N or more / N or fewer"
+/// patterns; life-total / graveyard variants will compose in here as more
+/// cards exercise them.
+fn parse_that_player_has_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("that player has "),
+        tag::<_, _, OracleError<'_>>("that opponent has "),
+    ))
+    .parse(input)?;
+
+    if let Some((rest, cond)) = parse_hand_size_predicate(rest, PlayerScope::ScopedPlayer) {
+        return Ok((rest, cond));
+    }
     Err(nom::Err::Error(nom::error::Error::new(
         input,
         nom::error::ErrorKind::Fail,
@@ -3078,6 +3144,84 @@ mod tests {
         }
     }
 
+    /// CR 500.2 + CR 603.4 + CR 603.7c: "if that player has no cards in hand" — the
+    /// HandSize ref binds to the scoped player (active player for Phase triggers
+    /// like Ghirapur Orrery), not the source's controller.
+    #[test]
+    fn test_parse_condition_that_player_no_cards() {
+        let (rest, c) = parse_condition("if that player has no cards in hand").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert_eq!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::ScopedPlayer,
+                        },
+                    }
+                );
+                assert_eq!(comparator, Comparator::EQ);
+                assert_eq!(rhs, QuantityExpr::Fixed { value: 0 });
+            }
+            other => panic!("expected QuantityComparison, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_condition_that_player_n_or_more_cards() {
+        let (rest, c) = parse_condition("if that player has three or more cards in hand").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert_eq!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::ScopedPlayer,
+                        },
+                    }
+                );
+                assert_eq!(comparator, Comparator::GE);
+                assert_eq!(rhs, QuantityExpr::Fixed { value: 3 });
+            }
+            other => panic!("expected QuantityComparison, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_condition_that_player_n_or_fewer_cards() {
+        let (rest, c) = parse_condition("if that player has one or fewer cards in hand").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert_eq!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::ScopedPlayer,
+                        },
+                    }
+                );
+                assert_eq!(comparator, Comparator::LE);
+                assert_eq!(rhs, QuantityExpr::Fixed { value: 1 });
+            }
+            other => panic!("expected QuantityComparison, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_parse_condition_not_your_turn() {
         let (rest, c) = parse_condition("if it's not your turn").unwrap();
@@ -4578,6 +4722,51 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 4 },
             } => {}
             other => panic!("expected SelfPower GE 4, got {other:?}"),
+        }
+    }
+
+    /// CR 208.1: The `~ has power N or greater` form is the canonical
+    /// templating used by intervening-if continuations such as
+    /// "Then if ~ has power 7 or greater, …" (Cloud, Ex-SOLDIER). Without
+    /// this combinator the clause is dropped and the gated sub-ability fires
+    /// unconditionally.
+    #[test]
+    fn test_self_ref_has_power_ge() {
+        let (rest, c) = parse_inner_condition("~ has power 7 or greater").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::Power {
+                                scope: crate::types::ability::ObjectScope::Source,
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 7 },
+            } => {}
+            other => panic!("expected SelfPower GE 7, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_this_creature_has_toughness_le() {
+        let (rest, c) = parse_inner_condition("this creature has toughness 2 or less").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::Toughness {
+                                scope: crate::types::ability::ObjectScope::Source,
+                            },
+                    },
+                comparator: Comparator::LE,
+                rhs: QuantityExpr::Fixed { value: 2 },
+            } => {}
+            other => panic!("expected SelfToughness LE 2, got {other:?}"),
         }
     }
 
