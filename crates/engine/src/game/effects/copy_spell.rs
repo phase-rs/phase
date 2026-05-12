@@ -416,6 +416,7 @@ mod tests {
                 condition: None,
                 trigger_event: None,
                 description: None,
+                source_name: String::new(),
             },
         });
     }
