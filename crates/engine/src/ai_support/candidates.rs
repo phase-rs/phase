@@ -1647,29 +1647,31 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                     .collect()
             }
         }
-        // CR 707.10c: Copy retargeting — pick the first legal alternative for
-        // each slot when populated (initial target selection for Prepare /
-        // Paradigm copies). Falls back to keeping `current` when no
+        // CR 707.10c: Copy retargeting — one candidate per legal alternative in
+        // the current slot. Falls back to keeping `current` when no
         // alternatives are exposed (classic copy_spell::resolve path).
         WaitingFor::CopyRetarget {
             player,
             target_slots,
+            current_slot,
             ..
         } => {
-            let targets: Vec<_> = target_slots
-                .iter()
-                .map(|s| {
-                    s.legal_alternatives
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(|| s.current.clone())
+            let slot = &target_slots[*current_slot];
+            let alternatives = if slot.legal_alternatives.is_empty() {
+                vec![slot.current.clone()]
+            } else {
+                slot.legal_alternatives.clone()
+            };
+            alternatives
+                .into_iter()
+                .map(|alt| {
+                    candidate(
+                        GameAction::SelectTargets { targets: vec![alt] },
+                        TacticalClass::Selection,
+                        Some(*player),
+                    )
                 })
-                .collect();
-            vec![candidate(
-                GameAction::SelectTargets { targets },
-                TacticalClass::Selection,
-                Some(*player),
-            )]
+                .collect()
         }
         // CR 510.1c/d: Assign combat damage — greedy (lethal to each in order, remainder to last).
         WaitingFor::AssignCombatDamage {
