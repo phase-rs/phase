@@ -398,6 +398,10 @@ impl<'a> PlannerServices<'a> {
                 {
                     true
                 }
+                // MulliganDecision is always valid — the engine generates Keep and
+                // Mulligan as the complete legal set; neither can fail apply_as_current.
+                // Skipping the clone+simulate eliminates ~2 state clones per mulligan step.
+                engine::types::actions::GameAction::MulliganDecision { .. } => true,
                 _ => {
                     let mut sim = state.clone();
                     apply_as_current(&mut sim, candidate.action.clone()).is_ok()
@@ -555,9 +559,13 @@ impl<'a> PlannerServices<'a> {
             // These are non-strategic decisions that can be resolved with heuristics.
             let actions: Vec<_> = ctx.candidates.iter().map(|c| c.action.clone()).collect();
             let acting_player = sim.waiting_for.acting_player().unwrap_or(self.ai_player);
-            if let Some(action) =
-                crate::search::deterministic_choice(&sim, acting_player, self.config, &actions)
-            {
+            if let Some(action) = crate::search::deterministic_choice(
+                &sim,
+                acting_player,
+                self.config,
+                &actions,
+                None,
+            ) {
                 if apply_as_current(&mut sim, action).is_err() {
                     break;
                 }

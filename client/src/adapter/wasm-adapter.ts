@@ -13,6 +13,7 @@ import type {
 import { AdapterError, AdapterErrorCode, isStateLostMessage } from "./types";
 import { EngineWorkerClient } from "./engine-worker-client";
 import { AiWorkerPool } from "./ai-worker-pool";
+import { useGameStore } from "../stores/gameStore";
 
 /**
  * Flatten the `ClientGameState { state, derived }` wire envelope produced
@@ -244,8 +245,13 @@ export class WasmAdapter implements EngineAdapter {
   ): Promise<GameAction | null> {
     this.assertInitialized();
 
-    // Root parallelism for VeryHard: multiple workers score independently, merge results
-    if (difficulty === "VeryHard" && this.engine) {
+    // Root parallelism for VeryHard: multiple workers score independently, merge results.
+    // Only worthwhile for Priority decisions where MCTS search explores multiple trees.
+    // Deterministic decisions (mulligan, scry, combat, etc.) return immediately in
+    // score_candidates and don't benefit from parallelism — serializing/deserializing
+    // the full game state (2.5+ MB for Commander) exceeds any parallel gain.
+    const currentWaitingForType = useGameStore.getState().gameState?.waiting_for?.type;
+    if (difficulty === "VeryHard" && this.engine && currentWaitingForType === "Priority") {
       const pool = await this.ensureAiPool();
       if (pool) {
         try {
