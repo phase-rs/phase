@@ -1048,7 +1048,13 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                 pending.push(PendingTriggerContext::single(PendingTrigger {
                     source_id: *cast_obj_id,
                     controller: dynamically_granted_casualty_instances.1,
-                    condition: Some(TriggerCondition::WasCast),
+                    // No WasCast intervening-if: SpellCast only fires for actual
+                    // casts, and cast_from_zone is cleared after trigger collection
+                    // so WasCast would always fail at resolution. The copy is gated
+                    // instead by AbilityCondition::additional_cost_paid_any() inside
+                    // casualty_copy_ability_definition(), which reads the already-set
+                    // `ability.context.additional_cost_paid = true` above.
+                    condition: None,
                     ability: casualty_ability,
                     timestamp,
                     target_constraints: Vec::new(),
