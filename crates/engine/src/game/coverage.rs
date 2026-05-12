@@ -615,6 +615,9 @@ fn fmt_quantity(q: &QuantityExpr) -> String {
             format!("({})", parts.join(" + "))
         }
         QuantityExpr::UpTo { max } => format!("up to {}", fmt_quantity(max)),
+        QuantityExpr::Power { base, exponent } => {
+            format!("{}^{}", base, fmt_quantity(exponent))
+        }
     }
 }
 
@@ -4449,6 +4452,7 @@ fn extract_quantity_features(qty: &QuantityExpr, features: &mut HashMap<String, 
             }
         }
         QuantityExpr::UpTo { max } => extract_quantity_features(max, features),
+        QuantityExpr::Power { exponent, .. } => extract_quantity_features(exponent, features),
     }
 }
 

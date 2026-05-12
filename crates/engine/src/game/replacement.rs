@@ -589,6 +589,12 @@ fn resolve_draw_replacement_quantity(expr: &QuantityExpr, event_count: u32) -> O
         // pipeline does not honor "may pick fewer" semantics (the choice
         // already happened at effect resolution before the replacement fires).
         QuantityExpr::UpTo { max } => resolve_draw_replacement_quantity(max, event_count),
+        // CR 107.3: `base ^ exponent`. Negative exponents clamp to 0 per
+        // CR 107.1b; `saturating_pow` prevents overflow.
+        QuantityExpr::Power { base, exponent } => {
+            let exp = resolve_draw_replacement_quantity(exponent, event_count)?.max(0) as u32;
+            Some(base.saturating_pow(exp))
+        }
         QuantityExpr::Ref { .. } => None,
     }
 }

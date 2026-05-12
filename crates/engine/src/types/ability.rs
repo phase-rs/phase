@@ -2545,6 +2545,15 @@ pub enum QuantityExpr {
     /// ("up to up to N" is just "up to N"). Always construct via the
     /// `QuantityExpr::up_to` helper which debug-asserts this invariant.
     UpTo { max: Box<QuantityExpr> },
+    /// CR 107.3: `base` raised to the power of `exponent`. The exponent is a
+    /// general `QuantityExpr` so it can resolve from a variable cost (e.g.
+    /// `Variable { name: "X" }` for Mathemagics' `2ˣ`) or any other dynamic
+    /// game-state lookup. Resolution uses saturating exponentiation; negative
+    /// exponents clamp to 0.
+    Power {
+        base: i32,
+        exponent: Box<QuantityExpr>,
+    },
 }
 
 impl QuantityExpr {
@@ -6850,8 +6859,16 @@ pub enum TriggerCondition {
     NoSpellsCastLastTurn,
     /// CR 603.4: "if two or more spells were cast last turn" — werewolf reverse transform.
     TwoOrMoreSpellsCastLastTurn,
-    /// CR 603.4: "if it's your turn" — intervening-if requiring the controller's turn.
-    DuringYourTurn,
+    /// CR 603.4 + CR 102.1: "if it's <player>'s turn" intervening-if.
+    ///
+    /// Parameterized on which player must be the active player:
+    /// - `PlayerFilter::Controller` ← "if it's your turn"
+    /// - `PlayerFilter::Opponent` ← "during each opponent's turn"
+    /// - `PlayerFilter::TriggeringPlayer` ← "if it's that player's turn"
+    ///   (the player named by the trigger event — drawer, tapper, etc.)
+    ///
+    /// Negation ("if it isn't <player>'s turn") wraps via `Not { Box::new(...) }`.
+    DuringPlayersTurn { player: PlayerFilter },
     /// CR 400.7 + CR 603.4: True when the source permanent entered the
     /// battlefield this turn.
     SourceEnteredThisTurn,
@@ -6898,10 +6915,6 @@ pub enum TriggerCondition {
     /// specified cast/activation variant this turn. Negation ("unless it escaped")
     /// is expressed via `Not { Box::new(CastVariantPaid { variant }) }`.
     CastVariantPaid { variant: CastVariantPaid },
-
-    /// CR 601.2: "during each opponent's turn" — the trigger only fires when it is
-    /// currently an opponent's turn. Used in conjunction with NthSpellThisTurn constraint.
-    DuringOpponentsTurn,
 
     /// CR 700.4 + CR 120.1: "a creature dealt damage by ~ this turn dies" — death trigger
     /// gated on the dying creature having been dealt damage by the trigger source this turn.

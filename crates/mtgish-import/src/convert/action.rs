@@ -245,7 +245,10 @@ fn rewrite_bound_x_in_quantity_expr(expr: &mut QuantityExpr, binding: &QuantityE
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
-        | QuantityExpr::UpTo { max: inner } => rewrite_bound_x_in_quantity_expr(inner, binding),
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => rewrite_bound_x_in_quantity_expr(inner, binding),
         QuantityExpr::Sum { exprs } => exprs
             .iter_mut()
             .map(|inner| rewrite_bound_x_in_quantity_expr(inner, binding))

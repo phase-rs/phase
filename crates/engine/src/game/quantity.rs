@@ -179,6 +179,7 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
         | QuantityExpr::Multiply { inner, .. } => quantity_expr_uses_recipient(inner),
         QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_uses_recipient),
         QuantityExpr::UpTo { max } => quantity_expr_uses_recipient(max),
+        QuantityExpr::Power { exponent, .. } => quantity_expr_uses_recipient(exponent),
     }
 }
 
@@ -242,6 +243,17 @@ fn fold_compose(expr: &QuantityExpr, recurse: impl Fn(&QuantityExpr) -> i32) -> 
         QuantityExpr::Offset { inner, offset } => recurse(inner) + offset,
         QuantityExpr::Multiply { factor, inner } => factor * recurse(inner),
         QuantityExpr::Sum { exprs } => exprs.iter().map(&recurse).sum(),
+        // CR 107.3: `base ^ exponent` with the exponent resolved from a
+        // QuantityExpr (typically the X variable on a cost). CR 107.1b clamps
+        // negative-value calculations that would yield negative results to
+        // zero, so we treat a negative resolved exponent as 0 (yielding
+        // `base^0 = 1`). The exponent is also clamped to u32 to fit
+        // `i32::checked_pow`, and `saturating_pow` handles overflow by
+        // returning `i32::MAX` rather than panicking.
+        QuantityExpr::Power { base, exponent } => {
+            let exp = recurse(exponent).max(0) as u32;
+            base.saturating_pow(exp)
+        }
         // CR 107.1c + CR 608.2d: Generic resolvers see UpTo transparently as
         // its upper bound — the 4 effect-specific resolvers (Draw,
         // Sacrifice, Discard, SearchLibrary) peel the wrapper via
@@ -272,10 +284,27 @@ pub(crate) fn resolve_quantity_for_trigger_check(
     source_id: ObjectId,
     event: Option<&crate::types::events::GameEvent>,
 ) -> i32 {
+    // CR 500.2 + CR 603.4 + CR 603.7c: Derive the "scoped player" from the
+    // triggering event so `PlayerScope::ScopedPlayer` (e.g. "that player has
+    // no cards in hand" on Ghirapur Orrery) resolves to the event's player
+    // — the active player for `PhaseChanged`, the drawing/discarding player
+    // for hand-event triggers, etc. Without this binding, intervening-if
+    // checks for `that player has X` silently resolve against the source's
+    // controller and produce wrong results.
+    let resolution_event = state.current_trigger_event.as_ref().or(event);
+    let scoped_player =
+        resolution_event.and_then(|e| crate::game::targeting::extract_player_from_event(e, state));
+    let ctx = QuantityContext {
+        entering: None,
+        source: source_id,
+        recipient: None,
+        scoped_player,
+    };
+
     // Fast path: when current_trigger_event is already set (resolution-time
     // re-check in stack::resolve_top), the default resolver reads it directly.
     if state.current_trigger_event.is_some() {
-        return resolve_quantity(state, expr, controller, source_id);
+        return resolve_quantity_with_ctx(state, expr, controller, ctx);
     }
     if let Some(event) = event {
         if let Some(value) = resolve_event_scoped_ref(state, expr, event) {
@@ -287,10 +316,10 @@ pub(crate) fn resolve_quantity_for_trigger_check(
         // override avoids a full `GameState` clone (which would be O(objects))
         // every time a trigger condition is checked.
         return with_detection_trigger_event(event, || {
-            resolve_quantity(state, expr, controller, source_id)
+            resolve_quantity_with_ctx(state, expr, controller, ctx)
         });
     }
-    resolve_quantity(state, expr, controller, source_id)
+    resolve_quantity_with_ctx(state, expr, controller, ctx)
 }
 
 std::thread_local! {
@@ -4734,5 +4763,72 @@ mod tests {
             qty: QuantityRef::SelfManaValue,
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), obj_id), 5);
+    }
+
+    /// CR 107.3: `Power { base, exponent }` computes `base^exponent`. With a
+    /// fixed exponent the math is straightforward.
+    #[test]
+    fn resolve_power_fixed_exponent() {
+        let state = GameState::new_two_player(42);
+        let expr = QuantityExpr::Power {
+            base: 2,
+            exponent: Box::new(QuantityExpr::Fixed { value: 5 }),
+        };
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)),
+            32
+        );
+    }
+
+    /// CR 107.3 + CR 107.3a: Mathemagics — "draws 2ˣ cards" with X=6 must
+    /// resolve to 64. This is the bug report this variant was added for:
+    /// before the fix, the parser silently dropped the `ˣ` and produced
+    /// `Fixed { value: 2 }`, so casting with X=6 drew 2 cards instead of 64.
+    #[test]
+    fn resolve_power_variable_x_via_chosen_x() {
+        let state = GameState::new_two_player(42);
+        let expr = QuantityExpr::Power {
+            base: 2,
+            exponent: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            }),
+        };
+        let mut ability = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: String::new(),
+                description: None,
+            },
+            vec![],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        ability.chosen_x = Some(6);
+        assert_eq!(resolve_quantity_with_targets(&state, &expr, &ability), 64);
+    }
+
+    /// CR 107.3 + CR 107.1b: Overflow saturates rather than panicking; a
+    /// negative resolved exponent clamps to 0 (yielding `base^0 = 1`).
+    #[test]
+    fn resolve_power_saturates_and_clamps() {
+        let state = GameState::new_two_player(42);
+
+        // 2^31 overflows i32 — must saturate to i32::MAX, not panic.
+        let big = QuantityExpr::Power {
+            base: 2,
+            exponent: Box::new(QuantityExpr::Fixed { value: 31 }),
+        };
+        assert_eq!(
+            resolve_quantity(&state, &big, PlayerId(0), ObjectId(1)),
+            i32::MAX
+        );
+
+        // Negative exponent clamps to 0; 5^0 = 1.
+        let neg = QuantityExpr::Power {
+            base: 5,
+            exponent: Box::new(QuantityExpr::Fixed { value: -3 }),
+        };
+        assert_eq!(resolve_quantity(&state, &neg, PlayerId(0), ObjectId(1)), 1);
     }
 }

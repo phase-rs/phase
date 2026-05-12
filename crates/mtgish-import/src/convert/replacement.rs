@@ -2515,6 +2515,7 @@ fn rewrite_variable_x_to_cost_x_paid(expr: &mut QuantityExpr) {
             }
         }
         QuantityExpr::UpTo { max } => rewrite_variable_x_to_cost_x_paid(max),
+        QuantityExpr::Power { exponent, .. } => rewrite_variable_x_to_cost_x_paid(exponent),
     }
 }
 

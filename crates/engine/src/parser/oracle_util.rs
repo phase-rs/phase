@@ -396,6 +396,28 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
         }
     }
     let (n, rest) = parse_number(text)?;
+    // CR 107.3: `Nˣ` (digit(s) followed by U+02E3 MODIFIER LETTER SMALL X)
+    // — exponential notation for "base raised to the variable X paid on the
+    // spell's cost." Mathemagics ("draws 2ˣ cards") is the canonical case.
+    // The exponent binds to `QuantityRef::Variable { name: "X" }` so the
+    // resolver reads `chosen_x` / `cost_x_paid` like any other X-scaled
+    // effect.
+    if let Ok((after_sup, _)) =
+        nom::combinator::value((), nom::bytes::complete::tag::<_, _, OracleError<'_>>("ˣ"))
+            .parse(rest)
+    {
+        return Some((
+            QuantityExpr::Power {
+                base: n as i32,
+                exponent: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                }),
+            },
+            after_sup.trim_start(),
+        ));
+    }
     Some((QuantityExpr::Fixed { value: n as i32 }, rest))
 }
 
@@ -2111,6 +2133,33 @@ mod tests {
             other => panic!("expected Multiply, got {other:?}"),
         }
         assert_eq!(rest, "cards");
+    }
+
+    // CR 107.3: Mathemagics' "draws 2ˣ cards" — digit + U+02E3 MODIFIER LETTER
+    // SMALL X notation must parse as `Power { base: 2, exponent: Variable("X") }`,
+    // not silently drop the superscript and return `Fixed { value: 2 }`.
+    #[test]
+    fn parse_count_expr_superscript_x_exponent() {
+        let (qty, rest) = parse_count_expr("2ˣ cards").unwrap();
+        match qty {
+            QuantityExpr::Power { base, exponent } => {
+                assert_eq!(base, 2);
+                assert!(matches!(
+                    *exponent,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { ref name }
+                    } if name == "X"
+                ));
+            }
+            other => panic!("expected Power, got {other:?}"),
+        }
+        assert_eq!(rest, "cards");
+    }
+
+    #[test]
+    fn parse_count_expr_superscript_x_multi_digit_base() {
+        let (qty, _) = parse_count_expr("10ˣ cards").unwrap();
+        assert!(matches!(qty, QuantityExpr::Power { base: 10, .. }));
     }
 
     #[test]

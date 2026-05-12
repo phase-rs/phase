@@ -818,9 +818,10 @@ fn quantity_expr_has_unresolved_variable(
         QuantityExpr::Offset { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::DivideRounded { inner, .. }
-        | QuantityExpr::UpTo { max: inner } => {
-            quantity_expr_has_unresolved_variable(state, ability, inner)
-        }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => quantity_expr_has_unresolved_variable(state, ability, inner),
         QuantityExpr::Sum { exprs } => exprs
             .iter()
             .any(|expr| quantity_expr_has_unresolved_variable(state, ability, expr)),

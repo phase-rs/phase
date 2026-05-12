@@ -5834,7 +5834,10 @@ fn rewrite_quantity_controller(expr: &mut QuantityExpr, from: ControllerRef, to:
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::Offset { inner, .. }
-        | QuantityExpr::UpTo { max: inner } => {
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => {
             rewrite_quantity_controller(inner, from, to);
         }
         QuantityExpr::Sum { exprs } => {
@@ -5858,7 +5861,10 @@ fn rewrite_event_source_power_to_object_power(expr: &mut QuantityExpr, scope: Ob
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::Offset { inner, .. }
-        | QuantityExpr::UpTo { max: inner } => {
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => {
             rewrite_event_source_power_to_object_power(inner, scope);
         }
         QuantityExpr::Sum { exprs } => {
@@ -7221,6 +7227,7 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
                 }
             }
             QuantityExpr::UpTo { max } => rewrite_condition_quantity_expr(max),
+            QuantityExpr::Power { exponent, .. } => rewrite_condition_quantity_expr(exponent),
             QuantityExpr::Fixed { .. } => {}
         }
     }
@@ -7298,6 +7305,7 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
                 }
             }
             QuantityExpr::UpTo { max } => rewrite_quantity_expr(max),
+            QuantityExpr::Power { exponent, .. } => rewrite_quantity_expr(exponent),
             QuantityExpr::Fixed { .. } => {}
         }
     }
@@ -7342,6 +7350,7 @@ fn rewrite_rounding_mode(def: &mut AbilityDefinition, mode: RoundingMode) {
                 }
             }
             QuantityExpr::UpTo { max } => rewrite_quantity_expr(max, mode),
+            QuantityExpr::Power { exponent, .. } => rewrite_quantity_expr(exponent, mode),
             QuantityExpr::Ref { .. } | QuantityExpr::Fixed { .. } => {}
         }
     }
