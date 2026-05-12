@@ -9,6 +9,7 @@ import {
 } from "./deckCatalog";
 import type { DeckArchetype } from "./engineRuntime";
 import type { ParsedDeck } from "./deckParser";
+import type { CommanderBracket } from "../types/bracket";
 
 export type AiDeckSource = DeckCatalogSource;
 
@@ -19,6 +20,7 @@ export interface AiDeckCandidate {
   deck: ParsedDeck;
   coveragePct: number | null;
   archetype: DeckArchetype | null;
+  bracket: CommanderBracket | null;
 }
 
 export interface AiDeckCatalogOptions {
@@ -71,6 +73,7 @@ export async function buildLegalAiDeckCatalog(
     deck: candidate.deck,
     coveragePct: candidate.coveragePct ?? null,
     archetype: null,
+    bracket: candidate.bracket ?? null,
     knownFormat: candidate.knownFormat,
   }));
 

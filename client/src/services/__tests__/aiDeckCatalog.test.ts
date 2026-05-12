@@ -163,6 +163,38 @@ describe("buildLegalAiDeckCatalog", () => {
     );
   });
 
+  it("surfaces null bracket on user-saved decks without a tag", async () => {
+    saveDeck("Untagged Commander", deck("Sol Ring", "Atraxa, Praetors' Voice"));
+
+    const catalog = await buildLegalAiDeckCatalog({
+      selectedFormat: "Commander",
+      selectedMatchType: "Bo1",
+    });
+
+    const candidate = catalog.candidates.find((c) => c.id === "saved:Untagged Commander");
+    expect(candidate?.bracket).toBeNull();
+  });
+
+  it("surfaces the persisted bracket on user-saved decks", async () => {
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + "Tagged Commander",
+      JSON.stringify({
+        main: [{ count: 1, name: "Sol Ring" }],
+        sideboard: [],
+        commander: ["Atraxa, Praetors' Voice"],
+        bracket: 4,
+      }),
+    );
+
+    const catalog = await buildLegalAiDeckCatalog({
+      selectedFormat: "Commander",
+      selectedMatchType: "Bo1",
+    });
+
+    const candidate = catalog.candidates.find((c) => c.id === "saved:Tagged Commander");
+    expect(candidate?.bracket).toBe(4);
+  });
+
   it("exposes Commander precons from shared catalog metadata without engine compatibility", async () => {
     vi.mocked(loadPreconDeckMap).mockResolvedValue({
       secrets: {
