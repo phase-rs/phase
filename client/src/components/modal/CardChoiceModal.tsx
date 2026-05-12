@@ -200,7 +200,7 @@ export function CardChoiceModal() {
       return <DiscardModal data={waitingFor.data} title="Discard as additional cost" canCancel />;
     case "SacrificeForCost":
       if (!canActForWaitingState) return null;
-      return <SacrificeModal data={waitingFor.data} />;
+      return <SacrificeModal key={waitingFor.data.permanents.join(",")} data={waitingFor.data} />;
     case "SacrificeForManaAbility":
       if (!canActForWaitingState) return null;
       return <SacrificeForManaAbilityModal data={waitingFor.data} />;
@@ -224,7 +224,7 @@ export function CardChoiceModal() {
       return null;
     case "ReturnToHandForCost":
       if (!canActForWaitingState) return null;
-      return <ReturnToHandModal data={waitingFor.data} />;
+      return <ReturnToHandModal key={waitingFor.data.permanents.join(",")} data={waitingFor.data} />;
     case "BlightChoice":
       if (!canActForWaitingState) return null;
       return <BlightModal data={waitingFor.data} />;

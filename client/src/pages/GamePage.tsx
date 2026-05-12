@@ -1188,7 +1188,7 @@ function GamePageContent({
           new WaitingFor so a fresh prompt is always visible. */}
       <DialogHost>
         {waitingFor != null &&
-          (["TargetSelection", "TriggerTargetSelection", "CopyTargetChoice", "ExploreChoice", "TapCreaturesForManaAbility", "TapCreaturesForSpellCost"] as const).includes(waitingFor.type as never) &&
+          (["TargetSelection", "TriggerTargetSelection", "CopyTargetChoice", "CopyRetarget", "ExploreChoice", "TapCreaturesForManaAbility", "TapCreaturesForSpellCost"] as const).includes(waitingFor.type as never) &&
           canActForWaitingState && <TargetingOverlay />}
         {waitingFor?.type === "ManaPayment" &&
           canActForWaitingState && <ManaPaymentUI />}

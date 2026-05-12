@@ -19,6 +19,12 @@ export function TargetingOverlay() {
   const isTargetSelection = waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection";
   const isCopyTargetChoice = waitingFor?.type === "CopyTargetChoice";
   const isCopyRetarget = waitingFor?.type === "CopyRetarget";
+  const canKeepCurrentTargets = isCopyRetarget && waitingFor.data.target_slots.every((slot) =>
+    slot.legal_alternatives.some((alt) =>
+      ("Object" in alt && "Object" in slot.current && alt.Object === slot.current.Object) ||
+      ("Player" in alt && "Player" in slot.current && alt.Player === slot.current.Player),
+    ),
+  );
   const isExploreChoice = waitingFor?.type === "ExploreChoice";
   const isTapCreatureChoice = waitingFor?.type === "TapCreaturesForManaAbility" || waitingFor?.type === "TapCreaturesForSpellCost";
   const targetSlots = isTargetSelection ? waitingFor.data.target_slots : [];
@@ -145,7 +151,7 @@ export function TargetingOverlay() {
               Confirm Tap ({selectedCardIds.length}/{waitingFor.data.count})
             </button>
           )}
-          {isCopyRetarget && (
+          {canKeepCurrentTargets && (
             <button
               onClick={() =>
                 dispatch({

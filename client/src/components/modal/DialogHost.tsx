@@ -34,6 +34,7 @@ const CLICK_THROUGH_WAITING_FOR_TYPES = new Set<string>([
   "TargetSelection",
   "TriggerTargetSelection",
   "CopyTargetChoice",
+  "CopyRetarget",
   "ExploreChoice",
   "TapCreaturesForManaAbility",
   "TapCreaturesForSpellCost",
