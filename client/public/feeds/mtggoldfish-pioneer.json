@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-05-25T00:00:00Z",
+  "updated": "2026-05-26T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -295,31 +295,19 @@
       "main": [
         {
           "count": 4,
-          "name": "Collected Company"
+          "name": "Archon of Emeria"
         },
         {
           "count": 4,
-          "name": "Archon of Emeria"
+          "name": "Llanowar Elves"
         },
         {
           "count": 1,
           "name": "Boseiju, Who Endures"
         },
         {
-          "count": 4,
-          "name": "Temple Garden"
-        },
-        {
-          "count": 4,
-          "name": "Elvish Mystic"
-        },
-        {
-          "count": 1,
-          "name": "Eiganjo, Seat of the Empire"
-        },
-        {
-          "count": 4,
-          "name": "Badgermole Cub"
+          "count": 2,
+          "name": "Starting Town"
         },
         {
           "count": 4,
@@ -327,22 +315,14 @@
         },
         {
           "count": 4,
-          "name": "Llanowar Elves"
+          "name": "Elvish Mystic"
         },
         {
           "count": 4,
-          "name": "Razorverge Thicket"
-        },
-        {
-          "count": 3,
-          "name": "Thalia, Guardian of Thraben"
-        },
-        {
-          "count": 3,
           "name": "Ouroboroid"
         },
         {
-          "count": 4,
+          "count": 2,
           "name": "Plains"
         },
         {
@@ -354,50 +334,70 @@
           "name": "Skyclave Apparition"
         },
         {
-          "count": 1,
-          "name": "Starting Town"
-        },
-        {
           "count": 4,
           "name": "Brushland"
         },
         {
-          "count": 2,
-          "name": "The Wandering Emperor"
+          "count": 4,
+          "name": "Razorverge Thicket"
         },
         {
-          "count": 2,
-          "name": "Elspeth, Storm Slayer"
+          "count": 4,
+          "name": "Temple Garden"
+        },
+        {
+          "count": 3,
+          "name": "Thalia, Guardian of Thraben"
+        },
+        {
+          "count": 4,
+          "name": "Badgermole Cub"
+        },
+        {
+          "count": 4,
+          "name": "Collected Company"
+        },
+        {
+          "count": 1,
+          "name": "Eiganjo, Seat of the Empire"
+        },
+        {
+          "count": 1,
+          "name": "Plains"
         },
         {
           "count": 2,
           "name": "Abandoned Air Temple"
+        },
+        {
+          "count": 3,
+          "name": "Elspeth, Storm Slayer"
         }
       ],
       "sideboard": [
         {
-          "count": 3,
-          "name": "Unlicensed Hearse"
+          "count": 4,
+          "name": "Aven Interrupter"
         },
         {
           "count": 3,
           "name": "Beza, the Bounding Spring"
         },
         {
-          "count": 1,
-          "name": "Elesh Norn, Mother of Machines"
+          "count": 2,
+          "name": "Seam Rip"
         },
         {
           "count": 2,
           "name": "March of Otherworldly Light"
         },
         {
-          "count": 2,
-          "name": "Seam Rip"
+          "count": 1,
+          "name": "Elesh Norn, Mother of Machines"
         },
         {
-          "count": 4,
-          "name": "Aven Interrupter"
+          "count": 3,
+          "name": "Clarion Conqueror"
         }
       ]
     },
@@ -532,11 +532,11 @@
       "name": "Niv to Light",
       "author": "MTGGoldfish",
       "colors": [
-        "U",
+        "W",
+        "G",
         "B",
         "R",
-        "G",
-        "W"
+        "U"
       ],
       "tags": [
         "metagame"
@@ -544,11 +544,15 @@
       "main": [
         {
           "count": 1,
-          "name": "Watery Grave"
+          "name": "Temple Garden"
         },
         {
-          "count": 4,
-          "name": "Sylvan Caryatid"
+          "count": 3,
+          "name": "Ancient Cornucopia"
+        },
+        {
+          "count": 1,
+          "name": "Angrath's Rampage"
         },
         {
           "count": 1,
@@ -556,11 +560,11 @@
         },
         {
           "count": 1,
-          "name": "Blood Crypt"
+          "name": "Sylvan Caryatid"
         },
         {
           "count": 1,
-          "name": "Wastewood Verge"
+          "name": "Swamp"
         },
         {
           "count": 4,
@@ -576,23 +580,23 @@
         },
         {
           "count": 1,
-          "name": "Elesh Norn, Mother of Machines"
+          "name": "Stomping Ground"
         },
         {
-          "count": 3,
-          "name": "Vanishing Verse"
+          "count": 2,
+          "name": "Fabled Passage"
         },
         {
           "count": 1,
           "name": "Floodfarm Verge"
         },
         {
-          "count": 1,
-          "name": "Swamp"
+          "count": 3,
+          "name": "Professor Dellian Fel"
         },
         {
           "count": 1,
-          "name": "Stomping Ground"
+          "name": "Overgrown Tomb"
         },
         {
           "count": 1,
@@ -600,15 +604,11 @@
         },
         {
           "count": 1,
-          "name": "Plains"
+          "name": "Mountain"
         },
         {
           "count": 2,
           "name": "Jetmir's Garden"
-        },
-        {
-          "count": 2,
-          "name": "North Wind Avatar"
         },
         {
           "count": 2,
@@ -623,8 +623,12 @@
           "name": "Kolaghan's Command"
         },
         {
-          "count": 4,
-          "name": "Leyline Binding"
+          "count": 2,
+          "name": "Hushwood Verge"
+        },
+        {
+          "count": 1,
+          "name": "Maelstrom Pulse"
         },
         {
           "count": 3,
@@ -632,14 +636,10 @@
         },
         {
           "count": 1,
-          "name": "Mountain"
+          "name": "Island"
         },
         {
-          "count": 1,
-          "name": "Maelstrom Pulse"
-        },
-        {
-          "count": 1,
+          "count": 2,
           "name": "Niv-Mizzet Reborn"
         },
         {
@@ -647,16 +647,12 @@
           "name": "Niv-Mizzet, Supreme"
         },
         {
-          "count": 4,
-          "name": "Fabled Passage"
-        },
-        {
-          "count": 3,
+          "count": 2,
           "name": "Omnath, Locus of Creation"
         },
         {
-          "count": 1,
-          "name": "Overgrown Tomb"
+          "count": 2,
+          "name": "Breeding Pool"
         },
         {
           "count": 1,
@@ -664,35 +660,7 @@
         },
         {
           "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 1,
-          "name": "Putrefy"
-        },
-        {
-          "count": 1,
-          "name": "Raugrin Triome"
-        },
-        {
-          "count": 4,
-          "name": "Ancient Cornucopia"
-        },
-        {
-          "count": 1,
-          "name": "Spara's Headquarters"
-        },
-        {
-          "count": 2,
-          "name": "Hushwood Verge"
-        },
-        {
-          "count": 1,
-          "name": "Sunbillow Verge"
-        },
-        {
-          "count": 1,
-          "name": "Supreme Verdict"
+          "name": "Plains"
         },
         {
           "count": 1,
@@ -700,11 +668,35 @@
         },
         {
           "count": 1,
-          "name": "Temple Garden"
+          "name": "Raugrin Triome"
         },
         {
           "count": 1,
-          "name": "Tolsimir, Friend to Wolves"
+          "name": "Sacred Foundry"
+        },
+        {
+          "count": 1,
+          "name": "Spara's Headquarters"
+        },
+        {
+          "count": 2,
+          "name": "Fabled Passage"
+        },
+        {
+          "count": 1,
+          "name": "Sunbillow Verge"
+        },
+        {
+          "count": 1,
+          "name": "Elesh Norn, Mother of Machines"
+        },
+        {
+          "count": 1,
+          "name": "Blood Crypt"
+        },
+        {
+          "count": 1,
+          "name": "Ultima"
         },
         {
           "count": 4,
@@ -715,8 +707,12 @@
           "name": "Valki, God of Lies"
         },
         {
-          "count": 2,
-          "name": "Breeding Pool"
+          "count": 3,
+          "name": "Vanishing Verse"
+        },
+        {
+          "count": 1,
+          "name": "Wastewood Verge"
         },
         {
           "count": 1,
@@ -736,37 +732,45 @@
         },
         {
           "count": 1,
-          "name": "Sacred Foundry"
+          "name": "Watery Grave"
+        },
+        {
+          "count": 1,
+          "name": "Ancient Cornucopia"
+        },
+        {
+          "count": 3,
+          "name": "Sylvan Caryatid"
+        },
+        {
+          "count": 4,
+          "name": "Leyline Binding"
         }
       ],
       "sideboard": [
         {
-          "count": 1,
+          "count": 2,
           "name": "Beza, the Bounding Spring"
         },
         {
-          "count": 1,
-          "name": "Illness in the Ranks"
-        },
-        {
-          "count": 1,
-          "name": "Kaervek, the Spiteful"
-        },
-        {
-          "count": 1,
-          "name": "Yorion, Sky Nomad"
-        },
-        {
-          "count": 1,
-          "name": "Niv-Mizzet Reborn"
-        },
-        {
           "count": 2,
+          "name": "Clarion Conqueror"
+        },
+        {
+          "count": 4,
+          "name": "Dovin's Veto"
+        },
+        {
+          "count": 1,
           "name": "Rest in Peace"
         },
         {
           "count": 1,
-          "name": "Sphinx's Revelation"
+          "name": "Rest in Peace"
+        },
+        {
+          "count": 1,
+          "name": "Professor Dellian Fel"
         },
         {
           "count": 1,
@@ -778,15 +782,11 @@
         },
         {
           "count": 1,
-          "name": "Maelstrom Pulse"
+          "name": "Yorion, Sky Nomad"
         },
         {
-          "count": 2,
-          "name": "Dovin's Veto"
-        },
-        {
-          "count": 2,
-          "name": "Clarion Conqueror"
+          "count": 1,
+          "name": "Sphinx's Revelation"
         }
       ]
     },
