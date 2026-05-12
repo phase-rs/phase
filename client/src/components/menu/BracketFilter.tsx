@@ -12,7 +12,7 @@ interface Props {
 
 export function BracketFilter({ selected, onChange }: Props) {
   const toggle = (b: CommanderBracket) => {
-    onChange(selected.includes(b) ? selected.filter((x) => x !== b) : [...selected, b].sort());
+    onChange(selected.includes(b) ? selected.filter((x) => x !== b) : [...selected, b].sort((a, b) => a - b));
   };
 
   return (
