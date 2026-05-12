@@ -1,3 +1,4 @@
+import { isCommanderBracket, type CommanderBracket } from "../types/bracket";
 import type { FeedSubscription } from "../types/feed";
 import { repairParsedDeck, type ParsedDeck } from "../services/deckParser";
 
@@ -126,6 +127,45 @@ export function loadSavedDeck(deckName: string): ParsedDeck | null {
     return repaired;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Read the bracket sidecar field from a persisted saved-deck JSON. Bracket
+ * is pre-game metadata stored alongside `format` — kept off the
+ * engine-bound `ParsedDeck` so the engine boundary stays clean. Returns
+ * `null` when the deck does not exist, has no bracket field, or carries
+ * an invalid value.
+ */
+export function loadSavedDeckBracket(deckName: string): CommanderBracket | null {
+  const raw = localStorage.getItem(STORAGE_KEY_PREFIX + deckName);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as { bracket?: unknown };
+    return isCommanderBracket(parsed.bracket) ? parsed.bracket : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Write the bracket sidecar field on a persisted saved-deck JSON. Passing
+ * `null` removes the field. Acts as a no-op when the deck does not exist;
+ * the deck builder is responsible for the initial save before tagging.
+ */
+export function saveSavedDeckBracket(deckName: string, bracket: CommanderBracket | null): void {
+  const raw = localStorage.getItem(STORAGE_KEY_PREFIX + deckName);
+  if (!raw) return;
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (bracket === null) {
+      delete parsed.bracket;
+    } else {
+      parsed.bracket = bracket;
+    }
+    localStorage.setItem(STORAGE_KEY_PREFIX + deckName, JSON.stringify(parsed));
+  } catch {
+    // Corrupt JSON: leave it alone. The deck builder will overwrite on save.
   }
 }
 
