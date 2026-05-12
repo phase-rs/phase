@@ -1545,53 +1545,6 @@ const MANA_COLOR_LABELS: Partial<Record<string, string>> = {
   Colorless: "C",
 };
 
-function PayManaAbilityManaModal({ data }: { data: PayManaAbilityMana["data"] }) {
-  const dispatch = useGameDispatch();
-  const [choices, setChoices] = useState<(ManaType | null)[]>(() => data.options.map(() => null));
-
-  const handlePick = useCallback((shardIdx: number, color: ManaType) => {
-    setChoices((prev) => {
-      const next = [...prev];
-      next[shardIdx] = color;
-      return next;
-    });
-  }, []);
-
-  const handleConfirm = useCallback(() => {
-    dispatch({ type: "PayManaAbilityMana", data: { payment: choices as ManaType[] } });
-  }, [dispatch, choices]);
-
-  const isReady = choices.every((c) => c !== null);
-
-  return (
-    <ChoiceOverlay
-      title="Pay Mana Cost"
-      subtitle="Choose which color of mana to pay for each hybrid symbol."
-      footer={<ConfirmButton onClick={handleConfirm} disabled={!isReady} label="Confirm" />}
-    >
-      <div className="flex flex-col gap-4 p-4">
-        {data.options.map((colorOptions, shardIdx) => (
-          <div key={shardIdx} className="flex flex-col gap-2">
-            <span className="text-sm font-medium text-gray-300">Hybrid symbol {shardIdx + 1}</span>
-            <div className="flex gap-2">
-              {colorOptions.map((color) => (
-                <button
-                  key={color}
-                  onClick={() => handlePick(shardIdx, color)}
-                  className={`rounded-lg px-4 py-2 text-sm font-semibold transition ${choices[shardIdx] === color ? "bg-cyan-600 text-white ring-2 ring-cyan-400" : "bg-white/10 text-gray-200 hover:bg-white/20"}`}
-                >
-                  {MANA_COLOR_LABELS[color] ?? color}
-                  <ManaSymbol shard={color} size="sm" className="ml-1 inline" />
-                </button>
-              ))}
-            </div>
-          </div>
-        ))}
-      </div>
-    </ChoiceOverlay>
-  );
-}
-
 function ReturnToHandModal({ data }: { data: ReturnToHandForCost["data"] }) {
   return (
     <PermanentCostModal
