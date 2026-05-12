@@ -1614,52 +1614,16 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
                 "if it's the first combat phase of the turn",
                 TriggerCondition::FirstCombatPhaseOfTurn,
             ),
-            // CR 603.4 + CR 102.1 + CR 113.3c: "if it's that player's turn" —
-            // intervening-if requiring the trigger event's player (the drawer /
-            // tapper / etc.) to be the active player. Source-referential because
-            // "that player" anaphors to the trigger event, which has no static
-            // equivalent. Negation forms appear immediately below.
-            (
-                "if it's that player's turn",
-                TriggerCondition::DuringPlayersTurn {
-                    player: PlayerFilter::TriggeringPlayer,
-                },
-            ),
-            (
-                "if it is that player's turn",
-                TriggerCondition::DuringPlayersTurn {
-                    player: PlayerFilter::TriggeringPlayer,
-                },
-            ),
-            // CR 603.4 + CR 102.1 + CR 113.3c: "if it isn't that player's turn"
-            // / "if it's not that player's turn" — negation wraps via `Not`.
-            // Used by Tataru Taru (Drawn) and Price of Glory (TapsForMana).
-            (
-                "if it isn't that player's turn",
-                TriggerCondition::Not {
-                    condition: Box::new(TriggerCondition::DuringPlayersTurn {
-                        player: PlayerFilter::TriggeringPlayer,
-                    }),
-                },
-            ),
-            (
-                "if it's not that player's turn",
-                TriggerCondition::Not {
-                    condition: Box::new(TriggerCondition::DuringPlayersTurn {
-                        player: PlayerFilter::TriggeringPlayer,
-                    }),
-                },
-            ),
-            (
-                "if it is not that player's turn",
-                TriggerCondition::Not {
-                    condition: Box::new(TriggerCondition::DuringPlayersTurn {
-                        player: PlayerFilter::TriggeringPlayer,
-                    }),
-                },
-            ),
         ],
     ) {
+        return result;
+    }
+
+    // CR 603.4 + CR 102.1: "if it's / it is / it isn't / it's not / it is not
+    // that player's turn" — composed from two orthogonal axes (linking-verb
+    // contraction and optional negation postfix) rather than enumerated as
+    // five verbatim phrases.
+    if let Some(result) = try_extract_that_players_turn(&tp, &lower, text) {
         return result;
     }
 
@@ -1860,6 +1824,51 @@ fn parse_no_mana_spent_clause(i: &str) -> OracleResult<'_, &str> {
         )),
     ))
     .parse(i)
+}
+
+/// CR 603.4 + CR 102.1 + CR 113.3c: Extract "if it's / it is / it isn't /
+/// it's not / it is not that player's turn" — intervening-if where "that
+/// player" anaphors to the triggering event's player. Source-referential
+/// (no static-condition equivalent) because the player binding lives in
+/// the trigger event, not in static game state.
+///
+/// Two orthogonal axes compose: the linking-verb form (`'s` / ` is` /
+/// ` isn't`) and an optional ` not` postfix. The five surface phrases
+/// reduce to a single `negated: bool` derived from `verb == " isn't"` OR
+/// `postfix == Some(" not")`.
+fn try_extract_that_players_turn(
+    tp: &TextPair<'_>,
+    lower: &str,
+    text: &str,
+) -> Option<(String, Option<TriggerCondition>)> {
+    // TextPair anchor lookup; nom combinator below validates the full clause.
+    let pos = tp.find("if it")?; // allow-noncombinator: anchor only, not dispatch
+    let tail = &lower[pos..];
+    let (rest, (_, verb_negated, postfix, _)) = (
+        tag::<_, _, OracleError<'_>>("if it"),
+        alt((
+            value(true, tag(" isn't")),
+            value(false, tag("'s")),
+            value(false, tag(" is")),
+        )),
+        opt(tag(" not")),
+        tag(" that player's turn"),
+    )
+        .parse(tail)
+        .ok()?;
+    let negated = verb_negated || postfix.is_some();
+    let consumed = tail.len() - rest.len();
+    let base = TriggerCondition::DuringPlayersTurn {
+        player: PlayerFilter::TriggeringPlayer,
+    };
+    let condition = if negated {
+        TriggerCondition::Not {
+            condition: Box::new(base),
+        }
+    } else {
+        base
+    };
+    Some((strip_condition_clause(text, pos, consumed), Some(condition)))
 }
 
 /// Try to extract an intervening predicate introduced by `keyword`.

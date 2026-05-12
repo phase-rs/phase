@@ -2096,6 +2096,10 @@ pub(crate) fn check_trigger_condition(
         // CR 603.4 + CR 102.1: "if it's <player>'s turn" — true when the named
         // player is currently the active player. Negation ("if it isn't <player>'s
         // turn") wraps via `Not { Box::new(DuringPlayersTurn { player }) }`.
+        //
+        // The match is exhaustive over PlayerFilter so future additions force a
+        // deliberate decision here. Variants with no single-player "whose turn"
+        // semantic (set-valued predicates, action-result predicates) fail-closed.
         TriggerCondition::DuringPlayersTurn { player } => match player {
             // CR 102.1: "your turn" — controller is active.
             PlayerFilter::Controller => state.active_player == controller,
@@ -2108,10 +2112,17 @@ pub(crate) fn check_trigger_condition(
             PlayerFilter::TriggeringPlayer => trigger_event
                 .and_then(|e| crate::game::targeting::extract_player_from_event(e, state))
                 .is_some_and(|p| state.active_player == p),
-            // Other PlayerFilter variants have no natural "whose turn" semantics
-            // (e.g. `OpponentLostLife` is a set predicate, not a single player).
-            // Fail-closed surfaces wiring errors rather than silently misfiring.
-            _ => false,
+            // Set-valued / action-result / no-turn-binding variants: no natural
+            // "whose turn" semantic. Fail-closed.
+            PlayerFilter::DefendingPlayer
+            | PlayerFilter::OpponentLostLife
+            | PlayerFilter::OpponentGainedLife
+            | PlayerFilter::All
+            | PlayerFilter::HighestSpeed
+            | PlayerFilter::ZoneChangedThisWay
+            | PlayerFilter::PerformedActionThisWay { .. }
+            | PlayerFilter::OwnersOfCardsExiledBySource
+            | PlayerFilter::OpponentOtherThanTriggering => false,
         },
         // CR 603.4: "if you control N or more [type]" — generalized control count.
         TriggerCondition::ControlCount { minimum, filter } => {
@@ -2494,14 +2505,15 @@ fn build_triggered_ability(
         if trig_def.unless_pay.is_some() {
             resolved.unless_pay = trig_def.unless_pay.clone();
         }
-        // CR 500.2 + CR 603.7c: Phase triggers ("at the beginning of each
-        // player's [phase], that player ...") bind `that player` to the
-        // player whose phase is beginning — the active player. Stamping
-        // `scoped_player` recursively here makes `TargetFilter::ScopedPlayer`
-        // and `PlayerScope::ScopedPlayer` resolve to the active player at
-        // both effect-resolution and intervening-if recheck time, so
-        // Dictate of Kruphix / Kami of the Crescent Moon / Howling Mine-class
-        // triggers no longer fall back to the source's controller.
+        // CR 603.2b + CR 102.1: Phase triggers ("at the beginning of each
+        // player's [phase], that player ...") fire when the phase begins
+        // (CR 603.2b), and "that player" anaphors to the active player whose
+        // phase it is (CR 102.1). Stamping `scoped_player` recursively here
+        // makes `TargetFilter::ScopedPlayer` and `PlayerScope::ScopedPlayer`
+        // resolve to the active player at both effect-resolution and
+        // intervening-if recheck time, so Dictate of Kruphix / Kami of the
+        // Crescent Moon / Howling Mine-class triggers no longer fall back to
+        // the source's controller.
         if matches!(trig_def.mode, TriggerMode::Phase) {
             resolved.set_scoped_player_recursive(state.active_player);
         }
@@ -3685,7 +3697,7 @@ pub mod tests {
         assert!(matches!(ability.effect, Effect::Unimplemented { .. }));
     }
 
-    /// CR 500.2 + CR 603.7c: For Phase triggers like "At the beginning of each
+    /// CR 603.2b + CR 102.1: For Phase triggers like "At the beginning of each
     /// player's draw step, that player draws an additional card" (Dictate of
     /// Kruphix, Kami of the Crescent Moon), the resolved ability must carry
     /// `scoped_player = active_player` so `TargetFilter::ScopedPlayer` resolves
