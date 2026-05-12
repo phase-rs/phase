@@ -245,11 +245,14 @@ pub fn convert_trigger(c: &Condition) -> ConvResult<TriggerCondition> {
                 .collect::<ConvResult<_>>()?,
         },
 
-        // CR 603.4: Turn-owner gating — engine has DuringYourTurn/NotYourTurn.
+        // CR 603.4 + CR 102.1: Turn-owner gating — engine has
+        // `TriggerCondition::DuringPlayersTurn { player: PlayerFilter }`.
         // mtgish encodes these as IsPlayersTurn(Player). Map "your turn" /
         // "not your turn"; everything else strict-fails for now.
         Condition::IsPlayersTurn(p) => match &**p {
-            Player::You => TriggerCondition::DuringYourTurn,
+            Player::You => TriggerCondition::DuringPlayersTurn {
+                player: PlayerFilter::Controller,
+            },
             other => {
                 return Err(ConversionGap::MalformedIdiom {
                     idiom: "Condition::IsPlayersTurn",
@@ -260,7 +263,9 @@ pub fn convert_trigger(c: &Condition) -> ConvResult<TriggerCondition> {
         },
         Condition::IsNotPlayersTurn(p) => match &**p {
             Player::You => TriggerCondition::Not {
-                condition: Box::new(TriggerCondition::DuringYourTurn),
+                condition: Box::new(TriggerCondition::DuringPlayersTurn {
+                    player: PlayerFilter::Controller,
+                }),
             },
             other => {
                 return Err(ConversionGap::MalformedIdiom {
@@ -469,10 +474,12 @@ fn player_set_turn_to_ability(players: &Players) -> ConvResult<AbilityCondition>
 fn player_set_turn_to_trigger(players: &Players) -> ConvResult<TriggerCondition> {
     match players {
         Players::SinglePlayer(player) if matches!(**player, Player::You) => {
-            Ok(TriggerCondition::DuringYourTurn)
+            Ok(TriggerCondition::DuringPlayersTurn {
+                player: PlayerFilter::Controller,
+            })
         }
-        Players::Opponent => Ok(TriggerCondition::Not {
-            condition: Box::new(TriggerCondition::DuringYourTurn),
+        Players::Opponent => Ok(TriggerCondition::DuringPlayersTurn {
+            player: PlayerFilter::Opponent,
         }),
         other => Err(ConversionGap::MalformedIdiom {
             idiom: "Condition::IsAPlayersTurn (trigger)",
@@ -1510,15 +1517,19 @@ pub fn convert_player_predicate_trigger(
                 .collect::<ConvResult<_>>()?,
         },
 
-        // CR 500: "if it's [player]'s turn".
+        // CR 500 + CR 102.1: "if it's [player]'s turn".
         Players::IsTheirTurn => {
             require_you_player(player, "Players::IsTheirTurn (trigger)")?;
-            TriggerCondition::DuringYourTurn
+            TriggerCondition::DuringPlayersTurn {
+                player: PlayerFilter::Controller,
+            }
         }
         Players::IsNotTheirTurn => {
             require_you_player(player, "Players::IsNotTheirTurn (trigger)")?;
             TriggerCondition::Not {
-                condition: Box::new(TriggerCondition::DuringYourTurn),
+                condition: Box::new(TriggerCondition::DuringPlayersTurn {
+                    player: PlayerFilter::Controller,
+                }),
             }
         }
 
@@ -3439,8 +3450,8 @@ mod tests {
 
         assert_eq!(
             converted,
-            TriggerCondition::Not {
-                condition: Box::new(TriggerCondition::DuringYourTurn),
+            TriggerCondition::DuringPlayersTurn {
+                player: PlayerFilter::Opponent,
             }
         );
     }

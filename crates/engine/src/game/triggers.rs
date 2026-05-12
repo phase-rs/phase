@@ -2020,8 +2020,6 @@ pub(crate) fn check_trigger_condition(
             .and_then(|id| state.objects.get(&id))
             .map(|obj| obj.cast_variant_paid == Some((*variant, state.turn_number)))
             .unwrap_or(false),
-        // CR 601.2: True when the current turn's active player is an opponent.
-        TriggerCondition::DuringOpponentsTurn => state.active_player != controller,
         // CR 700.4 + CR 120.1: True when the dying creature was dealt damage by the
         // trigger source this turn.
         TriggerCondition::DealtDamageBySourceThisTurn => {
@@ -2095,9 +2093,26 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::LifeTotalGE { minimum } => {
             player_field(state, controller, |p| p.life >= *minimum)
         }
-        // CR 603.4: "if it's your turn". Negation ("if it isn't your turn") wraps
-        // via `Not { Box::new(DuringYourTurn) }`.
-        TriggerCondition::DuringYourTurn => state.active_player == controller,
+        // CR 603.4 + CR 102.1: "if it's <player>'s turn" — true when the named
+        // player is currently the active player. Negation ("if it isn't <player>'s
+        // turn") wraps via `Not { Box::new(DuringPlayersTurn { player }) }`.
+        TriggerCondition::DuringPlayersTurn { player } => match player {
+            // CR 102.1: "your turn" — controller is active.
+            PlayerFilter::Controller => state.active_player == controller,
+            // CR 102.1 + CR 102.2: "an opponent's turn" — active player is any
+            // non-controller (set-valued match: true whenever it isn't your turn).
+            PlayerFilter::Opponent => state.active_player != controller,
+            // CR 113.3c + CR 603.2: "that player's turn" — the player named by
+            // the trigger event (drawer / tapper / damaged player / etc.) is
+            // currently the active player.
+            PlayerFilter::TriggeringPlayer => trigger_event
+                .and_then(|e| crate::game::targeting::extract_player_from_event(e, state))
+                .is_some_and(|p| state.active_player == p),
+            // Other PlayerFilter variants have no natural "whose turn" semantics
+            // (e.g. `OpponentLostLife` is a set predicate, not a single player).
+            // Fail-closed surfaces wiring errors rather than silently misfiring.
+            _ => false,
+        },
         // CR 603.4: "if you control N or more [type]" — generalized control count.
         TriggerCondition::ControlCount { minimum, filter } => {
             let ctx = FilterContext::from_source(state, source_id.unwrap_or(ObjectId(0)));
@@ -2478,6 +2493,17 @@ fn build_triggered_ability(
         // CR 118.12: Carry unless_pay modifier from trigger definition.
         if trig_def.unless_pay.is_some() {
             resolved.unless_pay = trig_def.unless_pay.clone();
+        }
+        // CR 500.2 + CR 603.7c: Phase triggers ("at the beginning of each
+        // player's [phase], that player ...") bind `that player` to the
+        // player whose phase is beginning — the active player. Stamping
+        // `scoped_player` recursively here makes `TargetFilter::ScopedPlayer`
+        // and `PlayerScope::ScopedPlayer` resolve to the active player at
+        // both effect-resolution and intervening-if recheck time, so
+        // Dictate of Kruphix / Kami of the Crescent Moon / Howling Mine-class
+        // triggers no longer fall back to the source's controller.
+        if matches!(trig_def.mode, TriggerMode::Phase) {
+            resolved.set_scoped_player_recursive(state.active_player);
         }
         resolved
     } else {
@@ -3657,6 +3683,64 @@ pub mod tests {
         let state = setup();
         let ability = build_triggered_ability(&state, &trig_def, ObjectId(1), PlayerId(0));
         assert!(matches!(ability.effect, Effect::Unimplemented { .. }));
+    }
+
+    /// CR 500.2 + CR 603.7c: For Phase triggers like "At the beginning of each
+    /// player's draw step, that player draws an additional card" (Dictate of
+    /// Kruphix, Kami of the Crescent Moon), the resolved ability must carry
+    /// `scoped_player = active_player` so `TargetFilter::ScopedPlayer` resolves
+    /// to the player whose phase is beginning — NOT to the source's controller.
+    /// This is the engine half of the fix; parser emits `ScopedPlayer` and the
+    /// runtime binds it at fire time.
+    #[test]
+    fn build_triggered_ability_phase_binds_scoped_player_to_active_player() {
+        let mut state = setup();
+        // Source controlled by P0, but it's P1's turn — the trigger must draw
+        // for P1 (active player), not P0.
+        state.active_player = PlayerId(1);
+
+        let trig_def = TriggerDefinition::new(TriggerMode::Phase)
+            .phase(crate::types::phase::Phase::Draw)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::ScopedPlayer,
+                },
+            ));
+
+        let ability = build_triggered_ability(&state, &trig_def, ObjectId(1), PlayerId(0));
+        assert_eq!(ability.controller, PlayerId(0));
+        assert_eq!(
+            ability.scoped_player,
+            Some(PlayerId(1)),
+            "Phase trigger must bind scoped_player to the active player so 'that player draws' resolves correctly on opponent's turn"
+        );
+    }
+
+    /// Non-Phase triggers must NOT have scoped_player auto-bound (preserves
+    /// the existing convention that ETB/Dies/SpellCast triggers leave
+    /// scoped_player None and resolve "that player" via event-context refs
+    /// like `TriggeringPlayer`).
+    #[test]
+    fn build_triggered_ability_non_phase_leaves_scoped_player_none() {
+        let mut state = setup();
+        state.active_player = PlayerId(1);
+
+        let trig_def =
+            TriggerDefinition::new(TriggerMode::ChangesZone).execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+
+        let ability = build_triggered_ability(&state, &trig_def, ObjectId(1), PlayerId(0));
+        assert!(
+            ability.scoped_player.is_none(),
+            "Non-Phase triggers must not auto-bind scoped_player; they rely on event-context resolution"
+        );
     }
 
     // === Triggered ability target selection tests ===
@@ -7891,6 +7975,100 @@ pub mod tests {
             check_trigger_condition(&state, &condition, controller, None, Some(&opponent_draw)),
             "draw step draws by the non-active player must fire"
         );
+    }
+
+    /// CR 603.4 + CR 102.1 + CR 113.3c — `DuringPlayersTurn { TriggeringPlayer }`
+    /// gates Tataru Taru's Scions' Secretary so it ONLY fires when an opponent
+    /// draws a card on a turn that isn't theirs. Drawing on their own turn (the
+    /// drawer == active player) must NOT fire.
+    #[test]
+    fn during_players_turn_triggering_player_tracks_event_player() {
+        let mut state = setup();
+        let controller = PlayerId(0); // Tataru Taru's owner
+        let opponent = PlayerId(1);
+
+        let affirmative = TriggerCondition::DuringPlayersTurn {
+            player: PlayerFilter::TriggeringPlayer,
+        };
+        let negation = TriggerCondition::Not {
+            condition: Box::new(affirmative.clone()),
+        };
+
+        // Opponent draws on their own turn → affirmative true, negation false.
+        state.active_player = opponent;
+        let own_turn_draw = GameEvent::CardDrawn {
+            player_id: opponent,
+            object_id: ObjectId(50),
+            nth_in_step: 1,
+        };
+        assert!(
+            check_trigger_condition(&state, &affirmative, controller, None, Some(&own_turn_draw)),
+            "affirmative must hold when the drawing player IS active"
+        );
+        assert!(
+            !check_trigger_condition(&state, &negation, controller, None, Some(&own_turn_draw)),
+            "Tataru Taru must NOT trigger on an opponent's own-turn draw"
+        );
+
+        // Opponent draws on the controller's turn → affirmative false, negation true.
+        state.active_player = controller;
+        let off_turn_draw = GameEvent::CardDrawn {
+            player_id: opponent,
+            object_id: ObjectId(51),
+            nth_in_step: 2,
+        };
+        assert!(
+            !check_trigger_condition(&state, &affirmative, controller, None, Some(&off_turn_draw)),
+            "affirmative must NOT hold when the drawing player is not active"
+        );
+        assert!(
+            check_trigger_condition(&state, &negation, controller, None, Some(&off_turn_draw)),
+            "Tataru Taru MUST trigger when an opponent draws on a turn that isn't theirs"
+        );
+    }
+
+    /// CR 603.4 + CR 102.1 — `DuringPlayersTurn { Controller }` preserves the
+    /// pre-refactor semantics of the retired `DuringYourTurn` variant: true iff
+    /// the active player is the trigger controller.
+    #[test]
+    fn during_players_turn_controller_tracks_active_vs_controller() {
+        let mut state = setup();
+        let controller = PlayerId(0);
+        let condition = TriggerCondition::DuringPlayersTurn {
+            player: PlayerFilter::Controller,
+        };
+
+        state.active_player = PlayerId(0);
+        assert!(check_trigger_condition(
+            &state, &condition, controller, None, None
+        ));
+
+        state.active_player = PlayerId(1);
+        assert!(!check_trigger_condition(
+            &state, &condition, controller, None, None
+        ));
+    }
+
+    /// CR 603.4 + CR 102.1 + CR 102.2 — `DuringPlayersTurn { Opponent }`
+    /// preserves the pre-refactor semantics of the retired `DuringOpponentsTurn`
+    /// variant: true iff the active player is NOT the trigger controller.
+    #[test]
+    fn during_players_turn_opponent_tracks_active_not_controller() {
+        let mut state = setup();
+        let controller = PlayerId(0);
+        let condition = TriggerCondition::DuringPlayersTurn {
+            player: PlayerFilter::Opponent,
+        };
+
+        state.active_player = PlayerId(0);
+        assert!(!check_trigger_condition(
+            &state, &condition, controller, None, None
+        ));
+
+        state.active_player = PlayerId(1);
+        assert!(check_trigger_condition(
+            &state, &condition, controller, None, None
+        ));
     }
 
     // === L9-23: Sliver-lord self-static keyword/trigger grant ===

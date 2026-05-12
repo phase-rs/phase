@@ -1311,7 +1311,9 @@ fn substitute_another_in_expr(expr: &QuantityExpr) -> QuantityExpr {
 /// the caller falls through to the next strategy.
 fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<TriggerCondition> {
     match sc {
-        StaticCondition::DuringYourTurn => Some(TriggerCondition::DuringYourTurn),
+        StaticCondition::DuringYourTurn => Some(TriggerCondition::DuringPlayersTurn {
+            player: PlayerFilter::Controller,
+        }),
         StaticCondition::DayNightIs { .. } => None,
 
         // CR 608.2c: Quantity comparisons map 1:1 (same fields). The only
@@ -1349,7 +1351,9 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
         // Not combinator — handle common negation patterns.
         StaticCondition::Not { condition } => match condition.as_ref() {
             StaticCondition::DuringYourTurn => Some(TriggerCondition::Not {
-                condition: Box::new(TriggerCondition::DuringYourTurn),
+                condition: Box::new(TriggerCondition::DuringPlayersTurn {
+                    player: PlayerFilter::Controller,
+                }),
             }),
             // Negate a quantity comparison by flipping the comparator.
             // Apply the same `Another` → `OtherThanTriggerObject` substitution
@@ -1609,6 +1613,50 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
             (
                 "if it's the first combat phase of the turn",
                 TriggerCondition::FirstCombatPhaseOfTurn,
+            ),
+            // CR 603.4 + CR 102.1 + CR 113.3c: "if it's that player's turn" —
+            // intervening-if requiring the trigger event's player (the drawer /
+            // tapper / etc.) to be the active player. Source-referential because
+            // "that player" anaphors to the trigger event, which has no static
+            // equivalent. Negation forms appear immediately below.
+            (
+                "if it's that player's turn",
+                TriggerCondition::DuringPlayersTurn {
+                    player: PlayerFilter::TriggeringPlayer,
+                },
+            ),
+            (
+                "if it is that player's turn",
+                TriggerCondition::DuringPlayersTurn {
+                    player: PlayerFilter::TriggeringPlayer,
+                },
+            ),
+            // CR 603.4 + CR 102.1 + CR 113.3c: "if it isn't that player's turn"
+            // / "if it's not that player's turn" — negation wraps via `Not`.
+            // Used by Tataru Taru (Drawn) and Price of Glory (TapsForMana).
+            (
+                "if it isn't that player's turn",
+                TriggerCondition::Not {
+                    condition: Box::new(TriggerCondition::DuringPlayersTurn {
+                        player: PlayerFilter::TriggeringPlayer,
+                    }),
+                },
+            ),
+            (
+                "if it's not that player's turn",
+                TriggerCondition::Not {
+                    condition: Box::new(TriggerCondition::DuringPlayersTurn {
+                        player: PlayerFilter::TriggeringPlayer,
+                    }),
+                },
+            ),
+            (
+                "if it is not that player's turn",
+                TriggerCondition::Not {
+                    condition: Box::new(TriggerCondition::DuringPlayersTurn {
+                        player: PlayerFilter::TriggeringPlayer,
+                    }),
+                },
             ),
         ],
     ) {
@@ -5119,7 +5167,9 @@ fn try_parse_nth_spell_you(lower: &str) -> Option<(TriggerMode, TriggerDefinitio
     ));
     def.constraint = Some(TriggerConstraint::NthSpellThisTurn { n, filter });
     if timing == NthSpellTimingKind::DuringOpponentsTurn {
-        def.condition = Some(TriggerCondition::DuringOpponentsTurn);
+        def.condition = Some(TriggerCondition::DuringPlayersTurn {
+            player: PlayerFilter::Opponent,
+        });
     }
     Some((TriggerMode::SpellCast, def))
 }
@@ -7419,6 +7469,70 @@ mod tests {
             }
             other => panic!("sub_ability effect must be LoseLife, got {other:?}"),
         }
+    }
+
+    /// CR 208.1 + CR 603.4: Cloud, Ex-SOLDIER — attack trigger with a "Then if
+    /// ~ has power 7 or greater, …" sub-ability gate. Before the `~ has power N`
+    /// grammar branch was added to `parse_source_power_toughness_condition`,
+    /// the condition silently dropped and the Treasure sub-ability fired on
+    /// every attack regardless of Cloud's power.
+    ///
+    /// Asserted shape:
+    /// - Trigger-level `condition` is None (the gate scopes to the sub_ability).
+    /// - Outer effect is the draw clause.
+    /// - Sub-ability effect is Token creation, and its `condition` is a
+    ///   `QuantityCheck` on `Power { scope: Source } >= 7`.
+    #[test]
+    fn parse_cloud_ex_soldier_attack_trigger_structure() {
+        use crate::types::ability::{AbilityCondition, Effect};
+
+        let def = parse_trigger_line(
+            "Whenever ~ attacks, draw a card for each equipped attacking creature you control. Then if ~ has power 7 or greater, create two Treasure tokens.",
+            "Cloud, Ex-SOLDIER",
+        );
+
+        // Trigger-level condition must be None — the "Then if ~ has power 7 or
+        // greater" gate scopes only to the sub_ability.
+        assert_eq!(
+            def.condition, None,
+            "trigger.condition must be None (gate scopes to sub_ability)"
+        );
+
+        let execute = def.execute.as_ref().expect("execute must be Some");
+
+        // Outer effect: draw clause.
+        assert!(
+            matches!(*execute.effect, Effect::Draw { .. }),
+            "outer execute must be Draw, got {:?}",
+            execute.effect,
+        );
+
+        // Sub-ability: Treasure token creation gated on Power >= 7.
+        let sub = execute
+            .sub_ability
+            .as_deref()
+            .expect("sub_ability must be Some (Treasure clause)");
+        match &sub.condition {
+            Some(AbilityCondition::QuantityCheck {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::Power {
+                                scope: crate::types::ability::ObjectScope::Source,
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 7 },
+            }) => {}
+            other => panic!(
+                "sub_ability.condition must be QuantityCheck Power(Source) >= 7, got {other:?}",
+            ),
+        }
+        assert!(
+            matches!(*sub.effect, Effect::Token { .. }),
+            "sub_ability effect must be Token, got {:?}",
+            sub.effect,
+        );
     }
 
     /// CR 208.1 + CR 107.3e + CR 603.4: Betor, Kin to All — three-tier end-step
@@ -10268,6 +10382,68 @@ mod tests {
         assert_eq!(def.constraint, None);
     }
 
+    /// CR 504.2 + CR 603.7c: Dictate of Kruphix / Kami of the Crescent Moon —
+    /// "At the beginning of each player's draw step, that player draws an
+    /// additional card." `target` must be `ScopedPlayer`; the runtime then
+    /// binds it to the active player at trigger fire time
+    /// (`triggers::build_triggered_ability` for Phase triggers).
+    #[test]
+    fn phase_trigger_each_players_draw_step_that_player_draws() {
+        let def = parse_trigger_line(
+            "At the beginning of each player's draw step, that player draws an additional card.",
+            "Dictate of Kruphix",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::Draw));
+        assert_eq!(def.constraint, None);
+        match def.execute.as_ref().map(|ability| ability.effect.as_ref()) {
+            Some(Effect::Draw { target, .. }) => {
+                assert_eq!(target, &TargetFilter::ScopedPlayer);
+            }
+            other => panic!("expected Draw effect with ScopedPlayer target, got {other:?}"),
+        }
+    }
+
+    /// CR 504.2 + CR 603.4 + CR 603.7c: Ghirapur Orrery — the intervening-if
+    /// "if that player has no cards in hand" must hoist onto the trigger
+    /// definition as a `QuantityComparison` against `HandSize { ScopedPlayer }`,
+    /// not be silently dropped. Without this, every player would draw three
+    /// cards on every upkeep regardless of hand size.
+    #[test]
+    fn phase_trigger_intervening_if_that_player_no_cards_in_hand() {
+        let def = parse_trigger_line(
+            "At the beginning of each player's upkeep, if that player has no cards in hand, that player draws three cards.",
+            "Ghirapur Orrery",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::Upkeep));
+        match def.condition.as_ref() {
+            Some(TriggerCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            }) => {
+                assert_eq!(
+                    lhs,
+                    &QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::ScopedPlayer,
+                        },
+                    }
+                );
+                assert_eq!(*comparator, Comparator::EQ);
+                assert_eq!(rhs, &QuantityExpr::Fixed { value: 0 });
+            }
+            other => panic!("expected QuantityComparison condition, got {other:?}"),
+        }
+        match def.execute.as_ref().map(|ability| ability.effect.as_ref()) {
+            Some(Effect::Draw { target, .. }) => {
+                assert_eq!(target, &TargetFilter::ScopedPlayer);
+            }
+            other => panic!("expected Draw effect with ScopedPlayer target, got {other:?}"),
+        }
+    }
+
     #[test]
     fn phase_trigger_that_player_sacrifices_uses_scoped_player_not_target_player() {
         let def = parse_trigger_line(
@@ -11478,7 +11654,12 @@ mod tests {
             def.constraint,
             Some(TriggerConstraint::NthSpellThisTurn { n: 1, filter: None })
         );
-        assert_eq!(def.condition, Some(TriggerCondition::DuringOpponentsTurn));
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::DuringPlayersTurn {
+                player: PlayerFilter::Opponent,
+            })
+        );
     }
 
     /// CR 107.3 + CR 202.1: "whenever you cast your first spell with {X} in its
@@ -12087,7 +12268,9 @@ mod tests {
         assert_eq!(
             tc,
             TriggerCondition::Not {
-                condition: Box::new(TriggerCondition::DuringYourTurn),
+                condition: Box::new(TriggerCondition::DuringPlayersTurn {
+                    player: PlayerFilter::Controller,
+                }),
             }
         );
     }
@@ -12096,7 +12279,9 @@ mod tests {
     fn bridge_during_your_turn_maps_to_trigger() {
         assert_eq!(
             static_condition_to_trigger_condition(&StaticCondition::DuringYourTurn),
-            Some(TriggerCondition::DuringYourTurn),
+            Some(TriggerCondition::DuringPlayersTurn {
+                player: PlayerFilter::Controller,
+            }),
         );
     }
 
@@ -12300,6 +12485,94 @@ mod tests {
 
     // -- Nom bridge fallback integration tests --
 
+    // CR 603.4 + CR 102.1 + CR 113.3c: "that player's turn" patterns bind to
+    // the trigger event's player (drawer / tapper / damaged player / etc.), not
+    // the trigger controller. Both the affirmative ("if it's") and negation
+    // ("if it isn't" / "if it's not") forms are parsed via the source-referential
+    // simple-pattern branch in `extract_if_condition`.
+    #[test]
+    fn extract_if_isnt_that_players_turn_yields_triggering_player_negation() {
+        let (cleaned, cond) =
+            extract_if_condition("if it isn't that player's turn, create a tapped Treasure token");
+        assert_eq!(cleaned, "create a tapped Treasure token");
+        assert_eq!(
+            cond.unwrap(),
+            TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::DuringPlayersTurn {
+                    player: PlayerFilter::TriggeringPlayer,
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn extract_if_its_not_that_players_turn_yields_triggering_player_negation() {
+        let (cleaned, cond) =
+            extract_if_condition("if it's not that player's turn, destroy that land");
+        assert_eq!(cleaned, "destroy that land");
+        assert_eq!(
+            cond.unwrap(),
+            TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::DuringPlayersTurn {
+                    player: PlayerFilter::TriggeringPlayer,
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn extract_if_its_that_players_turn_yields_triggering_player_affirmative() {
+        let (cleaned, cond) = extract_if_condition("if it's that player's turn, you gain 1 life");
+        assert_eq!(cleaned, "you gain 1 life");
+        assert_eq!(
+            cond.unwrap(),
+            TriggerCondition::DuringPlayersTurn {
+                player: PlayerFilter::TriggeringPlayer,
+            }
+        );
+    }
+
+    #[test]
+    fn tataru_taru_scions_secretary_attaches_triggering_player_negation() {
+        // CR 603.4 + CR 102.1: "Whenever an opponent draws a card, if it isn't
+        // that player's turn, create a tapped Treasure token. This ability
+        // triggers only once each turn."
+        let def = parse_trigger_line(
+            "Whenever an opponent draws a card, if it isn't that player's turn, create a tapped Treasure token. This ability triggers only once each turn.",
+            "Tataru Taru",
+        );
+        assert_eq!(def.mode, TriggerMode::Drawn);
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::DuringPlayersTurn {
+                    player: PlayerFilter::TriggeringPlayer,
+                }),
+            }),
+            "Tataru Taru must gate on it NOT being the drawing player's turn"
+        );
+    }
+
+    #[test]
+    fn price_of_glory_attaches_triggering_player_negation() {
+        // CR 603.4 + CR 102.1: "Whenever a player taps a land for mana, if it's
+        // not that player's turn, destroy that land."
+        let def = parse_trigger_line(
+            "Whenever a player taps a land for mana, if it's not that player's turn, destroy that land.",
+            "Price of Glory",
+        );
+        assert_eq!(def.mode, TriggerMode::TapsForMana);
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::DuringPlayersTurn {
+                    player: PlayerFilter::TriggeringPlayer,
+                }),
+            }),
+            "Price of Glory must gate on it NOT being the tapping player's turn"
+        );
+    }
+
     #[test]
     fn fallback_if_you_control_a_creature() {
         // "if you control a creature" is handled by the nom bridge fallback
@@ -12351,7 +12624,9 @@ mod tests {
         assert_eq!(
             cond.unwrap(),
             TriggerCondition::Not {
-                condition: Box::new(TriggerCondition::DuringYourTurn),
+                condition: Box::new(TriggerCondition::DuringPlayersTurn {
+                    player: PlayerFilter::Controller,
+                }),
             }
         );
     }
