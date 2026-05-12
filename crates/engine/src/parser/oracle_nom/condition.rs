@@ -723,12 +723,15 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
 
 /// Parse "that player has" / "that opponent has" quantity conditions.
 ///
-/// CR 500.2 + CR 603.4 + CR 603.7c: "that player" inside a Phase trigger's
-/// intervening-if binds to the player whose phase fired the trigger. The
-/// resulting `PlayerScope::ScopedPlayer` is bound to the active player at
-/// trigger fire time (see `triggers::build_triggered_ability`) and threaded
-/// into trigger-condition quantity resolution
-/// (`quantity::resolve_quantity_for_trigger_check`).
+/// CR 603.2b + CR 603.4 + CR 102.1: "that player" inside a Phase trigger's
+/// intervening-if binds to the player whose phase fired the trigger
+/// (CR 603.2b: phase-begin triggers fire at phase start; CR 102.1: that
+/// phase belongs to the active player). The resulting
+/// `PlayerScope::ScopedPlayer` is bound to the active player at trigger
+/// fire time (see `triggers::build_triggered_ability`) and threaded into
+/// trigger-condition quantity resolution
+/// (`quantity::resolve_quantity_for_trigger_check`). CR 603.4 covers the
+/// intervening-if recheck at resolution.
 ///
 /// Currently covers the hand-size suffix family used by Ghirapur Orrery and
 /// related "if that player has no cards in hand" / "N or more / N or fewer"
@@ -3144,7 +3147,7 @@ mod tests {
         }
     }
 
-    /// CR 500.2 + CR 603.4 + CR 603.7c: "if that player has no cards in hand" — the
+    /// CR 603.2b + CR 603.4 + CR 102.1: "if that player has no cards in hand" — the
     /// HandSize ref binds to the scoped player (active player for Phase triggers
     /// like Ghirapur Orrery), not the source's controller.
     #[test]
