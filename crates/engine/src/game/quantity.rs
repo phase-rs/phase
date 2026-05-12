@@ -244,14 +244,15 @@ fn fold_compose(expr: &QuantityExpr, recurse: impl Fn(&QuantityExpr) -> i32) -> 
         QuantityExpr::Multiply { factor, inner } => factor * recurse(inner),
         QuantityExpr::Sum { exprs } => exprs.iter().map(&recurse).sum(),
         // CR 107.3: `base ^ exponent` with the exponent resolved from a
-        // QuantityExpr (typically the X variable on a cost). CR 107.1b clamps
-        // negative-value calculations that would yield negative results to
-        // zero, so we treat a negative resolved exponent as 0 (yielding
-        // `base^0 = 1`). The exponent is also clamped to u32 to fit
-        // `i32::checked_pow`, and `saturating_pow` handles overflow by
-        // returning `i32::MAX` rather than panicking.
+        // QuantityExpr (typically the X variable on a cost). The exponent is
+        // clamped to a non-negative u32 because `i32::saturating_pow` requires
+        // u32 — a raw `as u32` cast of a negative i32 would compute against a
+        // ~4B exponent and saturate to `i32::MAX`. No real card emits a
+        // negative exponent (X is non-negative per CR 107.3a), so the clamp
+        // is purely defensive. `saturating_pow` handles overflow by returning
+        // `i32::MAX` rather than panicking.
         QuantityExpr::Power { base, exponent } => {
-            let exp = recurse(exponent).max(0) as u32;
+            let exp = u32::try_from(recurse(exponent)).unwrap_or(0);
             base.saturating_pow(exp)
         }
         // CR 107.1c + CR 608.2d: Generic resolvers see UpTo transparently as

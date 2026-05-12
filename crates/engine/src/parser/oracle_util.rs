@@ -402,13 +402,14 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
     // The exponent binds to `QuantityRef::Variable { name: "X" }` so the
     // resolver reads `chosen_x` / `cost_x_paid` like any other X-scaled
     // effect.
+    let base = i32::try_from(n).unwrap_or(i32::MAX);
     if let Ok((after_sup, _)) =
         nom::combinator::value((), nom::bytes::complete::tag::<_, _, OracleError<'_>>("ˣ"))
             .parse(rest)
     {
         return Some((
             QuantityExpr::Power {
-                base: n as i32,
+                base,
                 exponent: Box::new(QuantityExpr::Ref {
                     qty: QuantityRef::Variable {
                         name: "X".to_string(),
@@ -418,7 +419,7 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
             after_sup.trim_start(),
         ));
     }
-    Some((QuantityExpr::Fixed { value: n as i32 }, rest))
+    Some((QuantityExpr::Fixed { value: base }, rest))
 }
 
 /// Parse an English ordinal number word at the start of text.
