@@ -1699,13 +1699,9 @@ fn try_parse_unless_three_branch_choice(
     const UNLESS_THEY: &str = " unless they ";
 
     // Split on the "unless" boundary. Try "that player" first (most specific).
-    let (default_lower, alts_lower, needle_len) =
-        split_around(tp.lower, UNLESS_THAT_PLAYER)
-            .map(|(d, a)| (d, a, UNLESS_THAT_PLAYER.len()))
-            .or_else(|| {
-                split_around(tp.lower, UNLESS_THEY)
-                    .map(|(d, a)| (d, a, UNLESS_THEY.len()))
-            })?;
+    let (default_lower, alts_lower, needle_len) = split_around(tp.lower, UNLESS_THAT_PLAYER)
+        .map(|(d, a)| (d, a, UNLESS_THAT_PLAYER.len()))
+        .or_else(|| split_around(tp.lower, UNLESS_THEY).map(|(d, a)| (d, a, UNLESS_THEY.len())))?;
 
     // The alternatives must contain exactly one top-level " or ".
     let (alt1_lower, _alt2_lower) = split_around(alts_lower, " or ")?;
@@ -9715,7 +9711,9 @@ pub(crate) fn parse_effect_chain_ir(
         } else {
             (None, text)
         };
-        let repeat_for = repeat_for.or(repeat_count).or_else(|| pending_repeat_for.take());
+        let repeat_for = repeat_for
+            .or(repeat_count)
+            .or_else(|| pending_repeat_for.take());
         let (player_scope, text) = strip_player_scope_subject(&text);
         let carried_player_scope = if player_scope.is_none()
             && !sequence::starts_clause_text(&text)
