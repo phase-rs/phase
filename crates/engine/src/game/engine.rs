@@ -315,10 +315,26 @@ fn pass_priority_once_with_pipeline(
     let stack_was_empty = state.stack.is_empty();
     let wf = priority::handle_priority_pass(state, events);
     sync_waiting_for(state, &wf);
+
+    // CR 614.1a + CR 707.9: Drain any pending continuation (e.g. Twinning Staff
+    // amplifier) while the stack is still in its post-resolution state. Targeted
+    // copies set CopyRetarget and are drained from that handler; no-target copies
+    // (e.g. Finale of Glory) never enter CopyRetarget, so without this drain the
+    // continuation sits until an unrelated action, by which point the original
+    // spell has left the stack and the amplifier's target lookup fails silently.
+    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        effects::drain_pending_continuation(state, events);
+    }
+
     let skip_triggers =
         stack_was_empty && !state.stack.is_empty() && state.phase == Phase::CombatDamage;
 
-    let wf = engine_priority::run_post_action_pipeline(state, events, &wf, skip_triggers)?;
+    let wf = engine_priority::run_post_action_pipeline(
+        state,
+        events,
+        &state.waiting_for.clone(),
+        skip_triggers,
+    )?;
     sync_waiting_for(state, &wf);
     Ok(wf)
 }

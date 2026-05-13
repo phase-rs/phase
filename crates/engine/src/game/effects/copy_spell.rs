@@ -132,7 +132,13 @@ pub fn resolve(
     // Guard: skip when this resolve call is itself an amplifier-spawned continuation so
     // the replacement effect applies exactly once to the original copy event, not
     // recursively to each additional copy it produces (which would loop infinitely).
-    let is_amplifier_spawn = matches!(ability.effect, Effect::CopySpell { amplifier_spawn: true, .. });
+    let is_amplifier_spawn = matches!(
+        ability.effect,
+        Effect::CopySpell {
+            amplifier_spawn: true,
+            ..
+        }
+    );
     if !is_amplifier_spawn {
         let amplifier_count = game_active_statics(state)
             .filter(|(obj, def)| {
@@ -683,7 +689,11 @@ mod tests {
         resolve(&mut state, &continuation_ability, &mut events).unwrap();
 
         // Stack: original + one copy = 2 entries. No further continuation queued.
-        assert_eq!(state.stack.len(), 2, "Amplifier-spawned copy should produce exactly one copy");
+        assert_eq!(
+            state.stack.len(),
+            2,
+            "Amplifier-spawned copy should produce exactly one copy"
+        );
         assert!(
             state.pending_continuation.is_none(),
             "Amplifier-spawned copy must not queue another continuation (infinite loop guard)"
