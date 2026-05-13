@@ -1783,25 +1783,23 @@ fn try_parse_choose_one_of_inline(
         split_around(tp.lower, ", or ").or_else(|| split_around(tp.lower, " or "))?;
 
     // CR 119.7 + CR 119.8 + CR 104.2 + CR 104.3: When the left half contains a
-    // restriction-predicate marker ("can't", "cannot", "doesn't", "don't"),
-    // the "or" coordinates predicates within a single restriction — NOT two
-    // imperative choices. Everybody Lives! prints "players can't lose the game
-    // or win the game this turn"; without this guard, the detector
-    // mis-classifies the compound as a ChooseOneOf(CantLoseTheGame, WinTheGame)
-    // because both halves happen to parse independently as supported effects.
-    // Restriction predicates are surface-level "subject can't <verb-list>"
-    // grammar and have no chooser semantic — defer to the subject+predicate
-    // path so `parse_restriction_modes` can recognize the compound.
-    if [" can't ", " cannot ", " doesn't ", " don't "]
-        .iter()
-        .any(|needle| before_lower.contains(needle))
-        || ["can't ", "cannot ", "doesn't ", "don't "]
-            .iter()
-            .any(|needle| {
-                tag::<_, _, OracleError<'_>>(*needle)
-                    .parse(before_lower)
-                    .is_ok()
-            })
+    // restriction-predicate marker ("can't", "cannot", "doesn't", "don't") at
+    // any word boundary, the "or" coordinates predicates within a single
+    // restriction — NOT two imperative choices. Everybody Lives! prints
+    // "players can't lose the game or win the game this turn"; without this
+    // guard, the detector mis-classifies the compound as
+    // ChooseOneOf(CantLoseTheGame, WinTheGame) because both halves happen to
+    // parse independently as supported effects. Restriction predicates are
+    // surface-level "subject can't <verb-list>" grammar and have no chooser
+    // semantic — defer to the subject+predicate path so
+    // `parse_restriction_modes` can recognize the compound. Word-boundary
+    // matching via the project's `scan_contains` combinator handles both the
+    // start-of-string case ("can't ...") and the mid-string case
+    // ("<subject> can't ...") in a single pass.
+    if nom_primitives::scan_contains(before_lower, "can't ")
+        || nom_primitives::scan_contains(before_lower, "cannot ")
+        || nom_primitives::scan_contains(before_lower, "doesn't ")
+        || nom_primitives::scan_contains(before_lower, "don't ")
     {
         return None;
     }

@@ -13,10 +13,11 @@ type VoteChoice = Extract<WaitingFor, { type: "VoteChoice" }>;
  * choice list (lowercase, from `data.options`) using the original-case
  * `data.option_labels` for display.
  *
- * CR 608.2c: When `data.delegate_chooser` is set (Battlebond friend-or-foe
- * cards), the spell controller is the ACTOR and `data.player` is the SUBJECT
- * being labeled. The header re-renders to "Label <subject>:" on each step as
- * the engine cycles `data.player` through each player.
+ * When `data.delegate_chooser` is set (Battlebond friend-or-foe cards;
+ * no explicit CR section), the spell controller is the ACTOR and
+ * `data.player` is the SUBJECT being labeled. The header re-renders to
+ * "Label <subject>:" on each step as the engine cycles `data.player`
+ * through each player.
  *
  * Display layer only — `remaining_votes`, the running tally, and the queued
  * voter list all come straight from the engine's `WaitingFor::VoteChoice`.

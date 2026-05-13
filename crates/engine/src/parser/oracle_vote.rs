@@ -84,13 +84,14 @@ pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityD
         let mut parsed =
             parse_effect_chain_with_context(effect_text, kind, &mut ParseContext::default());
         if who_chose || is_controller_labels {
-            // CR 608.2c + CR 701.38: Wire the per-vote sub-effect to fan out
+            // CR 701.38 + CR 101.4: Wire the per-vote sub-effect to fan out
             // across the players who received this choice index.
             // - "for each player who chose <choice>, <effect>" (Master of
             //   Ceremonies-style) routes to controller + voters who picked
             //   the option.
-            // - "Each <choice> <effect>" under ControllerLabels routes to
-            //   every labeled player, re-binding the sub-effect controller to
+            // - "Each <choice> <effect>" under ControllerLabels (Battlebond
+            //   friend-or-foe; no explicit CR section) routes to every
+            //   labeled player, re-binding the sub-effect controller to
             //   each labeled player so "they" / "their" refers correctly.
             //
             // u8 fits trivially: vote-choice cardinality is bounded by Magic
@@ -149,10 +150,11 @@ fn parse_starting_with(input: &str) -> Option<(&str, ControllerRef)> {
 /// Generalized to N>=2 choices via repeated " or " / ", " separators —
 /// covers cards like Capital Punishment that vote on three options.
 ///
-/// CR 608.2c: The `ControllerLabels` opener is Battlebond's friend-or-foe
-/// pattern. The leading `"for each player, "` is consumed here (mirroring
-/// the `"starting with you, "` handling) so the chain splitter does not
-/// bisect the opener.
+/// The `ControllerLabels` opener is Battlebond's friend-or-foe pattern
+/// (no explicit CR section; resolution follows CR 101.4 APNAP + CR 608.2
+/// general spell resolution). The leading `"for each player, "` is
+/// consumed here (mirroring the `"starting with you, "` handling) so the
+/// chain splitter does not bisect the opener.
 fn parse_each_player_votes_clause(input: &str) -> Option<(&str, Vec<String>, VoterScope)> {
     let res: nom::IResult<&str, VoterScope, OracleError<'_>> = alt((
         value(VoterScope::AllPlayers, tag("each player votes for ")),
@@ -230,11 +232,11 @@ fn parse_for_each_vote_clause<'a>(
     Some((rest, (choice_lower, effect_text, false)))
 }
 
-/// CR 608.2c: Parse a single "Each <choice> <effect>." clause used by
-/// Battlebond's friend-or-foe cards (Pir's Whim, Khorvath's Fury, Regna's
-/// Sanction, Virtus's Maneuver, Zndrsplt's Judgment). The `<choice>` token
-/// must be a member of the parent vote's `choices` list (canonically
-/// `["friend", "foe"]`).
+/// Parse a single "Each <choice> <effect>." clause used by Battlebond's
+/// friend-or-foe cards (no explicit CR section): Pir's Whim, Khorvath's
+/// Fury, Regna's Sanction, Virtus's Maneuver, Zndrsplt's Judgment. The
+/// `<choice>` token must be a member of the parent vote's `choices` list
+/// (canonically `["friend", "foe"]`).
 ///
 /// Shape: `"Each <choice> <effect>."` — case-insensitive on `"Each"`.
 ///
@@ -784,9 +786,10 @@ mod tests {
         }
     }
 
-    // --- CR 608.2c: Battlebond friend-or-foe (Pir's Whim class) ---
+    // --- Battlebond friend-or-foe (Pir's Whim class) ---
 
-    /// CR 608.2c: Pir's Whim is the canonical friend-or-foe spell. The opener
+    /// Pir's Whim is the canonical friend-or-foe spell (no explicit CR
+    /// section; CR 101.4 APNAP + CR 608.2 resolution apply). The opener
     /// `"For each player, choose friend or foe."` emits a Vote with
     /// `voter_scope = ControllerLabels`; the two `"Each <choice> <effect>."`
     /// clauses emit per-choice sub-effects with `player_scope = VotedFor`.
@@ -832,9 +835,10 @@ mod tests {
         }
     }
 
-    /// CR 608.2c: The CR-ordering invariant — `choices[0]` must be `"friend"`
-    /// so per-class fan-out runs friends before foes (Pir's Whim ruling
-    /// 2018-06-08). All five Battlebond cards print the friend clause first.
+    /// The CR-ordering invariant — `choices[0]` must be `"friend"` so
+    /// per-class fan-out runs friends before foes (Pir's Whim 2018-06-08
+    /// ruling: "Friends perform their specified actions before foes."). All
+    /// five Battlebond cards print the friend clause first.
     #[test]
     fn pirs_whim_emits_friend_before_foe_in_choices() {
         let text = "For each player, choose friend or foe. \
@@ -849,7 +853,7 @@ mod tests {
         }
     }
 
-    /// CR 608.2c: The bare `Each <choice>` per-class shape must not false-match
+    /// The bare `Each <choice>` per-class shape must not false-match
     /// intra-body `each` (e.g., "puts a +1/+1 counter on each creature they
     /// control" — Regna's Sanction friend body). The split discriminator
     /// requires the token after `each ` to be a known class label.
@@ -879,10 +883,10 @@ mod tests {
         }
     }
 
-    /// CR 608.2c: Rejects single-class openers — every friend-or-foe card
-    /// prints two classes. A single-choice opener like
-    /// `"For each player, choose friend."` is malformed and must fail
-    /// (matches the existing single-choice rejection for classic votes).
+    /// Rejects single-class openers — every friend-or-foe card prints two
+    /// classes. A single-choice opener like `"For each player, choose
+    /// friend."` is malformed and must fail (matches the existing
+    /// single-choice rejection for classic votes).
     #[test]
     fn rejects_single_class_friend_or_foe_opener() {
         let text = "For each player, choose friend. Each friend draws a card.";

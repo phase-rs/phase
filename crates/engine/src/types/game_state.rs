@@ -1955,13 +1955,14 @@ pub enum WaitingFor {
         /// echoes; mirrors the `source_id` carried on other interactive
         /// `WaitingFor` variants (e.g., NamedChoice).
         source_id: ObjectId,
-        /// CR 608.2c: When `Some`, the named player is the ACTOR who submits
+        /// CR 101.4 + CR 608.2 (Battlebond keyword action, no explicit CR
+        /// section): When `Some`, the named player is the ACTOR who submits
         /// `ChooseOption`; `player` is the SUBJECT being labeled by that
-        /// action. Set by `VoterScope::ControllerLabels` (Battlebond's
-        /// friend-or-foe cards) so the spell controller alone makes every
-        /// choice while the labeled-player slot cycles through each player
-        /// in APNAP order. When `None`, today's default: `player` is both
-        /// the subject and the actor (classic Council's-dilemma vote).
+        /// action. Set by `VoterScope::ControllerLabels` (friend-or-foe
+        /// cards) so the spell controller alone makes every choice while
+        /// the labeled-player slot cycles through each player in APNAP
+        /// order. When `None`, today's default: `player` is both the
+        /// subject and the actor (classic Council's-dilemma vote).
         #[serde(default)]
         delegate_chooser: Option<PlayerId>,
     },

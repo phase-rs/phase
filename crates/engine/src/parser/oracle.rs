@@ -2263,9 +2263,9 @@ pub(crate) fn parse_oracle_ir(
             };
             ctx.subject = None;
             ctx.actor = None;
-            // CR 608.2c + CR 701.38: Spell-level vote / labeling blocks
-            // (Council's-dilemma cards plus Battlebond's friend-or-foe class)
-            // produce a single Vote effect with per-choice sub-effects. The
+            // CR 701.38 (Council's-dilemma vote) + CR 101.4 (APNAP for
+            // Battlebond friend-or-foe — no dedicated CR section). Both
+            // shapes produce a single Vote effect with per-choice sub-effects. The
             // dispatcher in `parse_vote_block` recognises the entire opener +
             // per-class clauses and returns a synthesised AbilityDefinition;
             // when it matches we use that directly rather than chunk-splitting
