@@ -1706,7 +1706,7 @@ fn try_parse_unless_three_branch_choice(
     // The alternatives must contain exactly one top-level " or ".
     let (alt1_lower, _alt2_lower) = split_around(alts_lower, " or ")?;
     // Reject if alt1 itself contains another " or " (3+ alternatives — not handled here).
-    if alt1_lower.contains(" or ") {
+    if split_around(alt1_lower, " or ").is_some() {
         return None;
     }
 
