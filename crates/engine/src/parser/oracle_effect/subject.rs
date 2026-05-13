@@ -1851,6 +1851,36 @@ fn build_restriction_clause(
     };
 
     let affected = static_affected_for_application(&application);
+    // CR 119.7 + CR 119.8 + CR 104.2b + CR 104.3b: Player-scoped life and
+    // game-state restriction modes (Everybody Lives!: "Players can't lose life
+    // this turn and players can't lose the game or win the game this turn.")
+    // must bind to actual players, not be broadcast over battlefield
+    // permanents. Rewrite an unscoped `Typed(empty)` affected filter — the
+    // canonical form produced by the bare "Players" subject — to
+    // `TargetFilter::Player` so `register_transient_effect` fans the modes
+    // out as per-player TCEs.  Controller-scoped subjects ("you") already
+    // produce `TargetFilter::Controller`, which the resolver routes to
+    // `SpecificPlayer { id: controller }` without further intervention.
+    let all_modes_are_player_scoped = !modes.is_empty()
+        && modes.iter().all(|m| {
+            matches!(
+                m,
+                StaticMode::CantGainLife
+                    | StaticMode::CantLoseLife
+                    | StaticMode::CantLoseTheGame
+                    | StaticMode::CantWinTheGame
+            )
+        });
+    let affected = if all_modes_are_player_scoped {
+        match &affected {
+            TargetFilter::Typed(t) if t.type_filters.is_empty() && t.controller.is_none() => {
+                TargetFilter::Player
+            }
+            _ => affected,
+        }
+    } else {
+        affected
+    };
     let static_abilities = modes
         .into_iter()
         .map(|mode| {
@@ -1895,6 +1925,16 @@ fn build_restriction_clause(
     })
 }
 
+// CR 613.2 layer 6 + CR 509.1b: Combat / untap restriction modes granted
+// to a target need `AddStaticMode` so the layer system propagates them
+// onto the granted creature's `static_definitions`.
+// CR 119.7 + CR 119.8 + CR 104.2b + CR 104.3b: Player-scoped life and
+// game-state restriction modes (Everybody Lives!, Skullcrack, Teferi's
+// Protection-style life locks scoped at the spell layer) must also carry
+// `AddStaticMode` so the transient continuous effect system propagates
+// them through to runtime queries — without this, the resolver creates a
+// TCE with empty modifications and `player_has_cant_lose` /
+// `player_has_cant_gain_life` never see it.
 pub(crate) fn static_mode_needs_grant_propagation(mode: &StaticMode) -> bool {
     matches!(
         mode,
@@ -1905,6 +1945,10 @@ pub(crate) fn static_mode_needs_grant_propagation(mode: &StaticMode) -> bool {
             | StaticMode::CantBeBlockedBy { .. }
             | StaticMode::CantBeBlockedExceptBy { .. }
             | StaticMode::CantUntap
+            | StaticMode::CantGainLife
+            | StaticMode::CantLoseLife
+            | StaticMode::CantLoseTheGame
+            | StaticMode::CantWinTheGame
     )
 }
 
@@ -2027,6 +2071,31 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     // CR 119.7: "can't gain life" — lifegain prevention
     if lower == "can't gain life" || lower == "cannot gain life" {
         return Some(vec![StaticMode::CantGainLife]);
+    }
+    // CR 119.8: "can't lose life" — life-loss prevention
+    if lower == "can't lose life" || lower == "cannot lose life" {
+        return Some(vec![StaticMode::CantLoseLife]);
+    }
+    // CR 104.3b + CR 104.3c + CR 704.5: "can't lose the game" / "can't win the game".
+    // Compound "can't lose the game or win the game" (and the symmetric "win or
+    // lose") must be checked before the bare forms — Everybody Lives! prints the
+    // compound shape, and the bare "can't lose the game" tag would otherwise
+    // short-circuit before the win-leg is recognized.
+    if lower == "can't lose the game or win the game"
+        || lower == "cannot lose the game or win the game"
+        || lower == "can't win the game or lose the game"
+        || lower == "cannot win the game or lose the game"
+    {
+        return Some(vec![
+            StaticMode::CantLoseTheGame,
+            StaticMode::CantWinTheGame,
+        ]);
+    }
+    if lower == "can't lose the game" || lower == "cannot lose the game" {
+        return Some(vec![StaticMode::CantLoseTheGame]);
+    }
+    if lower == "can't win the game" || lower == "cannot win the game" {
+        return Some(vec![StaticMode::CantWinTheGame]);
     }
     // CR 302.6: "doesn't untap during [controller's] untap step"
     if alt((
@@ -2851,6 +2920,64 @@ mod tests {
         assert_eq!(
             parse_restriction_modes("can't transform"),
             Some(vec![StaticMode::Other("CantTransform".to_string())])
+        );
+    }
+
+    // CR 119.8: "can't lose life" predicate emits `CantLoseLife`. Players-subject
+    // and you-subject share this same predicate after subject stripping.
+    #[test]
+    fn parse_restriction_modes_cant_lose_life() {
+        assert_eq!(
+            parse_restriction_modes("can't lose life"),
+            Some(vec![StaticMode::CantLoseLife])
+        );
+        assert_eq!(
+            parse_restriction_modes("cannot lose life"),
+            Some(vec![StaticMode::CantLoseLife])
+        );
+    }
+
+    // CR 104.3 + CR 704.5: "can't lose the game" predicate emits `CantLoseTheGame`.
+    #[test]
+    fn parse_restriction_modes_cant_lose_the_game() {
+        assert_eq!(
+            parse_restriction_modes("can't lose the game"),
+            Some(vec![StaticMode::CantLoseTheGame])
+        );
+        assert_eq!(
+            parse_restriction_modes("cannot lose the game"),
+            Some(vec![StaticMode::CantLoseTheGame])
+        );
+    }
+
+    // CR 104.2b: "can't win the game" predicate emits `CantWinTheGame`.
+    #[test]
+    fn parse_restriction_modes_cant_win_the_game() {
+        assert_eq!(
+            parse_restriction_modes("can't win the game"),
+            Some(vec![StaticMode::CantWinTheGame])
+        );
+    }
+
+    // CR 104.2b + CR 104.3b: Compound "can't lose the game or win the game"
+    // (Everybody Lives! prints this shape) emits BOTH `CantLoseTheGame` and
+    // `CantWinTheGame`. The compound check fires before the bare-"can't lose
+    // the game" arm so we never short-circuit and drop the win-leg.
+    #[test]
+    fn parse_restriction_modes_cant_lose_or_win_the_game_compound() {
+        assert_eq!(
+            parse_restriction_modes("can't lose the game or win the game"),
+            Some(vec![
+                StaticMode::CantLoseTheGame,
+                StaticMode::CantWinTheGame
+            ])
+        );
+        assert_eq!(
+            parse_restriction_modes("can't win the game or lose the game"),
+            Some(vec![
+                StaticMode::CantLoseTheGame,
+                StaticMode::CantWinTheGame
+            ])
         );
     }
 }

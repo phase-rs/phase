@@ -120,7 +120,31 @@ fn register_transient_effect(
                 static_def.condition.clone(),
             );
         }
-        Some(TargetFilter::Player | TargetFilter::None) | None => {}
+        // CR 104.3 + CR 119.7 + CR 119.8: Bare-player scope ("Players can't ...")
+        // fans out to one transient effect per non-eliminated player so
+        // player-scoped runtime queries (`player_has_cant_lose`,
+        // `player_has_cant_gain_life`, etc.) see a `SpecificPlayer`-bound TCE
+        // for each player. Without this branch, spell-applied player-scoped
+        // statics like Everybody Lives! never reach those queries.
+        Some(TargetFilter::Player) => {
+            let player_ids: Vec<_> = state
+                .players
+                .iter()
+                .filter(|p| !p.is_eliminated)
+                .map(|p| p.id)
+                .collect();
+            for player_id in player_ids {
+                state.add_transient_continuous_effect(
+                    ability.source_id,
+                    ability.controller,
+                    duration.clone(),
+                    TargetFilter::SpecificPlayer { id: player_id },
+                    modifications.clone(),
+                    static_def.condition.clone(),
+                );
+            }
+        }
+        Some(TargetFilter::None) | None => {}
         Some(filter) => {
             let filter = crate::game::effects::resolved_object_filter(ability, filter);
             let filter = resolve_chain_tracked_set_filter(state, filter);

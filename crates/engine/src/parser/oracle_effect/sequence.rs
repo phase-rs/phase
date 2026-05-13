@@ -858,6 +858,15 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         value((), tag("it loses ")),
         value((), tag("this creature gets ")),
         value((), tag("~ gets ")),
+        // CR 104.3 + CR 119.7 + CR 119.8: Bare-plural-player subject + restriction
+        // predicate. Everybody Lives! prints "Players can't lose life this turn
+        // and players can't lose the game or win the game this turn." — the
+        // conjunction must split so each half parses as its own
+        // subject + predicate clause. Safe to split: "players can't" /
+        // "players cannot" can only begin a subject-predicate clause, never a
+        // noun-phrase continuation.
+        value((), tag("players can't ")),
+        value((), tag("players cannot ")),
     )))
     .parse(s)
     .is_ok();
