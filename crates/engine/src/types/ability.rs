@@ -5936,6 +5936,13 @@ pub enum VoterScope {
     /// votes. The controller does not vote — they receive per-choice
     /// sub-effects via `PlayerFilter::VotedFor` against the recorded ballots.
     EachOpponent,
+    /// CR 608.2c: The spell controller alone makes one choice per
+    /// non-eliminated player, in APNAP order from the controller. The
+    /// "voter" slot in each ballot records the LABELED player (subject),
+    /// not the actor — the actor is always the controller. Used by
+    /// Battlebond's "Friend or foe" cards (Pir's Whim, Khorvath's Fury,
+    /// Regna's Sanction, Virtus's Maneuver, Zndrsplt's Judgment).
+    ControllerLabels,
 }
 
 impl TargetFilter {

@@ -2263,7 +2263,23 @@ pub(crate) fn parse_oracle_ir(
             };
             ctx.subject = None;
             ctx.actor = None;
-            let mut def = parse_effect_chain_with_context(parse_line, AbilityKind::Spell, &mut ctx);
+            // CR 608.2c + CR 701.38: Spell-level vote / labeling blocks
+            // (Council's-dilemma cards plus Battlebond's friend-or-foe class)
+            // produce a single Vote effect with per-choice sub-effects. The
+            // dispatcher in `parse_vote_block` recognises the entire opener +
+            // per-class clauses and returns a synthesised AbilityDefinition;
+            // when it matches we use that directly rather than chunk-splitting
+            // the text through `parse_effect_chain_with_context`, which would
+            // mis-parse `"For each player, choose friend or foe."` as an
+            // Unimplemented chunk and leave the per-class clauses to chain as
+            // ordinary sequential effects.
+            let mut def = if let Some(vote_def) =
+                crate::parser::oracle_vote::parse_vote_block(parse_line, AbilityKind::Spell)
+            {
+                vote_def
+            } else {
+                parse_effect_chain_with_context(parse_line, AbilityKind::Spell, &mut ctx)
+            };
             def.min_x_value = spell_min_x_value;
             def.description = Some(description);
             // CR 608.2c: Compose ability word condition with chain-extracted condition.

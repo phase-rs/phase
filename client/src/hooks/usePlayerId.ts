@@ -31,6 +31,14 @@ export function getPlayerId(): PlayerId {
 
 function waitingPlayer(waitingFor: ReturnType<typeof useGameStore.getState>["waitingFor"]): PlayerId | null {
   if (!waitingFor || waitingFor.type === "GameOver") return null;
+  // CR 608.2c: `VoteChoice.delegate_chooser`, when set, names the ACTOR who
+  // submits the next `ChooseOption`. Battlebond's friend-or-foe cards pin
+  // this to the spell controller so the labeling cycle's `player` field
+  // (the subject being labeled) does not gate submission. Returning the
+  // delegate makes `useCanActForWaitingState` resolve to the correct seat.
+  if (waitingFor.type === "VoteChoice") {
+    return waitingFor.data.delegate_chooser ?? waitingFor.data.player;
+  }
   return "player" in waitingFor.data ? waitingFor.data.player : null;
 }
 

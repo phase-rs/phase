@@ -523,10 +523,35 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::ParadigmCastOffer { .. } => Some(GameAction::PassParadigmOffer),
 
         // Vote: pick the first option.
-        WaitingFor::VoteChoice { options, .. } => {
-            options.first().map(|opt| GameAction::ChooseOption {
-                choice: opt.clone(),
-            })
+        // CR 608.2c: For `ControllerLabels` votes (Battlebond friend-or-foe),
+        // the AI is the spell controller making one label per player. The
+        // heuristic is trivial: self → friend (the beneficial label, choice
+        // index 0), every other player → foe (the harmful label, choice
+        // index 1). Falls back to "first option" for classic votes when
+        // `delegate_chooser` is None.
+        WaitingFor::VoteChoice {
+            options,
+            player,
+            delegate_chooser,
+            controller,
+            ..
+        } => {
+            let choice_text = match delegate_chooser {
+                Some(actor) if *actor == *controller => {
+                    let target_label = if player == controller {
+                        "friend"
+                    } else {
+                        "foe"
+                    };
+                    options
+                        .iter()
+                        .find(|o| o.as_str() == target_label)
+                        .or_else(|| options.first())
+                        .cloned()
+                }
+                _ => options.first().cloned(),
+            };
+            choice_text.map(|choice| GameAction::ChooseOption { choice })
         }
 
         // Legend choice: pick the first candidate.

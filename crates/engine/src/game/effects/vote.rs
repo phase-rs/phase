@@ -79,6 +79,11 @@ pub fn resolve(
         .filter(|pid| match scope {
             VoterScope::AllPlayers => true,
             VoterScope::EachOpponent => *pid != controller,
+            // CR 608.2c: `ControllerLabels` cycles the SUBJECT (labeled player)
+            // through every non-eliminated player in APNAP order from the
+            // controller. The ACTOR is always the controller; that gets pinned
+            // via `delegate_chooser` on the WaitingFor below.
+            VoterScope::ControllerLabels => true,
         })
         .collect();
     if voters_in_order.is_empty() {
@@ -91,9 +96,15 @@ pub fn resolve(
         return Ok(());
     }
 
+    // CR 608.2c: `ControllerLabels` gives each labeled player exactly one
+    // choice (no extra-vote stacking — labels are not votes). Other scopes
+    // honor the `GrantsExtraVote` static via `votes_per_session_for`.
     let voter_queue: Vec<(PlayerId, u32)> = voters_in_order
         .into_iter()
-        .map(|pid| (pid, votes_per_session_for(state, pid)))
+        .map(|pid| match scope {
+            VoterScope::ControllerLabels => (pid, 1),
+            _ => (pid, votes_per_session_for(state, pid)),
+        })
         .collect();
 
     let (first_player, first_votes) = voter_queue[0];
@@ -104,6 +115,14 @@ pub fn resolve(
     let option_labels: Vec<String> = choices.iter().map(|c| title_case_word(c)).collect();
     let tallies = vec![0u32; choices.len()];
 
+    // CR 608.2c: For `ControllerLabels`, pin the actor to the spell
+    // controller; `player` cycles through subjects. For all other scopes,
+    // `delegate_chooser` is `None` and the voter acts on their own behalf.
+    let delegate_chooser = match scope {
+        VoterScope::ControllerLabels => Some(controller),
+        VoterScope::AllPlayers | VoterScope::EachOpponent => None,
+    };
+
     state.waiting_for = WaitingFor::VoteChoice {
         player: first_player,
         remaining_votes: first_votes,
@@ -113,11 +132,13 @@ pub fn resolve(
         tallies,
         // CR 608.2c: Initialize the ballot ledger empty. Each `ChooseOption`
         // append in `engine_resolution_choices.rs` extends this vector with
-        // `(voter, choice_index)`.
+        // `(voter, choice_index)` — or, under `ControllerLabels`, with
+        // `(labeled_player, choice_index)`.
         ballots: crate::im::Vector::new(),
         per_choice_effect: per_choice_effect.clone(),
         controller,
         source_id: ability.source_id,
+        delegate_chooser,
     };
 
     // Stash the parent's sub_ability tail so it resumes after the tally fans
@@ -652,5 +673,256 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    // --- CR 608.2c: ControllerLabels (Battlebond friend-or-foe) ---
+
+    /// CR 608.2c + CR 101.4: `ControllerLabels` queues every non-eliminated
+    /// player in APNAP order from the controller. Each entry has exactly
+    /// one vote (labels are not stackable like Council's-dilemma votes).
+    #[test]
+    fn controller_labels_builds_apnap_player_queue() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        let controller = state.players[0].id;
+        let ability = make_vote_ability(
+            controller,
+            VoterScope::ControllerLabels,
+            vec!["friend".to_string(), "foe".to_string()],
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("vote resolves");
+        match state.waiting_for {
+            WaitingFor::VoteChoice {
+                player,
+                remaining_votes,
+                ref remaining_voters,
+                ..
+            } => {
+                // First subject is the controller (APNAP starts with them).
+                assert_eq!(player, controller);
+                assert_eq!(remaining_votes, 1);
+                // Two more subjects queued, both with exactly 1 vote each.
+                assert_eq!(remaining_voters.len(), 2);
+                assert!(remaining_voters.iter().all(|(_, v)| *v == 1));
+            }
+            other => panic!("expected VoteChoice, got {:?}", other),
+        }
+    }
+
+    /// CR 608.2c: Every `VoteChoice` produced under `ControllerLabels` has
+    /// `delegate_chooser = Some(controller)` so the spell controller is the
+    /// authorized actor regardless of which subject is currently being
+    /// labeled.
+    #[test]
+    fn controller_labels_delegate_chooser_is_set_to_controller() {
+        let mut state = GameState::new_two_player(42);
+        let controller = state.players[0].id;
+        let ability = make_vote_ability(
+            controller,
+            VoterScope::ControllerLabels,
+            vec!["friend".to_string(), "foe".to_string()],
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("vote resolves");
+        match state.waiting_for {
+            WaitingFor::VoteChoice {
+                delegate_chooser, ..
+            } => {
+                assert_eq!(delegate_chooser, Some(controller));
+            }
+            other => panic!("expected VoteChoice, got {:?}", other),
+        }
+    }
+
+    /// CR 608.2c: When every player is eliminated except the controller (an
+    /// odd edge case but valid input), `ControllerLabels` still queues the
+    /// controller. Verifies the resolver does not produce an empty queue in
+    /// the only-controller case.
+    #[test]
+    fn controller_labels_with_solo_controller_queues_just_controller() {
+        let mut state = GameState::new_two_player(42);
+        let controller = state.players[0].id;
+        state.players[1].is_eliminated = true;
+        let ability = make_vote_ability(
+            controller,
+            VoterScope::ControllerLabels,
+            vec!["friend".to_string(), "foe".to_string()],
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("vote resolves");
+        match state.waiting_for {
+            WaitingFor::VoteChoice {
+                player,
+                ref remaining_voters,
+                delegate_chooser,
+                ..
+            } => {
+                assert_eq!(player, controller);
+                assert!(remaining_voters.is_empty());
+                assert_eq!(delegate_chooser, Some(controller));
+            }
+            other => panic!("expected VoteChoice, got {:?}", other),
+        }
+    }
+
+    /// CR 608.2c + CR 701.38: End-to-end label-and-tally walkthrough for the
+    /// Pir's Whim shape. The Oracle text parses to a Vote with
+    /// `ControllerLabels` scope; resolving the spell parks on
+    /// `VoteChoice { delegate_chooser = Some(controller) }` with the
+    /// controller as the first subject. After the controller submits
+    /// `friend` for themselves and `foe` for the opponent, the ballot ledger
+    /// records both labels with the SUBJECT in the first slot (not the
+    /// actor), and the tally publishes them to `state.last_vote_ballots` so
+    /// per-choice sub-effects can fan out via `PlayerFilter::VotedFor`.
+    #[test]
+    fn pirs_whim_resolves_friend_label_then_foe_label_then_tally() {
+        use crate::parser::oracle_vote::parse_vote_block;
+        use crate::types::identifiers::ObjectId;
+
+        let text = "For each player, choose friend or foe. \
+                    Each friend draws a card. \
+                    Each foe draws a card.";
+        let parsed_def =
+            parse_vote_block(text, AbilityKind::Spell).expect("Pir's Whim shape parses");
+        let mut state = GameState::new_two_player(42);
+        let controller = state.players[0].id;
+        let opp = state.players[1].id;
+
+        // Build a ResolvedAbility from the parsed AbilityDefinition.
+        let ability = ResolvedAbility {
+            effect: (*parsed_def.effect).clone(),
+            targets: vec![],
+            source_id: ObjectId(1),
+            controller,
+            original_controller: None,
+            scoped_player: None,
+            kind: AbilityKind::Spell,
+            sub_ability: None,
+            else_ability: None,
+            duration: None,
+            condition: None,
+            context: Default::default(),
+            optional_targeting: false,
+            optional: false,
+            optional_for: None,
+            multi_target: None,
+            target_choice_timing: crate::types::ability::TargetChoiceTiming::Stack,
+            description: None,
+            repeat_for: None,
+            min_x_value: 0,
+            cant_be_copied: false,
+            forward_result: false,
+            unless_pay: None,
+            distribution: None,
+            player_scope: None,
+            chosen_x: None,
+            cost_paid_object: None,
+            ability_index: None,
+            may_trigger_origin: None,
+            target_selection_mode: crate::types::ability::TargetSelectionMode::Chosen,
+        };
+
+        // Resolution parks on VoteChoice with controller as first subject.
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("vote initiates");
+        match state.waiting_for {
+            WaitingFor::VoteChoice {
+                player,
+                delegate_chooser,
+                ref options,
+                ..
+            } => {
+                assert_eq!(player, controller, "first subject is controller (APNAP)");
+                assert_eq!(delegate_chooser, Some(controller));
+                assert_eq!(options, &vec!["friend".to_string(), "foe".to_string()]);
+            }
+            other => panic!("expected VoteChoice for first label, got {:?}", other),
+        }
+
+        // Controller labels themselves as friend.
+        let snapshot = state.waiting_for.clone();
+        let acted = crate::game::engine_resolution_choices::handle_resolution_choice(
+            &mut state,
+            snapshot,
+            crate::types::GameAction::ChooseOption {
+                choice: "friend".to_string(),
+            },
+            &mut events,
+        )
+        .expect("first label submits");
+        assert!(matches!(
+            acted,
+            crate::game::engine_resolution_choices::ResolutionChoiceOutcome::WaitingFor(_)
+        ));
+
+        // Now the engine should be waiting for the controller to label the
+        // opponent. delegate_chooser is still the controller; subject is opp.
+        match state.waiting_for {
+            WaitingFor::VoteChoice {
+                player,
+                delegate_chooser,
+                ref ballots,
+                ..
+            } => {
+                assert_eq!(player, opp, "subject advanced to opponent");
+                assert_eq!(delegate_chooser, Some(controller));
+                // The first ballot records the SUBJECT (controller), not the
+                // actor — both happen to coincide here for the friend label
+                // but the slot semantics matter for the foe label.
+                assert_eq!(ballots.len(), 1);
+                assert_eq!(ballots[0], (controller, 0));
+            }
+            other => panic!("expected VoteChoice for second label, got {:?}", other),
+        }
+
+        // Controller labels opp as foe.
+        let snapshot = state.waiting_for.clone();
+        crate::game::engine_resolution_choices::handle_resolution_choice(
+            &mut state,
+            snapshot,
+            crate::types::GameAction::ChooseOption {
+                choice: "foe".to_string(),
+            },
+            &mut events,
+        )
+        .expect("second label submits");
+
+        // Ballot ledger must record (opp, foe_index=1) for the second label —
+        // the SUBJECT being labeled, not the actor.
+        assert_eq!(
+            state.last_vote_ballots.len(),
+            2,
+            "tally must publish both ballots"
+        );
+        assert_eq!(state.last_vote_ballots[0], (controller, 0));
+        assert_eq!(state.last_vote_ballots[1], (opp, 1));
+    }
+
+    /// CR 608.2c: `WaitingFor::acting_player()` for a `ControllerLabels` vote
+    /// must return the delegate (controller), not the subject. Other choice
+    /// modals route the action to `acting_player`, so a mismatch would gate
+    /// the wrong seat.
+    #[test]
+    fn controller_labels_acting_player_returns_delegate_not_subject() {
+        let mut state = GameState::new_two_player(42);
+        let controller = state.players[0].id;
+        let opp = state.players[1].id;
+        // Build a VoteChoice with subject = opponent, delegate = controller.
+        // After the controller labels themselves, the queue advances to opp
+        // as the next subject — the actor must still be the controller.
+        state.waiting_for = WaitingFor::VoteChoice {
+            player: opp,
+            remaining_votes: 1,
+            options: vec!["friend".to_string(), "foe".to_string()],
+            option_labels: vec!["Friend".to_string(), "Foe".to_string()],
+            remaining_voters: Vec::new(),
+            tallies: vec![1, 0],
+            ballots: crate::im::Vector::unit((controller, 0)),
+            per_choice_effect: Vec::new(),
+            controller,
+            source_id: crate::types::identifiers::ObjectId(1),
+            delegate_chooser: Some(controller),
+        };
+        assert_eq!(state.waiting_for.acting_player(), Some(controller));
     }
 }

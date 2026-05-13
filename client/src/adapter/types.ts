@@ -851,6 +851,12 @@ export type WaitingFor =
       tallies: number[];
       controller: PlayerId;
       source_id: ObjectId;
+      // CR 608.2c: When set, the named player is the ACTOR; `player` above
+      // is the SUBJECT being labeled. Battlebond friend-or-foe cards
+      // (ControllerLabels scope) pin this to the spell controller so the
+      // labeling submissions cycle through subjects while the actor is
+      // fixed. When null, classic vote: `player` is both subject and actor.
+      delegate_chooser?: PlayerId | null;
     } }
   | { type: "ChooseDungeon"; data: { player: PlayerId; options: DungeonId[] } }
   | { type: "ChooseDungeonRoom"; data: { player: PlayerId; dungeon: DungeonId; options: number[]; option_names: string[] } }

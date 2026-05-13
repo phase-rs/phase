@@ -13,12 +13,20 @@ type VoteChoice = Extract<WaitingFor, { type: "VoteChoice" }>;
  * choice list (lowercase, from `data.options`) using the original-case
  * `data.option_labels` for display.
  *
+ * CR 608.2c: When `data.delegate_chooser` is set (Battlebond friend-or-foe
+ * cards), the spell controller is the ACTOR and `data.player` is the SUBJECT
+ * being labeled. The header re-renders to "Label <subject>:" on each step as
+ * the engine cycles `data.player` through each player.
+ *
  * Display layer only — `remaining_votes`, the running tally, and the queued
  * voter list all come straight from the engine's `WaitingFor::VoteChoice`.
  */
 export function VoteChoiceModal({ data }: { data: VoteChoice["data"] }) {
   const dispatch = useGameDispatch();
   const [selected, setSelected] = useState<string | null>(null);
+  // Frontend renders engine-provided state; the engine does not yet expose a
+  // human player name field, so fall back to the 1-indexed seat ordinal.
+  const subjectName = `Player ${data.player + 1}`;
 
   const handleConfirm = useCallback(() => {
     if (selected !== null) {
@@ -27,14 +35,18 @@ export function VoteChoiceModal({ data }: { data: VoteChoice["data"] }) {
     }
   }, [dispatch, selected]);
 
-  const subtitle =
-    data.remaining_votes > 1
+  const isLabelingMode =
+    data.delegate_chooser != null && data.delegate_chooser !== data.player;
+  const title = isLabelingMode ? "Label Player" : "Vote";
+  const subtitle = isLabelingMode
+    ? `Choose a label for ${subjectName}`
+    : data.remaining_votes > 1
       ? `Cast a vote (${data.remaining_votes} remaining)`
       : "Cast your vote";
 
   return (
     <ChoiceOverlay
-      title="Vote"
+      title={title}
       subtitle={subtitle}
       widthClassName="w-fit max-w-full"
       maxWidthClassName="max-w-3xl"

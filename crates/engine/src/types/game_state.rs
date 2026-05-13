@@ -1955,6 +1955,15 @@ pub enum WaitingFor {
         /// echoes; mirrors the `source_id` carried on other interactive
         /// `WaitingFor` variants (e.g., NamedChoice).
         source_id: ObjectId,
+        /// CR 608.2c: When `Some`, the named player is the ACTOR who submits
+        /// `ChooseOption`; `player` is the SUBJECT being labeled by that
+        /// action. Set by `VoterScope::ControllerLabels` (Battlebond's
+        /// friend-or-foe cards) so the spell controller alone makes every
+        /// choice while the labeled-player slot cycles through each player
+        /// in APNAP order. When `None`, today's default: `player` is both
+        /// the subject and the actor (classic Council's-dilemma vote).
+        #[serde(default)]
+        delegate_chooser: Option<PlayerId>,
     },
     /// CR 702.139a: Before the game begins, reveal companion from outside the game.
     CompanionReveal {
@@ -2279,7 +2288,6 @@ impl WaitingFor {
             | WaitingFor::ParadigmCastOffer { player, .. }
             | WaitingFor::PopulateChoice { player, .. }
             | WaitingFor::ClashCardPlacement { player, .. }
-            | WaitingFor::VoteChoice { player, .. }
             | WaitingFor::CompanionReveal { player, .. }
             | WaitingFor::ChooseLegend { player, .. }
             | WaitingFor::BattleProtectorChoice { player, .. }
@@ -2301,6 +2309,15 @@ impl WaitingFor {
             | WaitingFor::MiracleCastOffer { player, .. }
             | WaitingFor::MadnessCastOffer { player, .. }
             | WaitingFor::CommanderZoneChoice { player, .. } => Some(*player),
+            // CR 608.2c: For `ControllerLabels` votes (Battlebond friend-or-foe
+            // cards), the ACTOR is `delegate_chooser` (the spell controller),
+            // not `player` (the subject being labeled). The acting-player API
+            // returns whoever is authorized to submit the next action.
+            WaitingFor::VoteChoice {
+                player,
+                delegate_chooser,
+                ..
+            } => Some(delegate_chooser.unwrap_or(*player)),
             WaitingFor::GameOver { .. } => None,
         }
     }
