@@ -1979,6 +1979,16 @@ pub(super) fn parse_followup_continuation_ast(
         {
             Some(ContinuationAst::SearchResultClauseHandled)
         }
+        Effect::SearchOutsideGame {
+            destination: Zone::Hand,
+            ..
+        } if matches!(
+            lower.trim(),
+            "put that card into your hand" | "put it into your hand"
+        ) =>
+        {
+            Some(ContinuationAst::SearchResultClauseHandled)
+        }
         // CR 701.23a + CR 701.18a: When the preceding SearchDestination
         // continuation already moved the found card onto the battlefield
         // (e.g., Assassin's Trophy / Ranging Raptors / Harrow compound), the

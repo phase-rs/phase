@@ -1001,6 +1001,21 @@ pub struct PlayerDeckPool {
     pub current_commander: std::sync::Arc<Vec<DeckEntry>>,
 }
 
+/// CR 400.11/400.11a/400.11b: Tracks sideboard cards brought into this game
+/// without mutating the between-games sideboard partition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutsideGameCardUse {
+    pub player: PlayerId,
+    pub sideboard_index: usize,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutsideGameChoiceEntry {
+    pub sideboard_index: usize,
+    pub entry: DeckEntry,
+}
+
 /// CR 103.6: A beginning-of-game ability waiting to resolve after mulligans.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingBeginGameAbility {
@@ -1234,6 +1249,19 @@ pub enum WaitingFor {
         /// AI candidate enumerator to prune illegal combinations.
         #[serde(default)]
         constraint: SearchSelectionConstraint,
+    },
+    /// CR 400.11/400.11a + CR 701.23j: Player chooses card(s) they own from
+    /// outside the game. The engine's bounded outside-game set is the player's
+    /// current sideboard, represented by `DeckEntry`s rather than `GameObject`s.
+    OutsideGameChoice {
+        player: PlayerId,
+        choices: Vec<OutsideGameChoiceEntry>,
+        count: usize,
+        #[serde(default)]
+        reveal: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        up_to: bool,
+        destination: Zone,
     },
     /// CR 700.2: Player selects card(s) from a tracked set (e.g., exiled cards).
     /// Chosen/unchosen cards flow into sub-abilities via pending_continuation,
@@ -2190,6 +2218,7 @@ impl WaitingFor {
             | WaitingFor::SurveilChoice { player, .. }
             | WaitingFor::RevealChoice { player, .. }
             | WaitingFor::SearchChoice { player, .. }
+            | WaitingFor::OutsideGameChoice { player, .. }
             | WaitingFor::ChooseFromZoneChoice { player, .. }
             | WaitingFor::ChooseOneOfBranch { player, .. }
             | WaitingFor::LearnChoice { player, .. }
@@ -2976,6 +3005,8 @@ pub struct GameState {
     pub next_game_chooser: Option<PlayerId>,
     #[serde(default)]
     pub deck_pools: Vec<PlayerDeckPool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outside_game_cards_brought_in: Vec<OutsideGameCardUse>,
     #[serde(default)]
     pub sideboard_submitted: Vec<PlayerId>,
 
@@ -3569,6 +3600,7 @@ impl GameState {
             current_starting_player: PlayerId(0),
             next_game_chooser: None,
             deck_pools: Vec::new(),
+            outside_game_cards_brought_in: Vec::new(),
             sideboard_submitted: Vec::new(),
             triggers_fired_this_turn: HashSet::new(),
             trigger_fire_counts_this_turn: HashMap::new(),
@@ -3812,6 +3844,7 @@ impl PartialEq for GameState {
             && self.current_starting_player == other.current_starting_player
             && self.next_game_chooser == other.next_game_chooser
             && self.deck_pools == other.deck_pools
+            && self.outside_game_cards_brought_in == other.outside_game_cards_brought_in
             && self.sideboard_submitted == other.sideboard_submitted
             && self.triggers_fired_this_turn == other.triggers_fired_this_turn
             && self.trigger_fire_counts_this_turn == other.trigger_fire_counts_this_turn

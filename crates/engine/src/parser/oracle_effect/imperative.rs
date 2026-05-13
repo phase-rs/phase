@@ -1441,6 +1441,9 @@ pub(super) fn parse_search_and_creation_ast(
     lower: &str,
     ctx: &mut ParseContext,
 ) -> Option<SearchCreationImperativeAst> {
+    if let Some(ast) = parse_search_outside_game_ast(lower, ctx) {
+        return Some(ast);
+    }
     if let Some((_, _)) = nom_on_lower(text, lower, |input| value((), tag("seek ")).parse(input)) {
         let details = super::parse_seek_details(lower, ctx);
         return Some(SearchCreationImperativeAst::Seek {
@@ -1584,6 +1587,37 @@ pub(super) fn parse_search_and_creation_ast(
     None
 }
 
+fn parse_search_outside_game_ast(
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<SearchCreationImperativeAst> {
+    fn parse_clause<'a>(
+        input: &'a str,
+    ) -> Result<(&'a str, (&'a str, Zone)), nom::Err<OracleError<'a>>> {
+        let (rest, _) = tag("reveal a ").parse(input)?;
+        let (rest, filter_text) = take_until(" card you own from outside the game").parse(rest)?;
+        let (rest, _) = tag(" card you own from outside the game").parse(rest)?;
+        let (rest, destination) = opt(alt((
+            value(Zone::Hand, tag(" and put it into your hand")),
+            value(Zone::Hand, tag(" and put that card into your hand")),
+        )))
+        .parse(rest)?;
+        let (rest, _) = opt(tag(".")).parse(rest)?;
+        let (rest, _) = eof.parse(rest)?;
+        Ok((rest, (filter_text, destination.unwrap_or(Zone::Hand))))
+    }
+
+    let (_, (filter_text, destination)) = parse_clause(lower).ok()?;
+    let filter = super::search::parse_search_filter(filter_text, ctx);
+    Some(SearchCreationImperativeAst::SearchOutsideGame {
+        filter,
+        count: QuantityExpr::Fixed { value: 1 },
+        reveal: true,
+        destination,
+        up_to: true,
+    })
+}
+
 pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) -> Effect {
     match ast {
         SearchCreationImperativeAst::SearchLibrary {
@@ -1615,6 +1649,22 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             reveal,
             target_player,
             selection_constraint,
+        },
+        SearchCreationImperativeAst::SearchOutsideGame {
+            filter,
+            count,
+            reveal,
+            destination,
+            up_to,
+        } => Effect::SearchOutsideGame {
+            filter,
+            count: if up_to {
+                QuantityExpr::up_to(count)
+            } else {
+                count
+            },
+            reveal,
+            destination,
         },
         SearchCreationImperativeAst::Dig { count, reveal } => Effect::Dig {
             count,
@@ -5727,6 +5777,63 @@ fn try_parse_bolster(lower: &str) -> Option<Effect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_outside_game_wish_reveal_to_hand() {
+        let ability = super::super::parse_effect_chain(
+            "You may reveal a sorcery card you own from outside the game and put it into your hand. Exile ~.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            !ability.optional,
+            "the reveal choice is optional; the self-exile sentence is mandatory"
+        );
+        assert!(matches!(&*ability.effect, Effect::SearchOutsideGame { .. }));
+        assert!(matches!(
+            ability.sub_ability.as_deref().map(|sub| &*sub.effect),
+            Some(Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            })
+        ));
+
+        let effect = super::super::parse_effect(
+            "reveal a sorcery card you own from outside the game and put it into your hand",
+        );
+        match effect {
+            Effect::SearchOutsideGame {
+                filter,
+                count,
+                reveal,
+                destination,
+            } => {
+                assert_eq!(count, QuantityExpr::up_to(QuantityExpr::Fixed { value: 1 }));
+                assert!(reveal);
+                assert_eq!(destination, Zone::Hand);
+                match filter {
+                    TargetFilter::Typed(typed) => {
+                        assert!(typed.type_filters.contains(&TypeFilter::Sorcery));
+                    }
+                    other => panic!("expected sorcery filter, got {other:?}"),
+                }
+            }
+            other => panic!("expected SearchOutsideGame, got {other:?}"),
+        }
+
+        let effect = super::super::parse_effect(
+            "reveal a creature card you own from outside the game and put it into your hand",
+        );
+        match effect {
+            Effect::SearchOutsideGame { filter, .. } => match filter {
+                TargetFilter::Typed(typed) => {
+                    assert!(typed.type_filters.contains(&TypeFilter::Creature));
+                }
+                other => panic!("expected creature filter, got {other:?}"),
+            },
+            other => panic!("expected SearchOutsideGame, got {other:?}"),
+        }
+    }
 
     /// CR 701.27 + CR 608.2c + CR 608.2k: "transform it" / "convert itself" —
     /// bare object pronoun resolves to `ParentTarget` when no trigger subject

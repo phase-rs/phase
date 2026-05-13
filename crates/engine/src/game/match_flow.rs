@@ -515,6 +515,13 @@ mod tests {
                 ..
             }
         ));
+        state
+            .outside_game_cards_brought_in
+            .push(crate::types::game_state::OutsideGameCardUse {
+                player: PlayerId(0),
+                sideboard_index: 0,
+                count: 1,
+            });
 
         let choose =
             apply_as_current(&mut state, GameAction::ChoosePlayDraw { play_first: true }).unwrap();
@@ -523,6 +530,7 @@ mod tests {
         assert_eq!(state.match_score.p0_wins, 1);
         assert_eq!(state.game_number, 2);
         assert_eq!(state.current_starting_player, PlayerId(1));
+        assert!(state.outside_game_cards_brought_in.is_empty());
         assert!(!state.players[0].hand.is_empty());
         assert!(!state.players[1].hand.is_empty());
         assert!(!matches!(choose.waiting_for, WaitingFor::GameOver { .. }));

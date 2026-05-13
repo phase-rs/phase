@@ -669,7 +669,7 @@ fn parse_seek_from_top_limit(filter_text: &str) -> (&str, Option<usize>) {
 
 /// Parse the card type filter from search text like "basic land card, ..."
 /// or "creature card with ..." into a TargetFilter.
-pub(super) fn parse_search_filter(text: &str, ctx: &mut ParseContext) -> TargetFilter {
+pub(crate) fn parse_search_filter(text: &str, ctx: &mut ParseContext) -> TargetFilter {
     let type_text = search_filter_region(text).trim();
 
     if let Some(filter) = parse_search_filter_color_disjunction(type_text, ctx) {

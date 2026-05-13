@@ -4608,6 +4608,7 @@ pub fn start_game_with_starting_player(
     starting_player: PlayerId,
 ) -> ActionResult {
     let mut events = Vec::new();
+    state.outside_game_cards_brought_in.clear();
 
     if state.match_config.match_type == MatchType::Bo3 && state.players.len() != 2 {
         state.match_config.match_type = MatchType::Bo1;
@@ -4665,6 +4666,7 @@ pub fn start_game_with_starting_player(
 /// Start game without mulligan (for backward compatibility with existing tests).
 pub fn start_game_skip_mulligan(state: &mut GameState) -> ActionResult {
     let mut events = Vec::new();
+    state.outside_game_cards_brought_in.clear();
 
     events.push(GameEvent::GameStarted);
 

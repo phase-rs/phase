@@ -109,6 +109,7 @@ pub mod roll_die;
 pub mod sacrifice;
 pub mod scry;
 pub mod search_library;
+pub mod search_outside_game;
 pub mod seek;
 pub mod set_class_level;
 pub mod shuffle;
@@ -423,6 +424,7 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::SurveilChoice { .. }
             | WaitingFor::RevealChoice { .. }
             | WaitingFor::SearchChoice { .. }
+            | WaitingFor::OutsideGameChoice { .. }
             | WaitingFor::TriggerTargetSelection { .. }
             | WaitingFor::NamedChoice { .. }
             | WaitingFor::DamageSourceChoice { .. }
@@ -667,6 +669,7 @@ pub fn resolve_effect(
         Effect::Shuffle { .. } => shuffle::resolve(state, ability, events),
         Effect::Transform { .. } => transform_effect::resolve(state, ability, events),
         Effect::SearchLibrary { .. } => search_library::resolve(state, ability, events),
+        Effect::SearchOutsideGame { .. } => search_outside_game::resolve(state, ability, events),
         Effect::Seek { .. } => seek::resolve(state, ability, events),
         Effect::RevealHand { .. } => reveal_hand::resolve(state, ability, events),
         Effect::RevealFromHand { .. } => reveal_from_hand::resolve(state, ability, events),

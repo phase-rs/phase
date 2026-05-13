@@ -3,13 +3,13 @@ use std::borrow::Cow;
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::space0;
-use nom::combinator::{opt, value};
+use nom::character::complete::{alpha1, space0};
+use nom::combinator::{not, opt, peek, value};
 use nom::Parser;
 
 use super::oracle_cost::parse_oracle_cost;
 use super::oracle_nom::primitives as nom_primitives;
-use super::oracle_nom::primitives::{scan_contains, split_once_on};
+use super::oracle_nom::primitives::{scan_at_word_boundaries, scan_contains, split_once_on};
 use super::oracle_quantity::parse_cda_quantity;
 use super::oracle_target::parse_type_phrase;
 use super::oracle_util::strip_reminder_text;
@@ -23,12 +23,20 @@ use crate::types::keywords::{
 
 /// CR 702.16 + CR 702.11f: Expand compound "X from A and from B" keyword lines.
 /// Handles both "protection from X and from Y" and "hexproof from X and from Y"
-/// by splitting into individual keyword entries.
+/// by splitting into individual keyword entries. Also expands the
+/// "from each color" / "from all colors" shorthand (CR 105.2) into one entry
+/// per WUBRG color so the runtime gets typed `Color(ManaColor)` variants
+/// instead of an opaque string. Bare "each color"/"all colors" only — phrases
+/// like "each color that's not in your commander's color identity" (Commander's
+/// Plate) or "each color with the most votes" (Council Guardian) carry
+/// additional qualifiers and pass through unchanged for a future dynamic
+/// handler.
 pub(crate) fn expand_protection_parts<'a>(parts: &[&'a str]) -> Vec<Cow<'a, str>> {
     // Fast path: skip allocation when no expansion is needed
     if !parts.iter().any(|p| {
         let l = p.to_ascii_lowercase();
         scan_contains(&l, "and from ")
+            || contains_each_or_all_colors_phrase(&l)
             || tag::<_, _, OracleError<'_>>("from ")
                 .parse(l.as_str())
                 .is_ok()
@@ -65,17 +73,17 @@ pub(crate) fn expand_protection_parts<'a>(parts: &[&'a str]) -> Vec<Cow<'a, str>
                                                     // CR 702.11f / CR 702.16: split on " and from "
             let mut remainder = after;
             while let Ok((_, (before, rest))) = split_once_on(remainder, " and from ") {
-                expanded.push(Cow::Owned(format!("{prefix} {}", before.trim())));
+                push_quality_entry(&mut expanded, prefix, before);
                 remainder = rest;
             }
-            expanded.push(Cow::Owned(format!("{prefix} {}", remainder.trim())));
+            push_quality_entry(&mut expanded, prefix, remainder);
             active_prefix = Some(prefix);
         } else if let Some(pfx) = active_prefix {
             if let Ok((rest, _)) =
                 alt((tag::<_, _, OracleError<'_>>("and from "), tag("from "))).parse(lower.as_str())
             {
                 // ", and from Zombies" or ", from Werewolves" — continuation
-                expanded.push(Cow::Owned(format!("{pfx} {}", rest.trim())));
+                push_quality_entry(&mut expanded, pfx, rest);
             } else {
                 active_prefix = None;
                 expanded.push(Cow::Borrowed(part));
@@ -85,6 +93,49 @@ pub(crate) fn expand_protection_parts<'a>(parts: &[&'a str]) -> Vec<Cow<'a, str>
         }
     }
     expanded
+}
+
+/// Push one "<prefix> <quality>" entry — or 5 WUBRG entries when the quality
+/// is the bare "each color" / "all colors" shorthand. CR 702.16 + CR 105.2:
+/// "protection from each color" means protection from W, U, B, R, AND G
+/// simultaneously (Akroma's Will reminder text on Spectra Ward confirms
+/// this enumeration). Equivalent reasoning applies to "hexproof from each
+/// color" under CR 702.11d. The normalized lookup tolerates trailing
+/// punctuation (period/comma/semicolon) in case an upstream caller hasn't
+/// stripped it; the emitted non-shorthand entry preserves the original
+/// quality slice to avoid changing behavior for cards with qualifier text.
+fn push_quality_entry<'a>(out: &mut Vec<Cow<'a, str>>, prefix: &str, quality: &str) {
+    let q = quality.trim();
+    let normalized = q.trim_end_matches(['.', ',', ';']).to_ascii_lowercase();
+    if normalized == "each color" || normalized == "all colors" {
+        for color in ["white", "blue", "black", "red", "green"] {
+            out.push(Cow::Owned(format!("{prefix} {color}")));
+        }
+    } else {
+        out.push(Cow::Owned(format!("{prefix} {q}")));
+    }
+}
+
+/// CR 105.2: Word-boundary-aware check for "from each color" / "from all
+/// colors" — distinguishes the bare WUBRG shorthand from longer color-stem
+/// words like "from each colored permanent". The trailing `peek(not(alpha1))`
+/// guard requires the match to end at a non-alphabetic boundary, so
+/// `scan_contains` overmatches like "from each colored ..." are rejected
+/// at the fast-path stage. Correctness is preserved either way (the slow
+/// path's `push_quality_entry` exact-match guard refuses to expand qualified
+/// phrases), but this keeps the fast-path optimization sound under future
+/// Oracle text.
+fn contains_each_or_all_colors_phrase(text: &str) -> bool {
+    scan_at_word_boundaries(text, |i| {
+        let (rest, _) = alt((
+            tag::<_, _, OracleError<'_>>("from each color"),
+            tag::<_, _, OracleError<'_>>("from all colors"),
+        ))
+        .parse(i)?;
+        peek(not(alpha1::<_, OracleError<'_>>)).parse(rest)?;
+        Ok((rest, ()))
+    })
+    .is_some()
 }
 
 /// CR 702.33a-c: Parse a kicker or multikicker keyword line into the casting
@@ -1533,6 +1584,190 @@ mod tests {
             keywords.contains(&Keyword::Protection(ProtectionTarget::Color(
                 ManaColor::Green
             )))
+        );
+    }
+
+    #[test]
+    fn expand_protection_from_each_color_to_five_wubrg() {
+        use crate::types::keywords::ProtectionTarget;
+        use crate::types::mana::ManaColor;
+
+        // CR 702.16 + CR 105.2: "protection from each color" is shorthand for
+        // protection from white, blue, black, red, and green simultaneously
+        // (Akroma's Will, Iridescent Angel, Spectra Ward, etc.).
+        let keywords = extract_keyword_line(
+            "Flying, protection from each color",
+            &["flying".to_string(), "protection".to_string()],
+        )
+        .unwrap();
+        let prots: Vec<_> = keywords
+            .iter()
+            .filter_map(|k| match k {
+                Keyword::Protection(pt) => Some(pt.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            prots.len(),
+            5,
+            "expected 5 color protections, got {prots:?}"
+        );
+        for color in [
+            ManaColor::White,
+            ManaColor::Blue,
+            ManaColor::Black,
+            ManaColor::Red,
+            ManaColor::Green,
+        ] {
+            assert!(
+                prots.contains(&ProtectionTarget::Color(color)),
+                "missing Protection(Color({color:?})) in {prots:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn expand_protection_from_all_colors_to_five_wubrg() {
+        use crate::types::keywords::ProtectionTarget;
+        use crate::types::mana::ManaColor;
+
+        // CR 702.16 + CR 105.2: "protection from all colors" is the same
+        // shorthand as "from each color" (Pristine Angel pattern, simplified
+        // form ignoring the artifact clause).
+        let keywords =
+            extract_keyword_line("protection from all colors", &["protection".to_string()])
+                .unwrap();
+        let prots: Vec<_> = keywords
+            .iter()
+            .filter_map(|k| match k {
+                Keyword::Protection(pt) => Some(pt.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            prots.len(),
+            5,
+            "expected 5 color protections, got {prots:?}"
+        );
+        assert!(prots.contains(&ProtectionTarget::Color(ManaColor::White)));
+        assert!(prots.contains(&ProtectionTarget::Color(ManaColor::Blue)));
+        assert!(prots.contains(&ProtectionTarget::Color(ManaColor::Black)));
+        assert!(prots.contains(&ProtectionTarget::Color(ManaColor::Red)));
+        assert!(prots.contains(&ProtectionTarget::Color(ManaColor::Green)));
+    }
+
+    #[test]
+    fn expand_hexproof_from_each_color_to_five_wubrg() {
+        use crate::types::keywords::HexproofFilter;
+        use crate::types::mana::ManaColor;
+
+        // CR 702.11d + CR 105.2: "hexproof from each color" — Breaker of
+        // Creation. Mirrors the protection-from-each-color expansion.
+        let keywords =
+            extract_keyword_line("hexproof from each color", &["hexproof".to_string()]).unwrap();
+        let hf: Vec<_> = keywords
+            .iter()
+            .filter_map(|k| match k {
+                Keyword::HexproofFrom(f) => Some(f.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(hf.len(), 5, "expected 5 color hexproofs, got {hf:?}");
+        for color in [
+            ManaColor::White,
+            ManaColor::Blue,
+            ManaColor::Black,
+            ManaColor::Red,
+            ManaColor::Green,
+        ] {
+            assert!(
+                hf.contains(&HexproofFilter::Color(color)),
+                "missing HexproofFrom(Color({color:?})) in {hf:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn contains_each_or_all_colors_phrase_word_boundary() {
+        // Word-boundary guard: bare phrases match, color-stem extensions don't.
+        assert!(super::contains_each_or_all_colors_phrase(
+            "protection from each color"
+        ));
+        assert!(super::contains_each_or_all_colors_phrase(
+            "protection from all colors"
+        ));
+        assert!(super::contains_each_or_all_colors_phrase(
+            "protection from each color."
+        ));
+        assert!(super::contains_each_or_all_colors_phrase(
+            "has protection from each color and from artifacts"
+        ));
+        // Negative: "colored" is not "color"; "colorless" not "colors".
+        assert!(!super::contains_each_or_all_colors_phrase(
+            "draw a card from each colored permanent"
+        ));
+        assert!(!super::contains_each_or_all_colors_phrase(
+            "search from all colorless lands"
+        ));
+        // Not a from-phrase at all.
+        assert!(!super::contains_each_or_all_colors_phrase(
+            "for each color among permanents you control"
+        ));
+    }
+
+    #[test]
+    fn expand_protection_from_each_color_with_trailing_period() {
+        use crate::types::keywords::ProtectionTarget;
+
+        // Defensive: if an upstream caller forgets to strip the trailing
+        // period, the helper still recognizes the shorthand and emits the
+        // 5 typed Color protections rather than falling through to the
+        // no-op CardType branch.
+        let mut expanded: Vec<Cow<'_, str>> = Vec::new();
+        super::push_quality_entry(&mut expanded, "protection from", "each color.");
+        assert_eq!(expanded.len(), 5);
+
+        // End-to-end through extract_keyword_line is the more conservative
+        // check — current callers do strip the period, so we don't assert
+        // on that path. The helper-level guard is what we're locking in.
+        let keywords =
+            extract_keyword_line("protection from each color", &["protection".to_string()])
+                .unwrap();
+        let prots = keywords
+            .iter()
+            .filter(|k| matches!(k, Keyword::Protection(ProtectionTarget::Color(_))))
+            .count();
+        assert_eq!(prots, 5);
+    }
+
+    #[test]
+    fn protection_from_each_color_with_qualifier_not_expanded() {
+        use crate::types::keywords::ProtectionTarget;
+
+        // Guard: Commander's Plate ("protection from each color that's not in
+        // your commander's color identity") and Council Guardian ("protection
+        // from each color with the most votes") are dynamic, conditional
+        // qualifiers — the "each color" prefix here is NOT the bare 5-WUBRG
+        // shorthand. Expansion must leave them untouched so a future dynamic
+        // handler can interpret them.
+        let keywords = extract_keyword_line(
+            "protection from each color that's not in your commander's color identity",
+            &["protection".to_string()],
+        )
+        .unwrap();
+        let prots: Vec<_> = keywords
+            .iter()
+            .filter(|k| matches!(k, Keyword::Protection(_)))
+            .collect();
+        assert_eq!(
+            prots.len(),
+            1,
+            "qualified 'each color' phrase must not expand, got {prots:?}"
+        );
+        // Should remain as CardType (or future dynamic variant) — not 5 Color entries.
+        assert!(
+            !matches!(prots[0], Keyword::Protection(ProtectionTarget::Color(_))),
+            "qualified 'each color' was wrongly expanded to a Color variant: {prots:?}"
         );
     }
 

@@ -662,6 +662,36 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 })
                 .collect()
         }
+        WaitingFor::OutsideGameChoice {
+            player,
+            choices,
+            count,
+            up_to,
+            ..
+        } => {
+            let indices: Vec<usize> = choices
+                .iter()
+                .flat_map(|choice| (0..choice.entry.count).map(move |_| choice.sideboard_index))
+                .collect();
+            let sizes = if *up_to {
+                (0..=*count).collect()
+            } else {
+                vec![*count]
+            };
+            let mut seen = HashSet::new();
+            sizes
+                .into_iter()
+                .flat_map(|size| combinations_usize(&indices, size))
+                .filter(|sideboard_indices| seen.insert(sideboard_indices.clone()))
+                .map(|sideboard_indices| {
+                    candidate(
+                        GameAction::ChooseOutsideGameCards { sideboard_indices },
+                        TacticalClass::Selection,
+                        Some(*player),
+                    )
+                })
+                .collect()
+        }
         // CR 700.2: Choose card(s) from a tracked set (exiled/revealed cards).
         WaitingFor::ChooseFromZoneChoice {
             player,

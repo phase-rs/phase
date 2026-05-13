@@ -10588,13 +10588,19 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
             clause_ir.parsed.sub_ability.clone()
         };
 
-        if clause_ir.is_optional {
+        if clause_ir.is_optional
+            && !matches!(&clause_ir.parsed.effect, Effect::SearchOutsideGame { .. })
+        {
             def.optional = true;
             def.optional_for = clause_ir.opponent_may_scope;
         }
         // CR 117.3a + CR 608.2c: Propagate subject-phrase "may" modal.
         if clause_ir.parsed.optional {
             def.optional = true;
+        }
+        if matches!(&clause_ir.parsed.effect, Effect::SearchOutsideGame { .. }) {
+            def.optional = false;
+            def.optional_for = None;
         }
         if let Some(ref qty) = clause_ir.repeat_for {
             if matches!(*def.effect, Effect::TargetOnly { .. }) {
@@ -10870,6 +10876,10 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     // attaching object.
     rewire_attach_forward_result(&mut result);
     wire_optional_cast_decline_fallback(&mut result);
+    if matches!(&*result.effect, Effect::SearchOutsideGame { .. }) {
+        result.optional = false;
+        result.optional_for = None;
+    }
 
     result
 }
