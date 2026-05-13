@@ -1006,10 +1006,22 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
             // only fires on SpellCast (which is only emitted for actual casts),
             // and obj.cast_from_zone is cleared after trigger collection so a
             // WasCast check at resolution would always fail.
+            // CR 702.153a: Skip cards with a printed Casualty keyword — those
+            // already have the copy trigger from synthesize_casualty (face-level
+            // trigger synthesis). Only cards whose Casualty is dynamically
+            // granted (e.g. from Silverquill) need this path. We must NOT use
+            // `obj.additional_cost.is_none()` here: that excluded any card
+            // with ANY printed additional cost (e.g. Corrupted Conviction's
+            // Required sacrifice), which is wrong — only the presence of a
+            // printed Casualty keyword means the face trigger already exists.
             let dynamically_granted_casualty_instances = state
                 .objects
                 .get(cast_obj_id)
-                .filter(|obj| obj.additional_cost.is_none())
+                .filter(|obj| {
+                    !obj.keywords
+                        .iter()
+                        .any(|k| matches!(k, Keyword::Casualty(_)))
+                })
                 .and_then(|obj| {
                     let paid = state
                         .stack
