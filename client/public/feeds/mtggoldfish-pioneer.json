@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-05-26T00:00:00Z",
+  "updated": "2026-05-27T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -140,6 +140,125 @@
         {
           "count": 4,
           "name": "Ray of Enfeeblement"
+        }
+      ]
+    },
+    {
+      "name": "Selesnya Company",
+      "author": "MTGGoldfish",
+      "colors": [
+        "W",
+        "G"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Archon of Emeria"
+        },
+        {
+          "count": 4,
+          "name": "Llanowar Elves"
+        },
+        {
+          "count": 1,
+          "name": "Boseiju, Who Endures"
+        },
+        {
+          "count": 2,
+          "name": "Starting Town"
+        },
+        {
+          "count": 4,
+          "name": "Enduring Innocence"
+        },
+        {
+          "count": 4,
+          "name": "Elvish Mystic"
+        },
+        {
+          "count": 4,
+          "name": "Ouroboroid"
+        },
+        {
+          "count": 2,
+          "name": "Plains"
+        },
+        {
+          "count": 1,
+          "name": "Forest"
+        },
+        {
+          "count": 4,
+          "name": "Skyclave Apparition"
+        },
+        {
+          "count": 4,
+          "name": "Brushland"
+        },
+        {
+          "count": 4,
+          "name": "Razorverge Thicket"
+        },
+        {
+          "count": 4,
+          "name": "Temple Garden"
+        },
+        {
+          "count": 3,
+          "name": "Thalia, Guardian of Thraben"
+        },
+        {
+          "count": 4,
+          "name": "Badgermole Cub"
+        },
+        {
+          "count": 4,
+          "name": "Collected Company"
+        },
+        {
+          "count": 1,
+          "name": "Eiganjo, Seat of the Empire"
+        },
+        {
+          "count": 1,
+          "name": "Plains"
+        },
+        {
+          "count": 2,
+          "name": "Abandoned Air Temple"
+        },
+        {
+          "count": 3,
+          "name": "Elspeth, Storm Slayer"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 4,
+          "name": "Aven Interrupter"
+        },
+        {
+          "count": 3,
+          "name": "Beza, the Bounding Spring"
+        },
+        {
+          "count": 2,
+          "name": "Seam Rip"
+        },
+        {
+          "count": 2,
+          "name": "March of Otherworldly Light"
+        },
+        {
+          "count": 1,
+          "name": "Elesh Norn, Mother of Machines"
+        },
+        {
+          "count": 3,
+          "name": "Clarion Conqueror"
         }
       ]
     },
@@ -279,125 +398,6 @@
         {
           "count": 2,
           "name": "Doorkeeper Thrull"
-        }
-      ]
-    },
-    {
-      "name": "Selesnya Company",
-      "author": "MTGGoldfish",
-      "colors": [
-        "W",
-        "G"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Archon of Emeria"
-        },
-        {
-          "count": 4,
-          "name": "Llanowar Elves"
-        },
-        {
-          "count": 1,
-          "name": "Boseiju, Who Endures"
-        },
-        {
-          "count": 2,
-          "name": "Starting Town"
-        },
-        {
-          "count": 4,
-          "name": "Enduring Innocence"
-        },
-        {
-          "count": 4,
-          "name": "Elvish Mystic"
-        },
-        {
-          "count": 4,
-          "name": "Ouroboroid"
-        },
-        {
-          "count": 2,
-          "name": "Plains"
-        },
-        {
-          "count": 1,
-          "name": "Forest"
-        },
-        {
-          "count": 4,
-          "name": "Skyclave Apparition"
-        },
-        {
-          "count": 4,
-          "name": "Brushland"
-        },
-        {
-          "count": 4,
-          "name": "Razorverge Thicket"
-        },
-        {
-          "count": 4,
-          "name": "Temple Garden"
-        },
-        {
-          "count": 3,
-          "name": "Thalia, Guardian of Thraben"
-        },
-        {
-          "count": 4,
-          "name": "Badgermole Cub"
-        },
-        {
-          "count": 4,
-          "name": "Collected Company"
-        },
-        {
-          "count": 1,
-          "name": "Eiganjo, Seat of the Empire"
-        },
-        {
-          "count": 1,
-          "name": "Plains"
-        },
-        {
-          "count": 2,
-          "name": "Abandoned Air Temple"
-        },
-        {
-          "count": 3,
-          "name": "Elspeth, Storm Slayer"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 4,
-          "name": "Aven Interrupter"
-        },
-        {
-          "count": 3,
-          "name": "Beza, the Bounding Spring"
-        },
-        {
-          "count": 2,
-          "name": "Seam Rip"
-        },
-        {
-          "count": 2,
-          "name": "March of Otherworldly Light"
-        },
-        {
-          "count": 1,
-          "name": "Elesh Norn, Mother of Machines"
-        },
-        {
-          "count": 3,
-          "name": "Clarion Conqueror"
         }
       ]
     },
@@ -946,153 +946,6 @@
       ]
     },
     {
-      "name": "Rakdos Midrange",
-      "author": "MTGGoldfish",
-      "colors": [
-        "B",
-        "R"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 2,
-          "name": "Duress"
-        },
-        {
-          "count": 1,
-          "name": "Sulfurous Springs"
-        },
-        {
-          "count": 2,
-          "name": "Blazemire Verge"
-        },
-        {
-          "count": 4,
-          "name": "Blightstep Pathway"
-        },
-        {
-          "count": 4,
-          "name": "Blood Crypt"
-        },
-        {
-          "count": 4,
-          "name": "Bloodtithe Harvester"
-        },
-        {
-          "count": 4,
-          "name": "Fatal Push"
-        },
-        {
-          "count": 4,
-          "name": "Fable of the Mirror-Breaker"
-        },
-        {
-          "count": 4,
-          "name": "Mutavault"
-        },
-        {
-          "count": 1,
-          "name": "Torch the Tower"
-        },
-        {
-          "count": 4,
-          "name": "Sheoldred, the Apocalypse"
-        },
-        {
-          "count": 2,
-          "name": "Takenuma, Abandoned Mire"
-        },
-        {
-          "count": 3,
-          "name": "Blackcleave Cliffs"
-        },
-        {
-          "count": 4,
-          "name": "Unholy Annex // Ritual Chamber"
-        },
-        {
-          "count": 1,
-          "name": "Urborg, Tomb of Yawgmoth"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 1,
-          "name": "Swamp"
-        },
-        {
-          "count": 4,
-          "name": "Thoughtseize"
-        },
-        {
-          "count": 1,
-          "name": "Kroxa, Titan of Death's Hunger"
-        },
-        {
-          "count": 3,
-          "name": "Bonecrusher Giant"
-        },
-        {
-          "count": 1,
-          "name": "Sheoldred's Edict"
-        },
-        {
-          "count": 3,
-          "name": "Abrade"
-        },
-        {
-          "count": 2,
-          "name": "Haunted Ridge"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Duress"
-        },
-        {
-          "count": 1,
-          "name": "Go Blank"
-        },
-        {
-          "count": 2,
-          "name": "Hidetsugu Consumes All"
-        },
-        {
-          "count": 2,
-          "name": "Invoke Despair"
-        },
-        {
-          "count": 2,
-          "name": "Unlicensed Hearse"
-        },
-        {
-          "count": 1,
-          "name": "Gifted Aetherborn"
-        },
-        {
-          "count": 1,
-          "name": "Reckoner Bankbuster"
-        },
-        {
-          "count": 1,
-          "name": "Ray of Enfeeblement"
-        },
-        {
-          "count": 1,
-          "name": "Abrade"
-        },
-        {
-          "count": 2,
-          "name": "Path of Peril"
-        }
-      ]
-    },
-    {
       "name": "Izzet Phoenix",
       "author": "MTGGoldfish",
       "colors": [
@@ -1400,6 +1253,153 @@
         {
           "count": 2,
           "name": "Temporary Lockdown"
+        }
+      ]
+    },
+    {
+      "name": "Rakdos Midrange",
+      "author": "MTGGoldfish",
+      "colors": [
+        "B",
+        "R"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 2,
+          "name": "Duress"
+        },
+        {
+          "count": 1,
+          "name": "Sulfurous Springs"
+        },
+        {
+          "count": 2,
+          "name": "Blazemire Verge"
+        },
+        {
+          "count": 4,
+          "name": "Blightstep Pathway"
+        },
+        {
+          "count": 4,
+          "name": "Blood Crypt"
+        },
+        {
+          "count": 4,
+          "name": "Bloodtithe Harvester"
+        },
+        {
+          "count": 4,
+          "name": "Fatal Push"
+        },
+        {
+          "count": 4,
+          "name": "Fable of the Mirror-Breaker"
+        },
+        {
+          "count": 4,
+          "name": "Mutavault"
+        },
+        {
+          "count": 1,
+          "name": "Torch the Tower"
+        },
+        {
+          "count": 4,
+          "name": "Sheoldred, the Apocalypse"
+        },
+        {
+          "count": 2,
+          "name": "Takenuma, Abandoned Mire"
+        },
+        {
+          "count": 3,
+          "name": "Blackcleave Cliffs"
+        },
+        {
+          "count": 4,
+          "name": "Unholy Annex // Ritual Chamber"
+        },
+        {
+          "count": 1,
+          "name": "Urborg, Tomb of Yawgmoth"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 1,
+          "name": "Swamp"
+        },
+        {
+          "count": 4,
+          "name": "Thoughtseize"
+        },
+        {
+          "count": 1,
+          "name": "Kroxa, Titan of Death's Hunger"
+        },
+        {
+          "count": 3,
+          "name": "Bonecrusher Giant"
+        },
+        {
+          "count": 1,
+          "name": "Sheoldred's Edict"
+        },
+        {
+          "count": 3,
+          "name": "Abrade"
+        },
+        {
+          "count": 2,
+          "name": "Haunted Ridge"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Duress"
+        },
+        {
+          "count": 1,
+          "name": "Go Blank"
+        },
+        {
+          "count": 2,
+          "name": "Hidetsugu Consumes All"
+        },
+        {
+          "count": 2,
+          "name": "Invoke Despair"
+        },
+        {
+          "count": 2,
+          "name": "Unlicensed Hearse"
+        },
+        {
+          "count": 1,
+          "name": "Gifted Aetherborn"
+        },
+        {
+          "count": 1,
+          "name": "Reckoner Bankbuster"
+        },
+        {
+          "count": 1,
+          "name": "Ray of Enfeeblement"
+        },
+        {
+          "count": 1,
+          "name": "Abrade"
+        },
+        {
+          "count": 2,
+          "name": "Path of Peril"
         }
       ]
     },
