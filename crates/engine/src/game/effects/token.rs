@@ -610,6 +610,11 @@ pub fn apply_create_token_after_replacement(
                 obj.base_keywords = spec.keywords.clone();
             }
             obj.tapped = enter_tapped.resolve(spec.tapped);
+            // CR 302.6: Tokens enter with summoning sickness, same as any
+            // permanent entering the battlefield. Cleared at the start of the
+            // controller's next turn by `turns::start_next_turn`. Haste is
+            // folded in at query time by `combat::has_summoning_sickness`.
+            obj.summoning_sick = true;
 
             // CR 113.3d + CR 613.1: Apply static abilities from the token
             // definition. Mirror onto `base_static_definitions` so the
