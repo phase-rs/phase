@@ -25,6 +25,9 @@ export interface MoveListProps {
    *  exceeds 15-card limit"). */
   warning?: string;
   onChooseArt?: (cardName: string, x: number, y: number) => void;
+  /** Forwarded to each row. See `CardEntryRowProps.onSetAsCommander`. */
+  onSetAsCommander?: (name: string) => void;
+  isCommanderEligible?: (name: string) => boolean;
 }
 
 export function MoveList({
@@ -39,6 +42,8 @@ export function MoveList({
   emptyHint,
   warning,
   onChooseArt,
+  onSetAsCommander,
+  isCommanderEligible,
 }: MoveListProps) {
   if (entries.length === 0 && !alwaysShow) return null;
   const count = totalCards(entries);
@@ -72,6 +77,8 @@ export function MoveList({
             onCardHover={onCardHover}
             unsupported={unsupportedMap?.get(entry.name)}
             onChooseArt={onChooseArt}
+            onSetAsCommander={onSetAsCommander}
+            isCommanderEligible={isCommanderEligible}
           />
         ))
       )}

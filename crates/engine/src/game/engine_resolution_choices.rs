@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::types::ability::{
     CategoryChooserScope, ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectKind,
     PaymentCost, QuantityExpr, QuantityRef, ResolvedAbility, TargetRef,
@@ -38,6 +40,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::SurveilChoice { .. }
             | WaitingFor::RevealChoice { .. }
             | WaitingFor::SearchChoice { .. }
+            | WaitingFor::OutsideGameChoice { .. }
             | WaitingFor::ChooseFromZoneChoice { .. }
             | WaitingFor::ChooseOneOfBranch { .. }
             | WaitingFor::DiscardToHandSize { .. }
@@ -307,7 +310,9 @@ pub(super) fn handle_resolution_choice(
                         shards: vec![],
                         generic: amount.saturating_mul(per_x),
                     };
-                    if !casting::can_pay_cost_after_auto_tap(state, player, source_id, &cost) {
+                    if !casting::can_pay_effect_mana_cost_after_auto_tap(
+                        state, player, source_id, &cost,
+                    ) {
                         return Err(EngineError::InvalidAction(format!(
                             "Player {:?} cannot pay {} generic mana",
                             player,
@@ -777,6 +782,85 @@ pub(super) fn handle_resolution_choice(
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (
+            WaitingFor::OutsideGameChoice {
+                player,
+                choices,
+                count,
+                reveal,
+                up_to,
+                destination,
+            },
+            GameAction::ChooseOutsideGameCards { sideboard_indices },
+        ) => {
+            let valid = if up_to {
+                sideboard_indices.len() <= count
+            } else {
+                sideboard_indices.len() == count
+            };
+            if !valid {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must select {}{} outside-game card(s), got {}",
+                    if up_to { "up to " } else { "exactly " },
+                    count,
+                    sideboard_indices.len()
+                )));
+            }
+            let mut requested_counts = HashMap::new();
+            for index in &sideboard_indices {
+                *requested_counts.entry(*index).or_insert(0usize) += 1;
+            }
+            for (index, requested_count) in requested_counts {
+                let Some(choice) = choices
+                    .iter()
+                    .find(|choice| choice.sideboard_index == index)
+                else {
+                    return Err(EngineError::InvalidAction(
+                        "Selected card not in outside-game choices".to_string(),
+                    ));
+                };
+                if requested_count > choice.entry.count as usize {
+                    return Err(EngineError::InvalidAction(
+                        "Selected more copies than are available outside the game".to_string(),
+                    ));
+                }
+            }
+
+            let mut chosen_ids = Vec::new();
+            for sideboard_index in sideboard_indices {
+                let object_id = effects::search_outside_game::put_sideboard_entry_into_game(
+                    state,
+                    player,
+                    sideboard_index,
+                    destination,
+                )
+                .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?;
+                chosen_ids.push(object_id);
+            }
+
+            if reveal {
+                state.last_revealed_ids = chosen_ids.clone();
+                for &card_id in &chosen_ids {
+                    state.revealed_cards.insert(card_id);
+                }
+                let card_names: Vec<String> = chosen_ids
+                    .iter()
+                    .filter_map(|id| state.objects.get(id).map(|obj| obj.name.clone()))
+                    .collect();
+                events.push(GameEvent::CardsRevealed {
+                    player,
+                    card_ids: chosen_ids.clone(),
+                    card_names,
+                });
+            } else {
+                state.last_revealed_ids.clear();
+            }
+
+            if let Some(cont) = state.pending_continuation.as_mut() {
+                cont.chain.targets = chosen_ids.iter().map(|&id| TargetRef::Object(id)).collect();
+            }
+            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+        }
+        (
             WaitingFor::ChooseFromZoneChoice {
                 player,
                 cards,
@@ -1104,6 +1188,7 @@ pub(super) fn handle_resolution_choice(
                 ));
             }
 
+            let events_before_effect = events.len();
             match effect_kind {
                 EffectKind::Sacrifice => {
                     for &card_id in &chosen {
@@ -1180,10 +1265,10 @@ pub(super) fn handle_resolution_choice(
                         }
                     }
                 }
-                // CR 701.24g + CR 115.1: Resolution-time selection for
-                // PutAtLibraryPosition from a private zone (e.g. Brainstorm's
-                // "put two cards from your hand on top of your library").
-                // Cards are placed in selection order (first chosen = top).
+                // CR 115.1: Resolution-time selection for PutAtLibraryPosition
+                // from a private zone (e.g. Brainstorm's "put two cards from
+                // your hand on top of your library"). Cards are placed in
+                // selection order (first chosen = top).
                 EffectKind::PutAtLibraryPosition => {
                     for &card_id in chosen.iter().rev() {
                         super::zones::move_to_library_at_index(state, card_id, Some(0), events);
@@ -1196,6 +1281,13 @@ pub(super) fn handle_resolution_choice(
                 }
             }
 
+            if let Some(snapshot) =
+                effects::parent_referent_context_from_events(state, &events[events_before_effect..])
+            {
+                if let Some(cont) = state.pending_continuation.as_mut() {
+                    cont.chain.set_effect_context_object_recursive(snapshot);
+                }
+            }
             state.last_effect_count = Some(chosen.len() as i32);
             events.push(GameEvent::EffectResolved {
                 kind: effect_kind,

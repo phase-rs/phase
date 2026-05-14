@@ -1172,6 +1172,12 @@ fn build_continuous_clause(
     {
         return None;
     }
+    if tag::<_, _, OracleError<'_>>("create ")
+        .parse(normalized.as_str())
+        .is_ok()
+    {
+        return None;
+    }
 
     // Try the full predicate first (simple pump with no compound).
     if let Some((power, toughness, duration)) = super::parse_pump_clause(&normalized) {
@@ -1726,7 +1732,7 @@ fn try_parse_become_choice(
         )
     } else if lower.contains("color") {
         // CR 105.3: "become the color of your choice" — player chooses a color.
-        (ChoiceType::Color, ContinuousModification::AddChosenColor)
+        (ChoiceType::color(), ContinuousModification::AddChosenColor)
     } else {
         return None;
     };
@@ -1864,16 +1870,7 @@ fn build_restriction_clause(
             // outer clause. The injection is intrinsic to the mode, not the
             // duration: intrinsic statics never reach this grant path
             // (`build_restriction_clause` is the subject-predicate route).
-            if matches!(
-                mode,
-                StaticMode::CantBlock
-                    | StaticMode::CantAttack
-                    | StaticMode::CantAttackOrBlock
-                    | StaticMode::CantBeBlocked
-                    | StaticMode::CantBeBlockedBy { .. }
-                    | StaticMode::CantBeBlockedExceptBy { .. }
-                    | StaticMode::CantUntap
-            ) {
+            if static_mode_needs_grant_propagation(&mode) {
                 def = def.modifications(vec![ContinuousModification::AddStaticMode {
                     mode: mode.clone(),
                 }]);
@@ -1896,6 +1893,19 @@ fn build_restriction_clause(
         optional: false,
         unless_pay: None,
     })
+}
+
+pub(crate) fn static_mode_needs_grant_propagation(mode: &StaticMode) -> bool {
+    matches!(
+        mode,
+        StaticMode::CantBlock
+            | StaticMode::CantAttack
+            | StaticMode::CantAttackOrBlock
+            | StaticMode::CantBeBlocked
+            | StaticMode::CantBeBlockedBy { .. }
+            | StaticMode::CantBeBlockedExceptBy { .. }
+            | StaticMode::CantUntap
+    )
 }
 
 /// Parse restriction predicates into one or more `StaticMode` variants.

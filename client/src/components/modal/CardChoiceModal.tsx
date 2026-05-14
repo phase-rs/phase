@@ -15,7 +15,7 @@ import { VoteChoiceModal } from "./VoteChoiceModal.tsx";
 import { DungeonChoiceModal, RoomChoiceModal } from "./DungeonChoiceModal.tsx";
 import { DamageAssignmentModal } from "../combat/DamageAssignmentModal.tsx";
 import { DistributeAmongModal } from "./DistributeAmongModal.tsx";
-import { RetargetChoiceModal } from "./RetargetChoiceModal.tsx";
+import { CopyRetargetModal, RetargetChoiceModal } from "./RetargetChoiceModal.tsx";
 import { ProliferateModal } from "./ProliferateModal.tsx";
 
 type ScryChoice = Extract<WaitingFor, { type: "ScryChoice" }>;
@@ -23,6 +23,7 @@ type DigChoice = Extract<WaitingFor, { type: "DigChoice" }>;
 type SurveilChoice = Extract<WaitingFor, { type: "SurveilChoice" }>;
 type RevealChoice = Extract<WaitingFor, { type: "RevealChoice" }>;
 type SearchChoice = Extract<WaitingFor, { type: "SearchChoice" }>;
+type OutsideGameChoice = Extract<WaitingFor, { type: "OutsideGameChoice" }>;
 type ChooseFromZoneChoice = Extract<WaitingFor, { type: "ChooseFromZoneChoice" }>;
 type EffectZoneChoice = Extract<WaitingFor, { type: "EffectZoneChoice" }>;
 type DrawnThisTurnTopdeckChoice = Extract<WaitingFor, { type: "DrawnThisTurnTopdeckChoice" }>;
@@ -170,6 +171,9 @@ export function CardChoiceModal() {
     case "SearchChoice":
       if (!canActForWaitingState) return null;
       return <SearchModal data={waitingFor.data} />;
+    case "OutsideGameChoice":
+      if (!canActForWaitingState) return null;
+      return <OutsideGameModal key={outsideGameChoiceKey(waitingFor.data)} data={waitingFor.data} />;
     case "ChooseFromZoneChoice":
       if (!canActForWaitingState) return null;
       return <ChooseFromZoneModal data={waitingFor.data} />;
@@ -308,6 +312,9 @@ export function CardChoiceModal() {
     case "RetargetChoice":
       if (!canActForWaitingState) return null;
       return <RetargetChoiceModal data={waitingFor.data} />;
+    case "CopyRetarget":
+      if (!canActForWaitingState) return null;
+      return <CopyRetargetModal data={waitingFor.data} />;
     case "ProliferateChoice":
       if (!canActForWaitingState) return null;
       return <ProliferateModal data={waitingFor.data} />;
@@ -855,6 +862,93 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
       </ScrollableCardStrip>
     </ChoiceOverlay>
   );
+}
+
+function OutsideGameModal({ data }: { data: OutsideGameChoice["data"] }) {
+  const dispatch = useGameDispatch();
+  const [selectedCounts, setSelectedCounts] = useState<Map<number, number>>(new Map());
+  const availableCounts = useMemo(
+    () => new Map(data.choices.map((choice) => [choice.sideboard_index, choice.entry.count])),
+    [data.choices],
+  );
+  const selectedIndices = useMemo(
+    () =>
+      Array.from(selectedCounts.entries()).flatMap(([sideboardIndex, count]) => {
+        const availableCount = availableCounts.get(sideboardIndex) ?? 0;
+        return Array.from({ length: Math.min(count, availableCount) }, () => sideboardIndex);
+      }),
+    [availableCounts, selectedCounts],
+  );
+  const minCount = data.up_to ? 0 : data.count;
+  const countValid = selectedIndices.length >= minCount && selectedIndices.length <= data.count;
+
+  const toggleSelect = useCallback(
+    (sideboardIndex: number, maxCopies: number) => {
+      setSelectedCounts((prev) => {
+        const next = new Map(prev);
+        const current = next.get(sideboardIndex) ?? 0;
+        const selectedTotal = Array.from(prev.values()).reduce((sum, count) => sum + count, 0);
+        if (current > 0 && (current >= maxCopies || selectedTotal >= data.count)) {
+          next.delete(sideboardIndex);
+        } else if (selectedTotal < data.count) {
+          next.set(sideboardIndex, current + 1);
+        }
+        return next;
+      });
+    },
+    [data.count],
+  );
+
+  const handleConfirm = useCallback(() => {
+    if (countValid) {
+      dispatch({
+        type: "ChooseOutsideGameCards",
+        data: { sideboard_indices: selectedIndices },
+      });
+    }
+  }, [countValid, dispatch, selectedIndices]);
+
+  return (
+    <ChoiceOverlay
+      title="Choose From Sideboard"
+      subtitle={`Choose ${data.up_to ? "up to " : ""}${data.count}`}
+      footer={<ConfirmButton onClick={handleConfirm} disabled={!countValid} />}
+    >
+      <div className="flex max-h-[60vh] min-w-[280px] flex-col gap-2 overflow-y-auto p-1">
+        {data.choices.map((choice) => {
+          const selectedCount = Math.min(
+            selectedCounts.get(choice.sideboard_index) ?? 0,
+            choice.entry.count,
+          );
+          const isSelected = selectedCount > 0;
+          return (
+            <button
+              key={choice.sideboard_index}
+              type="button"
+              className={`flex items-center justify-between rounded-md border px-3 py-2 text-left text-sm transition ${
+                isSelected
+                  ? "border-emerald-400 bg-emerald-500/20 text-white"
+                  : "border-white/15 bg-black/30 text-zinc-100 hover:bg-white/10"
+              }`}
+              onClick={() => toggleSelect(choice.sideboard_index, choice.entry.count)}
+            >
+              <span>{choice.entry.card.name}</span>
+              <span className="text-xs text-zinc-400">
+                {isSelected ? `${selectedCount}/` : ""}x{choice.entry.count}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </ChoiceOverlay>
+  );
+}
+
+function outsideGameChoiceKey(data: OutsideGameChoice["data"]) {
+  const choicesKey = data.choices
+    .map((choice) => `${choice.sideboard_index}:${choice.entry.count}`)
+    .join(",");
+  return `${data.player}:${data.count}:${data.up_to ?? false}:${data.destination}:${choicesKey}`;
 }
 
 // ── Choose From Zone Modal ───────────────────────────────────────────────────
@@ -2573,7 +2667,9 @@ function HarmonizeTapModal({ data }: { data: HarmonizeTapChoice["data"] }) {
 
 function LegendChoiceModal({ data }: { data: ChooseLegend["data"] }) {
   const dispatch = useGameDispatch();
-  const objects = useGameStore((s) => s.gameState?.objects);
+  const gameState = useGameStore((s) => s.gameState);
+  const objects = gameState?.objects;
+  const turnNumber = gameState?.turn_number;
   const hoverProps = useInspectHoverProps();
 
   if (!objects) return null;
@@ -2587,9 +2683,13 @@ function LegendChoiceModal({ data }: { data: ChooseLegend["data"] }) {
         {data.candidates.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
+          const isCurrentTurnEntry =
+            turnNumber != null && obj.entered_battlefield_turn === turnNumber;
+          const entryLabel = isCurrentTurnEntry ? "Just entered" : "Already on battlefield";
           return (
             <motion.button
               key={id}
+              aria-label={`Keep ${obj.name} (${entryLabel})`}
               className="relative rounded-lg transition hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
               initial={{ opacity: 0, y: 60, scale: 0.85 }}
               animate={{ opacity: 0.85, y: 0, scale: 1 }}
@@ -2605,6 +2705,17 @@ function LegendChoiceModal({ data }: { data: ChooseLegend["data"] }) {
                 size="normal"
                 className={CHOICE_CARD_IMAGE_CLASS}
               />
+              <div className="absolute top-2 left-1/2 -translate-x-1/2">
+                <span
+                  className={`whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-bold text-white shadow ${
+                    isCurrentTurnEntry
+                      ? "bg-amber-500/95"
+                      : "bg-sky-700/95"
+                  }`}
+                >
+                  {entryLabel}
+                </span>
+              </div>
             </motion.button>
           );
         })}

@@ -119,3 +119,49 @@ export async function sideboardPolicyForFormat(
   const engine = await loadEngineModule();
   return engine.sideboardPolicyForFormat(format) as SideboardPolicy;
 }
+
+/**
+ * Engine-typed catalog of debug-spawnable token presets. Loaded once on
+ * first access; the result is cached for the session because the catalog is
+ * static engine data (compiled into the WASM binary via `include_str!`).
+ */
+import type { TokenCharacteristics } from "../adapter/types";
+
+export type PredefinedTokenKind =
+  | "Treasure"
+  | "Food"
+  | "Clue"
+  | "Blood"
+  | "Powerstone"
+  | "Map"
+  | "Spawn"
+  | "Gold";
+
+export type TokenCategory =
+  | { PredefinedArtifact: { kind: PredefinedTokenKind } }
+  | "Creature"
+  | "Aura"
+  | "Equipment"
+  | "Vehicle"
+  | "Enchantment"
+  | "Land"
+  | "Artifact";
+
+export type PresetFidelity = "Full" | "PartialMissingAbilities";
+
+export interface TokenPreset {
+  id: string;
+  category: TokenCategory;
+  fidelity: PresetFidelity;
+  body: TokenCharacteristics;
+}
+
+let tokenPresetsCache: TokenPreset[] | null = null;
+
+export async function listTokenPresets(): Promise<TokenPreset[]> {
+  if (tokenPresetsCache !== null) return tokenPresetsCache;
+  await ensureWasmInit();
+  const engine = await loadEngineModule();
+  tokenPresetsCache = engine.list_token_presets_js() as TokenPreset[];
+  return tokenPresetsCache;
+}

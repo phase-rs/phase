@@ -9,7 +9,7 @@ use crate::types::ability::{
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    DelayedTrigger, GameState, MayTriggerOrigin, StackEntry, StackEntryKind,
+    DelayedTrigger, DistributionUnit, GameState, MayTriggerOrigin, StackEntry, StackEntryKind,
     TargetSelectionConstraint,
 };
 use crate::types::identifiers::ObjectId;
@@ -51,6 +51,10 @@ pub struct PendingTrigger {
     pub timestamp: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub target_constraints: Vec<TargetSelectionConstraint>,
+    /// CR 601.2d + CR 603.3d: Trigger controllers divide distributed effects
+    /// while putting the triggered ability on the stack, after targets are known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distribute: Option<DistributionUnit>,
     /// CR 603.7c: The event that caused this trigger to fire, for event-context resolution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_event: Option<GameEvent>,
@@ -276,6 +280,10 @@ fn collect_matching_triggers(
                         ability: ability.clone(),
                         timestamp,
                         target_constraints: Vec::new(),
+                        distribute: trig_def
+                            .execute
+                            .as_ref()
+                            .and_then(|execute| execute.distribute.clone()),
                         trigger_event: Some(trigger_event),
                         modal: modal.clone(),
                         mode_abilities: mode_abilities.clone(),
@@ -555,6 +563,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             ability: prowess_ability,
                             timestamp,
                             target_constraints: Vec::new(),
+                            distribute: None,
                             trigger_event: Some(event.clone()),
                             modal: None,
                             mode_abilities: vec![],
@@ -599,6 +608,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             ability: draw_ability,
                             timestamp,
                             target_constraints: Vec::new(),
+                            distribute: None,
                             trigger_event: Some(event.clone()),
                             modal: None,
                             mode_abilities: vec![],
@@ -636,6 +646,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             ability: fb_ability,
                             timestamp,
                             target_constraints: Vec::new(),
+                            distribute: None,
                             trigger_event: Some(event.clone()),
                             modal: None,
                             mode_abilities: vec![],
@@ -685,6 +696,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                         ability: decayed_ability,
                         timestamp,
                         target_constraints: Vec::new(),
+                        distribute: None,
                         trigger_event: Some(event.clone()),
                         modal: None,
                         mode_abilities: vec![],
@@ -726,6 +738,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             ability: exploit_ability,
                             timestamp,
                             target_constraints: Vec::new(),
+                            distribute: None,
                             trigger_event: Some(event.clone()),
                             modal: None,
                             mode_abilities: vec![],
@@ -792,6 +805,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                                         ability: ward_ability,
                                         timestamp,
                                         target_constraints: Vec::new(),
+                                        distribute: None,
                                         trigger_event: Some(event.clone()),
                                         modal: None,
                                         mode_abilities: vec![],
@@ -951,6 +965,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                         ability: storm_ability,
                         timestamp,
                         target_constraints: Vec::new(),
+                        distribute: None,
                         trigger_event: Some(event.clone()),
                         modal: None,
                         mode_abilities: vec![],
@@ -991,6 +1006,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                     ability: cascade_ability,
                     timestamp,
                     target_constraints: Vec::new(),
+                    distribute: None,
                     trigger_event: Some(event.clone()),
                     modal: None,
                     mode_abilities: vec![],
@@ -1071,6 +1087,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                     ability: casualty_ability,
                     timestamp,
                     target_constraints: Vec::new(),
+                    distribute: None,
                     trigger_event: Some(event.clone()),
                     modal: None,
                     mode_abilities: vec![],
@@ -1100,6 +1117,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                         ability: draw_ability,
                         timestamp: 0,
                         target_constraints: Vec::new(),
+                        distribute: None,
                         trigger_event: Some(event.clone()),
                         modal: None,
                         mode_abilities: vec![],
@@ -1132,6 +1150,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                         ability: venture_ability,
                         timestamp: 0,
                         target_constraints: Vec::new(),
+                        distribute: None,
                         trigger_event: Some(event.clone()),
                         modal: None,
                         mode_abilities: vec![],
@@ -1172,6 +1191,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             ability: become_ability,
                             timestamp: 0,
                             target_constraints: Vec::new(),
+                            distribute: None,
                             trigger_event: Some(event.clone()),
                             modal: None,
                             mode_abilities: vec![],
@@ -1211,6 +1231,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             ability: take_init,
                             timestamp: 0,
                             target_constraints: Vec::new(),
+                            distribute: None,
                             trigger_event: Some(event.clone()),
                             modal: None,
                             mode_abilities: vec![],
@@ -1251,6 +1272,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                     ability: increase_ability,
                     timestamp: 0,
                     target_constraints: Vec::new(),
+                    distribute: None,
                     trigger_event: Some(event.clone()),
                     modal: None,
                     mode_abilities: vec![],
@@ -1295,6 +1317,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                     ability: rad_ability,
                     timestamp: 0,
                     target_constraints: Vec::new(),
+                    distribute: None,
                     trigger_event: Some(event.clone()),
                     modal: None,
                     mode_abilities: vec![],
@@ -1413,6 +1436,30 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                     trigger.controller,
                     &mut events_out,
                 );
+                if let Some(unit) = trigger.distribute.clone() {
+                    if let Some(total) = super::casting_targets::extract_fixed_distribution_total(
+                        &trigger.ability.effect,
+                    ) {
+                        let assigned_targets =
+                            super::ability_utils::flatten_targets_in_chain(&trigger.ability);
+                        if assigned_targets.len() == 1 {
+                            trigger.ability.distribution =
+                                Some(vec![(assigned_targets[0].clone(), total)]);
+                        } else {
+                            let player = trigger.controller;
+                            state.pending_trigger_event_batch = trigger_events;
+                            state.pending_trigger = Some(trigger);
+                            state.waiting_for =
+                                crate::types::game_state::WaitingFor::DistributeAmong {
+                                    player,
+                                    total,
+                                    targets: assigned_targets,
+                                    unit,
+                                };
+                            return;
+                        }
+                    }
+                }
                 push_pending_trigger_to_stack_with_event_batch(
                     state,
                     trigger,
@@ -1715,6 +1762,10 @@ pub fn check_state_triggers(state: &mut GameState) {
                     ability,
                     timestamp,
                     target_constraints: Vec::new(),
+                    distribute: trigger
+                        .execute
+                        .as_ref()
+                        .and_then(|execute| execute.distribute.clone()),
                     trigger_event: None,
                     modal: None,
                     mode_abilities: vec![],
@@ -1807,6 +1858,7 @@ pub fn check_delayed_triggers(state: &mut GameState, events: &[GameEvent]) -> Ve
             ability: trigger.ability,
             timestamp: state.turn_number,
             target_constraints: Vec::new(),
+            distribute: None,
             trigger_event,
             modal: None,
             mode_abilities: vec![],
@@ -2789,23 +2841,24 @@ pub mod tests {
     use crate::game::filter::{matches_target_filter, FilterContext};
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, AggregateFunction,
-        ChosenAttribute, ChosenSubtypeKind, Comparator, ContinuousModification, ControllerRef,
-        DelayedTriggerCondition, Duration, Effect, FilterProp, GainLifePlayer, KickerVariant,
-        MultiTargetSpec, PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility, SharedQuality,
-        SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter, TargetRef,
-        TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+        AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
+        AggregateFunction, ChosenAttribute, ChosenSubtypeKind, Comparator, ContinuousModification,
+        ControllerRef, DelayedTriggerCondition, Duration, Effect, FilterProp, GainLifePlayer,
+        KickerVariant, MultiTargetSpec, PaymentCost, PlayerScope, QuantityExpr, QuantityRef,
+        ResolvedAbility, SharedQuality, SharedQualityRelation, StaticCondition, StaticDefinition,
+        TargetFilter, TargetRef, TriggerCondition, TriggerConstraint, TriggerDefinition,
+        TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
     use crate::types::game_state::{
-        DelayedTrigger, GameState, SpellCastRecord, StackEntry, StackEntryKind, WaitingFor,
-        ZoneChangeRecord,
+        DelayedTrigger, DistributionUnit, GameState, SpellCastRecord, StackEntry, StackEntryKind,
+        WaitingFor, ZoneChangeRecord,
     };
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::keywords::{Keyword, KeywordKind};
-    use crate::types::mana::ManaColor;
+    use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
     use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
     use crate::types::triggers::AttackTargetFilter;
@@ -2971,6 +3024,99 @@ pub mod tests {
                 .expect("pass priority");
         }
         panic!("stack did not resolve");
+    }
+
+    #[test]
+    fn dies_trigger_optional_composite_ability_cost_pays_and_draws_through_stack() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.players[0].life = 20;
+        state.players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(200),
+            false,
+            Vec::new(),
+        ));
+        create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Drawn Card".to_string(),
+            Zone::Library,
+        );
+
+        let source = make_creature(&mut state, PlayerId(0), "Miara Stand-In", 1, 2);
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.subtypes.push("Elf".to_string());
+            obj.base_card_types = obj.card_types.clone();
+        }
+        let dying_elf = make_creature(&mut state, PlayerId(0), "Dying Elf", 1, 1);
+        {
+            let obj = state.objects.get_mut(&dying_elf).unwrap();
+            obj.card_types.subtypes.push("Elf".to_string());
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        let draw = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .condition(AbilityCondition::IfYouDo);
+        let pay_then_draw = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PayCost {
+                cost: PaymentCost::AbilityCost {
+                    cost: AbilityCost::Composite {
+                        costs: vec![
+                            AbilityCost::Mana {
+                                cost: ManaCost::generic(1),
+                            },
+                            AbilityCost::PayLife {
+                                amount: QuantityExpr::Fixed { value: 1 },
+                            },
+                        ],
+                    },
+                },
+                payer: TargetFilter::Controller,
+            },
+        )
+        .sub_ability(draw)
+        .optional();
+        let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .execute(pay_then_draw)
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::default()
+                    .with_type(TypeFilter::Subtype("Elf".to_string()))
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Another]),
+            ))
+            .origin(Zone::Battlefield)
+            .destination(Zone::Graveyard);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .trigger_definitions
+            .push(trigger);
+
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, dying_elf, Zone::Graveyard, &mut events);
+        process_triggers(&mut state, &events);
+        assert_eq!(state.stack.len(), 1);
+
+        resolve_stack_to_optional_choice(&mut state);
+        accept_optional_effect(&mut state);
+
+        assert!(!state.cost_payment_failed_flag);
+        assert_eq!(state.players[0].mana_pool.mana.len(), 0);
+        assert_eq!(state.players[0].life, 19);
+        assert_eq!(state.players[0].hand.len(), 1);
+        assert_eq!(state.players[0].library.len(), 0);
     }
 
     #[test]
@@ -4638,6 +4784,118 @@ pub mod tests {
         assert_eq!(pending.controller, PlayerId(0));
     }
 
+    /// CR 601.2d + CR 603.3d: A triggered ability with a divided effect
+    /// chooses targets first, then its controller divides the total among those
+    /// targets while putting the trigger on the stack.
+    #[test]
+    fn trigger_distributed_damage_uses_chosen_amounts() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let target1 = make_creature(&mut state, PlayerId(1), "Target 1", 2, 10);
+        let target2 = make_creature(&mut state, PlayerId(1), "Target 2", 2, 10);
+
+        let source = make_creature(&mut state, PlayerId(0), "Fury-like Source", 3, 3);
+        {
+            let mut execute = AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 4 },
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    damage_source: None,
+                },
+            );
+            execute.multi_target = Some(MultiTargetSpec::unlimited(1));
+            execute.distribute = Some(DistributionUnit::Damage);
+
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.entered_battlefield_turn = Some(1);
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .execute(execute)
+                    .valid_card(TargetFilter::SelfRef)
+                    .destination(Zone::Battlefield),
+            );
+        }
+
+        let events = vec![zone_changed_event(
+            source,
+            Zone::Hand,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            Vec::new(),
+        )];
+        process_triggers(&mut state, &events);
+
+        let wf = crate::game::engine::begin_pending_trigger_target_selection(&mut state)
+            .expect("begin trigger target selection")
+            .expect("target selection required");
+        state.waiting_for = wf;
+
+        let result = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(target1), TargetRef::Object(target2)],
+            },
+        )
+        .expect("target selection should succeed");
+
+        match result.waiting_for {
+            WaitingFor::DistributeAmong {
+                total,
+                targets,
+                unit: DistributionUnit::Damage,
+                ..
+            } => {
+                assert_eq!(total, 4);
+                assert_eq!(targets.len(), 2);
+            }
+            other => panic!("expected DistributeAmong, got {other:?}"),
+        }
+        assert!(state.pending_trigger.is_some());
+        assert_eq!(state.stack.len(), 0);
+
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DistributeAmong {
+                distribution: vec![
+                    (TargetRef::Object(target1), 1),
+                    (TargetRef::Object(target2), 3),
+                ],
+            },
+        )
+        .expect("distribution should put trigger on stack");
+
+        assert!(state.pending_trigger.is_none());
+        assert_eq!(state.stack.len(), 1);
+        match &state.stack[0].kind {
+            StackEntryKind::TriggeredAbility { ability, .. } => {
+                assert_eq!(
+                    ability.distribution,
+                    Some(vec![
+                        (TargetRef::Object(target1), 1),
+                        (TargetRef::Object(target2), 3),
+                    ])
+                );
+            }
+            other => panic!("expected triggered ability on stack, got {other:?}"),
+        }
+
+        let mut safety_bound = 10;
+        while !state.stack.is_empty() && safety_bound > 0 {
+            let actor = state.priority_player;
+            crate::game::engine::apply(&mut state, actor, GameAction::PassPriority)
+                .expect("pass priority");
+            safety_bound -= 1;
+        }
+
+        assert_eq!(state.objects[&target1].damage_marked, 1);
+        assert_eq!(state.objects[&target2].damage_marked, 3);
+    }
+
     #[test]
     fn granted_etb_destroy_other_same_name_skips_source_when_no_other_exists() {
         let mut state = setup();
@@ -6225,6 +6483,7 @@ pub mod tests {
             source_id: source,
             source_controller: PlayerId(0),
             target: TargetRef::Object(dying_creature),
+            target_controller: PlayerId(0),
             amount: 3,
             is_combat: false,
         });
@@ -6284,6 +6543,7 @@ pub mod tests {
             source_id: ObjectId(1),
             source_controller: PlayerId(0),
             target: TargetRef::Object(ObjectId(2)),
+            target_controller: PlayerId(0),
             amount: 2,
             is_combat: true,
         });

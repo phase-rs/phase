@@ -6,7 +6,8 @@
 //! shapes — full Permanents conversion lands with Phase 3.
 
 use engine::types::ability::{
-    Comparator, ControllerRef, FilterProp, QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
+    ChoiceType, Comparator, ControllerRef, FilterProp, QuantityExpr, TargetFilter, TypeFilter,
+    TypedFilter,
 };
 use engine::types::keywords::{Keyword, KeywordKind};
 use engine::types::mana::ManaColor;
@@ -14,9 +15,9 @@ use engine::types::mana::ManaColor;
 use crate::convert::quantity::convert as convert_quantity;
 use crate::convert::result::{ConvResult, ConversionGap};
 use crate::schema::types::{
-    ArtifactType, CardType, CardtypeVariable, CheckHasable, Color, Comparison, CounterType,
-    CreatureType, CreatureTypeVariable, DamageSources, EnchantmentType, LandType, NameFilter,
-    Permanent, Permanents, PlaneswalkerType, Player, Players, SuperType,
+    ArtifactType, CardType, CardtypeVariable, CheckHasable, ChoosableColor, Color, Comparison,
+    CounterType, CreatureType, CreatureTypeVariable, DamageSources, EnchantmentType, LandType,
+    NameFilter, Permanent, Permanents, PlaneswalkerType, Player, Players, SuperType,
 };
 
 fn color_count_prop(comparator: Comparator, count: u8) -> FilterProp {
@@ -627,6 +628,32 @@ pub(crate) fn concrete_color(c: &Color) -> Option<ManaColor> {
         // Colorless / chosen-color refs are not concrete; caller decides.
         _ => return None,
     })
+}
+
+pub(crate) fn choice_type_for_choosable_color(choice: &ChoosableColor) -> ChoiceType {
+    match choice {
+        ChoosableColor::AnyColor => ChoiceType::color(),
+        ChoosableColor::Other(color) => concrete_color(color)
+            .map(|color| ChoiceType::color_excluding(vec![color]))
+            .unwrap_or_else(ChoiceType::color),
+        ChoosableColor::ColorList(colors) => {
+            let allowed: Vec<_> = colors.iter().filter_map(concrete_color).collect();
+            if allowed.is_empty() {
+                ChoiceType::color()
+            } else {
+                let excluded = ManaColor::ALL
+                    .iter()
+                    .copied()
+                    .filter(|color| !allowed.contains(color))
+                    .collect();
+                ChoiceType::color_excluding(excluded)
+            }
+        }
+        ChoosableColor::ColorsInPlayersHand(_)
+        | ChoosableColor::ColorsOfCardsInPlayersGraveyard(_, _)
+        | ChoosableColor::ColorAmoungPermanents(_)
+        | ChoosableColor::NotColorAmoungPermanents(_) => ChoiceType::color(),
+    }
 }
 
 pub(crate) fn supertype_name(s: &SuperType) -> String {
@@ -1948,5 +1975,30 @@ mod tests {
             .expect("convert static host");
 
         assert_eq!(converted, TargetFilter::AttachedTo);
+    }
+
+    #[test]
+    fn choosable_color_other_maps_to_restricted_color_choice() {
+        assert_eq!(
+            choice_type_for_choosable_color(&ChoosableColor::Other(Color::White)),
+            ChoiceType::Color {
+                excluded: vec![ManaColor::White],
+            }
+        );
+    }
+
+    #[test]
+    fn choosable_color_list_maps_to_inverse_exclusion() {
+        assert_eq!(
+            choice_type_for_choosable_color(&ChoosableColor::ColorList(vec![
+                Color::Blue,
+                Color::Black,
+                Color::Red,
+                Color::Green,
+            ])),
+            ChoiceType::Color {
+                excluded: vec![ManaColor::White],
+            }
+        );
     }
 }

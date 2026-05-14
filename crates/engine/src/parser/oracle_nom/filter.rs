@@ -46,6 +46,26 @@ pub fn parse_zone_filter(input: &str) -> OracleResult<'_, Zone> {
     .parse(input)
 }
 
+/// Parse an origin-zone qualifier for ChangesZone triggers — the "from <zone>"
+/// suffix on phrases like "enters from your graveyard" / "enters from exile".
+///
+/// Unlike [`parse_zone_filter`], this combinator only accepts "from X" forms;
+/// "in X" / "on X" / "of X" phrasings are not grammatical after a zone-change
+/// verb. Keeping the axis tight prevents over-matching on unrelated text.
+///
+/// "Your" vs "a" graveyard both lower to `Zone::Graveyard`. Per-player origin
+/// scope is not currently modeled on ChangesZone triggers.
+pub fn parse_enters_origin_zone(input: &str) -> OracleResult<'_, Zone> {
+    alt((
+        value(Zone::Hand, tag("from your hand")),
+        value(Zone::Graveyard, tag("from your graveyard")),
+        value(Zone::Graveyard, tag("from a graveyard")),
+        value(Zone::Exile, tag("from exile")),
+        value(Zone::Library, tag("from your library")),
+    ))
+    .parse(input)
+}
+
 /// Parse a zone owner/controller qualifier following a zone filter.
 ///
 /// Matches "you control", "an opponent controls", "you own", "you don't control".

@@ -1,7 +1,9 @@
 use std::fmt;
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
+use serde::de;
+use serde::ser::SerializeStructVariant;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 use super::card_type::{CardType, CoreType, Supertype};
@@ -92,10 +94,16 @@ pub enum OpponentMayScope {
 }
 
 /// What kind of named choice the player must make at resolution time.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ChoiceType {
     CreatureType,
-    Color,
+    Color {
+        /// Colors that cannot be chosen by this prompt.
+        ///
+        /// CR 105.1 + CR 105.4 define the five legal color choices; prompts such as
+        /// "choose a color other than white" restrict that set.
+        excluded: Vec<ManaColor>,
+    },
     OddOrEven,
     BasicLandType,
     CardType,
@@ -121,6 +129,134 @@ pub enum ChoiceType {
     Word,
     /// "Choose an artist" — selects a Magic card artist name.
     Artist,
+}
+
+impl ChoiceType {
+    pub fn color() -> Self {
+        Self::Color {
+            excluded: Vec::new(),
+        }
+    }
+
+    pub fn color_excluding(excluded: Vec<ManaColor>) -> Self {
+        Self::Color { excluded }
+    }
+}
+
+impl Serialize for ChoiceType {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::CreatureType => {
+                serializer.serialize_unit_variant("ChoiceType", 0, "CreatureType")
+            }
+            Self::Color { excluded } => {
+                if excluded.is_empty() {
+                    serializer.serialize_unit_variant("ChoiceType", 1, "Color")
+                } else {
+                    let mut variant =
+                        serializer.serialize_struct_variant("ChoiceType", 1, "Color", 1)?;
+                    variant.serialize_field("excluded", excluded)?;
+                    variant.end()
+                }
+            }
+            Self::OddOrEven => serializer.serialize_unit_variant("ChoiceType", 2, "OddOrEven"),
+            Self::BasicLandType => {
+                serializer.serialize_unit_variant("ChoiceType", 3, "BasicLandType")
+            }
+            Self::CardType => serializer.serialize_unit_variant("ChoiceType", 4, "CardType"),
+            Self::CardName => serializer.serialize_unit_variant("ChoiceType", 5, "CardName"),
+            Self::NumberRange { min, max } => {
+                let mut variant =
+                    serializer.serialize_struct_variant("ChoiceType", 6, "NumberRange", 2)?;
+                variant.serialize_field("min", min)?;
+                variant.serialize_field("max", max)?;
+                variant.end()
+            }
+            Self::Labeled { options } => {
+                let mut variant =
+                    serializer.serialize_struct_variant("ChoiceType", 7, "Labeled", 1)?;
+                variant.serialize_field("options", options)?;
+                variant.end()
+            }
+            Self::LandType => serializer.serialize_unit_variant("ChoiceType", 8, "LandType"),
+            Self::Opponent => serializer.serialize_unit_variant("ChoiceType", 9, "Opponent"),
+            Self::Player => serializer.serialize_unit_variant("ChoiceType", 10, "Player"),
+            Self::TwoColors => serializer.serialize_unit_variant("ChoiceType", 11, "TwoColors"),
+            Self::Word => serializer.serialize_unit_variant("ChoiceType", 12, "Word"),
+            Self::Artist => serializer.serialize_unit_variant("ChoiceType", 13, "Artist"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ChoiceType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum ChoiceTypeRepr {
+            Unit(String),
+            Data(ChoiceTypeData),
+        }
+
+        #[derive(Deserialize)]
+        enum ChoiceTypeData {
+            Color {
+                #[serde(default)]
+                excluded: Vec<ManaColor>,
+            },
+            NumberRange {
+                min: u8,
+                max: u8,
+            },
+            Labeled {
+                options: Vec<String>,
+            },
+        }
+
+        match ChoiceTypeRepr::deserialize(deserializer)? {
+            ChoiceTypeRepr::Unit(value) => match value.as_str() {
+                "CreatureType" => Ok(Self::CreatureType),
+                "Color" => Ok(Self::color()),
+                "OddOrEven" => Ok(Self::OddOrEven),
+                "BasicLandType" => Ok(Self::BasicLandType),
+                "CardType" => Ok(Self::CardType),
+                "CardName" => Ok(Self::CardName),
+                "LandType" => Ok(Self::LandType),
+                "Opponent" => Ok(Self::Opponent),
+                "Player" => Ok(Self::Player),
+                "TwoColors" => Ok(Self::TwoColors),
+                "Word" => Ok(Self::Word),
+                "Artist" => Ok(Self::Artist),
+                other => Err(de::Error::unknown_variant(
+                    other,
+                    &[
+                        "CreatureType",
+                        "Color",
+                        "OddOrEven",
+                        "BasicLandType",
+                        "CardType",
+                        "CardName",
+                        "LandType",
+                        "Opponent",
+                        "Player",
+                        "TwoColors",
+                        "Word",
+                        "Artist",
+                    ],
+                )),
+            },
+            ChoiceTypeRepr::Data(data) => match data {
+                ChoiceTypeData::Color { excluded } => Ok(Self::Color { excluded }),
+                ChoiceTypeData::NumberRange { min, max } => Ok(Self::NumberRange { min, max }),
+                ChoiceTypeData::Labeled { options } => Ok(Self::Labeled { options }),
+            },
+        }
+    }
 }
 
 /// The five basic land types (CR 305.6).
@@ -319,7 +455,7 @@ impl ChosenAttribute {
     /// Which category of choice this represents.
     pub fn choice_type(&self) -> ChoiceType {
         match self {
-            Self::Color(_) => ChoiceType::Color,
+            Self::Color(_) => ChoiceType::color(),
             Self::CreatureType(_) => ChoiceType::CreatureType,
             Self::BasicLandType(_) => ChoiceType::BasicLandType,
             Self::CardType(_) => ChoiceType::CardType,
@@ -377,7 +513,10 @@ pub enum ChoiceValue {
 impl ChoiceValue {
     pub fn from_choice(choice_type: &ChoiceType, value: &str) -> Option<Self> {
         match choice_type {
-            ChoiceType::Color => value.parse::<ManaColor>().ok().map(Self::Color),
+            ChoiceType::Color { excluded } => {
+                let color = value.parse::<ManaColor>().ok()?;
+                (!excluded.contains(&color)).then_some(Self::Color(color))
+            }
             ChoiceType::CreatureType => Some(Self::CreatureType(value.to_string())),
             ChoiceType::BasicLandType => {
                 value.parse::<BasicLandType>().ok().map(Self::BasicLandType)
@@ -1963,7 +2102,10 @@ pub enum TargetFilter {
     },
     /// Matches non-mana activated or triggered abilities on the stack.
     /// Used by "counter target activated or triggered ability" effects.
-    StackAbility,
+    StackAbility {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        controller: Option<ControllerRef>,
+    },
     /// Matches spells on the stack (not activated/triggered abilities).
     /// CR 115.1a: Used by "becomes the target of a spell" triggers to filter source type.
     StackSpell,
@@ -2675,7 +2817,7 @@ pub enum ObjectProperty {
     ManaValue,
 }
 
-/// CR 701.13 + CR 701.17a: Termination predicate for an iterative exile-from-top
+/// CR 701.13a + CR 608.2c: Termination predicate for an iterative exile-from-top
 /// loop. The loop exiles one card at a time off the top of a library and checks
 /// the predicate after each exile; the loop ends as soon as the predicate is
 /// satisfied (or the library is empty).
@@ -3986,8 +4128,8 @@ impl LegacyUnlessCost {
 // Effect enum -- typed variants, zero HashMap
 // ---------------------------------------------------------------------------
 
-/// CR 701.24g: Specific position within a library for placement effects.
-/// Top and Bottom use move_to_library_position; NthFromTop inserts at index n-1.
+/// Specific position within a library for placement effects. Top and Bottom use
+/// move_to_library_position; NthFromTop inserts at index n-1.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum LibraryPosition {
@@ -4754,6 +4896,18 @@ pub enum Effect {
         )]
         selection_constraint: SearchSelectionConstraint,
     },
+    /// CR 400.11/400.11a + CR 701.23j: Choose card(s) the player owns from
+    /// outside the game. For tournament-style play, the bounded accessible set
+    /// is the player's current sideboard, which is not modeled as a zone.
+    SearchOutsideGame {
+        filter: TargetFilter,
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
+        #[serde(default)]
+        reveal: bool,
+        #[serde(default = "default_zone_hand")]
+        destination: Zone,
+    },
     RevealHand {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
@@ -5143,7 +5297,7 @@ pub enum Effect {
     LoseAllPlayerCounters {
         target: TargetFilter,
     },
-    /// CR 701.13 + CR 701.17a: Exile cards from the top of a player's library
+    /// CR 701.13a + CR 608.2c: Exile cards from the top of a player's library
     /// one at a time until the typed `until` predicate is satisfied. The
     /// `until` axis is parameterized by [`UntilCondition`] — either
     /// `NextMatches(filter)` (Etali/Cascade/Discover-shape: stop on first hit
@@ -5153,6 +5307,11 @@ pub enum Effect {
     /// the running sum of the property over every card exiled this resolution
     /// satisfies the comparator vs the threshold; CR 202.3 + CR 107.3e).
     ExileFromTopUntil {
+        /// CR 109.5: Whose library is exiled. `Controller` for "you exile...",
+        /// or any player-resolving target filter for "target opponent exiles..."
+        /// and similar subject-anchored forms.
+        #[serde(default = "default_target_filter_controller")]
+        player: TargetFilter,
         until: UntilCondition,
     },
     /// CR 701.20a: Reveal cards from the top of a player's library one at a time
@@ -5201,9 +5360,10 @@ pub enum Effect {
     MadnessCast {
         cost: super::mana::ManaCost,
     },
-    /// CR 701.24g: Put a card at a specific position in its owner's library.
-    /// Unlike ChangeZone { destination: Library } which auto-shuffles (CR 401.3),
-    /// this uses move_to_library_position for precise placement without shuffling.
+    /// Put a card at a specific position in its owner's library.
+    /// Unlike ChangeZone { destination: Library } which shuffles the destination
+    /// library, this uses move_to_library_position for precise placement without
+    /// shuffling.
     ///
     /// `count` carries the cardinality of the placement ("put **two** cards
     /// from your hand on top of your library in any order" — Cavalier of Gales,
@@ -5227,7 +5387,7 @@ pub enum Effect {
         #[serde(default = "default_target_filter_controller")]
         player: TargetFilter,
     },
-    /// CR 401.4: Target's owner puts it on top or bottom of their library (owner chooses).
+    /// Target's owner puts it on top or bottom of their library (owner chooses).
     PutOnTopOrBottom {
         target: TargetFilter,
     },
@@ -5802,11 +5962,28 @@ impl TargetFilter {
         }
     }
 
+    pub fn references_exiled_by_source(&self) -> bool {
+        match self {
+            TargetFilter::ExiledBySource => true,
+            TargetFilter::And { filters } => filters
+                .iter()
+                .any(TargetFilter::references_exiled_by_source),
+            TargetFilter::Or { filters } => filters
+                .iter()
+                .all(TargetFilter::references_exiled_by_source),
+            TargetFilter::TrackedSetFiltered { filter, .. } => filter.references_exiled_by_source(),
+            _ => false,
+        }
+    }
+
     /// CR 115.1: Returns true for filters that are NOT player-chosen targets —
     /// context references (triggering event participants per CR 603.7c),
     /// parent target anaphora, and self-references resolve automatically
     /// without target selection.
     pub fn is_context_ref(&self) -> bool {
+        if self.references_exiled_by_source() {
+            return true;
+        }
         matches!(
             self,
             TargetFilter::None
@@ -5995,7 +6172,9 @@ impl Effect {
                 ..
             } => source_filter.is_none().then_some(target),
 
-            Effect::ExileTop { player, .. } => Some(player),
+            Effect::ExileTop { player, .. } | Effect::ExileFromTopUntil { player, .. } => {
+                Some(player)
+            }
 
             // CR 111.2 + CR 601.2c: "Target player creates ..." token modes
             // (e.g. Ashling's Command mode 4, Brigid's Command, Prismari Command)
@@ -6045,6 +6224,7 @@ impl Effect {
             | Effect::Vote { .. }
             | Effect::Cleanup { .. }
             | Effect::RevealTop { .. }
+            | Effect::SearchOutsideGame { .. }
             | Effect::Choose { .. }
             | Effect::ChooseDamageSource { .. }
             | Effect::SolveCase
@@ -6062,7 +6242,6 @@ impl Effect {
             | Effect::ChooseFromZone { .. }
             | Effect::ChooseAndSacrificeRest { .. }
             | Effect::GainEnergy { .. }
-            | Effect::ExileFromTopUntil { .. }
             | Effect::RevealUntil { .. }
             | Effect::Discover { .. }
             | Effect::Cascade
@@ -6183,6 +6362,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Shuffle { .. } => "Shuffle",
         Effect::Transform { .. } => "Transform",
         Effect::SearchLibrary { .. } => "SearchLibrary",
+        Effect::SearchOutsideGame { .. } => "SearchOutsideGame",
         Effect::RevealHand { .. } => "RevealHand",
         Effect::RevealFromHand { .. } => "RevealFromHand",
         Effect::Reveal { .. } => "Reveal",
@@ -6351,6 +6531,7 @@ pub enum EffectKind {
     Discard,
     Shuffle,
     SearchLibrary,
+    SearchOutsideGame,
     ExileTop,
     TargetOnly,
     Choose,
@@ -6521,6 +6702,7 @@ impl From<&Effect> for EffectKind {
             Effect::Shuffle { .. } => EffectKind::Shuffle,
             Effect::Transform { .. } => EffectKind::Transform,
             Effect::SearchLibrary { .. } => EffectKind::SearchLibrary,
+            Effect::SearchOutsideGame { .. } => EffectKind::SearchOutsideGame,
             Effect::RevealHand { .. } => EffectKind::Reveal,
             Effect::RevealFromHand { .. } => EffectKind::Reveal,
             Effect::Reveal { .. } => EffectKind::Reveal,
@@ -6952,6 +7134,13 @@ pub struct AbilityDefinition {
     /// Produced by "for each [X], [effect]" leading patterns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeat_for: Option<QuantityExpr>,
+    /// Minimum legal announced value for X. Defaults to zero; set to one by
+    /// "X can't be 0" annotations.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub min_x_value: u32,
+    /// Stack-copy restriction from "This ability can't be copied."
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cant_be_copied: bool,
     /// CR 601.2f: Self-referential cost reduction applied before activation.
     /// "This ability costs {N} less to activate for each [condition]"
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -7023,6 +7212,8 @@ impl AbilityDefinition {
             modal: None,
             mode_abilities: Vec::new(),
             repeat_for: None,
+            min_x_value: 0,
+            cant_be_copied: false,
             cost_reduction: None,
             forward_result: false,
             player_scope: None,
@@ -8955,6 +9146,13 @@ pub struct ResolvedAbility {
     /// CR 609.3: Repeat this ability N times (from "for each [X], [effect]").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeat_for: Option<QuantityExpr>,
+    /// Minimum legal announced value for X. Defaults to zero; set to one by
+    /// "X can't be 0" annotations.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub min_x_value: u32,
+    /// Stack-copy restriction from "This ability can't be copied."
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cant_be_copied: bool,
     /// When true, moved/created objects from this effect are forwarded to the sub_ability.
     #[serde(default)]
     pub forward_result: bool,
@@ -8981,6 +9179,12 @@ pub struct ResolvedAbility {
     /// `AbilityCondition::CostPaidObjectMatchesFilter` during resolution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_paid_object: Option<CostPaidObjectSnapshot>,
+    /// Public characteristics of an object chosen or moved by an earlier
+    /// effect in the same resolving ability. This is distinct from
+    /// `cost_paid_object`: the object was not paid as a cost, but later
+    /// instructions may still refer to it after it left its zone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect_context_object: Option<CostPaidObjectSnapshot>,
     /// CR 603.4: Index of the printed ability this resolution came from on the
     /// source object's ability list. Identifies "this ability" for per-turn
     /// resolution tracking (`AbilityCondition::NthResolutionThisTurn`). `None` for
@@ -9025,12 +9229,15 @@ impl ResolvedAbility {
             target_choice_timing: TargetChoiceTiming::Stack,
             description: None,
             repeat_for: None,
+            min_x_value: 0,
+            cant_be_copied: false,
             forward_result: false,
             unless_pay: None,
             distribution: None,
             player_scope: None,
             chosen_x: None,
             cost_paid_object: None,
+            effect_context_object: None,
             ability_index: None,
             may_trigger_origin: None,
             target_selection_mode: TargetSelectionMode::Chosen,
@@ -9070,6 +9277,20 @@ impl ResolvedAbility {
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_cost_paid_object_recursive(snapshot);
+        }
+    }
+
+    /// Stamp an object selected by a previous effect in this same resolution
+    /// across the continuation chain. Used by sacrifice-as-effect patterns
+    /// whose later instructions reference "that creature" after it has left
+    /// the battlefield.
+    pub fn set_effect_context_object_recursive(&mut self, snapshot: CostPaidObjectSnapshot) {
+        self.effect_context_object = Some(snapshot.clone());
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_effect_context_object_recursive(snapshot.clone());
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_effect_context_object_recursive(snapshot);
         }
     }
 
@@ -9169,6 +9390,14 @@ pub enum EffectError {
     Unregistered(String),
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -9176,6 +9405,41 @@ pub enum EffectError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn choice_type_color_deserializes_legacy_unit_variant() {
+        let choice_type: ChoiceType = serde_json::from_str("\"Color\"").unwrap();
+
+        assert_eq!(choice_type, ChoiceType::color());
+    }
+
+    #[test]
+    fn choice_type_color_deserializes_excluded_colors() {
+        let choice_type: ChoiceType =
+            serde_json::from_str(r#"{"Color":{"excluded":["White"]}}"#).unwrap();
+
+        assert_eq!(
+            choice_type,
+            ChoiceType::Color {
+                excluded: vec![ManaColor::White],
+            }
+        );
+    }
+
+    #[test]
+    fn restricted_color_choice_value_rejects_excluded_color() {
+        assert_eq!(
+            ChoiceValue::from_choice(
+                &ChoiceType::color_excluding(vec![ManaColor::White]),
+                "White",
+            ),
+            None
+        );
+        assert_eq!(
+            ChoiceValue::from_choice(&ChoiceType::color_excluding(vec![ManaColor::White]), "Blue"),
+            Some(ChoiceValue::Color(ManaColor::Blue))
+        );
+    }
 
     #[test]
     fn target_ref_object_variant() {
@@ -9353,6 +9617,32 @@ mod tests {
         let obj = TargetRef::Object(ObjectId(0));
         let plr = TargetRef::Player(PlayerId(0));
         assert_ne!(obj, plr);
+    }
+
+    #[test]
+    fn stack_ability_filter_accepts_legacy_unit_json() {
+        let filter: TargetFilter = serde_json::from_str(r#"{"type":"StackAbility"}"#).unwrap();
+        assert_eq!(filter, TargetFilter::StackAbility { controller: None });
+        assert_eq!(
+            serde_json::to_string(&filter).unwrap(),
+            r#"{"type":"StackAbility"}"#
+        );
+    }
+
+    #[test]
+    fn stack_ability_filter_roundtrips_controller_scope() {
+        let filter: TargetFilter =
+            serde_json::from_str(r#"{"type":"StackAbility","controller":"You"}"#).unwrap();
+        assert_eq!(
+            filter,
+            TargetFilter::StackAbility {
+                controller: Some(ControllerRef::You)
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&filter).unwrap(),
+            r#"{"type":"StackAbility","controller":"You"}"#
+        );
     }
 
     #[test]

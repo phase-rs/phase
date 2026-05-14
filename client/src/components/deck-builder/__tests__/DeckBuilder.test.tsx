@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useEffect } from "react";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 
 import { DeckBuilder } from "../DeckBuilder";
 import { loadPreconDeckMap } from "../../../hooks/useDecks";
+import { resolveCommander } from "../../../services/deckParser";
 
 const cacheCardsMock = vi.fn();
 
@@ -67,6 +69,123 @@ describe("DeckBuilder", () => {
     cleanup();
     cacheCardsMock.mockClear();
     vi.mocked(loadPreconDeckMap).mockReset();
+    vi.mocked(resolveCommander).mockReset();
+    vi.mocked(resolveCommander).mockImplementation(async (deck) => deck);
+    localStorage.clear();
+  });
+
+  it("runs commander inference at save-time and persists the result", async () => {
+    const user = userEvent.setup();
+    // A 100-singleton Commander-shaped precon with NO explicit commander —
+    // exactly the case where save-time inference must fire.
+    const mainBoard = Array.from({ length: 100 }, (_, i) => ({
+      name: `Card ${i + 1}`,
+      count: 1,
+    }));
+    vi.mocked(loadPreconDeckMap).mockResolvedValue({
+      orphans: {
+        code: "ORF",
+        name: "Orphan Precon",
+        type: "Commander",
+        coveragePct: 100,
+        mainBoard,
+        sideBoard: [],
+        commander: [],
+      },
+    });
+    // Mock chain: load path returns the precon as-is (no inference) so the
+    // editor starts commander-less, mirroring the user's mid-edit state. The
+    // second call (from handleSave) is the one we want to verify performs
+    // inference and produces a commander.
+    vi.mocked(resolveCommander)
+      .mockImplementationOnce(async (deck) => deck)
+      .mockImplementationOnce(async (deck) => ({
+        ...deck,
+        main: deck.main.filter((e) => e.name !== "Card 1"),
+        commander: ["Card 1"],
+      }));
+    localStorage.clear();
+
+    render(
+      <DeckBuilder
+        format="Commander"
+        onFormatChange={vi.fn()}
+        initialDeckName="[Pre-built] Orphan Precon (ORF)"
+        searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}
+        onSearchFiltersChange={vi.fn()}
+        onResetSearch={vi.fn()}
+      />,
+    );
+
+    // Wait for precon load to complete — Save becomes enabled once deckName is set.
+    const saveButton = await screen.findByRole("button", { name: "Save" });
+    await waitFor(() => expect(saveButton).not.toBeDisabled());
+
+    // Pre-save sanity: load path called resolveCommander once and returned a
+    // commander-less deck (the mock returns as-is for the load call because
+    // commander.length === 0 path of the mock implementation doesn't apply
+    // until save when currentDeck.commander is also empty — see mock above).
+    expect(vi.mocked(resolveCommander)).toHaveBeenCalledTimes(1);
+
+    await user.click(saveButton);
+
+    // Save triggered a second resolveCommander call which inferred Card 1.
+    await waitFor(() => {
+      expect(vi.mocked(resolveCommander)).toHaveBeenCalledTimes(2);
+    });
+    await waitFor(() => {
+      // The precon loader sets deckName to "<name> (<code>)" without the
+      // [Pre-built] prefix — saving stores under that bare key.
+      const persisted = JSON.parse(
+        localStorage.getItem("phase-deck:Orphan Precon (ORF)") ?? "{}",
+      );
+      expect(persisted.commander).toEqual(["Card 1"]);
+    });
+  });
+
+  it("does not reactively auto-resolve a commander mid-edit", async () => {
+    // Regression: the reactive auto-resolve effect was deleted in favour of
+    // save-time inference. Loading a Commander-shaped 100-singleton precon
+    // with no explicit commander must NOT trigger a second resolveCommander
+    // call — that call used to immediately re-populate the commander after
+    // any user Remove, forcing users to cycle through legendary creatures.
+    const mainBoard = Array.from({ length: 100 }, (_, i) => ({
+      name: `Card ${i + 1}`,
+      count: 1,
+    }));
+    vi.mocked(loadPreconDeckMap).mockResolvedValue({
+      orphans: {
+        code: "ORF",
+        name: "Orphan Precon",
+        type: "Commander",
+        coveragePct: 100,
+        mainBoard,
+        sideBoard: [],
+        commander: [],
+      },
+    });
+    // Identity mock — if the reactive effect still existed, it would call
+    // resolveCommander a second time after the load-path applyDeckToEditor.
+    vi.mocked(resolveCommander).mockImplementation(async (deck) => deck);
+
+    render(
+      <DeckBuilder
+        format="Commander"
+        onFormatChange={vi.fn()}
+        initialDeckName="[Pre-built] Orphan Precon (ORF)"
+        searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}
+        onSearchFiltersChange={vi.fn()}
+        onResetSearch={vi.fn()}
+      />,
+    );
+
+    // Wait for load to complete via the Save button becoming enabled.
+    const saveButton = await screen.findByRole("button", { name: "Save" });
+    await waitFor(() => expect(saveButton).not.toBeDisabled());
+
+    // Exactly one call: the load path. No reactive re-fire on the empty
+    // commanders state — pre-deletion, the effect would have called twice.
+    expect(vi.mocked(resolveCommander)).toHaveBeenCalledTimes(1);
   });
 
   it("loads virtual precons into the editor without requiring saved storage", async () => {

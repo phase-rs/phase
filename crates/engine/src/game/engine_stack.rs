@@ -9,6 +9,7 @@ use super::ability_utils::{
     assign_selected_slots_in_chain, assign_targets_in_chain, choose_target_for_ability,
     flatten_targets_in_chain, validate_selected_targets_for_ability, TargetSelectionAdvance,
 };
+use super::casting_targets::extract_fixed_distribution_total;
 use super::effects;
 use super::engine::{resume_pending_continuation_if_priority, EngineError};
 use super::triggers::PendingTrigger;
@@ -19,25 +20,51 @@ pub(super) fn finalize_trigger_target_selection(
     trigger: PendingTrigger,
     ability: ResolvedAbility,
     events: &mut Vec<GameEvent>,
-) {
+) -> WaitingFor {
+    let assigned_targets = flatten_targets_in_chain(&ability);
     casting::emit_targeting_events(
         state,
-        &flatten_targets_in_chain(&ability),
+        &assigned_targets,
         trigger.source_id,
         trigger.controller,
         events,
     );
 
     let mut trigger = trigger;
+    let controller = trigger.controller;
+    let distribute = trigger.distribute.clone();
     trigger.ability = ability;
+
+    // CR 601.2d + CR 603.3d: When a triggered ability divides damage or
+    // counters among its targets, the controller announces that division while
+    // putting the ability on the stack, after targets have been chosen.
+    if let Some(unit) = distribute {
+        if let Some(total) = extract_fixed_distribution_total(&trigger.ability.effect) {
+            if assigned_targets.len() == 1 {
+                trigger.ability.distribution = Some(vec![(assigned_targets[0].clone(), total)]);
+            } else {
+                state.pending_trigger = Some(trigger);
+                state.priority_passes.clear();
+                state.priority_pass_count = 0;
+                return WaitingFor::DistributeAmong {
+                    player: controller,
+                    total,
+                    targets: assigned_targets,
+                    unit,
+                };
+            }
+        }
+    }
+
     triggers::push_pending_trigger_to_stack(state, trigger, events);
     state.priority_passes.clear();
     state.priority_pass_count = 0;
+    WaitingFor::Priority { player: controller }
 }
 
 pub(super) fn handle_trigger_target_selection_select_targets(
     state: &mut GameState,
-    player: PlayerId,
+    _player: PlayerId,
     target_slots: &[TargetSelectionSlot],
     target_constraints: &[TargetSelectionConstraint],
     targets: Vec<TargetRef>,
@@ -61,8 +88,9 @@ pub(super) fn handle_trigger_target_selection_select_targets(
     let mut ability = trigger.ability.clone();
     assign_targets_in_chain(state, &mut ability, &targets)?;
 
-    finalize_trigger_target_selection(state, trigger, ability, events);
-    Ok(WaitingFor::Priority { player })
+    Ok(finalize_trigger_target_selection(
+        state, trigger, ability, events,
+    ))
 }
 
 pub(super) fn handle_trigger_target_selection_choose_target(
@@ -123,8 +151,9 @@ pub(super) fn handle_trigger_target_selection_choose_target(
             let mut ability = trigger.ability.clone();
             assign_selected_slots_in_chain(&mut ability, &selected_slots)?;
 
-            finalize_trigger_target_selection(state, trigger, ability, events);
-            Ok(WaitingFor::Priority { player })
+            Ok(finalize_trigger_target_selection(
+                state, trigger, ability, events,
+            ))
         }
     }
 }

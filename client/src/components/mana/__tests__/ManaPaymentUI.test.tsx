@@ -86,6 +86,72 @@ describe("ManaPaymentUI", () => {
     expect(dispatch).toHaveBeenCalledWith({ type: "CancelCast" });
   });
 
+  it("shows the convoke payment hint during convoke mana payment", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const spellObj = {
+      id: 300,
+      name: "Venerated Loxodon",
+      controller: 0,
+      owner: 0,
+      card_id: 3,
+      mana_cost: {
+        type: "Cost",
+        shards: ["White"],
+        generic: 4,
+      },
+      zone: "Stack",
+      tapped: false,
+      card_types: { core_types: ["Creature"], subtypes: [], supertypes: [] },
+      abilities: [],
+      colors: ["White"],
+      counters: {},
+      damage: 0,
+      is_summon_sick: false,
+      attached_to: null,
+      cast_from_zone: null,
+      face_down: false,
+      is_commander: false,
+      is_attacking: null,
+      is_blocking: null,
+      mana_spent_to_cast: false,
+      colors_spent_to_cast: { W: 0, U: 0, B: 0, R: 0, G: 0, C: 0 },
+    } as unknown as GameState["objects"][number];
+    const gameState = createGameState({
+      objects: { 300: spellObj },
+      stack: [
+        {
+          id: 300,
+          source_id: 300,
+          controller: 0,
+          kind: {
+            type: "Spell",
+            card_id: 3,
+            ability: null,
+            casting_variant: { type: "Normal" },
+            actual_mana_spent: 0,
+          },
+        },
+      ] as unknown as GameState["stack"],
+      waiting_for: {
+        type: "ManaPayment",
+        data: { player: 0, convoke_mode: "Convoke" },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+        legalActions: [{ type: "CancelCast" }, { type: "PassPriority" }],
+      });
+    });
+
+    render(<ManaPaymentUI />);
+
+    expect(screen.getByText("Tap creatures to help pay.")).toBeInTheDocument();
+  });
+
   // CR 107.4f + CR 601.2f: When the engine reports PhyrexianPayment, clicking Pay
   // dispatches SubmitPhyrexianChoices with one choice per shard (default: PayMana).
   it("dispatches SubmitPhyrexianChoices with defaults for PhyrexianPayment", () => {

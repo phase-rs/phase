@@ -70,6 +70,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
         | WaitingFor::DamageSourceChoice { .. }
         | WaitingFor::SearchChoice { .. }
+        | WaitingFor::OutsideGameChoice { .. }
         | WaitingFor::ChooseFromZoneChoice { .. }
         | WaitingFor::ConniveDiscard { .. }
         | WaitingFor::DiscardChoice { .. }

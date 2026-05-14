@@ -223,6 +223,18 @@ fn append_definition_to_sub_chain(ability: &mut AbilityDefinition, next: Ability
     let mut cursor = ability;
     loop {
         if cursor.sub_ability.is_none() {
+            if cursor.optional
+                && matches!(*cursor.effect, Effect::CastFromZone { .. })
+                && matches!(
+                    *next.effect,
+                    Effect::PutAtLibraryPosition {
+                        target: TargetFilter::ExiledBySource,
+                        ..
+                    }
+                )
+            {
+                cursor.else_ability = Some(Box::new(next.clone()));
+            }
             cursor.sub_ability = Some(Box::new(next));
             break;
         }
@@ -1975,6 +1987,16 @@ pub(super) fn parse_followup_continuation_ast(
                 | "reveal it"
                 | "put that card into your hand"
                 | "put it into your hand"
+        ) =>
+        {
+            Some(ContinuationAst::SearchResultClauseHandled)
+        }
+        Effect::SearchOutsideGame {
+            destination: Zone::Hand,
+            ..
+        } if matches!(
+            lower.trim(),
+            "put that card into your hand" | "put it into your hand"
         ) =>
         {
             Some(ContinuationAst::SearchResultClauseHandled)

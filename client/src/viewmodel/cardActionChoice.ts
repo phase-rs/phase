@@ -19,6 +19,7 @@ export function collectObjectActions(
 
 export function isManaObjectAction(action: GameAction, object: GameObject | undefined): boolean {
   if (action.type === "TapLandForMana") return true;
+  if (action.type === "TapForConvoke") return true;
   if (action.type !== "ActivateAbility") return false;
   return object?.abilities?.[action.data.ability_index]?.effect?.type === "Mana";
 }

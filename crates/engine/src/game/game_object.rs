@@ -989,9 +989,18 @@ impl GameObject {
             .max()
     }
 
-    /// CR 702.51a: Whether this object can be tapped for convoke/waterbend mana.
-    /// Requires: on battlefield, untapped, creature or artifact, controlled by `player`.
+    /// CR 702.51a: Whether this object can be tapped for convoke mana.
+    /// Requires: on battlefield, untapped, creature, controlled by `player`.
     pub fn is_convoke_eligible(&self, player: PlayerId) -> bool {
+        self.controller == player
+            && self.zone == Zone::Battlefield
+            && !self.tapped
+            && self.card_types.core_types.contains(&CoreType::Creature)
+    }
+
+    /// Whether this object can be tapped for waterbend mana.
+    /// Requires: on battlefield, untapped, creature or artifact, controlled by `player`.
+    pub fn is_waterbend_eligible(&self, player: PlayerId) -> bool {
         self.controller == player
             && self.zone == Zone::Battlefield
             && !self.tapped

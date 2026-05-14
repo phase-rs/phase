@@ -1,5 +1,6 @@
 pub mod ability;
 pub mod actions;
+pub mod attribution;
 pub mod card;
 pub mod card_type;
 pub mod counter;
@@ -29,6 +30,7 @@ pub use ability::{
     TargetRef, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
 };
 pub use actions::GameAction;
+pub use attribution::{EffectRef, ObjectAttribution};
 pub use card::{CardFace, CardLayout, CardRules, Rarity};
 pub use card_type::{is_land_subtype, CardType, CoreType, Supertype};
 pub use counter::{parse_counter_type, CounterMatch, CounterType};

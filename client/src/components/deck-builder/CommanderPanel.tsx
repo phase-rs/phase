@@ -5,7 +5,6 @@ import {
   getColorIdentityViolations,
   getSingletonViolations,
   canBeCommander,
-  canAddPartner,
 } from "./commanderUtils";
 
 const WUBRG_COLORS = ["W", "U", "B", "R", "G"] as const;
@@ -39,13 +38,13 @@ export function CommanderPanel({
   const singletonViolations = getSingletonViolations(deck, cardDataCache);
   const totalCards = deck.reduce((sum, e) => sum + e.count, 0) + commanders.length;
 
-  // Find cards in deck that are eligible to be set as commander
+  // Cards in deck that could become a commander. The handler decides whether
+  // clicking adds (free slot or partner pair) or swaps (replaces existing).
   const eligibleCommanders = deck
     .filter((entry) => {
       const card = cardDataCache.get(entry.name);
       if (!card || !canBeCommander(card)) return false;
-      if (commanders.includes(entry.name)) return false;
-      return canAddPartner(commanders, card, cardDataCache);
+      return !commanders.includes(entry.name);
     })
     .map((e) => e.name);
 

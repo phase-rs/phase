@@ -418,6 +418,7 @@ struct SpellResolutionLine {
     effect_text: String,
     ability_word_condition: Option<StaticCondition>,
     has_ability_word_prefix: bool,
+    min_x_value: u32,
 }
 
 fn prepare_spell_resolution_line(raw_line: &str) -> Option<SpellResolutionLine> {
@@ -428,7 +429,9 @@ fn prepare_spell_resolution_line(raw_line: &str) -> Option<SpellResolutionLine> 
 
     let reminder_body_owned = extract_ability_word_reminder_body(raw_line);
     let raw_line = reminder_body_owned.as_deref().unwrap_or(raw_line);
-    let line = strip_x_cant_be_zero_suffix(&strip_reminder_text(raw_line));
+    let line_with_reminder_stripped = strip_reminder_text(raw_line);
+    let min_x_value = x_annotation_min_value(&line_with_reminder_stripped);
+    let line = strip_x_cant_be_zero_suffix(&line_with_reminder_stripped);
     if line.is_empty() {
         return None;
     }
@@ -445,6 +448,7 @@ fn prepare_spell_resolution_line(raw_line: &str) -> Option<SpellResolutionLine> 
         effect_text,
         ability_word_condition,
         has_ability_word_prefix,
+        min_x_value,
     })
 }
 
@@ -1227,9 +1231,17 @@ pub(crate) fn parse_oracle_ir(
         let raw_line: &str = reminder_body_owned.as_deref().unwrap_or(raw_line);
 
         let line = strip_reminder_text(raw_line);
+        let ability_cant_be_copied = x_annotation_marks_ability_uncopyable(&line);
+        let min_x_value = x_annotation_min_value(&line);
         // Strip "X can't be 0." casting constraint suffix — annotation only, not an ability.
         let line = strip_x_cant_be_zero_suffix(&line);
+        let line = strip_copy_retarget_suffix(&line);
         if line.is_empty() {
+            if min_x_value > 0 {
+                if let Some(previous) = result.abilities.last_mut() {
+                    previous.min_x_value = previous.min_x_value.max(min_x_value);
+                }
+            }
             // Priority 14: entirely parenthesized reminder text
             i += 1;
             continue;
@@ -1306,6 +1318,9 @@ pub(crate) fn parse_oracle_ir(
         let is_ability_cost_static = is_ability_activate_cost_static(&lower);
         if !is_ability_cost_static {
             if let Some(extracted) = extract_keyword_line(&line, mtgjson_keyword_names) {
+                if let Some(cost) = parse_kicker_additional_cost_line(&line, &lower) {
+                    merge_kicker_additional_cost(&mut result.additional_cost, cost);
+                }
                 result.extracted_keywords.extend(extracted);
                 i += 1;
                 continue;
@@ -1569,6 +1584,10 @@ pub(crate) fn parse_oracle_ir(
                 card_name,
                 &mut ctx,
             );
+            if ability_cant_be_copied {
+                def.cant_be_copied = true;
+            }
+            def.min_x_value = min_x_value;
             i += 1;
             // CR 706: If the activated ability ends with "roll a dN", consume
             // subsequent d20 table lines and attach them as die result branches.
@@ -1932,7 +1951,7 @@ pub(crate) fn parse_oracle_ir(
             let def = AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Choose {
-                    choice_type: ChoiceType::Color,
+                    choice_type: ChoiceType::color(),
                     persist: true,
                 },
             )
@@ -2182,6 +2201,7 @@ pub(crate) fn parse_oracle_ir(
                 continue;
             };
             let aw_condition = prepared_line.ability_word_condition.clone();
+            let mut spell_min_x_value = min_x_value.max(prepared_line.min_x_value);
             spell_body_lines.push(prepared_line.effect_text.clone());
             spell_description_lines.push(prepared_line.line);
 
@@ -2196,6 +2216,13 @@ pub(crate) fn parse_oracle_ir(
                 }
 
                 let Some(next_prepared) = prepare_spell_resolution_line(lines[next_i]) else {
+                    let next_line = strip_reminder_text(lines[next_i].trim());
+                    let next_min_x_value = x_annotation_min_value(&next_line);
+                    let next_stripped = strip_x_cant_be_zero_suffix(&next_line);
+                    if next_min_x_value > 0 && next_stripped.is_empty() {
+                        spell_min_x_value = spell_min_x_value.max(next_min_x_value);
+                        next_i += 1;
+                    }
                     break;
                 };
 
@@ -2215,6 +2242,7 @@ pub(crate) fn parse_oracle_ir(
                 }
 
                 spell_body_lines.push(next_prepared.effect_text);
+                spell_min_x_value = spell_min_x_value.max(next_prepared.min_x_value);
                 spell_description_lines.push(next_prepared.line);
                 next_i += 1;
             }
@@ -2236,6 +2264,7 @@ pub(crate) fn parse_oracle_ir(
             ctx.subject = None;
             ctx.actor = None;
             let mut def = parse_effect_chain_with_context(parse_line, AbilityKind::Spell, &mut ctx);
+            def.min_x_value = spell_min_x_value;
             def.description = Some(description);
             // CR 608.2c: Compose ability word condition with chain-extracted condition.
             // When both exist (e.g., Revolt + MV ≤ 4), compose through
@@ -2373,10 +2402,13 @@ pub(crate) fn parse_oracle_ir(
         }
 
         // Priority 13e: "X can't be 0." — casting constraint annotation, not an ability.
-        // These appear as standalone lines on X-cost spells. The engine does not yet
-        // enforce X-minimum restrictions, but recognizing this pattern prevents
-        // Unimplemented fallback.
+        // These appear as standalone lines on X-cost spells. Earlier empty-line
+        // handling stamps the previous ability's `min_x_value`; this guard is a
+        // defensive fallback for already-normalized forms.
         if lower.trim_end_matches('.') == "x can't be 0" {
+            if let Some(previous) = result.abilities.last_mut() {
+                previous.min_x_value = previous.min_x_value.max(1);
+            }
             i += 1;
             continue;
         }
@@ -3360,23 +3392,65 @@ fn strip_condition_suffix(
     true
 }
 
-/// Strip trailing "X can't be 0." / " X can't be 0." constraint annotations from Oracle text.
-/// These are casting restrictions that annotate X-cost spells but are not themselves abilities.
+/// Strip trailing "X can't be 0." / "This ability can't be copied and X can't
+/// be 0." constraint annotations from Oracle text. These are activation/casting
+/// restrictions that annotate X-cost abilities but are not themselves effects.
 fn strip_x_cant_be_zero_suffix(line: &str) -> String {
     let lower = line.to_lowercase();
     let trimmed = lower.trim_end_matches('.');
-    // Standalone case: entire line is "X can't be 0"
-    if trimmed == "x can't be 0" {
+    // Standalone cases: entire line is only an activation/casting annotation.
+    if matches!(
+        trimmed,
+        "x can't be 0" | "this ability can't be copied and x can't be 0"
+    ) {
         return String::new();
     }
     // Suffix case: "... X can't be 0." at end of line
-    for suffix in [". x can't be 0", " x can't be 0"] {
+    for suffix in [
+        ". this ability can't be copied and x can't be 0",
+        " this ability can't be copied and x can't be 0",
+        ". x can't be 0",
+        " x can't be 0",
+    ] {
         if let Some(pos) = trimmed.rfind(suffix) {
             let mut result = line[..pos].to_string();
             // Preserve trailing period if we stripped at a sentence boundary
             if suffix.starts_with('.') {
                 result.push('.');
             }
+            return result.trim_end().to_string();
+        }
+    }
+    line.to_string()
+}
+
+fn x_annotation_marks_ability_uncopyable(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    scan_contains(&lower, "this ability can't be copied and x can't be 0")
+}
+
+fn x_annotation_min_value(line: &str) -> u32 {
+    let lower = line.to_lowercase();
+    if scan_contains(&lower, "x can't be 0") {
+        1
+    } else {
+        0
+    }
+}
+
+/// Strip the reminder-like retarget sentence from copy effects. The runtime
+/// copy resolver implements CR 707.10c via `WaitingFor::CopyRetarget`; keeping
+/// this sentence as a separate effect would duplicate that behavior.
+fn strip_copy_retarget_suffix(line: &str) -> String {
+    let lower = line.to_lowercase();
+    let trimmed = lower.trim_end_matches('.');
+    for suffix in [
+        ". you may choose new targets for the copies",
+        ". you may choose new targets for the copy",
+    ] {
+        if let Some(pos) = trimmed.rfind(suffix) {
+            let mut result = line[..pos].to_string();
+            result.push('.');
             return result.trim_end().to_string();
         }
     }
@@ -3827,6 +3901,39 @@ mod tests {
                     AbilityCost::Mana {
                         cost: ManaCost::Cost { shards, generic: 0 }
                     } if shards == &vec![ManaCostShard::Red]
+                ));
+            }
+            other => panic!("expected two-cost Kicker, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn keyword_extracted_kicker_and_or_line_sets_two_kicker_costs() {
+        let r = parse_with_keyword_names(
+            "Kicker {G} and/or {1}{U}\n\
+             When you cast this spell, if it was kicked with its {G} kicker, draw a card.\n\
+             When you cast this spell, if it was kicked with its {1}{U} kicker, scry 1.",
+            "Test Kicker",
+            &["Kicker"],
+            &["Creature"],
+            &["Eldrazi"],
+        );
+
+        match r.additional_cost.expect("additional cost") {
+            AdditionalCost::Kicker { costs, repeatable } => {
+                assert!(!repeatable);
+                assert_eq!(costs.len(), 2);
+                assert!(matches!(
+                    &costs[0],
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost { shards, generic: 0 }
+                    } if shards == &vec![ManaCostShard::Green]
+                ));
+                assert!(matches!(
+                    &costs[1],
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost { shards, generic: 1 }
+                    } if shards == &vec![ManaCostShard::Blue]
                 ));
             }
             other => panic!("expected two-cost Kicker, got {other:?}"),
@@ -4378,6 +4485,71 @@ mod tests {
             "Mode 4 Token must carry owner=TargetFilter::Player so each modal \
              mode surfaces an independent target slot, got {target:?}",
         );
+    }
+
+    #[test]
+    fn modal_target_player_creates_spawn_tokens_with_quoted_mana_ability() {
+        let r = parse(
+            "Choose two —\n\
+             • Target player creates X 0/1 colorless Eldrazi Spawn creature tokens with \"Sacrifice this token: Add {C}.\"\n\
+             • Target player scries X, then draws a card.",
+            "Kozilek's Command",
+            &[],
+            &["Kindred", "Instant"],
+            &["Eldrazi"],
+        );
+
+        let first_mode = r.abilities.first().expect("first mode");
+        match &*first_mode.effect {
+            Effect::Token {
+                name,
+                power,
+                toughness,
+                types,
+                colors,
+                count,
+                owner,
+                static_abilities,
+                ..
+            } => {
+                assert_eq!(name, "Eldrazi Spawn");
+                assert_eq!(power, &PtValue::Fixed(0));
+                assert_eq!(toughness, &PtValue::Fixed(1));
+                assert_eq!(
+                    types,
+                    &vec![
+                        "Creature".to_string(),
+                        "Eldrazi".to_string(),
+                        "Spawn".to_string()
+                    ]
+                );
+                assert!(colors.is_empty());
+                assert!(matches!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { name }
+                    } if name == "X"
+                ));
+                assert_eq!(owner, &TargetFilter::Player);
+                assert!(static_abilities.iter().any(|static_definition| {
+                    static_definition.modifications.iter().any(|modification| {
+                        matches!(
+                            modification,
+                            ContinuousModification::GrantAbility { definition }
+                                if matches!(*definition.effect, Effect::Mana { .. })
+                                    && matches!(
+                                        definition.cost,
+                                        Some(AbilityCost::Sacrifice {
+                                            target: TargetFilter::SelfRef,
+                                            count: 1
+                                        })
+                                    )
+                        )
+                    })
+                }));
+            }
+            other => panic!("expected first mode Token, got {other:?}"),
+        }
     }
 
     #[test]
@@ -7289,6 +7461,66 @@ mod tests {
             "Channel effect should not be Unimplemented, got {:?}",
             ability.effect,
         );
+    }
+
+    #[test]
+    fn gogo_copy_ability_targets_controlled_stack_ability_and_strips_annotations() {
+        let r = parse(
+            "{X}{X}, {T}: Copy target activated or triggered ability you control X times. You may choose new targets for the copies. This ability can't be copied and X can't be 0. (Mana abilities can't be targeted.)",
+            "Gogo, Master of Mimicry",
+            &[],
+            &["Creature"],
+            &["Wizard"],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let ability = &r.abilities[0];
+        assert_eq!(ability.kind, AbilityKind::Activated);
+        assert!(ability.cant_be_copied);
+        assert_eq!(ability.min_x_value, 1);
+        assert!(matches!(
+            ability.repeat_for,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::Variable { ref name }
+            }) if name == "X"
+        ));
+        let Effect::CopySpell { target, .. } = &*ability.effect else {
+            panic!("expected CopySpell, got {:?}", ability.effect);
+        };
+        assert!(matches!(
+            target,
+            TargetFilter::StackAbility {
+                controller: Some(ControllerRef::You)
+            }
+        ));
+        assert!(
+            ability.sub_ability.is_none(),
+            "retarget annotation should not become a sub-ability: {:?}",
+            ability.sub_ability
+        );
+    }
+
+    #[test]
+    fn spell_x_cant_be_zero_annotation_sets_min_x_value() {
+        let r = parse(
+            "Draw X cards.\nX can't be 0.",
+            "Test X Draw",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let ability = &r.abilities[0];
+        assert_eq!(ability.kind, AbilityKind::Spell);
+        assert_eq!(ability.min_x_value, 1);
+        assert!(matches!(
+            *ability.effect,
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable { ref name }
+                },
+                ..
+            } if name == "X"
+        ));
     }
 
     #[test]

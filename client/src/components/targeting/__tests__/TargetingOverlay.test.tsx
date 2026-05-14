@@ -7,6 +7,7 @@ import { buildGameObject, buildGameObjectWithCoreTypes } from "../../../test/fac
 import { TargetingOverlay } from "../TargetingOverlay.tsx";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
+import { useUiStore } from "../../../stores/uiStore.ts";
 
 function createGameState(overrides: Partial<GameState> = {}): GameState {
   return {
@@ -164,6 +165,57 @@ describe("TargetingOverlay", () => {
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
 
     expect(dispatch).toHaveBeenCalledWith({ type: "CancelCast" });
+  });
+
+  it("confirms selected creatures for mana ability costs", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const gameState = createGameState({
+      objects: {
+        "4": buildGameObjectWithCoreTypes(["Land"], {
+          id: 4,
+          name: "Holdout Settlement",
+        }),
+        "7": buildGameObjectWithCoreTypes(["Creature"], {
+          id: 7,
+          name: "Memnite",
+        }),
+      },
+      waiting_for: {
+        type: "TapCreaturesForManaAbility",
+        data: {
+          player: 0,
+          count: 1,
+          creatures: [7],
+          pending_mana_ability: {
+            player: 0,
+            source_id: 4,
+            ability_index: 1,
+            resume: "Priority",
+          },
+        },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+
+    act(() => {
+      useUiStore.setState({ selectedCardIds: [7] });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Confirm Tap (1/1)" }));
+
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "SelectCards",
+      data: { cards: [7] },
+    });
   });
 
   it("informs the player when the target slot is up to one nonland permanent", () => {

@@ -25,6 +25,7 @@ export function ManaPoolSummary({ playerId }: ManaPoolSummaryProps) {
 
   const counts = new Map<ManaType, number>();
   for (const unit of manaUnits) {
+    if (unit.restrictions.includes("ConvokePayment")) continue;
     counts.set(unit.color, (counts.get(unit.color) ?? 0) + 1);
   }
 

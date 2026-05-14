@@ -172,6 +172,10 @@ pub const ORDERING_MANIFEST: &[((&str, &str), OrderingClass)] = &[
     // display order in the prompt UI. Treat as positional so the diff
     // surfaces "we reordered the menu" as a real divergence.
     (("ChoiceType", "options"), OrderingClass::OrderSignificant),
+    // CR 106.1: the set of colors barred from a restricted color choice
+    // (e.g. a Gate's "of a color of your choice" minus already-chosen
+    // colors) is unordered — only membership matters.
+    (("ChoiceType", "excluded"), OrderingClass::SetEquivalent),
     // ----- ManaProduction colors -----
     // CR 106.1: the color set produced is unordered.
     (("ManaProduction", "colors"), OrderingClass::SetEquivalent),

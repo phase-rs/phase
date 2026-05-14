@@ -8,7 +8,7 @@ use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::zones::Zone;
 
-/// CR 701.13 + CR 701.17a: Exile cards from the top of the acting player's
+/// CR 701.13a + CR 608.2c: Exile cards from the top of the acting player's
 /// library one at a time until the typed `until` predicate is satisfied.
 ///
 /// The `UntilCondition` axis selects between two stop-condition families:
@@ -44,12 +44,19 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let until = match &ability.effect {
-        Effect::ExileFromTopUntil { until } => until,
+    let (player_filter, until) = match &ability.effect {
+        Effect::ExileFromTopUntil { player, until } => (player, until),
         _ => return Err(EffectError::MissingParam("until".to_string())),
     };
 
-    let acting_player = ability.scoped_player.unwrap_or(ability.controller);
+    let acting_player = if matches!(
+        player_filter,
+        crate::types::ability::TargetFilter::Controller
+    ) {
+        ability.scoped_player.unwrap_or(ability.controller)
+    } else {
+        super::resolve_player_for_context_ref(state, ability, player_filter)
+    };
     let player = state
         .players
         .iter()
@@ -186,11 +193,14 @@ fn extract_property(state: &GameState, obj_id: ObjectId, property: ObjectPropert
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::engine::apply;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, Comparator, PlayerFilter, QuantityExpr,
-        ReplacementDefinition, ResolvedAbility, TargetFilter, TypeFilter, TypedFilter,
+        AbilityDefinition, AbilityKind, CardPlayMode, Comparator, ControllerRef, LibraryPosition,
+        PlayerFilter, QuantityExpr, ReplacementDefinition, ResolvedAbility, TargetFilter,
+        TargetRef, TypeFilter, TypedFilter,
     };
+    use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
     use crate::types::identifiers::CardId;
@@ -222,6 +232,15 @@ mod tests {
         )
     }
 
+    fn instant_or_sorcery_filter() -> TargetFilter {
+        TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+            ],
+        }
+    }
+
     /// CR 701.57a + CR 702.85a: When the iterator hits a nonland, it stops and
     /// reports the hit. CR 400.7 + CR 406.6: every exiled card (lands + the
     /// hit) is recorded with `ExileLinkKind::TrackedBySource` so
@@ -245,6 +264,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ExileFromTopUntil {
+                player: TargetFilter::Controller,
                 until: UntilCondition::NextMatches {
                     filter: nonland_filter(),
                 },
@@ -306,6 +326,7 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::ExileFromTopUntil {
+                player: TargetFilter::Controller,
                 until: UntilCondition::NextMatches {
                     filter: nonland_filter(),
                 },
@@ -326,6 +347,209 @@ mod tests {
         );
         assert_eq!(state.objects.get(&faced_land).unwrap().zone, Zone::Exile);
         assert_eq!(state.objects.get(&faced_hit).unwrap().zone, Zone::Exile);
+    }
+
+    /// CR 701.13a + CR 601.2 + CR 118.9: A targeted-player
+    /// ExileFromTopUntil chain uses the chosen player's library. If the caster
+    /// accepts the optional free-cast branch, CastFromZone grants permission but
+    /// does not move the hit to the stack in this resolver pipeline. The hit
+    /// remains source-linked, so cleanup moves it with the misses.
+    #[test]
+    fn targeted_player_accept_cast_offer_cleans_up_uncast_hit_and_misses() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Chaos Wand".to_string(),
+            Zone::Battlefield,
+        );
+
+        let controller_card = add_library_card(&mut state, PlayerId(0), "Controller Bear", false);
+        state.players[0].library = crate::im::vector![controller_card];
+
+        let miss_a = add_library_card(&mut state, PlayerId(1), "Opponent Bear", false);
+        let miss_b = add_library_card(&mut state, PlayerId(1), "Opponent Elk", false);
+        let hit = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Lightning Bolt".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&hit)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+        let unreached = add_library_card(&mut state, PlayerId(1), "Unreached Bear", false);
+        state.players[1].library = crate::im::vector![miss_a, miss_b, hit, unreached];
+
+        let cleanup = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::ExiledBySource,
+                count: QuantityExpr::Fixed { value: 0 },
+                position: LibraryPosition::Bottom,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut cast = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        cast.optional = true;
+        cast.sub_ability = Some(Box::new(cleanup.clone()));
+        cast.else_ability = Some(Box::new(cleanup));
+
+        let mut ability = ResolvedAbility::new(
+            Effect::ExileFromTopUntil {
+                player: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                ),
+                until: UntilCondition::NextMatches {
+                    filter: instant_or_sorcery_filter(),
+                },
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+        ability.sub_ability = Some(Box::new(cast));
+
+        let mut events = Vec::new();
+        super::super::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            crate::types::game_state::WaitingFor::OptionalEffectChoice { .. }
+        ));
+
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .unwrap();
+
+        assert_eq!(state.objects[&controller_card].zone, Zone::Library);
+        assert_eq!(state.objects[&hit].zone, Zone::Library);
+        assert!(state.objects[&hit].casting_permissions.is_empty());
+        assert_eq!(state.objects[&miss_a].zone, Zone::Library);
+        assert_eq!(state.objects[&miss_b].zone, Zone::Library);
+        assert!(state.players[1].library.contains(&miss_a));
+        assert!(state.players[1].library.contains(&miss_b));
+        assert!(state.players[1].library.contains(&hit));
+        assert!(state.players[1].library.contains(&unreached));
+        assert!(!state
+            .exile_links
+            .iter()
+            .any(|link| link.source_id == source));
+    }
+
+    /// CR 608.2c: Declining the optional cast branch leaves the hit
+    /// source-linked, so the same ExiledBySource cleanup moves misses and hit.
+    #[test]
+    fn targeted_player_decline_cast_offer_cleans_up_hit_and_misses() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Chaos Wand".to_string(),
+            Zone::Battlefield,
+        );
+
+        let miss = add_library_card(&mut state, PlayerId(1), "Opponent Bear", false);
+        let hit = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Lightning Bolt".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&hit)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+        let unreached = add_library_card(&mut state, PlayerId(1), "Unreached Bear", false);
+        state.players[1].library = crate::im::vector![miss, hit, unreached];
+
+        let cleanup = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::ExiledBySource,
+                count: QuantityExpr::Fixed { value: 0 },
+                position: LibraryPosition::Bottom,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut cast = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        cast.optional = true;
+        cast.sub_ability = Some(Box::new(cleanup.clone()));
+        cast.else_ability = Some(Box::new(cleanup));
+
+        let mut ability = ResolvedAbility::new(
+            Effect::ExileFromTopUntil {
+                player: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                ),
+                until: UntilCondition::NextMatches {
+                    filter: instant_or_sorcery_filter(),
+                },
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+        ability.sub_ability = Some(Box::new(cast));
+
+        let mut events = Vec::new();
+        super::super::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: false },
+        )
+        .unwrap();
+
+        assert_eq!(state.objects[&miss].zone, Zone::Library);
+        assert_eq!(state.objects[&hit].zone, Zone::Library);
+        assert!(state.players[1].library.contains(&miss));
+        assert!(state.players[1].library.contains(&hit));
+        assert!(state.players[1].library.contains(&unreached));
+        assert!(state.objects[&hit].casting_permissions.is_empty());
+        assert!(!state
+            .exile_links
+            .iter()
+            .any(|link| link.source_id == source));
     }
 
     #[test]
@@ -366,6 +590,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ExileFromTopUntil {
+                player: TargetFilter::Controller,
                 until: UntilCondition::NextMatches {
                     filter: nonland_filter(),
                 },
@@ -430,6 +655,7 @@ mod tests {
         // is exercised by the same path Etali's runtime uses.
         let mut wrapped = ResolvedAbility::new(
             Effect::ExileFromTopUntil {
+                player: TargetFilter::Controller,
                 until: UntilCondition::NextMatches {
                     filter: nonland_filter(),
                 },
@@ -591,6 +817,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ExileFromTopUntil {
+                player: TargetFilter::Controller,
                 until: UntilCondition::CumulativeThreshold {
                     property: ObjectProperty::ManaValue,
                     comparator: Comparator::GE,
@@ -640,6 +867,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ExileFromTopUntil {
+                player: TargetFilter::Controller,
                 until: UntilCondition::CumulativeThreshold {
                     property: ObjectProperty::ManaValue,
                     comparator: Comparator::GE,
@@ -698,6 +926,7 @@ mod tests {
 
         let mut wrapped = ResolvedAbility::new(
             Effect::ExileFromTopUntil {
+                player: TargetFilter::Controller,
                 until: UntilCondition::CumulativeThreshold {
                     property: ObjectProperty::ManaValue,
                     comparator: Comparator::GE,
@@ -775,6 +1004,7 @@ mod tests {
         );
         let mut ability = ResolvedAbility::new(
             Effect::ExileFromTopUntil {
+                player: TargetFilter::Controller,
                 until: UntilCondition::CumulativeThreshold {
                     property: ObjectProperty::ManaValue,
                     comparator: Comparator::GE,

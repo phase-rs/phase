@@ -1017,7 +1017,7 @@ fn target_filter_variant_name(f: &TargetFilter) -> &'static str {
         TargetFilter::Not { .. } => "Not",
         TargetFilter::Or { .. } => "Or",
         TargetFilter::And { .. } => "And",
-        TargetFilter::StackAbility => "StackAbility",
+        TargetFilter::StackAbility { .. } => "StackAbility",
         TargetFilter::StackSpell => "StackSpell",
         TargetFilter::SpecificObject { .. } => "SpecificObject",
         TargetFilter::SpecificPlayer { .. } => "SpecificPlayer",

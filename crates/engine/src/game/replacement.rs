@@ -16,6 +16,7 @@ use super::filter::{
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingReplacement, WaitingFor};
 use crate::types::identifiers::ObjectId;
+use crate::types::mana::{StepEndManaAction, UnitDisposition};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{EtbTapState, ProposedEvent, ReplacementId};
 use crate::types::replacements::ReplacementEvent;
@@ -62,42 +63,66 @@ pub struct ReplacementHandlerEntry {
 
 /// Build a `WaitingFor::ReplacementChoice` from the current `pending_replacement` state.
 /// Centralizes candidate count and description extraction so callers don't repeat this logic.
+///
+/// CR 616.1 + CR 703.4q: For `ProposedEvent::EmptyManaPool` events, descriptions
+/// come from `state.pending_step_end_mana_handlers` (sentinel-source path)
+/// rather than from each rid's source object's `replacement_definitions`,
+/// because step-end mana handlers are not attached to a single object — they
+/// are scanned per-player per-phase-transition.
 pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> WaitingFor {
     let (candidate_count, candidate_descriptions) = state
         .pending_replacement
         .as_ref()
-        .map(|p| {
-            let count = if p.is_optional { 2 } else { p.candidates.len() };
-            let descs: Vec<String> = if p.is_optional {
-                let accept_desc = p
+        .map(|p| match &p.proposed {
+            // CR 703.4q + CR 616.1: Sentinel-source dispatch. Descriptions are
+            // read from the per-phase handler list rather than per-object
+            // replacement_definitions.
+            ProposedEvent::EmptyManaPool { .. } => {
+                let descs: Vec<String> = p
                     .candidates
-                    .first()
-                    .and_then(|rid| state.objects.get(&rid.source))
-                    .and_then(|obj| obj.replacement_definitions.get(p.candidates[0].index))
-                    .map(|repl| match &repl.mode {
-                        ReplacementMode::MayCost { cost, .. } => {
-                            format!("Pay {}", replacement_cost_description(cost))
-                        }
-                        ReplacementMode::Mandatory | ReplacementMode::Optional { .. } => repl
-                            .description
-                            .clone()
-                            .unwrap_or_else(|| "Accept".to_string()),
-                    })
-                    .unwrap_or_else(|| "Accept".to_string());
-                vec![accept_desc, "Decline".to_string()]
-            } else {
-                p.candidates
                     .iter()
                     .filter_map(|rid| {
                         state
-                            .objects
-                            .get(&rid.source)
-                            .and_then(|obj| obj.replacement_definitions.get(rid.index))
-                            .and_then(|repl| repl.description.clone())
+                            .pending_step_end_mana_handlers
+                            .get(rid.index)
+                            .map(|entry| entry.description.clone())
                     })
-                    .collect()
-            };
-            (count, descs)
+                    .collect();
+                (descs.len(), descs)
+            }
+            _ => {
+                let count = if p.is_optional { 2 } else { p.candidates.len() };
+                let descs: Vec<String> = if p.is_optional {
+                    let accept_desc = p
+                        .candidates
+                        .first()
+                        .and_then(|rid| state.objects.get(&rid.source))
+                        .and_then(|obj| obj.replacement_definitions.get(p.candidates[0].index))
+                        .map(|repl| match &repl.mode {
+                            ReplacementMode::MayCost { cost, .. } => {
+                                format!("Pay {}", replacement_cost_description(cost))
+                            }
+                            ReplacementMode::Mandatory | ReplacementMode::Optional { .. } => repl
+                                .description
+                                .clone()
+                                .unwrap_or_else(|| "Accept".to_string()),
+                        })
+                        .unwrap_or_else(|| "Accept".to_string());
+                    vec![accept_desc, "Decline".to_string()]
+                } else {
+                    p.candidates
+                        .iter()
+                        .filter_map(|rid| {
+                            state
+                                .objects
+                                .get(&rid.source)
+                                .and_then(|obj| obj.replacement_definitions.get(rid.index))
+                                .and_then(|repl| repl.description.clone())
+                        })
+                        .collect()
+                };
+                (count, descs)
+            }
         })
         .unwrap_or((0, vec![]));
 
@@ -1065,8 +1090,9 @@ fn create_token_applier(
                 .map(|o| o.controller)
                 .unwrap_or(owner);
             for mut extra in specs {
-                let already_present = extra.subtypes.iter().any(|s| {
-                    spec.subtypes
+                let already_present = extra.characteristics.subtypes.iter().any(|s| {
+                    spec.characteristics
+                        .subtypes
                         .iter()
                         .any(|already| already.eq_ignore_ascii_case(s))
                 });
@@ -1162,6 +1188,127 @@ fn produce_mana_applier(
     } else {
         ApplyResult::Modified(event)
     }
+}
+
+// --- LoseMana (CR 703.4q step-end empty-mana replacement) ---
+
+/// CR 703.4q + CR 614.1a + CR 614.5: An `EmptyManaPool` event is applicable to
+/// a `StepEndManaScanEntry` iff it carries at least one unit with `Drop`
+/// disposition that the entry's filter accepts. CR 614.5 enforces "one
+/// opportunity per event" via the `applied` set checked by
+/// `event.already_applied(&rid)` upstream; the disposition gate here is a
+/// secondary correctness property that prevents a handler from re-acting on
+/// units it has already transformed in a prior pipeline pass.
+fn empty_mana_pool_matcher(event: &ProposedEvent, _source: ObjectId, state: &GameState) -> bool {
+    let ProposedEvent::EmptyManaPool { units, .. } = event else {
+        return false;
+    };
+    // Sentinel scan path: `find_applicable_replacements` only calls this with
+    // the sentinel source `ObjectId(0)`; per-source scans never produce
+    // EmptyManaPool candidates. Look up the handler entry currently being
+    // tested via the per-phase handler list.
+    //
+    // The handler index is not threaded into the matcher signature, so this
+    // function approves any event with at least one Drop-disposition unit;
+    // the per-handler filter is enforced in the sentinel block of
+    // `find_applicable_replacements`. This keeps the matcher signature
+    // homogeneous with other matchers in the registry.
+    let _ = state;
+    units
+        .iter()
+        .any(|u| matches!(u.disposition, UnitDisposition::Drop))
+}
+
+/// CR 703.4q + CR 614.1a: Dead applier for the `LoseMana` registry slot.
+/// `apply_single_replacement` discriminates `ProposedEvent::EmptyManaPool`
+/// to `apply_empty_mana_pool_replacement` (the Path A carve-out) before
+/// registry dispatch, so this function is never invoked at runtime. The
+/// matcher + applier pair exist only to occupy the `LoseMana` slot in the
+/// `ReplacementEvent` enum — `build_replacement_registry`'s exhaustive
+/// match would otherwise fail to compile, and a `None` entry would mask
+/// the slot's "structurally registered, dispatched out-of-band" intent.
+///
+/// Reaching this code path is a discriminator regression: either the
+/// carve-out branch was removed, or a new ProposedEvent variant was added
+/// that routes through `LoseMana` instead of past it.
+fn empty_mana_pool_applier(
+    _event: ProposedEvent,
+    _rid: ReplacementId,
+    _state: &mut GameState,
+    _events: &mut Vec<GameEvent>,
+) -> ApplyResult {
+    unreachable!(
+        "empty_mana_pool_applier reached: apply_single_replacement \
+         discriminator should have routed to apply_empty_mana_pool_replacement \
+         (Path A carve-out for ProposedEvent::EmptyManaPool)"
+    );
+}
+
+/// CR 703.4q + CR 614.1a + CR 614.5 + CR 614.6: Path A carve-out applier for
+/// `ProposedEvent::EmptyManaPool`. Bypasses the registry's
+/// `ReplacementDefinition`-driven dispatch (matchers, event modifiers,
+/// post-replacement continuation) — step-end mana handlers have no sub-ability
+/// work to stash, so the carve-out IS the applier.
+///
+/// For the handler addressed by `rid.index` in
+/// `state.pending_step_end_mana_handlers`, walks `units` and flips each
+/// `Drop`-disposition unit whose color matches the handler filter to either
+/// `Keep` (CR 614.6, `StepEndManaAction::Retain`) or `Recolor(_)`
+/// (CR 614.1a, `StepEndManaAction::Transform(_)`). Records the handler on
+/// the event's `applied` set so CR 614.5 prevents re-application.
+fn apply_empty_mana_pool_replacement(
+    state: &mut GameState,
+    proposed: ProposedEvent,
+    rid: ReplacementId,
+    _events: &mut Vec<GameEvent>,
+) -> Result<ProposedEvent, ApplyResult> {
+    let ProposedEvent::EmptyManaPool {
+        player_id,
+        mut units,
+        mut applied,
+    } = proposed
+    else {
+        unreachable!("apply_empty_mana_pool_replacement discriminator guarantees variant");
+    };
+
+    let entry = match state.pending_step_end_mana_handlers.get(rid.index) {
+        Some(e) => e.clone(),
+        None => {
+            // Handler vanished — return event unchanged so the pipeline can complete.
+            return Ok(ProposedEvent::EmptyManaPool {
+                player_id,
+                units,
+                applied,
+            });
+        }
+    };
+
+    // CR 614.5 + CR 614.6 + CR 614.1a: Mutate per-unit disposition. Filter
+    // matches on the unit's *current* color (a previously-recolored unit reads
+    // its `Recolor(_)` target only via the disposition, not via `color`; the
+    // disposition gate ensures handlers don't re-act on units they already
+    // transformed).
+    for unit in units.iter_mut() {
+        if !matches!(unit.disposition, UnitDisposition::Drop) {
+            continue;
+        }
+        if let Some(filter_color) = entry.filter {
+            if crate::types::mana::ManaType::from(filter_color) != unit.color {
+                continue;
+            }
+        }
+        match entry.action {
+            StepEndManaAction::Retain => unit.disposition = UnitDisposition::Keep,
+            StepEndManaAction::Transform(t) => unit.disposition = UnitDisposition::Recolor(t),
+        }
+    }
+
+    applied.insert(rid);
+    Ok(ProposedEvent::EmptyManaPool {
+        player_id,
+        units,
+        applied,
+    })
 }
 
 // --- 11. Tap ---
@@ -1589,6 +1736,22 @@ pub fn build_replacement_registry() -> IndexMap<ReplacementEvent, ReplacementHan
         },
     );
 
+    // CR 703.4q + CR 614.1a + CR 614.6: LoseMana routes step-end empty-mana
+    // events through the replacement pipeline so CR 616.1 player-choice
+    // ordering applies when ≥2 handlers (Upwelling, Horizon Stone, Kruphix,
+    // Omnath, …) match the same emptying event. The applier registered here
+    // is a debug-assert stub because the path A carve-out
+    // (`apply_empty_mana_pool_replacement` at the top of
+    // `apply_single_replacement`) handles disposition mutation directly,
+    // bypassing the registry applier dispatch.
+    registry.insert(
+        ReplacementEvent::LoseMana,
+        ReplacementHandlerEntry {
+            matcher: empty_mana_pool_matcher,
+            applier: empty_mana_pool_applier,
+        },
+    );
+
     // CR 104.2b + CR 104.3b: GameLoss / GameWin are parser-emitted by
     // Platinum Angel, Lich's Mastery, Angel's Grace, etc. The effective
     // runtime enforcement for these cards is via first-class static-ability
@@ -1910,13 +2073,10 @@ fn evaluate_replacement_condition(
         // turn start (`start_next_turn`).
         ReplacementCondition::OpponentDamagedThisTurn => {
             let opponents = crate::game::players::opponents(state, controller);
-            state.damage_dealt_this_turn.iter().any(|r| match r.target {
-                TargetRef::Player(pid) => opponents.contains(&pid),
-                TargetRef::Object(oid) => state
-                    .objects
-                    .get(&oid)
-                    .is_some_and(|obj| opponents.contains(&obj.controller)),
-            })
+            state
+                .damage_dealt_this_turn
+                .iter()
+                .any(|r| opponents.contains(&r.target_controller))
         }
         // CR 702.33d + CR 702.33f: "if was kicked" — applies only when the
         // source permanent's spell was kicked. `kickers_paid` is populated at
@@ -1999,7 +2159,8 @@ fn evaluate_replacement_condition(
         // listed subtype. Non-CreateToken events never match this condition.
         ReplacementCondition::TokenSubtypeMatches { subtypes } => match event {
             ProposedEvent::CreateToken { spec, .. } => subtypes.iter().any(|wanted| {
-                spec.subtypes
+                spec.characteristics
+                    .subtypes
                     .iter()
                     .any(|got| got.eq_ignore_ascii_case(wanted))
             }),
@@ -2357,6 +2518,43 @@ pub fn find_applicable_replacements(
         }
     }
 
+    // CR 703.4q + CR 614.1a + CR 616.1: Step-end empty-mana sentinel scan.
+    // Each entry in `pending_step_end_mana_handlers` is a candidate handler
+    // for an `EmptyManaPool` event; addressed via sentinel source
+    // `ObjectId(0)` + `index`. The per-handler filter is enforced here (not
+    // in `empty_mana_pool_matcher`) because the matcher signature does not
+    // carry a handler index.
+    if let ProposedEvent::EmptyManaPool { units, .. } = event {
+        for (index, entry) in state.pending_step_end_mana_handlers.iter().enumerate() {
+            let rid = ReplacementId {
+                source: ObjectId(0),
+                index,
+            };
+            // CR 614.5: skip handlers that already applied to this event.
+            if event.already_applied(&rid) {
+                continue;
+            }
+            // CR 614.5 secondary correctness: handler applies iff at least one
+            // unit has `Drop` disposition AND the filter accepts that unit's
+            // color. Handlers do not re-act on units they have already
+            // transformed (disposition is now Keep / Recolor).
+            let applicable = units.iter().any(|u| {
+                if !matches!(u.disposition, UnitDisposition::Drop) {
+                    return false;
+                }
+                match entry.filter {
+                    None => true,
+                    Some(filter_color) => {
+                        crate::types::mana::ManaType::from(filter_color) == u.color
+                    }
+                }
+            });
+            if applicable {
+                candidates.push(rid);
+            }
+        }
+    }
+
     candidates
 }
 
@@ -2709,6 +2907,19 @@ fn apply_single_replacement(
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
     events: &mut Vec<GameEvent>,
 ) -> Result<ProposedEvent, ApplyResult> {
+    // CR 703.4q + CR 614.1a: Path A carve-out for step-end empty-mana events.
+    // Step-end mana handlers carry no `ReplacementDefinition` (no execute /
+    // decline ability, no event-modifier sub-ability work, no runtime_execute)
+    // so `branch` and `registry` are intentionally ignored — the carve-out IS
+    // the applier. See `apply_empty_mana_pool_replacement` for the per-unit
+    // disposition mutation. Discriminating on the event variant (rather than
+    // on `state.pending_phase_transition_progress`) makes dispatch robust
+    // against control-flow state being out-of-sync with event identity during
+    // pipeline pauses.
+    if matches!(proposed, ProposedEvent::EmptyManaPool { .. }) {
+        return apply_empty_mana_pool_replacement(state, proposed, rid, events);
+    }
+
     // CR 615.3: Pending damage prevention shields use sentinel ObjectId(0).
     // Look up from game-state-level registry instead of object replacement_definitions.
     let repl_def_ref = if rid.source == ObjectId(0) {
@@ -4035,16 +4246,19 @@ mod tests {
         owner_controller: PlayerId,
         core_type: crate::types::card_type::CoreType,
     ) -> TokenSpec {
+        use crate::types::proposed_event::TokenCharacteristics;
         TokenSpec {
-            display_name: "Test Token".to_string(),
+            characteristics: TokenCharacteristics {
+                display_name: "Test Token".to_string(),
+                power: Some(1),
+                toughness: Some(1),
+                core_types: vec![core_type],
+                subtypes: vec!["Soldier".to_string()],
+                supertypes: Vec::new(),
+                colors: vec![crate::types::mana::ManaColor::White],
+                keywords: Vec::new(),
+            },
             script_name: "w_1_1_soldier".to_string(),
-            power: Some(1),
-            toughness: Some(1),
-            core_types: vec![core_type],
-            subtypes: vec!["Soldier".to_string()],
-            supertypes: Vec::new(),
-            colors: vec![crate::types::mana::ManaColor::White],
-            keywords: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
             tapped: false,
@@ -4282,6 +4496,7 @@ mod tests {
             source_id: ObjectId(10),
             source_controller: PlayerId(0),
             target: TargetRef::Object(ObjectId(20)),
+            target_controller: PlayerId(0),
             amount: 1,
             is_combat: false,
         });
@@ -4304,6 +4519,45 @@ mod tests {
             ObjectId(10),
             &state,
             Some(ObjectId(30)),
+            &dummy_begin_turn_event(),
+        ));
+    }
+
+    #[test]
+    fn opponent_damaged_condition_uses_recorded_target_controller() {
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, Vec::new());
+        let mut victim = GameObject::new(
+            ObjectId(20),
+            CardId(2),
+            PlayerId(1),
+            "Victim".to_string(),
+            Zone::Battlefield,
+        );
+        victim.controller = PlayerId(0);
+        state.objects.insert(ObjectId(20), victim);
+        state.damage_dealt_this_turn.push(DamageRecord {
+            source_id: ObjectId(10),
+            source_controller: PlayerId(0),
+            target: TargetRef::Object(ObjectId(20)),
+            target_controller: PlayerId(1),
+            amount: 1,
+            is_combat: false,
+        });
+
+        assert!(evaluate_replacement_condition(
+            &ReplacementCondition::OpponentDamagedThisTurn,
+            PlayerId(0),
+            ObjectId(10),
+            &state,
+            None,
+            &dummy_begin_turn_event(),
+        ));
+        assert!(!evaluate_replacement_condition(
+            &ReplacementCondition::OpponentDamagedThisTurn,
+            PlayerId(1),
+            ObjectId(10),
+            &state,
+            None,
             &dummy_begin_turn_event(),
         ));
     }
@@ -4333,6 +4587,7 @@ mod tests {
             source_id: ObjectId(20),
             source_controller: PlayerId(0),
             target: TargetRef::Object(ObjectId(30)),
+            target_controller: PlayerId(0),
             amount: 1,
             is_combat: false,
         });
@@ -4502,11 +4757,11 @@ mod tests {
         let mut events = Vec::new();
         let mut spec = test_token_spec(PlayerId(1), crate::types::card_type::CoreType::Land);
         spec.tapped = true;
-        spec.power = None;
-        spec.toughness = None;
+        spec.characteristics.power = None;
+        spec.characteristics.toughness = None;
         spec.script_name = "c_a_clue".to_string();
-        spec.display_name = "Land Token".to_string();
-        spec.subtypes.clear();
+        spec.characteristics.display_name = "Land Token".to_string();
+        spec.characteristics.subtypes.clear();
 
         let proposed = ProposedEvent::CreateToken {
             owner: PlayerId(0),
@@ -5878,17 +6133,20 @@ mod tests {
     /// plus two Squirrel tokens, all under the primary owner's control.
     #[test]
     fn create_token_applier_emits_additional_token_spec_batch() {
+        use crate::types::proposed_event::TokenCharacteristics;
         let chatterfang = ObjectId(500);
         let squirrel_spec = TokenSpec {
-            display_name: "Squirrel".to_string(),
+            characteristics: TokenCharacteristics {
+                display_name: "Squirrel".to_string(),
+                power: Some(1),
+                toughness: Some(1),
+                core_types: vec![crate::types::card_type::CoreType::Creature],
+                subtypes: vec!["Squirrel".to_string()],
+                supertypes: Vec::new(),
+                colors: vec![crate::types::mana::ManaColor::Green],
+                keywords: Vec::new(),
+            },
             script_name: "Squirrel".to_string(),
-            power: Some(1),
-            toughness: Some(1),
-            core_types: vec![crate::types::card_type::CoreType::Creature],
-            subtypes: vec!["Squirrel".to_string()],
-            supertypes: Vec::new(),
-            colors: vec![crate::types::mana::ManaColor::Green],
-            keywords: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
             tapped: false,
@@ -5904,15 +6162,17 @@ mod tests {
         let mut events = Vec::new();
 
         let plant_spec = TokenSpec {
-            display_name: "Plant".to_string(),
+            characteristics: TokenCharacteristics {
+                display_name: "Plant".to_string(),
+                power: Some(0),
+                toughness: Some(2),
+                core_types: vec![crate::types::card_type::CoreType::Creature],
+                subtypes: vec!["Plant".to_string()],
+                supertypes: Vec::new(),
+                colors: vec![crate::types::mana::ManaColor::Green],
+                keywords: Vec::new(),
+            },
             script_name: "Plant".to_string(),
-            power: Some(0),
-            toughness: Some(2),
-            core_types: vec![crate::types::card_type::CoreType::Creature],
-            subtypes: vec!["Plant".to_string()],
-            supertypes: Vec::new(),
-            colors: vec![crate::types::mana::ManaColor::Green],
-            keywords: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
             tapped: false,
@@ -5970,16 +6230,19 @@ mod tests {
     #[test]
     fn create_token_applier_ensure_specs_emits_only_missing_subtypes_cr_614_1a() {
         fn artifact_spec(name: &str) -> TokenSpec {
+            use crate::types::proposed_event::TokenCharacteristics;
             TokenSpec {
-                display_name: name.to_string(),
+                characteristics: TokenCharacteristics {
+                    display_name: name.to_string(),
+                    power: None,
+                    toughness: None,
+                    core_types: vec![crate::types::card_type::CoreType::Artifact],
+                    subtypes: vec![name.to_string()],
+                    supertypes: Vec::new(),
+                    colors: Vec::new(),
+                    keywords: Vec::new(),
+                },
                 script_name: name.to_string(),
-                power: None,
-                toughness: None,
-                core_types: vec![crate::types::card_type::CoreType::Artifact],
-                subtypes: vec![name.to_string()],
-                supertypes: Vec::new(),
-                colors: Vec::new(),
-                keywords: Vec::new(),
                 static_abilities: Vec::new(),
                 enter_with_counters: Vec::new(),
                 tapped: false,
@@ -6300,5 +6563,97 @@ mod tests {
                 "counter_match=None must accept any counter type, including {ct:?}"
             );
         }
+    }
+
+    /// SHAPE: `empty_mana_pool_matcher` returns true for an EmptyManaPool event
+    /// with at least one `Drop`-disposition unit, false when every unit is
+    /// already `Keep` or `Recolor(_)` (the per-event applicability gate; the
+    /// per-handler filter is enforced in `find_applicable_replacements`'s
+    /// sentinel block).
+    #[test]
+    fn empty_mana_pool_matcher_predicate() {
+        use crate::types::mana::{ManaType, UnitDecision, UnitDisposition};
+
+        let state = GameState::new_two_player(0);
+
+        let with_drop = ProposedEvent::EmptyManaPool {
+            player_id: PlayerId(0),
+            units: vec![
+                UnitDecision {
+                    pool_index: 0,
+                    color: ManaType::Green,
+                    disposition: UnitDisposition::Keep,
+                },
+                UnitDecision {
+                    pool_index: 1,
+                    color: ManaType::Red,
+                    disposition: UnitDisposition::Drop,
+                },
+            ],
+            applied: HashSet::new(),
+        };
+        assert!(empty_mana_pool_matcher(&with_drop, ObjectId(0), &state));
+
+        let all_kept = ProposedEvent::EmptyManaPool {
+            player_id: PlayerId(0),
+            units: vec![UnitDecision {
+                pool_index: 0,
+                color: ManaType::Green,
+                disposition: UnitDisposition::Recolor(ManaType::Colorless),
+            }],
+            applied: HashSet::new(),
+        };
+        assert!(!empty_mana_pool_matcher(&all_kept, ObjectId(0), &state));
+
+        // Non-EmptyManaPool events never match.
+        let damage = ProposedEvent::Damage {
+            source_id: ObjectId(1),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        assert!(!empty_mana_pool_matcher(&damage, ObjectId(0), &state));
+    }
+
+    /// SHAPE: `build_replacement_registry` registers `LoseMana` with the real
+    /// `empty_mana_pool_matcher` (not the placeholder `stub_matcher`). Verified
+    /// by feeding a synthetic event through the registered matcher and
+    /// asserting it discriminates on the variant.
+    #[test]
+    fn lose_mana_registry_is_not_stub() {
+        use crate::types::mana::{ManaType, UnitDecision, UnitDisposition};
+        let registry = build_replacement_registry();
+        let entry = registry
+            .get(&ReplacementEvent::LoseMana)
+            .expect("LoseMana must be registered");
+        let state = GameState::new_two_player(0);
+
+        // A real matcher rejects non-EmptyManaPool events (stub_matcher would
+        // also reject, but would also reject EmptyManaPool — so the
+        // discrimination below is what actually proves promotion).
+        let damage = ProposedEvent::Damage {
+            source_id: ObjectId(1),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 1,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        assert!(!(entry.matcher)(&damage, ObjectId(0), &state));
+
+        // A real matcher ACCEPTS an EmptyManaPool with a Drop unit.
+        let pool = ProposedEvent::EmptyManaPool {
+            player_id: PlayerId(0),
+            units: vec![UnitDecision {
+                pool_index: 0,
+                color: ManaType::Green,
+                disposition: UnitDisposition::Drop,
+            }],
+            applied: HashSet::new(),
+        };
+        assert!(
+            (entry.matcher)(&pool, ObjectId(0), &state),
+            "LoseMana registry must use the promoted empty_mana_pool_matcher, not the stub"
+        );
     }
 }

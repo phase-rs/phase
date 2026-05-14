@@ -11,7 +11,10 @@ import {
   listSavedDeckNames,
   loadDeckOrigins,
   loadSavedDeck,
+  loadSavedDeckBracket,
 } from "../constants/storage";
+import type { CommanderBracket } from "../types/bracket";
+import { getPreconBracket } from "../data/preconBrackets";
 import type { Feed, FeedDeck } from "../types/feed";
 import {
   isCommanderPreconDeck,
@@ -33,6 +36,7 @@ export interface DeckCatalogCandidate {
   deck: ParsedDeck;
   knownFormat?: GameFormat;
   coveragePct?: number | null;
+  bracket?: CommanderBracket | null;
   feedDeck?: FeedDeck;
   preconDeck?: PreconDeckEntry;
 }
@@ -106,6 +110,7 @@ export async function buildDeckCatalog({
       source: origin ? { type: "saved", feedId: origin } : { type: "saved" },
       deck,
       knownFormat: origin ? registeredFeedFormat(origin, cachedFeed(origin, feedCache)?.format) : undefined,
+      bracket: loadSavedDeckBracket(name),
     });
     savedDisplayNames.add(name);
   }
@@ -122,6 +127,7 @@ export async function buildDeckCatalog({
         source: { type: "feed", feedId: sub.sourceId },
         deck: feedDeckToParsedDeck(deck),
         knownFormat,
+        bracket: null,
         feedDeck: deck,
       });
     }
@@ -144,6 +150,7 @@ export async function buildDeckCatalog({
       deck: preconDeckEntryToParsedDeck(deck),
       knownFormat: "Commander",
       coveragePct: deck.coveragePct,
+      bracket: getPreconBracket(deckId),
       preconDeck: deck,
     });
   }

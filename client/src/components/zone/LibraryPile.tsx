@@ -3,10 +3,12 @@ import { useCallback, useMemo } from "react";
 import type { ObjectId } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
+import { useLongPress } from "../../hooks/useLongPress.ts";
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
+import { CASTABLE_AFFORDANCE_IDLE } from "../../viewmodel/castableAffordance.ts";
 import { playOrCastActionsForObject } from "../../viewmodel/cardActionChoice.ts";
 
 interface LibraryPileProps {
@@ -69,6 +71,8 @@ export function LibraryPile({ playerId, size }: LibraryPileProps) {
   const waitingFor = useGameStore((s) => s.waitingFor);
   const canActForWaitingState = useCanActForWaitingState();
   const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
+  const inspectObject = useUiStore((s) => s.inspectObject);
+  const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
   const dispatchAction = useGameDispatch();
 
   const isMyLibrary = playerId === myId;
@@ -99,10 +103,19 @@ export function LibraryPile({ playerId, size }: LibraryPileProps) {
     }
   }, [playActions, topObjectId, dispatchAction, setPendingAbilityChoice]);
 
+  const { handlers: longPressHandlers, firedRef: longPressFired } = useLongPress(
+    useCallback(() => {
+      if (topObjectId == null || topCardName == null) return;
+      inspectObject(topObjectId as ObjectId);
+      setPreviewSticky(true);
+    }, [inspectObject, setPreviewSticky, topObjectId, topCardName]),
+  );
+
   if (count === 0) return null;
 
   const stackDepth = Math.min(count - 1, 4);
   const isPeeking = (canPeek || isRevealed) && topCardName;
+  const cardCountLabel = `${count} ${count === 1 ? "card" : "cards"}`;
   const w = size?.width ?? "var(--card-w)";
   const h = size?.height ?? "var(--card-h)";
 
@@ -112,7 +125,7 @@ export function LibraryPile({ playerId, size }: LibraryPileProps) {
       title={
         canPlay
           ? `Play ${topCardName ?? "top of library"} from top of library`
-          : `Library (${count})`
+          : `Library (${cardCountLabel})`
       }
       data-library-pile={playerId}
       style={{ width: w, height: h }}
@@ -134,17 +147,24 @@ export function LibraryPile({ playerId, size }: LibraryPileProps) {
       {/* Top card */}
       <button
         type="button"
-        onClick={canPlay ? handlePlay : undefined}
-        disabled={!canPlay}
+        onClick={() => {
+          if (longPressFired.current) {
+            longPressFired.current = false;
+            return;
+          }
+          if (canPlay) handlePlay();
+        }}
+        disabled={!canPlay && topCardName == null}
         aria-label={
           canPlay
             ? `Play ${topCardName ?? "top of library"} from top of library`
-            : `Library (${count} cards)`
+            : `Library (${cardCountLabel})`
         }
         data-library-top-cast={canPlay ? "true" : "false"}
+        {...longPressHandlers}
         className={`relative block h-full w-full overflow-hidden rounded-lg border shadow-md ${
           canPlay
-            ? "border-amber-400 ring-2 ring-amber-400/70 shadow-[0_0_12px_3px_rgba(245,158,11,0.5)] cursor-pointer"
+            ? `border-amber-400 ${CASTABLE_AFFORDANCE_IDLE} cursor-pointer`
             : isRevealed
               ? "border-amber-500 cursor-default"
               : isPeeking

@@ -1172,6 +1172,20 @@ where
                 }
             }
         }
+        // CR 118.3 + CR 605.3b: Self-sacrifice mana ability costs are paid
+        // atomically before mana production. This is the Treasure / Eldrazi
+        // Spawn / Lotus Petal shape.
+        Some(AbilityCost::Sacrifice {
+            target: TargetFilter::SelfRef,
+            ..
+        }) => {
+            if super::static_abilities::player_cant_sacrifice_as_cost(state, player, source_id) {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot sacrifice this permanent as a cost".to_string(),
+                ));
+            }
+            let _ = sacrifice::sacrifice_permanent(state, source_id, player, events)?;
+        }
         // CR 117.1 + CR 118.3 + CR 605.3b: Non-self sacrifice-from-battlefield
         // as a mana ability cost (Phyrexian Altar class). The interactive flow
         // has already captured the chosen permanents; verify each is still

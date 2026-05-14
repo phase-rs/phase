@@ -23,24 +23,27 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (without_paying, cast_transformed, alt_ability_cost, constraint) = match &ability.effect {
-        Effect::CastFromZone {
-            without_paying_mana_cost,
-            cast_transformed,
-            alt_ability_cost,
-            constraint,
-            ..
-        } => (
-            *without_paying_mana_cost,
-            *cast_transformed,
-            alt_ability_cost.clone(),
-            constraint.clone(),
-        ),
-        _ => return Err(EffectError::MissingParam("CastFromZone".to_string())),
-    };
+    let (target_filter, without_paying, cast_transformed, alt_ability_cost, constraint) =
+        match &ability.effect {
+            Effect::CastFromZone {
+                target,
+                without_paying_mana_cost,
+                cast_transformed,
+                alt_ability_cost,
+                constraint,
+                ..
+            } => (
+                target,
+                *without_paying_mana_cost,
+                *cast_transformed,
+                alt_ability_cost.clone(),
+                constraint.clone(),
+            ),
+            _ => return Err(EffectError::MissingParam("CastFromZone".to_string())),
+        };
 
     // Collect target object IDs from the resolved ability's targets.
-    let target_ids: Vec<_> = ability
+    let mut target_ids: Vec<_> = ability
         .targets
         .iter()
         .filter_map(|t| {
@@ -51,6 +54,21 @@ pub fn resolve(
             }
         })
         .collect();
+
+    if target_ids.is_empty() && target_filter.references_exiled_by_source() {
+        let ctx = crate::game::filter::FilterContext::from_ability(ability);
+        target_ids = crate::game::players::linked_exile_cards_for_source(state, ability.source_id)
+            .iter()
+            .map(|link| link.exiled_id)
+            .filter(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| obj.zone == Zone::Exile)
+                    && crate::game::filter::matches_target_filter(state, *id, target_filter, &ctx)
+            })
+            .collect();
+    }
 
     if target_ids.is_empty() {
         // No targets resolved — nothing to cast.
@@ -126,7 +144,10 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         CardPlayMode, CastPermissionConstraint, Comparator, Effect, QuantityExpr, TargetFilter,
+        TypeFilter, TypedFilter,
     };
+    use crate::types::card_type::CoreType;
+    use crate::types::game_state::{ExileLink, ExileLinkKind};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
 
@@ -239,6 +260,78 @@ mod tests {
             p,
             CastingPermission::ExileWithAltCost { cost, .. } if *cost == ManaCost::generic(3)
         )));
+    }
+
+    #[test]
+    fn exiled_by_source_filter_materializes_linked_exile_cards_without_targets() {
+        let mut state = make_test_state();
+        let source = create_object(
+            &mut state,
+            CardId(999),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let instant = add_card_to_exile(&mut state, PlayerId(1), CardId(301));
+        state
+            .objects
+            .get_mut(&instant)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+        let creature = add_card_to_exile(&mut state, PlayerId(1), CardId(302));
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state.exile_links.push(ExileLink {
+            exiled_id: instant,
+            source_id: source,
+            kind: ExileLinkKind::TrackedBySource,
+        });
+        state.exile_links.push(ExileLink {
+            exiled_id: creature,
+            source_id: source,
+            kind: ExileLinkKind::TrackedBySource,
+        });
+
+        let ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                        TargetFilter::ExiledBySource,
+                    ],
+                },
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = vec![];
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.objects[&instant]
+            .casting_permissions
+            .iter()
+            .any(|p| matches!(
+                p,
+                CastingPermission::ExileWithAltCost { cost, .. } if *cost == ManaCost::zero()
+            )));
+        assert!(
+            state.objects[&creature].casting_permissions.is_empty(),
+            "composed filter must preserve the typed restriction"
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use rand::SeedableRng;
@@ -12,6 +12,7 @@ use super::ability::{
     ModalChoice, ResolvedAbility, SearchSelectionConstraint, StaticCondition, TargetFilter,
     TargetRef, TriggerCondition,
 };
+use super::attribution::ObjectAttribution;
 use super::card::CardFace;
 use super::card_type::{CoreType, Supertype};
 use super::counter::CounterType;
@@ -19,7 +20,7 @@ use super::events::{GameEvent, PlayerActionKind};
 use super::format::FormatConfig;
 use super::identifiers::{CardId, ObjectId, TrackedSetId};
 use super::keywords::{Keyword, KeywordKind};
-use super::mana::{ManaColor, ManaCost, ManaType};
+use super::mana::{ManaColor, ManaCost, ManaType, StepEndManaAction};
 use super::match_config::{MatchConfig, MatchPhase, MatchScore};
 use super::phase::Phase;
 use super::player::{Player, PlayerId};
@@ -442,6 +443,8 @@ pub struct DamageRecord {
     #[serde(default)]
     pub source_controller: PlayerId,
     pub target: TargetRef,
+    #[serde(default)]
+    pub target_controller: PlayerId,
     pub amount: u32,
     #[serde(default)]
     pub is_combat: bool,
@@ -1008,6 +1011,21 @@ pub struct PlayerDeckPool {
     pub current_commander: std::sync::Arc<Vec<DeckEntry>>,
 }
 
+/// CR 400.11/400.11a/400.11b: Tracks sideboard cards brought into this game
+/// without mutating the between-games sideboard partition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutsideGameCardUse {
+    pub player: PlayerId,
+    pub sideboard_index: usize,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutsideGameChoiceEntry {
+    pub sideboard_index: usize,
+    pub entry: DeckEntry,
+}
+
 /// CR 103.6: A beginning-of-game ability waiting to resolve after mulligans.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingBeginGameAbility {
@@ -1076,11 +1094,15 @@ pub enum WaitingFor {
     /// whose cost contains `ManaCostShard::X`. Fires after target selection and
     /// before `ManaPayment`. `max` is the engine-computed upper bound for UI
     /// display and AI enumeration (see `casting_costs::max_x_value`).
+    /// `min` defaults to zero and is raised by parser-stamped restrictions such
+    /// as "X can't be 0."
     /// `convoke_mode` passes through to the subsequent `ManaPayment` step.
     /// `pending_cast` is embedded so filtered state snapshots (multiplayer)
     /// still carry enough context for the UI to render the spell name/cost.
     ChooseXValue {
         player: PlayerId,
+        #[serde(default)]
+        min: u32,
         max: u32,
         pending_cast: Box<PendingCast>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1241,6 +1263,19 @@ pub enum WaitingFor {
         /// AI candidate enumerator to prune illegal combinations.
         #[serde(default)]
         constraint: SearchSelectionConstraint,
+    },
+    /// CR 400.11/400.11a + CR 701.23j: Player chooses card(s) they own from
+    /// outside the game. The engine's bounded outside-game set is the player's
+    /// current sideboard, represented by `DeckEntry`s rather than `GameObject`s.
+    OutsideGameChoice {
+        player: PlayerId,
+        choices: Vec<OutsideGameChoiceEntry>,
+        count: usize,
+        #[serde(default)]
+        reveal: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        up_to: bool,
+        destination: Zone,
     },
     /// CR 700.2: Player selects card(s) from a tracked set (e.g., exiled cards).
     /// Chosen/unchosen cards flow into sub-abilities via pending_continuation,
@@ -2200,6 +2235,7 @@ impl WaitingFor {
             | WaitingFor::SurveilChoice { player, .. }
             | WaitingFor::RevealChoice { player, .. }
             | WaitingFor::SearchChoice { player, .. }
+            | WaitingFor::OutsideGameChoice { player, .. }
             | WaitingFor::ChooseFromZoneChoice { player, .. }
             | WaitingFor::ChooseOneOfBranch { player, .. }
             | WaitingFor::LearnChoice { player, .. }
@@ -2606,11 +2642,15 @@ pub enum CastingVariant {
 }
 
 impl CastingVariant {
-    pub fn stack_to_graveyard_replacement(self) -> Option<Zone> {
-        if matches!(
+    pub fn exiles_when_leaving_stack_for_any_reason(self) -> bool {
+        matches!(
             self,
             CastingVariant::Flashback | CastingVariant::Aftermath | CastingVariant::Harmonize
-        ) {
+        )
+    }
+
+    pub fn stack_to_graveyard_replacement(self) -> Option<Zone> {
+        if self.exiles_when_leaving_stack_for_any_reason() {
             return Some(Zone::Exile);
         }
         if let CastingVariant::GraveyardPermission {
@@ -2812,6 +2852,14 @@ pub struct GameState {
     #[serde(default)]
     pub next_continuous_effect_id: u64,
 
+    /// Per-object source-attribution side-table, rebuilt fresh every layers
+    /// pass. Records which continuous effects contributed grants/removals to
+    /// each object so the frontend can display "Flying — from Akroma's
+    /// Memorial" without inferring source by name-diffing. Display metadata
+    /// only — never read by game logic. Empty objects skip serialization.
+    #[serde(default, skip_serializing_if = "im::HashMap::is_empty")]
+    pub attribution: im::HashMap<ObjectId, ObjectAttribution>,
+
     // Day/night tracking
     #[serde(default)]
     pub day_night: Option<DayNight>,
@@ -2986,6 +3034,8 @@ pub struct GameState {
     pub next_game_chooser: Option<PlayerId>,
     #[serde(default)]
     pub deck_pools: Vec<PlayerDeckPool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outside_game_cards_brought_in: Vec<OutsideGameCardUse>,
     #[serde(default)]
     pub sideboard_submitted: Vec<PlayerId>,
 
@@ -3346,6 +3396,24 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_damage_replacements: Vec<crate::types::ability::ReplacementDefinition>,
 
+    /// CR 703.4q + CR 616.1: Game-state-level pending step-end mana handlers,
+    /// scanned at the start of `drain_pending_phase_transition_progress` for
+    /// each player in APNAP order. Indexed by `ReplacementId::index` with the
+    /// sentinel source `ObjectId(0)` (mirrors `pending_damage_replacements`).
+    /// Populated and drained per-player; never serialized in a paused state
+    /// outside the engine's own phase-transition drain.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_step_end_mana_handlers: Vec<StepEndManaScanEntry>,
+
+    /// CR 500.1 + CR 616.1: Per-phase APNAP-queue progress for resolving
+    /// step-end empty-mana events across players. Set in `enter_phase` when
+    /// transitioning between phases; cleared when the queue empties and
+    /// `finish_enter_phase` runs. Parallel to `pending_replacement` /
+    /// `pending_continuation` as a resume primitive across pipeline pauses
+    /// (CR 616.1e iteration).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_phase_transition_progress: Option<PhaseTransitionProgress>,
+
     /// Transient: set by stack.rs before resolving a triggered ability, cleared after.
     /// Used by event-context TargetFilter variants to resolve trigger event data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3407,6 +3475,14 @@ pub struct TransientContinuousEffect {
     pub modifications: Vec<ContinuousModification>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condition: Option<StaticCondition>,
+    /// Snapshot of the originating object's name, captured at construction.
+    /// The originating spell/ability typically moves to a new zone (graveyard,
+    /// stack→exile, etc.) with a new ObjectId per CR 400.7 after resolution,
+    /// so live `state.objects[source_id]` lookup may not return the original
+    /// card. Snapshot is captured here so attribution display ("+3/+3 from
+    /// Giant Growth") survives the source's zone change.
+    #[serde(default)]
+    pub source_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3418,6 +3494,38 @@ pub struct PendingReplacement {
     /// `candidates` has exactly one entry (the real replacement); decline is synthetic.
     #[serde(default)]
     pub is_optional: bool,
+}
+
+/// CR 703.4q + CR 616.1 + CR 614.1a: One step-end mana handler entry pending
+/// resolution for the current phase transition. Built from the printed-static
+/// and transient-continuous-effect scans at the start of each per-player drain,
+/// and addressed by the replacement pipeline via `ReplacementId { source:
+/// ObjectId(0), index }`.
+///
+/// `description` is the player-facing string surfaced in `WaitingFor::
+/// ReplacementChoice::candidate_descriptions` when multiple handlers apply to
+/// the same emptying event and CR 616.1 requires the affected player to choose
+/// ordering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepEndManaScanEntry {
+    pub source: ObjectId,
+    pub controller: PlayerId,
+    pub filter: Option<ManaColor>,
+    pub action: StepEndManaAction,
+    pub description: String,
+}
+
+/// CR 500.1 + CR 616.1: Resume primitive for the per-phase APNAP-queue of
+/// step-end empty-mana events. Drained by
+/// `drain_pending_phase_transition_progress` (commit 2). When all players are
+/// processed (queue empties), the drain calls `finish_enter_phase` to complete
+/// the phase entry (priority reset, LKI clear, `PhaseChanged` emission).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhaseTransitionProgress {
+    pub remaining_players: VecDeque<PlayerId>,
+    pub next_phase: Phase,
+    pub in_combat: bool,
+    pub entering_cleanup: bool,
 }
 
 /// Context stored when a permanent spell's ETB replacement needs a player choice
@@ -3546,6 +3654,7 @@ impl GameState {
             state_revision: 0,
             transient_continuous_effects: im::Vector::new(),
             next_continuous_effect_id: 1,
+            attribution: im::HashMap::new(),
             day_night: None,
             spells_cast_this_turn: 0,
             spells_cast_last_turn: None,
@@ -3579,6 +3688,7 @@ impl GameState {
             current_starting_player: PlayerId(0),
             next_game_chooser: None,
             deck_pools: Vec::new(),
+            outside_game_cards_brought_in: Vec::new(),
             sideboard_submitted: Vec::new(),
             triggers_fired_this_turn: HashSet::new(),
             trigger_fire_counts_this_turn: HashMap::new(),
@@ -3647,6 +3757,8 @@ impl GameState {
             city_blessing: HashSet::new(),
             restrictions: Vec::new(),
             pending_damage_replacements: Vec::new(),
+            pending_step_end_mana_handlers: Vec::new(),
+            pending_phase_transition_progress: None,
             current_trigger_event: None,
             current_trigger_events: Vec::new(),
             stack_trigger_event_batches: HashMap::new(),
@@ -3714,6 +3826,19 @@ impl GameState {
         let id = self.next_continuous_effect_id;
         self.next_continuous_effect_id += 1;
         let timestamp = self.next_timestamp();
+        // CR 400.7 + CR 603.10: When a triggered ability creates a transient
+        // continuous effect AFTER its source has left a public zone (e.g., a
+        // leaves-the-battlefield trigger), `state.objects` no longer holds the
+        // pre-zone-change ObjectId — `lki_cache` is the canonical snapshot of
+        // the source's characteristics at the moment it left. Falling back to
+        // LKI mirrors the same name-resolution pattern used in `filter.rs`,
+        // `quantity.rs`, and `log.rs`.
+        let source_name = self
+            .objects
+            .get(&source_id)
+            .map(|o| o.name.clone())
+            .or_else(|| self.lki_cache.get(&source_id).map(|lki| lki.name.clone()))
+            .unwrap_or_default();
         self.transient_continuous_effects
             .push_back(TransientContinuousEffect {
                 id,
@@ -3724,6 +3849,7 @@ impl GameState {
                 affected,
                 modifications,
                 condition,
+                source_name,
             });
         self.layers_dirty = true;
         id
@@ -3822,6 +3948,7 @@ impl PartialEq for GameState {
             && self.current_starting_player == other.current_starting_player
             && self.next_game_chooser == other.next_game_chooser
             && self.deck_pools == other.deck_pools
+            && self.outside_game_cards_brought_in == other.outside_game_cards_brought_in
             && self.sideboard_submitted == other.sideboard_submitted
             && self.triggers_fired_this_turn == other.triggers_fired_this_turn
             && self.trigger_fire_counts_this_turn == other.trigger_fire_counts_this_turn
@@ -4298,6 +4425,7 @@ mod tests {
         });
         let choose_x = WaitingFor::ChooseXValue {
             player: PlayerId(0),
+            min: 0,
             max: 5,
             pending_cast: pending,
             convoke_mode: None,
@@ -4503,6 +4631,7 @@ mod tests {
             ),
             timestamp: 42,
             target_constraints: Vec::new(),
+            distribute: None,
             trigger_event: None,
             modal: None,
             mode_abilities: vec![],
@@ -4566,6 +4695,7 @@ mod tests {
             ),
             timestamp: 1,
             target_constraints: Vec::new(),
+            distribute: None,
             trigger_event: None,
             modal: None,
             mode_abilities: vec![],

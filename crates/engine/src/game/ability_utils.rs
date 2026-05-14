@@ -58,6 +58,8 @@ pub fn build_resolved_from_def_with_targets(
     resolved.multi_target = def.multi_target.clone();
     resolved.target_choice_timing = def.target_choice_timing;
     resolved.repeat_for = def.repeat_for.clone();
+    resolved.min_x_value = def.min_x_value;
+    resolved.cant_be_copied = def.cant_be_copied;
     resolved.description = def.description.clone();
     resolved.forward_result = def.forward_result;
     resolved.unless_pay = def.unless_pay.clone();
@@ -84,8 +86,8 @@ pub fn build_resolved_from_def_with_targets(
 ///
 /// Fields from `sub`: effect, duration, sub_ability, else_ability,
 /// player_scope, optional, optional_for, optional_targeting, multi_target,
-/// target_choice_timing, description, repeat_for, forward_result, unless_pay,
-/// distribution, target_selection_mode.
+/// target_choice_timing, description, repeat_for, min_x_value, forward_result,
+/// unless_pay, distribution, target_selection_mode.
 ///
 /// Fields preserved from `parent`: controller, source_id, kind, context,
 /// original_controller, scoped_player, targets, chosen_x, cost_paid_object,
@@ -121,6 +123,7 @@ pub(crate) fn apply_instead_swap(
     overridden.target_choice_timing = sub.target_choice_timing;
     overridden.description = sub.description.clone();
     overridden.repeat_for = sub.repeat_for.clone();
+    overridden.min_x_value = sub.min_x_value;
     overridden.forward_result = sub.forward_result;
     overridden.unless_pay = sub.unless_pay.clone();
     overridden.distribution = sub.distribution.clone();
@@ -2658,16 +2661,116 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityKind, CounterTransferMode, Duration, Effect, FilterProp, ModalChoice,
-        ModalSelectionConstraint, MultiTargetSpec, PtValue, QuantityExpr, QuantityRef,
-        SearchSelectionConstraint, TargetFilter, TargetRef, TypeFilter, TypedFilter,
-        UnlessPayModifier,
+        AbilityCost, AbilityKind, CounterTransferMode, Duration, Effect, FilterProp,
+        LibraryPosition, ModalChoice, ModalSelectionConstraint, MultiTargetSpec, PtValue,
+        QuantityExpr, QuantityRef, SearchSelectionConstraint, TargetFilter, TargetRef, TypeFilter,
+        TypedFilter, UnlessPayModifier,
     };
     use crate::types::card_type::CoreType;
-    use crate::types::game_state::{GameState, TargetSelectionConstraint, TargetSelectionSlot};
+    use crate::types::game_state::{
+        GameState, StackEntryKind, TargetSelectionConstraint, TargetSelectionSlot, WaitingFor,
+    };
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
+    use crate::types::mana::{ManaCost, ManaType, ManaUnit};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+    use crate::types::{FormatConfig, GameAction};
+    //mazes end test for self bounce lands
+    #[test]
+    fn mazes_end_search_resolves_after_self_bounce_cost() {
+        let format = FormatConfig::duel_commander();
+        let mut state = GameState::new(format, 2, 2);
+        let mazes_end = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Maze's End".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&mazes_end).expect("Maze's End");
+            obj.card_types.core_types.push(CoreType::Land);
+            std::sync::Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::SearchLibrary {
+                        filter: TargetFilter::Typed(
+                            TypedFilter::new(TypeFilter::Land)
+                                .with_type(TypeFilter::Subtype("Gate".to_string())),
+                        ),
+                        count: QuantityExpr::Fixed { value: 1 },
+                        reveal: false,
+                        target_player: None,
+                        selection_constraint: SearchSelectionConstraint::None,
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::Cost {
+                                shards: Vec::new(),
+                                generic: 3,
+                            },
+                        },
+                        AbilityCost::Tap,
+                        AbilityCost::ReturnToHand {
+                            count: 1,
+                            filter: Some(TargetFilter::SelfRef),
+                            from_zone: Some(Zone::Battlefield),
+                        },
+                    ],
+                }),
+            );
+        }
+        for _ in 0..3 {
+            state.players[0].mana_pool.add(ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(999),
+                false,
+                Vec::new(),
+            ));
+        }
+
+        let waiting = crate::game::casting::handle_activate_ability(
+            &mut state,
+            PlayerId(0),
+            mazes_end,
+            0,
+            &mut Vec::new(),
+        )
+        .expect("Maze's End activation should begin");
+        assert!(
+            matches!(waiting, WaitingFor::ReturnToHandForCost { .. }),
+            "self-bounce cost should request a return-to-hand selection"
+        );
+        state.waiting_for = waiting;
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![mazes_end],
+            },
+        )
+        .expect("paying the self-bounce cost should finish activation");
+
+        assert_eq!(state.objects[&mazes_end].zone, Zone::Hand);
+        assert!(
+            state.players[0].hand.contains(&mazes_end),
+            "Maze's End is returned to hand as an activation cost"
+        );
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "Maze's End ability should be on the stack"
+        );
+        match &state.stack[0].kind {
+            StackEntryKind::ActivatedAbility { source_id, ability } => {
+                assert_eq!(*source_id, mazes_end);
+                assert!(matches!(ability.effect, Effect::SearchLibrary { .. }));
+            }
+            other => panic!("expected Maze's End activated ability on stack, got {other:?}"),
+        }
+    }
 
     #[test]
     fn build_chained_resolved_preserves_mode_sub_abilities() {
@@ -3592,6 +3695,95 @@ mod tests {
             slots.is_empty(),
             "tracked-set pronouns are bound by prior effects, not chosen as targets"
         );
+    }
+
+    #[test]
+    fn build_target_slots_ignores_exiled_by_source_library_cleanup() {
+        let state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![],
+                duration: None,
+                target: None,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::ExiledBySource,
+                count: QuantityExpr::Fixed { value: 0 },
+                position: LibraryPosition::Bottom,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        ));
+
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+
+        assert!(
+            slots.is_empty(),
+            "linked-exile cleanup is resolved from source links, not chosen as a target"
+        );
+    }
+
+    #[test]
+    fn build_target_slots_ignores_composed_exiled_by_source_cast_filter() {
+        let state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                        TargetFilter::ExiledBySource,
+                    ],
+                },
+                without_paying_mana_cost: true,
+                mode: crate::types::ability::CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+
+        assert!(
+            slots.is_empty(),
+            "typed linked-exile filters are resolved from source links, not chosen as targets"
+        );
+    }
+
+    #[test]
+    fn build_target_slots_keeps_or_filter_with_non_context_branch_targeted() {
+        let state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::ExiledBySource,
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                    ],
+                },
+                without_paying_mana_cost: true,
+                mode: crate::types::ability::CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+
+        let err = build_target_slots(&state, &ability).expect_err("target slot should be required");
+
+        assert!(matches!(err, EngineError::ActionNotAllowed(_)));
     }
 
     #[test]

@@ -4,71 +4,30 @@ use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{CopyTargetSlot, GameState, WaitingFor};
+use crate::types::game_state::{CopyTargetSlot, GameState, StackEntry, StackEntryKind, WaitingFor};
 use crate::types::identifiers::ObjectId;
+use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
-/// CR 707.10: Copy a spell — create a copy on the stack with the same characteristics and choices.
-/// CR 707.10a: The copy becomes a token.
-/// CR 707.10c: Controller may choose new targets for the copy.
+/// CR 707.10: Copy a spell or ability by putting a copy onto the stack with the
+/// same characteristics and choices.
+/// CR 707.10c: Some copy effects let the controller choose new targets before
+/// the copy is put onto the stack.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // CR 707.10: Find the spell to copy.
-    // For SelfRef targets (e.g. Casualty "copy this spell"), look up by source_id so
-    // that intermediate triggered abilities pushed between the original spell and this
-    // copy trigger do not cause state.stack.last() to return the wrong entry.
-    // For explicit object targets (e.g. Twincast), use the chosen target id.
-    // Fallback: take the top of the stack (legacy / untargeted copy effects).
-    let top_entry = if let Some(TargetRef::Object(target_id)) = ability.targets.first() {
-        state
-            .stack
-            .iter()
-            .find(|e| e.id == *target_id)
-            .cloned()
-            .ok_or_else(|| {
-                EffectError::MissingParam("Target spell not found on stack".to_string())
-            })?
-    } else if matches!(
-        ability.effect,
-        Effect::CopySpell {
-            target: TargetFilter::SelfRef,
-            ..
-        }
-    ) {
-        // CR 702.176a (Casualty): copy the spell this ability belongs to, identified by source_id.
-        state
-            .stack
-            .iter()
-            .find(|e| e.id == ability.source_id)
-            .cloned()
-            .ok_or_else(|| {
-                EffectError::MissingParam("Source spell not found on stack".to_string())
-            })?
-    } else {
-        state
-            .stack
-            .last()
-            .cloned()
-            .ok_or_else(|| EffectError::MissingParam("No spell on stack to copy".to_string()))?
-    };
+    // CR 707.10 / CR 702.176a (Casualty): resolve which stack entry to copy.
+    // The helper handles explicit object targets (Twincast / Gogo), SelfRef
+    // (Casualty triggers whose intermediate stack pushes would make stack.last()
+    // wrong), and untargeted fallback (top of stack).
+    let top_entry = copy_source_entry(state, ability).ok_or_else(|| {
+        EffectError::MissingParam("No spell or ability on stack to copy".to_string())
+    })?;
 
-    // CR 707.10 + CR 101.2: A spell with "this spell can't be copied" is
-    // uncopyable — the copy attempt fails with no effect. Check the target
-    // spell's static definitions via the single-authority helper used by
-    // counter.rs for the analogous CantBeCountered case.
-    let has_cant_be_copied = state
-        .objects
-        .get(&top_entry.id)
-        .map(|obj| {
-            super::super::functioning_abilities::active_static_definitions(state, obj)
-                .any(|sd| sd.mode == StaticMode::CantBeCopied)
-        })
-        .unwrap_or(false);
-    if has_cant_be_copied {
+    if stack_entry_cant_be_copied(state, &top_entry) {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
@@ -76,30 +35,32 @@ pub fn resolve(
         return Ok(());
     }
 
-    // Allocate a new object ID for the copy
+    // Allocate a new stack ID for the copy.
     let copy_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
 
-    // CR 707.10a: The copy becomes a token. Create a GameObject with copiable
-    // characteristics from the original spell so zone transitions work correctly.
-    let source_obj = state
-        .objects
-        .get(&top_entry.id)
-        .ok_or(EffectError::ObjectNotFound(top_entry.id))?;
-    let mut copy_obj = source_obj.clone();
-    copy_obj.id = copy_id;
-    copy_obj.controller = ability.controller;
-    copy_obj.zone = Zone::Stack;
-    copy_obj.is_token = true;
-    state.objects.insert(copy_id, copy_obj);
+    // CR 707.10: A spell copy is itself a spell on the stack. Ability stack
+    // entries are objects too, but this engine does not store GameObjects for
+    // activated/triggered ability entries; clone a GameObject only when the
+    // copied stack entry already has one.
+    if let Some(source_obj) = state.objects.get(&top_entry.id) {
+        let mut copy_obj = source_obj.clone();
+        copy_obj.id = copy_id;
+        copy_obj.controller = ability.controller;
+        copy_obj.zone = Zone::Stack;
+        copy_obj.is_token = true;
+        state.objects.insert(copy_id, copy_obj);
+    }
 
-    // Build the copy's kind, updating internal source_id references to copy_id.
     // CR 707.10: The copy has the same characteristics as the original, but its
-    // identity is distinct. Reset additional_cost_paid and kickers_paid so any
-    // "if its [additional] cost was paid" conditions (e.g. Offspring ETB triggers)
-    // do not fire for the copy — the copy was placed on the stack, not cast.
+    // identity is distinct.
+    //   - Reset additional_cost_paid + kickers_paid so any "if its [additional]
+    //     cost was paid" triggers (Offspring ETB, Casualty) do not fire for the
+    //     copy — the copy is placed on the stack, not cast.
+    //   - Update internal source_id references on the Spell variant to copy_id.
+    //   - Re-controller the resolved ability chain so opponent-controlled copies
+    //     (Twincast, Gogo) resolve under the copying player.
     let copy_kind = {
-        use crate::types::game_state::StackEntryKind;
         let mut kind = top_entry.kind.clone();
         if let StackEntryKind::Spell {
             ability: Some(ref mut a),
@@ -110,11 +71,12 @@ pub fn resolve(
             a.context.additional_cost_paid = false;
             a.context.kickers_paid.clear();
         }
+        set_copied_kind_controller(&mut kind, ability.controller);
         kind
     };
 
     // CR 707.10: The copy's source_id is its own id (not the original's).
-    let copy_entry = crate::types::game_state::StackEntry {
+    let copy_entry = StackEntry {
         id: copy_id,
         source_id: copy_id,
         controller: ability.controller,
@@ -213,6 +175,78 @@ pub fn resolve(
     Ok(())
 }
 
+fn copy_source_entry(state: &GameState, ability: &ResolvedAbility) -> Option<StackEntry> {
+    let target_id = ability.targets.iter().find_map(|target| match target {
+        TargetRef::Object(id) => Some(*id),
+        TargetRef::Player(_) => None,
+    });
+    if let Some(target_id) = target_id {
+        return state
+            .stack
+            .iter()
+            .find(|entry| entry.id == target_id)
+            .cloned();
+    }
+    if matches!(
+        &ability.effect,
+        Effect::CopySpell {
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    ) {
+        return state
+            .stack
+            .iter()
+            .find(|entry| entry.id == ability.source_id)
+            .cloned();
+    }
+    state.stack.last().cloned()
+}
+
+fn stack_entry_cant_be_copied(state: &GameState, entry: &StackEntry) -> bool {
+    if entry
+        .ability()
+        .is_some_and(|ability| ability.cant_be_copied)
+    {
+        return true;
+    }
+
+    state
+        .objects
+        .get(&entry.id)
+        .map(|obj| {
+            super::super::functioning_abilities::active_static_definitions(state, obj)
+                .any(|sd| sd.mode == StaticMode::CantBeCopied)
+        })
+        .unwrap_or(false)
+}
+
+fn set_copied_kind_controller(kind: &mut StackEntryKind, controller: PlayerId) {
+    match kind {
+        StackEntryKind::Spell {
+            ability: Some(ability),
+            ..
+        }
+        | StackEntryKind::ActivatedAbility { ability, .. } => {
+            set_resolved_controller_recursive(ability, controller);
+        }
+        StackEntryKind::TriggeredAbility { ability, .. } => {
+            set_resolved_controller_recursive(ability, controller);
+        }
+        StackEntryKind::Spell { ability: None, .. } | StackEntryKind::KeywordAction { .. } => {}
+    }
+}
+
+fn set_resolved_controller_recursive(ability: &mut ResolvedAbility, controller: PlayerId) {
+    ability.controller = controller;
+    if let Some(sub_ability) = ability.sub_ability.as_mut() {
+        set_resolved_controller_recursive(sub_ability, controller);
+    }
+    if let Some(else_ability) = ability.else_ability.as_mut() {
+        set_resolved_controller_recursive(else_ability, controller);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,7 +324,7 @@ mod tests {
         // Copy should have a different ID
         assert_ne!(state.stack[0].id, state.stack[1].id);
 
-        // CR 707.10a: The copy's GameObject should be a token
+        // Engine bookkeeping: spell copies get a stack GameObject.
         let copy_id = state.stack[1].id;
         let copy_obj = state.objects.get(&copy_id).expect("copy object exists");
         assert!(copy_obj.is_token);
@@ -697,6 +731,197 @@ mod tests {
         assert!(
             state.pending_continuation.is_none(),
             "Amplifier-spawned copy must not queue another continuation (infinite loop guard)"
+        );
+    }
+
+    #[test]
+    fn uncopyable_activated_ability_on_stack_is_not_copied_through_stack_resolution() {
+        let mut state = GameState::new_two_player(42);
+        let gogo_id = ObjectId(20);
+        let other_id = ObjectId(21);
+
+        let mut gogo_ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::StackAbility {
+                    controller: Some(crate::types::ability::ControllerRef::You),
+                },
+                amplifier_spawn: false,
+            },
+            vec![],
+            gogo_id,
+            PlayerId(0),
+        );
+        gogo_ability.cant_be_copied = true;
+
+        state.stack.push_back(StackEntry {
+            id: ObjectId(40),
+            source_id: gogo_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: gogo_id,
+                ability: gogo_ability,
+            },
+        });
+
+        let copy_gogo = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::StackAbility {
+                    controller: Some(crate::types::ability::ControllerRef::You),
+                },
+                amplifier_spawn: false,
+            },
+            vec![TargetRef::Object(ObjectId(40))],
+            other_id,
+            PlayerId(0),
+        );
+        state.stack.push_back(StackEntry {
+            id: ObjectId(41),
+            source_id: other_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: other_id,
+                ability: copy_gogo,
+            },
+        });
+
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        assert_eq!(state.stack.len(), 1);
+        assert_eq!(state.stack[0].id, ObjectId(40));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::StackPushed { .. })));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, GameEvent::EffectResolved { .. })));
+    }
+
+    #[test]
+    fn copy_targeted_triggered_ability_on_stack_through_stack_resolution() {
+        let mut state = GameState::new_two_player(42);
+        let hope_id = ObjectId(10);
+        let gogo_id = ObjectId(20);
+        state.objects.insert(
+            hope_id,
+            GameObject::new(
+                hope_id,
+                CardId(10),
+                PlayerId(0),
+                "Hope Estheim".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+        state.objects.insert(
+            gogo_id,
+            GameObject::new(
+                gogo_id,
+                CardId(20),
+                PlayerId(0),
+                "Gogo, Master of Mimicry".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+
+        let hope_trigger_entry = ObjectId(30);
+        let hope_trigger = ResolvedAbility::new(
+            Effect::Mill {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::default()
+                        .controller(crate::types::ability::ControllerRef::Opponent),
+                ),
+                destination: Zone::Graveyard,
+            },
+            vec![],
+            hope_id,
+            PlayerId(0),
+        );
+        state.stack.push_back(StackEntry {
+            id: hope_trigger_entry,
+            source_id: hope_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: hope_id,
+                ability: Box::new(hope_trigger),
+                condition: None,
+                trigger_event: None,
+                description: Some("At the beginning of your end step".to_string()),
+                source_name: "Hope Estheim".to_string(),
+            },
+        });
+        state.stack.push_back(StackEntry {
+            id: ObjectId(31),
+            source_id: ObjectId(31),
+            controller: PlayerId(1),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: ObjectId(31),
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                    vec![],
+                    ObjectId(31),
+                    PlayerId(1),
+                )),
+                condition: None,
+                trigger_event: None,
+                description: Some("Opponent trigger".to_string()),
+                source_name: "Opponent Source".to_string(),
+            },
+        });
+
+        let gogo_entry = ObjectId(40);
+        let gogo_target_filter = TargetFilter::StackAbility {
+            controller: Some(crate::types::ability::ControllerRef::You),
+        };
+        assert_eq!(
+            crate::game::targeting::find_legal_targets(
+                &state,
+                &gogo_target_filter,
+                PlayerId(0),
+                gogo_id,
+            ),
+            vec![TargetRef::Object(hope_trigger_entry)]
+        );
+
+        let mut gogo_copy = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: gogo_target_filter,
+                amplifier_spawn: false,
+            },
+            vec![TargetRef::Object(hope_trigger_entry)],
+            gogo_id,
+            PlayerId(0),
+        );
+        gogo_copy.repeat_for = Some(QuantityExpr::Fixed { value: 2 });
+        state.stack.push_back(StackEntry {
+            id: gogo_entry,
+            source_id: gogo_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: gogo_id,
+                ability: gogo_copy,
+            },
+        });
+
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        assert_eq!(state.stack.len(), 4);
+        assert_eq!(state.stack[0].id, hope_trigger_entry);
+        assert_eq!(state.stack[1].id, ObjectId(31));
+        assert!(state.stack.iter().skip(2).all(|entry| matches!(
+            &entry.kind,
+            StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == hope_id
+        )));
+        assert!(
+            events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::StackPushed { .. }))
+                .count()
+                >= 2
         );
     }
 }

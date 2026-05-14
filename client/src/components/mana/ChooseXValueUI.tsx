@@ -22,7 +22,10 @@ export function ChooseXValueUI() {
   const canAct = useCanActForWaitingState();
 
   const isChooseX = waitingFor?.type === "ChooseXValue";
+  const min = isChooseX ? (waitingFor.data.min ?? 0) : 0;
   const max = isChooseX ? waitingFor.data.max : 0;
+  const hasValidBounds = min <= max;
+  const defaultValue = hasValidBounds ? Math.max(min, 0) : 0;
   const pendingCast = isChooseX ? waitingFor.data.pending_cast : null;
 
   const pendingCostShards = useMemo(() => {
@@ -39,12 +42,15 @@ export function ChooseXValueUI() {
   const [value, setValue] = useState(0);
 
   useEffect(() => {
-    if (isChooseX) setValue(0);
-  }, [isChooseX, max]);
+    if (isChooseX) setValue(defaultValue);
+  }, [isChooseX, defaultValue]);
 
   const handleCommit = useCallback(() => {
-    dispatch({ type: "ChooseX", data: { value } });
-  }, [dispatch, value]);
+    dispatch({
+      type: "ChooseX",
+      data: { value: Math.min(Math.max(value, min), max) },
+    });
+  }, [dispatch, max, min, value]);
 
   const handleCancel = useCallback(() => {
     dispatch({ type: "CancelCast" });
@@ -52,7 +58,7 @@ export function ChooseXValueUI() {
 
   // CR 601.2f: X is chosen by the caster; opponents observe via the stack
   // ghost entry, not an interactive panel.
-  if (!isChooseX || !canAct) return null;
+  if (!isChooseX || !canAct || !hasValidBounds) return null;
 
   return (
     <AnimatePresence>
@@ -86,7 +92,7 @@ export function ChooseXValueUI() {
               </span>
               <input
                 type="range"
-                min={0}
+                min={min}
                 max={max}
                 value={value}
                 onChange={(e) => setValue(Number(e.target.value))}
@@ -94,7 +100,7 @@ export function ChooseXValueUI() {
                 aria-label="Choose X value"
               />
               <span className="shrink-0 text-xs text-gray-500">
-                max {max}
+                {min > 0 ? `min ${min} / max ${max}` : `max ${max}`}
               </span>
             </label>
           </div>

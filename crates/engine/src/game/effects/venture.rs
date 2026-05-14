@@ -241,6 +241,7 @@ fn queue_room_trigger(state: &mut GameState, player: PlayerId, dungeon: DungeonI
         ability: room_ability,
         timestamp: 0,
         target_constraints,
+        distribute: None,
         trigger_event: Some(GameEvent::RoomEntered {
             player_id: player,
             dungeon,

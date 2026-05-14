@@ -1,6 +1,8 @@
-use crate::types::ability::{FilterProp, ResolvedAbility, TargetFilter, TargetRef, TypedFilter};
+use crate::types::ability::{
+    ControllerRef, FilterProp, ResolvedAbility, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+};
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::{HexproofFilter, Keyword};
 use crate::types::player::PlayerId;
@@ -17,14 +19,7 @@ pub fn find_legal_targets(
     source_controller: PlayerId,
     source_id: ObjectId,
 ) -> Vec<TargetRef> {
-    use crate::types::ability::ControllerRef;
     let mut targets = Vec::new();
-
-    // StackAbility: only match non-mana activated/triggered abilities on the stack
-    if matches!(filter, TargetFilter::StackAbility) {
-        add_stack_abilities(state, source_id, &mut targets);
-        return targets;
-    }
 
     // SpecificObject is runtime-bound (not used for target selection)
     if matches!(filter, TargetFilter::SpecificObject { .. }) {
@@ -37,13 +32,6 @@ pub fn find_legal_targets(
         return targets;
     }
 
-    if matches!(filter, TargetFilter::AttachedTo) {
-        if let Some(target) = resolve_event_context_target(state, filter, source_id) {
-            targets.push(target);
-        }
-        return targets;
-    }
-
     if let TargetFilter::Or { filters } = filter {
         let mut seen = HashSet::new();
         for branch in filters {
@@ -52,6 +40,19 @@ pub fn find_legal_targets(
                     targets.push(target);
                 }
             }
+        }
+        return targets;
+    }
+
+    // StackAbility: only match non-mana activated/triggered abilities on the stack.
+    if filter_targets_stack_abilities(filter) {
+        add_stack_abilities(state, filter, source_controller, source_id, &mut targets);
+        return targets;
+    }
+
+    if matches!(filter, TargetFilter::AttachedTo) {
+        if let Some(target) = resolve_event_context_target(state, filter, source_id) {
+            targets.push(target);
         }
         return targets;
     }
@@ -175,8 +176,13 @@ pub fn find_legal_targets(
                 Zone::Stack => {
                     for entry in &state.stack {
                         let obj_id = entry.id;
-                        if super::filter::matches_target_filter(state, obj_id, filter, &target_ctx)
-                        {
+                        if stack_entry_matches_filter(
+                            state,
+                            entry,
+                            filter,
+                            source_controller,
+                            source_id,
+                        ) {
                             let obj = match state.objects.get(&obj_id) {
                                 Some(o) => o,
                                 None => continue,
@@ -641,23 +647,112 @@ pub(crate) fn extract_amount_from_event(event: &crate::types::events::GameEvent)
 /// Find activated/triggered (non-mana) abilities on the stack as legal targets.
 /// Mana abilities never go on the stack, so all ActivatedAbility/TriggeredAbility
 /// entries are valid. Excludes the source ability itself.
-fn add_stack_abilities(state: &GameState, source_id: ObjectId, targets: &mut Vec<TargetRef>) {
-    use crate::types::game_state::StackEntryKind;
+fn add_stack_abilities(
+    state: &GameState,
+    filter: &TargetFilter,
+    source_controller: PlayerId,
+    source_id: ObjectId,
+    targets: &mut Vec<TargetRef>,
+) {
     for entry in &state.stack {
         if entry.id == source_id {
             continue; // Don't target yourself
         }
-        match &entry.kind {
-            // CR 113.3b: Activated keyword abilities (Crew / Station / Equip / Saddle)
-            // are activated abilities and are targetable by counterspell-class effects
-            // that filter "activated or triggered ability on the stack".
-            StackEntryKind::ActivatedAbility { .. }
-            | StackEntryKind::TriggeredAbility { .. }
-            | StackEntryKind::KeywordAction { .. } => {
-                targets.push(TargetRef::Object(entry.id));
-            }
-            StackEntryKind::Spell { .. } => {}
+        if stack_ability_matches_filter(entry, filter, source_controller) {
+            targets.push(TargetRef::Object(entry.id));
         }
+    }
+}
+
+pub(crate) fn stack_entry_matches_filter(
+    state: &GameState,
+    entry: &StackEntry,
+    filter: &TargetFilter,
+    source_controller: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    match &entry.kind {
+        StackEntryKind::Spell { .. } => {
+            stack_spell_entry_matches_filter(state, entry, filter, source_controller, source_id)
+        }
+        StackEntryKind::ActivatedAbility { .. }
+        | StackEntryKind::TriggeredAbility { .. }
+        | StackEntryKind::KeywordAction { .. } => {
+            filter_targets_stack_abilities(filter)
+                && stack_ability_matches_filter(entry, filter, source_controller)
+        }
+    }
+}
+
+fn stack_ability_matches_filter(
+    entry: &StackEntry,
+    filter: &TargetFilter,
+    source_controller: PlayerId,
+) -> bool {
+    match filter {
+        TargetFilter::StackAbility { controller } => {
+            if !matches!(
+                &entry.kind,
+                // CR 113.3b / CR 113.3c: Activated and triggered abilities are
+                // objects on the stack. Mana abilities do not reach the stack, so
+                // entries of these kinds are targetable stack abilities.
+                StackEntryKind::ActivatedAbility { .. }
+                    | StackEntryKind::TriggeredAbility { .. }
+                    | StackEntryKind::KeywordAction { .. }
+            ) {
+                return false;
+            }
+            stack_entry_controller_matches(entry, controller.as_ref(), source_controller)
+        }
+        TargetFilter::Typed(tf) => {
+            if !tf.type_filters.is_empty()
+                && !tf
+                    .type_filters
+                    .iter()
+                    .all(|ty| matches!(ty, TypeFilter::Card))
+            {
+                return false;
+            }
+            if tf.controller.is_some()
+                && !stack_entry_controller_matches(entry, tf.controller.as_ref(), source_controller)
+            {
+                return false;
+            }
+            tf.properties.iter().all(|property| match property {
+                FilterProp::HasSingleTarget => entry
+                    .ability()
+                    .is_some_and(|ability| ability.targets.len() == 1),
+                FilterProp::InZone { zone } => *zone == Zone::Stack,
+                _ => true,
+            })
+        }
+        TargetFilter::And { filters } => filters
+            .iter()
+            .all(|filter| stack_ability_matches_filter(entry, filter, source_controller)),
+        TargetFilter::Or { filters } => filters
+            .iter()
+            .any(|filter| stack_ability_matches_filter(entry, filter, source_controller)),
+        TargetFilter::Not { filter } => {
+            !stack_ability_matches_filter(entry, filter, source_controller)
+        }
+        TargetFilter::Any => true,
+        _ => false,
+    }
+}
+
+fn stack_entry_controller_matches(
+    entry: &StackEntry,
+    controller: Option<&ControllerRef>,
+    source_controller: PlayerId,
+) -> bool {
+    let Some(controller) = controller else {
+        return true;
+    };
+    let is_you = entry.controller == source_controller;
+    match controller {
+        ControllerRef::You => is_you,
+        ControllerRef::Opponent => !is_you,
+        _ => false,
     }
 }
 
@@ -696,73 +791,108 @@ fn add_stack_spells(
     source_id: ObjectId,
     targets: &mut Vec<TargetRef>,
 ) {
+    for entry in &state.stack {
+        if !stack_spell_entry_matches_filter(state, entry, filter, source_controller, source_id) {
+            continue;
+        }
+
+        let obj = match state.objects.get(&entry.id) {
+            Some(o) => o,
+            None => continue,
+        };
+        if can_target(obj, source_controller, source_id, state) {
+            targets.push(TargetRef::Object(entry.id));
+        }
+    }
+}
+
+fn stack_spell_entry_matches_filter(
+    state: &GameState,
+    entry: &StackEntry,
+    filter: &TargetFilter,
+    source_controller: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    if !matches!(entry.kind, StackEntryKind::Spell { .. }) {
+        return false;
+    }
+
     let requires_single_target = filter_requires_single_target(filter);
     let targets_only_constraint = super::filter::extract_targets_only(filter);
     let targets_constraint = super::filter::extract_targets(filter);
     let source_controller_opt = state.objects.get(&source_id).map(|o| o.controller);
 
-    for entry in &state.stack {
-        if !matches!(
-            entry.kind,
-            crate::types::game_state::StackEntryKind::Spell { .. }
-        ) {
-            continue;
+    // CR 115.9a: "with a single target" counts the spell's chosen target instances.
+    if requires_single_target {
+        let targets = entry.ability().map(|a| &a.targets[..]).unwrap_or(&[]);
+        if targets.len() != 1 {
+            return false;
         }
-        // CR 115.7: "with a single target" — only match stack entries with exactly one target.
-        if requires_single_target {
-            let targets = entry.ability().map(|a| &a.targets[..]).unwrap_or(&[]);
-            if targets.len() != 1 {
-                continue;
-            }
+    }
+
+    let bare_ctx = super::filter::FilterContext::from_source(state, source_id);
+    // CR 115.9c: "that targets only [X]" — all targets must match the constraint filter.
+    if let Some(ref constraint) = targets_only_constraint {
+        let targets = entry.ability().map(|a| &a.targets[..]).unwrap_or(&[]);
+        if targets.is_empty()
+            || !targets.iter().all(|t| match t {
+                TargetRef::Object(id) => {
+                    super::filter::matches_target_filter(state, *id, constraint, &bare_ctx)
+                }
+                TargetRef::Player(pid) => super::filter::player_matches_target_filter(
+                    constraint,
+                    *pid,
+                    source_controller_opt,
+                ),
+            })
+        {
+            return false;
         }
-        let bare_ctx = super::filter::FilterContext::from_source(state, source_id);
-        // CR 115.9c: "that targets only [X]" — all targets must match the constraint filter.
-        if let Some(ref constraint) = targets_only_constraint {
-            let targets = entry.ability().map(|a| &a.targets[..]).unwrap_or(&[]);
-            if targets.is_empty()
-                || !targets.iter().all(|t| match t {
-                    TargetRef::Object(id) => {
-                        super::filter::matches_target_filter(state, *id, constraint, &bare_ctx)
-                    }
-                    TargetRef::Player(pid) => super::filter::player_matches_target_filter(
-                        constraint,
-                        *pid,
-                        source_controller_opt,
-                    ),
-                })
-            {
-                continue;
-            }
+    }
+    // CR 115.9b: "that targets [X]" — at least one target must match (.any() semantics).
+    if let Some(ref constraint) = targets_constraint {
+        let targets = entry.ability().map(|a| &a.targets[..]).unwrap_or(&[]);
+        if targets.is_empty()
+            || !targets.iter().any(|t| match t {
+                TargetRef::Object(id) => {
+                    super::filter::matches_target_filter(state, *id, constraint, &bare_ctx)
+                }
+                TargetRef::Player(pid) => super::filter::player_matches_target_filter(
+                    constraint,
+                    *pid,
+                    source_controller_opt,
+                ),
+            })
+        {
+            return false;
         }
-        // CR 115.9b: "that targets [X]" — at least one target must match (.any() semantics).
-        if let Some(ref constraint) = targets_constraint {
-            let targets = entry.ability().map(|a| &a.targets[..]).unwrap_or(&[]);
-            if targets.is_empty()
-                || !targets.iter().any(|t| match t {
-                    TargetRef::Object(id) => {
-                        super::filter::matches_target_filter(state, *id, constraint, &bare_ctx)
-                    }
-                    TargetRef::Player(pid) => super::filter::player_matches_target_filter(
-                        constraint,
-                        *pid,
-                        source_controller_opt,
-                    ),
-                })
-            {
-                continue;
-            }
+    }
+
+    let controlled_ctx =
+        super::filter::FilterContext::from_source_with_controller(source_id, source_controller);
+    stack_spell_matches_filter(state, entry.id, filter, &controlled_ctx)
+}
+
+fn stack_spell_matches_filter(
+    state: &GameState,
+    object_id: ObjectId,
+    filter: &TargetFilter,
+    ctx: &super::filter::FilterContext,
+) -> bool {
+    match filter {
+        TargetFilter::StackSpell => true,
+        TargetFilter::StackAbility { .. } => false,
+        TargetFilter::Typed(_) => {
+            super::filter::matches_target_filter(state, object_id, filter, ctx)
         }
-        let controlled_ctx =
-            super::filter::FilterContext::from_source_with_controller(source_id, source_controller);
-        if super::filter::matches_target_filter(state, entry.id, filter, &controlled_ctx) {
-            let obj = match state.objects.get(&entry.id) {
-                Some(o) => o,
-                None => continue,
-            };
-            if can_target(obj, source_controller, source_id, state) {
-                targets.push(TargetRef::Object(entry.id));
-            }
-        }
+        TargetFilter::And { filters } => filters
+            .iter()
+            .all(|filter| stack_spell_matches_filter(state, object_id, filter, ctx)),
+        TargetFilter::Or { filters } => filters
+            .iter()
+            .any(|filter| stack_spell_matches_filter(state, object_id, filter, ctx)),
+        TargetFilter::Not { filter } => !stack_spell_matches_filter(state, object_id, filter, ctx),
+        other => super::filter::matches_target_filter(state, object_id, other, ctx),
     }
 }
 
@@ -781,8 +911,8 @@ fn filter_requires_single_target(filter: &TargetFilter) -> bool {
 }
 
 fn filter_targets_stack_spells(filter: &TargetFilter) -> bool {
-    use crate::types::ability::TypeFilter;
     match filter {
+        TargetFilter::StackSpell => true,
         TargetFilter::Typed(TypedFilter {
             type_filters,
             properties,
@@ -797,6 +927,17 @@ fn filter_targets_stack_spells(filter: &TargetFilter) -> bool {
             filters.iter().any(filter_targets_stack_spells)
         }
         TargetFilter::Not { filter } => filter_targets_stack_spells(filter),
+        _ => false,
+    }
+}
+
+fn filter_targets_stack_abilities(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::StackAbility { .. } => true,
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_targets_stack_abilities)
+        }
+        TargetFilter::Not { filter } => filter_targets_stack_abilities(filter),
         _ => false,
     }
 }
@@ -1244,6 +1385,60 @@ mod tests {
     }
 
     #[test]
+    fn protection_from_each_color_blocks_every_color_source() {
+        // CR 702.16b + CR 105.2: "Protection from each color" — Akroma's Will
+        // / Iridescent Angel scenario. End-to-end: parse the Oracle text via
+        // `extract_keyword_line` (which routes through `expand_protection_parts`
+        // and emits 5 typed `Protection(Color(X))` keywords), attach the
+        // parsed keywords to a creature, and verify every monocolored source
+        // is rejected by `find_legal_targets`. Regression test for the bug
+        // where "protection from each color" was emitted as the no-op
+        // `ProtectionTarget::CardType("each color")`, letting black sources
+        // like Dark Impostor target a creature buffed by Akroma's Will.
+        use crate::types::mana::ManaColor;
+
+        let keywords = crate::parser::oracle_keyword::extract_keyword_line(
+            "protection from each color",
+            &["protection".to_string()],
+        )
+        .expect("'protection from each color' should parse as a keyword line");
+
+        let (mut state, _c0, c1) = setup_with_creatures();
+        state
+            .objects
+            .get_mut(&c1)
+            .unwrap()
+            .keywords
+            .extend(keywords);
+
+        for (idx, color) in [
+            ManaColor::White,
+            ManaColor::Blue,
+            ManaColor::Black,
+            ManaColor::Red,
+            ManaColor::Green,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let source = create_object(
+                &mut state,
+                CardId(100u64 + idx as u64),
+                PlayerId(0),
+                format!("{color:?} Source"),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&source).unwrap().color.push(color);
+
+            let targets = find_legal_targets(&state, &creature_filter(), PlayerId(0), source);
+            assert!(
+                !targets.contains(&TargetRef::Object(c1)),
+                "creature with protection from each color must reject {color:?} source"
+            );
+        }
+    }
+
+    #[test]
     fn ward_does_not_prevent_targeting() {
         // Ward should be recognized but not block targeting (cost enforcement deferred)
         let (mut state, _c0, c1) = setup_with_creatures();
@@ -1544,6 +1739,151 @@ mod tests {
         assert!(targets.contains(&TargetRef::Object(spell_id)));
         assert!(!targets.contains(&TargetRef::Object(source_id)));
         assert!(!targets.contains(&TargetRef::Object(land)));
+    }
+
+    #[test]
+    fn stack_spell_or_creature_filter_matches_spells_and_creatures_only() {
+        let (mut state, source_id, creature, land) = setup_with_typed_creatures();
+        let spell_id = create_object(
+            &mut state,
+            CardId(301),
+            PlayerId(1),
+            "Stack Spell".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(crate::types::game_state::StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: PlayerId(1),
+            kind: crate::types::game_state::StackEntryKind::Spell {
+                card_id: CardId(301),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let ability_id = create_object(
+            &mut state,
+            CardId(302),
+            PlayerId(1),
+            "Stack Ability".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(crate::types::game_state::StackEntry {
+            id: ability_id,
+            source_id,
+            controller: PlayerId(1),
+            kind: crate::types::game_state::StackEntryKind::KeywordAction {
+                action: crate::types::ability::KeywordAction::Equip {
+                    equipment_id: source_id,
+                    target_creature_id: creature,
+                },
+            },
+        });
+
+        let filter = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::StackSpell,
+                TargetFilter::Typed(TypedFilter::creature()),
+            ],
+        };
+        let targets = find_legal_targets(&state, &filter, PlayerId(0), source_id);
+
+        assert!(targets.contains(&TargetRef::Object(spell_id)));
+        assert!(targets.contains(&TargetRef::Object(creature)));
+        assert!(!targets.contains(&TargetRef::Object(ability_id)));
+        assert!(!targets.contains(&TargetRef::Object(land)));
+    }
+
+    #[test]
+    fn explicit_stack_zone_composed_stack_spell_filter_matches_instant_spell() {
+        let (mut state, source_id, creature, _land) = setup_with_typed_creatures();
+        let instant_id = create_object(
+            &mut state,
+            CardId(303),
+            PlayerId(1),
+            "Instant Spell".to_string(),
+            Zone::Stack,
+        );
+        state
+            .objects
+            .get_mut(&instant_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+        state.stack.push_back(crate::types::game_state::StackEntry {
+            id: instant_id,
+            source_id: instant_id,
+            controller: PlayerId(1),
+            kind: crate::types::game_state::StackEntryKind::Spell {
+                card_id: CardId(303),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let sorcery_id = create_object(
+            &mut state,
+            CardId(304),
+            PlayerId(1),
+            "Sorcery Spell".to_string(),
+            Zone::Stack,
+        );
+        state
+            .objects
+            .get_mut(&sorcery_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Sorcery);
+        state.stack.push_back(crate::types::game_state::StackEntry {
+            id: sorcery_id,
+            source_id: sorcery_id,
+            controller: PlayerId(1),
+            kind: crate::types::game_state::StackEntryKind::Spell {
+                card_id: CardId(304),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let ability_id = create_object(
+            &mut state,
+            CardId(305),
+            PlayerId(1),
+            "Stack Ability".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(crate::types::game_state::StackEntry {
+            id: ability_id,
+            source_id,
+            controller: PlayerId(1),
+            kind: crate::types::game_state::StackEntryKind::KeywordAction {
+                action: crate::types::ability::KeywordAction::Equip {
+                    equipment_id: source_id,
+                    target_creature_id: creature,
+                },
+            },
+        });
+
+        let filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::StackSpell,
+                TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Instant)
+                        .properties(vec![FilterProp::InZone { zone: Zone::Stack }]),
+                ),
+            ],
+        };
+        let targets = find_legal_targets(&state, &filter, PlayerId(0), source_id);
+
+        assert!(targets.contains(&TargetRef::Object(instant_id)));
+        assert!(!targets.contains(&TargetRef::Object(sorcery_id)));
+        assert!(!targets.contains(&TargetRef::Object(ability_id)));
     }
 
     #[test]

@@ -17,6 +17,7 @@ import { useLongPress } from "../../hooks/useLongPress.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
+import { buildGrantedKeywordSources, buildPTSources } from "../../viewmodel/attribution.ts";
 import { COUNTER_COLORS, computePTDisplay, formatCounterTooltip, formatCounterType, toRoman } from "../../viewmodel/cardProps.ts";
 import { getCardDisplayColors } from "../card/cardFrame.ts";
 import { useBoardInteractionState } from "./BoardInteractionContext.tsx";
@@ -104,6 +105,35 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
   const tapRotation = usePreferencesStore((s) => s.tapRotation);
   const isCompactHeight = useIsCompactHeight();
   const showKeywordStrip = usePreferencesStore((s) => s.showKeywordStrip) ?? true;
+  // Narrow subscriptions so a non-attribution state change (mana pool, phase,
+  // animation tick) doesn't re-render every PermanentCard on the board.
+  const objectAttribution = useGameStore(
+    (s) => s.gameState?.attribution?.[String(objectId)],
+  );
+  const transientContinuousEffects = useGameStore(
+    (s) => s.gameState?.transient_continuous_effects,
+  );
+  const objId = obj?.id;
+  const keywordSourceMap = useMemo(
+    () =>
+      objId !== undefined
+        ? buildGrantedKeywordSources(objectAttribution, objId, {
+            objects: gameObjects,
+            transientContinuousEffects,
+          })
+        : undefined,
+    [objectAttribution, transientContinuousEffects, gameObjects, objId],
+  );
+  const ptSources = useMemo(
+    () =>
+      objId !== undefined
+        ? buildPTSources(objectAttribution, objId, {
+            objects: gameObjects,
+            transientContinuousEffects,
+          })
+        : undefined,
+    [objectAttribution, transientContinuousEffects, gameObjects, objId],
+  );
   const {
     activatableObjectIds,
     committedAttackerIds,
@@ -485,7 +515,11 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
             <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? { power: obj.power, toughness: obj.toughness, colors: obj.color } : undefined} faceDown={obj.face_down} />
             {/* Keyword strip overlay — inside the card image wrapper so absolute positioning works */}
             {showKeywordStrip && obj.keywords.length > 0 && !obj.face_down && (
-              <KeywordStrip keywords={obj.keywords} baseKeywords={obj.base_keywords} />
+              <KeywordStrip
+                keywords={obj.keywords}
+                baseKeywords={obj.base_keywords}
+                sourceByKeyword={keywordSourceMap}
+              />
             )}
             {/* CR 702.26: phased-out tint overlay — sky-blue mix-blend-screen
                 matches the player-area treatment (PlayerArea.tsx 4d6cfb506). */}
@@ -498,7 +532,14 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
           </div>
 
           {/* P/T box for creatures */}
-          {ptDisplay && <PTBox ptDisplay={ptDisplay} />}
+          {ptDisplay && (
+            <PTBox
+              ptDisplay={ptDisplay}
+              ptSources={ptSources}
+              basePower={obj.base_power}
+              baseToughness={obj.base_toughness}
+            />
+          )}
 
           {/* Damage overlay for non-creatures only (creatures use P/T box) */}
           {!ptDisplay && obj.damage_marked > 0 && (

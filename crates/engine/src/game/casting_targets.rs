@@ -404,7 +404,7 @@ fn repeat_escalate_cost(cost: AbilityCost, count: usize) -> AbilityCost {
 
 /// CR 601.2d: Extract a fixed distribution total from an effect's amount field.
 /// Returns `None` if the amount depends on X or other runtime values (deferred to post-payment).
-fn extract_fixed_distribution_total(effect: &Effect) -> Option<u32> {
+pub(super) fn extract_fixed_distribution_total(effect: &Effect) -> Option<u32> {
     match effect {
         Effect::DealDamage {
             amount: QuantityExpr::Fixed { value },

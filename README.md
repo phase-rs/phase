@@ -158,6 +158,8 @@ Transport-agnostic `EngineAdapter` interface with multiple implementations:
 
 ### Build Commands
 
+> **Tip:** If you're running Tilt (`tilt up`), prefer `./scripts/tilt-wait.sh <resource>` over the direct cargo/pnpm equivalents — Tilt continuously rebuilds in the background and `tilt-wait.sh` blocks only until the relevant resource settles, avoiding target-lock contention. When Tilt is **not** running, fall back to the commands below. See `CLAUDE.md` § "Canonical verification pattern" for the conditional template used by agents and skills.
+
 ```bash
 # Rust (uses cargo-nextest for test execution)
 cargo test-all                             # Run all tests (nextest)

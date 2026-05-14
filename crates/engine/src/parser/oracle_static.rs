@@ -11,7 +11,8 @@ use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::oracle_cost::parse_oracle_cost;
-use super::oracle_effect::parse_effect_chain;
+use super::oracle_effect::subject::{parse_restriction_modes, static_mode_needs_grant_propagation};
+use super::oracle_effect::{parse_effect_chain, strip_trailing_duration};
 use super::oracle_ir::static_ir::StaticIr;
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::condition as nom_condition;
@@ -39,7 +40,7 @@ use crate::types::ability::{
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{parse_counter_type, CounterMatch};
 use crate::types::keywords::{Keyword, KeywordKind};
-use crate::types::mana::{ManaColor, ManaCost};
+use crate::types::mana::{ManaColor, ManaCost, ManaType};
 use crate::types::phase::Phase;
 use crate::types::statics::{
     ActivationExemption, CastFrequency, CastingProhibitionCondition, CostPaymentProhibition,
@@ -67,6 +68,94 @@ fn nom_tag_tp<'a>(tp: &TextPair<'a>, prefix: &str) -> Option<TextPair<'a>> {
             let rest_original = &tp.original[matched.len()..];
             TextPair::new(rest_original, rest_lower)
         })
+}
+
+/// CR 614.1a + CR 703.4q: Parse "If you would lose unspent mana, that mana
+/// becomes [type] instead." — Horizon Stone / Kruphix / Omnath / Ozai class.
+/// Emits the unified `StepEndUnspentMana { filter: None, action: Transform(to) }`
+/// bound to the source's controller.
+pub(crate) fn try_parse_transform_unspent_mana_static(
+    text: &str,
+    lower: &str,
+) -> Option<StaticDefinition> {
+    use crate::types::mana::StepEndManaAction;
+
+    nom_on_lower(text, lower, |input| {
+        let (input, _) =
+            tag::<_, _, OracleError<'_>>("if you would lose unspent mana, that mana becomes ")
+                .parse(input)?;
+        let (input, to) = alt((
+            value(ManaType::Colorless, tag("colorless")),
+            map(nom_primitives::parse_color, ManaType::from),
+        ))
+        .parse(input)?;
+        let (input, _) = tag(" instead").parse(input)?;
+        let (input, _) = opt(tag(".")).parse(input)?;
+        eof(input)?;
+        Ok((input, to))
+    })
+    .map(|(to, _)| {
+        let mode = StaticMode::StepEndUnspentMana {
+            filter: None,
+            action: StepEndManaAction::Transform(to),
+        };
+        StaticDefinition::new(mode.clone())
+            .affected(TargetFilter::Controller)
+            .modifications(vec![ContinuousModification::AddStaticMode { mode }])
+            .description(text.to_string())
+    })
+}
+
+pub(crate) fn try_parse_retain_unspent_mana_static(
+    text: &str,
+    lower: &str,
+) -> Option<StaticDefinition> {
+    use crate::types::mana::StepEndManaAction;
+
+    nom_on_lower(text, lower, |input| {
+        // CR 703.4q: Subject parameterizes the affected scope.
+        // "You" → controller (Electro); "Players" → every player (Upwelling).
+        let (input, affected) = alt((
+            value(
+                TargetFilter::Controller,
+                tag::<_, _, OracleError<'_>>("you "),
+            ),
+            value(TargetFilter::Player, tag("players ")),
+        ))
+        .parse(input)?;
+        let (input, _) = alt((tag("don't lose "), tag("don\u{2019}t lose "))).parse(input)?;
+        let (input, color) = alt((
+            value(None, tag("unspent mana")),
+            map(
+                preceded(
+                    tag("unspent "),
+                    terminated(nom_primitives::parse_color, tag(" mana")),
+                ),
+                Some,
+            ),
+        ))
+        .parse(input)?;
+        let (input, _) = tag(" as steps and phases end").parse(input)?;
+        let (input, _) = opt(tag(".")).parse(input)?;
+        eof(input)?;
+        Ok((input, (affected, color)))
+    })
+    .map(|((affected, color), _)| {
+        // CR 611.2b: `modifications` carries the same mode so transient-effect
+        // installation (spells like The Last Agni Kai that emit this via
+        // `Effect::GenericEffect`) propagates the retention rule through
+        // `register_transient_effect` → `add_transient_continuous_effect`.
+        // Printed-static callers (Upwelling, Electro) reach this via the
+        // source's `static_definitions` scan and ignore `modifications`.
+        let mode = StaticMode::StepEndUnspentMana {
+            filter: color,
+            action: StepEndManaAction::Retain,
+        };
+        StaticDefinition::new(mode.clone())
+            .affected(affected)
+            .modifications(vec![ContinuousModification::AddStaticMode { mode }])
+            .description(text.to_string())
+    })
 }
 
 fn parse_activated_cost_reduction_minimum_mana(lower: &str) -> Option<u32> {
@@ -625,6 +714,14 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     // "you may cast Dragon spells without paying their mana costs" relies on
     // CR 601.2's implicit hand zone.
     if let Some(result) = try_parse_cast_free_permission(&text, &lower) {
+        return Some(result);
+    }
+
+    if let Some(result) = try_parse_retain_unspent_mana_static(&text, &lower) {
+        return Some(result);
+    }
+
+    if let Some(result) = try_parse_transform_unspent_mana_static(&text, &lower) {
         return Some(result);
     }
 
@@ -6754,10 +6851,11 @@ fn parse_continuous_gets_has(
                     // e.g., "gets +1/+0 for each Mountain you control and has first strike"
                     if let Some(keyword_text) = extract_keyword_clause(description) {
                         for part in split_keyword_list(keyword_text.trim().trim_end_matches('.')) {
-                            if let Some(kw) = map_keyword(part.trim().trim_end_matches('.')) {
-                                modifications
-                                    .push(ContinuousModification::AddKeyword { keyword: kw });
-                            }
+                            push_grant_clause_modifications(
+                                &mut modifications,
+                                part.as_ref(),
+                                None,
+                            );
                         }
                     }
                     return Some(
@@ -6962,35 +7060,11 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
         }
     } else if let Some(keyword_text) = extract_keyword_clause(&unquoted_text) {
         for part in split_keyword_list(keyword_text.trim().trim_end_matches('.')) {
-            let part_trimmed = part.trim().trim_end_matches('.');
-            let part_lower = part_trimmed.to_lowercase();
-            // CR 702: Check for dynamic "keyword X" with "where X is [qty]"
-            if let Some(ref where_expr) = where_x_expression {
-                if let Ok((_, kw_name)) = terminated(
-                    alpha1::<_, OracleError<'_>>,
-                    preceded(space1, tag_no_case("x")),
-                )
-                .parse(part_lower.as_str())
-                {
-                    if let Some(kind) =
-                        crate::types::keywords::DynamicKeywordKind::from_name(kw_name)
-                    {
-                        if let Some(qty_ref) =
-                            crate::parser::oracle_quantity::parse_quantity_ref(where_expr)
-                        {
-                            modifications.push(ContinuousModification::AddDynamicKeyword {
-                                kind,
-                                value: QuantityExpr::Ref { qty: qty_ref },
-                            });
-                            continue;
-                        }
-                    }
-                }
-            }
-            // Fall through to normal AddKeyword
-            if let Some(kw) = map_keyword(part_trimmed) {
-                modifications.push(ContinuousModification::AddKeyword { keyword: kw });
-            }
+            push_grant_clause_modifications(
+                &mut modifications,
+                part.as_ref(),
+                where_x_expression.as_deref(),
+            );
         }
     }
 
@@ -7011,6 +7085,52 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     modifications.extend(parse_becomes_type_addition_modifications(&unquoted_tp));
 
     modifications
+}
+
+fn push_grant_clause_modifications(
+    modifications: &mut Vec<ContinuousModification>,
+    part: &str,
+    where_x_expression: Option<&str>,
+) {
+    let part_trimmed = part.trim().trim_end_matches('.');
+    let (part_without_duration, _) = strip_trailing_duration(part_trimmed);
+    let part_trimmed = part_without_duration.trim().trim_end_matches('.');
+    let part_lower = part_trimmed.to_lowercase();
+
+    // CR 702: Check for dynamic "keyword X" with "where X is [qty]"
+    if let Some(where_expr) = where_x_expression {
+        if let Ok((_, kw_name)) = terminated(
+            alpha1::<_, OracleError<'_>>,
+            preceded(space1, tag_no_case("x")),
+        )
+        .parse(part_lower.as_str())
+        {
+            if let Some(kind) = crate::types::keywords::DynamicKeywordKind::from_name(kw_name) {
+                if let Some(qty_ref) =
+                    crate::parser::oracle_quantity::parse_quantity_ref(where_expr)
+                {
+                    modifications.push(ContinuousModification::AddDynamicKeyword {
+                        kind,
+                        value: QuantityExpr::Ref { qty: qty_ref },
+                    });
+                    return;
+                }
+            }
+        }
+    }
+
+    if let Some(kw) = map_keyword(part_trimmed) {
+        modifications.push(ContinuousModification::AddKeyword { keyword: kw });
+        return;
+    }
+
+    if let Some(modes) = parse_restriction_modes(part_lower.as_str()) {
+        for mode in modes {
+            if static_mode_needs_grant_propagation(&mode) {
+                modifications.push(ContinuousModification::AddStaticMode { mode });
+            }
+        }
+    }
 }
 
 fn strip_quoted_segments(text: &str) -> String {
@@ -11990,6 +12110,60 @@ mod tests {
         );
     }
 
+    #[test]
+    fn continuous_mods_grant_keyword_and_cant_be_blocked() {
+        let mods = parse_continuous_modifications("gains flying and can't be blocked this turn");
+        assert!(
+            mods.contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            }),
+            "missing flying grant in {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddStaticMode {
+                    mode: StaticMode::CantBeBlocked
+                }
+            )),
+            "missing CantBeBlocked grant in {mods:?}"
+        );
+    }
+
+    #[test]
+    fn continuous_mods_grant_chosen_color_hexproof_and_block_restriction() {
+        use crate::types::keywords::{HexproofFilter, Keyword};
+
+        let mods = parse_continuous_modifications(
+            "gains hexproof from that color until end of turn and can't be blocked by creatures of that color this turn",
+        );
+
+        assert!(
+            mods.contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::HexproofFrom(HexproofFilter::ChosenColor),
+            }),
+            "missing typed HexproofFrom(ChosenColor) grant in {mods:?}"
+        );
+
+        let Some(filter) = mods.iter().find_map(|m| match m {
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantBeBlockedBy { filter },
+            } => Some(filter),
+            _ => None,
+        }) else {
+            panic!("missing CantBeBlockedBy grant in {mods:?}");
+        };
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.properties
+                .iter()
+                .any(|prop| matches!(prop, FilterProp::IsChosenColor)),
+            "missing IsChosenColor filter prop in {tf:?}"
+        );
+    }
+
     // --- Graveyard cast permission tests ---
 
     #[test]
@@ -16258,6 +16432,294 @@ mod tests {
         assert_eq!(modes.len(), 2);
         assert!(modes.contains(&StaticMode::CantGainLife));
         assert!(modes.contains(&StaticMode::CantLoseLife));
+    }
+
+    #[test]
+    fn static_retain_unspent_colored_mana_across_steps_and_phases() {
+        use crate::types::mana::StepEndManaAction;
+        let def =
+            parse_static_line("You don't lose unspent red mana as steps and phases end.").unwrap();
+
+        assert_eq!(
+            def.mode,
+            StaticMode::StepEndUnspentMana {
+                filter: Some(ManaColor::Red),
+                action: StepEndManaAction::Retain,
+            }
+        );
+        assert_eq!(def.affected, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn static_retain_all_unspent_mana_across_steps_and_phases() {
+        use crate::types::mana::StepEndManaAction;
+        let def =
+            parse_static_line("You don't lose unspent mana as steps and phases end.").unwrap();
+
+        assert_eq!(
+            def.mode,
+            StaticMode::StepEndUnspentMana {
+                filter: None,
+                action: StepEndManaAction::Retain,
+            }
+        );
+        assert_eq!(def.affected, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn static_retain_unspent_mana_accepts_curly_apostrophe() {
+        use crate::types::mana::StepEndManaAction;
+        let def = parse_static_line("You don’t lose unspent green mana as steps and phases end.")
+            .unwrap();
+
+        assert_eq!(
+            def.mode,
+            StaticMode::StepEndUnspentMana {
+                filter: Some(ManaColor::Green),
+                action: StepEndManaAction::Retain,
+            }
+        );
+    }
+
+    #[test]
+    fn static_retain_unspent_mana_players_subject() {
+        // CR 703.4q: Upwelling — "Players don't lose unspent mana as steps and
+        // phases end." Affected scope widens from controller to every player.
+        use crate::types::mana::StepEndManaAction;
+        let def =
+            parse_static_line("Players don't lose unspent mana as steps and phases end.").unwrap();
+
+        assert_eq!(
+            def.mode,
+            StaticMode::StepEndUnspentMana {
+                filter: None,
+                action: StepEndManaAction::Retain,
+            }
+        );
+        assert_eq!(def.affected, Some(TargetFilter::Player));
+    }
+
+    #[test]
+    fn static_transform_unspent_mana_colorless() {
+        // CR 614.1a + CR 703.4q: Horizon Stone / Kruphix.
+        use crate::types::mana::{ManaType, StepEndManaAction};
+        let def = parse_static_line(
+            "If you would lose unspent mana, that mana becomes colorless instead.",
+        )
+        .unwrap();
+
+        assert_eq!(
+            def.mode,
+            StaticMode::StepEndUnspentMana {
+                filter: None,
+                action: StepEndManaAction::Transform(ManaType::Colorless),
+            }
+        );
+        assert_eq!(def.affected, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn static_transform_unspent_mana_to_color() {
+        use crate::types::mana::{ManaType, StepEndManaAction};
+        // CR 614.1a + CR 703.4q: Omnath, Locus of All (Black) and Ozai (Red).
+        let black =
+            parse_static_line("If you would lose unspent mana, that mana becomes black instead.")
+                .unwrap();
+        assert_eq!(
+            black.mode,
+            StaticMode::StepEndUnspentMana {
+                filter: None,
+                action: StepEndManaAction::Transform(ManaType::Black),
+            }
+        );
+
+        let red =
+            parse_static_line("If you would lose unspent mana, that mana becomes red instead.")
+                .unwrap();
+        assert_eq!(
+            red.mode,
+            StaticMode::StepEndUnspentMana {
+                filter: None,
+                action: StepEndManaAction::Transform(ManaType::Red),
+            }
+        );
+    }
+
+    /// Printed-card round-trip tests for the step-end unspent mana class.
+    /// Each test feeds the exact printed Oracle text for the matching clause
+    /// (verified against `client/public/card-data.json`) through the parser
+    /// to confirm the unified `StepEndUnspentMana` variant emerges with the
+    /// right filter and action.
+    #[test]
+    fn card_text_upwelling_players_retention() {
+        // CR 703.4q: Upwelling printed text.
+        use crate::types::mana::StepEndManaAction;
+        let def =
+            parse_static_line("Players don't lose unspent mana as steps and phases end.").unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::StepEndUnspentMana {
+                filter: None,
+                action: StepEndManaAction::Retain,
+            }
+        );
+        assert_eq!(def.affected, Some(TargetFilter::Player));
+    }
+
+    #[test]
+    fn card_text_omnath_locus_of_mana_green_retention() {
+        // CR 703.4q: Omnath, Locus of Mana — printed first ability line.
+        // The card's other line ("Omnath gets +1/+1 for each unspent green
+        // mana you have.") is a separate static parsed independently.
+        use crate::types::mana::StepEndManaAction;
+        let def = parse_static_line("You don't lose unspent green mana as steps and phases end.")
+            .unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::StepEndUnspentMana {
+                filter: Some(ManaColor::Green),
+                action: StepEndManaAction::Retain,
+            }
+        );
+        assert_eq!(def.affected, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn card_text_horizon_stone_transforms_to_colorless() {
+        // CR 614.1a + CR 703.4q: Horizon Stone printed text.
+        use crate::types::mana::{ManaType, StepEndManaAction};
+        let def = parse_static_line(
+            "If you would lose unspent mana, that mana becomes colorless instead.",
+        )
+        .unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::StepEndUnspentMana {
+                filter: None,
+                action: StepEndManaAction::Transform(ManaType::Colorless),
+            }
+        );
+        assert_eq!(def.affected, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn card_text_kruphix_transforms_to_colorless() {
+        // CR 614.1a + CR 703.4q: Kruphix, God of Horizons — the transform
+        // clause printed alongside indestructible / devotion / no-max-hand.
+        // Same Oracle wording as Horizon Stone; the other clauses route
+        // through their own parser paths.
+        use crate::types::mana::{ManaType, StepEndManaAction};
+        let def = parse_static_line(
+            "If you would lose unspent mana, that mana becomes colorless instead.",
+        )
+        .unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::StepEndUnspentMana {
+                filter: None,
+                action: StepEndManaAction::Transform(ManaType::Colorless),
+            }
+        );
+    }
+
+    #[test]
+    fn card_text_omnath_locus_of_all_transforms_to_black() {
+        // CR 614.1a + CR 703.4q: Omnath, Locus of All printed text.
+        use crate::types::mana::{ManaType, StepEndManaAction};
+        let def =
+            parse_static_line("If you would lose unspent mana, that mana becomes black instead.")
+                .unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::StepEndUnspentMana {
+                filter: None,
+                action: StepEndManaAction::Transform(ManaType::Black),
+            }
+        );
+    }
+
+    #[test]
+    fn card_text_ozai_transforms_to_red() {
+        // CR 614.1a + CR 703.4q: Ozai, the Phoenix King printed text. The
+        // surrounding keyword and as-long-as-flying clauses route through
+        // their own parser paths.
+        use crate::types::mana::{ManaType, StepEndManaAction};
+        let def =
+            parse_static_line("If you would lose unspent mana, that mana becomes red instead.")
+                .unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::StepEndUnspentMana {
+                filter: None,
+                action: StepEndManaAction::Transform(ManaType::Red),
+            }
+        );
+    }
+
+    /// CR 611.2b + CR 703.4q: SHAPE test for The Last Agni Kai's *full
+    /// printed Oracle text* — the two-sentence card (fight + excess-damage
+    /// mana rider on line 1, retention static on line 2) routed through
+    /// the card-level entry point `parse_oracle_text`.
+    ///
+    /// The pre-parser line-splitter delivers each sentence to its own
+    /// dispatch path, so the retention clause reaches the spell-effect
+    /// parser independently of the fight clause; the existing
+    /// `until_end_of_turn_retain_unspent_color_mana_installs_generic_effect`
+    /// test in `oracle_effect/mod.rs` already covers the second-line
+    /// behavior in isolation. This regression test pins the full printed
+    /// text so a future change to line splitting, chained-clause handling,
+    /// or sentence dispatch cannot silently drop the retention sub-effect.
+    #[test]
+    fn card_text_the_last_agni_kai_full_printed_text() {
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::ability::{Duration, Effect};
+        use crate::types::mana::{ManaColor, StepEndManaAction};
+
+        let parsed = parse_oracle_text(
+            "Target creature you control fights target creature an opponent \
+             controls. If the creature the opponent controls is dealt excess \
+             damage this way, add that much {R}.\n\
+             Until end of turn, you don't lose unspent red mana as steps and \
+             phases end.",
+            "The Last Agni Kai",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+
+        // Exactly two top-level spell abilities, one per printed sentence.
+        assert_eq!(
+            parsed.abilities.len(),
+            2,
+            "expected 2 spell abilities, got {:?}",
+            parsed.abilities
+        );
+
+        // Sentence 2: the retention rider installs a turn-scoped
+        // `StepEndUnspentMana { Red, Retain }` via `GenericEffect`.
+        let retention_ability = parsed
+            .abilities
+            .iter()
+            .find(|a| matches!(*a.effect, Effect::GenericEffect { .. }))
+            .expect("retention sentence should parse as GenericEffect");
+        let Effect::GenericEffect {
+            ref static_abilities,
+            ref duration,
+            ..
+        } = *retention_ability.effect
+        else {
+            unreachable!()
+        };
+        assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+        assert_eq!(static_abilities.len(), 1);
+        assert_eq!(
+            static_abilities[0].mode,
+            StaticMode::StepEndUnspentMana {
+                filter: Some(ManaColor::Red),
+                action: StepEndManaAction::Retain,
+            }
+        );
+        assert_eq!(static_abilities[0].affected, Some(TargetFilter::Controller));
     }
 
     #[test]

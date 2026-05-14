@@ -41,6 +41,11 @@ interface DeckListProps {
   format?: string;
   compatibility?: DeckCompatibilityResult | null;
   onChooseArt?: (cardName: string, x: number, y: number) => void;
+  /** When provided, each main-deck row of a commander-eligible card renders a
+   *  crown button that promotes the card to commander. Format-gated by the
+   *  parent (DeckBuilder); MoveList/CardEntryRow stay format-agnostic. */
+  onSetAsCommander?: (name: string) => void;
+  isCommanderEligible?: (name: string) => boolean;
 }
 
 
@@ -94,6 +99,8 @@ export function DeckList({
   format,
   compatibility,
   onChooseArt,
+  onSetAsCommander,
+  isCommanderEligible,
 }: DeckListProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [showPasteModal, setShowPasteModal] = useState(false);
@@ -341,6 +348,8 @@ export function DeckList({
                 onCardHover={onCardHover}
                 unsupportedMap={unsupportedMap}
                 onChooseArt={onChooseArt}
+                onSetAsCommander={onSetAsCommander}
+                isCommanderEligible={isCommanderEligible}
               />
             ))
           : !hideSideboard && (

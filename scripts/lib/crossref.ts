@@ -22,7 +22,7 @@ export interface CrossrefItem {
   category: string;
   cards: string[];
   card_statuses: CardStatus;
-  overall_status: "likely_fixed" | "still_broken" | "unknown_card" | "no_card";
+  overall_status: "needs_semantic_verify" | "still_broken" | "unknown_card" | "no_card";
   summary: string;
   source_url: string;
 }
@@ -86,7 +86,7 @@ export async function crossReference(
 
       if (allUnknown) overall = "unknown_card";
       else if (anyGaps) overall = "still_broken";
-      else overall = "likely_fixed";
+      else overall = "needs_semantic_verify";
     }
 
     results.push({

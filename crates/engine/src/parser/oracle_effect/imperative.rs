@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{eof, map, opt, rest, value};
+use nom::combinator::{all_consuming, eof, map, opt, rest, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -1441,6 +1441,9 @@ pub(super) fn parse_search_and_creation_ast(
     lower: &str,
     ctx: &mut ParseContext,
 ) -> Option<SearchCreationImperativeAst> {
+    if let Some(ast) = parse_search_outside_game_ast(lower, ctx) {
+        return Some(ast);
+    }
     if let Some((_, _)) = nom_on_lower(text, lower, |input| value((), tag("seek ")).parse(input)) {
         let details = super::parse_seek_details(lower, ctx);
         return Some(SearchCreationImperativeAst::Seek {
@@ -1584,6 +1587,37 @@ pub(super) fn parse_search_and_creation_ast(
     None
 }
 
+fn parse_search_outside_game_ast(
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<SearchCreationImperativeAst> {
+    fn parse_clause<'a>(
+        input: &'a str,
+    ) -> Result<(&'a str, (&'a str, Zone)), nom::Err<OracleError<'a>>> {
+        let (rest, _) = tag("reveal a ").parse(input)?;
+        let (rest, filter_text) = take_until(" card you own from outside the game").parse(rest)?;
+        let (rest, _) = tag(" card you own from outside the game").parse(rest)?;
+        let (rest, destination) = opt(alt((
+            value(Zone::Hand, tag(" and put it into your hand")),
+            value(Zone::Hand, tag(" and put that card into your hand")),
+        )))
+        .parse(rest)?;
+        let (rest, _) = opt(tag(".")).parse(rest)?;
+        let (rest, _) = eof.parse(rest)?;
+        Ok((rest, (filter_text, destination.unwrap_or(Zone::Hand))))
+    }
+
+    let (_, (filter_text, destination)) = parse_clause(lower).ok()?;
+    let filter = super::search::parse_search_filter(filter_text, ctx);
+    Some(SearchCreationImperativeAst::SearchOutsideGame {
+        filter,
+        count: QuantityExpr::Fixed { value: 1 },
+        reveal: true,
+        destination,
+        up_to: true,
+    })
+}
+
 pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) -> Effect {
     match ast {
         SearchCreationImperativeAst::SearchLibrary {
@@ -1615,6 +1649,22 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             reveal,
             target_player,
             selection_constraint,
+        },
+        SearchCreationImperativeAst::SearchOutsideGame {
+            filter,
+            count,
+            reveal,
+            destination,
+            up_to,
+        } => Effect::SearchOutsideGame {
+            filter,
+            count: if up_to {
+                QuantityExpr::up_to(count)
+            } else {
+                count
+            },
+            reveal,
+            destination,
         },
         SearchCreationImperativeAst::Dig { count, reveal } => Effect::Dig {
             count,
@@ -2237,7 +2287,15 @@ pub(super) fn parse_utility_imperative_ast(
                 text: text.to_string(),
             }),
             "copy" => {
-                let (target, _rem) = parse_target(rest);
+                let rest_lower = &lower[lower.len() - rest.len()..];
+                let (target, _rem) = if let Some((target, rem_lower)) =
+                    parse_copy_stack_ability_target(rest_lower)
+                {
+                    let rem = &rest[rest.len() - rem_lower.len()..];
+                    (target, rem)
+                } else {
+                    parse_target(rest)
+                };
                 #[cfg(debug_assertions)]
                 assert_no_compound_remainder(_rem, text);
                 Some(UtilityImperativeAst::Copy { target })
@@ -2352,6 +2410,51 @@ pub(super) fn parse_utility_imperative_ast(
         });
     }
     None
+}
+
+fn parse_copy_stack_ability_target(input: &str) -> Option<(TargetFilter, &str)> {
+    let (input, _) = opt(tag::<_, _, OracleError<'_>>("target "))
+        .parse(input)
+        .ok()?;
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("activated or triggered ability"),
+        tag("triggered or activated ability"),
+        tag("activated ability"),
+        tag("triggered ability"),
+    ))
+    .parse(input)
+    .ok()?;
+    let (input, _) = nom::character::complete::multispace0::<_, OracleError<'_>>(input).ok()?;
+    if let Ok((rem, _)) = tag::<_, _, OracleError<'_>>("you control").parse(input) {
+        return Some((
+            TargetFilter::StackAbility {
+                controller: Some(ControllerRef::You),
+            },
+            rem,
+        ));
+    }
+    if input.is_empty()
+        || all_consuming(tag::<_, _, OracleError<'_>>("."))
+            .parse(input)
+            .is_ok()
+    {
+        return Some((TargetFilter::StackAbility { controller: None }, input));
+    }
+    None
+}
+
+pub(super) fn stack_ability_filter_from_text(input: &str) -> TargetFilter {
+    let controller = if nom_primitives::scan_contains(input, "you control") {
+        Some(ControllerRef::You)
+    } else if nom_primitives::scan_contains(input, "opponents control")
+        || nom_primitives::scan_contains(input, "opponent controls")
+        || nom_primitives::scan_contains(input, "opponent's control")
+    {
+        Some(ControllerRef::Opponent)
+    } else {
+        None
+    };
+    TargetFilter::StackAbility { controller }
 }
 
 fn parse_explicit_targeted_attach(
@@ -2611,7 +2714,7 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
         }
     }
 
-    // CR 701.24g: "put X on top of Y's library" — specific position, no auto-shuffle.
+    // "put X on top of Y's library" — specific position, no auto-shuffle.
     // Must check before try_parse_put_zone_change which would emit ChangeZone (auto-shuffles).
     // Only matches forms WITHOUT an explicit origin zone ("from your hand") — those
     // specify a real zone transfer and should go through try_parse_put_zone_change.
@@ -2624,13 +2727,13 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
         }
     }
 
-    // CR 701.24g: "put that card on top" / "put it on top" / "put them on top" —
+    // "put that card on top" / "put it on top" / "put them on top" —
     // abbreviated form used after "shuffle" in search-and-put-on-top tutors (41 cards).
     if lower.ends_with("on top") {
         return Some(PutImperativeAst::TopOfLibrary);
     }
 
-    // CR 701.24g: "put X on the bottom of Y's library" — specific position without
+    // "put X on the bottom of Y's library" — specific position without
     // explicit origin zone. Forms with "from" (e.g. "from your hand") go through
     // try_parse_put_zone_change for proper ChangeZone handling.
     if nom_primitives::scan_contains(lower, "on the bottom of")
@@ -2642,13 +2745,13 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
         }
     }
 
-    // CR 701.24g: "put that card on the bottom" / "put it on the bottom" —
+    // "put that card on the bottom" / "put it on the bottom" —
     // abbreviated form without "of Y's library".
     if lower.ends_with("on the bottom") {
         return Some(PutImperativeAst::BottomOfLibrary);
     }
 
-    // CR 701.24g: "put X into Y's library Nth from the top" —
+    // "put X into Y's library Nth from the top" —
     // specific positional placement (God-Eternals, Approach, Bury in Books).
     if let Ok((_, before_from)) = take_until::<_, _, OracleError<'_>>("from the top").parse(lower) {
         {
@@ -2744,8 +2847,8 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                 }
             }
         }
-        // CR 701.24g: Place at a specific position — uses move_to_library_position,
-        // not ChangeZone which auto-shuffles per CR 401.3. `count` defaults to
+        // Place at a specific position — uses move_to_library_position,
+        // not ChangeZone which shuffles the destination library. `count` defaults to
         // `Fixed(1)` here; the cardinality patcher in `oracle_effect/mod.rs`
         // upgrades it (and the target filter) by re-inspecting the imperative
         // text once the clause has been lowered.
@@ -3691,7 +3794,7 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
         // CR 118.12: Parse "unless pays" even for ability counters.
         let unless_pay = super::parse_unless_payment(rest).map(super::counter_unless_pay_modifier);
         return Some(ZoneCounterImperativeAst::Counter {
-            target: TargetFilter::StackAbility,
+            target: stack_ability_filter_from_text(rest),
             source_static: None,
             unless_pay,
             all: mass_consumed,
@@ -5668,7 +5771,9 @@ fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
 /// and compound forms like "can't attack or block". These delegate to the subject.rs
 /// static-granting machinery, wrapping the result in a `GenericEffect`.
 fn try_parse_subjectless_cant(lower: &str) -> Option<ImperativeFamilyAst> {
-    use crate::parser::oracle_effect::subject::parse_restriction_modes;
+    use crate::parser::oracle_effect::subject::{
+        parse_restriction_modes, static_mode_needs_grant_propagation,
+    };
 
     let trimmed = lower.trim_end_matches('.');
 
@@ -5693,16 +5798,7 @@ fn try_parse_subjectless_cant(lower: &str) -> Option<ImperativeFamilyAst> {
             // time. Without this, the runtime block / attack check never
             // sees the rule. Mirrors the injection in
             // `subject::build_restriction_clause`.
-            let needs_propagation = matches!(
-                mode,
-                StaticMode::CantBlock
-                    | StaticMode::CantAttack
-                    | StaticMode::CantAttackOrBlock
-                    | StaticMode::CantBeBlocked
-                    | StaticMode::CantBeBlockedBy { .. }
-                    | StaticMode::CantBeBlockedExceptBy { .. }
-                    | StaticMode::CantUntap
-            );
+            let needs_propagation = static_mode_needs_grant_propagation(&mode);
             let mut def = StaticDefinition::new(mode.clone());
             if needs_propagation {
                 def = def.modifications(vec![ContinuousModification::AddStaticMode { mode }]);
@@ -5730,6 +5826,87 @@ fn try_parse_bolster(lower: &str) -> Option<Effect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn typed_leg(filter: &TargetFilter) -> Option<&TypedFilter> {
+        match filter {
+            TargetFilter::Typed(tf) => Some(tf),
+            TargetFilter::And { filters } => filters.iter().find_map(typed_leg),
+            _ => None,
+        }
+    }
+
+    fn is_stack_spell_leg(filter: &TargetFilter) -> bool {
+        match filter {
+            TargetFilter::StackSpell => true,
+            TargetFilter::And { filters } => filters.iter().any(is_stack_spell_leg),
+            _ => false,
+        }
+    }
+
+    fn has_type(tf: &TypedFilter, ty: TypeFilter) -> bool {
+        tf.type_filters.iter().any(|candidate| candidate == &ty)
+    }
+
+    fn has_prop(tf: &TypedFilter, prop: FilterProp) -> bool {
+        tf.properties.iter().any(|candidate| candidate == &prop)
+    }
+
+    #[test]
+    fn parse_outside_game_wish_reveal_to_hand() {
+        let ability = super::super::parse_effect_chain(
+            "You may reveal a sorcery card you own from outside the game and put it into your hand. Exile ~.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            !ability.optional,
+            "the reveal choice is optional; the self-exile sentence is mandatory"
+        );
+        assert!(matches!(&*ability.effect, Effect::SearchOutsideGame { .. }));
+        assert!(matches!(
+            ability.sub_ability.as_deref().map(|sub| &*sub.effect),
+            Some(Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            })
+        ));
+
+        let effect = super::super::parse_effect(
+            "reveal a sorcery card you own from outside the game and put it into your hand",
+        );
+        match effect {
+            Effect::SearchOutsideGame {
+                filter,
+                count,
+                reveal,
+                destination,
+            } => {
+                assert_eq!(count, QuantityExpr::up_to(QuantityExpr::Fixed { value: 1 }));
+                assert!(reveal);
+                assert_eq!(destination, Zone::Hand);
+                match filter {
+                    TargetFilter::Typed(typed) => {
+                        assert!(typed.type_filters.contains(&TypeFilter::Sorcery));
+                    }
+                    other => panic!("expected sorcery filter, got {other:?}"),
+                }
+            }
+            other => panic!("expected SearchOutsideGame, got {other:?}"),
+        }
+
+        let effect = super::super::parse_effect(
+            "reveal a creature card you own from outside the game and put it into your hand",
+        );
+        match effect {
+            Effect::SearchOutsideGame { filter, .. } => match filter {
+                TargetFilter::Typed(typed) => {
+                    assert!(typed.type_filters.contains(&TypeFilter::Creature));
+                }
+                other => panic!("expected creature filter, got {other:?}"),
+            },
+            other => panic!("expected SearchOutsideGame, got {other:?}"),
+        }
+    }
 
     /// CR 701.27 + CR 608.2c + CR 608.2k: "transform it" / "convert itself" —
     /// bare object pronoun resolves to `ParentTarget` when no trigger subject
@@ -6296,18 +6473,18 @@ mod tests {
                     filters.iter().any(|filter| matches!(
                         filter,
                         crate::types::ability::TargetFilter::Typed(tf)
-                            if tf.type_filters.contains(&crate::types::ability::TypeFilter::Creature)
-                                && tf.properties.contains(&crate::types::ability::FilterProp::Another)
+                            if has_type(tf, crate::types::ability::TypeFilter::Creature)
+                                && has_prop(tf, crate::types::ability::FilterProp::Another)
                     )),
                     "expected creature branch with Another, got {filters:?}"
                 );
                 assert!(
-                    filters.iter().any(|filter| matches!(
-                        filter,
-                        crate::types::ability::TargetFilter::Typed(tf)
-                            if tf.type_filters.contains(&crate::types::ability::TypeFilter::Card)
-                                && tf.properties.contains(&crate::types::ability::FilterProp::Another)
-                    )),
+                    filters.iter().any(|filter| {
+                        is_stack_spell_leg(filter)
+                            && typed_leg(filter).is_some_and(|tf| {
+                                has_prop(tf, crate::types::ability::FilterProp::Another)
+                            })
+                    }),
                     "expected spell branch with Another, got {filters:?}"
                 );
             }
@@ -7546,6 +7723,36 @@ mod tests {
                 "expected no match for: {text}"
             );
         }
+    }
+
+    #[test]
+    fn parse_copy_stack_ability_target_preserves_unknown_qualifier_remainder() {
+        let controlled =
+            parse_copy_stack_ability_target("target activated or triggered ability you control")
+                .expect("controlled stack ability target should parse");
+        assert_eq!(controlled.1, "");
+        assert!(matches!(
+            controlled.0,
+            TargetFilter::StackAbility {
+                controller: Some(ControllerRef::You)
+            }
+        ));
+
+        let unscoped = parse_copy_stack_ability_target("target triggered ability")
+            .expect("unqualified stack ability target should parse");
+        assert_eq!(unscoped.1, "");
+        assert!(matches!(
+            unscoped.0,
+            TargetFilter::StackAbility { controller: None }
+        ));
+
+        assert!(
+            parse_copy_stack_ability_target(
+                "target activated or triggered ability you don't control"
+            )
+            .is_none(),
+            "unknown qualifier must not widen to an unscoped StackAbility target"
+        );
     }
 
     #[test]

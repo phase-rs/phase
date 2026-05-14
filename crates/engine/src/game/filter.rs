@@ -582,7 +582,7 @@ fn filter_inner_for_object(
             )
         }),
         // StackAbility/StackSpell targeting is handled directly at call sites, not via filter
-        TargetFilter::StackAbility | TargetFilter::StackSpell => false,
+        TargetFilter::StackAbility { .. } | TargetFilter::StackSpell => false,
         TargetFilter::SpecificObject { id: target_id } => object_id == *target_id,
         // SpecificPlayer scopes to players, not objects — no object matches.
         TargetFilter::SpecificPlayer { .. } => false,
@@ -690,27 +690,28 @@ fn build_battlefield_entry_token_object(
     spec: &TokenSpec,
     enter_tapped: EtbTapState,
 ) -> GameObject {
+    let ch = &spec.characteristics;
     let mut obj = GameObject::new(
         ObjectId(u64::MAX),
         CardId(0),
         owner,
-        spec.display_name.clone(),
+        ch.display_name.clone(),
         Zone::Battlefield,
     );
     obj.controller = owner;
     obj.is_token = true;
-    obj.power = spec.power;
-    obj.toughness = spec.toughness;
-    obj.base_power = spec.power;
-    obj.base_toughness = spec.toughness;
-    obj.card_types.core_types = spec.core_types.clone();
-    obj.card_types.subtypes = spec.subtypes.clone();
-    obj.card_types.supertypes = spec.supertypes.clone();
+    obj.power = ch.power;
+    obj.toughness = ch.toughness;
+    obj.base_power = ch.power;
+    obj.base_toughness = ch.toughness;
+    obj.card_types.core_types = ch.core_types.clone();
+    obj.card_types.subtypes = ch.subtypes.clone();
+    obj.card_types.supertypes = ch.supertypes.clone();
     obj.base_card_types = obj.card_types.clone();
-    obj.color = spec.colors.clone();
-    obj.base_color = spec.colors.clone();
-    obj.keywords = spec.keywords.clone();
-    obj.base_keywords = spec.keywords.clone();
+    obj.color = ch.colors.clone();
+    obj.base_color = ch.colors.clone();
+    obj.keywords = ch.keywords.clone();
+    obj.base_keywords = ch.keywords.clone();
     for static_def in &spec.static_abilities {
         obj.static_definitions.push(static_def.clone());
     }
@@ -872,7 +873,7 @@ fn zone_change_filter_inner(
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::DefendingPlayer
-        | TargetFilter::StackAbility
+        | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
         | TargetFilter::Owner => false,
     }
@@ -1067,7 +1068,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::ScopedPlayer
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
-        | TargetFilter::StackAbility
+        | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
@@ -1273,7 +1274,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::ScopedPlayer
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
-        | TargetFilter::StackAbility
+        | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
@@ -3167,6 +3168,7 @@ mod tests {
             source_id: damage_source,
             source_controller: PlayerId(1),
             target: TargetRef::Object(creature),
+            target_controller: PlayerId(0),
             amount: 2,
             is_combat: true,
         });

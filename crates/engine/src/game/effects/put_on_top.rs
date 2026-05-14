@@ -1,3 +1,5 @@
+use rand::seq::SliceRandom;
+
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::zones;
 use crate::types::ability::{
@@ -7,9 +9,9 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::zones::Zone;
 
-/// CR 701.24g / CR 401.3: Place target card at a specific position in its owner's
-/// library. Unlike ChangeZone { destination: Library } which auto-shuffles per
-/// CR 401.3, this places at a specific position without shuffling.
+/// Place target card at a specific position in its owner's library. Unlike
+/// ChangeZone { destination: Library } which shuffles the destination library,
+/// this places at a specific position without shuffling.
 ///
 /// Also handles LTB self-return triggers (CR 603.10a) such as Avenging Angel:
 /// "When this creature dies, you may put it on top of its owner's library."
@@ -41,8 +43,20 @@ pub fn resolve(
     // This is the post-#323 SelfRef short-circuit applied uniformly.
     let effective_targets =
         crate::game::targeting::resolved_targets(ability, &target_filter, state);
-    let collected_targets =
+    let mut collected_targets =
         crate::game::effects::effect_object_targets(&target_filter, &effective_targets);
+    if collected_targets.is_empty() && matches!(target_filter, TargetFilter::ExiledBySource) {
+        let ctx = crate::game::filter::FilterContext::from_ability(ability);
+        collected_targets = state
+            .objects
+            .iter()
+            .filter(|(id, obj)| {
+                obj.zone == Zone::Exile
+                    && crate::game::filter::matches_target_filter(state, **id, &target_filter, &ctx)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+    }
 
     // CR 115.1 + CR 400.2: When the filter specifies a private zone (hand/library)
     // and no targets were pre-selected during casting (because the Oracle text does
@@ -99,22 +113,29 @@ pub fn resolve(
         ));
     }
 
-    // CR 701.24g: `count` carries the cardinality of the placement. The runtime
-    // collects N `TargetRef::Object` entries from the targeting layer; the
-    // resolver places each at `position` in the order they were chosen, which
-    // honors the trailing "in any order" Oracle phrase (the player's selection
-    // order *is* the placement order). For the dominant `count: Fixed(1)` case,
-    // `expected` is 1 and `collected_targets` carries exactly one id.
+    // `count` carries the cardinality of the placement. For multi-card
+    // placement, CR 401.4 lets the owner arrange cards put into the same
+    // library position. The runtime uses target/selection order for "in any
+    // order" effects; linked-exile bottom cleanup randomizes separately below.
     let expected = resolve_quantity_with_targets(state, &count_expr, ability).max(0) as usize;
+    let mut randomized_targets;
     let to_place = if expected == 0 {
-        collected_targets.as_slice()
+        if matches!(position, LibraryPosition::Bottom)
+            && matches!(target_filter, TargetFilter::ExiledBySource)
+        {
+            randomized_targets = collected_targets.clone();
+            randomized_targets.shuffle(&mut state.rng);
+            randomized_targets.as_slice()
+        } else {
+            collected_targets.as_slice()
+        }
     } else {
         &collected_targets[..collected_targets.len().min(expected)]
     };
 
     let index = match position {
-        // CR 701.24g: Top = index 0, Bottom = None (push to end),
-        // NthFromTop = index n-1 ("second from the top" = index 1).
+        // Top = index 0, Bottom = None (push to end), NthFromTop = index n-1
+        // ("second from the top" = index 1).
         LibraryPosition::Top => Some(0),
         LibraryPosition::Bottom => None,
         LibraryPosition::NthFromTop { n } => Some(n.saturating_sub(1) as usize),
@@ -130,6 +151,11 @@ pub fn resolve(
                 zones::move_to_library_at_index(state, *object_id, index, events);
             }
         }
+    }
+    if matches!(target_filter, TargetFilter::ExiledBySource) {
+        state.exile_links.retain(|link| {
+            link.source_id != ability.source_id || !to_place.contains(&link.exiled_id)
+        });
     }
 
     events.push(GameEvent::EffectResolved {

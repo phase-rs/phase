@@ -139,6 +139,19 @@ pub struct ActiveContinuousEffect {
     /// Index into the source object's `static_definitions` array, or `None` for
     /// transient effects that have no backing static definition on any object.
     pub def_index: Option<usize>,
+    /// For transient effects (those derived from a `TransientContinuousEffect`),
+    /// the originating transient's stable `id`. `None` for static-derived effects.
+    /// Used by source-attribution display so the frontend can resolve back to
+    /// the canonical `TransientContinuousEffect` (which carries the snapshotted
+    /// source name for spells whose source has left the stack).
+    pub transient_id: Option<u64>,
+    /// Index of this modification within the originating source's
+    /// `modifications` vector (`StaticDefinition.modifications` or
+    /// `TransientContinuousEffect.modifications`). Used by source-attribution
+    /// display to identify which specific `ContinuousModification` a multi-
+    /// modification source (e.g., Akroma's Memorial granting many keywords)
+    /// contributed to the recipient.
+    pub mod_index: usize,
     pub layer: Layer,
     pub timestamp: u64,
     pub modification: ContinuousModification,

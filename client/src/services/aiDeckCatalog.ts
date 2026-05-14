@@ -9,6 +9,7 @@ import {
 } from "./deckCatalog";
 import type { DeckArchetype } from "./engineRuntime";
 import type { ParsedDeck } from "./deckParser";
+import type { CommanderBracket } from "../types/bracket";
 
 export type AiDeckSource = DeckCatalogSource;
 
@@ -19,6 +20,7 @@ export interface AiDeckCandidate {
   deck: ParsedDeck;
   coveragePct: number | null;
   archetype: DeckArchetype | null;
+  bracket: CommanderBracket | null;
 }
 
 export interface AiDeckCatalogOptions {
@@ -41,8 +43,13 @@ async function legalCandidate(
 ): Promise<AiDeckCandidate | null> {
   const { knownFormat, ...base } = candidate;
   if (knownFormat && options.selectedFormat && knownFormat !== options.selectedFormat) return null;
-  if (candidate.source.type === "precon" && knownFormat) return base;
 
+  // Precon decks MUST still pass the legality check (CR 903 + the Commander
+  // Rules Committee ban list). WotC ships precons with cards that later get
+  // banned (Jeweled Lotus, Mana Crypt, Dockside Extortionist in 2024+) and
+  // never retroactively curates the precon lists. The previous short-circuit
+  // "if precon, skip compat" let AI opponents auto-pick decks containing
+  // banned cards — the engine is the rules authority, no catalog bypass.
   const result = await evaluateDeckCompatibility(candidate.deck, {
     selectedFormat: options.selectedFormat,
     selectedMatchType: options.selectedMatchType,
@@ -71,6 +78,7 @@ export async function buildLegalAiDeckCatalog(
     deck: candidate.deck,
     coveragePct: candidate.coveragePct ?? null,
     archetype: null,
+    bracket: candidate.bracket ?? null,
     knownFormat: candidate.knownFormat,
   }));
 

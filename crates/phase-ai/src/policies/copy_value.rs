@@ -369,6 +369,7 @@ mod tests {
         let decision = AiDecisionContext {
             waiting_for: WaitingFor::ChooseXValue {
                 player: PlayerId(0),
+                min: 0,
                 max: 3,
                 pending_cast: Box::new(pending_cast),
                 convoke_mode: None,
@@ -436,6 +437,7 @@ mod tests {
         let decision = AiDecisionContext {
             waiting_for: WaitingFor::ChooseXValue {
                 player: PlayerId(0),
+                min: 0,
                 max: 3,
                 pending_cast: Box::new(pending_cast),
                 convoke_mode: None,

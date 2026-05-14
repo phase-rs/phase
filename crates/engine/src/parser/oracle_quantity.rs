@@ -20,7 +20,7 @@ use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target as nom_target;
 use crate::parser::oracle_effect::counter::normalize_counter_type;
-use crate::parser::oracle_target::parse_type_phrase;
+use crate::parser::oracle_target::{parse_type_phrase, parse_type_phrase_with_ctx};
 use crate::types::ability::{
     AggregateFunction, ControllerRef, CountScope, DevotionColors, FilterProp, ObjectProperty,
     ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, QuantityExpr, QuantityRef,
@@ -39,6 +39,14 @@ use crate::types::zones::Zone;
 /// starting life total), then falls through to complex patterns (counters,
 /// aggregates, object counts, devotion, etc.) that nom doesn't yet cover.
 pub(crate) fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
+    let mut ctx = ParseContext::default();
+    parse_quantity_ref_with_context(text, &mut ctx)
+}
+
+pub(crate) fn parse_quantity_ref_with_context(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<QuantityRef> {
     let trimmed = text.trim().trim_end_matches('.');
 
     // Try nom combinator first for simple exact-match patterns.
@@ -115,7 +123,7 @@ pub(crate) fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
                 continue;
             }
             let counter_type = normalize_counter_type(counter_text);
-            let (filter, remainder) = parse_type_phrase(after_filter);
+            let (filter, remainder) = parse_type_phrase_with_ctx(after_filter, ctx);
             if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
                 return Some(QuantityRef::CountersOnObjects {
                     counter_type: Some(counter_type),
@@ -160,7 +168,7 @@ pub(crate) fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
     ))
     .parse(trimmed)
     {
-        let (filter, _) = parse_type_phrase(rest);
+        let (filter, _) = parse_type_phrase_with_ctx(rest, ctx);
         if !matches!(filter, TargetFilter::Any) {
             return Some(QuantityRef::Aggregate {
                 function: func,
@@ -178,7 +186,7 @@ pub(crate) fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
                 filter: PlayerFilter::Opponent,
             });
         }
-        let (filter, _) = parse_type_phrase(rest);
+        let (filter, _) = parse_type_phrase_with_ctx(rest, ctx);
         if !matches!(filter, TargetFilter::Any) {
             return Some(QuantityRef::ObjectCount { filter });
         }
@@ -251,6 +259,14 @@ pub(crate) fn capitalize_first(s: &str) -> String {
 /// - "the number of basic land types among lands you control"
 /// - "N plus the number of X"
 pub(crate) fn parse_cda_quantity(text: &str) -> Option<QuantityExpr> {
+    let mut ctx = ParseContext::default();
+    parse_cda_quantity_with_context(text, &mut ctx)
+}
+
+pub(crate) fn parse_cda_quantity_with_context(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<QuantityExpr> {
     let text = text.trim().trim_end_matches('.');
 
     // "twice [inner]" or "three times [inner]" → Multiply { factor, inner }
@@ -260,7 +276,7 @@ pub(crate) fn parse_cda_quantity(text: &str) -> Option<QuantityExpr> {
     ))
     .parse(text)
     {
-        if let Some(inner) = parse_cda_quantity(rest) {
+        if let Some(inner) = parse_cda_quantity_with_context(rest, ctx) {
             return Some(QuantityExpr::Multiply {
                 factor,
                 inner: Box::new(inner),
@@ -280,7 +296,7 @@ pub(crate) fn parse_cda_quantity(text: &str) -> Option<QuantityExpr> {
     )
         .parse(text)
     {
-        if let Some(inner) = parse_cda_quantity(rest) {
+        if let Some(inner) = parse_cda_quantity_with_context(rest, ctx) {
             let inner_expr = if sign < 0 {
                 QuantityExpr::Multiply {
                     factor: -1,
@@ -342,7 +358,7 @@ pub(crate) fn parse_cda_quantity(text: &str) -> Option<QuantityExpr> {
                     .or_else(|| spell_part.strip_suffix(" spell"))
                     .unwrap_or(spell_part)
                     .trim();
-                let (filter, remainder) = parse_type_phrase(qualifier);
+                let (filter, remainder) = parse_type_phrase_with_ctx(qualifier, ctx);
                 if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
                     Some(filter)
                 } else {
@@ -360,7 +376,7 @@ pub(crate) fn parse_cda_quantity(text: &str) -> Option<QuantityExpr> {
 
     // Delegate to existing parse_quantity_ref for patterns like
     // "the number of {type} you control", "your devotion to X"
-    if let Some(qty) = parse_quantity_ref(text) {
+    if let Some(qty) = parse_quantity_ref_with_context(text, ctx) {
         return Some(QuantityExpr::Ref { qty });
     }
 
@@ -1380,6 +1396,31 @@ mod tests {
             matches!(qty, QuantityRef::ObjectCount { .. }),
             "Expected ObjectCount, got {qty:?}"
         );
+    }
+
+    #[test]
+    fn cda_quantity_uses_relative_player_scope_for_they_control() {
+        let mut ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::DefendingPlayer),
+            ..Default::default()
+        };
+        let qty = parse_cda_quantity_with_context("the number of artifacts they control", &mut ctx)
+            .unwrap();
+
+        match qty {
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::ObjectCount {
+                        filter:
+                            TargetFilter::Typed(TypedFilter {
+                                controller: Some(ControllerRef::DefendingPlayer),
+                                type_filters,
+                                ..
+                            }),
+                    },
+            } => assert_eq!(type_filters, vec![TypeFilter::Artifact]),
+            other => panic!("Expected defending-player artifact count, got {other:?}"),
+        }
     }
 
     #[test]

@@ -52,6 +52,7 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::CastWithKeyword { .. }
             | StaticMode::ActivateAsInstant { .. }
             | StaticMode::MaximumHandSize { .. }
+            | StaticMode::StepEndUnspentMana { .. }
             | StaticMode::CantBeBlockedBy { .. }
             // CR 602.5 + CR 603.2a: CantBeActivated carries `who` + `source_filter`.
             | StaticMode::CantBeActivated { .. }
@@ -291,7 +292,16 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::ScopedPlayer => "scoped player".into(),
         TargetFilter::SelfRef => "self".into(),
         TargetFilter::SourceOrPaired => "source or paired creature".into(),
-        TargetFilter::StackAbility => "ability on stack".into(),
+        TargetFilter::StackAbility { controller: None } => "ability on stack".into(),
+        TargetFilter::StackAbility {
+            controller: Some(ControllerRef::You),
+        } => "ability you control on stack".into(),
+        TargetFilter::StackAbility {
+            controller: Some(ControllerRef::Opponent),
+        } => "ability opponent controls on stack".into(),
+        TargetFilter::StackAbility {
+            controller: Some(controller),
+        } => format!("ability scoped to {controller:?} on stack"),
         TargetFilter::StackSpell => "spell on stack".into(),
         TargetFilter::AttachedTo => "attached permanent".into(),
         TargetFilter::LastCreated => "last created".into(),
@@ -1146,7 +1156,13 @@ fn fmt_mana_production(mp: &ManaProduction) -> String {
 fn fmt_choice_type(ct: &ChoiceType) -> String {
     match ct {
         ChoiceType::CreatureType => "creature type",
-        ChoiceType::Color => "color",
+        ChoiceType::Color { excluded } => {
+            if excluded.is_empty() {
+                "color"
+            } else {
+                "restricted color"
+            }
+        }
         ChoiceType::OddOrEven => "odd or even",
         ChoiceType::BasicLandType => "basic land type",
         ChoiceType::CardType => "card type",
@@ -1262,6 +1278,16 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::DealDamage { amount, target, .. } => {
             d.push(("amount".into(), fmt_quantity(amount)));
             d.push(("target".into(), fmt_target(target)));
+        }
+        Effect::SearchOutsideGame {
+            filter,
+            count,
+            destination,
+            ..
+        } => {
+            d.push(("filter".into(), fmt_target(filter)));
+            d.push(("count".into(), fmt_quantity(count)));
+            d.push(("destination".into(), format!("{destination:?}")));
         }
         Effect::Draw { count, target } => {
             if !matches!(count, QuantityExpr::Fixed { value: 1 }) {
@@ -1799,37 +1825,40 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::LoseAllPlayerCounters { target } => {
             d.push(("target".into(), fmt_target(target)));
         }
-        Effect::ExileFromTopUntil { until } => match until {
-            crate::types::ability::UntilCondition::NextMatches { filter } => {
-                d.push(("until".into(), fmt_target(filter)));
+        Effect::ExileFromTopUntil { player, until } => {
+            d.push(("player".into(), fmt_target(player)));
+            match until {
+                crate::types::ability::UntilCondition::NextMatches { filter } => {
+                    d.push(("until".into(), fmt_target(filter)));
+                }
+                crate::types::ability::UntilCondition::CumulativeThreshold {
+                    property,
+                    comparator,
+                    threshold,
+                } => {
+                    d.push((
+                        "until_cumulative".into(),
+                        format!(
+                            "{} {} {}",
+                            match property {
+                                ObjectProperty::Power => "power",
+                                ObjectProperty::Toughness => "toughness",
+                                ObjectProperty::ManaValue => "mana value",
+                            },
+                            match comparator {
+                                crate::types::ability::Comparator::GE => "≥",
+                                crate::types::ability::Comparator::GT => ">",
+                                crate::types::ability::Comparator::LE => "≤",
+                                crate::types::ability::Comparator::LT => "<",
+                                crate::types::ability::Comparator::EQ => "=",
+                                crate::types::ability::Comparator::NE => "≠",
+                            },
+                            fmt_quantity(threshold),
+                        ),
+                    ));
+                }
             }
-            crate::types::ability::UntilCondition::CumulativeThreshold {
-                property,
-                comparator,
-                threshold,
-            } => {
-                d.push((
-                    "until_cumulative".into(),
-                    format!(
-                        "{} {} {}",
-                        match property {
-                            ObjectProperty::Power => "power",
-                            ObjectProperty::Toughness => "toughness",
-                            ObjectProperty::ManaValue => "mana value",
-                        },
-                        match comparator {
-                            crate::types::ability::Comparator::GE => "≥",
-                            crate::types::ability::Comparator::GT => ">",
-                            crate::types::ability::Comparator::LE => "≤",
-                            crate::types::ability::Comparator::LT => "<",
-                            crate::types::ability::Comparator::EQ => "=",
-                            crate::types::ability::Comparator::NE => "≠",
-                        },
-                        fmt_quantity(threshold),
-                    ),
-                ));
-            }
-        },
+        }
         Effect::RevealUntil {
             player,
             filter,
@@ -6105,6 +6134,16 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 effective_lower.contains("can't be blocked")
             }
             StaticMode::CantBeBlockedBy { .. } => effective_lower.contains("can't be blocked"),
+            StaticMode::StepEndUnspentMana { action, .. } => match action {
+                crate::types::mana::StepEndManaAction::Retain => {
+                    effective_lower.contains("don't lose unspent")
+                        && effective_lower.contains("mana as steps and phases end")
+                }
+                crate::types::mana::StepEndManaAction::Transform(_) => {
+                    effective_lower.contains("would lose unspent mana")
+                        && effective_lower.contains("becomes")
+                }
+            },
             StaticMode::CanAttackWithDefender => {
                 effective_lower.contains("as though it didn't have defender")
             }
@@ -6155,10 +6194,7 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                     effective_lower.contains("gift was promised")
                         || effective_lower.contains("gift wasn't promised")
                 }
-                Effect::GenericEffect { .. } => {
-                    // "don't lose unspent mana" parsed as GenericEffect
-                    effective_lower.contains("don't lose unspent")
-                }
+                Effect::GenericEffect { .. } => false,
                 Effect::LoseTheGame => {
                     // "You don't lose the game for ..." parsed as LoseTheGame prevention
                     effective_lower.contains("don't lose the game")
@@ -7786,6 +7822,7 @@ mod tests {
             solve_condition: None,
             parse_warnings: vec![],
             brawl_commander: false,
+            is_commander: false,
             metadata: Default::default(),
             rarities: Default::default(),
         }

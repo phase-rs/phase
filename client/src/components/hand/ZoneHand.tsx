@@ -8,6 +8,7 @@ import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
+import { CASTABLE_AFFORDANCE_ACTIVE } from "../../viewmodel/castableAffordance.ts";
 import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
 
 interface ZoneHandProps {
@@ -162,7 +163,7 @@ export function ZoneHand({ zone }: ZoneHandProps) {
               <div className="absolute inset-0 rounded-lg bg-purple-600/30 transition-colors group-hover:bg-purple-600/15" />
 
               {/* Castable glow ring */}
-              <div className="absolute inset-0 rounded-lg ring-2 ring-purple-400/70 shadow-[0_0_12px_3px_rgba(147,51,234,0.5)]" />
+              <div className={`absolute inset-0 rounded-lg ${CASTABLE_AFFORDANCE_ACTIVE}`} />
             </div>
 
             {/* Count badge */}

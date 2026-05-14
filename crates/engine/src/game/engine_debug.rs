@@ -277,38 +277,44 @@ pub fn apply_debug_action(
 
         DebugAction::CreateToken {
             owner,
-            name,
-            power,
-            toughness,
-            core_types,
-            subtypes,
-            colors,
-            keywords,
+            characteristics,
         } => {
             validate_player(state, owner)?;
-            let id = zones::create_object(
-                state,
-                crate::types::identifiers::CardId(0),
+            // CR 111.1 + CR 614.1a: Route debug token creation through the real
+            // CreateToken pipeline so replacements, predefined-subtype
+            // abilities (Treasure/Clue/Food/etc.), and ETB triggers all fire.
+            let spec = crate::types::proposed_event::TokenSpec {
+                script_name: characteristics.display_name.clone(),
+                characteristics,
+                static_abilities: Vec::new(),
+                enter_with_counters: Vec::new(),
+                tapped: false,
+                enters_attacking: false,
+                sacrifice_at: None,
+                source_id: ObjectId(0),
+                controller: owner,
+            };
+            let proposed = ProposedEvent::CreateToken {
                 owner,
-                name,
-                Zone::Battlefield,
-            );
-            if let Some(obj) = state.objects.get_mut(&id) {
-                obj.is_token = true;
-                obj.base_power = power;
-                obj.base_toughness = toughness;
-                obj.controller = owner;
-                obj.card_types.core_types = core_types;
-                obj.card_types.subtypes = subtypes;
-                obj.color = colors;
-                for kw in keywords {
-                    if !obj.keywords.contains(&kw) {
-                        obj.keywords.push(kw);
-                    }
+                spec: Box::new(spec),
+                enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+                count: 1,
+                applied: HashSet::new(),
+            };
+            match super::replacement::replace_event(state, proposed, events) {
+                super::replacement::ReplacementResult::Execute(event) => {
+                    super::effects::token::apply_create_token_after_replacement(
+                        state, event, events,
+                    );
+                    super::triggers::process_triggers(state, events); // CR 603: Process triggers
+                    super::sba::check_state_based_actions(state, events); // CR 704: Check SBAs
                 }
-                obj.summoning_sick = true;
+                super::replacement::ReplacementResult::Prevented => {}
+                super::replacement::ReplacementResult::NeedsChoice(player) => {
+                    state.waiting_for =
+                        super::replacement::replacement_choice_waiting_for(player, state);
+                }
             }
-            state.layers_dirty = true;
         }
     }
 
@@ -317,6 +323,66 @@ pub fn apply_debug_action(
         waiting_for: state.waiting_for.clone(),
         log_entries: vec![],
     })
+}
+
+/// CR 400.7 + CR 614.1: Route a debug-created object through the standard
+/// battlefield-entry pipeline (replacements → move-to-zone → ETB triggers →
+/// SBAs). Caller must have already created the object in an off-battlefield
+/// staging zone (typically `Zone::Hand`) with face data applied. Returns the
+/// resulting events and any new `WaitingFor` (e.g. replacement choice).
+///
+/// Auras created this way will be put onto the battlefield with `attached_to
+/// = None`; CR 704.5n SBA then moves them to the graveyard. The debug UI
+/// must collect a target separately if the user wants an attached Aura.
+pub fn route_debug_create_to_battlefield(
+    state: &mut GameState,
+    object_id: ObjectId,
+) -> ActionResult {
+    use super::replacement::{self, ReplacementResult};
+
+    let mut events: Vec<GameEvent> = vec![];
+    let from = state
+        .objects
+        .get(&object_id)
+        .map(|o| o.zone)
+        .unwrap_or(Zone::Hand);
+
+    let proposed = ProposedEvent::ZoneChange {
+        object_id,
+        from,
+        to: Zone::Battlefield,
+        cause: None,
+        enter_tapped: Default::default(),
+        enter_with_counters: vec![],
+        controller_override: None,
+        enter_transformed: false,
+        applied: HashSet::new(),
+    };
+
+    let mut waiting_for = state.waiting_for.clone();
+    match replacement::replace_event(state, proposed, &mut events) {
+        ReplacementResult::Execute(event) => {
+            super::effects::change_zone::deliver_replaced_zone_change(
+                state,
+                event,
+                None,
+                None,
+                &mut events,
+            );
+            super::triggers::process_triggers(state, &events); // CR 603: Process triggers
+            super::sba::check_state_based_actions(state, &mut events); // CR 704: Check SBAs
+        }
+        ReplacementResult::Prevented => {}
+        ReplacementResult::NeedsChoice(player) => {
+            waiting_for = replacement::replacement_choice_waiting_for(player, state);
+        }
+    }
+
+    ActionResult {
+        events,
+        waiting_for,
+        log_entries: vec![],
+    }
 }
 
 fn validate_object(state: &GameState, object_id: ObjectId) -> Result<(), EngineError> {

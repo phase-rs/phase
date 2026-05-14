@@ -785,6 +785,7 @@ pub(crate) fn static_filter_matches(
                 // All players match
                 return true;
             }
+            TargetFilter::Controller => return source_controller == Some(player_id),
             TargetFilter::Typed(TypedFilter { controller, .. }) => {
                 if let Some(ctrl) = controller {
                     return match ctrl {

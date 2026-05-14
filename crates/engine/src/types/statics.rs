@@ -8,7 +8,7 @@ use super::ability::{
     AbilityCost, CardPlayMode, CostCategory, QuantityExpr, QuantityRef, TargetFilter,
 };
 use super::keywords::Keyword;
-use super::mana::{ManaColor, ManaCost};
+use super::mana::{ManaColor, ManaCost, StepEndManaAction};
 use super::phase::Phase;
 use super::zones::Zone;
 
@@ -726,6 +726,21 @@ pub enum StaticMode {
     /// CR 609.4b: "You may spend mana as though it were mana of any color."
     /// Allows the controller to pay colored mana costs with mana of any color.
     SpendManaAsAnyColor,
+    /// CR 106.4 + CR 500.5 + CR 703.4q + CR 614.1a: How the affected player's
+    /// unspent mana is handled as steps and phases end. `filter` selects which
+    /// mana the rule applies to (`None` = every color including colorless;
+    /// `Some(color)` = only matching units); `action` is what happens to a
+    /// matching unit at the would-be-empty event.
+    ///
+    /// Unified across the retention family (Upwelling, Electro, Omnath Locus
+    /// of Mana, The Last Agni Kai) and the transformation family (Horizon
+    /// Stone, Kruphix, Omnath Locus of All, Ozai) per the parameterization
+    /// rule — both differ only on what happens at the CR 703.4q event, not on
+    /// which event they react to.
+    StepEndUnspentMana {
+        filter: Option<ManaColor>,
+        action: StepEndManaAction,
+    },
     /// CR 702.3b: Allows creatures with defender to attack despite having the keyword.
     /// "can attack as though it didn't have defender" overrides the defender restriction.
     CanAttackWithDefender,
@@ -781,6 +796,10 @@ impl Hash for StaticMode {
             StaticMode::CantBeBlockedExceptBy { filter } => filter.hash(state),
             StaticMode::CantBeBlockedBy { .. } => {} // TargetFilter does not implement Hash; discriminant only
             StaticMode::AdditionalLandDrop { count } => count.hash(state),
+            StaticMode::StepEndUnspentMana { filter, action } => {
+                filter.hash(state);
+                action.hash(state);
+            }
             StaticMode::Other(s) => s.hash(state),
             StaticMode::GraveyardCastPermission {
                 frequency,
@@ -973,6 +992,9 @@ impl fmt::Display for StaticMode {
             }
             StaticMode::SkipStep { step } => write!(f, "SkipStep({step:?})"),
             StaticMode::SpendManaAsAnyColor => write!(f, "SpendManaAsAnyColor"),
+            StaticMode::StepEndUnspentMana { filter, action } => {
+                write!(f, "StepEndUnspentMana({filter:?},{action})")
+            }
             StaticMode::CanAttackWithDefender => write!(f, "CanAttackWithDefender"),
             StaticMode::AssignNoCombatDamage => write!(f, "AssignNoCombatDamage"),
             StaticMode::UntapsDuringEachOtherPlayersUntapStep => {
@@ -1196,6 +1218,7 @@ impl FromStr for StaticMode {
             "CantWinTheGame" => StaticMode::CantWinTheGame,
             "CantLoseTheGame" => StaticMode::CantLoseTheGame,
             "CanAttackWithDefender" => StaticMode::CanAttackWithDefender,
+            s if s.starts_with("StepEndUnspentMana(") => StaticMode::Other(s.to_string()),
             "UntapsDuringEachOtherPlayersUntapStep" => {
                 StaticMode::UntapsDuringEachOtherPlayersUntapStep
             }

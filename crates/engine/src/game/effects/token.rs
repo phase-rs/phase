@@ -485,7 +485,7 @@ fn build_token_spec(
     ability: &ResolvedAbility,
     state: &GameState,
 ) -> crate::types::proposed_event::TokenSpec {
-    use crate::types::proposed_event::TokenSpec;
+    use crate::types::proposed_event::{TokenCharacteristics, TokenSpec};
 
     let (display_name, power, toughness, core_types, subtypes, supertypes, colors, keywords) =
         if let Some(attrs) = parsed {
@@ -527,15 +527,17 @@ fn build_token_spec(
         };
 
     TokenSpec {
-        display_name,
+        characteristics: TokenCharacteristics {
+            display_name,
+            power,
+            toughness,
+            core_types,
+            subtypes,
+            supertypes,
+            colors,
+            keywords,
+        },
         script_name: script_name.to_string(),
-        power,
-        toughness,
-        core_types,
-        subtypes,
-        supertypes,
-        colors,
-        keywords,
         static_abilities,
         enter_with_counters,
         tapped,
@@ -572,11 +574,12 @@ pub fn apply_create_token_after_replacement(
     let mut created_ids = Vec::with_capacity(final_count as usize);
 
     for _ in 0..final_count {
+        let ch = &spec.characteristics;
         let obj_id = zones::create_object(
             state,
             CardId(0),
             owner,
-            spec.display_name.clone(),
+            ch.display_name.clone(),
             Zone::Battlefield,
         );
 
@@ -586,28 +589,28 @@ pub fn apply_create_token_after_replacement(
             // True token from a TokenSpec — image lives in the generic-token
             // database (Treasure, Spirit, Saproling, Soldier, etc.).
             obj.display_source = DisplaySource::Token;
-            let has_attrs = spec.power.is_some()
-                || spec.toughness.is_some()
-                || !spec.core_types.is_empty()
-                || !spec.subtypes.is_empty()
-                || !spec.supertypes.is_empty()
-                || !spec.colors.is_empty()
-                || !spec.keywords.is_empty();
+            let has_attrs = ch.power.is_some()
+                || ch.toughness.is_some()
+                || !ch.core_types.is_empty()
+                || !ch.subtypes.is_empty()
+                || !ch.supertypes.is_empty()
+                || !ch.colors.is_empty()
+                || !ch.keywords.is_empty();
             if has_attrs {
-                obj.power = spec.power;
-                obj.toughness = spec.toughness;
-                obj.base_power = spec.power;
-                obj.base_toughness = spec.toughness;
+                obj.power = ch.power;
+                obj.toughness = ch.toughness;
+                obj.base_power = ch.power;
+                obj.base_toughness = ch.toughness;
                 obj.card_types = CardType {
-                    supertypes: spec.supertypes.clone(),
-                    core_types: spec.core_types.clone(),
-                    subtypes: spec.subtypes.clone(),
+                    supertypes: ch.supertypes.clone(),
+                    core_types: ch.core_types.clone(),
+                    subtypes: ch.subtypes.clone(),
                 };
                 obj.base_card_types = obj.card_types.clone();
-                obj.color = spec.colors.clone();
-                obj.base_color = spec.colors.clone();
-                obj.keywords = spec.keywords.clone();
-                obj.base_keywords = spec.keywords.clone();
+                obj.color = ch.colors.clone();
+                obj.base_color = ch.colors.clone();
+                obj.keywords = ch.keywords.clone();
+                obj.base_keywords = ch.keywords.clone();
             }
             obj.tapped = enter_tapped.resolve(spec.tapped);
             // CR 302.6: Tokens enter with summoning sickness, same as any
@@ -678,7 +681,7 @@ pub fn apply_create_token_after_replacement(
 
         events.push(GameEvent::TokenCreated {
             object_id: obj_id,
-            name: spec.display_name.clone(),
+            name: spec.characteristics.display_name.clone(),
         });
 
         // CR 603.7: Tokens with a limited duration get a delayed sacrifice trigger.
@@ -926,7 +929,7 @@ fn blood_ability() -> AbilityDefinition {
     })
 }
 
-/// CR 106.1 + CR 701.16a: Eldrazi Spawn — "Sacrifice this token: Add {C}."
+/// CR 106.1 + CR 701.21a: Eldrazi Spawn — "Sacrifice this token: Add {C}."
 /// Modern Eldrazi Spawn printings (from Rise of the Eldrazi onward) use this
 /// no-tap sacrifice mana ability. Applied by subtype lookup so every token
 /// with subtype "Spawn" gains the ability without per-card registration.
@@ -1001,7 +1004,7 @@ fn map_ability() -> AbilityDefinition {
 
 /// CR 111.10a–v: Predefined token abilities keyed by subtype.
 /// Returns ability definitions to inject for the given subtype, or empty if none.
-fn predefined_token_abilities(subtype: &str) -> Vec<AbilityDefinition> {
+pub fn predefined_token_abilities(subtype: &str) -> Vec<AbilityDefinition> {
     match subtype {
         "Treasure" => vec![treasure_ability()],
         "Food" => vec![food_ability()],
@@ -1353,8 +1356,16 @@ pub(super) fn inject_predefined_token_abilities(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::ability_utils::build_resolved_from_def;
+    use crate::game::engine::apply_as_current;
+    use crate::game::zones::create_object;
+    use crate::types::actions::GameAction;
+    use crate::types::card_type::CardType;
+    use crate::types::game_state::WaitingFor;
     use crate::types::identifiers::ObjectId;
+    use crate::types::mana::ManaType;
     use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
 
     // ── Parser unit tests ───────────────────────────────────────────────
 
@@ -1941,7 +1952,7 @@ mod tests {
 
     #[test]
     fn predefined_spawn_has_colorless_sacrifice_mana_ability() {
-        // CR 106.1 + CR 701.16a: Eldrazi Spawn tokens produced by Writhing
+        // CR 106.1 + CR 701.21a: Eldrazi Spawn tokens produced by Writhing
         // Chrysalis, Awakening Zone, etc. share a single sacrifice-for-{C}
         // mana ability, injected by subtype.
         let abilities = predefined_token_abilities("Spawn");
@@ -1954,6 +1965,121 @@ mod tests {
                 count: 1,
             })
         ));
+    }
+
+    #[test]
+    fn focused_writhing_chrysalis_spawn_token_sacrifice_adds_mana_and_triggers_counter() {
+        let parsed = crate::parser::parse_oracle_text(
+            "Devoid (This card has no color.)\n\
+             When you cast this spell, create two 0/1 colorless Eldrazi Spawn creature tokens with \"Sacrifice this token: Add {C}.\"\n\
+             Reach\n\
+             Whenever you sacrifice another Eldrazi, put a +1/+1 counter on this creature.",
+            "Writhing Chrysalis",
+            &["devoid".to_string(), "reach".to_string()],
+            &["Creature".to_string()],
+            &["Eldrazi".to_string(), "Drone".to_string()],
+        );
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let chrysalis = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Writhing Chrysalis".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&chrysalis).unwrap();
+            obj.card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Eldrazi".to_string(), "Drone".to_string()],
+            };
+            obj.power = Some(2);
+            obj.toughness = Some(3);
+            obj.trigger_definitions = parsed.triggers.clone().into();
+            Arc::make_mut(&mut obj.base_trigger_definitions).extend(parsed.triggers.clone());
+        }
+
+        // Focused runtime coverage: start from the parsed cast-trigger execute
+        // ability so this test isolates token resolution, injected token mana
+        // abilities, mana-ability cost payment, and sacrifice-trigger handling.
+        // Full casting would add unrelated hand/mana/priority setup.
+        let create_spawn = parsed.triggers[0]
+            .execute
+            .as_ref()
+            .expect("Writhing Chrysalis cast trigger creates Spawn tokens");
+        let ability = build_resolved_from_def(create_spawn, chrysalis, PlayerId(0));
+        let mut events = Vec::new();
+        super::super::resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("Spawn token creation should resolve");
+
+        let spawn = state
+            .battlefield
+            .iter()
+            .copied()
+            .find(|id| {
+                let object = &state.objects[id];
+                object.is_token
+                    && object
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|subtype| subtype == "Spawn")
+            })
+            .expect("Writhing Chrysalis should create an Eldrazi Spawn token");
+
+        assert!(
+            matches!(
+                *state.objects[&spawn].abilities[0].effect,
+                Effect::Mana {
+                    produced: ManaProduction::Colorless { .. },
+                    ..
+                }
+            ),
+            "Spawn token must have the runtime sacrifice-for-colorless mana ability"
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: spawn,
+                ability_index: 0,
+            },
+        )
+        .expect("Spawn mana ability should activate");
+
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Colorless),
+            1,
+            "Spawn sacrifice ability should add {{C}}"
+        );
+        assert!(!state.battlefield.contains(&spawn));
+        assert!(
+            state.stack.iter().any(|entry| entry.source_id == chrysalis),
+            "Writhing Chrysalis should see another Eldrazi sacrificed"
+        );
+
+        apply_as_current(&mut state, GameAction::PassPriority).expect("active player passes");
+        apply_as_current(&mut state, GameAction::PassPriority).expect("opponent passes");
+
+        assert_eq!(
+            state.objects[&chrysalis]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            1,
+            "Writhing Chrysalis sacrifice trigger should resolve to a +1/+1 counter"
+        );
     }
 
     #[test]
@@ -2471,17 +2597,20 @@ mod tests {
                 },
             ]);
 
+        use crate::types::proposed_event::TokenCharacteristics;
         let mut state = GameState::new_two_player(42);
         let spec = TokenSpec {
-            display_name: "Construct".to_string(),
+            characteristics: TokenCharacteristics {
+                display_name: "Construct".to_string(),
+                power: Some(0),
+                toughness: Some(0),
+                core_types: vec![CoreType::Artifact, CoreType::Creature],
+                subtypes: vec!["Construct".to_string()],
+                supertypes: vec![],
+                colors: vec![],
+                keywords: vec![],
+            },
             script_name: "Construct".to_string(),
-            power: Some(0),
-            toughness: Some(0),
-            core_types: vec![CoreType::Artifact, CoreType::Creature],
-            subtypes: vec!["Construct".to_string()],
-            supertypes: vec![],
-            colors: vec![],
-            keywords: vec![],
             static_abilities: vec![boost],
             enter_with_counters: vec![],
             tapped: false,
@@ -2525,16 +2654,19 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         assert!(state.last_created_token_ids.is_empty());
 
+        use crate::types::proposed_event::TokenCharacteristics;
         let spec = TokenSpec {
-            display_name: "Hero".to_string(),
+            characteristics: TokenCharacteristics {
+                display_name: "Hero".to_string(),
+                power: Some(1),
+                toughness: Some(1),
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Hero".to_string()],
+                supertypes: vec![],
+                colors: vec![],
+                keywords: vec![],
+            },
             script_name: "c_1_1_hero".to_string(),
-            power: Some(1),
-            toughness: Some(1),
-            core_types: vec![CoreType::Creature],
-            subtypes: vec!["Hero".to_string()],
-            supertypes: vec![],
-            colors: vec![],
-            keywords: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
             tapped: false,

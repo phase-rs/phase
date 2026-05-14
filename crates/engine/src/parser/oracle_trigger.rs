@@ -14,6 +14,7 @@ use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::trigger::{TriggerBody, TriggerIr, TriggerModifiers};
 use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::error::OracleResult;
+use super::oracle_nom::filter::parse_enters_origin_zone;
 use super::oracle_nom::primitives::{
     self as nom_primitives, scan_contains, scan_preceded, scan_split_at_phrase,
 };
@@ -2850,6 +2851,15 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
         }
     }
 
+    // CR 608.2c + CR 603.7c: In delayed triggers created by targeted spells,
+    // "that <noun>" refers back to the parent ability's chosen target.
+    if let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>("that ")).parse(text) {
+        let noun_end = rest.find(' ').unwrap_or(rest.len());
+        if noun_end > 0 {
+            return (TargetFilter::ParentTarget, rest[noun_end..].trim_start());
+        }
+    }
+
     // "equipped creature" / "enchanted creature/land/permanent" / "enchanted <basic-type>"
     // → AttachedTo. The Enchant keyword already constrains the attach target's type,
     // so `AttachedTo` alone is sufficient here (CR 702.5a). Utopia Sprawl's
@@ -3037,8 +3047,6 @@ fn add_controller(filter: TargetFilter, controller: ControllerRef) -> TargetFilt
 /// - "to an opponent"      → opponent-controlled TypedFilter
 /// - "to you"              → `Controller`
 ///
-/// Other qualifiers (e.g. "to a player or planeswalker") are left as `None`
-/// so the trigger fires for any target, matching current behaviour.
 fn parse_damage_to_qualifier(after_verb: &str) -> Option<TargetFilter> {
     let (rest, ()) = value((), tag::<_, _, OracleError<'_>>("to "))
         .parse(after_verb.trim_start())
@@ -3046,6 +3054,18 @@ fn parse_damage_to_qualifier(after_verb: &str) -> Option<TargetFilter> {
     // Use nom alt() to match damage target qualifiers (input already lowercase)
     fn parse_damage_target(input: &str) -> OracleResult<'_, TargetFilter> {
         alt((
+            value(
+                TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Player,
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker)),
+                    ],
+                },
+                alt((
+                    tag("a player or planeswalker"),
+                    tag("a player or a planeswalker"),
+                )),
+            ),
             value(TargetFilter::Player, tag("a player")),
             value(
                 TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
@@ -3158,10 +3178,33 @@ fn try_parse_event(
         def.destination = Some(Zone::Battlefield);
         def.valid_card = Some(subject.clone());
 
-        // CR 702.49c: "enters from your hand" — set origin zone.
-        let rest_lower = rest.to_lowercase();
-        if scan_contains(&rest_lower, "from your hand") {
-            def.origin = Some(Zone::Hand);
+        // CR 603.6 + CR 603.6a: "enters from <zone>" — origin-zone qualifier on
+        // an ETB trigger restricts which zone-change events match. Without
+        // this, a battlefield permanent with "whenever a creature enters from
+        // your graveyard" would fire on every creature entering from anywhere
+        // (cast from hand, returned from exile, commander from command zone),
+        // because the runtime trigger matcher treats `origin: None` as
+        // "any origin zone." Issue #396 (Flayer of the Hatebound firing on
+        // commanders cast from the command zone) is exactly this drop.
+        //
+        // The origin qualifier may appear immediately after the verb
+        // ("enters from your graveyard, …") or after the battlefield phrase
+        // ("enters the battlefield from a graveyard"). Scan the condition
+        // segment at word boundaries with the typed combinator so the order
+        // of the qualifier does not matter. (The effect segment is already
+        // separated upstream by `split_trigger`, so a tail clause like
+        // "return that card from your graveyard" cannot poison this scan.)
+        //
+        // TODO: extend `parse_enters_origin_zone` to handle "from anywhere",
+        // "from anywhere other than <zone>", and opponent-scoped origins as
+        // those patterns surface in real cards.
+        let mut scan = after_enter.trim_start();
+        while !scan.is_empty() {
+            if let Ok((_, origin)) = parse_enters_origin_zone(scan) {
+                def.origin = Some(origin);
+                break;
+            }
+            scan = scan.find(' ').map_or("", |i| scan[i + 1..].trim_start());
         }
 
         // CR 603.6a + CR 611.2b: "enters untapped" / "enters tapped" — conditional
@@ -6422,8 +6465,9 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AbilityKind, AggregateFunction, CastingPermission,
         Comparator, ContinuousModification, ControllerRef, CountScope, DamageModification,
-        Duration, Effect, FilterProp, ManaSpendPermission, ObjectScope, PlayerFilter, PlayerScope,
-        PtValue, QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
+        DelayedTriggerCondition, Duration, Effect, FilterProp, ManaSpendPermission, ObjectScope,
+        PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
+        TypedFilter,
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::replacements::ReplacementEvent;
@@ -6730,6 +6774,89 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::DamageDone);
         assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
         assert_eq!(def.valid_target, Some(TargetFilter::Player));
+    }
+
+    #[test]
+    fn that_creature_subject_resolves_to_parent_target() {
+        let mut ctx = ParseContext::default();
+        let (_, def) = parse_trigger_condition(
+            "that creature deals combat damage to a player or planeswalker",
+            &mut ctx,
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+        assert_eq!(def.valid_source, Some(TargetFilter::ParentTarget));
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Player,
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker)),
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn that_permanent_attacks_subject_resolves_to_parent_target() {
+        let mut ctx = ParseContext::default();
+        let (_, def) = parse_trigger_condition("that permanent attacks", &mut ctx);
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        assert_eq!(def.valid_card, Some(TargetFilter::ParentTarget));
+    }
+
+    #[test]
+    fn creature_subject_still_returns_typed_filter() {
+        let mut ctx = ParseContext::default();
+        let (_, def) =
+            parse_trigger_condition("a creature deals combat damage to a player", &mut ctx);
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(
+            def.valid_source,
+            Some(TargetFilter::Typed(TypedFilter::creature()))
+        );
+    }
+
+    #[test]
+    fn hunters_insight_class_builds_whenever_event_delayed_trigger() {
+        use crate::parser::oracle::parse_oracle_text;
+
+        let parsed = parse_oracle_text(
+            "Choose target creature you control. Whenever that creature deals combat damage to a player or planeswalker this turn, draw that many cards.",
+            "Hunter's Insight",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        assert_eq!(parsed.abilities.len(), 1);
+
+        let delayed = parsed.abilities[0]
+            .sub_ability
+            .as_deref()
+            .expect("target choice should chain into delayed trigger");
+        let Effect::CreateDelayedTrigger {
+            condition, effect, ..
+        } = delayed.effect.as_ref()
+        else {
+            panic!("expected CreateDelayedTrigger, got {:?}", delayed.effect);
+        };
+        let DelayedTriggerCondition::WheneverEvent { trigger } = condition else {
+            panic!("expected WheneverEvent, got {condition:?}");
+        };
+        assert_eq!(trigger.mode, TriggerMode::DamageDone);
+        assert_eq!(trigger.damage_kind, DamageKindFilter::CombatOnly);
+        assert_eq!(trigger.valid_source, Some(TargetFilter::ParentTarget));
+
+        let Effect::Draw { count, target } = effect.effect.as_ref() else {
+            panic!("expected Draw, got {:?}", effect.effect);
+        };
+        assert_eq!(
+            *count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            }
+        );
+        assert_eq!(*target, TargetFilter::Controller);
     }
 
     // Thrummingbird: pins the trigger event shape AND the parsed execute body
@@ -11347,6 +11474,35 @@ mod tests {
         assert!(def.execute.is_some());
         let exec = def.execute.as_ref().unwrap();
         assert!(matches!(*exec.effect, Effect::CopyTokenOf { .. }));
+    }
+
+    /// CR 603.6 + CR 603.6a — Flayer of the Hatebound: "enters from your
+    /// graveyard" must set `origin = Some(Graveyard)` on the ChangesZone
+    /// trigger. Issue #396 — previously the origin-zone qualifier was
+    /// dropped, so the trigger fired on any creature entering from any zone
+    /// (including commanders cast from the command zone).
+    #[test]
+    fn trigger_etb_from_graveyard_flayer() {
+        let def = parse_trigger_line(
+            "Whenever this creature or another creature enters from your graveyard, that creature deals damage equal to its power to any target.",
+            "Flayer of the Hatebound",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        assert_eq!(def.origin, Some(Zone::Graveyard));
+    }
+
+    /// CR 603.6 + CR 603.6a — origin extraction for "enters from exile"
+    /// triggers (e.g. cards that fire when a creature comes back from exile).
+    #[test]
+    fn trigger_etb_from_exile_origin() {
+        let def = parse_trigger_line(
+            "Whenever another creature enters from exile, draw a card.",
+            "Test Source",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        assert_eq!(def.origin, Some(Zone::Exile));
     }
 
     /// CR 508.4 + CR 614.1 — Kaalia of the Vast: the inline-tail patcher in

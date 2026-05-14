@@ -17,8 +17,8 @@ use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
 use crate::convert::filter::{
-    artifact_type_name, convert as convert_permanents, convert_permanent, damage_sources_to_filter,
-    land_type_name,
+    artifact_type_name, choice_type_for_choosable_color, convert as convert_permanents,
+    convert_permanent, damage_sources_to_filter, land_type_name,
 };
 use crate::convert::mana;
 use crate::convert::quantity;
@@ -1627,8 +1627,8 @@ fn build_replacement_exec(
             choice_type: ChoiceType::CreatureType,
             persist: true,
         },
-        A::ChooseAColor(_) => Effect::Choose {
-            choice_type: ChoiceType::Color,
+        A::ChooseAColor(choice) => Effect::Choose {
+            choice_type: choice_type_for_choosable_color(choice),
             persist: true,
         },
         A::ChooseACardName(_) => Effect::Choose {

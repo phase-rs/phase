@@ -87,32 +87,10 @@ export function renderTriageDashboard(items: TriageItem[]): string {
   }
   lines.push(``);
 
-  // --- Stale / likely fixed ---
-  const stale = items.filter((i) => i.classification === "stale_likely_fixed");
-  const staleByCard = new Map<string, TriageItem[]>();
-  for (const item of stale) {
-    const key = item.dedup_group ?? "(no card)";
-    if (!staleByCard.has(key)) staleByCard.set(key, []);
-    staleByCard.get(key)!.push(item);
-  }
-
-  lines.push(`## Likely Fixed — Verify (${stale.length} items)`);
-  lines.push(``);
-  if (stale.length === 0) {
-    lines.push(`_None._`);
-  } else {
-    for (const [card, cardItems] of [...staleByCard.entries()].sort()) {
-      lines.push(`### ${card}`);
-      for (const item of cardItems) {
-        lines.push(`- ${item.thread_name} — ${item.summary}`);
-        lines.push(`  - [Discord](${item.source_url})`);
-      }
-      lines.push(``);
-    }
-  }
-
   // --- Skipped summary ---
-  const skipped = items.filter((i) => i.proposed_action === "skip");
+  const skipped = items.filter(
+    (i) => i.proposed_action === "skip" || i.proposed_action === "skip_existing_closed",
+  );
   const skipByClass = new Map<string, number>();
   for (const item of skipped) {
     skipByClass.set(item.classification, (skipByClass.get(item.classification) ?? 0) + 1);

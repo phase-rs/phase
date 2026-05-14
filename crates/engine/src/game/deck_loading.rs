@@ -143,6 +143,7 @@ pub fn create_commander_from_card_face(
 /// Load deck data into a GameState, creating GameObjects in each player's library and shuffling.
 pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     state.deck_pools.clear();
+    state.outside_game_cards_brought_in.clear();
     state.sideboard_submitted.clear();
 
     // Build each Arc<Vec<_>> once and share between registered_X and current_X —
@@ -375,6 +376,7 @@ mod tests {
             solve_condition: None,
             parse_warnings: vec![],
             brawl_commander: false,
+            is_commander: false,
             metadata: Default::default(),
             rarities: Default::default(),
         }
@@ -422,6 +424,7 @@ mod tests {
             solve_condition: None,
             parse_warnings: vec![],
             brawl_commander: false,
+            is_commander: false,
             metadata: Default::default(),
             rarities: Default::default(),
         }
@@ -526,6 +529,44 @@ mod tests {
         assert_eq!(state.players[0].library.len(), 6); // 4 + 2
         assert_eq!(state.players[1].library.len(), 3);
         assert_eq!(state.objects.len(), 9); // 6 + 3
+    }
+
+    #[test]
+    fn load_deck_clears_outside_game_cards_brought_in() {
+        let mut state = GameState::new_two_player(42);
+        state
+            .outside_game_cards_brought_in
+            .push(crate::types::game_state::OutsideGameCardUse {
+                player: PlayerId(0),
+                sideboard_index: 0,
+                count: 1,
+            });
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: vec![DeckEntry {
+                    card: make_creature_face(),
+                    count: 1,
+                }],
+                sideboard: vec![DeckEntry {
+                    card: make_instant_face(),
+                    count: 1,
+                }],
+                commander: vec![],
+            },
+            opponent: PlayerDeckPayload {
+                main_deck: vec![DeckEntry {
+                    card: make_creature_face(),
+                    count: 1,
+                }],
+                sideboard: vec![],
+                commander: vec![],
+            },
+            ai_decks: vec![],
+        };
+
+        load_deck_into_state(&mut state, &payload);
+
+        assert!(state.outside_game_cards_brought_in.is_empty());
     }
 
     #[test]
@@ -732,6 +773,65 @@ mod tests {
         assert_eq!(cmd.zone, Zone::Command);
         assert!(cmd.is_commander);
         assert_eq!(cmd.owner, PlayerId(0));
+    }
+
+    #[test]
+    fn resolve_combined_face_commander_name_creates_command_zone_object() {
+        let front_face = CardFace {
+            name: "Brigid, Clachan's Heart".to_string(),
+            card_type: CardType {
+                supertypes: vec![crate::types::card_type::Supertype::Legendary],
+                core_types: vec![crate::types::card_type::CoreType::Creature],
+                subtypes: vec!["Kithkin".to_string(), "Warrior".to_string()],
+            },
+            ..make_creature_face()
+        };
+        let back_face = CardFace {
+            name: "Brigid, Doun's Mind".to_string(),
+            card_type: CardType {
+                supertypes: vec![crate::types::card_type::Supertype::Legendary],
+                core_types: vec![crate::types::card_type::CoreType::Creature],
+                subtypes: vec!["Kithkin".to_string(), "Soldier".to_string()],
+            },
+            ..make_creature_face()
+        };
+        let db_json = serde_json::json!({
+            "brigid, clachan's heart": front_face,
+            "brigid, doun's mind": back_face,
+        })
+        .to_string();
+        let db = CardDatabase::from_json_str(&db_json).unwrap();
+        let list = DeckList {
+            player: PlayerDeckList {
+                main_deck: vec![String::from("Grizzly Bears")],
+                sideboard: vec![],
+                commander: vec![String::from(
+                    "Brigid, Clachan's Heart // Brigid, Doun's Mind",
+                )],
+            },
+            opponent: PlayerDeckList {
+                main_deck: vec![],
+                sideboard: vec![],
+                commander: vec![],
+            },
+            ai_decks: vec![],
+        };
+
+        let payload = resolve_deck_list(&db, &list);
+        assert_eq!(payload.player.commander.len(), 1);
+        assert_eq!(
+            payload.player.commander[0].card.name,
+            "Brigid, Clachan's Heart"
+        );
+
+        let mut state = GameState::new_two_player(42);
+        load_deck_into_state(&mut state, &payload);
+
+        assert_eq!(state.command_zone.len(), 1);
+        let commander = &state.objects[&state.command_zone[0]];
+        assert_eq!(commander.name, "Brigid, Clachan's Heart");
+        assert_eq!(commander.zone, Zone::Command);
+        assert!(commander.is_commander);
     }
 
     #[test]

@@ -371,7 +371,15 @@ Also at this step: audit open `collector` trackers. When a resync pass closes ch
 ```bash
 bun scripts/sync-bug-reports.ts fetch
 ```
-If new messages exist, re-run extract → triage → render and review new items.
+If new messages exist, re-run extract → triage → render and review **only new report IDs** from the current fetch window. Do not re-process every historical Discord thread as new work. The raw store and dashboards may be regenerated from the full message archive for determinism, but GitHub issue work is delta-based:
+- Use Discord cursors in `triage/sync-state.json` and the `fetch` command's "New messages fetched" count to decide whether there is new Discord input.
+- Treat `report_id` (`discord:<thread_id>:<message_id>:<item_index>`) as the stable idempotency key. Before creating work, search GitHub issues/comments for that report id or thread/message URL.
+- GitHub dedupe checks MUST include closed issues: use `--state all`, not `--state open`. Closed `status:fixed-unreleased`, `stale`, `duplicate`, and `wont-fix` issues are still authoritative triage records and must prevent duplicate creation.
+- The `triage` command performs a GitHub issue-index dedupe pass against all issues by exact Discord report id/source URL/message path. If it marks a report `skip_existing_closed`, do not recreate it unless the Discord thread contains a newer unmatched report id.
+- Existing GitHub issues, comments, labels, and sub-issue parentage are the persistent triage state. Update those records instead of rediscovering or refiling old reports.
+- If an old report appears in the regenerated dashboard but already has a GH issue/comment or a documented stale/duplicate decision, skip it unless the Discord thread has a newer message with a new `report_id`.
+
+**Hard rule:** `parser_status: fully_parsed` is parser metadata only. It must never classify a user report as `likely_fixed`, stale, skipped, or ignorable. Runtime, frontend, AI, deckbuilder, multiplayer, and UI reports still require subsystem evidence or a GH issue even when all referenced cards are fully parsed.
 
 ### Step 5: Update dashboard
 ```bash
@@ -397,9 +405,9 @@ If you discover an existing issue references wrong Oracle text, fix it as part o
 
 ### Evidence Standard
 
-User reports are presumed real unless there is strong contradictory evidence. Do not mark an issue `likely_fixed`, `fixed-unreleased`, `verified`, or closed from parser coverage alone.
+User reports are presumed real unless there is strong contradictory evidence. Do not mark an issue `likely_fixed`, `fixed-unreleased`, `verified`, stale, skipped, or closed from parser coverage alone.
 
-`fully_parsed` only means the parser did not emit `Unimplemented` or `Unknown`. It does not prove the card behaves correctly: text can be swallowed, parsed into overly generic effects, attached to the wrong subject/controller/zone, or represented with the wrong typed semantics.
+`fully_parsed` only means the parser did not emit `Unimplemented` or `Unknown`. It does not prove the card behaves correctly: text can be swallowed, parsed into overly generic effects, attached to the wrong subject/controller/zone, represented with the wrong typed semantics, or fail at runtime/UI/AI/deckbuilding. A fresh user report with `fully_parsed` cards should normally become `status:confirmed` or `status:needs-repro` unless there is targeted contradictory evidence.
 
 Acceptable evidence depends on the report type:
 - Parser-gap report: the specific reported Oracle clause parses into the expected typed AST/IR/effect, with correct subject, controller, target, zone, condition, quantity, and optional/otherwise wiring.

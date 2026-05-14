@@ -11,6 +11,7 @@ import { useUiStore } from "../../stores/uiStore.ts";
 import { useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { getPlayerZoneIds, getWaitingForObjectChoiceIds } from "../../viewmodel/gameStateView.ts";
+import { CASTABLE_AFFORDANCE_ACTIVE, CASTABLE_AFFORDANCE_IDLE } from "../../viewmodel/castableAffordance.ts";
 import { playOrCastActionsForObject } from "../../viewmodel/cardActionChoice.ts";
 import { abilityChoiceLabel } from "../../viewmodel/costLabel.ts";
 
@@ -139,9 +140,9 @@ function ZoneCard({
     <div
       className={`shrink-0 cursor-pointer rounded transition-colors ${
         isValidTarget
-          ? "ring-2 ring-amber-400/60 shadow-[0_0_12px_3px_rgba(201,176,55,0.8)]"
+          ? CASTABLE_AFFORDANCE_ACTIVE
           : canCast
-            ? "ring-1 ring-amber-500/60 hover:ring-amber-400"
+            ? CASTABLE_AFFORDANCE_IDLE
             : "hover:ring-1 hover:ring-white/20"
       }`}
       data-card-hover

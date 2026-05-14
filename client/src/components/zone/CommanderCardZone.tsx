@@ -10,6 +10,7 @@ import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useDragToCast } from "../../hooks/useDragToCast.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
+import { CASTABLE_AFFORDANCE_ACTIVE } from "../../viewmodel/castableAffordance.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 
 interface CommanderCardZoneProps {
@@ -150,7 +151,7 @@ function CommanderCard({ commander }: { commander: GameObject }) {
 
       {/* Castable glow ring */}
       {canCast && (
-        <div className="absolute inset-0 rounded-lg ring-2 ring-amber-400/70 shadow-[0_0_12px_3px_rgba(245,158,11,0.5)]" />
+        <div className={`absolute inset-0 rounded-lg ${CASTABLE_AFFORDANCE_ACTIVE}`} />
       )}
 
       {/* Commander tax badge */}

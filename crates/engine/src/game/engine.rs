@@ -40,6 +40,7 @@ use super::priority;
 use super::public_state::{
     bump_state_revision, finalize_public_state, mark_public_state_all_dirty, sync_waiting_for,
 };
+use super::triggers;
 use super::turn_control;
 use super::turns;
 use super::zones;
@@ -2071,12 +2072,19 @@ fn apply_action(
         (
             WaitingFor::ChooseXValue {
                 player,
+                min,
                 max,
                 convoke_mode,
                 ..
             },
             GameAction::ChooseX { value },
         ) => {
+            if value < *min {
+                return Err(EngineError::InvalidAction(format!(
+                    "X={value} is below the minimum legal value of {min}",
+                    min = *min,
+                )));
+            }
             if value > *max {
                 return Err(EngineError::InvalidAction(format!(
                     "X={value} exceeds the maximum legal value of {max}",
@@ -2300,9 +2308,13 @@ fn apply_action(
                 .objects
                 .get(&object_id)
                 .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
-            if !obj.is_convoke_eligible(*player) {
+            let is_eligible = match mode {
+                ConvokeMode::Convoke => obj.is_convoke_eligible(*player),
+                ConvokeMode::Waterbend => obj.is_waterbend_eligible(*player),
+            };
+            if !is_eligible {
                 return Err(EngineError::ActionNotAllowed(
-                    "Can only tap untapped creatures or artifacts you control for convoke"
+                    "Can only tap an eligible untapped permanent you control for convoke"
                         .to_string(),
                 ));
             }
@@ -2339,18 +2351,28 @@ fn apply_action(
                 object_id,
                 caused_by: None,
             });
-            // Add mana to pool
-            let unit =
-                crate::types::mana::ManaUnit::new(resolved_mana_type, object_id, false, Vec::new());
+            let unit = match mode {
+                ConvokeMode::Convoke => {
+                    crate::types::mana::ManaUnit::convoke_payment(resolved_mana_type, object_id)
+                }
+                ConvokeMode::Waterbend => crate::types::mana::ManaUnit::new(
+                    resolved_mana_type,
+                    object_id,
+                    false,
+                    Vec::new(),
+                ),
+            };
             if let Some(p) = state.players.iter_mut().find(|p| p.id == *player) {
                 p.mana_pool.add(unit);
             }
-            events.push(GameEvent::ManaAdded {
-                player_id: *player,
-                mana_type: resolved_mana_type,
-                source_id: object_id,
-                tapped_for_mana: false,
-            });
+            if mode == ConvokeMode::Waterbend {
+                events.push(GameEvent::ManaAdded {
+                    player_id: *player,
+                    mana_type: resolved_mana_type,
+                    source_id: object_id,
+                    tapped_for_mana: false,
+                });
+            }
             if tapped_creature_for_convoke {
                 let pending = state.pending_cast.as_mut().ok_or_else(|| {
                     EngineError::InvalidAction("No pending cast for convoke".to_string())
@@ -2760,6 +2782,7 @@ fn apply_action(
                 ability,
                 timestamp: 0,
                 target_constraints: vec![],
+                distribute: None,
                 trigger_event: None,
                 modal: None,
                 mode_abilities: vec![],
@@ -3275,8 +3298,18 @@ fn apply_action(
                     pending.origin_zone,
                     &mut events,
                 )?
+            } else if let Some(mut pending_trigger) = state.pending_trigger.take() {
+                // CR 601.2d + CR 603.3d: Triggered abilities divide effects
+                // while being put on the stack. The chosen per-target amounts
+                // are resolution data on the resolved ability.
+                pending_trigger.ability.distribution =
+                    Some(distribution.iter().map(|(t, a)| (t.clone(), *a)).collect());
+                triggers::push_pending_trigger_to_stack(state, pending_trigger, &mut events);
+                state.priority_passes.clear();
+                state.priority_pass_count = 0;
+                WaitingFor::Priority { player: p }
             } else {
-                // Resolution-time distribution (triggered ability path).
+                // Resolution-time distribution continuation path.
                 state.waiting_for = WaitingFor::Priority { player: p };
                 state.priority_player = p;
                 effects::drain_pending_continuation(state, &mut events);
@@ -4677,6 +4710,7 @@ pub fn start_game_with_starting_player(
     starting_player: PlayerId,
 ) -> ActionResult {
     let mut events = Vec::new();
+    state.outside_game_cards_brought_in.clear();
 
     if state.match_config.match_type == MatchType::Bo3 && state.players.len() != 2 {
         state.match_config.match_type = MatchType::Bo1;
@@ -4734,6 +4768,7 @@ pub fn start_game_with_starting_player(
 /// Start game without mulligan (for backward compatibility with existing tests).
 pub fn start_game_skip_mulligan(state: &mut GameState) -> ActionResult {
     let mut events = Vec::new();
+    state.outside_game_cards_brought_in.clear();
 
     events.push(GameEvent::GameStarted);
 
@@ -4826,14 +4861,15 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, GainLifePlayer,
-        ManaContribution, ManaProduction, QuantityExpr, ResolvedAbility, TargetFilter,
-        TriggerDefinition, TypeFilter, TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ControllerRef, Effect,
+        GainLifePlayer, ManaContribution, ManaProduction, ManaSpendRestriction, QuantityExpr,
+        ResolvedAbility, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CardType;
     use crate::types::card_type::CoreType;
+    use crate::types::counter::CounterType;
     use crate::types::identifiers::{CardId, ObjectId};
-    use crate::types::mana::ManaCost;
+    use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::TriggerMode;
 
     /// Create a simple test ability definition.
@@ -4883,6 +4919,38 @@ mod tests {
         Arc::make_mut(&mut obj.base_abilities).extend(parsed.abilities);
     }
 
+    fn apply_oracle_to_object(
+        state: &mut GameState,
+        object_id: ObjectId,
+        name: &str,
+        oracle_text: &str,
+    ) {
+        let obj = state.objects.get(&object_id).unwrap();
+        let types = obj
+            .card_types
+            .core_types
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        let subtypes = obj.card_types.subtypes.clone();
+        let parsed = parse_oracle_text(oracle_text, name, &[], &types, &subtypes);
+        let obj = state.objects.get_mut(&object_id).unwrap();
+        Arc::make_mut(&mut obj.abilities).extend(parsed.abilities.clone());
+        Arc::make_mut(&mut obj.base_abilities).extend(parsed.abilities);
+        for trigger in parsed.triggers.clone() {
+            obj.trigger_definitions.push(trigger);
+        }
+        Arc::make_mut(&mut obj.base_trigger_definitions).extend(parsed.triggers);
+        for replacement in parsed.replacements.clone() {
+            obj.replacement_definitions.push(replacement);
+        }
+        Arc::make_mut(&mut obj.base_replacement_definitions).extend(parsed.replacements);
+        for static_def in parsed.statics.clone() {
+            obj.static_definitions.push(static_def);
+        }
+        Arc::make_mut(&mut obj.base_static_definitions).extend(parsed.statics);
+    }
+
     use crate::game::test_fixtures::brushland_colored_ability;
 
     fn setup_game_at_main_phase() -> GameState {
@@ -4895,6 +4963,373 @@ mod tests {
             player: PlayerId(0),
         };
         state
+    }
+
+    #[test]
+    fn eldrazi_temple_restricted_mana_casts_kindred_eldrazi_spell_only() {
+        let mut state = setup_game_at_main_phase();
+        let temple = create_object(
+            &mut state,
+            CardId(9100),
+            PlayerId(0),
+            "Eldrazi Temple".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&temple).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Colorless {
+                            count: QuantityExpr::Fixed { value: 2 },
+                        },
+                        restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation(
+                            "Colorless Eldrazi".to_string(),
+                        )],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+        }
+
+        let command = create_object(
+            &mut state,
+            CardId(9101),
+            PlayerId(0),
+            "Kozilek's Command".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&command).unwrap();
+            obj.card_types.core_types.push(CoreType::Kindred);
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.card_types.subtypes.push("Eldrazi".to_string());
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![
+                    ManaCostShard::X,
+                    ManaCostShard::Colorless,
+                    ManaCostShard::Colorless,
+                ],
+                generic: 0,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 0 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: temple,
+                ability_index: 0,
+            },
+        )
+        .unwrap();
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: command,
+                card_id: CardId(9101),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::ChooseXValue { .. }
+        ));
+        apply_as_current(&mut state, GameAction::ChooseX { value: 0 }).unwrap();
+        assert!(
+            state.stack.iter().any(|entry| entry.source_id == command),
+            "Eldrazi Temple mana should pay for colorless Kindred Eldrazi spells"
+        );
+
+        let mut state = setup_game_at_main_phase();
+        let temple = create_object(
+            &mut state,
+            CardId(9110),
+            PlayerId(0),
+            "Eldrazi Temple".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&temple).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Colorless {
+                            count: QuantityExpr::Fixed { value: 2 },
+                        },
+                        restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation(
+                            "Colorless Eldrazi".to_string(),
+                        )],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+        }
+        let construct = create_object(
+            &mut state,
+            CardId(9111),
+            PlayerId(0),
+            "Colorless Construct".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&construct).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Construct".to_string());
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Colorless, ManaCostShard::Colorless],
+                generic: 0,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 0 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        }
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: temple,
+                ability_index: 0,
+            },
+        )
+        .unwrap();
+        assert!(
+            apply_as_current(
+                &mut state,
+                GameAction::CastSpell {
+                    object_id: construct,
+                    card_id: CardId(9111),
+                    targets: vec![],
+                },
+            )
+            .is_err(),
+            "Eldrazi Temple restricted mana must not pay for non-Eldrazi spells"
+        );
+    }
+
+    #[test]
+    fn chalice_of_the_void_enters_with_x_and_counters_matching_spell() {
+        let mut state = setup_game_at_main_phase();
+        let chalice = create_object(
+            &mut state,
+            CardId(9120),
+            PlayerId(0),
+            "Chalice of the Void".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&chalice).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::X],
+                generic: 0,
+            };
+        }
+        apply_oracle_to_object(
+            &mut state,
+            chalice,
+            "Chalice of the Void",
+            "This artifact enters with X charge counters on it.\nWhenever a player casts a spell with mana value equal to the number of charge counters on this artifact, counter that spell.",
+        );
+        let player = state
+            .players
+            .iter_mut()
+            .find(|player| player.id == PlayerId(0))
+            .unwrap();
+        for _ in 0..3 {
+            player.mana_pool.add(crate::types::mana::ManaUnit::new(
+                crate::types::mana::ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: chalice,
+                card_id: CardId(9120),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        apply_as_current(&mut state, GameAction::ChooseX { value: 1 }).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        assert_eq!(state.objects[&chalice].zone, Zone::Battlefield);
+        assert_eq!(
+            state.objects[&chalice]
+                .counters
+                .get(&CounterType::Generic("charge".to_string()))
+                .copied()
+                .unwrap_or_default(),
+            1
+        );
+
+        let spell = create_object(
+            &mut state,
+            CardId(9121),
+            PlayerId(0),
+            "One Mana Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 1,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 0 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        }
+        state
+            .players
+            .iter_mut()
+            .find(|player| player.id == PlayerId(0))
+            .unwrap()
+            .mana_pool
+            .add(crate::types::mana::ManaUnit::new(
+                crate::types::mana::ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: spell,
+                card_id: CardId(9121),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        assert!(
+            state.stack.iter().any(|entry| entry.source_id == chalice),
+            "Chalice should trigger for a spell with matching mana value"
+        );
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        assert_eq!(
+            state.objects[&spell].zone,
+            Zone::Graveyard,
+            "Chalice trigger should counter the matching spell"
+        );
+    }
+
+    #[test]
+    fn broadside_bombardiers_boast_activates_after_attacking_and_requires_sacrifice() {
+        use crate::game::combat::AttackTarget;
+
+        let mut state = setup_game_at_main_phase();
+        state.phase = Phase::DeclareAttackers;
+        let bombardiers = create_object(
+            &mut state,
+            CardId(9140),
+            PlayerId(0),
+            "Broadside Bombardiers".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&bombardiers).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Goblin".to_string());
+            obj.card_types.subtypes.push("Pirate".to_string());
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.summoning_sick = false;
+        }
+        apply_oracle_to_object(
+            &mut state,
+            bombardiers,
+            "Broadside Bombardiers",
+            "Menace\nHaste\nBoast — Sacrifice another creature or artifact: This creature deals damage equal to 2 plus the sacrificed permanent's mana value to any target. (Activate only if this creature attacked this turn and only once each turn.)",
+        );
+        let sacrifice = create_object(
+            &mut state,
+            CardId(9141),
+            PlayerId(0),
+            "Sacrifice Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&sacrifice).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+        }
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: vec![bombardiers],
+            valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
+        };
+        apply_as_current(
+            &mut state,
+            GameAction::DeclareAttackers {
+                attacks: vec![(bombardiers, AttackTarget::Player(PlayerId(1)))],
+            },
+        )
+        .unwrap();
+        let ability_index = state.objects[&bombardiers]
+            .abilities
+            .iter()
+            .position(|ability| ability.ability_tag == Some(AbilityTag::Boast))
+            .expect("Broadside Bombardiers should have a Boast ability");
+        let result = apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: bombardiers,
+                ability_index,
+            },
+        )
+        .unwrap();
+        if matches!(result.waiting_for, WaitingFor::TargetSelection { .. }) {
+            apply_as_current(
+                &mut state,
+                GameAction::SelectTargets {
+                    targets: vec![TargetRef::Player(PlayerId(1))],
+                },
+            )
+            .unwrap();
+        }
+        let WaitingFor::SacrificeForCost {
+            count, permanents, ..
+        } = &state.waiting_for
+        else {
+            panic!("Broadside Bombardiers boast should require a sacrifice cost");
+        };
+        assert_eq!(*count, 1);
+        assert!(permanents.contains(&sacrifice));
+        assert!(!permanents.contains(&bombardiers));
     }
 
     fn room_back_face(name: &str) -> BackFaceData {
@@ -5383,13 +5818,29 @@ mod tests {
         assert_eq!(state.rng_seed, 42);
     }
 
+    /// CR 117.1c + CR 503.2: After Untap (no priority), the active player
+    /// receives priority during their Upkeep step. CR 103.7a skips the
+    /// first-turn Draw step entirely, so passing both priorities through
+    /// Upkeep lands at PreCombatMain.
     #[test]
-    fn start_game_advances_to_precombat_main() {
+    fn start_game_pauses_at_first_turn_upkeep_priority() {
         let mut state = new_game(42);
         let result = start_game_with_starting_player(&mut state, PlayerId(0));
 
-        assert_eq!(state.phase, Phase::PreCombatMain);
+        // CR 117.1c: starting player receives priority during Upkeep first.
+        assert_eq!(state.phase, Phase::Upkeep);
         assert_eq!(state.turn_number, 1);
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
+
+        // Both players pass through Upkeep → CR 103.7a skips Draw → PreCombatMain.
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        let result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        assert_eq!(state.phase, Phase::PreCombatMain);
         assert!(matches!(
             result.waiting_for,
             WaitingFor::Priority {
@@ -5460,10 +5911,18 @@ mod tests {
     fn integration_full_turn_cycle() {
         let mut state = new_game(42);
 
-        // Start game (turn 1, player 0)
+        // Start game (turn 1, player 0) — engine pauses at Upkeep priority per
+        // CR 117.1c. CR 103.7a skips the first-turn Draw step entirely.
+        // (Libraries are empty, which is fine because the first-turn player
+        // never draws and we stop the test before turn 2's draw step.)
         let _result = start_game_with_starting_player(&mut state, PlayerId(0));
-        assert_eq!(state.phase, Phase::PreCombatMain);
+        assert_eq!(state.phase, Phase::Upkeep);
         assert_eq!(state.turn_number, 1);
+
+        // Pass through Upkeep (both players) — lands at PreCombatMain (Draw skipped).
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        assert_eq!(state.phase, Phase::PreCombatMain);
 
         // Pass priority from player 0 (pre-combat main)
         let result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
@@ -5485,11 +5944,13 @@ mod tests {
         // Should advance to End step
         assert_eq!(state.phase, Phase::End);
 
-        // Pass through end step
+        // Pass through end step → cleanup → next turn. Turn 2 is player 1's
+        // turn; the engine pauses at P1's Upkeep priority (CR 117.1c).
+        // (We stop here rather than draining Draw, because empty libraries
+        // would trigger the CR 704.5b loss when P1 tries to draw.)
         let _result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         let _result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
-        // Should advance through cleanup to next turn, then auto-advance to PreCombatMain
-        assert_eq!(state.phase, Phase::PreCombatMain);
+        assert_eq!(state.phase, Phase::Upkeep);
         assert_eq!(state.turn_number, 2);
         assert_eq!(state.active_player, PlayerId(1));
     }
@@ -5498,6 +5959,8 @@ mod tests {
     fn monarch_end_step_draws_exactly_one_card() {
         let mut state = new_game(42);
         let _result = start_game_with_starting_player(&mut state, PlayerId(0));
+        // Test starts mid-turn at PostCombatMain — bypass the natural Upkeep
+        // priority window via direct state setup (test fixture pattern).
         state.phase = Phase::PostCombatMain;
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
@@ -5531,9 +5994,15 @@ mod tests {
         assert_eq!(state.players[0].hand.len(), 1);
         assert_eq!(state.players[0].library.len(), 1);
 
+        // End → cleanup → next turn. Turn 2 is P1's; engine pauses at P1's
+        // Upkeep priority per CR 117.1c. We stop here rather than draining
+        // Draw because P1's library is empty in this test fixture (CR 704.5b
+        // game-loss not under test). The monarch's end-step draw (P0, on turn
+        // 1) is what the test exercises and we've already validated above.
         apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         apply_as_current(&mut state, GameAction::PassPriority).unwrap();
-        assert_eq!(state.phase, Phase::PreCombatMain);
+        assert_eq!(state.phase, Phase::Upkeep);
+        assert_eq!(state.turn_number, 2);
         assert_eq!(state.players[0].hand.len(), 1);
         assert_eq!(state.players[0].library.len(), 1);
     }
@@ -5542,6 +6011,13 @@ mod tests {
     fn integration_play_land_then_pass() {
         let mut state = new_game(42);
         start_game_with_starting_player(&mut state, PlayerId(0));
+
+        // CR 305.3 + CR 117.1c: lands are sorcery-speed, so pass Upkeep
+        // priority (both players) to reach PreCombatMain before playing.
+        // CR 103.7a skips first-turn Draw so two passes is enough.
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        assert_eq!(state.phase, Phase::PreCombatMain);
 
         // Create a land in player 0's hand
         let land_id = create_object(
@@ -6601,7 +7077,7 @@ mod tests {
         ));
 
         // Player 1 keeps (apply_as_current now picks P1 since P0 was removed)
-        // -> game starts, auto-advances to PreCombatMain
+        // → game starts, lands at Upkeep priority for P0 (CR 117.1c).
         let result = apply_as_current(
             &mut state,
             GameAction::MulliganDecision {
@@ -6615,6 +7091,11 @@ mod tests {
                 player: PlayerId(0),
             }
         ));
+        assert_eq!(state.phase, Phase::Upkeep);
+
+        // Drain Upkeep priority (turn 1 skips Draw per CR 103.7a) to reach Main.
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         assert_eq!(state.phase, Phase::PreCombatMain);
 
         // Play a land from hand
@@ -6671,12 +7152,19 @@ mod tests {
         apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         assert_eq!(state.phase, Phase::End);
 
-        // End: both pass -> Cleanup -> next turn
+        // End: both pass → Cleanup → next turn. P1's Upkeep priority opens
+        // first (CR 117.1c); turn 2 doesn't skip Draw, so drain Upkeep + Draw.
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        assert_eq!(state.phase, Phase::Upkeep);
+        assert_eq!(state.turn_number, 2);
+        assert_eq!(state.active_player, PlayerId(1));
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        assert_eq!(state.phase, Phase::Draw);
         apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         assert_eq!(state.phase, Phase::PreCombatMain);
-        assert_eq!(state.turn_number, 2);
-        assert_eq!(state.active_player, PlayerId(1));
     }
 
     #[test]
@@ -7015,6 +7503,354 @@ mod tests {
     }
 
     #[test]
+    fn disciple_of_bolas_uses_sacrificed_creature_power_for_life_and_draw() {
+        let mut state = setup_game_at_main_phase();
+
+        let disciple = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Disciple of Bolas".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&disciple).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.power = Some(2);
+            obj.toughness = Some(1);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(1);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 3,
+            };
+        }
+        apply_oracle_to_object(
+            &mut state,
+            disciple,
+            "Disciple of Bolas",
+            "When this creature enters, sacrifice another creature. You gain X life and draw X cards, where X is that creature's power.",
+        );
+
+        let hill_giant = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Hill Giant".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&hill_giant).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.power = Some(3);
+            obj.toughness = Some(3);
+            obj.base_power = Some(3);
+            obj.base_toughness = Some(3);
+        }
+        let library_cards: Vec<_> = (0..3)
+            .map(|i| {
+                create_object(
+                    &mut state,
+                    CardId(30 + i),
+                    PlayerId(0),
+                    format!("Library Card {i}"),
+                    Zone::Library,
+                )
+            })
+            .collect();
+        assert!(library_cards
+            .iter()
+            .all(|id| state.players[0].library.contains(id)));
+
+        state.players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Black,
+            ObjectId(0),
+            false,
+            Vec::new(),
+        ));
+        for _ in 0..3 {
+            state.players[0].mana_pool.add(ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(0),
+                false,
+                Vec::new(),
+            ));
+        }
+
+        let disciple_card_id = state.objects[&disciple].card_id;
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: disciple,
+                card_id: disciple_card_id,
+                targets: vec![],
+            },
+        )
+        .unwrap();
+
+        let mut result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        for _ in 0..6 {
+            if matches!(result.waiting_for, WaitingFor::EffectZoneChoice { .. }) {
+                break;
+            }
+            result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        }
+        match result.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                player,
+                cards,
+                effect_kind,
+                ..
+            } => {
+                assert_eq!(player, PlayerId(0));
+                assert_eq!(effect_kind, EffectKind::Sacrifice);
+                assert!(cards.contains(&hill_giant));
+            }
+            other => panic!("expected Disciple sacrifice choice, got {other:?}"),
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![hill_giant],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(state.players[0].life, 23);
+        assert_eq!(state.players[0].hand.len(), 3);
+        assert!(state.players[0].graveyard.contains(&hill_giant));
+    }
+
+    const SQUADRON_HAWK_ORACLE: &str = "Flying\nWhen this creature enters, you may search your library for up to three cards named Squadron Hawk, reveal them, put them into your hand, then shuffle.";
+
+    fn add_squadron_hawk_to_library(state: &mut GameState, card_id: u64) -> ObjectId {
+        let hawk = create_object(
+            state,
+            CardId(card_id),
+            PlayerId(0),
+            "Squadron Hawk".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&hawk).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(1);
+        }
+        hawk
+    }
+
+    fn resolve_squadron_hawk_etb_to_search_choice() -> (GameState, [ObjectId; 3], ObjectId) {
+        let mut state = setup_game_at_main_phase();
+        let entering_hawk = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Squadron Hawk".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&entering_hawk).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(1);
+        }
+        apply_oracle_to_object(
+            &mut state,
+            entering_hawk,
+            "Squadron Hawk",
+            SQUADRON_HAWK_ORACLE,
+        );
+
+        let hawks = [
+            add_squadron_hawk_to_library(&mut state, 11),
+            add_squadron_hawk_to_library(&mut state, 12),
+            add_squadron_hawk_to_library(&mut state, 13),
+        ];
+        let nonmatch = create_object(
+            &mut state,
+            CardId(14),
+            PlayerId(0),
+            "Storm Crow".to_string(),
+            Zone::Library,
+        );
+
+        let mut events = Vec::new();
+        zones::move_to_zone(&mut state, entering_hawk, Zone::Battlefield, &mut events);
+        crate::game::triggers::process_triggers(&mut state, &events);
+
+        assert_eq!(state.stack.len(), 1, "Squadron Hawk ETB trigger must stack");
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "Squadron Hawk's 'you may' trigger must prompt before searching, got {:?}",
+            state.waiting_for
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::SearchChoice {
+                player,
+                cards,
+                count,
+                reveal,
+                up_to,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(*count, 3);
+                assert!(*reveal);
+                assert!(*up_to);
+                assert_eq!(cards.len(), 3);
+                for hawk in hawks {
+                    assert!(cards.contains(&hawk), "SearchChoice must offer {hawk:?}");
+                }
+                assert!(
+                    !cards.contains(&nonmatch),
+                    "SearchChoice must not offer non-Squadron Hawk cards"
+                );
+            }
+            other => {
+                panic!("Expected SearchChoice after accepting Squadron Hawk ETB, got {other:?}")
+            }
+        }
+
+        (state, hawks, nonmatch)
+    }
+
+    #[test]
+    fn squadron_hawk_may_trigger_can_be_declined_before_search() {
+        let mut state = setup_game_at_main_phase();
+        let entering_hawk = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Squadron Hawk".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&entering_hawk).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+        }
+        apply_oracle_to_object(
+            &mut state,
+            entering_hawk,
+            "Squadron Hawk",
+            SQUADRON_HAWK_ORACLE,
+        );
+        let library_hawk = add_squadron_hawk_to_library(&mut state, 11);
+
+        let mut events = Vec::new();
+        zones::move_to_zone(&mut state, entering_hawk, Zone::Battlefield, &mut events);
+        crate::game::triggers::process_triggers(&mut state, &events);
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ));
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::DecideOptionalEffect { accept: false },
+        )
+        .unwrap();
+
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.stack.is_empty());
+        assert_eq!(state.objects[&library_hawk].zone, Zone::Library);
+        assert!(state.players[0].library.contains(&library_hawk));
+        assert!(!state.players[0].hand.contains(&library_hawk));
+        assert!(!result.events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                action: crate::types::events::PlayerActionKind::SearchedLibrary,
+                ..
+            } | GameEvent::CardsRevealed { .. }
+                | GameEvent::EffectResolved {
+                    kind: EffectKind::Shuffle,
+                    ..
+                }
+        )));
+    }
+
+    #[test]
+    fn squadron_hawk_search_can_choose_zero_cards() {
+        let (mut state, hawks, nonmatch) = resolve_squadron_hawk_etb_to_search_choice();
+
+        let result =
+            apply_as_current(&mut state, GameAction::SelectCards { cards: vec![] }).unwrap();
+
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.stack.is_empty());
+        for hawk in hawks {
+            assert_eq!(state.objects[&hawk].zone, Zone::Library);
+            assert!(state.players[0].library.contains(&hawk));
+            assert!(!state.players[0].hand.contains(&hawk));
+        }
+        assert_eq!(state.objects[&nonmatch].zone, Zone::Library);
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::Shuffle,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn squadron_hawk_search_moves_only_selected_cards() {
+        for selected_count in [1, 2] {
+            let (mut state, hawks, _) = resolve_squadron_hawk_etb_to_search_choice();
+            let selected = hawks[..selected_count].to_vec();
+
+            let result = apply_as_current(
+                &mut state,
+                GameAction::SelectCards {
+                    cards: selected.clone(),
+                },
+            )
+            .unwrap();
+
+            assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+            assert!(state.stack.is_empty());
+            for hawk in selected {
+                assert_eq!(state.objects[&hawk].zone, Zone::Hand);
+                assert!(state.players[0].hand.contains(&hawk));
+                assert!(!state.players[0].library.contains(&hawk));
+            }
+            for hawk in &hawks[selected_count..] {
+                assert_eq!(state.objects[hawk].zone, Zone::Library);
+                assert!(state.players[0].library.contains(hawk));
+                assert!(!state.players[0].hand.contains(hawk));
+            }
+            assert!(result.events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Shuffle,
+                    ..
+                }
+            )));
+        }
+    }
+
+    #[test]
     fn fizzle_target_removed_before_resolution() {
         use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 
@@ -7111,8 +7947,6 @@ mod tests {
     // === Phase 04 Plan 03 Integration Tests ===
 
     use crate::types::ability::TargetRef;
-    use crate::types::mana::{ManaCostShard, ManaType, ManaUnit};
-
     fn add_mana(state: &mut GameState, player: PlayerId, color: ManaType, count: usize) {
         let player_data = state.players.iter_mut().find(|p| p.id == player).unwrap();
         for _ in 0..count {
@@ -7814,6 +8648,163 @@ mod tests {
                 .count_color(crate::types::mana::ManaType::Green),
             1
         );
+    }
+
+    #[test]
+    fn holdout_settlement_second_mana_ability_prompts_for_creature_then_adds_mana() {
+        let mut state = setup_game_at_main_phase();
+
+        let holdout = create_object(
+            &mut state,
+            CardId(104),
+            PlayerId(0),
+            "Holdout Settlement".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&holdout).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            let abilities = Arc::make_mut(&mut obj.abilities);
+            abilities.push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Colorless {
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+            abilities.push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::AnyOneColor {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            color_options: vec![
+                                crate::types::mana::ManaColor::White,
+                                crate::types::mana::ManaColor::Blue,
+                                crate::types::mana::ManaColor::Black,
+                                crate::types::mana::ManaColor::Red,
+                                crate::types::mana::ManaColor::Green,
+                            ],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Tap,
+                        AbilityCost::TapCreatures {
+                            count: 1,
+                            filter: TypedFilter::creature()
+                                .controller(ControllerRef::You)
+                                .into(),
+                        },
+                    ],
+                }),
+            );
+        }
+
+        let creature = create_object(
+            &mut state,
+            CardId(105),
+            PlayerId(0),
+            "Memnite".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let (_, _, grouped) = crate::ai_support::legal_actions_full(&state);
+        let holdout_actions = grouped
+            .get(&holdout)
+            .expect("Holdout Settlement should expose legal mana actions");
+        assert!(holdout_actions.iter().any(|action| matches!(
+            action,
+            GameAction::ActivateAbility {
+                source_id,
+                ability_index: 0
+            } if *source_id == holdout
+        )));
+        assert!(holdout_actions.iter().any(|action| matches!(
+            action,
+            GameAction::ActivateAbility {
+                source_id,
+                ability_index: 1
+            } if *source_id == holdout
+        )));
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: holdout,
+                ability_index: 1,
+            },
+        )
+        .unwrap();
+
+        match result.waiting_for {
+            WaitingFor::TapCreaturesForManaAbility {
+                player,
+                count,
+                creatures,
+                ..
+            } => {
+                assert_eq!(player, PlayerId(0));
+                assert_eq!(count, 1);
+                assert_eq!(creatures, vec![creature]);
+            }
+            other => panic!("expected TapCreaturesForManaAbility, got {other:?}"),
+        }
+        assert!(!state.objects.get(&holdout).unwrap().tapped);
+        assert!(!state.objects.get(&creature).unwrap().tapped);
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![creature],
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::ChooseManaColor {
+                player: PlayerId(0),
+                ..
+            }
+        ));
+        assert!(state.objects.get(&holdout).unwrap().tapped);
+        assert!(state.objects.get(&creature).unwrap().tapped);
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::ChooseManaColor {
+                choice: crate::types::game_state::ManaChoice::SingleColor(ManaType::Green),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 1);
     }
 
     #[test]
@@ -9002,6 +9993,7 @@ mod trigger_target_tests {
             ability,
             timestamp: 1,
             target_constraints: Vec::new(),
+            distribute: None,
             trigger_event: None,
             modal: None,
             mode_abilities: vec![],
@@ -9092,6 +10084,7 @@ mod trigger_target_tests {
             ),
             timestamp: 1,
             target_constraints: Vec::new(),
+            distribute: None,
             trigger_event: None,
             modal: None,
             mode_abilities: vec![],
@@ -9142,6 +10135,7 @@ mod trigger_target_tests {
             ),
             timestamp: 1,
             target_constraints: Vec::new(),
+            distribute: None,
             trigger_event: Some(GameEvent::SpellCast {
                 controller: PlayerId(0),
                 object_id: ObjectId(98),
@@ -9241,6 +10235,7 @@ mod trigger_target_tests {
             ),
             timestamp: 1,
             target_constraints: Vec::new(),
+            distribute: None,
             trigger_event: Some(GameEvent::SpellCast {
                 controller: PlayerId(0),
                 object_id: ObjectId(99),
@@ -9349,6 +10344,7 @@ mod trigger_target_tests {
             ),
             timestamp: 1,
             target_constraints: Vec::new(),
+            distribute: None,
             trigger_event: None,
             modal: Some(ModalChoice {
                 min_choices: 1,
@@ -9448,6 +10444,7 @@ mod trigger_target_tests {
             )),
             timestamp: 1,
             target_constraints: vec![TargetSelectionConstraint::DifferentTargetPlayers],
+            distribute: None,
             trigger_event: None,
             modal: None,
             mode_abilities: vec![],
@@ -9565,6 +10562,7 @@ mod trigger_target_tests {
             )),
             timestamp: 1,
             target_constraints: target_constraints.clone(),
+            distribute: None,
             trigger_event: None,
             modal: None,
             mode_abilities: vec![],
@@ -9635,6 +10633,7 @@ mod trigger_target_tests {
             ),
             timestamp: 1,
             target_constraints: Vec::new(),
+            distribute: None,
             trigger_event: Some(GameEvent::SpellCast {
                 controller: PlayerId(0),
                 object_id: ObjectId(97),
@@ -9741,6 +10740,7 @@ mod trigger_target_tests {
             ),
             timestamp: 1,
             target_constraints: Vec::new(),
+            distribute: None,
             trigger_event: None,
             modal: Some(modal),
             mode_abilities: vec![
@@ -12462,7 +13462,7 @@ mod phase_trigger_regression_tests {
         // Set up NamedChoice with source_id (simulating persist=true Choose)
         state.waiting_for = WaitingFor::NamedChoice {
             player: PlayerId(0),
-            choice_type: ChoiceType::Color,
+            choice_type: ChoiceType::color(),
             options: vec![
                 "White".to_string(),
                 "Blue".to_string(),
@@ -12484,6 +13484,34 @@ mod phase_trigger_regression_tests {
         // Verify the choice was stored on the object
         let obj = state.objects.get(&obj_id).unwrap();
         assert_eq!(obj.chosen_color(), Some(ManaColor::Red));
+    }
+
+    #[test]
+    fn restricted_color_choice_rejects_excluded_color() {
+        use crate::types::ability::ChoiceType;
+        use crate::types::mana::ManaColor;
+
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::NamedChoice {
+            player: PlayerId(0),
+            choice_type: ChoiceType::color_excluding(vec![ManaColor::White]),
+            options: vec![
+                "Blue".to_string(),
+                "Black".to_string(),
+                "Red".to_string(),
+                "Green".to_string(),
+            ],
+            source_id: None,
+        };
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::ChooseOption {
+                choice: "White".to_string(),
+            },
+        );
+
+        assert!(result.is_err());
     }
 
     #[test]

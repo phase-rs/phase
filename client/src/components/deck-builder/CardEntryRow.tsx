@@ -49,6 +49,13 @@ export interface CardEntryRowProps {
   onCardHover?: (cardName: string | null) => void;
   unsupported?: UnsupportedCard;
   onChooseArt?: (cardName: string, x: number, y: number) => void;
+  /** When defined and the card is commander-eligible in the current format,
+   *  renders a crown button that promotes the card to commander (add/partner
+   *  /swap semantics handled by the parent). Only shown in main section. */
+  onSetAsCommander?: (name: string) => void;
+  /** Eligibility predicate paired with `onSetAsCommander`. The row consults it
+   *  per-entry so the parent doesn't have to fan out card-data lookups. */
+  isCommanderEligible?: (name: string) => boolean;
 }
 
 export function CardEntryRow({
@@ -59,7 +66,14 @@ export function CardEntryRow({
   onCardHover,
   unsupported,
   onChooseArt,
+  onSetAsCommander,
+  isCommanderEligible,
 }: CardEntryRowProps) {
+  const showCommanderButton =
+    section === "main" &&
+    !!onSetAsCommander &&
+    !!isCommanderEligible &&
+    isCommanderEligible(entry.name);
   const [expanded, setExpanded] = useState(false);
   const printingsLoaded = usePrintingsLoaded();
   const oracleId = printingsLoaded ? resolveOracleIdSync(entry.name) : null;
@@ -107,6 +121,16 @@ export function CardEntryRow({
           )}
         </span>
         <span className="flex items-center">
+          {showCommanderButton && (
+            <button
+              onClick={() => onSetAsCommander?.(entry.name)}
+              className="invisible ml-1 h-5 w-5 rounded text-xs text-purple-300 hover:bg-purple-900/40 group-hover:visible"
+              aria-label={`Make ${entry.name} the commander`}
+              title="Make this my commander"
+            >
+              ♛
+            </button>
+          )}
           <button
             onClick={() => onMove(entry.name, section)}
             className="invisible ml-2 h-5 w-5 rounded text-xs text-sky-300 hover:bg-sky-900/40 group-hover:visible"

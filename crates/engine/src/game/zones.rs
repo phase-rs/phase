@@ -411,10 +411,10 @@ pub fn move_to_library_position(
     move_to_library_at_index(state, object_id, index, events);
 }
 
-/// CR 701.24g: Move an object to a specific index in its owner's library.
+/// Move an object to a specific index in its owner's library.
 /// `index = Some(0)` = top, `index = None` = bottom, `index = Some(n)` = nth position.
 /// Handles full cross-zone cleanup (LKI, transform revert, layer pruning, restrictions)
-/// unlike ChangeZone { destination: Library } which auto-shuffles per CR 401.3.
+/// unlike ChangeZone { destination: Library } which shuffles the destination library.
 pub fn move_to_library_at_index(
     state: &mut GameState,
     object_id: ObjectId,

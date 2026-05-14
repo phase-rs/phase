@@ -214,6 +214,7 @@ fn do_eliminate(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEv
                     ability: venture_ability,
                     timestamp: 0,
                     target_constraints: Vec::new(),
+                    distribute: None,
                     trigger_event: Some(GameEvent::InitiativeTaken {
                         player_id: new_holder,
                     }),

@@ -4237,12 +4237,13 @@ fn can_pay_mana_cost_after_auto_tap_with_context(
     excluded_sources: &HashSet<ObjectId>,
 ) -> bool {
     let mut tap_events: Vec<crate::types::events::GameEvent> = Vec::new();
-    super::casting_costs::auto_tap_mana_sources_excluding(
+    super::casting_costs::auto_tap_mana_sources_with_context_excluding(
         &mut simulated,
         player,
         cost,
         &mut tap_events,
         Some(source_id),
+        ctx,
         excluded_sources,
     );
 
@@ -4341,6 +4342,53 @@ pub(super) fn can_pay_ability_mana_cost_after_auto_tap_excluding(
     )
 }
 
+/// Returns true if the player can pay a resolution-time mana cost after
+/// auto-tapping mana sources. This is distinct from spell-casting and
+/// activated-ability payments: CR 106.6 restrictions that name those categories
+/// must not become eligible for a generic "you may pay" effect during
+/// resolution.
+pub(super) fn can_pay_effect_mana_cost_after_auto_tap(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+) -> bool {
+    let mut simulated = state.clone();
+    if simulated.layers_dirty {
+        super::layers::evaluate_layers(&mut simulated);
+    }
+
+    let mut tap_events: Vec<crate::types::events::GameEvent> = Vec::new();
+    let effect_ctx = PaymentContext::Effect;
+    super::casting_costs::auto_tap_mana_sources_with_context(
+        &mut simulated,
+        player,
+        cost,
+        &mut tap_events,
+        Some(source_id),
+        Some(&effect_ctx),
+    );
+    if !tap_events.is_empty() {
+        super::triggers::process_triggers(&mut simulated, &tap_events);
+    }
+
+    let any_color = player_can_spend_as_any_color_for_optional_spell(&simulated, player, None);
+    let max_life = super::life_costs::max_phyrexian_life_payments(&simulated, player);
+    simulated
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .is_some_and(|player_data| {
+            mana_payment::can_pay_for_spell(
+                &player_data.mana_pool,
+                cost,
+                Some(&effect_ctx),
+                any_color,
+                max_life,
+            )
+        })
+}
+
 // Target/mode selection handlers are in casting_targets module.
 pub(crate) use super::casting_targets::{
     handle_choose_target, handle_select_modes, handle_select_targets,
@@ -4402,8 +4450,23 @@ pub(super) fn pay_mana_cost_with_choices(
         events,
     )?;
 
+    let spent_convoke_sources = spent_units
+        .iter()
+        .filter(|unit| unit.is_convoke_payment())
+        .map(|unit| unit.source_id)
+        .collect::<HashSet<_>>();
+    cleanup_unused_convoke_payments(state, player, source_id, &spent_convoke_sources);
+
+    // CR 702.51a: Convoke taps are consumed by the payment algorithm but are
+    // not mana spent to cast the spell.
+    let mana_spent_units = spent_units
+        .iter()
+        .filter(|unit| !unit.is_convoke_payment())
+        .cloned()
+        .collect::<Vec<_>>();
+
     // CR 106.6: Apply mana spell grants to the spell being cast.
-    apply_mana_spell_grants(state, source_id, &spent_units);
+    apply_mana_spell_grants(state, source_id, &mana_spent_units);
 
     // CR 601.2h: Track whether mana was actually spent to cast this spell,
     // the per-color breakdown for Adamant-style intervening-if checks
@@ -4415,8 +4478,8 @@ pub(super) fn pay_mana_cost_with_choices(
         obj.mana_spent_source_snapshots.clear();
     }
 
-    if !spent_units.is_empty() {
-        let source_snapshots: Vec<_> = spent_units
+    if !mana_spent_units.is_empty() {
+        let source_snapshots: Vec<_> = mana_spent_units
             .iter()
             .filter_map(|unit| {
                 state
@@ -4432,8 +4495,8 @@ pub(super) fn pay_mana_cost_with_choices(
             .collect();
         if let Some(obj) = state.objects.get_mut(&source_id) {
             obj.mana_spent_to_cast = true;
-            obj.mana_spent_to_cast_amount = spent_units.len() as u32;
-            for unit in &spent_units {
+            obj.mana_spent_to_cast_amount = mana_spent_units.len() as u32;
+            for unit in &mana_spent_units {
                 obj.colors_spent_to_cast.add_unit(unit);
             }
             obj.mana_spent_source_snapshots = source_snapshots;
@@ -4441,6 +4504,65 @@ pub(super) fn pay_mana_cost_with_choices(
     }
 
     Ok(())
+}
+
+fn cleanup_unused_convoke_payments(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    spent_sources: &HashSet<ObjectId>,
+) {
+    let convoked_sources = state
+        .pending_cast
+        .as_ref()
+        .filter(|pending| pending.object_id == source_id)
+        .map(|pending| pending.convoked_creatures.clone())
+        .or_else(|| {
+            state
+                .objects
+                .get(&source_id)
+                .map(|obj| obj.convoked_creatures.clone())
+        })
+        .unwrap_or_default();
+    if convoked_sources.is_empty() {
+        return;
+    }
+
+    let mut unused_sources = Vec::new();
+    let spent_convoked_sources = convoked_sources
+        .into_iter()
+        .filter(|object_id| {
+            let spent = spent_sources.contains(object_id);
+            if !spent {
+                unused_sources.push(*object_id);
+            }
+            spent
+        })
+        .collect::<Vec<_>>();
+
+    if let Some(pending) = state
+        .pending_cast
+        .as_mut()
+        .filter(|pending| pending.object_id == source_id)
+    {
+        pending.convoked_creatures = spent_convoked_sources.clone();
+    }
+    if let Some(obj) = state.objects.get_mut(&source_id) {
+        obj.convoked_creatures = spent_convoked_sources;
+    }
+
+    for object_id in unused_sources {
+        if let Some(obj) = state.objects.get_mut(&object_id) {
+            obj.tapped = false;
+        }
+    }
+
+    if let Some(player_data) = state.players.iter_mut().find(|p| p.id == player) {
+        player_data
+            .mana_pool
+            .mana
+            .retain(|unit| !unit.is_convoke_payment());
+    }
 }
 
 /// CR 106.6: Pay the mana cost of an activated ability. Unlike `pay_mana_cost`
@@ -4495,6 +4617,83 @@ pub(super) fn pay_ability_mana_cost_excluding(
     Ok(())
 }
 
+/// Pay a mana cost during effect resolution. Resolution-time "you may pay"
+/// effects are neither spell casts nor activated-ability activations, so
+/// restricted mana is checked through `PaymentContext::Effect`.
+pub(super) fn pay_effect_mana_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    if state.layers_dirty {
+        super::layers::evaluate_layers(state);
+    }
+
+    let effect_ctx = PaymentContext::Effect;
+    super::casting_costs::auto_tap_mana_sources_with_context(
+        state,
+        player,
+        cost,
+        events,
+        Some(source_id),
+        Some(&effect_ctx),
+    );
+
+    {
+        let player_data = state
+            .players
+            .iter()
+            .find(|p| p.id == player)
+            .expect("player exists");
+        let any_color = player_can_spend_as_any_color_for_optional_spell(state, player, None);
+        let max_life = super::life_costs::max_phyrexian_life_payments(state, player);
+        if !mana_payment::can_pay_for_spell(
+            &player_data.mana_pool,
+            cost,
+            Some(&effect_ctx),
+            any_color,
+            max_life,
+        ) {
+            return Err(EngineError::ActionNotAllowed(
+                "Cannot pay mana cost".to_string(),
+            ));
+        }
+    }
+
+    let any_color = player_can_spend_as_any_color_for_optional_spell(state, player, None);
+    let player_data = state
+        .players
+        .iter_mut()
+        .find(|p| p.id == player)
+        .expect("player exists");
+    let (_spent_units, life_payments) = mana_payment::pay_cost_with_demand_and_choices(
+        &mut player_data.mana_pool,
+        cost,
+        None,
+        Some(&effect_ctx),
+        any_color,
+        None,
+    )
+    .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
+
+    for payment in &life_payments {
+        let amount = u32::try_from(payment.amount).unwrap_or(0);
+        match super::life_costs::pay_life_as_cost(state, player, amount, events) {
+            super::life_costs::PayLifeCostResult::Paid { .. } => {}
+            super::life_costs::PayLifeCostResult::InsufficientLife
+            | super::life_costs::PayLifeCostResult::Prohibited => {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot pay Phyrexian life cost".to_string(),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Shared mana-payment core: auto-taps sources, validates affordability,
 /// executes the spend with the given payment context, and processes any
 /// Phyrexian life payments. Returns the spent units so spell-specific callers
@@ -4531,12 +4730,13 @@ fn auto_tap_and_pay_cost_excluding(
     events: &mut Vec<GameEvent>,
     excluded_sources: &HashSet<ObjectId>,
 ) -> Result<Vec<crate::types::mana::ManaUnit>, EngineError> {
-    super::casting_costs::auto_tap_mana_sources_excluding(
+    super::casting_costs::auto_tap_mana_sources_with_context_excluding(
         state,
         player,
         cost,
         events,
         Some(source_id),
+        ctx,
         excluded_sources,
     );
 
@@ -5007,16 +5207,16 @@ pub fn pay_ability_cost(
     Ok(())
 }
 
-/// CR 118.12: Pay an "unless pays" cost. Auto-taps lands and deducts mana.
-/// Used when the opponent chooses to pay a counter-unless cost (e.g., Mana Leak).
+/// CR 118.12: Pay an "unless pays" or other non-spell/non-activation mana
+/// cost. These payments happen outside spell casting and ability activation,
+/// so CR 106.6 restricted mana must be checked through `PaymentContext::Effect`.
 pub fn pay_unless_cost(
     state: &mut GameState,
     player: PlayerId,
     cost: &crate::types::mana::ManaCost,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
-    // Use ObjectId(0) as a dummy source since there's no specific object paying
-    pay_mana_cost(state, player, ObjectId(0), cost, events)
+    pay_effect_mana_cost(state, player, ObjectId(0), cost, events)
 }
 
 /// Walk a cost tree and return the waterbend mana cost if present.
@@ -5139,13 +5339,14 @@ pub(crate) fn find_eligible_exile_for_cost_targets(
 fn find_return_to_hand_cost(cost: &AbilityCost) -> Option<(u32, Option<&TargetFilter>)> {
     match cost {
         // CR 118.12: This helper currently only handles the default
-        // battlefield-source shape (`from_zone: None`). Cards with
-        // `from_zone: Some(_)` use the unless-cost path in
+        // battlefield-source shape (`from_zone: None`) and its explicit
+        // spelling (`from_zone: Some(Battlefield)`). Cards with other
+        // `from_zone` values use the unless-cost path in
         // `engine_payment_choices.rs`, not the activation-cost path here.
         AbilityCost::ReturnToHand {
             count,
             filter,
-            from_zone: None,
+            from_zone: None | Some(Zone::Battlefield),
         } => Some((*count, filter.as_ref())),
         AbilityCost::ReturnToHand {
             from_zone: Some(_), ..
@@ -5865,6 +6066,30 @@ pub fn handle_cancel_cast(
 ) {
     state.cancelled_casts.push(pending.object_id);
 
+    let convoked_creatures = if pending.convoked_creatures.is_empty() {
+        state
+            .objects
+            .get(&pending.object_id)
+            .map(|obj| obj.convoked_creatures.clone())
+            .unwrap_or_default()
+    } else {
+        pending.convoked_creatures.clone()
+    };
+
+    for object_id in &convoked_creatures {
+        if let Some(obj) = state.objects.get_mut(object_id) {
+            obj.tapped = false;
+        }
+    }
+    for player in &mut state.players {
+        player.mana_pool.mana.retain(|unit| {
+            !(unit.is_convoke_payment() && convoked_creatures.contains(&unit.source_id))
+        });
+    }
+    if let Some(obj) = state.objects.get_mut(&pending.object_id) {
+        obj.convoked_creatures.clear();
+    }
+
     if pending.activation_ability_index.is_none() {
         // CR 601.2i: Remove the placeholder stack entry pushed at announcement.
         // No other player can interject between announce and cancel, so the
@@ -6349,18 +6574,18 @@ fn is_blocked_by_per_turn_cast_limit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database::CardDatabase;
     use crate::game::zones;
     use crate::game::zones::create_object;
+    use crate::parser::oracle_effect::parse_effect_chain;
     use crate::parser::oracle_static::parse_static_line;
     use crate::types::ability::{
         ActivationRestriction, BasicLandType, CastPermissionConstraint, CastVariantPaid,
         CastingPermission, ChosenAttribute, ChosenSubtypeKind, Comparator, ContinuousModification,
         ControllerRef, CostCategory, FilterProp, GainLifePlayer, GameRestriction, KickerVariant,
-        ManaContribution, ManaProduction, ManaSpendPermission, ModalSelectionCondition,
-        ModalSelectionConstraint, QuantityExpr, RestrictionExpiry, RestrictionPlayerScope,
-        SearchSelectionConstraint, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
-        TypedFilter,
+        ManaContribution, ManaProduction, ManaSpendPermission, ManaSpendRestriction,
+        ModalSelectionCondition, ModalSelectionConstraint, QuantityExpr, RestrictionExpiry,
+        RestrictionPlayerScope, SearchSelectionConstraint, StaticCondition, StaticDefinition,
+        TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CoreType, Supertype};
@@ -6399,16 +6624,122 @@ mod tests {
         }
     }
 
-    fn card_database_from_export() -> CardDatabase {
-        let paths = [
-            std::path::Path::new("client/public/card-data.json"),
-            std::path::Path::new("../../client/public/card-data.json"),
-        ];
-        let path = paths
-            .iter()
-            .find(|path| path.exists())
-            .expect("client/public/card-data.json must exist for real-card runtime tests");
-        CardDatabase::from_export(path).expect("card-data.json loads as a valid export")
+    fn add_activation_only_colorless_source(
+        state: &mut GameState,
+        card_id: CardId,
+        name: &str,
+    ) -> ObjectId {
+        let source = create_object(
+            state,
+            card_id,
+            PlayerId(0),
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    restrictions: vec![ManaSpendRestriction::ActivateOnly],
+                    grants: Vec::new(),
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+        source
+    }
+
+    #[test]
+    fn activation_mana_payment_auto_taps_activation_only_source() {
+        let mut state = setup_game_at_main_phase();
+        let restricted_source =
+            add_activation_only_colorless_source(&mut state, CardId(10), "Activation Battery");
+        let ability_source = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Ability Source".to_string(),
+            Zone::Battlefield,
+        );
+        let cost = ManaCost::generic(1);
+
+        assert!(can_pay_ability_mana_cost_after_auto_tap(
+            &state,
+            PlayerId(0),
+            ability_source,
+            &cost
+        ));
+
+        let mut events = Vec::new();
+        pay_ability_mana_cost(&mut state, PlayerId(0), ability_source, &cost, &mut events).unwrap();
+
+        assert!(state.objects.get(&restricted_source).unwrap().tapped);
+        assert_eq!(state.players[0].mana_pool.mana.len(), 0);
+    }
+
+    #[test]
+    fn unless_mana_payment_rejects_activation_only_source() {
+        let mut state = setup_game_at_main_phase();
+        let restricted_source =
+            add_activation_only_colorless_source(&mut state, CardId(10), "Activation Battery");
+        let cost = ManaCost::generic(1);
+        let mut events = Vec::new();
+
+        assert!(pay_unless_cost(&mut state, PlayerId(0), &cost, &mut events).is_err());
+
+        assert!(!state.objects.get(&restricted_source).unwrap().tapped);
+        assert_eq!(state.players[0].mana_pool.mana.len(), 0);
+    }
+
+    #[test]
+    fn spell_auto_tap_honors_exile_any_color_permission() {
+        let mut state = setup_game_at_main_phase();
+        let mountain = add_basic_land(&mut state, CardId(10), "Mountain", "Mountain");
+        let spell = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Borrowed Blue Spell".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 0,
+            };
+            obj.casting_permissions
+                .push(CastingPermission::PlayFromExile {
+                    duration: Duration::Permanent,
+                    granted_to: PlayerId(0),
+                    frequency: CastFrequency::Unlimited,
+                    source_id: None,
+                    exiled_by_ability_controller: None,
+                    mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+                });
+        }
+        let cost = state.objects[&spell].mana_cost.clone();
+
+        assert!(can_pay_cost_after_auto_tap(
+            &state,
+            PlayerId(0),
+            spell,
+            &cost
+        ));
+
+        let mut events = Vec::new();
+        pay_mana_cost(&mut state, PlayerId(0), spell, &cost, &mut events).unwrap();
+
+        assert!(state.objects.get(&mountain).unwrap().tapped);
+        assert_eq!(state.players[0].mana_pool.mana.len(), 0);
     }
 
     fn foretell_test_cost() -> ManaCost {
@@ -7664,6 +7995,193 @@ mod tests {
     }
 
     #[test]
+    fn x_cost_activated_minimum_rejects_zero_and_accepts_one() {
+        use super::super::engine::apply_as_current;
+        use crate::ai_support::candidate_actions_broad;
+        use crate::types::ability::{AbilityCost, QuantityRef};
+
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(951),
+            PlayerId(0),
+            "Minimum X Relic".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            let mut ability = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::CopySpell {
+                    target: TargetFilter::StackAbility {
+                        controller: Some(ControllerRef::You),
+                    },
+                    amplifier_spawn: false,
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Tap,
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            shards: vec![ManaCostShard::X, ManaCostShard::X],
+                            generic: 0,
+                        },
+                    },
+                ],
+            });
+            ability.repeat_for = Some(QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            });
+            ability.min_x_value = 1;
+            Arc::make_mut(&mut obj.abilities).push(ability);
+        }
+
+        let target_entry = ObjectId(900);
+        state.stack.push_back(StackEntry {
+            id: target_entry,
+            source_id: ObjectId(901),
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: ObjectId(901),
+                ability: ResolvedAbility::new(
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                    Vec::new(),
+                    ObjectId(901),
+                    PlayerId(0),
+                ),
+            },
+        });
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            },
+        )
+        .unwrap();
+        if matches!(state.waiting_for, WaitingFor::TargetSelection { .. }) {
+            apply_as_current(
+                &mut state,
+                GameAction::SelectTargets {
+                    targets: vec![TargetRef::Object(target_entry)],
+                },
+            )
+            .unwrap();
+        }
+
+        match state.waiting_for {
+            WaitingFor::ChooseXValue { min, max, .. } => {
+                assert_eq!(min, 1);
+                assert_eq!(max, 1);
+            }
+            ref other => panic!("expected ChooseXValue, got {other:?}"),
+        }
+        let choose_x_candidates: Vec<u32> = candidate_actions_broad(&state)
+            .iter()
+            .filter_map(|candidate| match candidate.action {
+                GameAction::ChooseX { value } => Some(value),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(choose_x_candidates, vec![1]);
+
+        let zero_result = apply_as_current(&mut state, GameAction::ChooseX { value: 0 });
+        assert!(zero_result.is_err(), "ChooseX below min should error");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ChooseXValue { min: 1, .. }
+        ));
+
+        apply_as_current(&mut state, GameAction::ChooseX { value: 1 }).unwrap();
+        assert!(
+            state.objects[&source].tapped,
+            "accepted X=1 should pay deferred tap cost"
+        );
+        assert!(
+            state.stack.iter().any(|entry| matches!(
+                &entry.kind,
+                StackEntryKind::ActivatedAbility { source_id, .. } if *source_id == source
+            )),
+            "accepted X=1 should push the activated ability"
+        );
+    }
+
+    #[test]
+    fn x_cost_activated_minimum_above_payable_max_rejects_before_choose_x() {
+        use super::super::engine::apply_as_current;
+        use crate::types::ability::{AbilityCost, QuantityRef};
+
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(952),
+            PlayerId(0),
+            "Unpayable Minimum X Relic".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            let mut ability = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Tap,
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            shards: vec![ManaCostShard::X, ManaCostShard::X],
+                            generic: 0,
+                        },
+                    },
+                ],
+            });
+            ability.min_x_value = 1;
+            Arc::make_mut(&mut obj.abilities).push(ability);
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            },
+        );
+
+        assert!(result.is_err(), "min X=1 with max X=0 must be rejected");
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }),
+            "engine must not enter an impossible ChooseXValue state"
+        );
+        assert!(
+            state.pending_cast.is_none(),
+            "failed activation must clear pending cast state"
+        );
+        assert!(
+            !state.objects[&source].tapped,
+            "failed activation must not pay deferred tap cost"
+        );
+    }
+
+    #[test]
     fn activated_discard_cost_prompts_and_resumes_activation() {
         use super::super::engine::apply_as_current;
         use crate::types::ability::{AbilityCost, AbilityKind, Effect};
@@ -8438,6 +8956,66 @@ mod tests {
             }
             other => panic!("expected ChooseXValue, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn x_cost_spell_minimum_above_payable_max_rejects_before_choose_x() {
+        use super::super::engine::apply_as_current;
+        use crate::types::ability::QuantityRef;
+
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_object(
+            &mut state,
+            CardId(905),
+            PlayerId(0),
+            "Unpayable Minimum X Sorcery".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            let mut ability = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                    target: TargetFilter::Controller,
+                },
+            );
+            ability.min_x_value = 1;
+            Arc::make_mut(&mut obj.abilities).push(ability);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::X],
+                generic: 0,
+            };
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: obj_id,
+                card_id: CardId(905),
+                targets: vec![],
+            },
+        );
+
+        assert!(result.is_err(), "min X=1 with max X=0 must be rejected");
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }),
+            "engine must not enter an impossible ChooseXValue state"
+        );
+        assert!(
+            state.pending_cast.is_none(),
+            "failed spell cast must clear pending cast state"
+        );
+        assert!(
+            state.stack.iter().all(|entry| entry.id != obj_id),
+            "failed spell cast must remove its announcement placeholder"
+        );
     }
 
     /// Invalid X values (exceeding max) must be rejected.
@@ -9997,6 +10575,98 @@ mod tests {
         .unwrap();
         assert!(matches!(result.waiting_for, WaitingFor::ManaPayment { .. }));
 
+        let result = apply_as_current(
+            &mut state,
+            GameAction::TapForConvoke {
+                object_id: helper,
+                mana_type: ManaType::Colorless,
+            },
+        )
+        .unwrap();
+        assert!(
+            result
+                .events
+                .iter()
+                .all(|event| !matches!(event, GameEvent::ManaAdded { .. })),
+            "convoke pays instead of adding mana"
+        );
+        let result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        assert!(
+            result
+                .events
+                .iter()
+                .all(|event| !matches!(event, GameEvent::ManaExpended { .. })),
+            "convoke payments are not mana spent"
+        );
+        assert!(matches!(
+            state.stack.last().map(|entry| &entry.kind),
+            Some(StackEntryKind::Spell {
+                actual_mana_spent: 0,
+                ..
+            })
+        ));
+
+        let obj = state.objects.get(&obj_id).unwrap();
+        assert_eq!(obj.convoked_creatures, vec![helper]);
+        assert!(!obj.mana_spent_to_cast);
+        assert_eq!(obj.mana_spent_to_cast_amount, 0);
+        assert_eq!(obj.colors_spent_to_cast.distinct_colors(), 0);
+    }
+
+    #[test]
+    fn cancel_cast_after_convoke_removes_payment_marker_and_untaps_creature() {
+        use crate::game::engine::apply_as_current;
+
+        let mut state = setup_game_at_main_phase();
+
+        let helper = create_object(
+            &mut state,
+            CardId(63),
+            PlayerId(0),
+            "Helper".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&helper)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let spell = create_object(
+            &mut state,
+            CardId(64),
+            PlayerId(0),
+            "Convoke Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.keywords.push(Keyword::Convoke);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 1,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: spell,
+                card_id: CardId(64),
+                targets: vec![],
+            },
+        )
+        .unwrap();
         apply_as_current(
             &mut state,
             GameAction::TapForConvoke {
@@ -10005,12 +10675,372 @@ mod tests {
             },
         )
         .unwrap();
-        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        assert!(state.objects.get(&helper).unwrap().tapped);
+        assert_eq!(state.players[0].mana_pool.total(), 1);
 
+        apply_as_current(&mut state, GameAction::CancelCast).unwrap();
+
+        assert!(!state.objects.get(&helper).unwrap().tapped);
+        assert!(state.players[0].mana_pool.mana.is_empty());
+        assert!(state.players[0].hand.contains(&spell));
+    }
+
+    #[test]
+    fn successful_cast_after_extra_convoke_tap_removes_unused_marker_and_untaps_creature() {
+        use crate::game::engine::apply_as_current;
+
+        let mut state = setup_game_at_main_phase();
+
+        let helper = create_object(
+            &mut state,
+            CardId(65),
+            PlayerId(0),
+            "Helper".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&helper)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let extra = create_object(
+            &mut state,
+            CardId(66),
+            PlayerId(0),
+            "Extra Helper".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&extra)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let spell = create_object(
+            &mut state,
+            CardId(67),
+            PlayerId(0),
+            "Convoke Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.keywords.push(Keyword::Convoke);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 1,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: spell,
+                card_id: CardId(67),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        apply_as_current(
+            &mut state,
+            GameAction::TapForConvoke {
+                object_id: helper,
+                mana_type: ManaType::Colorless,
+            },
+        )
+        .unwrap();
+        apply_as_current(
+            &mut state,
+            GameAction::TapForConvoke {
+                object_id: extra,
+                mana_type: ManaType::Colorless,
+            },
+        )
+        .unwrap();
+        assert_eq!(state.players[0].mana_pool.total(), 2);
+
+        let result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        assert!(
+            result
+                .events
+                .iter()
+                .all(|event| !matches!(event, GameEvent::ManaExpended { .. })),
+            "unused convoke markers must not become mana spent"
+        );
+        assert!(state.objects.get(&helper).unwrap().tapped);
+        assert!(!state.objects.get(&extra).unwrap().tapped);
+        assert!(state.players[0].mana_pool.mana.is_empty());
         assert_eq!(
-            state.objects.get(&obj_id).unwrap().convoked_creatures,
+            state.objects.get(&spell).unwrap().convoked_creatures,
             vec![helper]
         );
+    }
+
+    #[test]
+    fn cancel_cast_uses_stamped_convoked_creatures_when_pending_snapshot_is_empty() {
+        let mut state = setup_game_at_main_phase();
+
+        let helper = create_object(
+            &mut state,
+            CardId(68),
+            PlayerId(0),
+            "Helper".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&helper).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.tapped = true;
+        }
+        let spell = create_object(
+            &mut state,
+            CardId(69),
+            PlayerId(0),
+            "Convoke Spell".to_string(),
+            Zone::Hand,
+        );
+        state.objects.get_mut(&spell).unwrap().convoked_creatures = vec![helper];
+        state.players[0]
+            .mana_pool
+            .add(ManaUnit::convoke_payment(ManaType::Colorless, helper));
+
+        let pending = PendingCast::new(
+            spell,
+            CardId(69),
+            ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                spell,
+                PlayerId(0),
+            ),
+            ManaCost::Cost {
+                shards: vec![],
+                generic: 1,
+            },
+        );
+
+        handle_cancel_cast(&mut state, &pending, &mut Vec::new());
+
+        assert!(!state.objects.get(&helper).unwrap().tapped);
+        assert!(state
+            .objects
+            .get(&spell)
+            .unwrap()
+            .convoked_creatures
+            .is_empty());
+        assert!(state.players[0].mana_pool.mana.is_empty());
+    }
+
+    #[test]
+    fn generic_convoke_payment_cannot_pay_colorless_mana_symbol() {
+        use crate::game::engine::apply_as_current;
+
+        let mut state = setup_game_at_main_phase();
+
+        let helper = create_object(
+            &mut state,
+            CardId(70),
+            PlayerId(0),
+            "Helper".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&helper)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let spell = create_object(
+            &mut state,
+            CardId(71),
+            PlayerId(0),
+            "Colorless Convoke Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.keywords.push(Keyword::Convoke);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Colorless],
+                generic: 0,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: spell,
+                card_id: CardId(71),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        apply_as_current(
+            &mut state,
+            GameAction::TapForConvoke {
+                object_id: helper,
+                mana_type: ManaType::Colorless,
+            },
+        )
+        .unwrap();
+
+        assert!(
+            apply_as_current(&mut state, GameAction::PassPriority).is_err(),
+            "generic convoke payment must not satisfy a true colorless mana symbol"
+        );
+    }
+
+    #[test]
+    fn convoke_payment_offers_and_accepts_colored_creature_payment() {
+        use crate::game::engine::apply_as_current;
+
+        let mut state = setup_game_at_main_phase();
+
+        let creature = create_object(
+            &mut state,
+            CardId(63),
+            PlayerId(0),
+            "Green Helper".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.color.push(ManaColor::Green);
+        }
+
+        let artifact = create_object(
+            &mut state,
+            CardId(64),
+            PlayerId(0),
+            "Artifact Helper".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&artifact)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let spell = create_object(
+            &mut state,
+            CardId(65),
+            PlayerId(0),
+            "Convoke Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.keywords.push(Keyword::Convoke);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 0,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        }
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: spell,
+                card_id: CardId(65),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::ManaPayment {
+                convoke_mode: Some(ConvokeMode::Convoke),
+                ..
+            }
+        ));
+
+        let (_, _, grouped) = crate::ai_support::legal_actions_full(&state);
+        assert!(grouped
+            .get(&creature)
+            .is_some_and(|actions| actions.iter().any(|action| matches!(
+                action,
+                GameAction::TapForConvoke {
+                    object_id,
+                    mana_type: ManaType::Green
+                } if *object_id == creature
+            ))));
+        assert!(
+            grouped.get(&artifact).is_none_or(|actions| actions
+                .iter()
+                .all(|action| !matches!(action, GameAction::TapForConvoke { .. }))),
+            "artifacts must not be offered for convoke payment"
+        );
+
+        let rejected = apply_as_current(
+            &mut state,
+            GameAction::TapForConvoke {
+                object_id: artifact,
+                mana_type: ManaType::Colorless,
+            },
+        );
+        assert!(
+            rejected.is_err(),
+            "artifacts must not be accepted for convoke payment"
+        );
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::TapForConvoke {
+                object_id: creature,
+                mana_type: ManaType::Green,
+            },
+        )
+        .unwrap();
+        assert!(
+            result
+                .events
+                .iter()
+                .all(|event| !matches!(event, GameEvent::ManaAdded { .. })),
+            "colored convoke payment must not add mana"
+        );
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        let obj = state.objects.get(&spell).unwrap();
+        assert_eq!(obj.convoked_creatures, vec![creature]);
+        assert!(!obj.mana_spent_to_cast);
+        assert_eq!(obj.colors_spent_to_cast.distinct_colors(), 0);
     }
 
     // --- Aura casting tests ---
@@ -13133,6 +14163,40 @@ mod tests {
         obj_id
     }
 
+    fn add_echo_of_eons_to_graveyard(state: &mut GameState) -> ObjectId {
+        let echo_id = create_object(
+            state,
+            CardId(state.next_object_id),
+            PlayerId(0),
+            "Echo of Eons".to_string(),
+            Zone::Graveyard,
+        );
+        let obj = state.objects.get_mut(&echo_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Sorcery);
+        obj.base_card_types = obj.card_types.clone();
+        obj.mana_cost = ManaCost::Cost {
+            generic: 4,
+            shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+        };
+        obj.base_mana_cost = obj.mana_cost.clone();
+        obj.color.push(ManaColor::Blue);
+        obj.base_color = obj.color.clone();
+        obj.base_keywords
+            .push(Keyword::Flashback(FlashbackCost::Mana(ManaCost::Cost {
+                generic: 2,
+                shards: vec![ManaCostShard::Blue],
+            })));
+        obj.keywords = obj.base_keywords.clone();
+
+        let ability = parse_effect_chain(
+            "Each player shuffles their hand and graveyard into their library, then draws seven cards.",
+            AbilityKind::Spell,
+        );
+        Arc::make_mut(&mut obj.abilities).push(ability.clone());
+        Arc::make_mut(&mut obj.base_abilities).push(ability);
+        echo_id
+    }
+
     #[test]
     fn flashback_card_appears_castable_from_graveyard() {
         let mut state = setup_game_at_main_phase();
@@ -13157,17 +14221,8 @@ mod tests {
     #[test]
     fn echo_of_eons_flashback_castable_with_nonempty_hand() {
         let mut state = setup_game_at_main_phase();
-        let db = card_database_from_export();
-        let echo_face = db
-            .get_face_by_name("Echo of Eons")
-            .expect("Echo of Eons exists in card-data.json");
-        let echo_id = crate::game::deck_loading::create_object_from_card_face(
-            &mut state,
-            echo_face,
-            PlayerId(0),
-        );
+        let echo_id = add_echo_of_eons_to_graveyard(&mut state);
         let echo_card_id = state.objects.get(&echo_id).unwrap().card_id;
-        zones::move_to_zone(&mut state, echo_id, Zone::Graveyard, &mut Vec::new());
 
         let hand_card = create_object(
             &mut state,

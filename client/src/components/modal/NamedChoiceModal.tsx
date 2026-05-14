@@ -3,8 +3,14 @@ import { motion } from "framer-motion";
 
 import { ChoiceOverlay, ConfirmButton } from "./ChoiceOverlay.tsx";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
+import { useSeatColor } from "../../hooks/useSeatColor.ts";
+import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { getCardNames } from "../../services/cardNames.ts";
-import type { WaitingFor } from "../../adapter/types.ts";
+import {
+  getPlayerDisplayName,
+  useMultiplayerStore,
+} from "../../stores/multiplayerStore.ts";
+import type { PlayerId, WaitingFor } from "../../adapter/types.ts";
 
 type NamedChoice = Extract<WaitingFor, { type: "NamedChoice" }>;
 
@@ -209,6 +215,7 @@ function ButtonGrid({ data, typeKey }: { data: NamedChoice["data"]; typeKey: str
   }, [dispatch, selected]);
 
   const title = CHOICE_TYPE_LABELS[typeKey] ?? "Make a Choice";
+  const isPlayerChoice = typeKey === "Player" || typeKey === "Opponent";
 
   return (
     <ChoiceOverlay
@@ -218,9 +225,27 @@ function ButtonGrid({ data, typeKey }: { data: NamedChoice["data"]; typeKey: str
       maxWidthClassName="max-w-3xl"
       footer={<ConfirmButton onClick={handleConfirm} disabled={selected === null} />}
     >
-      <div className="mx-auto mb-6 flex w-fit max-w-3xl flex-wrap items-center justify-center gap-3 sm:mb-10">
+      <div
+        className={`mx-auto mb-6 max-w-3xl gap-3 sm:mb-10 ${
+          isPlayerChoice
+            ? "flex w-full min-w-[18rem] flex-col px-6"
+            : "flex w-fit flex-wrap items-center justify-center"
+        }`}
+      >
         {data.options.map((option, index) => {
           const isSelected = selected === option;
+          const onClick = () => setSelected(isSelected ? null : option);
+          if (isPlayerChoice) {
+            return (
+              <PlayerOptionButton
+                key={option}
+                option={option}
+                isSelected={isSelected}
+                index={index}
+                onClick={onClick}
+              />
+            );
+          }
           return (
             <motion.button
               key={option}
@@ -233,7 +258,7 @@ function ButtonGrid({ data, typeKey }: { data: NamedChoice["data"]; typeKey: str
               animate={{ opacity: 1, y: 0, scale: 1 }}
               transition={{ delay: 0.05 + index * 0.03, duration: 0.25 }}
               whileHover={{ scale: 1.05 }}
-              onClick={() => setSelected(isSelected ? null : option)}
+              onClick={onClick}
             >
               {option}
             </motion.button>
@@ -241,5 +266,67 @@ function ButtonGrid({ data, typeKey }: { data: NamedChoice["data"]; typeKey: str
         })}
       </div>
     </ChoiceOverlay>
+  );
+}
+
+/** Player/Opponent option: avatar + display name + seat color accent. The
+ *  engine sends `PlayerId.0.to_string()` (e.g. "0", "1") as the option id;
+ *  we render presentation here and pass the raw id back on confirm. */
+function PlayerOptionButton({
+  option,
+  isSelected,
+  index,
+  onClick,
+}: {
+  option: string;
+  isSelected: boolean;
+  index: number;
+  onClick: () => void;
+}) {
+  const playerId = Number(option) as PlayerId;
+  const myId = usePlayerId();
+  const seatColor = useSeatColor(playerId);
+  const avatarUrl = useMultiplayerStore((s) => s.playerAvatars.get(playerId) ?? null);
+  const displayName = getPlayerDisplayName(playerId, myId);
+
+  return (
+    <motion.button
+      type="button"
+      className={`flex w-full min-h-14 items-center gap-3 rounded-lg border-2 px-3 py-2 text-left font-semibold transition sm:px-4 ${
+        isSelected ? "bg-emerald-500/20 text-white" : "bg-gray-800/80 text-gray-200 hover:text-white"
+      }`}
+      style={{
+        borderColor: isSelected ? "#34D399" : `${seatColor}cc`,
+        boxShadow: isSelected
+          ? `0 0 0 1px ${seatColor}88, 0 0 14px ${seatColor}55`
+          : `0 0 0 1px ${seatColor}33`,
+      }}
+      initial={{ opacity: 0, y: 20, scale: 0.95 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      transition={{ delay: 0.05 + index * 0.03, duration: 0.25 }}
+      whileHover={{ scale: 1.04 }}
+      onClick={onClick}
+      aria-label={displayName}
+    >
+      <span
+        className="relative h-10 w-9 shrink-0 overflow-hidden rounded-md border bg-slate-950"
+        style={{ borderColor: `${seatColor}cc` }}
+      >
+        {avatarUrl ? (
+          <img src={avatarUrl} alt="" className="h-full w-full object-cover" />
+        ) : (
+          <span
+            className="flex h-full w-full items-center justify-center text-sm font-bold"
+            style={{ color: seatColor }}
+          >
+            {displayName.slice(0, 1).toUpperCase()}
+          </span>
+        )}
+        <span className="absolute inset-0 bg-gradient-to-b from-white/12 via-transparent to-black/35" />
+      </span>
+      <span className="text-sm sm:text-base" style={{ color: isSelected ? undefined : seatColor }}>
+        {displayName}
+      </span>
+    </motion.button>
   );
 }

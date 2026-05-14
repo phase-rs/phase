@@ -538,7 +538,7 @@ pub(super) fn target_filter_matches_object(
         | TargetFilter::ParentTargetOwner
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
-        | TargetFilter::StackAbility
+        | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
         | TargetFilter::Owner => false,
         TargetFilter::Any
@@ -2928,6 +2928,67 @@ mod tests {
             Vec::new(),
         );
         assert!(match_changes_zone(&event, &trigger, ObjectId(1), &state));
+    }
+
+    #[test]
+    fn changes_zone_origin_graveyard_rejects_command_zone_event() {
+        // CR 603.6 + CR 603.6a — issue #396: Flayer of the Hatebound's
+        // "whenever this creature or another creature enters from your
+        // graveyard" trigger must NOT fire when a creature enters from any
+        // other zone. Drives the same runtime entry-point the engine uses
+        // (`match_changes_zone`) with a Command-zone → Battlefield event to
+        // prove the parsed `origin = Some(Graveyard)` is actually honored at
+        // match time (and a parser-only fix is not a no-op).
+        let state = setup();
+        let mut trigger = make_trigger(TriggerMode::ChangesZone);
+        trigger.origin = Some(Zone::Graveyard);
+        trigger.destination = Some(Zone::Battlefield);
+
+        // Positive case: enters from graveyard — must match.
+        let graveyard_event = zone_changed_event(
+            ObjectId(5),
+            Zone::Graveyard,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            Vec::new(),
+        );
+        assert!(match_changes_zone(
+            &graveyard_event,
+            &trigger,
+            ObjectId(1),
+            &state,
+        ));
+
+        // Negative case (the user-reported bug): commander cast from the
+        // command zone — must NOT match.
+        let command_zone_event = zone_changed_event(
+            ObjectId(5),
+            Zone::Command,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            Vec::new(),
+        );
+        assert!(!match_changes_zone(
+            &command_zone_event,
+            &trigger,
+            ObjectId(1),
+            &state,
+        ));
+
+        // Negative case: creature cast normally from hand — must NOT match.
+        let hand_event = zone_changed_event(
+            ObjectId(5),
+            Zone::Hand,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            Vec::new(),
+        );
+        assert!(!match_changes_zone(
+            &hand_event,
+            &trigger,
+            ObjectId(1),
+            &state,
+        ));
     }
 
     #[test]

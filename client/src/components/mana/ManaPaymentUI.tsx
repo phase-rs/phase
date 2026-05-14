@@ -37,6 +37,7 @@ export function ManaPaymentUI() {
     : isPhyrexianPayment
       ? waitingFor.data.player
       : null;
+  const convokeMode = isManaPayment ? waitingFor.data.convoke_mode : undefined;
   const player = playerId != null ? gameState?.players[playerId] : null;
 
   // CR 107.4f + CR 601.2f: Engine-provided per-shard options for Phyrexian payment.
@@ -120,6 +121,7 @@ export function ManaPaymentUI() {
       White: 0, Blue: 0, Black: 0, Red: 0, Green: 0, Colorless: 0,
     };
     for (const unit of player.mana_pool.mana) {
+      if (unit.restrictions.includes("ConvokePayment")) continue;
       counts[unit.color]++;
     }
     return MANA_ORDER.filter((c) => counts[c] > 0).map((c) => ({ color: c, amount: counts[c] }));
@@ -221,6 +223,14 @@ export function ManaPaymentUI() {
                   <ManaSymbol key={idx} shard={shard} size="lg" />
                 ))}
               </div>
+
+              {convokeMode && (
+                <p className="mb-3 text-center text-xs font-medium text-cyan-300">
+                  {convokeMode === "Convoke"
+                    ? "Tap creatures to help pay."
+                    : "Tap creatures or artifacts to help pay."}
+                </p>
+              )}
 
               {/* Phyrexian toggles — during PhyrexianPayment we iterate the
                   engine-provided `shards` list (keyed by `shard_index` into

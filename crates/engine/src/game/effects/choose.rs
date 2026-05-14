@@ -2,6 +2,7 @@ use crate::game::players;
 use crate::types::ability::{ChoiceType, Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
 
 /// Choose: present the player with a named set of options (creature type, color, etc.).
@@ -72,8 +73,6 @@ const FALLBACK_CREATURE_TYPES: &[&str] = &[
     "Warrior",
 ];
 
-const COLORS: &[&str] = &["White", "Blue", "Black", "Red", "Green"];
-
 const ODD_OR_EVEN: &[&str] = &["Odd", "Even"];
 
 const BASIC_LAND_TYPES: &[&str] = &["Plains", "Island", "Swamp", "Mountain", "Forest"];
@@ -129,8 +128,12 @@ fn compute_options(
                 types
             }
         }
-        // CR 105.1: There are five colors: white, blue, black, red, and green.
-        ChoiceType::Color => to_strings(COLORS),
+        // CR 105.1 + CR 105.4: A color choice is one of white, blue, black, red, or green.
+        ChoiceType::Color { excluded } => ManaColor::ALL
+            .iter()
+            .filter(|color| !excluded.contains(color))
+            .map(|color| color_name(*color).to_string())
+            .collect(),
         ChoiceType::OddOrEven => to_strings(ODD_OR_EVEN),
         // CR 305.6: The basic land types are Plains, Island, Swamp, Mountain, and Forest.
         ChoiceType::BasicLandType => to_strings(BASIC_LAND_TYPES),
@@ -161,12 +164,26 @@ fn to_strings(strs: &[&str]) -> Vec<String> {
     strs.iter().map(|&s| s.to_string()).collect()
 }
 
+fn color_name(color: ManaColor) -> &'static str {
+    match color {
+        ManaColor::White => "White",
+        ManaColor::Blue => "Blue",
+        ManaColor::Black => "Black",
+        ManaColor::Red => "Red",
+        ManaColor::Green => "Green",
+    }
+}
+
 /// Generate all 10 two-color combinations from the 5 mana colors.
 /// Order within a pair doesn't matter, so we use ordered pairs (i < j).
 fn two_color_options() -> Vec<String> {
     let mut options = Vec::with_capacity(10);
-    for (i, &c1) in COLORS.iter().enumerate() {
-        for &c2 in &COLORS[i + 1..] {
+    let colors: Vec<_> = ManaColor::ALL
+        .iter()
+        .map(|color| color_name(*color))
+        .collect();
+    for (i, &c1) in colors.iter().enumerate() {
+        for &c2 in &colors[i + 1..] {
             options.push(format!("{c1}, {c2}"));
         }
     }
@@ -219,7 +236,7 @@ mod tests {
     #[test]
     fn choose_color_offers_five_colors() {
         let mut state = GameState::new_two_player(42);
-        let ability = make_choose_ability(ChoiceType::Color);
+        let ability = make_choose_ability(ChoiceType::color());
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
@@ -231,6 +248,31 @@ mod tests {
                 assert!(options.contains(&"Black".to_string()));
                 assert!(options.contains(&"Red".to_string()));
                 assert!(options.contains(&"Green".to_string()));
+            }
+            other => panic!("Expected NamedChoice, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn choose_color_with_excluded_color_offers_remaining_colors() {
+        let mut state = GameState::new_two_player(42);
+        let ability = make_choose_ability(ChoiceType::color_excluding(vec![ManaColor::White]));
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::NamedChoice {
+                choice_type,
+                options,
+                ..
+            } => {
+                assert_eq!(
+                    *choice_type,
+                    ChoiceType::Color {
+                        excluded: vec![ManaColor::White],
+                    }
+                );
+                assert_eq!(options, &["Blue", "Black", "Red", "Green"]);
             }
             other => panic!("Expected NamedChoice, got {:?}", other),
         }
@@ -324,7 +366,7 @@ mod tests {
     #[test]
     fn resolve_emits_effect_resolved_event() {
         let mut state = GameState::new_two_player(42);
-        let ability = make_choose_ability(ChoiceType::Color);
+        let ability = make_choose_ability(ChoiceType::color());
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 

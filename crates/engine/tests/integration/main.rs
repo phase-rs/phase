@@ -1,5 +1,6 @@
 mod abigale_integration;
 mod adapter_contract_fixtures;
+mod advanced_reconstruction_regression;
 mod aura_on_player;
 mod coalition_relic_integration;
 mod cr_annotations;

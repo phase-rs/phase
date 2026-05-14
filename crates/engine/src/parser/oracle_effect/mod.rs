@@ -27,8 +27,8 @@ use super::oracle_nom::error::OracleResult;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_quantity::{
-    parse_cda_quantity, parse_event_context_quantity, parse_for_each_clause,
-    parse_for_each_clause_expr, parse_for_each_clause_expr_with_context,
+    parse_cda_quantity, parse_cda_quantity_with_context, parse_event_context_quantity,
+    parse_for_each_clause, parse_for_each_clause_expr, parse_for_each_clause_expr_with_context,
     parse_for_each_object_filter_clause,
 };
 use super::oracle_target::{
@@ -2163,6 +2163,22 @@ fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause
         }
         return clause;
     }
+    let original_lower = text.to_lowercase();
+    if scan_contains_phrase(&original_lower, "this turn")
+        || scan_contains_phrase(&original_lower, "until ")
+    {
+        if let Some(mut clause) = try_parse_play_from_exile(TextPair::new(text, &original_lower)) {
+            if !matches!(clause.effect, Effect::GrantCastingPermission { .. }) {
+                peel_ctx.apply_optional(&mut clause.optional);
+            }
+            if clause.condition.is_none() {
+                if let Some(cond) = peel_ctx.condition().cloned() {
+                    clause.condition = Some(cond);
+                }
+            }
+            return clause;
+        }
+    }
     let mut clause = parse_effect_clause_inner(&peeled_text, ctx);
     // Trial-parse fallback: peeling may have removed disambiguation signal
     // a specialized parser depends on (e.g., `the next spell you cast this
@@ -2426,11 +2442,18 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return clause;
     }
 
-    // CR 106.12: "don't lose [unspent] {color} mana as steps and phases end" —
-    // mana pool retention. Parsed as supported no-op (runtime behavior is future work).
-    if scan_contains_phrase(tp.lower, "lose") && scan_contains_phrase(tp.lower, "mana as steps") {
+    // CR 703.4q + CR 611.2b: "[subject] don't lose [unspent] {color} mana as
+    // steps and phases end" — installs a turn-scoped mana-pool retention rule
+    // (The Last Agni Kai class). When this clause appears as a spell effect,
+    // the duration is supplied by `with_clause_duration` from a leading
+    // "Until end of turn, " or trailing duration suffix; when it appears as a
+    // printed static, `oracle_static::try_parse_retain_unspent_mana_static`
+    // emits it on the source object directly.
+    if let Some(static_def) =
+        crate::parser::oracle_static::try_parse_retain_unspent_mana_static(tp.original, tp.lower)
+    {
         return parsed_clause(Effect::GenericEffect {
-            static_abilities: vec![],
+            static_abilities: vec![static_def],
             duration: None,
             target: None,
         });
@@ -2621,8 +2644,9 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return clause;
     }
 
-    // CR 702.84a: "exile cards from the top of your library until you exile a [filter] card"
-    if let Some(clause) = try_parse_exile_from_top_until(tp) {
+    // CR 701.13a + CR 608.2c: "exile cards from the top of your library until
+    // you exile a [filter] card"
+    if let Some(clause) = try_parse_exile_from_top_until(tp, TargetFilter::Controller) {
         return clause;
     }
 
@@ -2705,7 +2729,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         }
     }
 
-    // CR 401.4: "[target]'s owner puts it on their choice of the top or bottom of their library"
+    // "[target]'s owner puts it on their choice of the top or bottom of their library"
     if let Some(clause) = try_parse_put_on_top_or_bottom(tp, ctx) {
         return clause;
     }
@@ -2715,7 +2739,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return clause;
     }
 
-    // CR 401.4 + CR 400.3: "the owner of target [filter] puts it into their library second from
+    // CR 400.3: "the owner of target [filter] puts it into their library second from
     // the top or on the bottom"
     if let Some(clause) = try_parse_owner_of_target_put_second(tp, ctx) {
         return clause;
@@ -3393,8 +3417,7 @@ fn try_parse_equal_to_quantity_effect(tp: TextPair) -> Option<ParsedEffectClause
     }
 }
 
-/// CR 702.84a: Parse "exile cards from the top of your library until you exile a [filter] card".
-/// CR 401.4: Parse "owner puts it on their choice of the top or bottom of their library".
+/// Parse "owner puts it on their choice of the top or bottom of their library".
 ///
 /// Two Oracle patterns:
 /// - "Target creature's owner puts it on their choice of the top or bottom of their library"
@@ -3491,7 +3514,7 @@ fn try_parse_owner_of_target_shuffle(
     }))
 }
 
-/// CR 401.4 + CR 400.3: Parse "the owner of target [filter] puts it into their library
+/// CR 400.3: Parse "the owner of target [filter] puts it into their library
 /// second from the top or on the bottom".
 ///
 /// Handles:
@@ -3561,7 +3584,10 @@ fn extract_owner_of_target(tp: TextPair, ctx: &mut ParseContext) -> Option<Targe
     None
 }
 
-fn try_parse_exile_from_top_until(tp: TextPair) -> Option<ParsedEffectClause> {
+fn try_parse_exile_from_top_until(
+    tp: TextPair,
+    player: TargetFilter,
+) -> Option<ParsedEffectClause> {
     // CR 701.13a + CR 701.57a + CR 702.85a + CR 202.3 + CR 107.3e: Parse the
     // unified `exile cards from the top of <possessive> library until <until>`
     // pattern. The `until` clause is dispatched into a typed
@@ -3609,7 +3635,7 @@ fn try_parse_exile_from_top_until(tp: TextPair) -> Option<ParsedEffectClause> {
     let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
 
     let until = parse_until_condition(rest_lower)?;
-    Some(parsed_clause(Effect::ExileFromTopUntil { until }))
+    Some(parsed_clause(Effect::ExileFromTopUntil { player, until }))
 }
 
 /// CR 701.13a + CR 701.57a + CR 702.85a + CR 202.3 + CR 107.3e: Dispatch the
@@ -4056,6 +4082,10 @@ fn try_parse_play_from_exile(tp: TextPair) -> Option<ParsedEffectClause> {
         return Some(clause);
     }
 
+    if let Some(clause) = try_parse_play_the_exiled_card_grant(tp) {
+        return Some(clause);
+    }
+
     // Try full forms first: "you may play/cast that card/it/those cards ..."
     // Then bare forms (after "you may" has been stripped): "play that card ..."
     let full_rest = nom_on_lower(tp.original, tp.lower, |input| {
@@ -4121,6 +4151,37 @@ fn try_parse_play_from_exile(tp: TextPair) -> Option<ParsedEffectClause> {
             mana_spend_permission: None,
         },
         target: TargetFilter::Any,
+        grantee: Default::default(),
+    }))
+}
+
+fn try_parse_play_the_exiled_card_grant(tp: TextPair) -> Option<ParsedEffectClause> {
+    let (duration, rest_orig) = nom_on_lower(tp.original, tp.lower, |input| {
+        let (input, _) = opt(alt((tag("you may "), tag("may ")))).parse(input)?;
+        let (input, _) = alt((tag("play "), tag("cast "))).parse(input)?;
+        let (input, _) = tag("the exiled card").parse(input)?;
+        let (input, duration) = alt((
+            value(Duration::UntilEndOfTurn, tag(" this turn")),
+            value(Duration::UntilEndOfTurn, tag(" until end of turn")),
+            value(Duration::UntilEndOfTurn, tag(" until the end of turn")),
+        ))
+        .parse(input)?;
+        Ok((input, duration))
+    })?;
+    if !rest_orig.trim().is_empty() {
+        return None;
+    }
+
+    Some(parsed_clause(Effect::GrantCastingPermission {
+        permission: CastingPermission::PlayFromExile {
+            duration,
+            granted_to: crate::types::player::PlayerId(0),
+            frequency: CastFrequency::Unlimited,
+            source_id: None,
+            exiled_by_ability_controller: None,
+            mana_spend_permission: None,
+        },
+        target: tracked_set_filter(),
         grantee: Default::default(),
     }))
 }
@@ -4833,7 +4894,7 @@ fn parse_clause_ast(text: &str, ctx: &mut ParseContext) -> ClauseAst {
 /// hand"), or `Some((None, input))` when the noun phrase has no leading
 /// quantity (the patcher leaves the existing `count: Fixed(1)` untouched).
 ///
-/// Recognized prefixes (CR 701.24g positional placement, multi-card form):
+/// Recognized prefixes for positional library placement:
 ///   - `"x "` (with X-cost)     → `QuantityExpr::Ref { Variable("X") }`
 ///   - numeric word/digit + " " → `QuantityExpr::Fixed { value: N }`
 ///
@@ -4866,15 +4927,40 @@ fn peel_put_at_library_count(input: &str) -> Option<(Option<QuantityExpr>, &str)
     Some((None, input))
 }
 
+fn parse_exiled_cards_not_cast_cleanup(input: &str) -> Option<()> {
+    let (input, _) = tag::<_, _, OracleError<'_>>("put the exiled cards")
+        .parse(input)
+        .ok()?;
+    let (input, _) = opt(tag::<_, _, OracleError<'_>>(" that weren't cast this way"))
+        .parse(input)
+        .ok()?;
+    let (input, _) = tag::<_, _, OracleError<'_>>(" on the bottom of ")
+        .parse(input)
+        .ok()?;
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("that library"),
+        tag("their library"),
+        tag("your library"),
+        tag("its owner's library"),
+    ))
+    .parse(input)
+    .ok()?;
+    let (input, _) = opt(tag::<_, _, OracleError<'_>>(" in a random order"))
+        .parse(input)
+        .ok()?;
+    let (input, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(input).ok()?;
+    input.is_empty().then_some(())
+}
+
 fn lower_clause_ast(ast: ClauseAst, ctx: &mut ParseContext) -> ParsedEffectClause {
     match ast {
         ClauseAst::Imperative { text } => {
             let mut clause = lower_imperative_clause(&text, ctx);
-            // CR 701.24g: "put [N] [type] on top/bottom of library" — the imperative
-            // parser returns PutAtLibraryPosition { target: Any, count: Fixed(1) }
-            // because it dispatches on the positional suffix without extracting the
-            // noun phrase. This patch re-inspects the imperative text and assigns
-            // both the target filter and the cardinality. Covers:
+            // "put [N] [type] on top/bottom of library" — the imperative parser
+            // returns PutAtLibraryPosition { target: Any, count: Fixed(1) }
+            // because it dispatches on the positional suffix without extracting
+            // the noun phrase. This patch re-inspects the imperative text and
+            // assigns both the target filter and the cardinality. Covers:
             //   - "put target X on top of Y's library"           (count = 1)
             //   - "put target X on the bottom of Y's library"    (count = 1)
             //   - "put target X into Y's library Nth from top"   (count = 1)
@@ -4886,6 +4972,11 @@ fn lower_clause_ast(ast: ClauseAst, ctx: &mut ParseContext) -> ParsedEffectClaus
                 ..
             } = clause.effect
             {
+                if parse_exiled_cards_not_cast_cleanup(&text.to_lowercase()).is_some() {
+                    *target = TargetFilter::ExiledBySource;
+                    *count = QuantityExpr::Fixed { value: 0 };
+                    return clause;
+                }
                 let extracted = (|| -> Option<(Option<TargetFilter>, Option<QuantityExpr>)> {
                     let lower = text.to_lowercase();
                     let (after_put, _) = tag::<_, _, OracleError<'_>>("put ")
@@ -5289,7 +5380,7 @@ fn try_parse_verb_and_target<'a>(
         let target = if scan_contains_phrase(rest_lower, "activated or triggered ability")
             || abilities_head(rest_lower).is_ok()
         {
-            TargetFilter::StackAbility
+            imperative::stack_ability_filter_from_text(rest_lower)
         } else if scan_contains_phrase(rest_lower, "spell") {
             constrain_filter_to_stack(parsed_target)
         } else {
@@ -5315,7 +5406,7 @@ fn try_parse_verb_and_target<'a>(
             // CR 701.6: "activated or triggered ability" is a special-case target
             // that maps to StackAbility. We still use parse_target's remainder to
             // preserve the compound-detection contract.
-            TargetFilter::StackAbility
+            imperative::stack_ability_filter_from_text(rest_lower)
         } else if scan_contains_phrase(rest_lower, "spell") {
             constrain_filter_to_stack(parsed_target)
         } else {
@@ -6720,6 +6811,11 @@ fn lower_subject_predicate_ast(
             // which would otherwise greedy-match the "reveals/top/library" verbs.
             {
                 let pred_tp = TextPair::new(text.as_str(), pred_lower.as_str());
+                if let Some(clause) =
+                    try_parse_exile_from_top_until(pred_tp, subject.affected.clone())
+                {
+                    return clause;
+                }
                 if let Some(clause) = try_parse_reveal_until(pred_tp, subject.affected.clone()) {
                     return clause;
                 }
@@ -7951,6 +8047,13 @@ fn parse_imperative_effect_inner(tp: TextPair, ctx: &mut ParseContext) -> Parsed
         return parsed_clause(effect);
     }
 
+    // Duration-scoped "play the exiled card" grants permission to the object
+    // just exiled by the preceding clause. It is not an immediate cast/play
+    // instruction, so it must win before the generic CastFromZone parser.
+    if let Some(clause) = try_parse_play_from_exile(tp) {
+        return clause;
+    }
+
     // CR 601.2a + CR 118.9: "cast it/that card without paying its mana cost"
     if let Some(effect) = try_parse_cast_effect(tp.lower) {
         return parsed_clause(effect);
@@ -8066,8 +8169,15 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
     type E<'a> = OracleError<'a>;
     if tag::<_, _, E>("a creature type").parse(rest).is_ok() {
         Some(ChoiceType::CreatureType)
+    } else if let Ok((_, excluded)) = preceded(
+        tag::<_, _, E>("a color other than "),
+        nom_primitives::parse_color,
+    )
+    .parse(rest)
+    {
+        Some(ChoiceType::color_excluding(vec![excluded]))
     } else if tag::<_, _, E>("a color").parse(rest).is_ok() {
-        Some(ChoiceType::Color)
+        Some(ChoiceType::color())
     } else if tag::<_, _, E>("odd or even").parse(rest).is_ok() {
         Some(ChoiceType::OddOrEven)
     } else if tag::<_, _, E>("a basic land type").parse(rest).is_ok() {
@@ -8931,9 +9041,9 @@ fn collapse_ephemeral_color_choice_mana(def: &mut AbilityDefinition) {
     if matches!(
         &*def.effect,
         Effect::Choose {
-            choice_type: ChoiceType::Color,
+            choice_type: ChoiceType::Color { excluded },
             persist: false,
-        }
+        } if excluded.is_empty()
     ) {
         let can_collapse = def.sub_ability.as_ref().is_some_and(|sub| {
             matches!(
@@ -10690,13 +10800,28 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
             clause_ir.parsed.sub_ability.clone()
         };
 
-        if clause_ir.is_optional {
+        if clause_ir.is_optional
+            && !matches!(&clause_ir.parsed.effect, Effect::SearchOutsideGame { .. })
+            && !matches!(
+                &clause_ir.parsed.effect,
+                Effect::GrantCastingPermission { .. }
+            )
+        {
             def.optional = true;
             def.optional_for = clause_ir.opponent_may_scope;
         }
         // CR 117.3a + CR 608.2c: Propagate subject-phrase "may" modal.
-        if clause_ir.parsed.optional {
+        if clause_ir.parsed.optional
+            && !matches!(
+                &clause_ir.parsed.effect,
+                Effect::GrantCastingPermission { .. }
+            )
+        {
             def.optional = true;
+        }
+        if matches!(&clause_ir.parsed.effect, Effect::SearchOutsideGame { .. }) {
+            def.optional = false;
+            def.optional_for = None;
         }
         if let Some(ref qty) = clause_ir.repeat_for {
             if matches!(*def.effect, Effect::TargetOnly { .. }) {
@@ -10915,6 +11040,18 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
             // dedicated clause builders that construct sub-abilities directly
             // (e.g., `try_parse_pump_with_damage_sub` at line 3220).
             chain.kind = AbilityKind::Spell;
+            if prev.optional
+                && matches!(*prev.effect, Effect::CastFromZone { .. })
+                && matches!(
+                    *chain.effect,
+                    Effect::PutAtLibraryPosition {
+                        target: TargetFilter::ExiledBySource,
+                        ..
+                    }
+                )
+            {
+                prev.else_ability = Some(Box::new(chain.clone()));
+            }
             if prev.sub_ability.is_some() {
                 // Walk to the deepest sub_ability and append there
                 let mut cursor = &mut prev;
@@ -10972,6 +11109,10 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     // attaching object.
     rewire_attach_forward_result(&mut result);
     wire_optional_cast_decline_fallback(&mut result);
+    if matches!(&*result.effect, Effect::SearchOutsideGame { .. }) {
+        result.optional = false;
+        result.optional_for = None;
+    }
 
     result
 }
@@ -12684,11 +12825,27 @@ fn try_parse_damage_with_remainder<'a>(
                 .trim_end_matches('.')
                 .trim_end_matches(',')
                 .trim();
+            let target_phrase = target_phrase.trim();
+            // CR 508.5: "defending player" in an attacking creature's ability
+            // identifies the player that creature is attacking. Bind local
+            // third-person quantity refs ("they control") to that player. This
+            // is intentionally scoped to the literal parsed recipient phrase.
+            let references_defending_player =
+                nom::combinator::all_consuming(tag::<_, _, OracleError<'_>>("defending player"))
+                    .parse(target_phrase)
+                    .is_ok();
             // Parse amount using existing helpers
             let qty = crate::parser::oracle_quantity::parse_event_context_quantity(amount_phrase)
-                .or_else(|| crate::parser::oracle_quantity::parse_cda_quantity(amount_phrase));
+                .or_else(|| {
+                    if references_defending_player {
+                        ctx.with_player_scope(ControllerRef::DefendingPlayer, |amount_ctx| {
+                            parse_cda_quantity_with_context(amount_phrase, amount_ctx)
+                        })
+                    } else {
+                        parse_cda_quantity_with_context(amount_phrase, ctx)
+                    }
+                });
             if let Some(qty) = qty {
-                let target_phrase = target_phrase.trim();
                 // Route based on target phrase
                 if target_phrase == "itself" {
                     // When target is "itself", "its power" means the target's power,
@@ -14035,12 +14192,15 @@ fn try_parse_change_targets(lower: &str) -> Option<Effect> {
     {
         // Both spells and abilities on the stack
         TargetFilter::Or {
-            filters: vec![TargetFilter::StackSpell, TargetFilter::StackAbility],
+            filters: vec![
+                TargetFilter::StackSpell,
+                TargetFilter::StackAbility { controller: None },
+            ],
         }
     } else if scan_contains_phrase(spell_phrase_clean, "activated or triggered ability")
         || scan_contains_phrase(spell_phrase_clean, "activated ability")
     {
-        TargetFilter::StackAbility
+        TargetFilter::StackAbility { controller: None }
     } else if scan_contains_phrase(spell_phrase_clean, "spell") {
         // Parse with parse_target for type-specific spells (e.g. "instant or sorcery spell")
         let (parsed, _) = parse_target(spell_phrase_clean);
@@ -14117,14 +14277,39 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, CardTypeSetSource, CastVariantPaid, ChoiceType, Comparator,
         ContinuousModification, ControllerRef, CountScope, DoublePTMode, Duration, FilterProp,
-        GainLifePlayer, LinkedExileScope, ManaContribution, ManaProduction, ObjectScope,
-        PaymentCost, QuantityExpr, QuantityRef, SearchSelectionConstraint, TypeFilter, ZoneRef,
+        GainLifePlayer, LibraryPosition, LinkedExileScope, ManaContribution, ManaProduction,
+        ObjectScope, PaymentCost, QuantityExpr, QuantityRef, SearchSelectionConstraint, TypeFilter,
+        ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaExpiry};
     use crate::types::player::PlayerCounterKind;
     use crate::types::zones::Zone;
+
+    fn typed_leg(filter: &TargetFilter) -> Option<&TypedFilter> {
+        match filter {
+            TargetFilter::Typed(tf) => Some(tf),
+            TargetFilter::And { filters } => filters.iter().find_map(typed_leg),
+            _ => None,
+        }
+    }
+
+    fn is_stack_spell_leg(filter: &TargetFilter) -> bool {
+        match filter {
+            TargetFilter::StackSpell => true,
+            TargetFilter::And { filters } => filters.iter().any(is_stack_spell_leg),
+            _ => false,
+        }
+    }
+
+    fn has_type(tf: &TypedFilter, ty: TypeFilter) -> bool {
+        tf.type_filters.iter().any(|candidate| candidate == &ty)
+    }
+
+    fn has_prop(tf: &TypedFilter, prop: FilterProp) -> bool {
+        tf.properties.iter().any(|candidate| candidate == &prop)
+    }
 
     /// Parser must not invent verb stems for unknown words. The "-es" stripping
     /// rule in `normalize_verb_token` was previously triggered purely by
@@ -14680,6 +14865,40 @@ mod tests {
                     .any(|t| matches!(t, TypeFilter::Creature)));
             }
             other => panic!("expected DamageAll against target player's creatures, got {other:?}"),
+        }
+    }
+
+    /// CR 508.5: In an attacking creature's ability, "defending player" is the
+    /// player the source is attacking, so local third-person refs in the damage
+    /// amount ("they control") bind to that player.
+    #[test]
+    fn effect_damage_to_defending_player_counts_defending_player_objects() {
+        let mut ctx = ParseContext::default();
+        let ability = parse_effect_chain_with_context(
+            "~ deals damage to defending player equal to the number of artifacts they control",
+            AbilityKind::Spell,
+            &mut ctx,
+        );
+
+        match &*ability.effect {
+            Effect::DealDamage {
+                amount:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(tf),
+                            },
+                    },
+                target: TargetFilter::DefendingPlayer,
+                damage_source: None,
+            } => {
+                assert_eq!(tf.controller, Some(ControllerRef::DefendingPlayer));
+                assert!(tf
+                    .type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Artifact)));
+            }
+            other => panic!("expected defending-player artifact count damage, got {other:?}"),
         }
     }
 
@@ -15434,11 +15653,9 @@ mod tests {
         assert!(matches!(
             e,
             Effect::Counter {
-                target: TargetFilter::Typed(TypedFilter { properties, .. }),
+                target: TargetFilter::StackSpell,
                 ..
-            } if properties
-                .iter()
-                .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Stack }))
+            }
         ));
     }
 
@@ -15455,11 +15672,9 @@ mod tests {
                 target: TargetFilter::Or { filters },
                 ..
             } if filters.iter().all(|f| {
-                matches!(
-                    f,
-                    TargetFilter::Typed(TypedFilter { properties, .. })
-                        if properties.iter().any(|p| matches!(p, FilterProp::InZone { zone: Zone::Stack }))
-                )
+                is_stack_spell_leg(f) && typed_leg(f).is_some_and(|tf| {
+                    has_type(tf, TypeFilter::Artifact) || has_type(tf, TypeFilter::Enchantment)
+                })
             })
         ));
     }
@@ -15470,11 +15685,31 @@ mod tests {
         assert!(matches!(
             e,
             Effect::Counter {
-                target: TargetFilter::Typed(TypedFilter { properties, .. }),
+                target,
                 ..
-            } if properties.iter().any(|p| matches!(p, FilterProp::InZone { zone: Zone::Stack }))
-                && properties.iter().any(|p| matches!(p, FilterProp::Cmc { comparator: Comparator::GE, value: QuantityExpr::Fixed { value: 4 } }))
+            } if is_stack_spell_leg(&target)
+                && typed_leg(&target).is_some_and(|tf| {
+                    tf.properties.iter().any(|p| matches!(p, FilterProp::Cmc { comparator: Comparator::GE, value: QuantityExpr::Fixed { value: 4 } }))
+                })
         ));
+    }
+
+    #[test]
+    fn effect_unsubstantiate_uses_stack_spell_for_spell_leg() {
+        let e = parse_effect("Return target spell or creature to its owner's hand");
+        let Effect::Bounce { target, .. } = e else {
+            panic!("expected Bounce to hand, got {e:?}");
+        };
+        let TargetFilter::Or { filters } = target else {
+            panic!("expected Or target filter, got {target:?}");
+        };
+        assert!(filters
+            .iter()
+            .any(|filter| matches!(filter, TargetFilter::StackSpell)));
+        assert!(filters.iter().any(|filter| matches!(
+            filter,
+            TargetFilter::Typed(tf) if has_type(tf, TypeFilter::Creature)
+        )));
     }
 
     #[test]
@@ -15512,11 +15747,7 @@ mod tests {
             AbilityKind::Spell,
         );
         if let Effect::Counter { target, .. } = def.effect.as_ref() {
-            assert!(
-                matches!(target, TargetFilter::Typed(TypedFilter { properties, .. })
-                    if properties.iter().any(|p| matches!(p, FilterProp::InZone { zone: Zone::Stack }))),
-                "target should be on stack"
-            );
+            assert!(is_stack_spell_leg(target), "target should be on stack");
         } else {
             panic!("expected Counter effect, got {:?}", def.effect);
         }
@@ -16576,70 +16807,56 @@ mod tests {
 
     /// CR 701.6 + CR 405.1: "Counter all spells your opponents control"
     /// (Glen Elendra's Answer) must lower to `Effect::CounterAll` with the
-    /// class filter preserving `controller: Opponent`, `InZone Stack`, and
-    /// the spell-card type — so the runtime resolver iterates the stack and
-    /// counters every matching opponent spell instead of prompting for one.
+    /// first-class spell-on-stack filter plus opponent controller scoping, so
+    /// the runtime resolver iterates the stack and counters every matching
+    /// opponent spell instead of prompting for one.
     #[test]
     fn effect_counter_all_opponent_spells_glen_elendra() {
         let e = parse_effect("Counter all spells your opponents control");
         match e {
-            Effect::CounterAll {
-                target: TargetFilter::Typed(filter),
-            } => {
+            Effect::CounterAll { target } => {
                 assert!(
-                    matches!(
-                        filter.controller,
-                        Some(crate::types::ability::ControllerRef::Opponent)
-                    ),
-                    "controller scoping preserved, got {:?}",
-                    filter.controller
+                    is_stack_spell_leg(&target),
+                    "StackSpell missing: {target:?}"
                 );
-                assert!(
-                    filter
-                        .properties
-                        .iter()
-                        .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Stack })),
-                    "InZone Stack preserved, got {:?}",
-                    filter.properties
+                let filter =
+                    typed_leg(&target).unwrap_or_else(|| panic!("missing typed leg: {target:?}"));
+                assert_eq!(
+                    filter.controller,
+                    Some(crate::types::ability::ControllerRef::Opponent),
+                    "controller scoping preserved"
                 );
             }
-            other => panic!("expected CounterAll {{ Typed }}, got {other:?}"),
+            other => panic!("expected CounterAll, got {other:?}"),
         }
     }
 
     /// "Counter all other spells" (Swift Silence) — `other` lowers to a
-    /// `FilterProp::Another` constraint plus the stack-zone pin.
+    /// `FilterProp::Another` constraint plus the first-class stack-spell pin.
     #[test]
     fn effect_counter_all_other_spells_swift_silence() {
         let e = parse_effect("Counter all other spells");
         match e {
-            Effect::CounterAll {
-                target: TargetFilter::Typed(filter),
-            } => {
+            Effect::CounterAll { target } => {
                 assert!(
-                    filter
-                        .properties
-                        .iter()
-                        .any(|p| matches!(p, FilterProp::Another)),
+                    is_stack_spell_leg(&target),
+                    "StackSpell missing: {target:?}"
+                );
+                let filter =
+                    typed_leg(&target).unwrap_or_else(|| panic!("missing typed leg: {target:?}"));
+                assert!(
+                    has_prop(filter, FilterProp::Another),
                     "Another constraint preserved, got {:?}",
                     filter.properties
                 );
-                assert!(
-                    filter
-                        .properties
-                        .iter()
-                        .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Stack })),
-                    "InZone Stack preserved"
-                );
             }
-            other => panic!("expected CounterAll {{ Typed, Another }}, got {other:?}"),
+            other => panic!("expected CounterAll with Another, got {other:?}"),
         }
     }
 
     /// "Counter all abilities your opponents control" (Kadena's Silencer
     /// trigger body) — bare "abilities" with the mass precheck routes to
-    /// `TargetFilter::StackAbility`. (Controller scoping on stack abilities
-    /// is a separate filter-extension follow-up — see resolver doc.)
+    /// a stack-ability filter scoped to opponents.
     #[test]
     fn effect_counter_all_abilities_kadena() {
         let e = parse_effect("Counter all abilities your opponents control");
@@ -16647,7 +16864,9 @@ mod tests {
             matches!(
                 e,
                 Effect::CounterAll {
-                    target: TargetFilter::StackAbility,
+                    target: TargetFilter::StackAbility {
+                        controller: Some(ControllerRef::Opponent)
+                    },
                 }
             ),
             "expected CounterAll {{ StackAbility }}, got {e:?}"
@@ -16685,7 +16904,7 @@ mod tests {
             matches!(
                 e,
                 Effect::Counter {
-                    target: TargetFilter::StackAbility,
+                    target: TargetFilter::StackAbility { controller: None },
                     ..
                 }
             ),
@@ -17041,6 +17260,29 @@ mod tests {
             Some(QuantityExpr::Ref {
                 qty: QuantityRef::CommanderCastFromCommandZoneCount
             })
+        ));
+    }
+
+    #[test]
+    fn effect_copy_target_controlled_activated_or_triggered_ability_x_times() {
+        let def = parse_effect_chain(
+            "Copy target activated or triggered ability you control X times",
+            AbilityKind::Activated,
+        );
+        assert!(matches!(
+            def.repeat_for,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::Variable { ref name }
+            }) if name == "X"
+        ));
+        let Effect::CopySpell { target, .. } = &*def.effect else {
+            panic!("expected CopySpell, got {:?}", def.effect);
+        };
+        assert!(matches!(
+            target,
+            TargetFilter::StackAbility {
+                controller: Some(ControllerRef::You)
+            }
         ));
     }
 
@@ -18409,7 +18651,7 @@ mod tests {
         assert_eq!(
             e,
             Effect::Choose {
-                choice_type: ChoiceType::Color,
+                choice_type: ChoiceType::color(),
                 persist: false
             }
         );
@@ -18525,6 +18767,62 @@ mod tests {
                 .iter()
                 .flat_map(|s| s.modifications.iter())
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// Issue #331: Inline conjunctive grants must parse both the keyword grant
+    /// and the trailing restriction grant when they share one sentence.
+    #[test]
+    fn sungold_style_inline_grant_keeps_hexproof_and_cant_be_blocked() {
+        use crate::types::keywords::{HexproofFilter, Keyword};
+        use crate::types::statics::StaticMode;
+
+        let def = parse_effect_chain(
+            "Choose a color. This creature gains hexproof from that color until end of turn and can't be blocked by creatures of that color this turn.",
+            AbilityKind::Activated,
+        );
+        let grant = def
+            .sub_ability
+            .as_ref()
+            .expect("must have sub_ability (Choose -> inline grant)");
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*grant.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", grant.effect);
+        };
+        let modifications: Vec<_> = static_abilities
+            .iter()
+            .flat_map(|s| s.modifications.iter())
+            .collect();
+        assert!(
+            modifications.iter().any(|m| {
+                matches!(
+                    m,
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::HexproofFrom(HexproofFilter::ChosenColor),
+                    }
+                )
+            }),
+            "expected typed HexproofFrom(ChosenColor), got {modifications:?}"
+        );
+        let Some(filter) = modifications.iter().find_map(|m| match m {
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantBeBlockedBy { filter },
+            } => Some(filter),
+            _ => None,
+        }) else {
+            panic!("expected AddStaticMode(CantBeBlockedBy), got {modifications:?}");
+        };
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.properties
+                .iter()
+                .any(|prop| matches!(prop, FilterProp::IsChosenColor)),
+            "filter must contain IsChosenColor, got {:?}",
+            tf.properties
         );
     }
 
@@ -20447,6 +20745,89 @@ mod tests {
     }
 
     #[test]
+    fn parse_play_the_exiled_card_this_turn_targets_tracked_set() {
+        let def = parse_effect_chain(
+            "You may play the exiled card this turn.",
+            AbilityKind::Spell,
+        );
+        let Effect::GrantCastingPermission {
+            permission, target, ..
+        } = def.effect.as_ref()
+        else {
+            panic!("expected GrantCastingPermission, got {:?}", def.effect);
+        };
+        assert_eq!(
+            *target,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            }
+        );
+        assert!(matches!(
+            permission,
+            CastingPermission::PlayFromExile {
+                duration: Duration::UntilEndOfTurn,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn advanced_reconstruction_body_uses_random_exile_and_tracked_permission() {
+        let def = parse_effect_chain(
+            "Mill a card, then exile a card from your graveyard at random. You may play the exiled card this turn.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(def.effect.as_ref(), Effect::Mill { .. }));
+
+        let exile = def.sub_ability.as_deref().expect("exile sub-ability");
+        let Effect::ChangeZone {
+            origin,
+            destination,
+            target,
+            ..
+        } = exile.effect.as_ref()
+        else {
+            panic!("expected ChangeZone, got {:?}", exile.effect);
+        };
+        assert_eq!(*origin, Some(Zone::Graveyard));
+        assert_eq!(*destination, Zone::Exile);
+        assert_eq!(exile.target_selection_mode, TargetSelectionMode::Random);
+        assert!(matches!(
+            target,
+            TargetFilter::Typed(TypedFilter {
+                controller: None,
+                properties,
+                ..
+            }) if properties.contains(&FilterProp::Owned { controller: ControllerRef::You })
+                && properties.contains(&FilterProp::InZone { zone: Zone::Graveyard })
+        ));
+
+        let grant = exile
+            .sub_ability
+            .as_deref()
+            .expect("permission sub-ability");
+        let Effect::GrantCastingPermission {
+            permission, target, ..
+        } = grant.effect.as_ref()
+        else {
+            panic!("expected GrantCastingPermission, got {:?}", grant.effect);
+        };
+        assert_eq!(
+            *target,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            }
+        );
+        assert!(matches!(
+            permission,
+            CastingPermission::PlayFromExile {
+                duration: Duration::UntilEndOfTurn,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn parse_play_from_exile_while_exiled_with_any_mana_permission() {
         let def = parse_effect_chain(
             "You may cast that card for as long as it remains exiled, and mana of any type can be spent to cast that spell.",
@@ -21599,24 +21980,12 @@ mod tests {
         assert_eq!(filters.len(), 2);
         let types: Vec<_> = filters
             .iter()
-            .filter_map(|f| {
-                if let TargetFilter::Typed(tf) = f {
-                    tf.get_primary_type().cloned()
-                } else {
-                    None
-                }
-            })
+            .filter_map(|f| typed_leg(f).and_then(|tf| tf.get_primary_type().cloned()))
             .collect();
         assert!(types.contains(&TypeFilter::Instant));
         assert!(types.contains(&TypeFilter::Sorcery));
-        // Both should have InZone(Stack)
         for f in filters {
-            if let TargetFilter::Typed(tf) = f {
-                assert!(tf
-                    .properties
-                    .iter()
-                    .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Stack })));
-            }
+            assert!(is_stack_spell_leg(f), "StackSpell missing from {f:?}");
         }
     }
 
@@ -23872,12 +24241,10 @@ mod tests {
 
         match &*def.effect {
             Effect::Counter { target, .. } => {
-                assert!(matches!(
-                    target,
-                    TargetFilter::Typed(tf)
-                        if tf.type_filters.contains(&TypeFilter::Card)
-                            && tf.properties.contains(&FilterProp::InZone { zone: Zone::Stack })
-                ));
+                assert!(
+                    is_stack_spell_leg(target),
+                    "expected StackSpell, got {target:?}"
+                );
             }
             other => panic!("expected Counter effect, got {other:?}"),
         }
@@ -24036,19 +24403,16 @@ mod tests {
                     filters.iter().any(|filter| matches!(
                         filter,
                         TargetFilter::Typed(tf)
-                            if tf.type_filters.contains(&TypeFilter::Creature)
-                                && tf.properties.contains(&FilterProp::Another)
+                            if has_type(tf, TypeFilter::Creature)
+                                && has_prop(tf, FilterProp::Another)
                     )),
                     "expected creature branch with Another, got {filters:?}"
                 );
                 assert!(
-                    filters.iter().any(|filter| matches!(
-                        filter,
-                        TargetFilter::Typed(tf)
-                            if tf.type_filters.contains(&TypeFilter::Card)
-                                && tf.properties.contains(&FilterProp::Another)
-                                && tf.properties.contains(&FilterProp::InZone { zone: Zone::Stack })
-                    )),
+                    filters.iter().any(|filter| {
+                        is_stack_spell_leg(filter)
+                            && typed_leg(filter).is_some_and(|tf| has_prop(tf, FilterProp::Another))
+                    }),
                     "expected spell branch with Another, got {filters:?}"
                 );
             }
@@ -27535,7 +27899,7 @@ mod tests {
     fn exile_from_top_until_second_person_nonland_filter() {
         let e =
             parse_effect("exile cards from the top of your library until you exile a nonland card");
-        let Effect::ExileFromTopUntil { until } = e else {
+        let Effect::ExileFromTopUntil { player: _, until } = e else {
             panic!("expected ExileFromTopUntil, got {:?}", e);
         };
         let UntilCondition::NextMatches { filter } = until else {
@@ -27562,7 +27926,7 @@ mod tests {
         let e = parse_effect(
             "exile cards from the top of their library until they exile a nonland card",
         );
-        let Effect::ExileFromTopUntil { until } = e else {
+        let Effect::ExileFromTopUntil { player: _, until } = e else {
             panic!("expected ExileFromTopUntil, got {:?}", e);
         };
         let UntilCondition::NextMatches { filter } = until else {
@@ -27575,6 +27939,71 @@ mod tests {
             .type_filters
             .iter()
             .any(|t| matches!(t, TypeFilter::Non(inner) if matches!(**inner, TypeFilter::Land))));
+    }
+
+    /// CR 701.13a + CR 601.2 + CR 118.9 + CR 401.4: Chaos Wand is a
+    /// targeted-player exile-until loop followed by an optional free-cast
+    /// branch and cleanup of cards still linked as exiled this way.
+    #[test]
+    fn chaos_wand_lowers_to_targeted_exile_until_optional_cast_and_cleanup() {
+        let def = parse_effect_chain(
+            "Target opponent exiles cards from the top of their library until they exile an instant or sorcery card. You may cast that card without paying its mana cost. Then put the exiled cards that weren't cast this way on the bottom of that library in a random order.",
+            AbilityKind::Activated,
+        );
+
+        let Effect::ExileFromTopUntil { player, until } = &*def.effect else {
+            panic!("expected ExileFromTopUntil, got {:?}", def.effect);
+        };
+        assert_eq!(
+            *player,
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+        );
+        let UntilCondition::NextMatches { filter } = until else {
+            panic!("expected NextMatches, got {until:?}");
+        };
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected instant/sorcery OR filter, got {filter:?}");
+        };
+        assert!(filters.iter().any(
+            |filter| matches!(filter, TargetFilter::Typed(typed) if typed.type_filters.contains(&TypeFilter::Instant))
+        ));
+        assert!(filters.iter().any(
+            |filter| matches!(filter, TargetFilter::Typed(typed) if typed.type_filters.contains(&TypeFilter::Sorcery))
+        ));
+
+        let cast = def
+            .sub_ability
+            .as_deref()
+            .expect("cast branch should be chained");
+        let Effect::CastFromZone {
+            target,
+            without_paying_mana_cost,
+            ..
+        } = &*cast.effect
+        else {
+            panic!("expected CastFromZone, got {:?}", cast.effect);
+        };
+        assert_eq!(*target, TargetFilter::ParentTarget);
+        assert!(*without_paying_mana_cost);
+        assert!(cast.optional);
+
+        for cleanup in [cast.sub_ability.as_deref(), cast.else_ability.as_deref()] {
+            let cleanup = cleanup.expect("cleanup should run after accept or decline");
+            let Effect::PutAtLibraryPosition {
+                target,
+                count,
+                position,
+            } = &*cleanup.effect
+            else {
+                panic!(
+                    "expected PutAtLibraryPosition cleanup, got {:?}",
+                    cleanup.effect
+                );
+            };
+            assert_eq!(*target, TargetFilter::ExiledBySource);
+            assert_eq!(*count, QuantityExpr::Fixed { value: 0 });
+            assert_eq!(*position, LibraryPosition::Bottom);
+        }
     }
 
     /// CR 603.2 + CR 701.57a + CR 702.85a + CR 608.2: Etali's outer ETB trigger
@@ -27600,7 +28029,7 @@ mod tests {
             Some(PlayerFilter::All),
             "player_scope must propagate from \"each player\" subject"
         );
-        let Effect::ExileFromTopUntil { ref until } = *def.effect else {
+        let Effect::ExileFromTopUntil { ref until, .. } = *def.effect else {
             panic!("expected outer ExileFromTopUntil, got {:?}", def.effect);
         };
         let UntilCondition::NextMatches { filter } = until else {
@@ -27704,7 +28133,7 @@ mod tests {
             "player_scope must be Opponent (from \"each opponent\" subject)"
         );
 
-        let Effect::ExileFromTopUntil { ref until } = *def.effect else {
+        let Effect::ExileFromTopUntil { ref until, .. } = *def.effect else {
             panic!(
                 "expected ExileFromTopUntil, got {:?} — issue #316 regression",
                 def.effect
@@ -27733,7 +28162,7 @@ mod tests {
         let e = parse_effect(
             "exile cards from the top of your library until you exile cards with total mana value 4 or greater",
         );
-        let Effect::ExileFromTopUntil { until } = e else {
+        let Effect::ExileFromTopUntil { player: _, until } = e else {
             panic!("expected ExileFromTopUntil, got {:?}", e);
         };
         let UntilCondition::CumulativeThreshold {
@@ -27763,7 +28192,7 @@ mod tests {
 
         assert_eq!(def.player_scope, Some(PlayerFilter::Opponent));
 
-        let Effect::ExileFromTopUntil { ref until } = *def.effect else {
+        let Effect::ExileFromTopUntil { ref until, .. } = *def.effect else {
             panic!("expected ExileFromTopUntil, got {:?}", def.effect);
         };
         let UntilCondition::CumulativeThreshold {
@@ -27796,6 +28225,7 @@ mod tests {
             );
             let e = parse_effect(&text);
             let Effect::ExileFromTopUntil {
+                player: TargetFilter::Controller,
                 until:
                     UntilCondition::CumulativeThreshold {
                         comparator,
@@ -29633,5 +30063,40 @@ mod snapshot_tests {
                 player: TargetFilter::Controller,
             }
         ));
+    }
+
+    /// CR 611.2b + CR 703.4q: "Until end of turn, you don't lose unspent red
+    /// mana as steps and phases end." (The Last Agni Kai) parses as a spell
+    /// effect that installs a turn-scoped `StepEndUnspentMana { Retain }`
+    /// static via `Effect::GenericEffect`. The static carries both a `mode`
+    /// and an `AddStaticMode` modification so `register_transient_effect`
+    /// can propagate the rule to the controller via `SpecificPlayer`.
+    #[test]
+    fn until_end_of_turn_retain_unspent_color_mana_installs_generic_effect() {
+        use crate::types::ability::Duration;
+        use crate::types::mana::{ManaColor, StepEndManaAction};
+        use crate::types::statics::StaticMode;
+        let def = parse_effect_chain(
+            "Until end of turn, you don't lose unspent red mana as steps and phases end.",
+            AbilityKind::Spell,
+        );
+        let Effect::GenericEffect {
+            ref static_abilities,
+            duration,
+            ..
+        } = *def.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", def.effect);
+        };
+        assert_eq!(duration, Some(Duration::UntilEndOfTurn));
+        assert_eq!(static_abilities.len(), 1);
+        assert_eq!(
+            static_abilities[0].mode,
+            StaticMode::StepEndUnspentMana {
+                filter: Some(ManaColor::Red),
+                action: StepEndManaAction::Retain,
+            }
+        );
+        assert_eq!(static_abilities[0].affected, Some(TargetFilter::Controller));
     }
 }

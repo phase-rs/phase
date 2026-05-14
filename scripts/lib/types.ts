@@ -59,8 +59,7 @@ export type TriageClassification =
   | "developer_reply"
   | "correction"
   | "chatter"
-  | "evidence_only"
-  | "stale_likely_fixed";
+  | "evidence_only";
 
 export interface TriageItem {
   report_id: string;
@@ -74,8 +73,21 @@ export interface TriageItem {
   extraction_confidence: number;
   source_url: string;
   parser_status: "fully_parsed" | "has_gaps" | "unknown_card" | "no_card";
-  proposed_action: "create_issue" | "append_to_existing" | "skip" | "needs_human_review";
+  proposed_action:
+    | "create_issue"
+    | "append_to_existing"
+    | "skip"
+    | "skip_existing_closed"
+    | "needs_human_review";
   dedup_group: string | null;
+  github_issue?: {
+    number: number;
+    title: string;
+    state: "OPEN" | "CLOSED";
+    url: string;
+    closed_at: string | null;
+    match_kind: "report_id" | "source_url" | "discord_message";
+  };
 }
 
 export interface SyncState {

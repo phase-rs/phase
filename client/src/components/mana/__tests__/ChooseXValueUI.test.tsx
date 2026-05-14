@@ -70,10 +70,15 @@ function createPendingCast(): PendingCast {
   };
 }
 
-function chooseXWaitingFor(max: number): WaitingFor {
+function chooseXWaitingFor(max: number, min?: number): WaitingFor {
   return {
     type: "ChooseXValue",
-    data: { player: 0, max, pending_cast: createPendingCast() },
+    data: {
+      player: 0,
+      max,
+      ...(min === undefined ? {} : { min }),
+      pending_cast: createPendingCast(),
+    },
   };
 }
 
@@ -117,6 +122,7 @@ describe("ChooseXValueUI", () => {
     expect(screen.getByText(/Nature's Rhythm/)).toBeInTheDocument();
 
     const slider = screen.getByLabelText("Choose X value") as HTMLInputElement;
+    expect(slider.min).toBe("0");
     expect(slider.max).toBe("5");
 
     fireEvent.change(slider, { target: { value: "3" } });
@@ -144,9 +150,9 @@ describe("ChooseXValueUI", () => {
     expect(dispatch).toHaveBeenCalledWith({ type: "CancelCast" });
   });
 
-  it("resets value to 0 when ChooseXValue state re-enters", () => {
+  it("honors min value and resets to a valid value when ChooseXValue state re-enters", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
-    const waitingFor = chooseXWaitingFor(10);
+    const waitingFor = chooseXWaitingFor(10, 1);
 
     act(() => {
       useGameStore.setState({
@@ -159,11 +165,13 @@ describe("ChooseXValueUI", () => {
     const { rerender } = render(<ChooseXValueUI />);
 
     const slider = screen.getByLabelText("Choose X value") as HTMLInputElement;
+    expect(slider.min).toBe("1");
+    expect(screen.getByRole("button", { name: "Confirm X = 1" })).toBeInTheDocument();
     fireEvent.change(slider, { target: { value: "7" } });
     expect(screen.getByRole("button", { name: "Confirm X = 7" })).toBeInTheDocument();
 
     // Simulate re-entering ChooseXValue (e.g., after cost reduction changes max)
-    const nextWaitingFor = chooseXWaitingFor(4);
+    const nextWaitingFor = chooseXWaitingFor(4, 2);
     act(() => {
       useGameStore.setState({
         gameState: createGameState({ waiting_for: nextWaitingFor }),
@@ -174,6 +182,21 @@ describe("ChooseXValueUI", () => {
 
     rerender(<ChooseXValueUI />);
 
-    expect(screen.getByRole("button", { name: "Confirm X = 0" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Confirm X = 2" })).toBeInTheDocument();
+  });
+
+  it("renders nothing for impossible min greater than max bounds", () => {
+    const waitingFor = chooseXWaitingFor(0, 1);
+
+    act(() => {
+      useGameStore.setState({
+        gameState: createGameState({ waiting_for: waitingFor }),
+        waitingFor,
+        dispatch: vi.fn().mockResolvedValue([]),
+      });
+    });
+
+    const { container } = render(<ChooseXValueUI />);
+    expect(container).toBeEmptyDOMElement();
   });
 });

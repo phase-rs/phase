@@ -2081,9 +2081,20 @@ function AbilityChoiceModal() {
   // modal's subtitle — the user is choosing which attacker to return as the
   // cost-payment creature, not activating an ability.
   const allSneak = pending.actions.every((a) => a.type === "CastSpellAsSneak");
+  const allPlayOrCast = pending.actions.every((a) =>
+    a.type === "CastSpell"
+    || a.type === "CastSpellForFree"
+    || a.type === "CastSpellAsMiracle"
+    || a.type === "CastSpellAsMadness"
+    || a.type === "CastSpellAsSneak"
+    || a.type === "CastSpellAsWebSlinging"
+    || a.type === "PlayLand"
+  );
   const subtitle = allSneak
     ? "Choose which attacker to return (Sneak cost)"
-    : "Choose an ability to activate";
+    : allPlayOrCast
+      ? "Choose how to play this card"
+      : "Choose an ability to activate";
 
   return (
     <ChoiceModal

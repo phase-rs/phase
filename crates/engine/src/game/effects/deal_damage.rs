@@ -402,10 +402,19 @@ pub(crate) fn apply_damage_after_replacement(
 
     // CR 120.1: Record damage for "was dealt damage by" condition queries.
     if actual_amount > 0 {
+        let target_controller = match t {
+            TargetRef::Player(player_id) => *player_id,
+            TargetRef::Object(object_id) => state
+                .objects
+                .get(object_id)
+                .map(|object| object.controller)
+                .unwrap_or(ctx.controller),
+        };
         state.damage_dealt_this_turn.push(DamageRecord {
             source_id: ctx.source_id,
             source_controller: ctx.controller,
             target: t.clone(),
+            target_controller,
             amount: actual_amount,
             is_combat,
         });
@@ -997,6 +1006,57 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert_eq!(state.objects[&obj_id].damage_marked, 3);
+    }
+
+    #[test]
+    fn damage_record_snapshots_object_target_controller() {
+        let mut state = GameState::new_two_player(42);
+        let target = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let ctx = DamageContext::fallback(ObjectId(100), PlayerId(0));
+        let event = ProposedEvent::Damage {
+            source_id: ctx.source_id,
+            target: TargetRef::Object(target),
+            amount: 2,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+
+        apply_damage_after_replacement(&mut state, &ctx, event, false, &mut events);
+
+        assert_eq!(state.damage_dealt_this_turn.len(), 1);
+        assert_eq!(
+            state.damage_dealt_this_turn[0].target_controller,
+            PlayerId(1)
+        );
+    }
+
+    #[test]
+    fn damage_record_snapshots_player_target_as_its_own_controller() {
+        let mut state = GameState::new_two_player(42);
+        let ctx = DamageContext::fallback(ObjectId(100), PlayerId(0));
+        let event = ProposedEvent::Damage {
+            source_id: ctx.source_id,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 2,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+
+        apply_damage_after_replacement(&mut state, &ctx, event, false, &mut events);
+
+        assert_eq!(state.damage_dealt_this_turn.len(), 1);
+        assert_eq!(
+            state.damage_dealt_this_turn[0].target_controller,
+            PlayerId(1)
+        );
     }
 
     #[test]

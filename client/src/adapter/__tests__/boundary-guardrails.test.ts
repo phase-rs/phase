@@ -102,6 +102,24 @@ describe("adapter boundary guardrails", () => {
     expect(isWaitingForHandled(waitingFor)).toBe(true);
   });
 
+  it("handles the copy-retarget waiting payload", () => {
+    const waitingFor: WaitingFor = {
+      type: "CopyRetarget",
+      data: {
+        player: 0,
+        copy_id: 7,
+        target_slots: [
+          {
+            current: { Object: 42 },
+            legal_alternatives: [{ Object: 43 }, { Player: 1 }],
+          },
+        ],
+      },
+    };
+
+    expect(isWaitingForHandled(waitingFor)).toBe(true);
+  });
+
   it("keeps the frontend GameAction union in lockstep with the engine enum", () => {
     const root = repoRoot();
     const rustSource = readFileSync(resolve(root, "crates/engine/src/types/actions.rs"), "utf8");

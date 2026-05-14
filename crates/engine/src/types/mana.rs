@@ -2,8 +2,10 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use super::events::GameEvent;
 use super::identifiers::ObjectId;
 use super::keywords::{Keyword, KeywordKind};
+use super::player::PlayerId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ManaColor {
@@ -47,6 +49,95 @@ pub enum ManaType {
     Red,
     Green,
     Colorless,
+}
+
+impl From<ManaColor> for ManaType {
+    fn from(color: ManaColor) -> Self {
+        match color {
+            ManaColor::White => ManaType::White,
+            ManaColor::Blue => ManaType::Blue,
+            ManaColor::Black => ManaType::Black,
+            ManaColor::Red => ManaType::Red,
+            ManaColor::Green => ManaType::Green,
+        }
+    }
+}
+
+/// CR 614.1a + CR 703.4q: What happens to an affected unspent-mana unit at the
+/// CR 703.4q "any unspent mana left in a player's mana pool empties" event.
+///
+/// Two leaf-level actions today, both replacement effects on the same step-end
+/// drop event:
+/// - `Retain`: the mana doesn't empty (CR 614.6 — the loss event is replaced
+///   with nothing). Upwelling, Electro, Omnath Locus of Mana, The Last Agni Kai.
+/// - `Transform(type)`: the mana becomes `type` instead of emptying (CR 614.1a
+///   — the loss event is replaced with a recolor). Horizon Stone, Kruphix,
+///   Omnath Locus of All, Ozai.
+///
+/// **Sibling-cluster trip-trigger:** A third action variant only belongs here
+/// if it is also a CR 703.4q step-end-empty replacement. A "Whenever you lose
+/// mana, …" pattern is a *triggered* ability on the loss event (CR 603), a
+/// different rule domain that warrants its own ability surface rather than
+/// extending this enum. Likewise, any effect that fires at a non-step-end
+/// time (e.g., on cost payment, on damage) does not belong here.
+///
+/// Runtime path: handlers are scanned per-player by
+/// `game::turns::scan_step_end_mana_handlers` (combining
+/// `battlefield_active_statics` with `transient_continuous_effects` keyed on
+/// `SpecificPlayer`) and surface as `StepEndManaScanEntry` rows in
+/// `state.pending_step_end_mana_handlers`. The replacement pipeline
+/// (`empty_mana_pool_matcher` + the Path-A carve-out
+/// `apply_empty_mana_pool_replacement` in `game::replacement`) flips
+/// per-unit dispositions via the CR 616.1 player-choice surface; the final
+/// pool mutation runs in `apply_empty_mana_pool_decisions`. The TCE
+/// scan accepts both `Retain` and `Transform` arms — `Transform` is
+/// forward-compatible for a future spell-installed transformation rider
+/// (today only the printed-static path produces it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum StepEndManaAction {
+    Retain,
+    Transform(ManaType),
+}
+
+impl std::fmt::Display for StepEndManaAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StepEndManaAction::Retain => write!(f, "Retain"),
+            StepEndManaAction::Transform(t) => write!(f, "Transform({t:?})"),
+        }
+    }
+}
+
+/// CR 614.1a + CR 703.4q: Per-unit decision for the CR 703.4q step-end empty
+/// event. Each entry in `ProposedEvent::EmptyManaPool::units` describes one
+/// `ManaUnit` in the affected player's pool and how the replacement pipeline
+/// has chosen to resolve it.
+///
+/// `pool_index` is the unit's position in `ManaPool::mana` at the time the
+/// event was constructed. The disposition walker (commit 2) iterates in
+/// descending index order so removals don't invalidate later indices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnitDecision {
+    pub pool_index: usize,
+    pub color: ManaType,
+    pub disposition: UnitDisposition,
+}
+
+/// CR 614.1a + CR 614.6 + CR 703.4q: How a single unit in a step-end empty
+/// event will be resolved after the replacement pipeline finishes.
+///
+/// - `Drop`: default — the unit empties per CR 703.4q. A handler matching this
+///   unit may flip the disposition to `Keep` (CR 614.6) or `Recolor(_)`
+///   (CR 614.1a).
+/// - `Keep`: a `StepEndManaAction::Retain` handler has applied; the unit stays
+///   in the pool.
+/// - `Recolor(_)`: a `StepEndManaAction::Transform(_)` handler has applied; the
+///   unit stays in the pool with its color rewritten to the target type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UnitDisposition {
+    Drop,
+    Keep,
+    Recolor(ManaType),
 }
 
 /// Display-layer projection of `ManaProduction` — typed pip descriptors the
@@ -97,13 +188,15 @@ pub struct SpellMeta {
 }
 
 /// CR 106.6: Context for a mana-payment decision. Distinguishes "paying for a
-/// spell being cast" from "paying for an ability being activated" so the
-/// restriction check can route through `allows_spell` vs `allows_activation`.
+/// spell being cast", "paying for an ability being activated", and paying
+/// costs during effect resolution so the restriction check can route through
+/// the correct rules category.
 ///
 /// Casting-restricted mana (e.g., "creature-spell-only") must reject ability
 /// activations; activation-restricted mana (e.g., "activate abilities only")
-/// must reject spell casts. Using the correct variant per payment site is the
-/// single authority that enforces this bifurcation.
+/// must reject spell casts and resolution-time effect costs. Using the correct
+/// variant per payment site is the single authority that enforces this
+/// bifurcation.
 #[derive(Debug, Clone, Copy)]
 pub enum PaymentContext<'a> {
     /// Payment for a spell being cast — consult `allows_spell`.
@@ -114,6 +207,10 @@ pub enum PaymentContext<'a> {
         source_types: &'a [String],
         source_subtypes: &'a [String],
     },
+    /// Payment for a cost during spell or ability resolution. Current
+    /// restriction variants name spell-casting or ability-activation use, so
+    /// restricted mana is not eligible here.
+    Effect,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,6 +234,10 @@ pub enum ManaRestriction {
     OnlyForSpellWithKeywordKind(KeywordKind),
     /// "Spend this mana only to cast spells with flashback from a graveyard."
     OnlyForSpellWithKeywordKindFromZone(KeywordKind, crate::types::zones::Zone),
+    /// CR 702.51a: Internal marker for a convoke tap that substitutes for
+    /// paying mana. The payment algorithm may consume it for the current spell,
+    /// but cast-spent metrics and mana-added triggers must ignore it.
+    ConvokePayment,
 }
 
 impl ManaRestriction {
@@ -198,6 +299,7 @@ impl ManaRestriction {
                 meta.keyword_kinds.contains(required_keyword)
                     && meta.cast_from_zone == Some(*required_zone)
             }
+            ManaRestriction::ConvokePayment => true,
         }
     }
 
@@ -224,7 +326,7 @@ impl ManaRestriction {
             ManaRestriction::OnlyForActivation => true,
             // X-cost mana can be used for abilities with {X} in their cost.
             // TODO: Check if the ability has {X} in its cost once that data is available.
-            ManaRestriction::OnlyForXCosts => false,
+            ManaRestriction::OnlyForXCosts | ManaRestriction::ConvokePayment => false,
         }
     }
 
@@ -239,6 +341,7 @@ impl ManaRestriction {
                 source_types,
                 source_subtypes,
             } => self.allows_activation(source_types, source_subtypes),
+            PaymentContext::Effect => false,
         }
     }
 }
@@ -305,6 +408,25 @@ impl ManaUnit {
             grants: Vec::new(),
             expiry: None,
         }
+    }
+
+    /// Construct a convoke payment marker. This is intentionally not mana
+    /// production; it exists only so the shared mana-payment algorithm can
+    /// consume a tap as satisfying the selected shard.
+    pub fn convoke_payment(color: ManaType, source_id: ObjectId) -> Self {
+        Self {
+            color,
+            source_id,
+            snow: false,
+            source_could_produce_two_or_more_colors: false,
+            restrictions: vec![ManaRestriction::ConvokePayment],
+            grants: Vec::new(),
+            expiry: None,
+        }
+    }
+
+    pub fn is_convoke_payment(&self) -> bool {
+        self.restrictions.contains(&ManaRestriction::ConvokePayment)
     }
 }
 
@@ -754,17 +876,38 @@ impl ManaPool {
         self.mana.len()
     }
 
+    pub fn produced_mana_total(&self) -> usize {
+        self.mana
+            .iter()
+            .filter(|unit| !unit.is_convoke_payment())
+            .count()
+    }
+
     pub fn clear(&mut self) {
         self.mana.clear();
     }
 
-    /// CR 106.4: Clear mana on phase transition, retaining mana that carries an
-    /// explicit retention expiry until that expiry has been reached.
-    pub fn clear_step_transition(&mut self, in_combat: bool, entering_cleanup: bool) {
+    /// CR 500.5 + CR 614.6 + CR 703.4q: Drop only expiry-bound units whose
+    /// explicit rule fires on this transition. Runs FIRST during per-player
+    /// drain in `drain_pending_phase_transition_progress`, before the
+    /// CR 703.4q "empty unspent mana" event is constructed for the
+    /// replacement pipeline. Preserves H2 invariant (commit `e92fd3e19`):
+    /// expiry-bound mana leaves the pool through its own expiry rule, not
+    /// through the step-end empty event — handlers cannot intercept it.
+    ///
+    /// - `EndOfTurn`: drops at cleanup only.
+    /// - `EndOfCombat`: drops when leaving combat (i.e., `in_combat` false).
+    /// - `None`: untouched — passed through to the replacement pipeline as
+    ///   a `UnitDecision { disposition: Drop }`, where step-end mana
+    ///   handlers (Upwelling, Horizon Stone, Kruphix, …) may flip the
+    ///   disposition to `Keep` (CR 614.6) or `Recolor(_)` (CR 614.1a). The
+    ///   actual emptying / recoloring of `None`-expiry units happens later
+    ///   in `apply_empty_mana_pool_decisions` after the pipeline resolves.
+    pub fn clear_expiring_at_step_end(&mut self, in_combat: bool, entering_cleanup: bool) {
         self.mana.retain(|u| match u.expiry {
             Some(ManaExpiry::EndOfTurn) => !entering_cleanup,
             Some(ManaExpiry::EndOfCombat) => in_combat,
-            None => false,
+            None => true,
         });
     }
 
@@ -836,6 +979,63 @@ impl ManaPool {
             return Some(self.mana.swap_remove(pos));
         }
         None
+    }
+}
+
+/// CR 614.1a + CR 614.6 + CR 703.4q: Apply per-unit dispositions decided by
+/// the replacement pipeline to a player's mana pool. Single authority for
+/// the disposition→pool-mutation walk; called by
+/// `drain_pending_phase_transition_progress` and by the
+/// `EmptyManaPool` resume arm of `handle_replacement_choice`.
+///
+/// Walks `units` in descending `pool_index` order so removals do not
+/// invalidate later indices. Disposition resolution:
+/// - `Drop`: remove the unit; emit `GameEvent::ManaPoolEmptied`.
+/// - `Keep`: leave the unit in place (a `Retain` handler matched per CR 614.6).
+/// - `Recolor(t)`: mutate `unit.color = t`; emit `GameEvent::ManaRecolored`
+///   (a `Transform(_)` handler matched per CR 614.1a).
+///
+/// Pool-position stability across the pipeline is guaranteed by the
+/// surrounding drain: no priority is granted between event construction and
+/// disposition apply, and per CR 603.2 triggered abilities wait to be put on
+/// the stack — they do not fire mid-resolution.
+pub fn apply_empty_mana_pool_decisions(
+    state: &mut crate::types::game_state::GameState,
+    player_id: PlayerId,
+    units: &[UnitDecision],
+    events: &mut Vec<GameEvent>,
+) {
+    let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) else {
+        return;
+    };
+    // Descending pool_index order preserves index validity across removes.
+    let mut sorted: Vec<&UnitDecision> = units.iter().collect();
+    sorted.sort_by_key(|d| std::cmp::Reverse(d.pool_index));
+    for decision in sorted {
+        match decision.disposition {
+            UnitDisposition::Drop => {
+                if decision.pool_index < player.mana_pool.mana.len() {
+                    let removed = player.mana_pool.mana.remove(decision.pool_index);
+                    events.push(GameEvent::ManaPoolEmptied {
+                        player_id,
+                        source_id: removed.source_id,
+                        color: removed.color,
+                    });
+                }
+            }
+            UnitDisposition::Keep => {}
+            UnitDisposition::Recolor(to) => {
+                if let Some(unit) = player.mana_pool.mana.get_mut(decision.pool_index) {
+                    let from = unit.color;
+                    unit.color = to;
+                    events.push(GameEvent::ManaRecolored {
+                        player_id,
+                        from,
+                        to,
+                    });
+                }
+            }
+        }
     }
 }
 
@@ -947,19 +1147,45 @@ mod tests {
         assert_eq!(pool.total(), 0);
     }
 
+    // CR 500.5 + CR 703.4q: `clear_expiring_at_step_end` is the leading
+    // half of step-end mana resolution — it drops only expiry-bound units
+    // whose own rule fires on this transition. Handler-driven retention /
+    // transformation behavior is exercised end-to-end via the replacement
+    // pipeline in `game::turns` runtime tests, not here.
     #[test]
-    fn mana_pool_retains_end_of_turn_mana_until_cleanup() {
+    fn mana_pool_clear_expiring_drops_end_of_turn_only_at_cleanup() {
         let mut pool = ManaPool::default();
         let mut retained = make_unit(ManaType::Green);
         retained.expiry = Some(ManaExpiry::EndOfTurn);
         pool.add(retained);
         pool.add(make_unit(ManaType::Red));
 
-        pool.clear_step_transition(false, false);
+        // Non-cleanup transition: EndOfTurn unit survives; non-expiry unit
+        // is left in place (the pipeline drives Drop disposition elsewhere).
+        pool.clear_expiring_at_step_end(false, false);
         assert_eq!(pool.count_color(ManaType::Green), 1);
-        assert_eq!(pool.count_color(ManaType::Red), 0);
+        assert_eq!(pool.count_color(ManaType::Red), 1);
 
-        pool.clear_step_transition(false, true);
+        // Cleanup transition: EndOfTurn unit drops; non-expiry unit remains.
+        pool.clear_expiring_at_step_end(false, true);
+        assert_eq!(pool.count_color(ManaType::Green), 0);
+        assert_eq!(pool.count_color(ManaType::Red), 1);
+    }
+
+    #[test]
+    fn mana_pool_clear_expiring_drops_end_of_combat_when_leaving_combat() {
+        let mut pool = ManaPool::default();
+        let mut combat_mana = make_unit(ManaType::Red);
+        combat_mana.expiry = Some(ManaExpiry::EndOfCombat);
+        pool.add(combat_mana);
+
+        // In-combat transition (e.g., DeclareAttackers → DeclareBlockers):
+        // EndOfCombat unit survives.
+        pool.clear_expiring_at_step_end(true, false);
+        assert_eq!(pool.count_color(ManaType::Red), 1);
+
+        // Leaving combat (EndCombat → PostCombatMain): EndOfCombat unit drops.
+        pool.clear_expiring_at_step_end(false, false);
         assert_eq!(pool.total(), 0);
     }
 

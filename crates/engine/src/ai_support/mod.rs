@@ -161,6 +161,32 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 crate::types::actions::LearnOption::Skip => false,
             }
         }
+        (
+            WaitingFor::OutsideGameChoice {
+                choices,
+                count,
+                up_to,
+                ..
+            },
+            GameAction::ChooseOutsideGameCards { sideboard_indices },
+        ) => {
+            let valid_count = if *up_to {
+                sideboard_indices.len() <= *count
+            } else {
+                sideboard_indices.len() == *count
+            };
+            let mut requested_counts = HashMap::new();
+            for index in sideboard_indices {
+                *requested_counts.entry(*index).or_insert(0usize) += 1;
+            }
+            !valid_count
+                || requested_counts.iter().any(|(index, requested_count)| {
+                    choices
+                        .iter()
+                        .find(|choice| choice.sideboard_index == *index)
+                        .is_none_or(|choice| *requested_count > choice.entry.count as usize)
+                })
+        }
         (WaitingFor::PairChoice { choices, .. }, GameAction::ChoosePair { partner }) => {
             partner.is_some_and(|partner| !choices.contains(&partner))
         }
@@ -237,11 +263,15 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 player: _,
                 cards,
                 count,
+                up_to,
                 ..
             },
             GameAction::SelectCards { cards: chosen },
-        )
-        | (
+        ) => {
+            let exact = if *up_to { None } else { Some(*count) };
+            selection_mismatch(chosen, cards, exact) || (*up_to && chosen.len() > *count)
+        }
+        (
             WaitingFor::ChooseFromZoneChoice {
                 player: _,
                 cards,
@@ -745,7 +775,8 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, ManaContribution,
-        ManaProduction, QuantityExpr, ResolvedAbility, TargetFilter, TypedFilter,
+        ManaProduction, QuantityExpr, ResolvedAbility, SearchSelectionConstraint, TargetFilter,
+        TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -1295,6 +1326,68 @@ mod tests {
     fn cheap_reject_candidate_preserves_ambiguous_priority_pass() {
         let state = GameState::new_two_player(42);
         assert!(!cheap_reject_candidate(&state, &GameAction::PassPriority));
+    }
+
+    #[test]
+    fn cheap_reject_candidate_accepts_up_to_search_counts() {
+        let mut state = GameState::new_two_player(42);
+        let choices = vec![ObjectId(1), ObjectId(2), ObjectId(3)];
+        state.waiting_for = WaitingFor::SearchChoice {
+            player: PlayerId(0),
+            cards: choices.clone(),
+            count: 2,
+            reveal: false,
+            up_to: true,
+            constraint: SearchSelectionConstraint::None,
+        };
+
+        assert!(!cheap_reject_candidate(
+            &state,
+            &GameAction::SelectCards { cards: vec![] }
+        ));
+        assert!(!cheap_reject_candidate(
+            &state,
+            &GameAction::SelectCards {
+                cards: vec![choices[0]]
+            }
+        ));
+        assert!(!cheap_reject_candidate(
+            &state,
+            &GameAction::SelectCards {
+                cards: vec![choices[0], choices[1]]
+            }
+        ));
+        assert!(cheap_reject_candidate(
+            &state,
+            &GameAction::SelectCards {
+                cards: choices.clone()
+            }
+        ));
+    }
+
+    #[test]
+    fn cheap_reject_candidate_preserves_exact_search_count() {
+        let mut state = GameState::new_two_player(42);
+        let choices = vec![ObjectId(1), ObjectId(2)];
+        state.waiting_for = WaitingFor::SearchChoice {
+            player: PlayerId(0),
+            cards: choices.clone(),
+            count: 2,
+            reveal: false,
+            up_to: false,
+            constraint: SearchSelectionConstraint::None,
+        };
+
+        assert!(cheap_reject_candidate(
+            &state,
+            &GameAction::SelectCards {
+                cards: vec![choices[0]]
+            }
+        ));
+        assert!(!cheap_reject_candidate(
+            &state,
+            &GameAction::SelectCards { cards: choices }
+        ));
     }
 
     #[test]

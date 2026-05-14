@@ -12,6 +12,7 @@ use crate::types::ability::{
     ContinuousModification, CopiableValues, Duration, Effect, ManaContribution, ManaProduction,
     PlayerScope, QuantityExpr, StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
 };
+use crate::types::attribution::EffectRef;
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::game_state::{DayNight, GameState};
@@ -589,6 +590,12 @@ pub fn evaluate_layers(state: &mut GameState) {
     // Step 1: Reset computed characteristics to base values.
     // Only reset fields where base values were explicitly set; objects without
     // base values (e.g., from older test helpers) retain their current values.
+    // Attribution is also reset here so each layers pass rebuilds the
+    // source-attribution side-table from scratch alongside derived state.
+    // `im::HashMap::clear()` drops the cleared map's own root Arc; clones
+    // taken by AI search or snapshot diffing retain their own roots, so this
+    // does not break structural sharing across `GameState` clones.
+    state.attribution.clear();
     let bf_ids: Vec<ObjectId> = state.battlefield.iter().copied().collect();
     for &id in &bf_ids {
         if let Some(obj) = state.objects.get_mut(&id) {
@@ -956,7 +963,7 @@ fn active_continuous_effects_from_static_definitions(
         };
 
         let affected_filter = def.affected.clone().unwrap_or(TargetFilter::Any);
-        for modification in &def.modifications {
+        for (mod_index, modification) in def.modifications.iter().enumerate() {
             if is_combat_assignment_rule_modification(modification) {
                 continue;
             }
@@ -964,6 +971,8 @@ fn active_continuous_effects_from_static_definitions(
                 source_id,
                 controller,
                 def_index: Some(def_idx),
+                transient_id: None,
+                mod_index,
                 layer: modification.layer(),
                 timestamp,
                 modification: modification.clone(),
@@ -1010,7 +1019,7 @@ pub(crate) fn gather_transient_continuous_effects(
             None
         };
 
-        for modification in &tce.modifications {
+        for (mod_index, modification) in tce.modifications.iter().enumerate() {
             if is_combat_assignment_rule_modification(modification) {
                 continue;
             }
@@ -1018,6 +1027,8 @@ pub(crate) fn gather_transient_continuous_effects(
                 source_id: tce.source_id,
                 controller: tce.controller,
                 def_index: None,
+                transient_id: Some(tce.id),
+                mod_index,
                 layer: modification.layer(),
                 timestamp: tce.timestamp,
                 modification: modification.clone(),
@@ -1479,6 +1490,45 @@ fn resolve_chosen_color_in_filter(
 /// supports non-battlefield grant statics like Lorehold's "Each instant and
 /// sorcery card in your hand has miracle {2}", whose filter carries
 /// `InZone { zone: Hand }`.
+/// Derive the source-attribution reference for an active continuous effect.
+///
+/// Returns `None` only when the effect has neither a static `def_index` nor a
+/// `transient_id` — which shouldn't happen for any path that constructs an
+/// `ActiveContinuousEffect` (both gather sites populate one of the two).
+fn effect_ref_for(effect: &ActiveContinuousEffect) -> Option<EffectRef> {
+    if let Some(id) = effect.transient_id {
+        return Some(EffectRef::Transient {
+            id,
+            mod_index: effect.mod_index,
+        });
+    }
+    effect.def_index.map(|def_index| EffectRef::Static {
+        source: effect.source_id,
+        def_index,
+        mod_index: effect.mod_index,
+    })
+}
+
+/// Append a per-(target × layer) attribution entry for each affected object.
+///
+/// `EffectRef` is `Copy` (a small POD), and the referenced
+/// `ContinuousModification` / source-name lives in canonical state
+/// (`static_definitions` or `transient_continuous_effects`), so this records
+/// no copies of the modification itself.
+fn record_attribution(
+    state: &mut GameState,
+    effect: &ActiveContinuousEffect,
+    affected_ids: &[ObjectId],
+) {
+    let Some(effect_ref) = effect_ref_for(effect) else {
+        return;
+    };
+    for &target in affected_ids {
+        let attribution = state.attribution.entry(target).or_default();
+        attribution.record_layer(effect.layer, effect_ref);
+    }
+}
+
 fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffect) {
     let scan_zone = effect
         .affected_filter
@@ -1502,6 +1552,8 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
         })
         .copied()
         .collect();
+
+    record_attribution(state, effect, &affected_ids);
 
     // Pre-read chosen subtype from source (avoids borrow conflict in the loop)
     let chosen_subtype =
@@ -4721,6 +4773,7 @@ mod tests {
                     keyword: Keyword::Flying,
                 }],
                 condition: None,
+                source_name: String::new(),
             });
         let mut effects = vec![];
         gather_transient_continuous_effects(&state, &mut effects);
@@ -4751,6 +4804,7 @@ mod tests {
                     keyword: Keyword::Flying,
                 }],
                 condition: None,
+                source_name: String::new(),
             });
         let mut effects = vec![];
         gather_transient_continuous_effects(&state, &mut effects);
@@ -6563,5 +6617,418 @@ mod tests {
             !state.objects[&cmd_p1].keywords.contains(&ward),
             "P1's commander must NOT receive Ward from P0's Codsworth"
         );
+    }
+
+    // ---------- Source-attribution side-table tests ----------
+    //
+    // The attribution side-table is rebuilt each layers pass alongside the
+    // derived state (keywords, abilities, P/T). These tests verify the
+    // building-block contract: for every `ContinuousModification` that flows
+    // through `apply_continuous_effect`, an `EffectRef` lands in the target
+    // object's attribution under the right layer bucket. Tests cover (1) the
+    // two `EffectRef` variants — Static and Transient — and (2) multi-source
+    // accumulation, between-pass clearing, source-name snapshot, and self-
+    // grants. Per-`ContinuousModification`-variant coverage would duplicate
+    // the per-layer-bucket coverage here; one representative per emission
+    // path is enough at this level.
+
+    fn attach_static(state: &mut GameState, source: ObjectId, def: StaticDefinition) {
+        let obj = state.objects.get_mut(&source).unwrap();
+        Arc::make_mut(&mut obj.base_static_definitions).push(def.clone());
+        obj.static_definitions.push(def);
+    }
+
+    #[test]
+    fn attribution_static_source_keyword_grant() {
+        let mut state = setup();
+        let granter = make_creature(&mut state, "Akroma's Memorial", 0, 0, PlayerId(0));
+        let target = make_creature(&mut state, "Goblin", 1, 1, PlayerId(0));
+
+        attach_static(
+            &mut state,
+            granter,
+            StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(TypedFilter::creature()))
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flying,
+                }]),
+        );
+
+        evaluate_layers(&mut state);
+
+        let target_attr = state.attribution.get(&target).expect("target attributed");
+        let ability_layer = target_attr
+            .by_layer
+            .get(&Layer::Ability)
+            .expect("Ability layer entry present");
+        assert_eq!(ability_layer.len(), 1, "exactly one grant on target");
+        match ability_layer[0] {
+            EffectRef::Static {
+                source,
+                def_index,
+                mod_index,
+            } => {
+                assert_eq!(source, granter);
+                assert_eq!(def_index, 0);
+                assert_eq!(mod_index, 0, "single-mod static is index 0");
+            }
+            other => panic!("expected Static EffectRef, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attribution_transient_source_pt_grant() {
+        let mut state = setup();
+        let granter = make_creature(&mut state, "Giant Growth Caster", 0, 0, PlayerId(0));
+        let target = make_creature(&mut state, "Goblin", 1, 1, PlayerId(0));
+
+        let id = state.add_transient_continuous_effect(
+            granter,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: target },
+            vec![ContinuousModification::AddPower { value: 3 }],
+            None,
+        );
+
+        evaluate_layers(&mut state);
+
+        let target_attr = state.attribution.get(&target).expect("target attributed");
+        let modify_pt = target_attr
+            .by_layer
+            .get(&Layer::ModifyPT)
+            .expect("ModifyPT bucket present");
+        match modify_pt[0] {
+            EffectRef::Transient { id: tid, mod_index } => {
+                assert_eq!(tid, id);
+                assert_eq!(mod_index, 0, "single-mod transient is index 0");
+            }
+            other => panic!("expected Transient EffectRef, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attribution_transient_snapshots_source_name() {
+        let mut state = setup();
+        let granter = make_creature(&mut state, "Giant Growth", 0, 0, PlayerId(0));
+        let target = make_creature(&mut state, "Goblin", 1, 1, PlayerId(0));
+
+        let id = state.add_transient_continuous_effect(
+            granter,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: target },
+            vec![ContinuousModification::AddPower { value: 3 }],
+            None,
+        );
+
+        let tce = state
+            .transient_continuous_effects
+            .iter()
+            .find(|t| t.id == id)
+            .expect("transient effect persisted");
+        assert_eq!(
+            tce.source_name, "Giant Growth",
+            "source_name snapshotted at construction so attribution survives the spell's zone change"
+        );
+    }
+
+    /// CR 400.7 + CR 603.10: A leaves-the-battlefield trigger that resolves a
+    /// transient continuous effect runs AFTER its source has zone-changed out
+    /// of `state.objects`. The lki_cache fallback recovers the source name
+    /// from the snapshot captured when the source left the battlefield.
+    #[test]
+    fn attribution_transient_uses_lki_when_source_dead() {
+        use crate::types::game_state::LKISnapshot;
+        let mut state = setup();
+        let dead_source = ObjectId(9999);
+        let target = make_creature(&mut state, "Goblin", 1, 1, PlayerId(0));
+
+        // Source is NOT in state.objects — simulating a creature whose LTB
+        // trigger is resolving after the zone change has already happened.
+        state.lki_cache.insert(
+            dead_source,
+            LKISnapshot {
+                name: "Mortician Beetle".to_string(),
+                power: Some(1),
+                toughness: Some(1),
+                mana_value: 1,
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                card_types: vec![CoreType::Creature],
+                subtypes: vec![],
+                supertypes: vec![],
+                keywords: vec![],
+                colors: vec![],
+                counters: std::collections::HashMap::new(),
+            },
+        );
+
+        let id = state.add_transient_continuous_effect(
+            dead_source,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: target },
+            vec![ContinuousModification::AddPower { value: 1 }],
+            None,
+        );
+
+        let tce = state
+            .transient_continuous_effects
+            .iter()
+            .find(|t| t.id == id)
+            .expect("transient effect persisted");
+        assert_eq!(
+            tce.source_name, "Mortician Beetle",
+            "CR 400.7: lki_cache fallback recovers source name when source has left battlefield"
+        );
+    }
+
+    #[test]
+    fn attribution_multiple_sources_accumulate() {
+        let mut state = setup();
+        let lord_a = make_creature(&mut state, "Lord A", 2, 2, PlayerId(0));
+        let lord_b = make_creature(&mut state, "Lord B", 2, 2, PlayerId(0));
+        let target = make_creature(&mut state, "Goblin", 1, 1, PlayerId(0));
+
+        let anthem = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(TypedFilter::creature()))
+            .modifications(vec![
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+            ]);
+        attach_static(&mut state, lord_a, anthem.clone());
+        attach_static(&mut state, lord_b, anthem);
+
+        evaluate_layers(&mut state);
+
+        let modify_pt = state
+            .attribution
+            .get(&target)
+            .and_then(|a| a.by_layer.get(&Layer::ModifyPT))
+            .expect("ModifyPT bucket present");
+        // Each lord contributes 2 modifications (power + toughness), and both
+        // lords plus the target itself are creatures that the anthem affects —
+        // so the target receives 4 distinct grants from the two sources.
+        let sources: Vec<ObjectId> = modify_pt
+            .iter()
+            .filter_map(|r| match r {
+                EffectRef::Static { source, .. } => Some(*source),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            sources.contains(&lord_a) && sources.contains(&lord_b),
+            "attribution should record both lords as distinct sources, got {sources:?}",
+        );
+    }
+
+    #[test]
+    fn attribution_clears_between_passes() {
+        let mut state = setup();
+        let granter = make_creature(&mut state, "Anthem", 0, 0, PlayerId(0));
+        let target = make_creature(&mut state, "Goblin", 1, 1, PlayerId(0));
+
+        attach_static(
+            &mut state,
+            granter,
+            StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(TypedFilter::creature()))
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Flying,
+                }]),
+        );
+        evaluate_layers(&mut state);
+        assert!(state.attribution.contains_key(&target));
+
+        // Remove the granter from the battlefield. The attribution side-table
+        // must rebuild fresh on the next layers pass and drop the stale entry.
+        let granter_idx = state
+            .battlefield
+            .iter()
+            .position(|id| *id == granter)
+            .unwrap();
+        state.battlefield.remove(granter_idx);
+        evaluate_layers(&mut state);
+
+        assert!(
+            state
+                .attribution
+                .get(&target)
+                .is_none_or(|a| !a.by_layer.contains_key(&Layer::Ability)),
+            "attribution from a no-longer-on-battlefield source must not linger across passes"
+        );
+    }
+
+    #[test]
+    fn attribution_self_grant_is_emitted_engine_side() {
+        // CR 113.3c + CR 604.3: A creature with a static ability that grants
+        // itself a keyword (e.g., "this creature has trample") produces an
+        // `ActiveContinuousEffect` whose source and target are the same
+        // ObjectId. The engine emits attribution unconditionally; filtering
+        // self-grants for display is a frontend concern, not an engine one.
+        let mut state = setup();
+        let creature = make_creature(&mut state, "Intrinsic Trampler", 2, 2, PlayerId(0));
+
+        attach_static(
+            &mut state,
+            creature,
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Trample,
+                }]),
+        );
+
+        evaluate_layers(&mut state);
+
+        let attr = state
+            .attribution
+            .get(&creature)
+            .expect("self-grant produces an attribution entry");
+        let ability_layer = attr
+            .by_layer
+            .get(&Layer::Ability)
+            .expect("Ability bucket present");
+        match ability_layer[0] {
+            EffectRef::Static { source, .. } => assert_eq!(
+                source, creature,
+                "self-grant source equals target — frontend filters this case for display",
+            ),
+            other => panic!("expected Static EffectRef, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attribution_distinguishes_modifications_within_one_source() {
+        // Akroma's Memorial pattern: one StaticDefinition with multiple keyword
+        // grants. Each grant must produce a distinct EffectRef whose
+        // `mod_index` lets the FE recover the specific ContinuousModification.
+        let mut state = setup();
+        let granter = make_creature(&mut state, "Akroma's Memorial", 0, 0, PlayerId(0));
+        let target = make_creature(&mut state, "Goblin", 1, 1, PlayerId(0));
+
+        attach_static(
+            &mut state,
+            granter,
+            StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(TypedFilter::creature()))
+                .modifications(vec![
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flying,
+                    },
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Trample,
+                    },
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Vigilance,
+                    },
+                ]),
+        );
+
+        evaluate_layers(&mut state);
+
+        let ability_layer = state
+            .attribution
+            .get(&target)
+            .and_then(|a| a.by_layer.get(&Layer::Ability))
+            .expect("Ability bucket present");
+        let mod_indices: Vec<usize> = ability_layer
+            .iter()
+            .filter_map(|r| match r {
+                EffectRef::Static { mod_index, .. } => Some(*mod_index),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            mod_indices,
+            vec![0, 1, 2],
+            "each modification within the multi-mod source records its own mod_index",
+        );
+    }
+
+    #[test]
+    fn attribution_records_removal_modifications() {
+        // RemoveKeyword flows through the same apply path as AddKeyword, so it
+        // produces attribution. The FE distinguishes grant from removal by
+        // dereferencing the EffectRef to the actual ContinuousModification.
+        let mut state = setup();
+        // Target with a base keyword we'll strip.
+        let target = make_creature(&mut state, "Loses Flying", 2, 2, PlayerId(0));
+        state
+            .objects
+            .get_mut(&target)
+            .unwrap()
+            .base_keywords
+            .push(Keyword::Flying);
+
+        let stripper = make_creature(&mut state, "Hush", 0, 0, PlayerId(0));
+        attach_static(
+            &mut state,
+            stripper,
+            StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(TypedFilter::creature()))
+                .modifications(vec![ContinuousModification::RemoveKeyword {
+                    keyword: Keyword::Flying,
+                }]),
+        );
+
+        evaluate_layers(&mut state);
+
+        let ability_layer = state
+            .attribution
+            .get(&target)
+            .and_then(|a| a.by_layer.get(&Layer::Ability))
+            .expect("Ability bucket present for removal target");
+        assert!(
+            ability_layer
+                .iter()
+                .any(|r| matches!(r, EffectRef::Static { source, .. } if *source == stripper)),
+            "RemoveKeyword produces an attribution entry just like AddKeyword",
+        );
+    }
+
+    #[test]
+    fn attribution_layer_copy_records_source() {
+        // Layer 1 / CR 613.1a copy effects flow through the same
+        // `apply_continuous_effect` chokepoint via the early copy-effects loop
+        // in `evaluate_layers`. Verify that path emits attribution too.
+        let mut state = setup();
+        let source = make_creature(&mut state, "Mirror Source", 3, 3, PlayerId(0));
+        let target = make_creature(&mut state, "Clone Target", 1, 1, PlayerId(0));
+
+        let copy_values = crate::types::ability::CopiableValues {
+            name: "Mirror Source".to_string(),
+            mana_cost: ManaCost::default(),
+            color: vec![],
+            card_types: state.objects[&source].card_types.clone(),
+            power: Some(3),
+            toughness: Some(3),
+            loyalty: None,
+            keywords: vec![],
+            abilities: Default::default(),
+            trigger_definitions: Default::default(),
+            replacement_definitions: Default::default(),
+            static_definitions: Default::default(),
+        };
+        let _ = state.add_transient_continuous_effect(
+            source,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: target },
+            vec![ContinuousModification::CopyValues {
+                values: Box::new(copy_values),
+            }],
+            None,
+        );
+
+        evaluate_layers(&mut state);
+
+        let copy_layer = state
+            .attribution
+            .get(&target)
+            .and_then(|a| a.by_layer.get(&Layer::Copy))
+            .expect("Copy layer bucket present");
+        assert_eq!(copy_layer.len(), 1, "exactly one Copy-layer attribution");
     }
 }

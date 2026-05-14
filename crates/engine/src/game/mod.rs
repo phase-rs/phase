@@ -63,6 +63,7 @@ pub mod speed;
 pub mod stack;
 pub mod static_abilities;
 pub mod targeting;
+pub mod token_presets;
 pub mod transform;
 pub(crate) mod trigger_matchers;
 pub mod triggers;
@@ -87,6 +88,7 @@ pub use engine::{
     apply, apply_as_current, new_game, start_game, start_game_skip_mulligan,
     start_game_with_starting_player, EngineError,
 };
+pub use engine_debug::route_debug_create_to_battlefield;
 pub use game_object::{BackFaceData, GameObject, PhaseOutCause, PhaseStatus};
 pub use keywords::parse_keywords;
 pub use layers::evaluate_layers;

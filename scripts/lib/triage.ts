@@ -7,8 +7,7 @@ export type TriageClassification =
   | "developer_reply"
   | "correction"
   | "chatter"
-  | "evidence_only"
-  | "stale_likely_fixed";
+  | "evidence_only";
 
 export interface TriageItem {
   report_id: string;
@@ -22,8 +21,21 @@ export interface TriageItem {
   extraction_confidence: number;
   source_url: string;
   parser_status: "fully_parsed" | "has_gaps" | "unknown_card" | "no_card";
-  proposed_action: "create_issue" | "append_to_existing" | "skip" | "needs_human_review";
+  proposed_action:
+    | "create_issue"
+    | "append_to_existing"
+    | "skip"
+    | "skip_existing_closed"
+    | "needs_human_review";
   dedup_group: string | null;
+  github_issue?: {
+    number: number;
+    title: string;
+    state: "OPEN" | "CLOSED";
+    url: string;
+    closed_at: string | null;
+    match_kind: "report_id" | "source_url" | "discord_message";
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -313,27 +325,6 @@ export async function triageReports(reports: ReportItem[]): Promise<TriageItem[]
       }
 
       // --- First in thread (primary candidate) ---
-
-      // Stale / likely fixed: all cards are fully parsed
-      if (parserStatus === "fully_parsed") {
-        result.push({
-          report_id: r.report_id,
-          classification: "stale_likely_fixed",
-          reason: "All referenced cards have no Unimplemented effects or Unknown triggers",
-          thread_id: r.thread_id,
-          thread_name: r.thread_name,
-          message_id: r.message_id,
-          cards: r.cards,
-          summary,
-          extraction_confidence: r.extraction_confidence,
-          source_url: sourceUrl,
-          parser_status: parserStatus,
-          proposed_action: "needs_human_review",
-          dedup_group,
-        });
-        threadHasPrimary = true;
-        continue;
-      }
 
       // Determine dedup action
       let proposed_action: TriageItem["proposed_action"];

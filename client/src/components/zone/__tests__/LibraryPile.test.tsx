@@ -113,6 +113,8 @@ function setStore({
     gameMode: "ai",
   });
   useUiStore.setState({
+    inspectedObjectId: null,
+    previewSticky: false,
     pendingAbilityChoice: null,
   });
 }
@@ -138,6 +140,7 @@ describe("LibraryPile play/cast surfacing (#297)", () => {
 
   afterEach(() => {
     cleanup();
+    vi.useRealTimers();
   });
 
   it("dispatches the CastSpell action when the top card is castable (Mystic Forge)", () => {
@@ -187,8 +190,54 @@ describe("LibraryPile play/cast surfacing (#297)", () => {
   it("does not dispatch when there is no play action", () => {
     setStore({ canPeek: true, actions: [] });
     render(<LibraryPile playerId={0} />);
-    const button = screen.getByRole("button", { name: /library \(1 cards\)/i });
-    expect(button).toBeDisabled();
+    const button = screen.getByRole("button", { name: /library \(1 card\)/i });
+    expect(button).not.toBeDisabled();
+    fireEvent.click(button);
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+
+  it("pluralizes the hidden-library aria label", () => {
+    setStore({ canPeek: false, actions: [] });
+    render(<LibraryPile playerId={0} />);
+    expect(screen.getByRole("button", { name: /library \(1 card\)/i })).toBeInTheDocument();
+
+    cleanup();
+
+    setStore({ topCardId: 43, canPeek: false, actions: [] });
+    useGameStore.setState((state) => ({
+      gameState: state.gameState
+        ? {
+            ...state.gameState,
+            objects: {
+              ...state.gameState.objects,
+              44: makeObject(44, "Mox Pearl"),
+            },
+            players: state.gameState.players.map((player, index) =>
+              index === 0 ? { ...player, library: [43, 44] } : player,
+            ),
+          }
+        : state.gameState,
+    }));
+    render(<LibraryPile playerId={0} />);
+    expect(screen.getByRole("button", { name: /library \(2 cards\)/i })).toBeInTheDocument();
+  });
+
+  it("long-press previews the visible top card without dispatching", () => {
+    vi.useFakeTimers();
+    setStore({ canPeek: true, actions: [] });
+    render(<LibraryPile playerId={0} />);
+    const button = screen.getByRole("button", { name: /library \(1 card\)/i });
+
+    fireEvent.touchStart(button, {
+      touches: [{ clientX: 10, clientY: 10 }],
+    });
+    vi.advanceTimersByTime(500);
+    fireEvent.touchEnd(button);
+    fireEvent.click(button);
+
+    expect(dispatchMock).not.toHaveBeenCalled();
+    expect(useUiStore.getState().inspectedObjectId).toBe(42);
+    expect(useUiStore.getState().previewSticky).toBe(true);
   });
 
   it("surfaces engine-reported play action even without peek (engine is authoritative)", () => {

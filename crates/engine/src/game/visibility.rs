@@ -196,6 +196,26 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
+    if let WaitingFor::OutsideGameChoice {
+        player,
+        reveal,
+        up_to,
+        destination,
+        ..
+    } = state.waiting_for
+    {
+        if !can_view_private_for_player(player) {
+            filtered.waiting_for = WaitingFor::OutsideGameChoice {
+                player,
+                choices: Vec::new(),
+                count: 0,
+                reveal,
+                up_to,
+                destination,
+            };
+        }
+    }
+
     if let WaitingFor::ChooseFromZoneChoice {
         player,
         ref cards,
@@ -343,6 +363,9 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     filtered
         .cards_drawn_this_turn
         .retain(|pid, _| can_view_private_for_player(*pid));
+    filtered
+        .outside_game_cards_brought_in
+        .retain(|record| record.player == viewer);
 
     // CR 601.2 + CR 408: A spell being cast is on the stack and is public information —
     // caster, targets, chosen X values, and pending mana payment are all visible to
@@ -617,6 +640,7 @@ mod tests {
         let pending = dummy_pending_cast(ObjectId(20), CardId(2), PlayerId(0));
         state.waiting_for = WaitingFor::ChooseXValue {
             player: PlayerId(0),
+            min: 0,
             max: 5,
             pending_cast: pending.clone(),
             convoke_mode: None,

@@ -1,7 +1,10 @@
+use rand::Rng;
+
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
-    Duration, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TypedFilter,
+    Duration, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetSelectionMode,
+    TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
@@ -406,6 +409,57 @@ pub fn resolve(
             if !up_to {
                 state.cost_payment_failed_flag = true;
             }
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+            });
+            return Ok(());
+        }
+
+        if matches!(ability.target_selection_mode, TargetSelectionMode::Random) && !up_to {
+            let index = state.rng.random_range(0..eligible.len());
+            let chosen = eligible[index];
+            let ctrl_override = if under_your_control {
+                Some(ability.controller)
+            } else {
+                None
+            };
+            match execute_zone_move(
+                state,
+                chosen,
+                scan_zone,
+                dest_zone,
+                ability.source_id,
+                ability.duration.as_ref(),
+                effect_enter_transformed,
+                effect_enter_tapped,
+                ctrl_override,
+                &effect_enter_with_counters,
+                events,
+            ) {
+                ZoneMoveResult::Done => {
+                    state.last_effect_count = Some(1);
+                    if effect_enters_attacking && dest_zone == Zone::Battlefield {
+                        let controller = state
+                            .objects
+                            .get(&chosen)
+                            .map(|obj| obj.controller)
+                            .unwrap_or(ability.controller);
+                        crate::game::combat::enter_attacking(
+                            state,
+                            chosen,
+                            ability.source_id,
+                            controller,
+                        );
+                    }
+                }
+                ZoneMoveResult::NeedsChoice(player) => {
+                    state.waiting_for =
+                        crate::game::replacement::replacement_choice_waiting_for(player, state);
+                    return Ok(());
+                }
+            }
+
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,

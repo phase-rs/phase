@@ -1,4 +1,5 @@
 use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
+use crate::game::targeting;
 use crate::game::zones;
 use crate::types::ability::{
     Duration, Effect, EffectError, EffectKind, ResolvedAbility, StaticDefinition, TargetFilter,
@@ -36,15 +37,31 @@ pub fn resolve(
         _ => None,
     };
 
-    for target in &ability.targets {
+    let targets = match &ability.effect {
+        Effect::Counter { target, .. } if matches!(target, TargetFilter::ParentTarget) => {
+            let event_target = targeting::resolve_event_context_target(
+                state,
+                &TargetFilter::TriggeringSource,
+                ability.source_id,
+            );
+            match event_target {
+                Some(target) => vec![target],
+                None => targeting::resolved_targets(ability, target, state),
+            }
+        }
+        Effect::Counter { target, .. } => targeting::resolved_targets(ability, target, state),
+        _ => ability.targets.clone(),
+    };
+
+    for target in targets {
         if let TargetRef::Object(obj_id) = target {
             // CR 101.2: Check if the target can't be countered.
             // Two paths: (1) battlefield permanents granting uncounterability
             // (e.g. "Spells you control can't be countered"), and (2) the
             // spell's own intrinsic static definition (e.g. Carnage Tyrant).
             let ctx = StaticCheckContext {
-                source_id: Some(*obj_id),
-                target_id: Some(*obj_id),
+                source_id: Some(obj_id),
+                target_id: Some(obj_id),
                 ..Default::default()
             };
             if check_static_ability(state, StaticMode::CantBeCountered, &ctx) {
@@ -60,7 +77,7 @@ pub fn resolve(
             // behavior change.
             let has_cant_be_countered = state
                 .objects
-                .get(obj_id)
+                .get(&obj_id)
                 .map(|obj| {
                     super::super::functioning_abilities::active_static_definitions(state, obj)
                         .any(|sd| sd.mode == StaticMode::CantBeCountered)
@@ -75,7 +92,7 @@ pub fn resolve(
             let stack_idx = state
                 .stack
                 .iter()
-                .rposition(|e| e.id == *obj_id || e.source_id == *obj_id);
+                .rposition(|e| e.id == obj_id || e.source_id == obj_id);
             if let Some(idx) = stack_idx {
                 let is_spell = matches!(state.stack[idx].kind, StackEntryKind::Spell { .. });
                 // CR 702.34a / CR 702.127a / CR 702.180a: Flashback,
@@ -99,7 +116,7 @@ pub fn resolve(
                     } else {
                         Zone::Graveyard
                     };
-                    zones::move_to_zone(state, *obj_id, dest, events);
+                    zones::move_to_zone(state, obj_id, dest, events);
                 } else {
                     // Ability was countered — apply source_static if present
                     apply_source_static(
@@ -111,7 +128,7 @@ pub fn resolve(
                 }
 
                 events.push(GameEvent::SpellCountered {
-                    object_id: *obj_id,
+                    object_id: obj_id,
                     countered_by: ability.source_id,
                 });
             }
@@ -132,15 +149,10 @@ pub fn resolve(
 /// single-target `resolve` uses (re-using `CR 702.34a` Flashback exile-on-
 /// counter and `CR 608.2b` countered-spell-to-graveyard rules).
 ///
-/// Filter shapes recognized:
-///   - `TargetFilter::Typed { properties: [InZone { Stack }, ...], ... }` —
-///     spell entries are matched by `matches_target_filter` against the
-///     spell's `state.objects[id]` (which lives in the Stack zone).
-///   - `TargetFilter::StackAbility` — every activated/triggered ability on
-///     the stack matches. Controller scoping is not currently supported by
-///     this filter variant; for "counter all abilities your opponents
-///     control" the filter widens to all abilities. Tracked in queue for a
-///     follow-up that adds a controller slot to `StackAbility`.
+/// Stack entry matching is delegated to `targeting::stack_entry_matches_filter`
+/// so `CounterAll` shares the same `StackSpell`, `StackAbility`, typed,
+/// controller, and stack-target-constraint semantics as ordinary stack
+/// targeting.
 ///
 /// CR 101.2 / CR 614.5: `CantBeCountered` is honored per-entry in the same
 /// loop the single-target counter uses. CR 118.12 ("unless pays") does not
@@ -160,20 +172,17 @@ pub fn resolve_all(
     // CR 405.2: Iterate the stack from the bottom upward, collecting every
     // entry that matches. Snapshot the object IDs first so we can mutate
     // `state.stack` afterward without invalidating an active borrow.
-    let ctx = crate::game::filter::FilterContext::from_ability(ability);
     let matching: Vec<ObjectId> = state
         .stack
         .iter()
-        .filter(|entry| match &target_filter {
-            // CR 113.3: Activated and triggered abilities on the stack.
-            TargetFilter::StackAbility => matches!(
-                entry.kind,
-                StackEntryKind::ActivatedAbility { .. } | StackEntryKind::TriggeredAbility { .. }
-            ),
-            // CR 405.1 / CR 112.1: Spell entries are objects on the stack;
-            // the typed filter sees them via `state.objects[entry.id]` and
-            // the `InZone { Stack }` property.
-            other => crate::game::filter::matches_target_filter(state, entry.id, other, &ctx),
+        .filter(|entry| {
+            targeting::stack_entry_matches_filter(
+                state,
+                entry,
+                &target_filter,
+                ability.controller,
+                ability.source_id,
+            )
         })
         .map(|entry| entry.id)
         .collect();
@@ -291,10 +300,15 @@ fn apply_source_static(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{Effect, TargetFilter};
+    use crate::types::ability::{
+        ContinuousModification, ControllerRef, Duration, Effect, FilterProp, KeywordAction,
+        StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+    };
+    use crate::types::card_type::{CardType, CoreType};
     use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
+    use crate::types::statics::StaticMode;
 
     #[test]
     fn counter_removes_from_stack_and_moves_to_graveyard() {
@@ -385,9 +399,6 @@ mod tests {
 
     #[test]
     fn cant_be_countered_spell_stays_on_stack() {
-        use crate::types::ability::StaticDefinition;
-        use crate::types::statics::StaticMode;
-
         let mut state = GameState::new_two_player(42);
         let obj_id = create_object(
             &mut state,
@@ -437,8 +448,6 @@ mod tests {
 
     #[test]
     fn counter_ability_applies_source_static_to_counter_source() {
-        use crate::types::ability::{ContinuousModification, Duration, StaticDefinition};
-
         let mut state = GameState::new_two_player(42);
 
         // Source permanent on the battlefield (e.g., a creature whose ability was activated)
@@ -488,7 +497,7 @@ mod tests {
 
         let counter_ability = ResolvedAbility::new(
             Effect::Counter {
-                target: TargetFilter::StackAbility,
+                target: TargetFilter::StackAbility { controller: None },
                 source_static: Some(source_static),
             },
             vec![TargetRef::Object(ability_on_stack)],
@@ -531,8 +540,6 @@ mod tests {
 
     #[test]
     fn counter_spell_does_not_apply_source_static() {
-        use crate::types::ability::{ContinuousModification, StaticDefinition};
-
         let mut state = GameState::new_two_player(42);
 
         let tidebinder = create_object(
@@ -683,14 +690,10 @@ mod tests {
 
     /// CR 701.6 + CR 405.1: Mass counter iterates the stack and counters every
     /// spell matching the class filter. Mixed-population test: P1 has two
-    /// spells (matched by `Card + InZone Stack`), P0 has one (excluded by
-    /// the `controller: Opponent` constraint relative to P0 = ability
-    /// controller). Only P1's spells should leave the stack.
+    /// spells (matched by `StackSpell + Card + controller: Opponent`), P0 has one
+    /// spell and one ability on the stack. Only P1's spells should leave the stack.
     #[test]
     fn test_counter_all_opponent_spells_filters_own_spells() {
-        use crate::types::ability::{ControllerRef, FilterProp, TypeFilter, TypedFilter};
-        use crate::types::card_type::{CardType, CoreType};
-
         let mut state = GameState::new_two_player(42);
         // P1 (opponent of P0) has two spells on the stack.
         let p1_spell_a = create_object(
@@ -715,6 +718,7 @@ mod tests {
             "Healing Salve".to_string(),
             Zone::Stack,
         );
+        let p1_ability = ObjectId(901);
         // Stamp Instant card_type onto each so the filter evaluator
         // classifies them as Card/Spell objects.
         for id in [p1_spell_a, p1_spell_b, p0_spell] {
@@ -743,12 +747,38 @@ mod tests {
                 },
             });
         }
-
-        let opponent_spell_filter = TargetFilter::Typed(TypedFilter {
-            type_filters: vec![TypeFilter::Card],
-            controller: Some(ControllerRef::Opponent),
-            properties: vec![FilterProp::InZone { zone: Zone::Stack }],
+        state.stack.push_back(StackEntry {
+            id: p1_ability,
+            source_id: p1_spell_a,
+            controller: PlayerId(1),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: p1_spell_a,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::Draw {
+                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                    vec![],
+                    p1_spell_a,
+                    PlayerId(1),
+                )),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+            },
         });
+
+        let opponent_spell_filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::StackSpell,
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Card],
+                    controller: Some(ControllerRef::Opponent),
+                    properties: vec![FilterProp::InZone { zone: Zone::Stack }],
+                }),
+            ],
+        };
 
         // Glen Elendra-shape ability — controller is P0, so "your opponents"
         // resolves to P1.
@@ -767,14 +797,11 @@ mod tests {
         // P1's spells were countered → graveyard, removed from stack.
         assert_eq!(
             state.stack.len(),
-            1,
-            "P0's spell remains on stack, P1's two spells countered"
+            2,
+            "P0's spell and P1's stack ability remain, P1's two spells countered"
         );
-        assert_eq!(
-            state.stack.iter().next().unwrap().id,
-            p0_spell,
-            "remaining stack entry is P0's own spell"
-        );
+        assert!(state.stack.iter().any(|entry| entry.id == p0_spell));
+        assert!(state.stack.iter().any(|entry| entry.id == p1_ability));
         assert!(state.players[1].graveyard.contains(&p1_spell_a));
         assert!(state.players[1].graveyard.contains(&p1_spell_b));
         assert!(!state.players[0].graveyard.contains(&p0_spell));
@@ -788,9 +815,94 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_counter_all_artifact_spells_uses_composed_stack_spell_filter() {
+        let mut state = GameState::new_two_player(42);
+        let artifact_spell = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(1),
+            "Arcane Signet".to_string(),
+            Zone::Stack,
+        );
+        let instant_spell = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(1),
+            "Opt".to_string(),
+            Zone::Stack,
+        );
+
+        {
+            let card_type = CardType {
+                core_types: vec![CoreType::Artifact],
+                ..Default::default()
+            };
+            let obj = state.objects.get_mut(&artifact_spell).unwrap();
+            obj.card_types = card_type.clone();
+            obj.base_card_types = card_type;
+        }
+        {
+            let card_type = CardType {
+                core_types: vec![CoreType::Instant],
+                ..Default::default()
+            };
+            let obj = state.objects.get_mut(&instant_spell).unwrap();
+            obj.card_types = card_type.clone();
+            obj.base_card_types = card_type;
+        }
+
+        for id in [artifact_spell, instant_spell] {
+            state.stack.push_back(StackEntry {
+                id,
+                source_id: id,
+                controller: PlayerId(1),
+                kind: StackEntryKind::Spell {
+                    card_id: CardId(0),
+                    ability: None,
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            });
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::CounterAll {
+                target: TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::StackSpell,
+                        TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Artifact],
+                            controller: None,
+                            properties: vec![FilterProp::InZone { zone: Zone::Stack }],
+                        }),
+                    ],
+                },
+            },
+            vec![],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.stack.len(), 1);
+        assert_eq!(state.stack.iter().next().unwrap().id, instant_spell);
+        assert!(state.players[1].graveyard.contains(&artifact_spell));
+        assert!(!state.players[1].graveyard.contains(&instant_spell));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, GameEvent::SpellCountered { object_id, .. } if *object_id == artifact_spell))
+                .count(),
+            1
+        );
+    }
+
     /// CR 113.3 + CR 405.1: "Counter all abilities" — the resolver matches
-    /// every activated/triggered ability on the stack via
-    /// `TargetFilter::StackAbility` and removes the entry without moving any
+    /// every activated/triggered ability on the stack, including keyword actions, via
+    /// `TargetFilter::StackAbility { controller: None }` and removes the entry without moving any
     /// card to a graveyard (abilities aren't cards).
     #[test]
     fn test_counter_all_abilities_removes_ability_entries() {
@@ -803,10 +915,12 @@ mod tests {
             Zone::Battlefield,
         );
 
-        // Two triggered abilities + one activated ability + one spell on stack.
+        // Two triggered abilities + one activated ability + one keyword action
+        // + one spell on stack.
         let trig_a = ObjectId(901);
         let trig_b = ObjectId(902);
         let act = ObjectId(903);
+        let keyword_action = ObjectId(904);
         let spell = create_object(
             &mut state,
             CardId(20),
@@ -855,6 +969,17 @@ mod tests {
             },
         });
         state.stack.push_back(StackEntry {
+            id: keyword_action,
+            source_id: perm,
+            controller: PlayerId(1),
+            kind: StackEntryKind::KeywordAction {
+                action: KeywordAction::Crew {
+                    vehicle_id: perm,
+                    paid_creature_ids: vec![],
+                },
+            },
+        });
+        state.stack.push_back(StackEntry {
             id: spell,
             source_id: spell,
             controller: PlayerId(1),
@@ -868,7 +993,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::CounterAll {
-                target: TargetFilter::StackAbility,
+                target: TargetFilter::StackAbility { controller: None },
             },
             vec![],
             ObjectId(999),
@@ -878,18 +1003,89 @@ mod tests {
 
         resolve_all(&mut state, &ability, &mut events).unwrap();
 
-        // All three abilities removed; spell remains on stack.
+        // All four ability/action entries removed; spell remains on stack.
         assert_eq!(state.stack.len(), 1, "only the spell remains");
         assert_eq!(state.stack.iter().next().unwrap().id, spell);
         // No card moved to graveyard (abilities aren't cards).
         assert!(state.players[1].graveyard.is_empty());
-        // Three SpellCountered events for the three abilities.
+        // Four SpellCountered events for the ability/action entries.
         assert_eq!(
             events
                 .iter()
                 .filter(|e| matches!(e, GameEvent::SpellCountered { .. }))
                 .count(),
-            3
+            4
+        );
+    }
+
+    #[test]
+    fn test_counter_all_opponent_abilities_preserves_your_abilities() {
+        let mut state = GameState::new_two_player(42);
+        let your_perm = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Your Source".to_string(),
+            Zone::Battlefield,
+        );
+        let opponent_perm = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(1),
+            "Opponent Source".to_string(),
+            Zone::Battlefield,
+        );
+        let your_ability = ObjectId(910);
+        let opponent_ability = ObjectId(911);
+        for (entry_id, source_id, controller) in [
+            (your_ability, your_perm, PlayerId(0)),
+            (opponent_ability, opponent_perm, PlayerId(1)),
+        ] {
+            state.stack.push_back(StackEntry {
+                id: entry_id,
+                source_id,
+                controller,
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id,
+                    ability: Box::new(ResolvedAbility::new(
+                        Effect::Draw {
+                            count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        },
+                        vec![],
+                        source_id,
+                        controller,
+                    )),
+                    condition: None,
+                    trigger_event: None,
+                    description: None,
+                    source_name: String::new(),
+                },
+            });
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::CounterAll {
+                target: TargetFilter::StackAbility {
+                    controller: Some(ControllerRef::Opponent),
+                },
+            },
+            vec![],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.stack.len(), 1);
+        assert_eq!(state.stack.iter().next().unwrap().id, your_ability);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, GameEvent::SpellCountered { object_id, .. } if *object_id == opponent_ability))
+                .count(),
+            1
         );
     }
 }

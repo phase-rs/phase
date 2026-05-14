@@ -96,6 +96,12 @@ describe("isManaObjectAction", () => {
     expect(isManaObjectAction({ type: "TapLandForMana", data: { object_id: 1 } }, object)).toBe(true);
     expect(
       isManaObjectAction(
+        { type: "TapForConvoke", data: { object_id: 1, mana_type: "Green" } },
+        object,
+      ),
+    ).toBe(true);
+    expect(
+      isManaObjectAction(
         { type: "ActivateAbility", data: { source_id: 1, ability_index: 0 } },
         object,
       ),
@@ -122,6 +128,28 @@ describe("isManaObjectAction", () => {
 });
 
 describe("abilityChoiceLabel", () => {
+  it("labels convoke tap actions by the mana they pay for", () => {
+    const object = makeGameObject({
+      name: "Venerated Loxodon",
+    });
+
+    expect(
+      abilityChoiceLabel(
+        { type: "TapForConvoke", data: { object_id: 1, mana_type: "Green" } },
+        object,
+      ),
+    ).toEqual({
+      label: "Tap for {G}",
+      description: "Tap Venerated Loxodon to help pay this spell's cost.",
+    });
+    expect(
+      abilityChoiceLabel(
+        { type: "TapForConvoke", data: { object_id: 1, mana_type: "Colorless" } },
+        object,
+      ).label,
+    ).toBe("Tap for {1}");
+  });
+
   it("labels the spell face cast action with the front-face name", () => {
     const object = makeGameObject();
 

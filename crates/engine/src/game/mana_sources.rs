@@ -19,7 +19,7 @@ use crate::types::ability::{
 use crate::types::card_type::CoreType;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
-use crate::types::mana::{ManaColor, ManaPip, ManaType};
+use crate::types::mana::{ManaColor, ManaPip, ManaRestriction, ManaType};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 use crate::types::TriggerMode;
@@ -201,6 +201,11 @@ pub struct ManaSourceOption {
     /// atomically — the shard assigner must treat all combos sharing the same
     /// `(object_id, ability_index)` as alternatives (pick at most one).
     pub atomic_combination: Option<Vec<ManaType>>,
+    /// CR 106.6: Resolved spend restrictions attached to the mana this option
+    /// produces. Auto-tap filters with the same `PaymentContext` used by the
+    /// eventual pool spend, so it does not tap a source whose mana would be
+    /// rejected after production.
+    pub restrictions: Vec<ManaRestriction>,
 }
 
 /// Check whether an ability cost includes a tap component.
@@ -691,6 +696,7 @@ fn land_mana_options(
                 ),
                 penalty: ManaSourcePenalty::None,
                 atomic_combination: None,
+                restrictions: Vec::new(),
             });
         }
     }
@@ -741,6 +747,7 @@ fn scan_mana_abilities(
                 source_could_produce_two_or_more_colors,
                 penalty,
                 atomic_combination: row.atomic_combination,
+                restrictions: row.restrictions,
             };
             if !options.contains(&option) {
                 options.push(option);
@@ -756,6 +763,7 @@ fn scan_mana_abilities(
 struct SourceRow {
     mana_type: ManaType,
     atomic_combination: Option<Vec<ManaType>>,
+    restrictions: Vec<ManaRestriction>,
 }
 
 fn emit_source_rows(
@@ -765,9 +773,16 @@ fn emit_source_rows(
     _ability_index: usize,
     ability: &AbilityDefinition,
 ) -> Vec<SourceRow> {
-    let Effect::Mana { produced, .. } = &*ability.effect else {
+    let Effect::Mana {
+        produced,
+        restrictions,
+        ..
+    } = &*ability.effect
+    else {
         return Vec::new();
     };
+    let concrete_restrictions =
+        super::effects::mana::resolve_restrictions(restrictions, state, object_id);
     match produced {
         // CR 605.3b + CR 106.1a: Filter-land combinations. Emit one row per
         // combination so the auto-tap shard assigner can pick whichever
@@ -779,6 +794,7 @@ fn emit_source_rows(
                 types.first().copied().map(|first| SourceRow {
                     mana_type: first,
                     atomic_combination: Some(types),
+                    restrictions: concrete_restrictions.clone(),
                 })
             })
             .collect(),
@@ -787,6 +803,7 @@ fn emit_source_rows(
             .map(|mana_type| SourceRow {
                 mana_type,
                 atomic_combination: None,
+                restrictions: concrete_restrictions.clone(),
             })
             .collect(),
     }

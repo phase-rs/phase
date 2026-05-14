@@ -50,7 +50,7 @@ pub fn resolve(
         PaymentCost::Mana { cost: mana_cost } => {
             if payment_ability.chosen_x.is_none() && casting_costs::cost_has_x(mana_cost) {
                 let per_x = mana_x_shard_count(mana_cost);
-                let max = casting_costs::max_x_value(state, payer, mana_cost);
+                let max = max_resolution_mana_x_value(state, payer, ability.source_id, mana_cost);
                 let max = trigger_event_amount(state).map_or(max, |amount| max.min(amount));
                 state.waiting_for = WaitingFor::PayAmountChoice {
                     player: payer,
@@ -62,15 +62,20 @@ pub fn resolve(
                 };
                 return Ok(());
             }
-            // CR 117.1: Pre-check affordability on a cloned state to avoid
-            // partial mutations (auto_tap_lands runs before the can_pay check
-            // inside pay_mana_cost). Only commit if the player can pay.
-            if !casting::can_pay_cost_after_auto_tap(state, payer, ability.source_id, mana_cost) {
+            if !casting::can_pay_effect_mana_cost_after_auto_tap(
+                state,
+                payer,
+                ability.source_id,
+                mana_cost,
+            ) {
                 state.cost_payment_failed_flag = true;
                 return Ok(());
             }
-            // Payment is affordable — commit the mutation.
-            let _ = casting::pay_unless_cost(state, payer, mana_cost, events);
+            if casting::pay_effect_mana_cost(state, payer, ability.source_id, mana_cost, events)
+                .is_err()
+            {
+                state.cost_payment_failed_flag = true;
+            }
         }
         PaymentCost::Life { amount } => {
             // CR 118.8 + CR 119.4 + CR 119.8: Paying life as an effect-embedded
@@ -167,11 +172,38 @@ fn resolve_ability_cost_payment(
 ) -> Result<(), EffectError> {
     match cost {
         AbilityCost::Mana { cost: mana_cost } => {
-            if !casting::can_pay_cost_after_auto_tap(state, payer, ability.source_id, mana_cost) {
+            if !casting::can_pay_effect_mana_cost_after_auto_tap(
+                state,
+                payer,
+                ability.source_id,
+                mana_cost,
+            ) {
                 state.cost_payment_failed_flag = true;
                 return Ok(());
             }
-            let _ = casting::pay_unless_cost(state, payer, mana_cost, events);
+            if casting::pay_effect_mana_cost(state, payer, ability.source_id, mana_cost, events)
+                .is_err()
+            {
+                state.cost_payment_failed_flag = true;
+            }
+        }
+        AbilityCost::ManaDynamic { quantity } => {
+            let amount = resolve_quantity_with_targets(state, quantity, ability);
+            let mana_cost = ManaCost::generic(amount.max(0) as u32);
+            if !casting::can_pay_effect_mana_cost_after_auto_tap(
+                state,
+                payer,
+                ability.source_id,
+                &mana_cost,
+            ) {
+                state.cost_payment_failed_flag = true;
+                return Ok(());
+            }
+            if casting::pay_effect_mana_cost(state, payer, ability.source_id, &mana_cost, events)
+                .is_err()
+            {
+                state.cost_payment_failed_flag = true;
+            }
         }
         AbilityCost::PayLife { amount } => {
             let amount = resolve_quantity_with_targets(state, amount, ability);
@@ -287,9 +319,12 @@ fn can_pay_resolution_ability_cost(
     cost: &AbilityCost,
 ) -> bool {
     match cost {
-        AbilityCost::Mana { cost: mana_cost } => {
-            casting::can_pay_cost_after_auto_tap(state, payer, ability.source_id, mana_cost)
-        }
+        AbilityCost::Mana { cost: mana_cost } => casting::can_pay_effect_mana_cost_after_auto_tap(
+            state,
+            payer,
+            ability.source_id,
+            mana_cost,
+        ),
         // CR 118.4 + CR 107.3c: Resolve the dynamic generic to a concrete
         // amount, then check mana payability. Dynamic-generic ability costs
         // appear primarily in unless-pay contexts; activation paths normally
@@ -297,7 +332,7 @@ fn can_pay_resolution_ability_cost(
         AbilityCost::ManaDynamic { quantity } => {
             let amount = resolve_quantity_with_targets(state, quantity, ability);
             let mana = crate::types::mana::ManaCost::generic(amount.max(0) as u32);
-            casting::can_pay_cost_after_auto_tap(state, payer, ability.source_id, &mana)
+            casting::can_pay_effect_mana_cost_after_auto_tap(state, payer, ability.source_id, &mana)
         }
         // CR 119.4: Pay life requires the player's life total to be at least the
         // payment amount (and no CantLoseLife lock).
@@ -379,6 +414,26 @@ fn mana_x_shard_count(cost: &ManaCost) -> u32 {
     }
 }
 
+fn max_resolution_mana_x_value(
+    state: &GameState,
+    payer: PlayerId,
+    source_id: crate::types::identifiers::ObjectId,
+    cost: &ManaCost,
+) -> u32 {
+    let mut max = casting_costs::max_x_value(state, payer, cost);
+    loop {
+        let mut concrete = cost.clone();
+        concrete.concretize_x(max);
+        if casting::can_pay_effect_mana_cost_after_auto_tap(state, payer, source_id, &concrete) {
+            return max;
+        }
+        if max == 0 {
+            return 0;
+        }
+        max -= 1;
+    }
+}
+
 fn trigger_event_amount(state: &GameState) -> Option<u32> {
     state
         .current_trigger_event
@@ -390,13 +445,53 @@ fn trigger_event_amount(state: &GameState) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::TargetFilter;
-    use crate::types::identifiers::ObjectId;
-    use crate::types::mana::{ManaCost, ManaType, ManaUnit};
+    use std::sync::Arc;
+
+    use crate::game::zones::create_object;
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, ManaProduction, ManaSpendRestriction, TargetFilter,
+    };
+    use crate::types::card_type::CoreType;
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::mana::{ManaCost, ManaCostShard, ManaRestriction, ManaType, ManaUnit};
     use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
 
     fn make_ability(effect: Effect) -> ResolvedAbility {
         ResolvedAbility::new(effect, vec![], ObjectId(1), PlayerId(0))
+    }
+
+    fn create_colorless_source(
+        state: &mut GameState,
+        card_id: CardId,
+        name: &str,
+        restrictions: Vec<ManaSpendRestriction>,
+    ) -> ObjectId {
+        let source = create_object(
+            state,
+            card_id,
+            PlayerId(0),
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    restrictions,
+                    grants: Vec::new(),
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+        source
     }
 
     #[test]
@@ -444,6 +539,88 @@ mod tests {
         let result = resolve(&mut state, &ability, &mut events);
         assert!(result.is_ok());
         assert!(state.cost_payment_failed_flag);
+    }
+
+    #[test]
+    fn direct_resolution_mana_payment_rejects_activation_only_mana() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].mana_pool.add(ManaUnit {
+            color: ManaType::Colorless,
+            source_id: ObjectId(0),
+            snow: false,
+            source_could_produce_two_or_more_colors: false,
+            restrictions: vec![ManaRestriction::OnlyForActivation],
+            grants: vec![],
+            expiry: None,
+        });
+        let ability = make_ability(Effect::PayCost {
+            cost: PaymentCost::Mana {
+                cost: ManaCost::generic(1),
+            },
+            payer: TargetFilter::Controller,
+        });
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.cost_payment_failed_flag);
+        assert_eq!(state.players[0].mana_pool.mana.len(), 1);
+    }
+
+    #[test]
+    fn resolution_mana_payment_auto_tap_skips_activation_only_source() {
+        let mut state = GameState::new_two_player(42);
+        let restricted = create_colorless_source(
+            &mut state,
+            CardId(10),
+            "Restricted Source",
+            vec![ManaSpendRestriction::ActivateOnly],
+        );
+        let unrestricted =
+            create_colorless_source(&mut state, CardId(11), "Unrestricted Source", Vec::new());
+        let ability = make_ability(Effect::PayCost {
+            cost: PaymentCost::Mana {
+                cost: ManaCost::generic(1),
+            },
+            payer: TargetFilter::Controller,
+        });
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(!state.cost_payment_failed_flag);
+        assert_eq!(state.players[0].mana_pool.mana.len(), 0);
+        assert!(!state.objects.get(&restricted).unwrap().tapped);
+        assert!(state.objects.get(&unrestricted).unwrap().tapped);
+    }
+
+    #[test]
+    fn resolution_mana_pay_amount_choice_max_rejects_activation_only_sources() {
+        let mut state = GameState::new_two_player(42);
+        let restricted = create_colorless_source(
+            &mut state,
+            CardId(10),
+            "Restricted Source",
+            vec![ManaSpendRestriction::ActivateOnly],
+        );
+        let ability = make_ability(Effect::PayCost {
+            cost: PaymentCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![ManaCostShard::X],
+                    generic: 0,
+                },
+            },
+            payer: TargetFilter::Controller,
+        });
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match state.waiting_for {
+            WaitingFor::PayAmountChoice { max, .. } => assert_eq!(max, 0),
+            other => panic!("expected PayAmountChoice, got {other:?}"),
+        }
+        assert!(!state.objects.get(&restricted).unwrap().tapped);
     }
 
     #[test]
@@ -522,6 +699,64 @@ mod tests {
         assert!(!state.cost_payment_failed_flag);
         assert_eq!(state.players[0].mana_pool.mana.len(), 0);
         assert_eq!(state.players[0].life, 17);
+    }
+
+    #[test]
+    fn resolution_time_ability_mana_cost_rejects_activation_only_mana() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].mana_pool.add(ManaUnit {
+            color: ManaType::Colorless,
+            source_id: ObjectId(0),
+            snow: false,
+            source_could_produce_two_or_more_colors: false,
+            restrictions: vec![ManaRestriction::OnlyForActivation],
+            grants: vec![],
+            expiry: None,
+        });
+        let ability = make_ability(Effect::PayCost {
+            cost: PaymentCost::AbilityCost {
+                cost: AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+            },
+            payer: TargetFilter::Controller,
+        });
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.cost_payment_failed_flag);
+        assert_eq!(state.players[0].mana_pool.mana.len(), 1);
+    }
+
+    #[test]
+    fn resolution_time_dynamic_mana_cost_pays_resolved_amount() {
+        let mut state = GameState::new_two_player(42);
+        for _ in 0..2 {
+            state.players[0].mana_pool.add(ManaUnit {
+                color: ManaType::Colorless,
+                source_id: ObjectId(0),
+                snow: false,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+            });
+        }
+        let ability = make_ability(Effect::PayCost {
+            cost: PaymentCost::AbilityCost {
+                cost: AbilityCost::ManaDynamic {
+                    quantity: QuantityExpr::Fixed { value: 2 },
+                },
+            },
+            payer: TargetFilter::Controller,
+        });
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(!state.cost_payment_failed_flag);
+        assert_eq!(state.players[0].mana_pool.mana.len(), 0);
     }
 
     #[test]

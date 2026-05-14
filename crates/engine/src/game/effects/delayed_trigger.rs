@@ -137,31 +137,70 @@ fn bind_contextual_filter_to_condition(
     condition: &mut DelayedTriggerCondition,
     parent_targets: &[TargetRef],
 ) {
-    if let DelayedTriggerCondition::WhenDiesOrExiled { filter } = condition {
-        if matches!(filter, TargetFilter::ParentTarget) {
-            // Positive ParentTarget → resolve to SpecificObject for the animated target.
-            // normalize_contextual_filter only handles Not(ParentTarget); bare ParentTarget
-            // needs direct rewriting here so the delayed trigger can match at check time.
-            let object_ids: Vec<_> = parent_targets
-                .iter()
-                .filter_map(|t| match t {
-                    TargetRef::Object(id) => Some(*id),
-                    TargetRef::Player(_) => None,
-                })
-                .collect();
-            *filter = match object_ids.as_slice() {
-                [] => TargetFilter::Any,
-                [id] => TargetFilter::SpecificObject { id: *id },
-                _ => TargetFilter::Or {
-                    filters: object_ids
-                        .into_iter()
-                        .map(|id| TargetFilter::SpecificObject { id })
-                        .collect(),
-                },
-            };
-        } else {
-            *filter = crate::game::filter::normalize_contextual_filter(filter, parent_targets);
+    match condition {
+        DelayedTriggerCondition::WhenDiesOrExiled { filter } => {
+            bind_parent_target_filter(filter, parent_targets);
         }
+        DelayedTriggerCondition::WheneverEvent { trigger }
+        | DelayedTriggerCondition::WhenNextEvent { trigger } => {
+            for filter in [
+                &mut trigger.valid_card,
+                &mut trigger.valid_source,
+                &mut trigger.valid_target,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                bind_parent_target_filter(filter, parent_targets);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn bind_parent_target_filter(filter: &mut TargetFilter, parent_targets: &[TargetRef]) {
+    *filter = concrete_parent_target_filter(filter, parent_targets);
+}
+
+fn concrete_parent_target_filter(
+    filter: &TargetFilter,
+    parent_targets: &[TargetRef],
+) -> TargetFilter {
+    let filter = crate::game::filter::normalize_contextual_filter(filter, parent_targets);
+    match filter {
+        TargetFilter::ParentTarget => parent_targets_filter(parent_targets),
+        TargetFilter::Not { filter } => TargetFilter::Not {
+            filter: Box::new(concrete_parent_target_filter(&filter, parent_targets)),
+        },
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .iter()
+                .map(|filter| concrete_parent_target_filter(filter, parent_targets))
+                .collect(),
+        },
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .iter()
+                .map(|filter| concrete_parent_target_filter(filter, parent_targets))
+                .collect(),
+        },
+        other => other,
+    }
+}
+
+fn parent_targets_filter(parent_targets: &[TargetRef]) -> TargetFilter {
+    let targets: Vec<_> = parent_targets
+        .iter()
+        .map(|target| match target {
+            TargetRef::Object(id) => TargetFilter::SpecificObject { id: *id },
+            TargetRef::Player(id) => TargetFilter::SpecificPlayer { id: *id },
+        })
+        .collect();
+
+    match targets.as_slice() {
+        [] => TargetFilter::Any,
+        [target] => target.clone(),
+        _ => TargetFilter::Or { filters: targets },
     }
 }
 
@@ -229,11 +268,13 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect, QuantityExpr,
+        AbilityDefinition, AbilityKind, DamageKindFilter, DelayedTriggerCondition, Effect,
+        QuantityExpr, TriggerDefinition,
     };
     use crate::types::identifiers::ObjectId;
     use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
+    use crate::types::triggers::TriggerMode;
 
     #[test]
     fn creates_delayed_trigger_on_state() {
@@ -316,6 +357,55 @@ mod tests {
         assert_eq!(
             state.delayed_triggers[0].ability.targets,
             vec![TargetRef::Object(dead_creature)]
+        );
+    }
+
+    #[test]
+    fn whenever_event_parent_target_binds_to_specific_source() {
+        let mut state = GameState::new_two_player(42);
+        let target = ObjectId(10);
+
+        let mut trigger = TriggerDefinition::new(TriggerMode::DamageDone);
+        trigger.damage_kind = DamageKindFilter::CombatOnly;
+        trigger.valid_source = Some(TargetFilter::ParentTarget);
+        trigger.valid_target = Some(TargetFilter::Player);
+
+        let effect_def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::EventContextAmount,
+                },
+                target: TargetFilter::Controller,
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WheneverEvent {
+                    trigger: Box::new(trigger),
+                },
+                effect: Box::new(effect_def),
+                uses_tracked_set: false,
+            },
+            vec![TargetRef::Object(target)],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let DelayedTriggerCondition::WheneverEvent { trigger } =
+            &state.delayed_triggers[0].condition
+        else {
+            panic!(
+                "expected WheneverEvent, got {:?}",
+                state.delayed_triggers[0].condition
+            );
+        };
+        assert_eq!(
+            trigger.valid_source,
+            Some(TargetFilter::SpecificObject { id: target })
         );
     }
 

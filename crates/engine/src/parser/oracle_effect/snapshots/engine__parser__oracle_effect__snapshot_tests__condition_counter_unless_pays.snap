@@ -1,5 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_effect/mod.rs
+assertion_line: 29415
 expression: def
 ---
 {
@@ -7,17 +8,7 @@ expression: def
   "effect": {
     "type": "Counter",
     "target": {
-      "type": "Typed",
-      "type_filters": [
-        "Card"
-      ],
-      "controller": null,
-      "properties": [
-        {
-          "type": "InZone",
-          "zone": "Stack"
-        }
-      ]
+      "type": "StackSpell"
     },
     "source_static": null
   },

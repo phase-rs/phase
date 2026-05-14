@@ -262,6 +262,7 @@ fn redundancy_delta(
         | Effect::Shuffle { .. }
         | Effect::Transform { .. }
         | Effect::SearchLibrary { .. }
+        | Effect::SearchOutsideGame { .. }
         | Effect::RevealHand { .. }
         | Effect::RevealTop { .. }
         | Effect::ExileTop { .. }

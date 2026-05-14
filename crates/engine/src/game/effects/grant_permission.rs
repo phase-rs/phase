@@ -27,54 +27,46 @@ pub fn resolve(
         _ => return Err(EffectError::MissingParam("permission".to_string())),
     };
 
-    // CR 608.2c (issue #323 class): `SelfRef` always resolves to the source
-    // object regardless of `ability.targets`. Short-circuit BEFORE the
-    // chosen-targets fallback so chained
-    // `GrantCastingPermission { target: SelfRef }` sub-abilities don't
-    // inherit the parent's targets via chain propagation in
+    // CR 608.2c (issue #323 class): intrinsic permission targets (`SelfRef`
+    // and tracked-set anaphora) resolve from their own filter regardless of
+    // `ability.targets`. Short-circuit BEFORE the chosen-targets fallback so
+    // chained grants don't inherit parent targets via
     // `effects::mod.rs::resolve_ability_chain`.
-    let target_ids: Vec<_> = if matches!(target_filter, TargetFilter::SelfRef) {
-        vec![ability.source_id]
-    } else if ability.targets.is_empty() {
-        match target_filter {
-            TargetFilter::Any | TargetFilter::None => {
-                vec![ability.source_id]
-            }
-            TargetFilter::TrackedSet {
-                id: TrackedSetId(0),
-            } => state
-                .tracked_object_sets
-                .iter()
-                .max_by_key(|(id, _)| id.0)
-                .map(|(_, objects)| objects.clone())
-                .unwrap_or_default(),
-            TargetFilter::TrackedSet { id } => state
-                .tracked_object_sets
-                .get(id)
-                .cloned()
-                .unwrap_or_default(),
-            other => {
-                // CR 107.3a + CR 601.2b: ability-context filter evaluation.
-                let ctx = crate::game::filter::FilterContext::from_ability(ability);
-                state
-                    .objects
-                    .keys()
-                    .copied()
-                    .filter(|obj_id| {
-                        crate::game::filter::matches_target_filter(state, *obj_id, other, &ctx)
-                    })
-                    .collect()
-            }
-        }
-    } else {
-        ability
+    let target_ids: Vec<_> = match target_filter {
+        TargetFilter::SelfRef => vec![ability.source_id],
+        TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        } => state
+            .tracked_object_sets
+            .iter()
+            .max_by_key(|(id, _)| id.0)
+            .map(|(_, objects)| objects.clone())
+            .unwrap_or_default(),
+        TargetFilter::TrackedSet { id } => state
+            .tracked_object_sets
+            .get(id)
+            .cloned()
+            .unwrap_or_default(),
+        _ if !ability.targets.is_empty() => ability
             .targets
             .iter()
             .filter_map(|target| match target {
                 TargetRef::Object(obj_id) => Some(*obj_id),
                 TargetRef::Player(_) => None,
             })
-            .collect()
+            .collect(),
+        TargetFilter::Any | TargetFilter::None => vec![ability.source_id],
+        other => {
+            let ctx = crate::game::filter::FilterContext::from_ability(ability);
+            state
+                .objects
+                .keys()
+                .copied()
+                .filter(|obj_id| {
+                    crate::game::filter::matches_target_filter(state, *obj_id, other, &ctx)
+                })
+                .collect()
+        }
     };
 
     // CR 611.2a/b + CR 108.3: Resolve `grantee` to the `PlayerId` that a

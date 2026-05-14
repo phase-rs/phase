@@ -186,6 +186,17 @@ export interface DeckPoolEntry {
   count: number;
 }
 
+export interface OutsideGameChoiceEntry {
+  sideboard_index: number;
+  entry: DeckPoolEntry;
+}
+
+export interface OutsideGameCardUse {
+  player: PlayerId;
+  sideboard_index: number;
+  count: number;
+}
+
 // ── Attack Target ───────────────────────────────────────────────────────
 
 export type AttackTarget =
@@ -250,6 +261,7 @@ export type CoreType =
   | "Dungeon";
 
 export type ManaType = "White" | "Blue" | "Black" | "Red" | "Green" | "Colorless";
+export type ConvokeMode = "Convoke" | "Waterbend";
 export type RoomDoor = "Left" | "Right";
 
 /**
@@ -276,9 +288,9 @@ export type ManaPip =
 
 // ── Mana ─────────────────────────────────────────────────────────────────
 
-export interface ManaRestriction {
-  OnlyForSpellType: string;
-}
+export type ManaRestriction =
+  | { OnlyForSpellType: string }
+  | "ConvokePayment";
 
 export interface ManaUnit {
   color: ManaType;
@@ -335,6 +347,24 @@ export type CounterType =
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type Keyword = string | Record<string, any>;
+
+// ── Token body characteristics ──────────────────────────────────────────
+// Shared by TokenSpec (runtime), TokenPreset (catalog), and
+// DebugAction::CreateToken (debug payload). Single source of truth on
+// the Rust side; this mirrors `engine::types::proposed_event::TokenCharacteristics`.
+
+export type Supertype = "Legendary" | "Basic" | "Snow" | "World" | "Ongoing";
+
+export interface TokenCharacteristics {
+  display_name: string;
+  power: number | null;
+  toughness: number | null;
+  core_types: CoreType[];
+  subtypes: string[];
+  supertypes: Supertype[];
+  colors: ManaColor[];
+  keywords: Keyword[];
+}
 
 // ── CR 701.57a + CR 702.85a: Cast/decline choice for Discover and Cascade ──
 
@@ -723,8 +753,11 @@ export type WaitingFor =
       type: "MulliganBottomCards";
       data: { pending: { player: PlayerId; count: number }[] };
     }
-  | { type: "ManaPayment"; data: { player: PlayerId } }
-  | { type: "ChooseXValue"; data: { player: PlayerId; max: number; pending_cast: PendingCast } }
+  | { type: "ManaPayment"; data: { player: PlayerId; convoke_mode?: ConvokeMode } }
+  | {
+      type: "ChooseXValue";
+      data: { player: PlayerId; min?: number; max: number; pending_cast: PendingCast };
+    }
   | { type: "PayAmountChoice"; data: { player: PlayerId; resource: PayableResource; min: number; max: number; accumulated?: number; source_id: ObjectId } }
   | { type: "TargetSelection"; data: { player: PlayerId; pending_cast: PendingCast; target_slots: TargetSelectionSlot[]; selection: TargetSelectionProgress } }
   | { type: "DeclareAttackers"; data: { player: PlayerId; valid_attacker_ids: ObjectId[]; valid_attack_targets?: AttackTarget[] } }
@@ -742,6 +775,7 @@ export type WaitingFor =
   | { type: "SurveilChoice"; data: { player: PlayerId; cards: ObjectId[] } }
   | { type: "RevealChoice"; data: { player: PlayerId; cards: ObjectId[]; filter: unknown; optional?: boolean } }
   | { type: "SearchChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; reveal?: boolean; up_to?: boolean; constraint?: SearchSelectionConstraint } }
+  | { type: "OutsideGameChoice"; data: { player: PlayerId; choices: OutsideGameChoiceEntry[]; count: number; reveal?: boolean; up_to?: boolean; destination: Zone } }
   | { type: "ChooseOneOfBranch"; data: { player: PlayerId; controller: PlayerId; source_id: ObjectId; branches: unknown[]; branch_descriptions?: string[]; parent_targets?: TargetRef[]; context?: unknown; remaining_players?: PlayerId[] } }
   | { type: "TriggerTargetSelection"; data: { player: PlayerId; target_slots: TargetSelectionSlot[]; target_constraints?: TargetSelectionConstraint[]; selection: TargetSelectionProgress; source_id?: ObjectId; description?: string } }
   | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore } }
@@ -944,7 +978,7 @@ export type DebugAction =
   | { type: "AddMana"; data: { player_id: PlayerId; mana: ManaType[] } }
   | { type: "SetPhase"; data: { phase: Phase; active_player: PlayerId } }
   | { type: "RunStateBasedActions" }
-  | { type: "CreateToken"; data: { owner: PlayerId; name: string; power?: number; toughness?: number; core_types: CoreType[]; subtypes: string[]; colors: ManaColor[]; keywords: Keyword[] } };
+  | { type: "CreateToken"; data: { owner: PlayerId; characteristics: TokenCharacteristics } };
 
 export type GameAction =
   | { type: "PassPriority" }
@@ -959,6 +993,7 @@ export type GameAction =
   | { type: "TapLandForMana"; data: { object_id: ObjectId } }
   | { type: "UntapLandForMana"; data: { object_id: ObjectId } }
   | { type: "SelectCards"; data: { cards: ObjectId[] } }
+  | { type: "ChooseOutsideGameCards"; data: { sideboard_indices: number[] } }
   | { type: "SelectTargets"; data: { targets: TargetRef[] } }
   | { type: "ChooseTarget"; data: { target: TargetRef | null } }
   | { type: "ChoosePair"; data: { partner: ObjectId | null } }
@@ -1189,6 +1224,23 @@ export interface GameState {
   pending_replacement: unknown | null;
   layers_dirty: boolean;
   next_timestamp: number;
+  /**
+   * Per-object source attribution for layer-applied continuous effects,
+   * rebuilt every layers pass. Maps each affected object's id to the set
+   * of `EffectRef`s that contributed grants/modifications/removals to its
+   * current characteristics. Display-only — game logic never reads it.
+   *
+   * Empty objects (no granted effects) are omitted, so most state.attribution
+   * lookups for a given object id will be undefined.
+   */
+  attribution?: Record<string, ObjectAttribution>;
+  /**
+   * Runtime continuous effects from resolved spells/abilities. The frontend
+   * dereferences `EffectRef::Transient` entries here to recover the
+   * snapshotted `source_name` (which survives the spell's zone change to
+   * the graveyard per CR 400.7) and the granted `ContinuousModification`.
+   */
+  transient_continuous_effects?: TransientContinuousEffect[];
   seat_order?: PlayerId[];
   format_config?: FormatConfig;
   /**
@@ -1218,6 +1270,7 @@ export interface GameState {
     current_main: DeckPoolEntry[];
     current_sideboard: DeckPoolEntry[];
   }>;
+  outside_game_cards_brought_in?: OutsideGameCardUse[];
   sideboard_submitted?: PlayerId[];
   revealed_cards?: ObjectId[];
   restrictions?: GameRestriction[];
@@ -1236,6 +1289,83 @@ export interface GameState {
 export type AutoPassMode =
   | { type: "UntilStackEmpty"; initial_stack_len: number }
   | { type: "UntilEndOfTurn" };
+
+// ── Source attribution (CR 613 layers) ───────────────────────────────────
+
+/**
+ * One CR 613 layer of the continuous-effect pipeline.
+ *
+ * Mirrors `engine::types::layers::Layer`. Serialized as the variant name
+ * string by serde, so this is a plain TypeScript string union — match
+ * directly with `"Ability"`, `"ModifyPT"`, etc.
+ */
+export type AttributionLayer =
+  | "Copy"
+  | "Control"
+  | "Text"
+  | "Type"
+  | "Color"
+  | "Ability"
+  | "CharDef"
+  | "SetPT"
+  | "ModifyPT"
+  | "SwitchPT"
+  | "CounterPT";
+
+/**
+ * Reference to a single `ContinuousModification` that contributed to an
+ * object's characteristics. Resolves either to a static ability on a
+ * tracked-zone permanent or to a runtime transient effect from a resolved
+ * spell/ability.
+ *
+ * The frontend dereferences a `Static` ref via
+ *   state.objects[source].static_definitions[def_index].modifications[mod_index]
+ * and a `Transient` ref via
+ *   state.transient_continuous_effects.find(t => t.id === id).modifications[mod_index]
+ */
+export type EffectRef =
+  | { type: "Transient"; data: { id: number; mod_index: number } }
+  | {
+      type: "Static";
+      data: { source: ObjectId; def_index: number; mod_index: number };
+    };
+
+/**
+ * Per-object record of which continuous effects contributed grants /
+ * modifications / removals to that object during the last layers pass.
+ *
+ * Entries within a single layer bucket are in CR 613.7 timestamp order
+ * (the engine applies effects timestamp-sorted before recording them).
+ */
+export interface ObjectAttribution {
+  by_layer?: Partial<Record<AttributionLayer, EffectRef[]>>;
+}
+
+export interface TransientContinuousEffect {
+  id: number;
+  source_id: ObjectId;
+  controller: PlayerId;
+  timestamp: number;
+  /** Snapshotted at the originating spell/ability's resolution time. */
+  source_name: string;
+  /** `ContinuousModification` payloads — opaque to the display layer; the
+   *  FE only inspects the discriminant + a small subset of fields. */
+  modifications: ContinuousModification[];
+}
+
+/**
+ * Minimal display-layer shape for the engine's `ContinuousModification`
+ * enum. Internally tagged (`#[serde(tag = "type")]`) so variant fields
+ * flatten alongside the discriminant. Only the variants the FE currently
+ * renders attribution for are typed; everything else falls through the
+ * catch-all. Mirrors `engine::types::ability::ContinuousModification`.
+ */
+export type ContinuousModification =
+  | { type: "AddKeyword"; keyword: Keyword }
+  | { type: "RemoveKeyword"; keyword: Keyword }
+  | { type: "AddPower"; value: number }
+  | { type: "AddToughness"; value: number }
+  | { type: string; [key: string]: unknown };
 
 // ── Adapter Interface ────────────────────────────────────────────────────
 

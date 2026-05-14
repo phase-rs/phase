@@ -203,10 +203,19 @@ impl CardDatabase {
         if self.face_index.contains_key(&lower) || self.cards.contains_key(&lower) {
             return lower;
         }
-        self.name_alias_index
-            .get(&fold_card_name_key(name))
-            .cloned()
-            .unwrap_or(lower)
+        if let Some(alias) = self.name_alias_index.get(&fold_card_name_key(name)) {
+            return alias.clone();
+        }
+        if let Some((front, _)) = lower.split_once("//") {
+            let front = front.trim();
+            if self.face_index.contains_key(front) || self.cards.contains_key(front) {
+                return front.to_string();
+            }
+            if let Some(alias) = self.name_alias_index.get(&fold_card_name_key(front)) {
+                return alias.clone();
+            }
+        }
+        lower
     }
 }
 
@@ -346,6 +355,7 @@ mod tests {
             solve_condition: None,
             parse_warnings: vec![],
             brawl_commander: false,
+            is_commander: false,
             metadata: Default::default(),
             rarities: Default::default(),
         }
@@ -432,6 +442,44 @@ mod tests {
         assert_eq!(
             db.get_face_by_name("Cafe").map(|face| face.name.as_str()),
             Some("Cafe")
+        );
+    }
+
+    #[test]
+    fn combined_face_name_lookup_resolves_front_face() {
+        let mut map = HashMap::new();
+        map.insert(
+            "brigid, clachan's heart".to_string(),
+            test_face("Brigid, Clachan's Heart"),
+        );
+        map.insert(
+            "brigid, doun's mind".to_string(),
+            test_face("Brigid, Doun's Mind"),
+        );
+        let json = serde_json::to_string(&map).unwrap();
+
+        let db = CardDatabase::from_json_str(&json).unwrap();
+
+        assert_eq!(
+            db.get_face_by_name("Brigid, Clachan's Heart // Brigid, Doun's Mind")
+                .map(|face| face.name.as_str()),
+            Some("Brigid, Clachan's Heart")
+        );
+    }
+
+    #[test]
+    fn combined_face_name_lookup_resolves_unaccented_front_alias() {
+        let mut map = HashMap::new();
+        map.insert("séance board".to_string(), test_face("Séance Board"));
+        map.insert("planchette".to_string(), test_face("Planchette"));
+        let json = serde_json::to_string(&map).unwrap();
+
+        let db = CardDatabase::from_json_str(&json).unwrap();
+
+        assert_eq!(
+            db.get_face_by_name("Seance Board // Planchette")
+                .map(|face| face.name.as_str()),
+            Some("Séance Board")
         );
     }
 }

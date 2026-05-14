@@ -3580,8 +3580,8 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         // Choose enumeration.
 
         // CR 105.4: choosing a color picks one of the five colors.
-        Action::ChooseAColor(_) => Effect::Choose {
-            choice_type: ChoiceType::Color,
+        Action::ChooseAColor(choice) => Effect::Choose {
+            choice_type: filter_mod::choice_type_for_choosable_color(choice),
             persist: true,
         },
         // CR 608.2d: choose a creature type — the bounded creature-type

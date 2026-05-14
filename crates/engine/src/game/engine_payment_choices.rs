@@ -841,6 +841,119 @@ mod tests {
     }
 
     #[test]
+    fn declining_optional_effect_resolves_not_if_a_player_does_subability() {
+        let mut state = GameState::new_two_player(42);
+        let mut optional = ResolvedAbility::new(gain_life(1), vec![], ObjectId(100), PlayerId(0));
+        optional.optional = true;
+        let mut decline_branch =
+            ResolvedAbility::new(gain_life(3), vec![], ObjectId(100), PlayerId(0));
+        decline_branch.condition = Some(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::IfAPlayerDoes),
+        });
+        optional.sub_ability = Some(Box::new(decline_branch));
+        state.pending_optional_effect = Some(Box::new(optional));
+        state.waiting_for = WaitingFor::OptionalEffectChoice {
+            player: PlayerId(0),
+            source_id: ObjectId(100),
+            description: None,
+            may_trigger_key: None,
+        };
+
+        let mut events = Vec::new();
+        handle_optional_effect_choice(&mut state, false, &mut events)
+            .expect("decline branch should resolve");
+
+        assert_eq!(state.players[0].life, 23);
+    }
+
+    #[test]
+    fn declining_optional_effect_prefers_else_ability() {
+        let mut state = GameState::new_two_player(42);
+        let mut optional = ResolvedAbility::new(gain_life(1), vec![], ObjectId(100), PlayerId(0));
+        optional.optional = true;
+        optional.else_ability = Some(Box::new(ResolvedAbility::new(
+            gain_life(2),
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )));
+        let mut decline_branch =
+            ResolvedAbility::new(gain_life(3), vec![], ObjectId(100), PlayerId(0));
+        decline_branch.condition = Some(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::IfYouDo),
+        });
+        optional.sub_ability = Some(Box::new(decline_branch));
+        state.pending_optional_effect = Some(Box::new(optional));
+        state.waiting_for = WaitingFor::OptionalEffectChoice {
+            player: PlayerId(0),
+            source_id: ObjectId(100),
+            description: None,
+            may_trigger_key: None,
+        };
+
+        let mut events = Vec::new();
+        handle_optional_effect_choice(&mut state, false, &mut events)
+            .expect("else branch should resolve");
+
+        assert_eq!(state.players[0].life, 22);
+    }
+
+    #[test]
+    fn declining_optional_effect_resolves_if_you_do_subability_else_branch() {
+        let mut state = GameState::new_two_player(42);
+        let mut optional = ResolvedAbility::new(gain_life(1), vec![], ObjectId(100), PlayerId(0));
+        optional.optional = true;
+        let mut if_you_do = ResolvedAbility::new(gain_life(2), vec![], ObjectId(100), PlayerId(0));
+        if_you_do.condition = Some(AbilityCondition::IfYouDo);
+        if_you_do.else_ability = Some(Box::new(ResolvedAbility::new(
+            gain_life(4),
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )));
+        optional.sub_ability = Some(Box::new(if_you_do));
+        state.pending_optional_effect = Some(Box::new(optional));
+        state.waiting_for = WaitingFor::OptionalEffectChoice {
+            player: PlayerId(0),
+            source_id: ObjectId(100),
+            description: None,
+            may_trigger_key: None,
+        };
+
+        let mut events = Vec::new();
+        handle_optional_effect_choice(&mut state, false, &mut events)
+            .expect("sub-ability else branch should resolve");
+
+        assert_eq!(state.players[0].life, 24);
+    }
+
+    #[test]
+    fn declining_optional_effect_skips_ordinary_continuation() {
+        let mut state = GameState::new_two_player(42);
+        let mut optional = ResolvedAbility::new(gain_life(1), vec![], ObjectId(100), PlayerId(0));
+        optional.optional = true;
+        optional.sub_ability = Some(Box::new(ResolvedAbility::new(
+            gain_life(3),
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )));
+        state.pending_optional_effect = Some(Box::new(optional));
+        state.waiting_for = WaitingFor::OptionalEffectChoice {
+            player: PlayerId(0),
+            source_id: ObjectId(100),
+            description: None,
+            may_trigger_key: None,
+        };
+
+        let mut events = Vec::new();
+        handle_optional_effect_choice(&mut state, false, &mut events)
+            .expect("declining ordinary optional effect should resolve");
+
+        assert_eq!(state.players[0].life, 20);
+    }
+
+    #[test]
     fn accepting_optional_effect_skips_not_if_you_do_subability() {
         let mut state = GameState::new_two_player(42);
         let mut optional = ResolvedAbility::new(gain_life(1), vec![], ObjectId(100), PlayerId(0));

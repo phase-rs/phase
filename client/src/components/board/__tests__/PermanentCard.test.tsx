@@ -304,6 +304,164 @@ describe("PermanentCard attachments", () => {
     });
   });
 
+  it("opens the ability picker when a land has multiple mana abilities", () => {
+    const holdout = makeObject({
+      id: 40,
+      name: "Holdout Settlement",
+      power: null,
+      toughness: null,
+      base_power: null,
+      base_toughness: null,
+      card_types: {
+        supertypes: [],
+        core_types: ["Land"],
+        subtypes: [],
+      },
+      mana_cost: { type: "NoCost" },
+      color: [],
+      base_color: [],
+      abilities: [
+        {
+          kind: "Activated",
+          cost: { type: "Tap" },
+          description: "{T}: Add {C}.",
+          effect: {
+            type: "Mana",
+            produced: { type: "Colorless" },
+          },
+        },
+        {
+          kind: "Activated",
+          cost: {
+            type: "Composite",
+            costs: [
+              { type: "Tap" },
+              {
+                type: "TapCreatures",
+                count: 1,
+              },
+            ],
+          },
+          description: "{T}, Tap an untapped creature you control: Add one mana of any color.",
+          effect: {
+            type: "Mana",
+            produced: {
+              type: "AnyOneColor",
+              count: { type: "Fixed", value: 1 },
+              color_options: ["White", "Blue", "Black", "Red", "Green"],
+            },
+          },
+        },
+      ] as unknown as GameObject["abilities"],
+    });
+
+    const gameState = {
+      ...makeState(),
+      objects: { 40: holdout },
+      battlefield: [40],
+    } as unknown as GameState;
+    const colorlessAction = {
+      type: "ActivateAbility",
+      data: { source_id: 40, ability_index: 0 },
+    } as const;
+    const anyColorAction = {
+      type: "ActivateAbility",
+      data: { source_id: 40, ability_index: 1 },
+    } as const;
+
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      legalActions: [colorlessAction, anyColorAction],
+      legalActionsByObject: { 40: [colorlessAction, anyColorAction] },
+      spellCosts: {},
+    });
+
+    const { container } = render(
+      <BoardInteractionContext.Provider
+        value={{
+          activatableObjectIds: new Set(),
+          committedAttackerIds: new Set(),
+          incomingAttackerCounts: new Map(),
+          manaTappableObjectIds: new Set([40]),
+          selectableManaCostCreatureIds: new Set(),
+          undoableTapObjectIds: new Set(),
+          validAttackerIds: new Set(),
+          validTargetObjectIds: new Set(),
+        }}
+      >
+        <PermanentCard objectId={40} />
+      </BoardInteractionContext.Provider>,
+    );
+
+    fireEvent.click(container.querySelector('[data-object-id="40"]') as HTMLElement);
+
+    expect(dispatchAction).not.toHaveBeenCalled();
+    expect(useUiStore.getState().pendingAbilityChoice).toEqual({
+      objectId: 40,
+      actions: [colorlessAction, anyColorAction],
+    });
+  });
+
+  it("opens the ability picker when a convoke creature can pay colored or generic mana", () => {
+    const helper = makeObject({
+      id: 41,
+      name: "Conclave Helper",
+      color: ["Green"],
+      base_color: ["Green"],
+    });
+
+    const gameState = {
+      ...makeState(),
+      objects: { 41: helper },
+      battlefield: [41],
+    } as unknown as GameState;
+    const genericAction = {
+      type: "TapForConvoke",
+      data: { object_id: 41, mana_type: "Colorless" },
+    } as const;
+    const greenAction = {
+      type: "TapForConvoke",
+      data: { object_id: 41, mana_type: "Green" },
+    } as const;
+
+    useGameStore.setState({
+      gameState,
+      waitingFor: {
+        type: "ManaPayment",
+        data: { player: 0, convoke_mode: "Convoke" },
+      },
+      legalActions: [genericAction, greenAction],
+      legalActionsByObject: { 41: [genericAction, greenAction] },
+      spellCosts: {},
+    });
+
+    const { container } = render(
+      <BoardInteractionContext.Provider
+        value={{
+          activatableObjectIds: new Set(),
+          committedAttackerIds: new Set(),
+          incomingAttackerCounts: new Map(),
+          manaTappableObjectIds: new Set([41]),
+          selectableManaCostCreatureIds: new Set(),
+          undoableTapObjectIds: new Set(),
+          validAttackerIds: new Set(),
+          validTargetObjectIds: new Set(),
+        }}
+      >
+        <PermanentCard objectId={41} />
+      </BoardInteractionContext.Provider>,
+    );
+
+    fireEvent.click(container.querySelector('[data-object-id="41"]') as HTMLElement);
+
+    expect(dispatchAction).not.toHaveBeenCalled();
+    expect(useUiStore.getState().pendingAbilityChoice).toEqual({
+      objectId: 41,
+      actions: [genericAction, greenAction],
+    });
+  });
+
   it("renders face-down permanents with the card back in full-card mode", () => {
     const faceDownPermanent = makeObject({
       id: 54,

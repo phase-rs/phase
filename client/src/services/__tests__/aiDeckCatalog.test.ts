@@ -163,7 +163,44 @@ describe("buildLegalAiDeckCatalog", () => {
     );
   });
 
-  it("exposes Commander precons from shared catalog metadata without engine compatibility", async () => {
+  it("surfaces null bracket on user-saved decks without a tag", async () => {
+    saveDeck("Untagged Commander", deck("Sol Ring", "Atraxa, Praetors' Voice"));
+
+    const catalog = await buildLegalAiDeckCatalog({
+      selectedFormat: "Commander",
+      selectedMatchType: "Bo1",
+    });
+
+    const candidate = catalog.candidates.find((c) => c.id === "saved:Untagged Commander");
+    expect(candidate?.bracket).toBeNull();
+  });
+
+  it("surfaces the persisted bracket on user-saved decks", async () => {
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + "Tagged Commander",
+      JSON.stringify({
+        main: [{ count: 1, name: "Sol Ring" }],
+        sideboard: [],
+        commander: ["Atraxa, Praetors' Voice"],
+        bracket: 4,
+      }),
+    );
+
+    const catalog = await buildLegalAiDeckCatalog({
+      selectedFormat: "Commander",
+      selectedMatchType: "Bo1",
+    });
+
+    const candidate = catalog.candidates.find((c) => c.id === "saved:Tagged Commander");
+    expect(candidate?.bracket).toBe(4);
+  });
+
+  it("validates Commander precons through the engine's compatibility check (banned cards filtered)", async () => {
+    // CR 903 + Commander Rules Committee ban list: precons MUST be validated.
+    // WotC ships precons whose contents are later banned (Jeweled Lotus,
+    // Mana Crypt, Dockside Extortionist in 2024+) without curating the
+    // precon lists, so a precon short-circuit lets AI opponents auto-pick
+    // banned-card decks. The catalog has no rules authority — the engine does.
     vi.mocked(loadPreconDeckMap).mockResolvedValue({
       secrets: {
         code: "SOS",
@@ -182,15 +219,47 @@ describe("buildLegalAiDeckCatalog", () => {
       },
     });
 
-    const callsBefore = vi.mocked(evaluateDeckCompatibility).mock.calls.length;
     const catalog = await buildLegalAiDeckCatalog({
       selectedFormat: "Commander",
       selectedMatchType: "Bo1",
     });
     const ids = catalog.candidates.map((candidate) => candidate.id);
 
+    // Legal precon kept; non-Commander (`type: "Starter"`) filtered before
+    // the engine check by `isCommanderPreconDeck` in `deckCatalog`.
     expect(ids).toContain("precon:secrets");
     expect(ids).not.toContain("precon:starter");
-    expect(vi.mocked(evaluateDeckCompatibility).mock.calls).toHaveLength(callsBefore);
+
+    // The legal precon's contents are routed through `evaluateDeckCompatibility`
+    // — proving the engine ban-list check is consulted for precons.
+    expect(evaluateDeckCompatibility).toHaveBeenCalledWith(
+      expect.objectContaining({ commander: ["Zimone, Mystery Unraveler"] }),
+      { selectedFormat: "Commander", selectedMatchType: "Bo1", summaryOnly: true },
+    );
+  });
+
+  it("filters out precons that contain banned/illegal cards", async () => {
+    // Simulate a precon whose main board includes a card the engine flags
+    // as banned in the selected format. This is exactly the user-reported
+    // path: a 4-player Commander game where an AI seat would otherwise
+    // pick a precon containing a banned card.
+    vi.mocked(loadPreconDeckMap).mockResolvedValue({
+      tainted: {
+        code: "TNT",
+        name: "Tainted Precon",
+        type: "Commander Deck",
+        coveragePct: 100,
+        mainBoard: deck("Illegal Starter").main,
+        commander: [{ count: 1, name: "Some Commander" }],
+      },
+    });
+
+    const catalog = await buildLegalAiDeckCatalog({
+      selectedFormat: "Commander",
+      selectedMatchType: "Bo1",
+    });
+    const ids = catalog.candidates.map((candidate) => candidate.id);
+
+    expect(ids).not.toContain("precon:tainted");
   });
 });

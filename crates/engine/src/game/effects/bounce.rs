@@ -4,7 +4,7 @@ use crate::types::ability::{
     TypedFilter,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{CastingVariant, GameState, StackEntryKind};
 use crate::types::zones::Zone;
 
 fn filter_uses_scoped_player(filter: &TargetFilter) -> bool {
@@ -16,6 +16,18 @@ fn filter_uses_scoped_player(filter: &TargetFilter) -> bool {
         TargetFilter::Not { filter } => filter_uses_scoped_player(filter),
         _ => false,
     }
+}
+
+fn stack_spell_casting_variant(
+    state: &GameState,
+    obj_id: crate::types::identifiers::ObjectId,
+) -> Option<CastingVariant> {
+    state.stack.iter().find_map(|entry| match &entry.kind {
+        StackEntryKind::Spell {
+            casting_variant, ..
+        } if entry.id == obj_id => Some(*casting_variant),
+        _ => None,
+    })
 }
 
 /// CR 400.6: Zone change — return target object to the destination zone
@@ -86,10 +98,23 @@ pub fn resolve(
         // the destination zone. Battlefield is the usual case; graveyard covers
         // both LTB self-return triggers (Rancor class) and explicit
         // graveyard-targeted return spells (Treasured Find class — `Card` typed
-        // filter scoped to graveyard via `InZone` property).
+        // filter scoped to graveyard via `InZone` property). CR 112.1 also lets
+        // return-to-hand effects move targeted spell objects off the stack;
+        // activated and triggered ability stack entries are not cards and are
+        // intentionally excluded here.
         let current_zone = state.objects.get(&obj_id).map(|o| o.zone);
         if matches!(current_zone, Some(Zone::Battlefield | Zone::Graveyard)) {
             zones::move_to_zone(state, obj_id, destination, events);
+        } else if current_zone == Some(Zone::Stack) && destination == Zone::Hand {
+            if let Some(casting_variant) = stack_spell_casting_variant(state, obj_id) {
+                let stack_destination =
+                    if casting_variant.exiles_when_leaving_stack_for_any_reason() {
+                        Zone::Exile
+                    } else {
+                        destination
+                    };
+                zones::move_to_zone(state, obj_id, stack_destination, events);
+            }
         }
     }
 
@@ -233,6 +258,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::card_type::CoreType;
+    use crate::types::game_state::{CastingVariant, StackEntry};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
 
@@ -262,6 +288,163 @@ mod tests {
 
         assert!(!state.battlefield.contains(&obj_id));
         assert!(state.players[1].hand.contains(&obj_id));
+    }
+
+    #[test]
+    fn test_bounce_moves_stack_spell_to_hand() {
+        let mut state = GameState::new_two_player(42);
+        let spell_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Spell".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let ability = ResolvedAbility::new(
+            Effect::Bounce {
+                target: TargetFilter::StackSpell,
+                destination: None,
+            },
+            vec![TargetRef::Object(spell_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.stack.is_empty());
+        assert_eq!(state.objects.get(&spell_id).unwrap().zone, Zone::Hand);
+        assert!(state.players[1].hand.contains(&spell_id));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Stack),
+                to: Zone::Hand,
+                ..
+            } if *object_id == spell_id
+        )));
+    }
+
+    #[test]
+    fn test_bounce_exiles_flashback_stack_spell() {
+        let mut state = GameState::new_two_player(42);
+        let spell_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Flashback Spell".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Flashback,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let ability = ResolvedAbility::new(
+            Effect::Bounce {
+                target: TargetFilter::StackSpell,
+                destination: None,
+            },
+            vec![TargetRef::Object(spell_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.stack.is_empty());
+        assert_eq!(state.objects.get(&spell_id).unwrap().zone, Zone::Exile);
+        assert!(state.exile.contains(&spell_id));
+        assert!(!state.players[1].hand.contains(&spell_id));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Stack),
+                to: Zone::Exile,
+                ..
+            } if *object_id == spell_id
+        )));
+    }
+
+    #[test]
+    fn test_bounce_does_not_move_stack_ability_to_hand() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Ability Source".to_string(),
+            Zone::Battlefield,
+        );
+        let stack_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Stack Ability".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(StackEntry {
+            id: stack_id,
+            source_id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::Draw {
+                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                    vec![],
+                    source_id,
+                    PlayerId(1),
+                )),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: "Ability Source".to_string(),
+            },
+        });
+
+        let ability = ResolvedAbility::new(
+            Effect::Bounce {
+                target: TargetFilter::StackAbility { controller: None },
+                destination: None,
+            },
+            vec![TargetRef::Object(stack_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.stack.len(), 1);
+        assert_eq!(state.stack[0].id, stack_id);
+        assert_eq!(state.objects.get(&stack_id).unwrap().zone, Zone::Stack);
+        assert!(!state.players[1].hand.contains(&stack_id));
     }
 
     #[test]

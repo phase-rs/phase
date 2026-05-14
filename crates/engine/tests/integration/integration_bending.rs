@@ -12,7 +12,9 @@ use engine::types::events::{BendingType, GameEvent};
 use engine::types::game_state::{CastingVariant, ConvokeMode, GameState, PendingCast, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::Keyword;
-use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
+use engine::types::mana::{
+    ManaColor, ManaCost, ManaCostShard, ManaRestriction, ManaType, ManaUnit,
+};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -408,7 +410,7 @@ fn test_ai_convoke_ignores_summoning_sickness() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_convoke_white_creature_produces_white() {
+fn test_convoke_white_creature_pays_white() {
     let mut scenario = GameScenario::default();
     scenario.at_phase(Phase::PreCombatMain);
     let creature_id = scenario.add_creature(P0, "White Knight", 2, 2).id();
@@ -432,14 +434,18 @@ fn test_convoke_white_creature_produces_white() {
         })
         .unwrap();
 
-    // Should produce white mana
+    // Convoke pays without producing mana.
     assert!(
-        result.events.iter().any(|e| matches!(
-            e,
-            GameEvent::ManaAdded { mana_type, .. } if *mana_type == ManaType::White
-        )),
-        "Expected White mana from convoke with white creature"
+        result
+            .events
+            .iter()
+            .all(|e| !matches!(e, GameEvent::ManaAdded { .. })),
+        "Convoke should not produce mana"
     );
+    assert!(runner.state().players[0].mana_pool.mana.iter().any(|unit| {
+        unit.color == ManaType::White
+            && unit.restrictions.contains(&ManaRestriction::ConvokePayment)
+    }));
 
     // Should NOT emit Waterbend event
     assert!(
@@ -452,7 +458,7 @@ fn test_convoke_white_creature_produces_white() {
 }
 
 #[test]
-fn test_convoke_multicolor_creature_accepts_either_color() {
+fn test_convoke_multicolor_creature_accepts_either_color_payment() {
     let mut scenario = GameScenario::default();
     scenario.at_phase(Phase::PreCombatMain);
     let creature_id = scenario.add_creature(P0, "Simic Hybrid", 2, 2).id();
@@ -476,12 +482,16 @@ fn test_convoke_multicolor_creature_accepts_either_color() {
         .unwrap();
 
     assert!(
-        result.events.iter().any(|e| matches!(
-            e,
-            GameEvent::ManaAdded { mana_type, .. } if *mana_type == ManaType::Green
-        )),
-        "Expected Green mana from convoke with W/G creature"
+        result
+            .events
+            .iter()
+            .all(|e| !matches!(e, GameEvent::ManaAdded { .. })),
+        "Convoke should not produce mana"
     );
+    assert!(runner.state().players[0].mana_pool.mana.iter().any(|unit| {
+        unit.color == ManaType::Green
+            && unit.restrictions.contains(&ManaRestriction::ConvokePayment)
+    }));
 }
 
 #[test]
@@ -532,12 +542,16 @@ fn test_convoke_colorless_always_valid() {
         .unwrap();
 
     assert!(
-        result.events.iter().any(|e| matches!(
-            e,
-            GameEvent::ManaAdded { mana_type, .. } if *mana_type == ManaType::Colorless
-        )),
-        "Colorless creature should produce colorless mana for generic"
+        result
+            .events
+            .iter()
+            .all(|e| !matches!(e, GameEvent::ManaAdded { .. })),
+        "Convoke should not produce mana"
     );
+    assert!(runner.state().players[0].mana_pool.mana.iter().any(|unit| {
+        unit.color == ManaType::Colorless
+            && unit.restrictions.contains(&ManaRestriction::ConvokePayment)
+    }));
 }
 
 #[test]

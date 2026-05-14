@@ -12,9 +12,15 @@ import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 import { computePTDisplay, formatCounterType, formatTypeLine, toRoman } from "../../viewmodel/cardProps.ts";
 import {
   getKeywordDisplayText,
+  getKeywordName,
   isGrantedKeyword,
   sortKeywords,
 } from "../../viewmodel/keywordProps.ts";
+import {
+  buildGrantedKeywordSources,
+  buildPTSources,
+  formatPTDelta,
+} from "../../viewmodel/attribution.ts";
 
 let lastPointerPosition: { x: number; y: number } | null = null;
 
@@ -563,6 +569,19 @@ function CardInfoPanel({ obj, altAvailable }: { obj: GameObject; altAvailable: b
     obj.color.some((c, i) => c !== obj.base_color[i]);
   const rulings = useCardRulings(obj.name);
 
+  // Attribution: which permanent or transient effect granted each layered
+  // characteristic. The engine writes these refs into `state.attribution`
+  // during layer application; the FE only dereferences. See
+  // `viewmodel/attribution.ts` for the resolution logic.
+  const attribution = useGameStore((s) => s.gameState?.attribution?.[String(obj.id)]);
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const transientContinuousEffects = useGameStore(
+    (s) => s.gameState?.transient_continuous_effects,
+  );
+  const deref = { objects, transientContinuousEffects };
+  const keywordSources = buildGrantedKeywordSources(attribution, obj.id, deref);
+  const ptSources = buildPTSources(attribution, obj.id, deref);
+
   return (
     <div className="relative w-full border-t border-gray-600 bg-gray-900/95 px-3 py-2 text-xs text-gray-200">
       {altAvailable && (
@@ -586,14 +605,23 @@ function CardInfoPanel({ obj, altAvailable }: { obj: GameObject; altAvailable: b
       {/* Keywords */}
       {keywords.length > 0 && (
         <div className="mt-1 flex flex-wrap gap-x-2 gap-y-0.5">
-          {keywords.map((kw, i) => (
-            <span
-              key={i}
-              className={isGrantedKeyword(kw, obj.base_keywords) ? "text-indigo-300" : "text-white"}
-            >
-              {getKeywordDisplayText(kw)}
-            </span>
-          ))}
+          {keywords.map((kw, i) => {
+            const granted = isGrantedKeyword(kw, obj.base_keywords);
+            const source = keywordSources.get(getKeywordName(kw));
+            return (
+              <span
+                key={i}
+                className={granted ? "text-indigo-300" : "text-white"}
+              >
+                {getKeywordDisplayText(kw)}
+                {source && (
+                  <span className="ml-1 text-[10px] text-indigo-400/80">
+                    (from {source})
+                  </span>
+                )}
+              </span>
+            );
+          })}
         </div>
       )}
 
@@ -623,6 +651,15 @@ function CardInfoPanel({ obj, altAvailable }: { obj: GameObject; altAvailable: b
           )}
           {obj.damage_marked > 0 && (
             <span className="ml-2 text-red-400">Damage: {obj.damage_marked}</span>
+          )}
+          {ptSources.length > 0 && (
+            <ul className="mt-0.5 ml-1 space-y-px text-[10px] text-indigo-300/90">
+              {ptSources.map((c) => (
+                <li key={`${c.sourceName}-${c.deltaPower}-${c.deltaToughness}`}>
+                  {formatPTDelta(c)} from {c.sourceName}
+                </li>
+              ))}
+            </ul>
           )}
         </div>
       )}

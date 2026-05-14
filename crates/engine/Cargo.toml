@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 cli = ["tracing-subscriber"]
-audit = ["toml"]
+audit = []
 forge = []
 proptest = ["dep:proptest"]
 
@@ -19,7 +19,7 @@ rand_chacha = "0.9"
 indexmap = { version = "2", features = ["serde"] }
 petgraph = "0.6"
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
-toml = { version = "0.8", optional = true }
+toml = "0.8"
 proptest = { version = "1", optional = true }
 
 nom = "8.0"
@@ -52,6 +52,11 @@ test = false
 [[bin]]
 name = "card-data-validate"
 path = "src/bin/card_data_validate.rs"
+test = false
+
+[[bin]]
+name = "tokens-gen"
+path = "src/bin/tokens_gen.rs"
 test = false
 
 [dev-dependencies]
