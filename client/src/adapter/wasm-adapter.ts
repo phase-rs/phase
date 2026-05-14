@@ -9,6 +9,7 @@ import type {
   PlayerId,
   SubmitResult,
   ViewerSnapshot,
+  WaitingFor,
 } from "./types";
 import { AdapterError, AdapterErrorCode, isStateLostMessage } from "./types";
 import { EngineWorkerClient } from "./engine-worker-client";
@@ -240,7 +241,7 @@ export class WasmAdapter implements EngineAdapter {
   async getAiAction(
     difficulty: string,
     playerId: number,
-    waitingForType?: string,
+    waitingForType?: WaitingFor["type"],
   ): Promise<GameAction | null> {
     this.assertInitialized();
 
@@ -493,7 +494,7 @@ interface MainThreadFallback {
   getLegalActions(): Promise<LegalActionsResult>;
   getLegalActionsForViewer(viewerId: number): Promise<LegalActionsResult>;
   getViewerSnapshot(viewerId: number): Promise<ViewerSnapshot>;
-  getAiAction(difficulty: string, playerId: number, waitingForType?: string): Promise<GameAction | null>;
+  getAiAction(difficulty: string, playerId: number, waitingForType?: WaitingFor["type"]): Promise<GameAction | null>;
   restoreState(stateJson: string): Promise<void>;
   resumeMultiplayerHostState(stateJson: string): void;
   setMultiplayerMode(enabled: boolean): void;

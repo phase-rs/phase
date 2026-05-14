@@ -55,7 +55,7 @@ import { ReplacementModal } from "../components/modal/ReplacementModal.tsx";
 import { BattleProtectorModal } from "../components/modal/BattleProtectorModal.tsx";
 import { TributeModal } from "../components/modal/TributeModal.tsx";
 import { CombatTaxModal } from "../components/modal/CombatTaxModal.tsx";
-import { DialogHost } from "../components/modal/DialogHost.tsx";
+import { CLICK_THROUGH_WAITING_FOR_TYPES, DialogHost } from "../components/modal/DialogHost.tsx";
 import { EvokeCostModal } from "../components/modal/EvokeCostModal.tsx";
 import { BestowCostModal } from "../components/modal/BestowCostModal.tsx";
 import { OverloadCostModal } from "../components/modal/OverloadCostModal.tsx";
@@ -1188,7 +1188,7 @@ function GamePageContent({
           new WaitingFor so a fresh prompt is always visible. */}
       <DialogHost>
         {waitingFor != null &&
-          (["TargetSelection", "TriggerTargetSelection", "CopyTargetChoice", "CopyRetarget", "ExploreChoice", "TapCreaturesForManaAbility", "TapCreaturesForSpellCost"] as const).includes(waitingFor.type as never) &&
+          CLICK_THROUGH_WAITING_FOR_TYPES.has(waitingFor.type) &&
           canActForWaitingState && <TargetingOverlay />}
         {waitingFor?.type === "ManaPayment" &&
           canActForWaitingState && <ManaPaymentUI />}
@@ -1469,13 +1469,14 @@ function MulliganDecisionPrompt({
   const objects = useGameStore((s) => s.gameState?.objects);
   const legalActions = useGameStore((s) => s.legalActions);
   const hoverProps = useInspectHoverProps();
-  const [buttonsVisible, setButtonsVisible] = useState(false);
-
+  // `animationDone` is the raw signal from Framer's `onAnimationComplete`
+  // on the last card. `buttonsVisible` is the derived predicate — buttons
+  // show once card-deal animations finish *or* immediately when the hand
+  // is empty and there's nothing to animate (mulligan-to-zero path), so the
+  // last-card callback never fires.
+  const [animationDone, setAnimationDone] = useState(false);
   const handCount = player?.hand.length ?? 0;
-  // Guard: if the hand has no cards to animate, buttons would never appear via onAnimationComplete
-  useEffect(() => {
-    if (handCount === 0) setButtonsVisible(true);
-  }, [handCount]);
+  const buttonsVisible = animationDone || handCount === 0;
 
   // Engine rule (CR 103.5 + 103.5c): bottom_count_on_keep = mulligan_count - (free_first ? 1 : 0).
   // The *next* mulligan is "free" iff applying that formula at mulligan_count + 1 yields 0.
@@ -1611,7 +1612,7 @@ function MulliganDecisionPrompt({
                 }}
                 whileHover={{ scale: 1.06, y: -12 }}
                 onAnimationComplete={() => {
-                  if (index === handObjects.length - 1) setButtonsVisible(true);
+                  if (index === handObjects.length - 1) setAnimationDone(true);
                 }}
                 {...hoverProps(obj.id)}
               >
