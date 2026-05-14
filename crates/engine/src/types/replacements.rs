@@ -80,6 +80,14 @@ pub enum ReplacementEvent {
     GameLoss,
     GameWin,
     Learn,
+    /// CR 703.4q + CR 614.1a + CR 614.6: Replaces the CR 703.4q "any unspent
+    /// mana in a player's mana pool empties" event at end of each step or
+    /// phase. The replacement-effect family covers two leaf actions:
+    /// `Retain` (CR 614.6 — the loss event is replaced with nothing, e.g.
+    /// Upwelling, Omnath Locus of Mana) and `Transform(_)` (CR 614.1a —
+    /// the loss event is replaced with a recolor, e.g. Horizon Stone,
+    /// Kruphix). Matched against `ProposedEvent::EmptyManaPool` via the
+    /// `empty_mana_pool_matcher` registered in `build_replacement_registry`.
     LoseMana,
     PlanarDiceResult,
     Planeswalk,

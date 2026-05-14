@@ -305,6 +305,7 @@ mod tests {
             solve_condition: None,
             parse_warnings: vec![],
             brawl_commander: false,
+            is_commander: false,
             metadata: Default::default(),
             rarities: Default::default(),
         }

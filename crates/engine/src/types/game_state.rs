@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use rand::SeedableRng;
@@ -20,7 +20,7 @@ use super::events::{GameEvent, PlayerActionKind};
 use super::format::FormatConfig;
 use super::identifiers::{CardId, ObjectId, TrackedSetId};
 use super::keywords::{Keyword, KeywordKind};
-use super::mana::{ManaColor, ManaCost, ManaType};
+use super::mana::{ManaColor, ManaCost, ManaType, StepEndManaAction};
 use super::match_config::{MatchConfig, MatchPhase, MatchScore};
 use super::phase::Phase;
 use super::player::{Player, PlayerId};
@@ -3404,6 +3404,24 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_damage_replacements: Vec<crate::types::ability::ReplacementDefinition>,
 
+    /// CR 703.4q + CR 616.1: Game-state-level pending step-end mana handlers,
+    /// scanned at the start of `drain_pending_phase_transition_progress` for
+    /// each player in APNAP order. Indexed by `ReplacementId::index` with the
+    /// sentinel source `ObjectId(0)` (mirrors `pending_damage_replacements`).
+    /// Populated and drained per-player; never serialized in a paused state
+    /// outside the engine's own phase-transition drain.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_step_end_mana_handlers: Vec<StepEndManaScanEntry>,
+
+    /// CR 500.1 + CR 616.1: Per-phase APNAP-queue progress for resolving
+    /// step-end empty-mana events across players. Set in `enter_phase` when
+    /// transitioning between phases; cleared when the queue empties and
+    /// `finish_enter_phase` runs. Parallel to `pending_replacement` /
+    /// `pending_continuation` as a resume primitive across pipeline pauses
+    /// (CR 616.1e iteration).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_phase_transition_progress: Option<PhaseTransitionProgress>,
+
     /// Transient: set by stack.rs before resolving a triggered ability, cleared after.
     /// Used by event-context TargetFilter variants to resolve trigger event data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3484,6 +3502,38 @@ pub struct PendingReplacement {
     /// `candidates` has exactly one entry (the real replacement); decline is synthetic.
     #[serde(default)]
     pub is_optional: bool,
+}
+
+/// CR 703.4q + CR 616.1 + CR 614.1a: One step-end mana handler entry pending
+/// resolution for the current phase transition. Built from the printed-static
+/// and transient-continuous-effect scans at the start of each per-player drain,
+/// and addressed by the replacement pipeline via `ReplacementId { source:
+/// ObjectId(0), index }`.
+///
+/// `description` is the player-facing string surfaced in `WaitingFor::
+/// ReplacementChoice::candidate_descriptions` when multiple handlers apply to
+/// the same emptying event and CR 616.1 requires the affected player to choose
+/// ordering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepEndManaScanEntry {
+    pub source: ObjectId,
+    pub controller: PlayerId,
+    pub filter: Option<ManaColor>,
+    pub action: StepEndManaAction,
+    pub description: String,
+}
+
+/// CR 500.1 + CR 616.1: Resume primitive for the per-phase APNAP-queue of
+/// step-end empty-mana events. Drained by
+/// `drain_pending_phase_transition_progress` (commit 2). When all players are
+/// processed (queue empties), the drain calls `finish_enter_phase` to complete
+/// the phase entry (priority reset, LKI clear, `PhaseChanged` emission).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhaseTransitionProgress {
+    pub remaining_players: VecDeque<PlayerId>,
+    pub next_phase: Phase,
+    pub in_combat: bool,
+    pub entering_cleanup: bool,
 }
 
 /// Context stored when a permanent spell's ETB replacement needs a player choice
@@ -3715,6 +3765,8 @@ impl GameState {
             city_blessing: HashSet::new(),
             restrictions: Vec::new(),
             pending_damage_replacements: Vec::new(),
+            pending_step_end_mana_handlers: Vec::new(),
+            pending_phase_transition_progress: None,
             current_trigger_event: None,
             current_trigger_events: Vec::new(),
             stack_trigger_event_batches: HashMap::new(),

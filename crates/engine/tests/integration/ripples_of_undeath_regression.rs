@@ -93,8 +93,9 @@ fn ripples_of_undeath_triggers_at_precombat_main_phase() {
     // Drive auto_advance from Untap → Upkeep → Draw → PreCombatMain. The
     // PreCombatMain arm calls `process_phase_triggers`, which must land
     // Ripples's Mill ability on the stack.
-    let mut events = Vec::new();
-    let waiting = engine::game::turns::auto_advance(runner.state_mut(), &mut events);
+    // CR 117.1c: priority opens during Upkeep + Draw — the helper drains
+    // them after `auto_advance` to land in PreCombatMain.
+    let waiting = runner.auto_advance_to_main_phase();
 
     assert_eq!(runner.state().phase, Phase::PreCombatMain);
     assert!(
@@ -153,8 +154,8 @@ fn ripples_of_undeath_does_not_trigger_on_opponents_turn() {
         }
     }
 
-    let mut events = Vec::new();
-    let _waiting = engine::game::turns::auto_advance(runner.state_mut(), &mut events);
+    // CR 117.1c: drain Upkeep + Draw priority via the helper to reach Main.
+    let _waiting = runner.auto_advance_to_main_phase();
 
     assert_eq!(runner.state().phase, Phase::PreCombatMain);
     assert!(
@@ -321,8 +322,8 @@ fn ripples_of_undeath_resolves_mill_three_cards() {
 
     seed_library(&mut runner, 5);
 
-    let mut events = Vec::new();
-    let _waiting = engine::game::turns::auto_advance(runner.state_mut(), &mut events);
+    // CR 117.1c: drain Upkeep + Draw priority via the helper to reach Main.
+    let _waiting = runner.auto_advance_to_main_phase();
 
     assert_eq!(runner.state().phase, Phase::PreCombatMain);
     assert_eq!(
@@ -383,8 +384,8 @@ fn ripples_of_undeath_decline_optional_keeps_milled_cards_in_graveyard() {
 
     seed_library(&mut runner, 5);
 
-    let mut events = Vec::new();
-    let _waiting = engine::game::turns::auto_advance(runner.state_mut(), &mut events);
+    // CR 117.1c: drain Upkeep + Draw priority via the helper to reach Main.
+    let _waiting = runner.auto_advance_to_main_phase();
 
     // Resolve the trigger — Mill 3 fires.
     let _ = runner.act(GameAction::PassPriority);

@@ -2,8 +2,10 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use super::events::GameEvent;
 use super::identifiers::ObjectId;
 use super::keywords::{Keyword, KeywordKind};
+use super::player::PlayerId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ManaColor {
@@ -79,10 +81,18 @@ impl From<ManaColor> for ManaType {
 /// extending this enum. Likewise, any effect that fires at a non-step-end
 /// time (e.g., on cost payment, on damage) does not belong here.
 ///
-/// See `game::static_abilities::player_step_end_mana_handlers` for the
-/// forward-compatible scan over both `Retain` and `Transform` actions: the
-/// transient-effect path picks up spell-installed handlers of either action
-/// today (dormant for `Transform`, since no current spell installs one).
+/// Runtime path: handlers are scanned per-player by
+/// `game::turns::scan_step_end_mana_handlers` (combining
+/// `battlefield_active_statics` with `transient_continuous_effects` keyed on
+/// `SpecificPlayer`) and surface as `StepEndManaScanEntry` rows in
+/// `state.pending_step_end_mana_handlers`. The replacement pipeline
+/// (`empty_mana_pool_matcher` + the Path-A carve-out
+/// `apply_empty_mana_pool_replacement` in `game::replacement`) flips
+/// per-unit dispositions via the CR 616.1 player-choice surface; the final
+/// pool mutation runs in `apply_empty_mana_pool_decisions`. The TCE
+/// scan accepts both `Retain` and `Transform` arms — `Transform` is
+/// forward-compatible for a future spell-installed transformation rider
+/// (today only the printed-static path produces it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StepEndManaAction {
     Retain,
@@ -98,14 +108,36 @@ impl std::fmt::Display for StepEndManaAction {
     }
 }
 
-/// CR 703.4q runtime carrier: a single step-end mana handler that applies to a
-/// player. Built by `static_abilities::player_step_end_mana_handlers` from the
-/// printed-static and transient-continuous-effect scans, then consumed by
-/// `ManaPool::clear_step_transition`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StepEndManaHandler {
-    pub filter: Option<ManaColor>,
-    pub action: StepEndManaAction,
+/// CR 614.1a + CR 703.4q: Per-unit decision for the CR 703.4q step-end empty
+/// event. Each entry in `ProposedEvent::EmptyManaPool::units` describes one
+/// `ManaUnit` in the affected player's pool and how the replacement pipeline
+/// has chosen to resolve it.
+///
+/// `pool_index` is the unit's position in `ManaPool::mana` at the time the
+/// event was constructed. The disposition walker (commit 2) iterates in
+/// descending index order so removals don't invalidate later indices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnitDecision {
+    pub pool_index: usize,
+    pub color: ManaType,
+    pub disposition: UnitDisposition,
+}
+
+/// CR 614.1a + CR 614.6 + CR 703.4q: How a single unit in a step-end empty
+/// event will be resolved after the replacement pipeline finishes.
+///
+/// - `Drop`: default — the unit empties per CR 703.4q. A handler matching this
+///   unit may flip the disposition to `Keep` (CR 614.6) or `Recolor(_)`
+///   (CR 614.1a).
+/// - `Keep`: a `StepEndManaAction::Retain` handler has applied; the unit stays
+///   in the pool.
+/// - `Recolor(_)`: a `StepEndManaAction::Transform(_)` handler has applied; the
+///   unit stays in the pool with its color rewritten to the target type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UnitDisposition {
+    Drop,
+    Keep,
+    Recolor(ManaType),
 }
 
 /// Display-layer projection of `ManaProduction` — typed pip descriptors the
@@ -855,80 +887,27 @@ impl ManaPool {
         self.mana.clear();
     }
 
-    /// CR 106.4 + CR 500.5 + CR 614.1a + CR 703.4q: Clear mana on phase
-    /// transition. Each unit is matched against the active step-end handlers
-    /// for the affected player:
+    /// CR 500.5 + CR 614.6 + CR 703.4q: Drop only expiry-bound units whose
+    /// explicit rule fires on this transition. Runs FIRST during per-player
+    /// drain in `drain_pending_phase_transition_progress`, before the
+    /// CR 703.4q "empty unspent mana" event is constructed for the
+    /// replacement pipeline. Preserves H2 invariant (commit `e92fd3e19`):
+    /// expiry-bound mana leaves the pool through its own expiry rule, not
+    /// through the step-end empty event — handlers cannot intercept it.
     ///
-    /// 1. Expiry-bound units (`EndOfTurn`, `EndOfCombat`) follow their
-    ///    explicit expiry rule and bypass step-end handlers — the handlers
-    ///    only react to the unbounded step-end empty event of CR 703.4q.
-    ///    Retention and transformation are symmetric on this eligibility
-    ///    (CR 614.6): both are replacement effects on the same loss event,
-    ///    and expiry-bound mana is leaving the pool through a different
-    ///    rule (its own expiry), so neither handler intercepts it. Without
-    ///    this guard a `Transform(_)` handler would otherwise rewrite
-    ///    temporary mana into permanent at cleanup.
-    /// 2. Non-expiry units consult the per-player handler list. The first
-    ///    handler whose `filter` matches wins:
-    ///    - `Retain` keeps the unit (CR 614.6 — the loss event is replaced
-    ///      with nothing).
-    ///    - `Transform(type)` recolors the unit (CR 614.1a — the loss event
-    ///      is replaced with a recolor; the unit returns to the unrestricted
-    ///      pool, since the loss-triggering condition no longer holds).
-    /// 3. Units with no matching handler empty as usual.
-    ///
-    /// CR 616.1 (verified — known deferral, NOT compliance): when two or
-    /// more replacement effects attempt to modify the same event, the
-    /// affected player chooses one to apply. This implementation picks the
-    /// first handler in `step_end_handlers` whose `filter` matches the
-    /// unit — that is iteration-order-wins on
-    /// `player_step_end_mana_handlers`, not player-choice. For any single
-    /// unit that two handlers can replace, the engine MUST surface the
-    /// choice to the affected player; today it does not.
-    ///
-    /// Why this is acceptable as an interim state: every printed
-    /// transformation card pins a distinct color (Horizon Stone /
-    /// Kruphix → colorless, Omnath, Locus of All → black, Ozai → red) and
-    /// the retention class subsumes the transformation class for any
-    /// rational player (Retain is strictly at least as good as Transform on
-    /// any unit, and an unfiltered Retain handler is universally preferred
-    /// over an unfiltered Transform handler). For the matched-handler
-    /// conflicts that exist on the current corpus, the rational choice
-    /// happens to be the iteration order, so first-match-wins produces the
-    /// same observable outcome as CR-correct player-choice ordering — but
-    /// the equivalence is incidental, not architectural.
-    ///
-    /// Fix path: when a card prints a non-rational-default transformation
-    /// or a second-color transform handler that overlaps an existing
-    /// retention filter, route the conflict through the
-    /// engine's player-choice replacement-effect surface (the same
-    /// channel used for CR 616.1 ETB-tapped vs. shock-land ordering)
-    /// before relaxing this comment.
-    pub fn clear_step_transition(
-        &mut self,
-        in_combat: bool,
-        entering_cleanup: bool,
-        step_end_handlers: &[StepEndManaHandler],
-    ) {
-        self.mana.retain_mut(|u| {
-            match u.expiry {
-                Some(ManaExpiry::EndOfTurn) => return !entering_cleanup,
-                Some(ManaExpiry::EndOfCombat) => return in_combat,
-                None => {}
-            }
-            // CR 703.4q event candidate — consult step-end handlers in order.
-            let matching = step_end_handlers.iter().find(|h| match h.filter {
-                None => true,
-                Some(c) => ManaType::from(c) == u.color,
-            });
-            match matching.map(|h| h.action) {
-                Some(StepEndManaAction::Retain) => true,
-                Some(StepEndManaAction::Transform(new_type)) => {
-                    u.color = new_type;
-                    true
-                }
-                None => false,
-            }
+    /// - `EndOfTurn`: drops at cleanup only.
+    /// - `EndOfCombat`: drops when leaving combat (i.e., `in_combat` false).
+    /// - `None`: untouched — passed through to the replacement pipeline as
+    ///   a `UnitDecision { disposition: Drop }`, where step-end mana
+    ///   handlers (Upwelling, Horizon Stone, Kruphix, …) may flip the
+    ///   disposition to `Keep` (CR 614.6) or `Recolor(_)` (CR 614.1a). The
+    ///   actual emptying / recoloring of `None`-expiry units happens later
+    ///   in `apply_empty_mana_pool_decisions` after the pipeline resolves.
+    pub fn clear_expiring_at_step_end(&mut self, in_combat: bool, entering_cleanup: bool) {
+        self.mana.retain(|u| match u.expiry {
+            Some(ManaExpiry::EndOfTurn) => !entering_cleanup,
+            Some(ManaExpiry::EndOfCombat) => in_combat,
+            None => true,
         });
     }
 
@@ -1000,6 +979,63 @@ impl ManaPool {
             return Some(self.mana.swap_remove(pos));
         }
         None
+    }
+}
+
+/// CR 614.1a + CR 614.6 + CR 703.4q: Apply per-unit dispositions decided by
+/// the replacement pipeline to a player's mana pool. Single authority for
+/// the disposition→pool-mutation walk; called by
+/// `drain_pending_phase_transition_progress` and by the
+/// `EmptyManaPool` resume arm of `handle_replacement_choice`.
+///
+/// Walks `units` in descending `pool_index` order so removals do not
+/// invalidate later indices. Disposition resolution:
+/// - `Drop`: remove the unit; emit `GameEvent::ManaPoolEmptied`.
+/// - `Keep`: leave the unit in place (a `Retain` handler matched per CR 614.6).
+/// - `Recolor(t)`: mutate `unit.color = t`; emit `GameEvent::ManaRecolored`
+///   (a `Transform(_)` handler matched per CR 614.1a).
+///
+/// Pool-position stability across the pipeline is guaranteed by the
+/// surrounding drain: no priority is granted between event construction and
+/// disposition apply, and per CR 603.2 triggered abilities wait to be put on
+/// the stack — they do not fire mid-resolution.
+pub fn apply_empty_mana_pool_decisions(
+    state: &mut crate::types::game_state::GameState,
+    player_id: PlayerId,
+    units: &[UnitDecision],
+    events: &mut Vec<GameEvent>,
+) {
+    let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) else {
+        return;
+    };
+    // Descending pool_index order preserves index validity across removes.
+    let mut sorted: Vec<&UnitDecision> = units.iter().collect();
+    sorted.sort_by_key(|d| std::cmp::Reverse(d.pool_index));
+    for decision in sorted {
+        match decision.disposition {
+            UnitDisposition::Drop => {
+                if decision.pool_index < player.mana_pool.mana.len() {
+                    let removed = player.mana_pool.mana.remove(decision.pool_index);
+                    events.push(GameEvent::ManaPoolEmptied {
+                        player_id,
+                        source_id: removed.source_id,
+                        color: removed.color,
+                    });
+                }
+            }
+            UnitDisposition::Keep => {}
+            UnitDisposition::Recolor(to) => {
+                if let Some(unit) = player.mana_pool.mana.get_mut(decision.pool_index) {
+                    let from = unit.color;
+                    unit.color = to;
+                    events.push(GameEvent::ManaRecolored {
+                        player_id,
+                        from,
+                        to,
+                    });
+                }
+            }
+        }
     }
 }
 
@@ -1111,149 +1147,46 @@ mod tests {
         assert_eq!(pool.total(), 0);
     }
 
-    fn retain(filter: Option<ManaColor>) -> StepEndManaHandler {
-        StepEndManaHandler {
-            filter,
-            action: StepEndManaAction::Retain,
-        }
-    }
-
-    fn transform(to: ManaType) -> StepEndManaHandler {
-        StepEndManaHandler {
-            filter: None,
-            action: StepEndManaAction::Transform(to),
-        }
-    }
-
+    // CR 500.5 + CR 703.4q: `clear_expiring_at_step_end` is the leading
+    // half of step-end mana resolution — it drops only expiry-bound units
+    // whose own rule fires on this transition. Handler-driven retention /
+    // transformation behavior is exercised end-to-end via the replacement
+    // pipeline in `game::turns` runtime tests, not here.
     #[test]
-    fn mana_pool_retains_end_of_turn_mana_until_cleanup() {
+    fn mana_pool_clear_expiring_drops_end_of_turn_only_at_cleanup() {
         let mut pool = ManaPool::default();
         let mut retained = make_unit(ManaType::Green);
         retained.expiry = Some(ManaExpiry::EndOfTurn);
         pool.add(retained);
         pool.add(make_unit(ManaType::Red));
 
-        pool.clear_step_transition(false, false, &[]);
+        // Non-cleanup transition: EndOfTurn unit survives; non-expiry unit
+        // is left in place (the pipeline drives Drop disposition elsewhere).
+        pool.clear_expiring_at_step_end(false, false);
         assert_eq!(pool.count_color(ManaType::Green), 1);
-        assert_eq!(pool.count_color(ManaType::Red), 0);
+        assert_eq!(pool.count_color(ManaType::Red), 1);
 
-        pool.clear_step_transition(false, true, &[]);
+        // Cleanup transition: EndOfTurn unit drops; non-expiry unit remains.
+        pool.clear_expiring_at_step_end(false, true);
+        assert_eq!(pool.count_color(ManaType::Green), 0);
+        assert_eq!(pool.count_color(ManaType::Red), 1);
+    }
+
+    #[test]
+    fn mana_pool_clear_expiring_drops_end_of_combat_when_leaving_combat() {
+        let mut pool = ManaPool::default();
+        let mut combat_mana = make_unit(ManaType::Red);
+        combat_mana.expiry = Some(ManaExpiry::EndOfCombat);
+        pool.add(combat_mana);
+
+        // In-combat transition (e.g., DeclareAttackers → DeclareBlockers):
+        // EndOfCombat unit survives.
+        pool.clear_expiring_at_step_end(true, false);
+        assert_eq!(pool.count_color(ManaType::Red), 1);
+
+        // Leaving combat (EndCombat → PostCombatMain): EndOfCombat unit drops.
+        pool.clear_expiring_at_step_end(false, false);
         assert_eq!(pool.total(), 0);
-    }
-
-    #[test]
-    fn mana_pool_retains_static_selected_color() {
-        let mut pool = ManaPool::default();
-        pool.add(make_unit(ManaType::Red));
-        pool.add(make_unit(ManaType::Blue));
-        pool.add(make_unit(ManaType::Colorless));
-
-        pool.clear_step_transition(false, false, &[retain(Some(ManaColor::Red))]);
-
-        assert_eq!(pool.count_color(ManaType::Red), 1);
-        assert_eq!(pool.count_color(ManaType::Blue), 0);
-        assert_eq!(pool.count_color(ManaType::Colorless), 0);
-    }
-
-    #[test]
-    fn mana_pool_retains_static_all_mana_including_colorless() {
-        let mut pool = ManaPool::default();
-        pool.add(make_unit(ManaType::Red));
-        pool.add(make_unit(ManaType::Colorless));
-
-        pool.clear_step_transition(false, false, &[retain(None)]);
-
-        assert_eq!(pool.count_color(ManaType::Red), 1);
-        assert_eq!(pool.count_color(ManaType::Colorless), 1);
-    }
-
-    #[test]
-    fn mana_pool_transform_on_loss_recolors_to_target_type() {
-        // CR 614.1a + CR 703.4q: Horizon Stone — would-be-lost mana becomes
-        // colorless instead. All units are kept and recolored.
-        let mut pool = ManaPool::default();
-        pool.add(make_unit(ManaType::Red));
-        pool.add(make_unit(ManaType::Blue));
-
-        pool.clear_step_transition(false, false, &[transform(ManaType::Colorless)]);
-
-        assert_eq!(pool.total(), 2);
-        assert_eq!(pool.count_color(ManaType::Colorless), 2);
-        assert_eq!(pool.count_color(ManaType::Red), 0);
-        assert_eq!(pool.count_color(ManaType::Blue), 0);
-    }
-
-    #[test]
-    fn mana_pool_transform_does_not_promote_expiry_bound_mana_at_cleanup() {
-        // CR 614.6 + CR 703.4q: Symmetric with retention — a Transform
-        // handler must NOT rewrite expiry-bound mana into permanent. The
-        // EndOfTurn unit follows its own expiry rule at cleanup and is
-        // dropped; only the None-expiry unit is transformed.
-        let mut pool = ManaPool::default();
-        let mut expiry_bound = make_unit(ManaType::Red);
-        expiry_bound.expiry = Some(ManaExpiry::EndOfTurn);
-        pool.add(expiry_bound);
-        pool.add(make_unit(ManaType::Red));
-
-        // entering_cleanup = true: the expiry-bound unit's own rule fires.
-        pool.clear_step_transition(false, true, &[transform(ManaType::Colorless)]);
-
-        assert_eq!(pool.total(), 1);
-        assert_eq!(pool.count_color(ManaType::Colorless), 1);
-        assert_eq!(pool.count_color(ManaType::Red), 0);
-    }
-
-    #[test]
-    fn mana_pool_transform_leaves_expiry_bound_mana_alone_pre_cleanup() {
-        // CR 614.6 + CR 703.4q: An expiry-bound unit whose explicit rule
-        // hasn't fired yet (EndOfTurn at a non-cleanup transition) survives
-        // unchanged — its color is preserved, the transform handler does
-        // not touch it. The None-expiry unit transforms normally.
-        let mut pool = ManaPool::default();
-        let mut expiry_bound = make_unit(ManaType::Red);
-        expiry_bound.expiry = Some(ManaExpiry::EndOfTurn);
-        pool.add(expiry_bound);
-        pool.add(make_unit(ManaType::Red));
-
-        // entering_cleanup = false: expiry-bound rule has not yet fired.
-        pool.clear_step_transition(false, false, &[transform(ManaType::Colorless)]);
-
-        assert_eq!(pool.total(), 2);
-        // Expiry-bound unit is unchanged — still Red, still has expiry.
-        let expiry_survivor = pool
-            .mana
-            .iter()
-            .find(|u| u.expiry == Some(ManaExpiry::EndOfTurn))
-            .expect("expiry-bound unit survived");
-        assert_eq!(expiry_survivor.color, ManaType::Red);
-        // None-expiry unit transformed.
-        let transformed = pool
-            .mana
-            .iter()
-            .find(|u| u.expiry.is_none())
-            .expect("non-expiry unit survived");
-        assert_eq!(transformed.color, ManaType::Colorless);
-    }
-
-    #[test]
-    fn mana_pool_retention_wins_over_transform_when_both_apply() {
-        // CR 614.6 + CR 703.4q: Retained mana never enters the "would be lost"
-        // event, so a coexisting transform leaves it alone. Only unretained
-        // mana runs through the transform recolor. First-match policy means
-        // the retention handler (listed first) intercepts matching units.
-        let mut pool = ManaPool::default();
-        pool.add(make_unit(ManaType::Red));
-        pool.add(make_unit(ManaType::Blue));
-
-        pool.clear_step_transition(
-            false,
-            false,
-            &[retain(Some(ManaColor::Red)), transform(ManaType::Colorless)],
-        );
-
-        assert_eq!(pool.count_color(ManaType::Red), 1);
-        assert_eq!(pool.count_color(ManaType::Colorless), 1);
-        assert_eq!(pool.count_color(ManaType::Blue), 0);
     }
 
     #[test]

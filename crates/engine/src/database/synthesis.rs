@@ -815,6 +815,58 @@ pub fn synthesize_level_up(face: &mut CardFace) {
     face.abilities.extend(level_up_abilities);
 }
 
+/// CR 903.3: determine if a card can be a Commander.
+/// Uses the union of MTGJSON's `leadershipSkills.commander` (which catches the full
+/// WotC-blessed surface: legendary creatures, Vehicles, Spacecraft with P/T,
+/// Backgrounds, and every "can be your commander" carve-out) and our own type-line
+/// check (CR 903.3 a/b/c plus 903.3a). The union mirrors `compute_brawl_commander`
+/// so we stay correct when MTGJSON is missing, stale, or hasn't yet annotated
+/// a freshly-printed card.
+pub fn compute_commander(mtgjson: &super::mtgjson::AtomicCard, face: &CardFace) -> bool {
+    // Source 1: MTGJSON leadership skills (authoritative for the standard format).
+    let mtgjson_says = mtgjson
+        .leadership_skills
+        .as_ref()
+        .is_some_and(|ls| ls.commander);
+
+    // Source 2: type-line analysis — mirrors crate::game::deck_validation logic
+    // so this function is the single authority for commander eligibility.
+    mtgjson_says || type_line_commander_eligible(face)
+}
+
+/// CR 903.3 type-line analysis (excludes MTGJSON skill data). Public for use by
+/// the deck-validation predicate, which reads the precomputed `face.is_commander`
+/// at runtime but exposes this helper for callers that only have a `CardFace`.
+pub fn type_line_commander_eligible(face: &CardFace) -> bool {
+    let is_legendary = face.card_type.supertypes.contains(&Supertype::Legendary);
+    let subtypes = &face.card_type.subtypes;
+
+    // CR 903.3(a): legendary creature.
+    let is_creature = face.card_type.core_types.contains(&CoreType::Creature);
+    // CR 903.3(b): legendary Vehicle (introduced for Unfinity / pre-EOE Vehicles).
+    let is_vehicle = subtypes.iter().any(|s| s.eq_ignore_ascii_case("Vehicle"));
+    // CR 903.3(c): legendary Spacecraft with one or more power/toughness boxes.
+    // The P/T-box guard is load-bearing per CR 903.3(c); future Spacecraft
+    // without a P/T box are not eligible.
+    let is_spacecraft_with_pt = subtypes
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case("Spacecraft"))
+        && face.power.is_some()
+        && face.toughness.is_some();
+    // CR 702.124: legendary Background enchantment (paired with a partner).
+    let is_background = subtypes
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case("Background"));
+    // CR 903.3a: explicit "can be your commander" override.
+    let explicitly_allowed = face
+        .oracle_text
+        .as_ref()
+        .is_some_and(|text| oracle_text_allows_commander(text, &face.name));
+
+    (is_legendary && (is_creature || is_vehicle || is_spacecraft_with_pt || is_background))
+        || explicitly_allowed
+}
+
 /// Brawl variant of CR 903.3: determine if a card can be a Brawl commander.
 /// Uses the union of MTGJSON's `leadershipSkills.brawl` (which catches Vehicles/Spacecraft)
 /// and our own type-line check (legendary creature or legendary planeswalker, or
@@ -2969,11 +3021,13 @@ fn build_oracle_face_inner(
         solve_condition: parsed.solve_condition,
         parse_warnings: parsed.parse_warnings,
         brawl_commander: false,
+        is_commander: false,
         metadata: Default::default(),
         rarities: Default::default(),
     };
 
     face.brawl_commander = compute_brawl_commander(mtgjson, &face);
+    face.is_commander = compute_commander(mtgjson, &face);
     synthesize_all(&mut face);
     face
 }

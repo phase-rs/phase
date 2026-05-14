@@ -43,8 +43,13 @@ async function legalCandidate(
 ): Promise<AiDeckCandidate | null> {
   const { knownFormat, ...base } = candidate;
   if (knownFormat && options.selectedFormat && knownFormat !== options.selectedFormat) return null;
-  if (candidate.source.type === "precon" && knownFormat) return base;
 
+  // Precon decks MUST still pass the legality check (CR 903 + the Commander
+  // Rules Committee ban list). WotC ships precons with cards that later get
+  // banned (Jeweled Lotus, Mana Crypt, Dockside Extortionist in 2024+) and
+  // never retroactively curates the precon lists. The previous short-circuit
+  // "if precon, skip compat" let AI opponents auto-pick decks containing
+  // banned cards — the engine is the rules authority, no catalog bypass.
   const result = await evaluateDeckCompatibility(candidate.deck, {
     selectedFormat: options.selectedFormat,
     selectedMatchType: options.selectedMatchType,

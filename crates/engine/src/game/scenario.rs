@@ -1010,6 +1010,39 @@ impl GameRunner {
         let _ = apply_as_current(&mut self.state, GameAction::PassPriority);
     }
 
+    /// Drive `auto_advance` and then drain Upkeep and Draw priority windows so
+    /// callers can test PreCombatMain trigger behavior without rebuilding the
+    /// "skip empty priority steps" optimization at every call site. Stops as
+    /// soon as the active player receives priority during `Phase::PreCombatMain`
+    /// (or earlier if a priority-bearing trigger fires in Upkeep / Draw).
+    ///
+    /// CR 117.1c: priority opens during Upkeep and Draw, so reaching PreCombat
+    /// Main from Untap requires explicit priority passing — this helper is the
+    /// test-side analogue of the FE's auto-pass loop.
+    pub fn auto_advance_to_main_phase(&mut self) -> WaitingFor {
+        let mut events = Vec::new();
+        let mut waiting = crate::game::turns::auto_advance(&mut self.state, &mut events);
+
+        // Drain priority windows until the active player has priority during
+        // PreCombatMain. Each iteration passes both players through one step;
+        // bounded loop guards against unexpected non-priority states.
+        for _ in 0..8 {
+            if self.state.phase == Phase::PreCombatMain {
+                break;
+            }
+            if !matches!(waiting, WaitingFor::Priority { .. }) {
+                break;
+            }
+            let r1 = apply_as_current(&mut self.state, GameAction::PassPriority);
+            let r2 = apply_as_current(&mut self.state, GameAction::PassPriority);
+            match (r1, r2) {
+                (Ok(_), Ok(result)) => waiting = result.waiting_for,
+                _ => break,
+            }
+        }
+        waiting
+    }
+
     /// Pass priority until the top of the stack resolves.
     pub fn resolve_top(&mut self) {
         // Keep passing priority until the stack shrinks or we can't pass anymore
