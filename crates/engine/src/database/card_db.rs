@@ -4,12 +4,14 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
+use super::bracket_lists::{BracketLists, BracketSignals};
 use super::legality::{normalize_legalities, CardLegalities, LegalityFormat, LegalityStatus};
 use super::mtgjson::Ruling;
 use crate::types::card::{CardFace, CardRules, LayoutKind, PrintedCardRef};
 
 use std::io::BufReader;
 
+#[derive(Default)]
 pub struct CardDatabase {
     pub(crate) cards: HashMap<String, CardRules>,
     pub(crate) face_index: HashMap<String, CardFace>,
@@ -30,6 +32,10 @@ pub struct CardDatabase {
     /// cards carry rulings; back-face lookups return the empty slice.
     pub(crate) rulings_index: HashMap<String, Vec<Ruling>>,
     pub(crate) errors: Vec<(PathBuf, String)>,
+    /// Hand-curated bracket-axis name lists. Populated by `with_bracket_lists`
+    /// at runtime (engine binaries pass through `data/bracket_lists.json`;
+    /// WASM/server consumers receive an already-built database).
+    pub bracket_lists: BracketLists,
 }
 
 impl CardDatabase {
@@ -100,6 +106,7 @@ impl CardDatabase {
             printings_index,
             rulings_index,
             errors: Vec::new(),
+            bracket_lists: BracketLists::default(),
         }
     }
 
@@ -196,6 +203,24 @@ impl CardDatabase {
             .collect();
         names.sort();
         names
+    }
+
+    /// Attach loaded `BracketLists` to the database. Returns `Self` so it can
+    /// be chained off `from_export` / `from_json_str` builders.
+    pub fn with_bracket_lists(mut self, lists: BracketLists) -> Self {
+        self.bracket_lists = lists;
+        self
+    }
+
+    /// Case-insensitive bracket-signal lookup. Returns an all-false
+    /// `BracketSignals` when the database has no lists loaded.
+    ///
+    /// **Note:** Task 5 will replace this body with a dual-source lookup
+    /// that prefers per-card stamped signals from the card-data export and
+    /// falls back to live `bracket_lists`. For now (Task 3), it delegates
+    /// straight to the lists.
+    pub fn bracket_signals_for(&self, name: &str) -> BracketSignals {
+        self.bracket_lists.signals_for(name)
     }
 
     fn lookup_key(&self, name: &str) -> String {
@@ -481,5 +506,27 @@ mod tests {
                 .map(|face| face.name.as_str()),
             Some("Séance Board")
         );
+    }
+
+    #[test]
+    fn bracket_signals_lookup_returns_default_when_no_lists_loaded() {
+        let db = CardDatabase::default();
+        let sig = db.bracket_signals_for("Demonic Tutor");
+        assert!(
+            sig.is_clean(),
+            "default DB has no bracket lists → all signals false"
+        );
+    }
+
+    #[test]
+    fn bracket_signals_lookup_uses_loaded_lists() {
+        use crate::database::bracket_lists::BracketLists;
+        let lists = BracketLists::from_json_str(
+            r#"{ "version":"t", "efficient_tutors":["Demonic Tutor"] }"#,
+        )
+        .unwrap();
+        let db = CardDatabase::default().with_bracket_lists(lists);
+        let sig = db.bracket_signals_for("Demonic Tutor");
+        assert!(sig.efficient_tutor);
     }
 }
