@@ -23,14 +23,10 @@ interface Result {
  * deck or no commander is selected — the audit panel uses these flags
  * to decide whether to render the empty-state placeholder.
  *
- * Debounced 200ms to coalesce rapid edits. Memoized by a normalized
- * deck key so re-renders with identical inputs don't fire a new call.
- *
- * The deps array intentionally omits `commanders`, `deck.main`, and
- * `deck.sideboard` directly — their contents are captured via the
- * stable `deckKey` string, which changes only when contents actually
- * differ. This keeps the effect stable across object-identity churn
- * while still reacting to real mutations.
+ * Debounced 200ms. Memoized by deck contents so re-renders with identical
+ * inputs don't refire. A `pendingKeyRef` written synchronously at schedule
+ * time guards against stale async results: if a newer effect supersedes
+ * before the in-flight one resolves, the stale resolution is discarded.
  */
 export function useBracketEstimate({
   deck,
@@ -40,7 +36,10 @@ export function useBracketEstimate({
 }: Options): Result {
   const [estimate, setEstimate] = useState<BracketEstimate | null>(null);
   const [loading, setLoading] = useState(false);
-  const lastKeyRef = useRef<string | null>(null);
+  /** Last successfully *stored* key — used to short-circuit identical re-renders. */
+  const storedKeyRef = useRef<string | null>(null);
+  /** Latest *scheduled* key — written synchronously, used as the stale-result guard. */
+  const pendingKeyRef = useRef<string | null>(null);
 
   const eligible = format === "Commander" && commanders.length > 0;
 
@@ -56,13 +55,14 @@ export function useBracketEstimate({
     if (!eligible || !deckKey) {
       setEstimate(null);
       setLoading(false);
-      lastKeyRef.current = null;
+      storedKeyRef.current = null;
+      pendingKeyRef.current = null;
       return;
     }
-    if (deckKey === lastKeyRef.current) return;
+    if (deckKey === storedKeyRef.current) return;
+
+    pendingKeyRef.current = deckKey;
     setLoading(true);
-    // Capture the key at effect-scheduling time so we can detect staleness
-    // after the async gap.
     const scheduledKey = deckKey;
     const timer = setTimeout(async () => {
       try {
@@ -71,17 +71,20 @@ export function useBracketEstimate({
           main_deck: deck.main.flatMap((e) => Array(e.count).fill(e.name)),
           sideboard: deck.sideboard.flatMap((e) => Array(e.count).fill(e.name)),
         });
-        // Stale-result guard: if deckKey changed while we were awaiting,
-        // the new effect invocation owns the state update — discard this one.
-        if (lastKeyRef.current !== null && lastKeyRef.current !== scheduledKey) {
+        if (pendingKeyRef.current !== scheduledKey) {
+          // A newer effect superseded us; discard this stale result.
           return;
         }
-        lastKeyRef.current = scheduledKey;
+        storedKeyRef.current = scheduledKey;
         setEstimate(result);
       } catch {
-        setEstimate(null);
+        if (pendingKeyRef.current === scheduledKey) {
+          setEstimate(null);
+        }
       } finally {
-        setLoading(false);
+        if (pendingKeyRef.current === scheduledKey) {
+          setLoading(false);
+        }
       }
     }, DEBOUNCE_MS);
     return () => clearTimeout(timer);

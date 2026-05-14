@@ -86,4 +86,65 @@ describe("useBracketEstimate", () => {
     await new Promise((r) => setTimeout(r, 250));
     expect(adapter.estimateBracket).toHaveBeenCalledTimes(1);
   });
+
+  it("discards a stale async result when a newer call supersedes it", async () => {
+    // Two adapter calls: first one resolves slowly, second resolves fast.
+    // The hook should display the second result, not the first.
+    const firstEstimate: BracketEstimate = {
+      ...mockEstimate,
+      tier: "core",
+      contributing: { ...mockEstimate.contributing, game_changers: ["FIRST"] },
+    };
+    const secondEstimate: BracketEstimate = {
+      ...mockEstimate,
+      tier: "optimized",
+      contributing: { ...mockEstimate.contributing, game_changers: ["SECOND"] },
+    };
+
+    let resolveFirst: (v: BracketEstimate) => void = () => {};
+    const firstPromise = new Promise<BracketEstimate>((r) => {
+      resolveFirst = r;
+    });
+    const secondPromise = Promise.resolve(secondEstimate);
+
+    const adapter = {
+      estimateBracket: vi
+        .fn()
+        .mockImplementationOnce(() => firstPromise)
+        .mockImplementationOnce(() => secondPromise),
+    };
+
+    // Render with deck v1.
+    const deckV1: ParsedDeck = { main: [{ name: "A", count: 1 }], sideboard: [] };
+    const deckV2: ParsedDeck = { main: [{ name: "B", count: 1 }], sideboard: [] };
+
+    const { result, rerender } = renderHook(
+      ({ deck: d }: { deck: ParsedDeck }) =>
+        useBracketEstimate({
+          deck: d,
+          commanders: ["Atraxa"],
+          format: "Commander",
+          adapter,
+        }),
+      { initialProps: { deck: deckV1 } },
+    );
+
+    // Wait past debounce so the first call fires.
+    await new Promise((r) => setTimeout(r, 250));
+    expect(adapter.estimateBracket).toHaveBeenCalledTimes(1);
+
+    // Now switch to deck v2 before the first call resolves.
+    rerender({ deck: deckV2 });
+    await new Promise((r) => setTimeout(r, 250));
+    // Second call has fired and resolved with the optimized estimate.
+    expect(adapter.estimateBracket).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(result.current.estimate?.tier).toBe("optimized"));
+
+    // Now resolve the first promise late. It should be discarded.
+    resolveFirst(firstEstimate);
+    await new Promise((r) => setTimeout(r, 50));
+    // Hook should still show the second (newer) estimate.
+    expect(result.current.estimate?.tier).toBe("optimized");
+    expect(result.current.estimate?.contributing.game_changers).toEqual(["SECOND"]);
+  });
 });
