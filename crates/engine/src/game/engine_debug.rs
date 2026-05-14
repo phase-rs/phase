@@ -306,8 +306,8 @@ pub fn apply_debug_action(
                     super::effects::token::apply_create_token_after_replacement(
                         state, event, events,
                     );
-                    super::triggers::process_triggers(state, events);
-                    super::sba::check_state_based_actions(state, events);
+                    super::triggers::process_triggers(state, events); // CR 603: Process triggers
+                    super::sba::check_state_based_actions(state, events); // CR 704: Check SBAs
                 }
                 super::replacement::ReplacementResult::Prevented => {}
                 super::replacement::ReplacementResult::NeedsChoice(player) => {
@@ -369,8 +369,8 @@ pub fn route_debug_create_to_battlefield(
                 None,
                 &mut events,
             );
-            super::triggers::process_triggers(state, &events);
-            super::sba::check_state_based_actions(state, &mut events);
+            super::triggers::process_triggers(state, &events); // CR 603: Process triggers
+            super::sba::check_state_based_actions(state, &mut events); // CR 704: Check SBAs
         }
         ReplacementResult::Prevented => {}
         ReplacementResult::NeedsChoice(player) => {

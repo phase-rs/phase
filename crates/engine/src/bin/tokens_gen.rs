@@ -254,7 +254,7 @@ fn extract_colors(v: &Value) -> Result<Vec<ManaColor>, String> {
                     out.push(c);
                 }
             }
-            // CR canonical color ordering — WUBRG sort
+            // CR 105.2c: Canonical color ordering (WUBRG).
             out.sort_by_key(|c| match c {
                 ManaColor::White => 0,
                 ManaColor::Blue => 1,
@@ -684,6 +684,10 @@ fn parse_entry(v: &Value) -> Result<Entry, String> {
         "FoodToken" => {
             e.core_types = vec![CoreType::Artifact];
             e.subtypes = vec!["Food".to_string()];
+        }
+        "GoldToken" => {
+            e.core_types = vec![CoreType::Artifact];
+            e.subtypes = vec!["Gold".to_string()];
         }
         // OracleToken / NumberTokens: not viable as static catalog entries.
         "OracleToken" | "NumberTokens" => {

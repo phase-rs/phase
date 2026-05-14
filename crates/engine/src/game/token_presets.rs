@@ -18,10 +18,6 @@ use crate::types::proposed_event::TokenCharacteristics;
 /// variant maps to one arm of `effects::token::predefined_token_abilities`,
 /// keyed by subtype string. The cross-reference is asserted in tests so a
 /// preset's `category` cannot drift from the runtime ability registry.
-/// Predefined-ability artifact tokens. Each variant maps to one arm of
-/// `effects::token::predefined_token_abilities`, keyed by subtype string.
-/// The cross-reference is asserted in tests so a preset's `category` cannot
-/// drift from the runtime ability registry.
 ///
 /// Eldrazi Spawn (also keyed by `predefined_token_abilities`) is *not*
 /// listed here — Spawn is a Creature subtype, not an artifact token, so
@@ -35,6 +31,7 @@ pub enum PredefinedTokenKind {
     Blood,
     Powerstone,
     Map,
+    Gold,
 }
 
 impl PredefinedTokenKind {
