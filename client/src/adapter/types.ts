@@ -1039,6 +1039,7 @@ export type GameAction =
   | { type: "ReorderHand"; data: { order: ObjectId[] } }
   | { type: "TapLandForMana"; data: { object_id: ObjectId } }
   | { type: "UntapLandForMana"; data: { object_id: ObjectId } }
+  | { type: "TapForConvoke"; data: { object_id: ObjectId; mana_type: ManaType } }
   | { type: "SelectCards"; data: { cards: ObjectId[] } }
   | { type: "ChooseOutsideGameCards"; data: { sideboard_indices: number[] } }
   | { type: "SelectTargets"; data: { targets: TargetRef[] } }
