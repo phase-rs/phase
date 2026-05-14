@@ -26,6 +26,8 @@ pub enum CommanderBracketTier {
 }
 
 impl CommanderBracketTier {
+    /// Numeric bracket level (B1..=B5 → 1..=5). Used for ordered
+    /// comparisons (e.g., sorting violations by tier).
     pub fn as_u8(self) -> u8 {
         match self {
             Self::Exhibition => 1,
@@ -43,6 +45,18 @@ pub struct BracketAxisCounts {
     pub mass_land_denial: u8,
     pub extra_turns: u8,
     pub efficient_tutors: u8,
+}
+
+impl BracketAxisCounts {
+    /// Read the count for a given axis, by enum variant.
+    pub fn count_for(&self, axis: BracketAxis) -> u8 {
+        match axis {
+            BracketAxis::GameChangers => self.game_changers,
+            BracketAxis::MassLandDenial => self.mass_land_denial,
+            BracketAxis::ExtraTurns => self.extra_turns,
+            BracketAxis::EfficientTutors => self.efficient_tutors,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,14 +95,9 @@ pub struct BracketEstimate {
     pub data_version: String,
 }
 
-/// Returns `None` when the deck cannot be meaningfully estimated:
-/// no commander, or an entirely empty deck.
+/// Returns `None` when the deck has no commander.
 pub fn estimate_bracket(deck: &PlayerDeckList, db: &CardDatabase) -> Option<BracketEstimate> {
     if deck.commander.is_empty() {
-        return None;
-    }
-    let total_cards = deck.commander.len() + deck.main_deck.len();
-    if total_cards == 0 {
         return None;
     }
 
@@ -146,34 +155,34 @@ const TIERS: [CommanderBracketTier; 4] = [
     CommanderBracketTier::Optimized,
 ];
 
-fn axis_count(axes: &BracketAxisCounts, axis: BracketAxis) -> u8 {
-    match axis {
-        BracketAxis::GameChangers => axes.game_changers,
-        BracketAxis::MassLandDenial => axes.mass_land_denial,
-        BracketAxis::ExtraTurns => axes.extra_turns,
-        BracketAxis::EfficientTutors => axes.efficient_tutors,
-    }
-}
-
+/// Walks `axes` against the per-axis cap table. For each axis whose count
+/// exceeds at least one tier ceiling, emits exactly one `BracketViolation`
+/// recording the highest ceiling crossed. The returned tier is the max
+/// floor across axes. Violations are sorted by descending `forced_floor`
+/// so the UI can render "Why B3?" rows in priority order.
 fn decide_tier(axes: &BracketAxisCounts) -> (CommanderBracketTier, Vec<BracketViolation>) {
     let mut floor_index: usize = 0;
     let mut violations = Vec::new();
 
     for (axis, caps) in CAPS {
-        let count = axis_count(axes, *axis);
+        let count = axes.count_for(*axis);
+        let mut highest_crossed: Option<(u8, CommanderBracketTier)> = None;
         for (tier_idx, cap) in caps.iter().enumerate() {
             if count > *cap {
                 let new_floor = (tier_idx + 1).min(TIERS.len() - 1);
                 if new_floor > floor_index {
                     floor_index = new_floor;
                 }
-                violations.push(BracketViolation {
-                    axis: *axis,
-                    count,
-                    prior_cap: *cap,
-                    forced_floor: TIERS[new_floor],
-                });
+                highest_crossed = Some((*cap, TIERS[new_floor]));
             }
+        }
+        if let Some((cap, forced_floor)) = highest_crossed {
+            violations.push(BracketViolation {
+                axis: *axis,
+                count,
+                prior_cap: cap,
+                forced_floor,
+            });
         }
     }
 
@@ -383,6 +392,8 @@ mod tests {
         assert_eq!(e.axes.game_changers, 1);
         assert_eq!(e.axes.efficient_tutors, 1);
         assert_eq!(e.tier, CommanderBracketTier::Upgraded);
+        assert_eq!(e.contributing.game_changers, vec!["Demonic Tutor"]);
+        assert_eq!(e.contributing.efficient_tutors, vec!["Demonic Tutor"]);
     }
 
     #[test]
@@ -471,5 +482,70 @@ mod tests {
         let d = deck(vec!["Cmdr"], vec!["Forest"]);
         let e = estimate_bracket(&d, &db).unwrap();
         assert_eq!(e.data_version, "test-1");
+    }
+
+    #[test]
+    fn signal_on_commander_card_is_counted() {
+        let db = db_with_signals(&[(
+            "Sol Ring",
+            BracketSignals {
+                game_changer: true,
+                ..Default::default()
+            },
+        )]);
+        let d = deck(vec!["Sol Ring"], vec!["Forest", "Forest"]);
+        let e = estimate_bracket(&d, &db).unwrap();
+        assert_eq!(e.axes.game_changers, 1);
+        assert_eq!(e.tier, CommanderBracketTier::Upgraded);
+    }
+
+    #[test]
+    fn one_tutor_is_b2_core() {
+        let db = db_with_signals(&[(
+            "Demonic Tutor",
+            BracketSignals {
+                efficient_tutor: true,
+                ..Default::default()
+            },
+        )]);
+        let d = deck(vec!["Cmdr"], vec!["Demonic Tutor"]);
+        let e = estimate_bracket(&d, &db).unwrap();
+        assert_eq!(e.tier, CommanderBracketTier::Core);
+        assert_eq!(e.axes.efficient_tutors, 1);
+    }
+
+    #[test]
+    fn highest_axis_wins_and_violation_is_first_in_sort() {
+        let db = db_with_signals(&[
+            (
+                "Smothering Tithe",
+                BracketSignals {
+                    game_changer: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "Armageddon",
+                BracketSignals {
+                    mass_land_denial: true,
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let d = deck(vec!["Cmdr"], vec!["Smothering Tithe", "Armageddon"]);
+        let e = estimate_bracket(&d, &db).unwrap();
+        assert_eq!(e.tier, CommanderBracketTier::Optimized, "MLD pushes to B4");
+        assert_eq!(e.violations.len(), 2, "one violation per axis");
+        assert_eq!(
+            e.violations[0].axis,
+            BracketAxis::MassLandDenial,
+            "B4 violation sorts first"
+        );
+        assert_eq!(
+            e.violations[0].forced_floor,
+            CommanderBracketTier::Optimized
+        );
+        assert_eq!(e.violations[1].axis, BracketAxis::GameChangers);
+        assert_eq!(e.violations[1].forced_floor, CommanderBracketTier::Upgraded);
     }
 }
