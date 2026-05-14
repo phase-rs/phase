@@ -172,6 +172,13 @@ export function is_card_commander_eligible(name: string): boolean;
 export function is_multiplayer_mode(): boolean;
 
 /**
+ * Returns the engine-typed catalog of debug-spawnable token presets,
+ * loaded from `crates/engine/data/known-tokens.toml`. Read by the debug UI
+ * to populate the Create Token dropdown — frontend never derives this list.
+ */
+export function list_token_presets_js(): any;
+
+/**
  * Load the card database from a JSON string (card-data.json contents).
  * Must be called before initialize_game to enable name-based deck resolution.
  */
@@ -309,6 +316,7 @@ export interface InitOutput {
     readonly get_legal_actions_js: () => any;
     readonly get_stack_pressure: () => any;
     readonly init_panic_hook: () => void;
+    readonly list_token_presets_js: () => any;
     readonly create_initial_state: () => any;
     readonly clear_game_state: () => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;

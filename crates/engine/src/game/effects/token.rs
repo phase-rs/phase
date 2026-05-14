@@ -485,7 +485,7 @@ fn build_token_spec(
     ability: &ResolvedAbility,
     state: &GameState,
 ) -> crate::types::proposed_event::TokenSpec {
-    use crate::types::proposed_event::TokenSpec;
+    use crate::types::proposed_event::{TokenCharacteristics, TokenSpec};
 
     let (display_name, power, toughness, core_types, subtypes, supertypes, colors, keywords) =
         if let Some(attrs) = parsed {
@@ -527,15 +527,17 @@ fn build_token_spec(
         };
 
     TokenSpec {
-        display_name,
+        characteristics: TokenCharacteristics {
+            display_name,
+            power,
+            toughness,
+            core_types,
+            subtypes,
+            supertypes,
+            colors,
+            keywords,
+        },
         script_name: script_name.to_string(),
-        power,
-        toughness,
-        core_types,
-        subtypes,
-        supertypes,
-        colors,
-        keywords,
         static_abilities,
         enter_with_counters,
         tapped,
@@ -572,11 +574,12 @@ pub fn apply_create_token_after_replacement(
     let mut created_ids = Vec::with_capacity(final_count as usize);
 
     for _ in 0..final_count {
+        let ch = &spec.characteristics;
         let obj_id = zones::create_object(
             state,
             CardId(0),
             owner,
-            spec.display_name.clone(),
+            ch.display_name.clone(),
             Zone::Battlefield,
         );
 
@@ -586,28 +589,28 @@ pub fn apply_create_token_after_replacement(
             // True token from a TokenSpec — image lives in the generic-token
             // database (Treasure, Spirit, Saproling, Soldier, etc.).
             obj.display_source = DisplaySource::Token;
-            let has_attrs = spec.power.is_some()
-                || spec.toughness.is_some()
-                || !spec.core_types.is_empty()
-                || !spec.subtypes.is_empty()
-                || !spec.supertypes.is_empty()
-                || !spec.colors.is_empty()
-                || !spec.keywords.is_empty();
+            let has_attrs = ch.power.is_some()
+                || ch.toughness.is_some()
+                || !ch.core_types.is_empty()
+                || !ch.subtypes.is_empty()
+                || !ch.supertypes.is_empty()
+                || !ch.colors.is_empty()
+                || !ch.keywords.is_empty();
             if has_attrs {
-                obj.power = spec.power;
-                obj.toughness = spec.toughness;
-                obj.base_power = spec.power;
-                obj.base_toughness = spec.toughness;
+                obj.power = ch.power;
+                obj.toughness = ch.toughness;
+                obj.base_power = ch.power;
+                obj.base_toughness = ch.toughness;
                 obj.card_types = CardType {
-                    supertypes: spec.supertypes.clone(),
-                    core_types: spec.core_types.clone(),
-                    subtypes: spec.subtypes.clone(),
+                    supertypes: ch.supertypes.clone(),
+                    core_types: ch.core_types.clone(),
+                    subtypes: ch.subtypes.clone(),
                 };
                 obj.base_card_types = obj.card_types.clone();
-                obj.color = spec.colors.clone();
-                obj.base_color = spec.colors.clone();
-                obj.keywords = spec.keywords.clone();
-                obj.base_keywords = spec.keywords.clone();
+                obj.color = ch.colors.clone();
+                obj.base_color = ch.colors.clone();
+                obj.keywords = ch.keywords.clone();
+                obj.base_keywords = ch.keywords.clone();
             }
             obj.tapped = enter_tapped.resolve(spec.tapped);
 
@@ -673,7 +676,7 @@ pub fn apply_create_token_after_replacement(
 
         events.push(GameEvent::TokenCreated {
             object_id: obj_id,
-            name: spec.display_name.clone(),
+            name: spec.characteristics.display_name.clone(),
         });
 
         // CR 603.7: Tokens with a limited duration get a delayed sacrifice trigger.
@@ -996,7 +999,7 @@ fn map_ability() -> AbilityDefinition {
 
 /// CR 111.10a–v: Predefined token abilities keyed by subtype.
 /// Returns ability definitions to inject for the given subtype, or empty if none.
-fn predefined_token_abilities(subtype: &str) -> Vec<AbilityDefinition> {
+pub fn predefined_token_abilities(subtype: &str) -> Vec<AbilityDefinition> {
     match subtype {
         "Treasure" => vec![treasure_ability()],
         "Food" => vec![food_ability()],
@@ -2589,17 +2592,20 @@ mod tests {
                 },
             ]);
 
+        use crate::types::proposed_event::TokenCharacteristics;
         let mut state = GameState::new_two_player(42);
         let spec = TokenSpec {
-            display_name: "Construct".to_string(),
+            characteristics: TokenCharacteristics {
+                display_name: "Construct".to_string(),
+                power: Some(0),
+                toughness: Some(0),
+                core_types: vec![CoreType::Artifact, CoreType::Creature],
+                subtypes: vec!["Construct".to_string()],
+                supertypes: vec![],
+                colors: vec![],
+                keywords: vec![],
+            },
             script_name: "Construct".to_string(),
-            power: Some(0),
-            toughness: Some(0),
-            core_types: vec![CoreType::Artifact, CoreType::Creature],
-            subtypes: vec!["Construct".to_string()],
-            supertypes: vec![],
-            colors: vec![],
-            keywords: vec![],
             static_abilities: vec![boost],
             enter_with_counters: vec![],
             tapped: false,
@@ -2643,16 +2649,19 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         assert!(state.last_created_token_ids.is_empty());
 
+        use crate::types::proposed_event::TokenCharacteristics;
         let spec = TokenSpec {
-            display_name: "Hero".to_string(),
+            characteristics: TokenCharacteristics {
+                display_name: "Hero".to_string(),
+                power: Some(1),
+                toughness: Some(1),
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Hero".to_string()],
+                supertypes: vec![],
+                colors: vec![],
+                keywords: vec![],
+            },
             script_name: "c_1_1_hero".to_string(),
-            power: Some(1),
-            toughness: Some(1),
-            core_types: vec![CoreType::Creature],
-            subtypes: vec!["Hero".to_string()],
-            supertypes: vec![],
-            colors: vec![],
-            keywords: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
             tapped: false,

@@ -3454,15 +3454,17 @@ fn token_description_to_spec(
     }
 
     Some(TokenSpec {
-        display_name: token.name.clone(),
+        characteristics: crate::types::proposed_event::TokenCharacteristics {
+            display_name: token.name.clone(),
+            power,
+            toughness,
+            core_types,
+            subtypes,
+            supertypes: Vec::<Supertype>::new(),
+            colors: token.colors.clone(),
+            keywords: token.keywords.clone(),
+        },
         script_name: token.name.clone(),
-        power,
-        toughness,
-        core_types,
-        subtypes,
-        supertypes: Vec::<Supertype>::new(),
-        colors: token.colors.clone(),
-        keywords: token.keywords.clone(),
         static_abilities: token.static_abilities.clone(),
         enter_with_counters: Vec::new(),
         tapped: token.tapped,
@@ -7855,11 +7857,11 @@ mod tests {
             .additional_token_spec
             .as_ref()
             .expect("additional_token_spec set");
-        assert_eq!(spec.power, Some(1));
-        assert_eq!(spec.toughness, Some(1));
-        assert_eq!(spec.core_types, vec![CoreType::Creature]);
-        assert_eq!(spec.subtypes, vec!["Squirrel".to_string()]);
-        assert_eq!(spec.colors, vec![ManaColor::Green]);
+        assert_eq!(spec.characteristics.power, Some(1));
+        assert_eq!(spec.characteristics.toughness, Some(1));
+        assert_eq!(spec.characteristics.core_types, vec![CoreType::Creature]);
+        assert_eq!(spec.characteristics.subtypes, vec!["Squirrel".to_string()]);
+        assert_eq!(spec.characteristics.colors, vec![ManaColor::Green]);
     }
 
     /// CR 614.1a: The "twice that many" shape and the "those tokens plus"
@@ -7904,11 +7906,12 @@ mod tests {
             .as_ref()
             .expect("Xorn must populate additional_token_spec");
         assert!(
-            spec.subtypes
+            spec.characteristics
+                .subtypes
                 .iter()
                 .any(|s| s.eq_ignore_ascii_case("Treasure")),
             "appended spec must be a Treasure token, got {:?}",
-            spec.subtypes
+            spec.characteristics.subtypes
         );
     }
 
@@ -7945,7 +7948,10 @@ mod tests {
             .as_ref()
             .expect("Manufactor must populate ensure_token_specs");
         assert_eq!(specs.len(), 3);
-        let subtypes_present: Vec<String> = specs.iter().flat_map(|s| s.subtypes.clone()).collect();
+        let subtypes_present: Vec<String> = specs
+            .iter()
+            .flat_map(|s| s.characteristics.subtypes.clone())
+            .collect();
         for expected in &["Clue", "Food", "Treasure"] {
             assert!(
                 subtypes_present

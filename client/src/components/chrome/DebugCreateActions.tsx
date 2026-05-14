@@ -1,6 +1,11 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import type { CoreType, DebugAction, ManaColor, PlayerId, Zone } from "../../adapter/types";
+import {
+  listTokenPresets,
+  type TokenCategory,
+  type TokenPreset,
+} from "../../services/engineRuntime";
 import {
   AccordionItem,
   CardNameAutocomplete,
@@ -86,7 +91,173 @@ function CreateCardForm({ onDispatch }: Props) {
   );
 }
 
-function CreateTokenForm({ onDispatch }: Props) {
+// Stable header text per `TokenCategory`. The engine ships category as
+// pure data (variant tag); the FE maps it to display copy here. Sort key is
+// used to order groups in the dropdown.
+const CATEGORY_LABELS: { key: string; label: string; sort: number }[] = [
+  { key: "PredefinedArtifact", label: "Artifact tokens (with abilities)", sort: 0 },
+  { key: "Creature", label: "Creature tokens", sort: 1 },
+  { key: "Aura", label: "Auras / Roles / Curses", sort: 2 },
+  { key: "Equipment", label: "Equipment tokens", sort: 3 },
+  { key: "Vehicle", label: "Vehicle tokens", sort: 4 },
+  { key: "Enchantment", label: "Enchantment tokens", sort: 5 },
+  { key: "Land", label: "Land tokens", sort: 6 },
+  { key: "Artifact", label: "Other artifact tokens", sort: 7 },
+];
+
+function categoryKey(c: TokenCategory): string {
+  return typeof c === "string" ? c : "PredefinedArtifact";
+}
+
+function categoryLabel(c: TokenCategory): string {
+  if (typeof c !== "string") {
+    return `${c.PredefinedArtifact.kind} tokens`;
+  }
+  return CATEGORY_LABELS.find((x) => x.key === c)?.label ?? c;
+}
+
+function presetSummary(p: TokenPreset): string {
+  const ch = p.body;
+  const pt =
+    ch.power !== null && ch.toughness !== null ? `${ch.power}/${ch.toughness} ` : "";
+  const colors = ch.colors.length === 0 ? "C" : ch.colors.map((c) => c[0]).join("");
+  return `${pt}${colors} ${ch.display_name}`;
+}
+
+function CatalogTokenForm({ onDispatch }: Props) {
+  const [owner, setOwner] = useState<PlayerId>(0);
+  const [presets, setPresets] = useState<TokenPreset[] | null>(null);
+  const [search, setSearch] = useState("");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    listTokenPresets()
+      .then((p) => setPresets(p))
+      .catch((e: unknown) => {
+        setLoadError(e instanceof Error ? e.message : String(e));
+      });
+  }, []);
+
+  const filtered = useMemo(() => {
+    if (!presets) return [];
+    const q = search.trim().toLowerCase();
+    if (!q) return presets;
+    return presets.filter((p) => {
+      if (p.body.display_name.toLowerCase().includes(q)) return true;
+      if (p.body.subtypes.some((s) => s.toLowerCase().includes(q))) return true;
+      return false;
+    });
+  }, [presets, search]);
+
+  const grouped = useMemo(() => {
+    const groups = new Map<string, TokenPreset[]>();
+    for (const p of filtered) {
+      const key = categoryKey(p.category);
+      const arr = groups.get(key) ?? [];
+      arr.push(p);
+      groups.set(key, arr);
+    }
+    // Sort within each group by (power, toughness, name).
+    for (const arr of groups.values()) {
+      arr.sort((a, b) => {
+        const ap = a.body.power ?? -1;
+        const bp = b.body.power ?? -1;
+        if (ap !== bp) return ap - bp;
+        const at = a.body.toughness ?? -1;
+        const bt = b.body.toughness ?? -1;
+        if (at !== bt) return at - bt;
+        return a.body.display_name.localeCompare(b.body.display_name);
+      });
+    }
+    return groups;
+  }, [filtered]);
+
+  const orderedGroups = useMemo(() => {
+    const keys = Array.from(grouped.keys());
+    keys.sort((a, b) => {
+      const ai = CATEGORY_LABELS.find((c) => c.key === a)?.sort ?? 99;
+      const bi = CATEGORY_LABELS.find((c) => c.key === b)?.sort ?? 99;
+      return ai - bi;
+    });
+    return keys;
+  }, [grouped]);
+
+  const handleSubmit = () => {
+    const preset = presets?.find((p) => p.id === selectedId);
+    if (!preset) return;
+    onDispatch({
+      type: "CreateToken",
+      data: {
+        owner,
+        characteristics: preset.body,
+      },
+    });
+  };
+
+  if (loadError) {
+    return (
+      <div className="px-2 py-3 text-xs text-red-400">
+        Failed to load token catalog: {loadError}
+      </div>
+    );
+  }
+  if (!presets) {
+    return <div className="px-2 py-3 text-xs text-gray-500">Loading token catalog…</div>;
+  }
+
+  return (
+    <>
+      <FieldRow label="Owner">
+        <PlayerSelect value={owner} onChange={setOwner} />
+      </FieldRow>
+      <FieldRow label="Search">
+        <TextInput value={search} onChange={setSearch} placeholder="Name or subtype" />
+      </FieldRow>
+      <div className="mb-2 max-h-64 overflow-y-auto rounded border border-gray-800 bg-gray-950/40 p-1">
+        {orderedGroups.length === 0 && (
+          <div className="px-2 py-2 text-xs text-gray-500">No presets match.</div>
+        )}
+        {orderedGroups.map((key) => {
+          const items = grouped.get(key) ?? [];
+          const sample = items[0]?.category;
+          return (
+            <div key={key} className="mb-2">
+              <div className="px-1 pb-1 font-mono text-[10px] uppercase tracking-wider text-gray-500">
+                {sample !== undefined ? categoryLabel(sample) : key}
+              </div>
+              {items.map((p) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={() => setSelectedId(p.id)}
+                  className={
+                    "block w-full rounded px-2 py-1 text-left font-mono text-[11px] transition-colors " +
+                    (selectedId === p.id
+                      ? "bg-blue-500/20 text-blue-200"
+                      : "text-gray-300 hover:bg-gray-800/60")
+                  }
+                >
+                  <span>{presetSummary(p)}</span>
+                  {p.fidelity === "PartialMissingAbilities" && (
+                    <span className="ml-1 rounded border border-amber-500/40 bg-amber-500/10 px-1 text-[9px] text-amber-300">
+                      body only
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
+          );
+        })}
+      </div>
+      <SubmitButton onClick={handleSubmit} disabled={!selectedId}>
+        Create Selected Token
+      </SubmitButton>
+    </>
+  );
+}
+
+function CustomTokenForm({ onDispatch }: Props) {
   const [name, setName] = useState("");
   const [owner, setOwner] = useState<PlayerId>(0);
   const [power, setPower] = useState(1);
@@ -122,13 +293,16 @@ function CreateTokenForm({ onDispatch }: Props) {
       type: "CreateToken",
       data: {
         owner,
-        name: name || "Token",
-        power,
-        toughness,
-        core_types: coreTypes,
-        subtypes,
-        colors,
-        keywords,
+        characteristics: {
+          display_name: name || "Token",
+          power,
+          toughness,
+          core_types: coreTypes,
+          subtypes,
+          supertypes: [],
+          colors,
+          keywords,
+        },
       },
     });
   };
@@ -184,7 +358,7 @@ function CreateTokenForm({ onDispatch }: Props) {
       <FieldRow label="Keywords">
         <TextInput value={keywordsText} onChange={setKeywordsText} placeholder="Flying, Haste" />
       </FieldRow>
-      <SubmitButton onClick={handleSubmit}>Create Token</SubmitButton>
+      <SubmitButton onClick={handleSubmit}>Create Custom Token</SubmitButton>
     </>
   );
 }
@@ -197,8 +371,11 @@ export function DebugCreateActions({ onDispatch }: Props) {
       <AccordionItem label="Create Card" expanded={expanded === "card"} onToggle={() => toggle("card")}>
         <CreateCardForm onDispatch={onDispatch} />
       </AccordionItem>
-      <AccordionItem label="Create Token" expanded={expanded === "token"} onToggle={() => toggle("token")}>
-        <CreateTokenForm onDispatch={onDispatch} />
+      <AccordionItem label="Create Token (Catalog)" expanded={expanded === "token-catalog"} onToggle={() => toggle("token-catalog")}>
+        <CatalogTokenForm onDispatch={onDispatch} />
+      </AccordionItem>
+      <AccordionItem label="Create Token (Custom)" expanded={expanded === "token-custom"} onToggle={() => toggle("token-custom")}>
+        <CustomTokenForm onDispatch={onDispatch} />
       </AccordionItem>
     </div>
   );
