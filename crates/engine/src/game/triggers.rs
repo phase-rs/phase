@@ -348,7 +348,7 @@ fn storm_copy_count_before_cast(state: &GameState) -> i32 {
     state
         .spells_cast_this_turn_by_player
         .values()
-        .map(Vec::len)
+        .map(|records| records.len())
         .sum::<usize>()
         .saturating_sub(1) as i32
 }
@@ -3627,12 +3627,13 @@ pub mod tests {
             has_x_in_cost: false,
             from_zone: Zone::Hand,
         };
+        state.spells_cast_this_turn_by_player.insert(
+            player,
+            crate::im::Vector::from(vec![prior_record.clone(), current_record]),
+        );
         state
             .spells_cast_this_turn_by_player
-            .insert(player, vec![prior_record.clone(), current_record]);
-        state
-            .spells_cast_this_turn_by_player
-            .insert(opponent, vec![prior_record]);
+            .insert(opponent, crate::im::Vector::from(vec![prior_record]));
 
         process_triggers(
             &mut state,
@@ -5767,7 +5768,7 @@ pub mod tests {
         });
         state.spells_cast_this_turn_by_player.insert(
             PlayerId(0),
-            vec![
+            crate::im::Vector::from(vec![
                 SpellCastRecord {
                     name: String::new(),
                     core_types: vec![CoreType::Instant],
@@ -5790,7 +5791,7 @@ pub mod tests {
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
                 },
-            ],
+            ]),
         );
 
         let events = vec![GameEvent::SpellCast {
@@ -8251,7 +8252,7 @@ pub mod tests {
         // Case A: first qualifying spell — record has exactly one X-cost cast.
         state.spells_cast_this_turn_by_player.insert(
             PlayerId(0),
-            vec![SpellCastRecord {
+            crate::im::Vector::from(vec![SpellCastRecord {
                 name: String::new(),
                 core_types: vec![CoreType::Sorcery],
                 supertypes: vec![],
@@ -8261,7 +8262,7 @@ pub mod tests {
                 mana_value: 3,
                 has_x_in_cost: true,
                 from_zone: Zone::Hand,
-            }],
+            }]),
         );
         assert!(
             check_trigger_constraint(&state, &trig_def, source, 0, PlayerId(0), &spell_event),
@@ -8271,7 +8272,7 @@ pub mod tests {
         // Case B: first cast is non-qualifying (no X in cost). Constraint must NOT fire.
         state.spells_cast_this_turn_by_player.insert(
             PlayerId(0),
-            vec![SpellCastRecord {
+            crate::im::Vector::from(vec![SpellCastRecord {
                 name: String::new(),
                 core_types: vec![CoreType::Instant],
                 supertypes: vec![],
@@ -8281,7 +8282,7 @@ pub mod tests {
                 mana_value: 1,
                 has_x_in_cost: false,
                 from_zone: Zone::Hand,
-            }],
+            }]),
         );
         assert!(
             !check_trigger_constraint(&state, &trig_def, source, 0, PlayerId(0), &spell_event),
@@ -8291,7 +8292,7 @@ pub mod tests {
         // Case C: second qualifying spell (filter count == 2). Must NOT fire.
         state.spells_cast_this_turn_by_player.insert(
             PlayerId(0),
-            vec![
+            crate::im::Vector::from(vec![
                 SpellCastRecord {
                     name: String::new(),
                     core_types: vec![CoreType::Sorcery],
@@ -8314,7 +8315,7 @@ pub mod tests {
                     has_x_in_cost: true,
                     from_zone: Zone::Hand,
                 },
-            ],
+            ]),
         );
         assert!(
             !check_trigger_constraint(&state, &trig_def, source, 0, PlayerId(0), &spell_event),
@@ -8324,7 +8325,7 @@ pub mod tests {
         // Case D: intervening non-X spell does NOT reset the count — second X-spell still fails.
         state.spells_cast_this_turn_by_player.insert(
             PlayerId(0),
-            vec![
+            crate::im::Vector::from(vec![
                 SpellCastRecord {
                     name: String::new(),
                     core_types: vec![CoreType::Sorcery],
@@ -8358,7 +8359,7 @@ pub mod tests {
                     has_x_in_cost: true,
                     from_zone: Zone::Hand,
                 },
-            ],
+            ]),
         );
         assert!(
             !check_trigger_constraint(&state, &trig_def, source, 0, PlayerId(0), &spell_event),
@@ -8415,9 +8416,10 @@ pub mod tests {
             "Opponent Spell".to_string(),
             Zone::Stack,
         );
-        state
-            .spells_cast_this_turn_by_player
-            .insert(PlayerId(0), vec![spell_record(), spell_record()]);
+        state.spells_cast_this_turn_by_player.insert(
+            PlayerId(0),
+            crate::im::Vector::from(vec![spell_record(), spell_record()]),
+        );
         process_triggers(
             &mut state,
             &[GameEvent::SpellCast {
@@ -8438,9 +8440,10 @@ pub mod tests {
             "Controller Spell".to_string(),
             Zone::Stack,
         );
-        state
-            .spells_cast_this_turn_by_player
-            .insert(PlayerId(1), vec![spell_record(), spell_record()]);
+        state.spells_cast_this_turn_by_player.insert(
+            PlayerId(1),
+            crate::im::Vector::from(vec![spell_record(), spell_record()]),
+        );
         process_triggers(
             &mut state,
             &[GameEvent::SpellCast {

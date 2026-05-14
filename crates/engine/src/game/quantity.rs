@@ -4997,7 +4997,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.spells_cast_this_turn_by_player.insert(
             PlayerId(0),
-            vec![
+            crate::im::Vector::from(vec![
                 SpellCastRecord {
                     name: String::new(),
                     core_types: vec![CoreType::Creature],
@@ -5020,7 +5020,7 @@ mod tests {
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
                 },
-            ],
+            ]),
         );
 
         let expr = QuantityExpr::Ref {
@@ -5052,7 +5052,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.spells_cast_this_game_by_player.insert(
             PlayerId(0),
-            vec![
+            crate::im::Vector::from(vec![
                 SpellCastRecord {
                     name: "Approach of the Second Sun".to_string(),
                     core_types: vec![CoreType::Sorcery],
@@ -5063,7 +5063,7 @@ mod tests {
                     core_types: vec![CoreType::Instant],
                     ..SpellCastRecord::default()
                 },
-            ],
+            ]),
         );
 
         let filter =
@@ -5087,7 +5087,7 @@ mod tests {
             .spells_cast_this_game_by_player
             .get_mut(&PlayerId(0))
             .unwrap()
-            .push(SpellCastRecord {
+            .push_back(SpellCastRecord {
                 name: "Approach of the Second Sun".to_string(),
                 core_types: vec![CoreType::Sorcery],
                 ..SpellCastRecord::default()

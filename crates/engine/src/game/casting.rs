@@ -6447,7 +6447,7 @@ fn cant_cast_filter_matches(
         // All other filters delegate to the spell record matcher.
         _ => {
             let record = SpellCastRecord {
-                name: String::new(),
+                name: spell_obj.name.clone(),
                 core_types: spell_obj.card_types.core_types.clone(),
                 supertypes: spell_obj.card_types.supertypes.clone(),
                 subtypes: spell_obj.card_types.subtypes.clone(),
@@ -6498,7 +6498,7 @@ fn is_blocked_by_per_turn_cast_limit(
             // are unaffected regardless of how many noncreature spells were cast.
             if let Some(filter) = spell_filter {
                 let current_record = SpellCastRecord {
-                    name: String::new(),
+                    name: spell_obj.name.clone(),
                     core_types: spell_obj.card_types.core_types.clone(),
                     supertypes: spell_obj.card_types.supertypes.clone(),
                     subtypes: spell_obj.card_types.subtypes.clone(),
@@ -14022,7 +14022,7 @@ mod tests {
 
         state.spells_cast_this_turn_by_player.insert(
             PlayerId(0),
-            vec![crate::types::SpellCastRecord {
+            crate::im::Vector::from(vec![crate::types::SpellCastRecord {
                 name: String::new(),
                 core_types: vec![CoreType::Creature],
                 supertypes: vec![],
@@ -14032,7 +14032,7 @@ mod tests {
                 mana_value: 1,
                 has_x_in_cost: false,
                 from_zone: Zone::Hand,
-            }],
+            }]),
         );
 
         let second_bird = create_object(

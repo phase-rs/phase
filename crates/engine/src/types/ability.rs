@@ -576,6 +576,10 @@ pub enum CountScope {
     Opponents,
 }
 
+fn default_count_scope_controller() -> CountScope {
+    CountScope::Controller
+}
+
 /// Which zone to count cards in (for `QuantityRef::ZoneCardCount`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ZoneRef {
@@ -2710,6 +2714,7 @@ pub enum QuantityRef {
     /// Established usage: `{ scope: Controller, filter: None }` reproduces the
     /// pre-lift bare-leaf reading used by Establishing Shot class.
     SpellsCastThisGame {
+        #[serde(default = "default_count_scope_controller")]
         scope: CountScope,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<TargetFilter>,

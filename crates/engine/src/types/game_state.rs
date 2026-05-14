@@ -3158,12 +3158,12 @@ pub struct GameState {
     /// Second Sun's "another spell named {LITERAL} this game") can scan the
     /// full game-scope history.
     #[serde(default)]
-    pub spells_cast_this_game_by_player: HashMap<PlayerId, Vec<SpellCastRecord>>,
+    pub spells_cast_this_game_by_player: HashMap<PlayerId, im::Vector<SpellCastRecord>>,
     /// Per-player spell cast history this turn.
     /// Each entry records the spell's relevant characteristics at cast time,
     /// enabling data-driven filtered counting at resolution.
     #[serde(default)]
-    pub spells_cast_this_turn_by_player: HashMap<PlayerId, Vec<SpellCastRecord>>,
+    pub spells_cast_this_turn_by_player: HashMap<PlayerId, im::Vector<SpellCastRecord>>,
     #[serde(default)]
     pub players_who_searched_library_this_turn: HashSet<PlayerId>,
     /// CR 603.4: Typed player-action events performed this turn. This is the

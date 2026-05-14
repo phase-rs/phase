@@ -1989,13 +1989,16 @@ pub(super) fn try_nom_condition_as_ability_condition(
             }
             // Fallback: zone alone is still a valid condition if the suffix
             // is unrecognised but starts with a period / punctuation.
-            // allow-noncombinator: structural punctuation guard on the
-            // already-tokenized remainder, not parsing dispatch — we are
-            // distinguishing "clause boundary follows" from "more content
-            // follows we couldn't recognise". A `char(...)` combinator would
-            // require an extra wrapper and adds no precision over a
-            // 2-element char-class check.
-            if trimmed.starts_with(['.', ',']) {
+            // This remains a nom guard even though it is only distinguishing
+            // "clause boundary follows" from "more content follows we
+            // couldn't recognise".
+            if alt((
+                tag::<_, _, OracleError<'_>>("."),
+                tag::<_, _, OracleError<'_>>(","),
+            ))
+            .parse(trimmed)
+            .is_ok()
+            {
                 return Some(AbilityCondition::CastFromZone { zone });
             }
         }

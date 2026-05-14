@@ -179,7 +179,7 @@ pub fn record_spell_cast_from_zone(
         .spells_cast_this_turn_by_player
         .entry(player)
         .or_default()
-        .push(record.clone());
+        .push_back(record.clone());
     // CR 117.1: Game-scope history mirror — not cleared between turns so
     // "named {LITERAL} this game" conditions (Approach of the Second Sun)
     // can see all prior casts.
@@ -187,7 +187,7 @@ pub fn record_spell_cast_from_zone(
         .spells_cast_this_game_by_player
         .entry(player)
         .or_default()
-        .push(record);
+        .push_back(record);
 }
 
 /// CR 508.1m: Any abilities that trigger on attackers being declared trigger.
@@ -1765,7 +1765,7 @@ mod tests {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
         state.spells_cast_this_turn_by_player.insert(
             PlayerId(0),
-            vec![crate::types::game_state::SpellCastRecord {
+            crate::im::Vector::from(vec![crate::types::game_state::SpellCastRecord {
                 name: String::new(),
                 core_types: vec![CoreType::Instant],
                 supertypes: Vec::new(),
@@ -1775,7 +1775,7 @@ mod tests {
                 mana_value: 1,
                 has_x_in_cost: false,
                 from_zone: Zone::Hand,
-            }],
+            }]),
         );
 
         assert!(parse_and_evaluate_condition(
@@ -1797,7 +1797,7 @@ mod tests {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
         state.spells_cast_this_turn_by_player.insert(
             PlayerId(0),
-            vec![
+            crate::im::Vector::from(vec![
                 crate::types::game_state::SpellCastRecord {
                     name: String::new(),
                     core_types: vec![CoreType::Instant],
@@ -1831,7 +1831,7 @@ mod tests {
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
                 },
-            ],
+            ]),
         );
 
         assert!(parse_and_evaluate_condition(
