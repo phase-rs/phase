@@ -1015,7 +1015,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                 }));
             }
 
-            // CR 702.152b: Casualty triggers when the spell is cast with the
+            // CR 702.153a: Casualty triggers when the spell is cast with the
             // cost paid. Applies to both printed Casualty (obj.additional_cost
             // is set) and dynamically granted Casualty (e.g. from Silverquill).
             // The WasCast intervening-if is intentionally omitted: the trigger

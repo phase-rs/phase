@@ -19,7 +19,7 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // CR 707.10 / CR 702.176a (Casualty): resolve which stack entry to copy.
+    // CR 707.10 / CR 702.153a (Casualty): resolve which stack entry to copy.
     // The helper handles explicit object targets (Twincast / Gogo), SelfRef
     // (Casualty triggers whose intermediate stack pushes would make stack.last()
     // wrong), and untargeted fallback (top of stack).
@@ -496,7 +496,7 @@ mod tests {
         });
     }
 
-    /// CR 702.176a (Casualty): When another trigger sits between the original
+    /// CR 702.153a (Casualty): When another trigger sits between the original
     /// spell and the Casualty copy trigger, SelfRef lookup must find the spell
     /// by source_id rather than using stack.last().
     #[test]
