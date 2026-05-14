@@ -1360,13 +1360,15 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             .collect(),
         WaitingFor::OverloadCostChoice { player, .. } => vec![
             candidate(
-                GameAction::ChooseOverloadCost { use_overload: true },
+                GameAction::ChooseOverloadCost {
+                    choice: crate::types::actions::OverloadChoice::Overload,
+                },
                 TacticalClass::Selection,
                 Some(*player),
             ),
             candidate(
                 GameAction::ChooseOverloadCost {
-                    use_overload: false,
+                    choice: crate::types::actions::OverloadChoice::Normal,
                 },
                 TacticalClass::Selection,
                 Some(*player),

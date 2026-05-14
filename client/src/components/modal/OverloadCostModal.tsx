@@ -56,7 +56,7 @@ function OverloadCostContent({
       <div className="flex flex-col gap-2 px-3 py-3 lg:px-5 lg:py-5">
         <button
           onClick={() =>
-            dispatch({ type: "ChooseOverloadCost", data: { use_overload: false } })
+            dispatch({ type: "ChooseOverloadCost", data: { choice: { type: "Normal" } } })
           }
           className="rounded-[16px] border border-white/8 bg-white/5 px-4 py-3 text-left transition hover:bg-white/8 hover:ring-1 hover:ring-cyan-400/30"
         >
@@ -65,7 +65,7 @@ function OverloadCostContent({
         </button>
         <button
           onClick={() =>
-            dispatch({ type: "ChooseOverloadCost", data: { use_overload: true } })
+            dispatch({ type: "ChooseOverloadCost", data: { choice: { type: "Overload" } } })
           }
           className="rounded-[16px] border border-white/8 bg-white/5 px-4 py-3 text-left transition hover:bg-white/8 hover:ring-1 hover:ring-emerald-400/30"
         >

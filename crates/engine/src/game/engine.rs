@@ -317,12 +317,12 @@ fn pass_priority_once_with_pipeline(
     let wf = priority::handle_priority_pass(state, events);
     sync_waiting_for(state, &wf);
 
-    // CR 614.1a + CR 707.9: Drain any pending continuation (e.g. Twinning Staff
-    // amplifier) while the stack is still in its post-resolution state. Targeted
-    // copies set CopyRetarget and are drained from that handler; no-target copies
-    // (e.g. Finale of Glory) never enter CopyRetarget, so without this drain the
-    // continuation sits until an unrelated action, by which point the original
-    // spell has left the stack and the amplifier's target lookup fails silently.
+    // CR 608.2 + CR 117.4: Drain any pending continuation queued during the
+    // priority pass (e.g. effects that chain a sub-resolution after the parent
+    // settles) while the stack is still in its post-resolution state. Without
+    // this drain, a continuation queued after a no-choice effect would sit
+    // until an unrelated action, by which point referenced stack objects may
+    // have left the stack.
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         effects::drain_pending_continuation(state, events);
     }
@@ -773,7 +773,6 @@ mod auto_pass_decision_tests {
         let copy_ability = ResolvedAbility::new(
             Effect::CopySpell {
                 target: TargetFilter::Any,
-                amplifier_spawn: false,
             },
             Vec::new(),
             copy_id,
@@ -1395,13 +1394,13 @@ fn apply_action(
                 card_id,
                 ..
             },
-            GameAction::ChooseOverloadCost { use_overload },
+            GameAction::ChooseOverloadCost { choice },
         ) => casting::handle_overload_cost_choice(
             state,
             *player,
             *object_id,
             *card_id,
-            use_overload,
+            choice,
             &mut events,
         )?,
         // CR 702.103a: Player chooses normal cast or Bestow cast from hand.
@@ -3151,7 +3150,12 @@ fn apply_action(
             }
             state.waiting_for.clone()
         }
-        // CR 707.10c: Copy retarget — player chose new targets for the copy (all at once).
+        // CR 707.10c: "Keep Current Targets" — accept every remaining slot's
+        // current value in one action. Equivalent to dispatching
+        // `ChooseTarget { target: None }` for each remaining slot, but resolved
+        // server-side so the UI doesn't pay N round-trips. The slot-by-slot
+        // `ChooseTarget` path above remains the single authority for the
+        // per-slot legality/advance semantics.
         (
             WaitingFor::CopyRetarget {
                 player,
@@ -3159,33 +3163,11 @@ fn apply_action(
                 target_slots,
                 ..
             },
-            GameAction::SelectTargets { targets },
+            GameAction::KeepAllCopyTargets,
         ) => {
             let p = *player;
             let cid = *copy_id;
-            if targets.len() != target_slots.len() {
-                return Err(EngineError::InvalidAction(format!(
-                    "Must provide {} targets, got {}",
-                    target_slots.len(),
-                    targets.len()
-                )));
-            }
-            // CR 707.10c: When `legal_alternatives` is populated (e.g. copies
-            // minted by Prepare/Paradigm where initial target selection needs
-            // legality gating), validate each selected target is in its
-            // slot's alternatives. Slots with empty alternatives pre-date
-            // this check and remain permissive (retargeting an inherited
-            // target per the original CR 707.10c semantics).
-            for (idx, target) in targets.iter().enumerate() {
-                let slot = &target_slots[idx];
-                if !slot.legal_alternatives.is_empty() && !slot.legal_alternatives.contains(target)
-                {
-                    return Err(EngineError::InvalidAction(format!(
-                        "Target {target:?} not a legal alternative for copy slot {idx}"
-                    )));
-                }
-            }
-            // Update the copy's targets on the stack.
+            let targets: Vec<_> = target_slots.iter().map(|s| s.current.clone()).collect();
             if let Some(entry) = state.stack.iter_mut().find(|e| e.id == cid) {
                 if let Some(ability) = entry.ability_mut() {
                     ability.targets = targets;

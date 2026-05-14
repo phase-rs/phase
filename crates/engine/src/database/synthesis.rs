@@ -1089,7 +1089,6 @@ pub fn casualty_copy_ability_definition() -> AbilityDefinition {
         AbilityKind::Spell,
         Effect::CopySpell {
             target: TargetFilter::SelfRef,
-            amplifier_spawn: false,
         },
     )
     .condition(AbilityCondition::additional_cost_paid_any())

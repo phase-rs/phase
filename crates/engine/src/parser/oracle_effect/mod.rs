@@ -1695,29 +1695,39 @@ fn try_parse_unless_three_branch_choice(
     tp: TextPair<'_>,
     ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
-    const UNLESS_THAT_PLAYER: &str = " unless that player ";
-    const UNLESS_THEY: &str = " unless they ";
+    // Nom combinator: split on the "unless" boundary (try "that player" first as
+    // the most specific), then split the alternatives on exactly one top-level
+    // " or ". `take_until` is bounded by the subsequent `tag`, so a match means
+    // the literal boundary token was found in order — no permissive substring
+    // scanning. The grammar is:
+    //   <default> " unless " ("that player " | "they ") <alt1> " or " <alt2>
+    use nom::Parser;
+    let parsed = nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, default) = take_until(" unless ").parse(i)?;
+        let (i, _) = tag(" unless ").parse(i)?;
+        let (i, _) = alt((tag("that player "), tag("they "))).parse(i)?;
+        let (i, alt1) = take_until(" or ").parse(i)?;
+        let (i, _) = tag(" or ").parse(i)?;
+        // Reject 3+ alternatives — a second " or " in the remainder means the
+        // top-level split was ambiguous and this isn't the binary "A or B" form.
+        if nom::bytes::complete::take_until::<_, _, nom::error::Error<&str>>(" or ")
+            .parse(i)
+            .is_ok()
+        {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                i,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+        Ok((i, (default.len(), alt1.len(), i.len())))
+    });
 
-    // Split on the "unless" boundary. Try "that player" first (most specific).
-    let (default_lower, alts_lower, needle_len) = split_around(tp.lower, UNLESS_THAT_PLAYER)
-        .map(|(d, a)| (d, a, UNLESS_THAT_PLAYER.len()))
-        .or_else(|| split_around(tp.lower, UNLESS_THEY).map(|(d, a)| (d, a, UNLESS_THEY.len())))?;
-
-    // The alternatives must contain exactly one top-level " or ".
-    let (alt1_lower, _alt2_lower) = split_around(alts_lower, " or ")?;
-    // Reject if alt1 itself contains another " or " (3+ alternatives — not handled here).
-    if split_around(alt1_lower, " or ").is_some() {
-        return None;
-    }
-
-    // Map positions back to original-case slices (oracle text is ASCII so byte
-    // positions are identical between original and lowercased strings).
-    let unless_start = default_lower.len();
-    let alts_start = unless_start + needle_len;
-    let alt2_start = alts_start + alt1_lower.len() + " or ".len();
-
-    let default_orig = tp.original[..unless_start].trim();
-    let alt1_orig = tp.original[alts_start..alts_start + alt1_lower.len()].trim();
+    let (default_len, alt1_len, alt2_len) = parsed?.0;
+    // Oracle text is ASCII so byte positions in `tp.original` and `tp.lower` match.
+    let alts_start = tp.original.len() - alt2_len - " or ".len() - alt1_len;
+    let alt2_start = alts_start + alt1_len + " or ".len();
+    let default_orig = tp.original[..default_len].trim();
+    let alt1_orig = tp.original[alts_start..alts_start + alt1_len].trim();
     let alt2_orig = tp.original[alt2_start..].trim().trim_end_matches('.');
 
     if default_orig.is_empty() || alt1_orig.is_empty() || alt2_orig.is_empty() {

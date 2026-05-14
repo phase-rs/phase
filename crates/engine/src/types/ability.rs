@@ -4642,11 +4642,6 @@ pub enum Effect {
     CopySpell {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
-        /// When true, this copy was spawned by a CopySpellAmplifier (Twinning Staff class).
-        /// Amplifier-spawned copies do not trigger additional amplification — the replacement
-        /// effect (CR 614.1a) applies once to the original copy event, not recursively.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        amplifier_spawn: bool,
     },
     /// CR 707.2 / CR 707.5: Create a token that's a copy of a permanent.
     /// Copies copiable characteristics (name, mana cost, color, types, P/T, abilities, keywords)

@@ -2076,28 +2076,6 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         );
     }
 
-    // --- CR 707.10 + CR 614.1a: Twinning Staff class — "if you would copy a spell,
-    // instead copy it ... plus an additional time." ---
-    // Parsed as a CopySpellAmplifier static so the runtime (copy_spell.rs::resolve)
-    // can query the battlefield for active amplifiers and queue extra copies.
-    {
-        use nom::bytes::complete::{tag, take_until};
-        let detected = nom_on_lower(tp.original, tp.lower, |i| {
-            let (i, _) = take_until("would copy a spell").parse(i)?;
-            let (i, _) = tag("would copy a spell").parse(i)?;
-            let (i, _) = take_until("plus an additional time").parse(i)?;
-            let (i, _) = tag("plus an additional time").parse(i)?;
-            Ok((i, ()))
-        });
-        if detected.is_some() {
-            return Some(
-                StaticDefinition::new(StaticMode::CopySpellAmplifier)
-                    .affected(TargetFilter::Player)
-                    .description(text.to_string()),
-            );
-        }
-    }
-
     // CR 603.2d: Trigger doubling — "triggers an additional time".
     //
     // Cause classification by phrasing:

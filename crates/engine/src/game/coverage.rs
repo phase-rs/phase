@@ -6069,11 +6069,6 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             }
             StaticMode::CantBeCountered => effective_lower.contains("can't be countered"),
             StaticMode::CantBeCopied => effective_lower.contains("can't be copied"),
-            // CR 707.10 + CR 614.1a: Twinning Staff class.
-            StaticMode::CopySpellAmplifier => {
-                effective_lower.contains("would copy a spell")
-                    && effective_lower.contains("plus an additional time")
-            }
             // CR 119.7: "can't gain life" or its compound form "life total can't change"
             // (Platinum Emperion / Teferi's Protection both emit CantGainLife from
             // the bidirectional life-lock phrase).

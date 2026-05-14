@@ -155,8 +155,7 @@ export function TargetingOverlay() {
             <button
               onClick={() =>
                 dispatch({
-                  type: "SelectTargets",
-                  data: { targets: waitingFor.data.target_slots.map((s) => s.current) },
+                  type: "KeepAllCopyTargets",
                 })
               }
               className="rounded-lg bg-emerald-700 px-6 py-2 font-semibold text-gray-100 shadow-lg transition hover:bg-emerald-600"

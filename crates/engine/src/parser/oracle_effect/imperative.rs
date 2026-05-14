@@ -2534,10 +2534,7 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
             let (target, _) = parse_target(rest);
             Effect::Regenerate { target }
         }
-        UtilityImperativeAst::Copy { target } => Effect::CopySpell {
-            target,
-            amplifier_spawn: false,
-        },
+        UtilityImperativeAst::Copy { target } => Effect::CopySpell { target },
         UtilityImperativeAst::Transform { target } => Effect::Transform { target },
         UtilityImperativeAst::Attach { attachment, target } => {
             Effect::Attach { attachment, target }

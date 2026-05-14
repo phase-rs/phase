@@ -1,7 +1,7 @@
 use rand::Rng;
 
 use engine::ai_support::build_decision_context;
-use engine::types::actions::{GameAction, MulliganChoice};
+use engine::types::actions::{GameAction, MulliganChoice, OverloadChoice};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
@@ -458,7 +458,7 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             Some(GameAction::ChooseEvokeCost { use_evoke: false })
         }
         WaitingFor::OverloadCostChoice { .. } => Some(GameAction::ChooseOverloadCost {
-            use_overload: false,
+            choice: OverloadChoice::Normal,
         }),
         WaitingFor::BestowCostChoice { .. } => {
             Some(GameAction::ChooseBestowCost { use_bestow: false })

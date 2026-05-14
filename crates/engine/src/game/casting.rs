@@ -2759,29 +2759,32 @@ pub fn handle_warp_cost_choice(
     continue_cast_from_prepared(state, player, object_id, events)
 }
 
-/// CR 702.96a: Handle Overload cost choice and proceed with casting. When
-/// `use_overload` is true, the cast is prepared with `CastingVariant::Overload`
-/// — the overload mana cost substitutes for the printed cost and the spell's
-/// ability tree is transformed (target → each, CR 702.96b-c). When false, the
-/// cast proceeds normally (no variant override → `Normal`).
+/// CR 702.96a: Handle Overload cost choice and proceed with casting. For
+/// `OverloadChoice::Overload`, the cast is prepared with
+/// `CastingVariant::Overload` — the overload mana cost substitutes for the
+/// printed cost and the spell's ability tree is transformed (target → each,
+/// CR 702.96b-c). For `OverloadChoice::Normal`, the cast proceeds normally.
 pub fn handle_overload_cost_choice(
     state: &mut GameState,
     player: PlayerId,
     object_id: ObjectId,
     _card_id: CardId,
-    use_overload: bool,
+    choice: crate::types::actions::OverloadChoice,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    if use_overload {
-        let prepared = prepare_spell_cast_with_variant_override(
-            state,
-            player,
-            object_id,
-            Some(CastingVariant::Overload),
-        )?;
-        return continue_with_prepared(state, player, prepared, events);
+    use crate::types::actions::OverloadChoice;
+    match choice {
+        OverloadChoice::Overload => {
+            let prepared = prepare_spell_cast_with_variant_override(
+                state,
+                player,
+                object_id,
+                Some(CastingVariant::Overload),
+            )?;
+            continue_with_prepared(state, player, prepared, events)
+        }
+        OverloadChoice::Normal => continue_cast_from_prepared(state, player, object_id, events),
     }
-    continue_cast_from_prepared(state, player, object_id, events)
 }
 
 /// CR 702.103b: Apply the bestow type-changing effect to a stack-bound or
@@ -3481,7 +3484,12 @@ pub fn handle_cast_spell(
                 if !normal_affordable && overload_affordable {
                     // Only overload is payable — proceed via the overload path.
                     return handle_overload_cost_choice(
-                        state, player, object_id, card_id, true, events,
+                        state,
+                        player,
+                        object_id,
+                        card_id,
+                        crate::types::actions::OverloadChoice::Overload,
+                        events,
                     );
                 }
                 // Otherwise (normal-only or neither): fall through to normal cast.
@@ -8017,7 +8025,6 @@ mod tests {
                     target: TargetFilter::StackAbility {
                         controller: Some(ControllerRef::You),
                     },
-                    amplifier_spawn: false,
                 },
             )
             .cost(AbilityCost::Composite {

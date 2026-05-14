@@ -947,7 +947,6 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                     let mut storm_ability = ResolvedAbility::new(
                         Effect::CopySpell {
                             target: TargetFilter::SelfRef,
-                            amplifier_spawn: false,
                         },
                         Vec::new(),
                         *cast_obj_id,

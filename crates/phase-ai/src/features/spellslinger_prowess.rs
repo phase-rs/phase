@@ -435,7 +435,6 @@ mod tests {
     fn copy_spell_effect() -> Effect {
         Effect::CopySpell {
             target: TargetFilter::Any,
-            amplifier_spawn: false,
         }
     }
 

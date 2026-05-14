@@ -15,7 +15,7 @@ import { VoteChoiceModal } from "./VoteChoiceModal.tsx";
 import { DungeonChoiceModal, RoomChoiceModal } from "./DungeonChoiceModal.tsx";
 import { DamageAssignmentModal } from "../combat/DamageAssignmentModal.tsx";
 import { DistributeAmongModal } from "./DistributeAmongModal.tsx";
-import { CopyRetargetModal, RetargetChoiceModal } from "./RetargetChoiceModal.tsx";
+import { RetargetChoiceModal } from "./RetargetChoiceModal.tsx";
 import { ProliferateModal } from "./ProliferateModal.tsx";
 
 type ScryChoice = Extract<WaitingFor, { type: "ScryChoice" }>;
@@ -243,36 +243,6 @@ export function CardChoiceModal() {
     case "ExileForCost":
       if (!canActForWaitingState) return null;
       return <ExileForCostDispatch data={waitingFor.data} />;
-    case "DiscardForManaAbility":
-      if (!canActForWaitingState) return null;
-      return <DiscardModal data={waitingFor.data} title="Discard for mana ability" />;
-    case "ExileFromBattlefieldForManaAbility":
-      if (!canActForWaitingState) return null;
-      return <PermanentCostModal
-        data={waitingFor.data}
-        choices={waitingFor.data.permanents}
-        title="Exile"
-        subtitle={`Choose ${waitingFor.data.count} permanent${waitingFor.data.count > 1 ? "s" : ""} to exile`}
-        label="Exile"
-        selectedClassName="z-10 ring-2 ring-violet-300/80"
-        overlayClassName="absolute inset-0 flex items-center justify-center rounded-lg bg-violet-500/20"
-        badgeClassName="rounded-full bg-violet-500/90 px-3 py-1 text-xs font-bold text-white"
-      />;
-    case "SacrificeForManaAbility":
-      if (!canActForWaitingState) return null;
-      return <PermanentCostModal
-        data={waitingFor.data}
-        choices={waitingFor.data.permanents}
-        title="Sacrifice"
-        subtitle={`Choose ${waitingFor.data.count} permanent${waitingFor.data.count > 1 ? "s" : ""} to sacrifice`}
-        label="Sacrifice"
-        selectedClassName="z-10 ring-2 ring-red-400/80"
-        overlayClassName="absolute inset-0 flex items-center justify-center rounded-lg bg-red-500/20"
-        badgeClassName="rounded-full bg-red-500/90 px-3 py-1 text-xs font-bold text-white"
-      />;
-    case "PayManaAbilityMana":
-      if (!canActForWaitingState) return null;
-      return <PayManaAbilityManaModal data={waitingFor.data} />;
     case "CollectEvidenceChoice":
       if (!canActForWaitingState) return null;
       return <CollectEvidenceModal data={waitingFor.data} />;
@@ -312,9 +282,6 @@ export function CardChoiceModal() {
     case "RetargetChoice":
       if (!canActForWaitingState) return null;
       return <RetargetChoiceModal data={waitingFor.data} />;
-    case "CopyRetarget":
-      if (!canActForWaitingState) return null;
-      return <CopyRetargetModal data={waitingFor.data} />;
     case "ProliferateChoice":
       if (!canActForWaitingState) return null;
       return <ProliferateModal data={waitingFor.data} />;
@@ -1629,15 +1596,6 @@ function ParadigmCastOfferModal({ data }: { data: ParadigmCastOffer["data"] }) {
 }
 
 // ── Pay Mana Ability Mana Modal ───────────────────────────────────────────────
-
-const MANA_COLOR_LABELS: Partial<Record<string, string>> = {
-  White: "W",
-  Blue: "U",
-  Black: "B",
-  Red: "R",
-  Green: "G",
-  Colorless: "C",
-};
 
 function ReturnToHandModal({ data }: { data: ReturnToHandForCost["data"] }) {
   return (

@@ -857,7 +857,6 @@ export type WaitingFor =
   | { type: "DrawnThisTurnTopdeckChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; min_count: number; life_payment: number; source_id: ObjectId } }
   | { type: "RetargetChoice"; data: { player: PlayerId; stack_entry_index: number; scope: RetargetScope; current_targets: TargetRef[]; legal_new_targets: TargetRef[] } }
   | { type: "ProliferateChoice"; data: { player: PlayerId; eligible: TargetRef[] } }
-  | { type: "CopyRetarget"; data: { player: PlayerId; copy_id: ObjectId; target_slots: { current: TargetRef; legal_alternatives: TargetRef[] }[] } }
   | { type: "ConniveDiscard"; data: { player: PlayerId; conniver_id: ObjectId; source_id: ObjectId; cards: ObjectId[]; count: number } }
   | { type: "DiscardChoice"; data: { player: PlayerId; count: number; cards: ObjectId[]; source_id: ObjectId; effect_kind: string; up_to?: boolean; unless_filter?: TargetFilter } }
   | { type: "ManifestDreadChoice"; data: { player: PlayerId; cards: ObjectId[] } }
@@ -1017,9 +1016,9 @@ export type GameAction =
   | { type: "ChooseModalFace"; data: { back_face: boolean } }
   | { type: "ChooseWarpCost"; data: { use_warp: boolean } }
   | { type: "ChooseEvokeCost"; data: { use_evoke: boolean } }
-  | { type: "ChooseOverloadCost"; data: { use_overload: boolean } }
+  | { type: "ChooseOverloadCost"; data: { choice: { type: "Normal" } | { type: "Overload" } } }
+  | { type: "KeepAllCopyTargets" }
   | { type: "ChooseBestowCost"; data: { use_bestow: boolean } }
-  | { type: "ChooseOverloadCost"; data: { use_overload: boolean } }
   | { type: "PayManaAbilityMana"; data: { payment: ManaType[] } }
   | { type: "CastParadigmCopy"; data: { source: ObjectId } }
   | { type: "PassParadigmOffer" }
