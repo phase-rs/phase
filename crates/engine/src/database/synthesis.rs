@@ -1135,6 +1135,7 @@ pub fn synthesize_casualty(face: &mut CardFace) {
                 t.execute.as_deref().map(|a| &*a.effect),
                 Some(Effect::CopySpell {
                     target: TargetFilter::SelfRef,
+                    ..
                 })
             )
     });

@@ -1,7 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
 
-import type { CoreType, DebugAction, ManaColor, PlayerId, Zone } from "../../adapter/types";
+import type {
+  AttachTarget,
+  CoreType,
+  CounterType,
+  DebugAction,
+  Keyword,
+  ManaColor,
+  ObjectId,
+  PlayerId,
+  Zone,
+} from "../../adapter/types";
 import {
+  getCardFaceData,
   listTokenPresets,
   type TokenCategory,
   type TokenPreset,
@@ -10,8 +21,10 @@ import {
   AccordionItem,
   CardNameAutocomplete,
   CheckboxInput,
+  deriveAttachmentInfo,
   FieldRow,
   NumberInput,
+  ObjectSelect,
   PlayerSelect,
   SelectInput,
   SubmitButton,
@@ -59,14 +72,142 @@ const COLOR_LABELS: Record<ManaColor, string> = {
   Green: "G",
 };
 
+// The counter types most useful for debug recovery (state injection). The
+// engine accepts any `CounterType` over the wire, but the dropdown sticks to
+// the canonical SBA-relevant set so a single click resolves the "0/0 token
+// dies" case. Default is `P1P1` because that's the counter every 0/0-shape
+// printed card uses to make tokens survive.
+// Counter types exposed in the debug picker. Values are the canonical serde
+// wire strings — matching what the engine emits in `state.objects[*].counters`
+// — so the dropdown labels also serve as documentation for the wire format.
+const COUNTER_OPTIONS: readonly CounterType[] = ["P1P1", "M1M1", "loyalty", "stun"];
+
+interface CounterPickerProps {
+  counterType: CounterType;
+  setCounterType: (c: CounterType) => void;
+  count: number;
+  setCount: (n: number) => void;
+  hint?: string;
+}
+
+function CounterPicker({
+  counterType,
+  setCounterType,
+  count,
+  setCount,
+  hint,
+}: CounterPickerProps) {
+  return (
+    <>
+      <FieldRow label="Counter Type">
+        <SelectInput
+          value={counterType}
+          onChange={setCounterType}
+          options={COUNTER_OPTIONS}
+        />
+      </FieldRow>
+      <FieldRow label="Counters">
+        <NumberInput value={count} onChange={setCount} />
+      </FieldRow>
+      {hint && (
+        <div className="mb-2 px-2 text-[10px] text-amber-300">{hint}</div>
+      )}
+    </>
+  );
+}
+
+// Clamp non-positive counts to zero (an empty `enter_with_counters` payload)
+// so the wire never carries a negative `u32` that would fail deserialization
+// on the Rust side. `NumberInput` doesn't enforce a minimum at the input
+// boundary, so this is the safety net.
+function buildEnterCounters(
+  counterType: CounterType,
+  count: number,
+): [CounterType, number][] {
+  return count > 0 ? [[counterType, count]] : [];
+}
+
 interface Props {
   onDispatch: (action: DebugAction) => void;
+}
+
+// `CardFaceShape` — minimal slice of the engine's `CardFace` returned by
+// `getCardFaceData`. Only the fields the spawn-attached form reads are typed;
+// the wire shape carries more (oracle_text, abilities, triggers, etc.) but
+// those are surfaced elsewhere.
+interface CardFaceShape {
+  keywords?: Keyword[] | null;
+  card_type?: { core_types?: string[]; subtypes?: string[] } | null;
 }
 
 function CreateCardForm({ onDispatch }: Props) {
   const [cardName, setCardName] = useState("");
   const [owner, setOwner] = useState<PlayerId>(0);
   const [zone, setZone] = useState<Zone>("Hand");
+  const [face, setFace] = useState<CardFaceShape | null>(null);
+  const [targetKind, setTargetKind] = useState<"Object" | "Player">("Object");
+  const [targetObjectId, setTargetObjectId] = useState<ObjectId | null>(null);
+  const [targetPlayerId, setTargetPlayerId] = useState<PlayerId>(0);
+
+  // Resolve the face data through the engine's card database (single source
+  // of truth for keywords + subtypes). Loading is async — until it returns,
+  // the attach picker stays hidden and the form behaves as before. We debounce
+  // by trimming and gating on non-empty names so empty typing doesn't spam
+  // the WASM bridge.
+  useEffect(() => {
+    let cancelled = false;
+    const trimmed = cardName.trim();
+    if (!trimmed) {
+      setFace(null);
+      return;
+    }
+    getCardFaceData(trimmed)
+      .then((f) => {
+        if (!cancelled) setFace((f as CardFaceShape | null) ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setFace(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cardName]);
+
+  const info = useMemo(
+    () =>
+      deriveAttachmentInfo({
+        keywords: face?.keywords ?? null,
+        subtypes: face?.card_type?.subtypes ?? null,
+      }),
+    [face],
+  );
+
+  // Show the attach picker only when this card *can* attach AND the spawn
+  // destination is Battlefield (Auras/Equipment in Hand/Exile have no host
+  // until they're cast). When only one kind of target is legal, auto-pin to it.
+  const isAttachmentShape = info.canTargetPlayer || info.canTargetObject;
+  const showAttachPicker = isAttachmentShape && zone === "Battlefield";
+  useEffect(() => {
+    if (info.canTargetPlayer && !info.canTargetObject) setTargetKind("Player");
+    else if (!info.canTargetPlayer && info.canTargetObject) setTargetKind("Object");
+  }, [info.canTargetPlayer, info.canTargetObject]);
+
+  const buildAttachTo = (): AttachTarget | undefined => {
+    if (!showAttachPicker) return undefined;
+    if (targetKind === "Player") return { type: "Player", data: targetPlayerId };
+    if (targetObjectId == null) return undefined;
+    return { type: "Object", data: targetObjectId };
+  };
+
+  // Submit gating: when attach picker is shown, require a host selection so
+  // we never accidentally spawn an orphan Aura that the SBA pass will yank
+  // straight to the graveyard (CR 704.5n). The exception is when the user
+  // intentionally wants an orphan for testing — covered by the "skip attach"
+  // path (zone != Battlefield).
+  const needsHost = showAttachPicker;
+  const hasHost =
+    !needsHost ||
+    (targetKind === "Object" ? targetObjectId != null : true /* PlayerSelect always has a value */);
 
   return (
     <>
@@ -79,11 +220,41 @@ function CreateCardForm({ onDispatch }: Props) {
       <FieldRow label="Zone">
         <SelectInput value={zone} onChange={setZone} options={ZONES} />
       </FieldRow>
+      {showAttachPicker && (
+        <>
+          {info.canTargetPlayer && info.canTargetObject && (
+            <FieldRow label="Host Kind">
+              <SelectInput
+                value={targetKind}
+                onChange={setTargetKind}
+                options={["Object", "Player"] as const}
+              />
+            </FieldRow>
+          )}
+          {targetKind === "Object" && (
+            <ObjectSelect
+              value={targetObjectId}
+              onChange={setTargetObjectId}
+              filter={info.objectFilter}
+              label="Attach To"
+              placeholder="Pick a host…"
+            />
+          )}
+          {targetKind === "Player" && (
+            <FieldRow label="Attach To">
+              <PlayerSelect value={targetPlayerId} onChange={setTargetPlayerId} />
+            </FieldRow>
+          )}
+        </>
+      )}
       <SubmitButton
         onClick={() =>
-          onDispatch({ type: "CreateCard", data: { card_name: cardName, owner, zone } })
+          onDispatch({
+            type: "CreateCard",
+            data: { card_name: cardName, owner, zone, attach_to: buildAttachTo() },
+          })
         }
-        disabled={!cardName.trim()}
+        disabled={!cardName.trim() || !hasHost}
       >
         Create Card
       </SubmitButton>
@@ -116,12 +287,28 @@ function categoryLabel(c: TokenCategory): string {
   return CATEGORY_LABELS.find((x) => x.key === c)?.label ?? c;
 }
 
+// Parameterized keywords (Ward, Protection, Annihilator) serialize as
+// `{ Variant: data }` objects; plain keywords serialize as strings. Render
+// the variant name in both cases so the summary never shows `[object Object]`.
+function keywordLabel(k: Keyword): string {
+  return typeof k === "string" ? k : (Object.keys(k)[0] ?? "");
+}
+
 function presetSummary(p: TokenPreset): string {
   const ch = p.body;
   const pt =
     ch.power !== null && ch.toughness !== null ? `${ch.power}/${ch.toughness} ` : "";
   const colors = ch.colors.length === 0 ? "C" : ch.colors.map((c) => c[0]).join("");
-  return `${pt}${colors} ${ch.display_name}`;
+  // Show non-Creature core types so an "Enchantment Creature — Bird" preset
+  // disambiguates from a plain "Creature — Bird" preset that shares P/T,
+  // colors, subtypes, and keywords (real collisions exist in known-tokens.toml).
+  const extraTypes = ch.core_types.filter((t) => t !== "Creature");
+  const typesPrefix = extraTypes.length > 0 ? ` ${extraTypes.join(" ")}` : "";
+  const subtypes = ch.subtypes.length > 0 ? ` ${ch.subtypes.join(" ")}` : "";
+  const kw = ch.keywords.length > 0 ? ` — ${ch.keywords.map(keywordLabel).join(", ")}` : "";
+  return `${pt}${colors}${typesPrefix}${subtypes} ${ch.display_name}${kw}`
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function CatalogTokenForm({ onDispatch }: Props) {
@@ -130,6 +317,8 @@ function CatalogTokenForm({ onDispatch }: Props) {
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [counterType, setCounterType] = useState<CounterType>("P1P1");
+  const [counterCount, setCounterCount] = useState(0);
 
   useEffect(() => {
     listTokenPresets()
@@ -138,6 +327,14 @@ function CatalogTokenForm({ onDispatch }: Props) {
         setLoadError(e instanceof Error ? e.message : String(e));
       });
   }, []);
+
+  // Reset the counter count when the user switches presets so a count set
+  // for a 0/0 body doesn't silently carry over and pump a different preset.
+  // Counter *type* persists deliberately — that's a user preference, not a
+  // per-preset choice.
+  useEffect(() => {
+    setCounterCount(0);
+  }, [selectedId]);
 
   const filtered = useMemo(() => {
     if (!presets) return [];
@@ -183,14 +380,30 @@ function CatalogTokenForm({ onDispatch }: Props) {
     return keys;
   }, [grouped]);
 
+  const selectedPreset = presets?.find((p) => p.id === selectedId) ?? null;
+  // CR 704.5f hint: cite the rule that explains why this token would die.
+  // FE string formatting over engine-provided fields — no game-state inference.
+  // Only `+1/+1` (P1P1) counters raise toughness and prevent the SBA kill;
+  // a stack of `loyalty` or `stun` counters won't save a 0/0, so the hint
+  // remains until the user picks a counter type that actually helps.
+  const counterRescues = counterType === "P1P1" && counterCount > 0;
+  const survivalHint =
+    selectedPreset &&
+    selectedPreset.body.core_types.includes("Creature") &&
+    selectedPreset.body.power === 0 &&
+    selectedPreset.body.toughness === 0 &&
+    !counterRescues
+      ? "0/0 creature dies to state-based actions — add +1/+1 counters to keep it alive (CR 704.5f)."
+      : undefined;
+
   const handleSubmit = () => {
-    const preset = presets?.find((p) => p.id === selectedId);
-    if (!preset) return;
+    if (!selectedPreset) return;
     onDispatch({
       type: "CreateToken",
       data: {
         owner,
-        characteristics: preset.body,
+        characteristics: selectedPreset.body,
+        enter_with_counters: buildEnterCounters(counterType, counterCount),
       },
     });
   };
@@ -250,6 +463,13 @@ function CatalogTokenForm({ onDispatch }: Props) {
           );
         })}
       </div>
+      <CounterPicker
+        counterType={counterType}
+        setCounterType={setCounterType}
+        count={counterCount}
+        setCount={setCounterCount}
+        hint={survivalHint}
+      />
       <SubmitButton onClick={handleSubmit} disabled={!selectedId}>
         Create Selected Token
       </SubmitButton>
@@ -266,6 +486,8 @@ function CustomTokenForm({ onDispatch }: Props) {
   const [subtypesText, setSubtypesText] = useState("");
   const [colors, setColors] = useState<ManaColor[]>([]);
   const [keywordsText, setKeywordsText] = useState("");
+  const [counterType, setCounterType] = useState<CounterType>("P1P1");
+  const [counterCount, setCounterCount] = useState(0);
 
   const toggleCoreType = (ct: CoreType) => {
     setCoreTypes((prev) =>
@@ -303,9 +525,18 @@ function CustomTokenForm({ onDispatch }: Props) {
           colors,
           keywords,
         },
+        enter_with_counters: buildEnterCounters(counterType, counterCount),
       },
     });
   };
+
+  // CR 704.5f hint: same display-only annotation used by the catalog form.
+  // Only `+1/+1` (P1P1) counters raise toughness and prevent the SBA kill.
+  const counterRescues = counterType === "P1P1" && counterCount > 0;
+  const survivalHint =
+    coreTypes.includes("Creature") && power === 0 && toughness === 0 && !counterRescues
+      ? "0/0 creature dies to state-based actions — add +1/+1 counters to keep it alive (CR 704.5f)."
+      : undefined;
 
   return (
     <>
@@ -358,6 +589,13 @@ function CustomTokenForm({ onDispatch }: Props) {
       <FieldRow label="Keywords">
         <TextInput value={keywordsText} onChange={setKeywordsText} placeholder="Flying, Haste" />
       </FieldRow>
+      <CounterPicker
+        counterType={counterType}
+        setCounterType={setCounterType}
+        count={counterCount}
+        setCount={setCounterCount}
+        hint={survivalHint}
+      />
       <SubmitButton onClick={handleSubmit}>Create Custom Token</SubmitButton>
     </>
   );

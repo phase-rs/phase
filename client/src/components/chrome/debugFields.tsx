@@ -2,7 +2,7 @@
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import type { ManaType, PlayerId } from "../../adapter/types";
+import type { GameObject, Keyword, ManaType, ObjectId, PlayerId, Zone } from "../../adapter/types";
 import { getCardNames } from "../../services/cardNames";
 import { useGameStore } from "../../stores/gameStore";
 import { getSeatColor } from "../../hooks/useSeatColor";
@@ -156,6 +156,237 @@ export function ObjectIdInput({
   );
 }
 
+// `ObjectSelect` — searchable, zone-grouped dropdown for picking a `GameObject`
+// by name. Replaces raw numeric `ObjectIdInput` everywhere a debug action needs
+// an `ObjectId`. The optional `filter` lets each call site declare its actual
+// constraint (e.g., "battlefield only" for SetController, "creatures only" for
+// Equipment attach). The currently-selected object is always shown even when it
+// would otherwise be filtered out — never silently lose the user's selection
+// when state changes underneath.
+//
+// Ordering: groups by zone (Battlefield → Hand → others), then by "you" first
+// within each group, then by name.
+const ZONE_ORDER: readonly Zone[] = [
+  "Battlefield",
+  "Stack",
+  "Hand",
+  "Graveyard",
+  "Exile",
+  "Library",
+  "Command",
+];
+
+interface ObjectSelectProps {
+  value: ObjectId | null;
+  onChange: (v: ObjectId) => void;
+  /** Optional predicate. Default: include all objects in any zone. */
+  filter?: (obj: GameObject) => boolean;
+  label?: string;
+  placeholder?: string;
+}
+
+export function ObjectSelect({
+  value,
+  onChange,
+  filter,
+  label,
+  placeholder = "Pick an object…",
+}: ObjectSelectProps) {
+  const objectsMap = useGameStore((s) => s.gameState?.objects);
+  const myId = usePerspectivePlayerId();
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [highlightIndex, setHighlightIndex] = useState(0);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // Close on outside pointerdown.
+  useEffect(() => {
+    if (!open) return;
+    const handleClick = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", handleClick, true);
+    return () => document.removeEventListener("pointerdown", handleClick, true);
+  }, [open]);
+
+  const grouped = useMemo(() => {
+    if (!objectsMap) return [];
+    const filtered: GameObject[] = [];
+    for (const obj of Object.values(objectsMap) as GameObject[]) {
+      if (filter && !filter(obj)) {
+        // Always include the currently-selected object so the displayed value
+        // never becomes a phantom — applies whether or not it matches the filter.
+        if (obj.id !== value) continue;
+      }
+      const q = query.trim().toLowerCase();
+      if (q) {
+        const idMatch = String(obj.id).includes(q);
+        const nameMatch = obj.name.toLowerCase().includes(q);
+        if (!idMatch && !nameMatch && obj.id !== value) continue;
+      }
+      filtered.push(obj);
+    }
+    // Group by zone, sort by "you" then name within each group.
+    const buckets = new Map<Zone, GameObject[]>();
+    for (const obj of filtered) {
+      const arr = buckets.get(obj.zone) ?? [];
+      arr.push(obj);
+      buckets.set(obj.zone, arr);
+    }
+    const result: { zone: Zone; objects: GameObject[] }[] = [];
+    for (const zone of ZONE_ORDER) {
+      const arr = buckets.get(zone);
+      if (!arr) continue;
+      arr.sort((a, b) => {
+        const aMine = a.controller === myId ? 0 : 1;
+        const bMine = b.controller === myId ? 0 : 1;
+        if (aMine !== bMine) return aMine - bMine;
+        return a.name.localeCompare(b.name);
+      });
+      result.push({ zone, objects: arr });
+    }
+    return result;
+  }, [objectsMap, filter, query, value, myId]);
+
+  // Flat list mirrors the rendered order — drives keyboard navigation.
+  const flat = useMemo(() => grouped.flatMap((g) => g.objects), [grouped]);
+
+  useEffect(() => {
+    setHighlightIndex(0);
+  }, [query, open]);
+
+  const selectedObj =
+    value != null && objectsMap ? (objectsMap[value] as GameObject | undefined) : undefined;
+  const selectedLabel = selectedObj
+    ? `${selectedObj.name}  #${selectedObj.id}`
+    : placeholder;
+
+  // Drive a *debug-specific* board highlight (`debugHighlightedObjectId`),
+  // not the standard `hoveredObjectId`. Most board elements don't visibly
+  // react to plain hover, so the debug-panel preview needs its own loud
+  // signal — `PermanentCard` (and any other surface that opts in) renders an
+  // fuchsia ring + pulse for the debug-highlighted object. Decoupling from
+  // `hoveredObjectId` also avoids fighting the standard hover-lift behavior
+  // when the user is just trying to inspect from afar.
+  const setDebugHighlight = useUiStore((s) => s.setDebugHighlightedObjectId);
+
+  // Clear the highlight when the dropdown closes for any reason (selection,
+  // outside-click, Escape). The cleanup function ALSO runs on component
+  // unmount — without it, closing the parent accordion mid-hover would leave
+  // a phantom fuchsia ring on the last-previewed permanent forever.
+  useEffect(() => {
+    if (!open) setDebugHighlight(null);
+    return () => setDebugHighlight(null);
+  }, [open, setDebugHighlight]);
+
+  const select = (id: ObjectId) => {
+    onChange(id);
+    setOpen(false);
+    setQuery("");
+    setDebugHighlight(null);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (!flat.length) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setHighlightIndex((i) => Math.min(i + 1, flat.length - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setHighlightIndex((i) => Math.max(i - 1, 0));
+    } else if (e.key === "Enter" && flat[highlightIndex]) {
+      e.preventDefault();
+      select(flat[highlightIndex].id);
+    } else if (e.key === "Escape") {
+      setOpen(false);
+    }
+  };
+
+  let runningIndex = -1;
+  return (
+    <FieldRow label={label ?? "Object"}>
+      <div ref={containerRef} className="relative">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className={inputClass + " text-left flex items-center justify-between gap-2"}
+        >
+          <span className={selectedObj ? "truncate" : "truncate text-gray-500"}>
+            {selectedLabel}
+          </span>
+          <span className="shrink-0 text-[10px] text-gray-500">▾</span>
+        </button>
+        {open && (
+          <div className="absolute left-0 right-0 top-full z-50 mt-0.5 max-h-72 overflow-hidden rounded border border-gray-700 bg-gray-800 shadow-lg">
+            <input
+              type="text"
+              value={query}
+              autoFocus
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="Search by name or id…"
+              className="block w-full border-b border-gray-700 bg-gray-900 px-2 py-1 font-mono text-[11px] text-gray-200 focus:outline-none"
+            />
+            <div className="max-h-60 overflow-y-auto">
+              {grouped.length === 0 && (
+                <div className="px-2 py-1.5 font-mono text-[10px] text-gray-500">
+                  No matching objects
+                </div>
+              )}
+              {grouped.map(({ zone, objects }) => (
+                <div key={zone}>
+                  <div className="px-2 pt-1 pb-0.5 font-mono text-[9px] uppercase tracking-wider text-gray-500">
+                    {zone}
+                  </div>
+                  {objects.map((obj) => {
+                    runningIndex += 1;
+                    const isHighlighted = runningIndex === highlightIndex;
+                    const isSelected = obj.id === value;
+                    return (
+                      <button
+                        key={obj.id}
+                        type="button"
+                        onClick={() => select(obj.id)}
+                        onMouseEnter={() => setDebugHighlight(obj.id)}
+                        onMouseLeave={() => setDebugHighlight(null)}
+                        onFocus={() => setDebugHighlight(obj.id)}
+                        onBlur={() => setDebugHighlight(null)}
+                        className={
+                          "flex w-full items-center justify-between gap-2 px-2 py-1 text-left font-mono text-[10px] transition-colors " +
+                          (isHighlighted
+                            ? "bg-blue-700/40 text-blue-100"
+                            : isSelected
+                              ? "bg-gray-700/40 text-gray-200"
+                              : "text-gray-300 hover:bg-white/10")
+                        }
+                      >
+                        <span className="truncate">
+                          {obj.name}
+                          <span
+                            className={
+                              "ml-1.5 text-[9px] " +
+                              (obj.controller === myId ? "text-blue-400" : "text-rose-400")
+                            }
+                          >
+                            {obj.controller === myId ? "you" : `P${obj.controller}`}
+                          </span>
+                        </span>
+                        <span className="shrink-0 text-[9px] text-gray-500">#{obj.id}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </FieldRow>
+  );
+}
+
 export function PlayerSelect({
   value,
   onChange,
@@ -166,10 +397,22 @@ export function PlayerSelect({
   const players = useGameStore((s) => s.gameState?.players);
   const seatOrder = useGameStore((s) => s.gameState?.seat_order);
   const myId = usePerspectivePlayerId();
+  const setDebugHighlightedPlayerId = useUiStore((s) => s.setDebugHighlightedPlayerId);
+  // Native <select> doesn't surface per-option hover, so the closest analogue
+  // to "preview the chosen player" is: highlight on focus, follow the selected
+  // value while open, clear on blur. Combined with the avatar HudPlate
+  // honoring `debugHighlightedPlayerId`, the user gets a visible cue without
+  // a full custom dropdown rewrite.
   return (
     <select
       value={value}
-      onChange={(e) => onChange(Number(e.target.value) as PlayerId)}
+      onChange={(e) => {
+        const v = Number(e.target.value) as PlayerId;
+        onChange(v);
+        setDebugHighlightedPlayerId(v);
+      }}
+      onFocus={() => setDebugHighlightedPlayerId(value)}
+      onBlur={() => setDebugHighlightedPlayerId(null)}
       className={inputClass}
       style={{ color: getSeatColor(value, seatOrder) }}
     >
@@ -239,6 +482,70 @@ export function ManaTypeSelect({
       })}
     </div>
   );
+}
+
+// ── Attachment legality ─────────────────────────────────────────────────
+// Shared between the Attach form (works against a battlefield `GameObject`)
+// and the spawn-attached CreateCard form (works against a pre-spawn
+// `CardFace` from the database). The minimal shape both share is:
+//   - `keywords`: the printed/runtime keyword list (Enchant filter lives here)
+//   - `subtypes`: detects Equipment / Fortification when no Enchant
+// The returned `AttachmentInfo` is consumed by both forms to pick between a
+// `PlayerSelect` and an `ObjectSelect` filtered to the right host class.
+
+export interface AttachmentInfo {
+  /** True when the source can attach to a player (e.g., Curse cycle). */
+  canTargetPlayer: boolean;
+  /** True when the source can attach to an object (most cases). */
+  canTargetObject: boolean;
+  /** Object filter applied to ObjectSelect when targeting objects. */
+  objectFilter: (obj: GameObject) => boolean;
+}
+
+const onBattlefield = (obj: GameObject) => obj.zone === "Battlefield";
+const isCreatureOnBattlefield = (obj: GameObject) =>
+  obj.zone === "Battlefield" && obj.card_types.core_types.includes("Creature");
+
+export function deriveAttachmentInfo(input: {
+  keywords?: Keyword[] | null;
+  subtypes?: string[] | null;
+}): AttachmentInfo {
+  const subtypes = input.subtypes ?? [];
+  // Equipment / Fortification — Object-only, filtered to creatures per CR 301.5.
+  if (subtypes.includes("Equipment") || subtypes.includes("Fortification")) {
+    return {
+      canTargetPlayer: false,
+      canTargetObject: true,
+      objectFilter: isCreatureOnBattlefield,
+    };
+  }
+  // Inspect Keyword::Enchant payload. Keywords serialize as either bare strings
+  // ("Flying") or `{ Variant: data }` (parameterized) — Enchant is the latter,
+  // carrying a TargetFilter that tells us what hosts are legal.
+  for (const kw of input.keywords ?? []) {
+    if (typeof kw !== "object" || kw === null || !("Enchant" in kw)) continue;
+    const filter = (kw as { Enchant: unknown }).Enchant;
+    if (!filter || typeof filter !== "object") continue;
+    const t = (filter as { type?: string }).type;
+    if (t === "Player") {
+      return { canTargetPlayer: true, canTargetObject: false, objectFilter: onBattlefield };
+    }
+    if (t === "Typed") {
+      const typeFilters: string[] =
+        (filter as { type_filters?: string[] }).type_filters ?? [];
+      if (typeFilters.includes("Creature")) {
+        return {
+          canTargetPlayer: false,
+          canTargetObject: true,
+          objectFilter: isCreatureOnBattlefield,
+        };
+      }
+    }
+    // Unknown Enchant variant — accept any permanent.
+    return { canTargetPlayer: false, canTargetObject: true, objectFilter: onBattlefield };
+  }
+  // No Enchant, no Equipment/Fortification — not an attachment-shaped card.
+  return { canTargetPlayer: false, canTargetObject: false, objectFilter: onBattlefield };
 }
 
 // ── Card Name Autocomplete ─────────────────────────────────────────────

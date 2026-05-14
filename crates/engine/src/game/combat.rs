@@ -1583,7 +1583,6 @@ pub fn has_summoning_sickness(obj: &GameObject) -> bool {
 /// CR 702.26b: Phased-out creatures can't attack.
 pub fn get_valid_attacker_ids(state: &GameState) -> Vec<ObjectId> {
     let active = state.active_player;
-    let turn = state.turn_number;
 
     state
         .battlefield_phased_in_ids()
@@ -1610,8 +1609,10 @@ pub fn get_valid_attacker_ids(state: &GameState) -> Vec<ObjectId> {
                         StaticMode::CantAttack | StaticMode::CantAttackOrBlock
                     )
                 })
-                && (obj.has_keyword(&Keyword::Haste)
-                    || obj.entered_battlefield_turn.is_some_and(|etb| etb < turn))
+                // CR 302.6: delegate to the single authority for summoning
+                // sickness — folds in Haste at query time without duplicating
+                // the flag/keyword logic here.
+                && !has_summoning_sickness(obj)
             {
                 Some(*id)
             } else {

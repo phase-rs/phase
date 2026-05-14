@@ -124,7 +124,7 @@ function CardPreviewInner({
     size: "normal",
     faceIndex: defaultFaceIndex,
     isToken,
-    tokenFilters: isToken ? { power: obj?.power, toughness: obj?.toughness, colors: obj?.color } : undefined,
+    tokenFilters: isToken ? { power: obj?.power, toughness: obj?.toughness, colors: obj?.color, subtypes: obj?.card_types?.subtypes } : undefined,
     oracleId: obj?.printed_ref?.oracle_id,
     faceName: obj?.printed_ref?.face_name,
     scryfallId,

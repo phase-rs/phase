@@ -1,7 +1,7 @@
 use rand::Rng;
 
 use engine::ai_support::build_decision_context;
-use engine::types::actions::{GameAction, MulliganChoice};
+use engine::types::actions::{GameAction, MulliganChoice, OverloadChoice};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
@@ -106,7 +106,7 @@ pub fn choose_action(
     // the dedicated scorer). The deterministic path returns the chosen
     // SelectCards directly; only fall through if it produces nothing.
     if matches!(state.waiting_for, WaitingFor::SearchChoice { .. }) {
-        if let Some(action) = deterministic_choice(state, ai_player, config, &[]) {
+        if let Some(action) = deterministic_choice(state, ai_player, config, &[], None) {
             return Some(action);
         }
     }
@@ -362,6 +362,12 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
 
         // Unless payment: decline to pay (let the effect resolve).
         WaitingFor::UnlessPayment { .. } => Some(GameAction::PayUnlessCost { pay: false }),
+        // CR 118.12a: Disjunctive unless-cost choice. Fallback is to decline
+        // the choice (let the effect resolve), mirroring `UnlessPayment`'s
+        // pessimistic-default policy.
+        WaitingFor::UnlessPaymentChooseCost { .. } => Some(GameAction::ChooseUnlessCostBranch {
+            choice: engine::types::actions::UnlessCostBranch::Decline,
+        }),
 
         // Combat tax: decline to pay.
         WaitingFor::CombatTaxPayment { .. } => Some(GameAction::PayCombatTax { accept: false }),
@@ -458,7 +464,7 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             Some(GameAction::ChooseEvokeCost { use_evoke: false })
         }
         WaitingFor::OverloadCostChoice { .. } => Some(GameAction::ChooseOverloadCost {
-            use_overload: false,
+            choice: OverloadChoice::Normal,
         }),
         WaitingFor::BestowCostChoice { .. } => {
             Some(GameAction::ChooseBestowCost { use_bestow: false })
@@ -801,8 +807,12 @@ pub fn score_candidates(
         return vec![];
     }
 
-    // Deterministic early returns — these don't benefit from search/parallelism
-    if let Some(action) = deterministic_choice(state, ai_player, config, &actions) {
+    // Deterministic early returns — these don't benefit from search/parallelism.
+    // Pass the already-built context so the mulligan branch avoids a second
+    // full deck analysis (DeckProfile + SynergyGraph for both players).
+    if let Some(action) =
+        deterministic_choice(state, ai_player, config, &actions, Some(&services.context))
+    {
         return vec![(action, 1.0)];
     }
 
@@ -977,6 +987,7 @@ pub(crate) fn deterministic_choice(
     ai_player: PlayerId,
     config: &AiConfig,
     actions: &[GameAction],
+    context: Option<&AiContext>,
 ) -> Option<GameAction> {
     if matches!(
         state.waiting_for,
@@ -1013,7 +1024,14 @@ pub(crate) fn deterministic_choice(
         let entry = pending.iter().find(|e| e.player == ai_player)?;
         let player = entry.player;
         let mulligan_count = entry.mulligan_count;
-        let ctx = build_ai_context(state, player, config);
+        let owned_ctx;
+        let ctx = match context {
+            Some(c) => c,
+            None => {
+                owned_ctx = build_ai_context(state, player, config);
+                &owned_ctx
+            }
+        };
         let default_features = crate::features::DeckFeatures::default();
         let default_plan = crate::plan::PlanSnapshot::default();
         let features = ctx
@@ -2314,6 +2332,59 @@ mod tests {
         assert!(
             matches!(action, GameAction::ChooseOption { ref choice } if choice == "evidence"),
             "classic vote must pick first option, got {action:?}"
+        );
+    }
+
+    /// Regression guard: AI priority decision against 1000-token opponent
+    /// board must complete in single-digit milliseconds. The combination of
+    /// `ranked.truncate(branching)`, the deadline mechanism, and the
+    /// `im::HashMap` structural sharing in `apply_candidate` keeps priority
+    /// decisions cheap even on Scute Swarm-class boards. If this test ever
+    /// regresses past 100ms, something started doing per-opponent-creature
+    /// work inside `evaluate_after_action` or the candidate scoring loop —
+    /// hunt that down rather than relax this bound.
+    #[test]
+    fn priority_decision_vs_thousand_opponent_tokens_stays_fast() {
+        let mut state = make_state();
+        // 1000 1/1 opponent tokens — the pathological board.
+        for _ in 0..1000 {
+            add_creature(&mut state, PlayerId(1), 1, 1);
+        }
+        // AI has 5 untapped lands available (so legal_actions has some real
+        // candidates: PassPriority + maybe land-tap mana abilities).
+        for _ in 0..5 {
+            let cid = CardId(state.next_object_id);
+            let id = create_object(
+                &mut state,
+                cid,
+                PlayerId(0),
+                "Forest".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+        }
+
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let mut rng = SmallRng::seed_from_u64(42);
+
+        let start = std::time::Instant::now();
+        let action = choose_action(&state, PlayerId(0), &config, &mut rng);
+        let elapsed = start.elapsed();
+
+        eprintln!(
+            "[bench] choose_action priority-pass (1000 opponent tokens, AI difficulty=Hard): {:?}",
+            elapsed
+        );
+        assert!(action.is_some(), "AI must produce some action");
+        // Empirical baseline ~5ms in debug. 100ms is a generous ceiling that
+        // catches a 20× regression while staying robust to CI-runner noise.
+        assert!(
+            elapsed.as_millis() < 100,
+            "Priority decision regressed past 100ms ceiling: {:?}; \
+             investigate per-opponent-creature work in score_candidates / \
+             evaluate_after_action before relaxing this bound.",
+            elapsed
         );
     }
 }

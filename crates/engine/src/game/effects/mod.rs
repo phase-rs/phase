@@ -1885,12 +1885,26 @@ pub fn resolve_ability_chain(
             } else {
                 let mut pending = ability.clone();
                 pending.unless_pay = None;
-                state.waiting_for = WaitingFor::UnlessPayment {
-                    player: payer,
-                    cost: resolved_cost,
-                    pending_effect: Box::new(pending),
-                    trigger_event: state.current_trigger_event.clone(),
-                    effect_description: ability.description.clone(),
+                // CR 118.12a: A disjunctive unless-cost (`OneOf`) surfaces a
+                // sub-cost choice first; the chosen single cost re-enters
+                // `WaitingFor::UnlessPayment` via
+                // `handle_unless_payment_choose_cost`. This keeps the
+                // single-cost branch in `handle_unless_payment` unchanged.
+                state.waiting_for = match resolved_cost {
+                    AbilityCost::OneOf { costs } => WaitingFor::UnlessPaymentChooseCost {
+                        player: payer,
+                        costs,
+                        pending_effect: Box::new(pending),
+                        trigger_event: state.current_trigger_event.clone(),
+                        effect_description: ability.description.clone(),
+                    },
+                    cost => WaitingFor::UnlessPayment {
+                        player: payer,
+                        cost,
+                        pending_effect: Box::new(pending),
+                        trigger_event: state.current_trigger_event.clone(),
+                        effect_description: ability.description.clone(),
+                    },
                 };
                 return Ok(());
             }
@@ -1957,14 +1971,13 @@ pub fn resolve_ability_chain(
             });
         } else {
             // CR 609.3: Execute the effect N times when repeat_for is set.
+            // CR 107.3a: Variable("X") must resolve via resolve_quantity_with_targets
+            // so that ability.chosen_x (the paid X value) is passed through. The
+            // plain resolve_quantity path passes chosen_x=None, causing X to always
+            // resolve to 0 and the loop to never execute (Torment of Hailfire bug).
             let iterations = if let Some(ref qty) = ability.repeat_for {
-                crate::game::quantity::resolve_quantity(
-                    state,
-                    qty,
-                    ability.controller,
-                    ability.source_id,
-                )
-                .max(0) as usize
+                crate::game::quantity::resolve_quantity_with_targets(state, qty, ability).max(0)
+                    as usize
             } else {
                 1
             };
@@ -2850,6 +2863,15 @@ fn resolve_unless_payer(
         // controller of the targeted spell (the parent ability's first
         // target), which `resolve_effect_player_ref` looks up via the stack.
         TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner => {
+            crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
+        }
+        // CR 118.12a: "[Target player] loses N life unless they ..." —
+        // the paying player is the chosen player target on the ability
+        // (Tergrid's Lantern and the broader "target player unless they X"
+        // punisher class). Delegates to `resolve_effect_player_ref`'s
+        // `TargetFilter::Player` arm which scans `ability.targets` for the
+        // first `TargetRef::Player`.
+        TargetFilter::Player => {
             crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
         }
         _ => None,

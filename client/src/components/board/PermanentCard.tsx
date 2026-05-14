@@ -148,6 +148,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
   const {
     selectedObjectId, selectObject, hoverObject, inspectObject,
     hoveredObjectId,
+    debugHighlightedObjectId,
     combatMode, selectedAttackers, toggleAttacker,
     blockerAssignments, combatClickHandler, selectedCardIds, toggleSelectedCard,
   } = useUiStore(useShallow((s) => ({
@@ -156,6 +157,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
     hoverObject: s.hoverObject,
     inspectObject: s.inspectObject,
     hoveredObjectId: s.hoveredObjectId,
+    debugHighlightedObjectId: s.debugHighlightedObjectId,
     combatMode: s.combatMode,
     selectedAttackers: s.selectedAttackers,
     toggleAttacker: s.toggleAttacker,
@@ -164,6 +166,11 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
     selectedCardIds: s.selectedCardIds,
     toggleSelectedCard: s.toggleSelectedCard,
   })));
+  // Debug-panel preview highlight: lights up only when the user is hovering
+  // an ObjectSelect option (or otherwise dispatching `setDebugHighlightedObjectId`).
+  // Deliberately distinct from the standard hover-lift so the debug signal
+  // never blends into ambient interaction state.
+  const isDebugHighlighted = debugHighlightedObjectId === objectId;
   const isValidTarget = validTargetObjectIds.has(objectId);
   const isValidAttacker = validAttackerIds.has(objectId);
   const hasActivatableAbility = activatableObjectIds.has(objectId);
@@ -598,6 +605,18 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
         </>
       )}
 
+      {/* Debug-panel preview highlight — fuchsia neon ring + animated pulse.
+          Triggered when an ObjectSelect option in the debug panel is hovered
+          (`debugHighlightedObjectId` state). Deliberately loud and visually
+          unrelated to seat/turn/attack/target treatments so it never reads
+          as part of the normal game UI. `pointer-events-none` keeps it from
+          intercepting clicks/hovers on the card beneath. */}
+      {isDebugHighlighted && (
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-[-4px] z-40 rounded-xl ring-4 ring-fuchsia-400 shadow-[0_0_22px_6px_rgba(232,121,249,0.7),inset_0_0_18px_4px_rgba(232,121,249,0.45)] animate-pulse"
+        />
+      )}
     </motion.div>
   );
 });

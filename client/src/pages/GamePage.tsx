@@ -55,9 +55,10 @@ import { ReplacementModal } from "../components/modal/ReplacementModal.tsx";
 import { BattleProtectorModal } from "../components/modal/BattleProtectorModal.tsx";
 import { TributeModal } from "../components/modal/TributeModal.tsx";
 import { CombatTaxModal } from "../components/modal/CombatTaxModal.tsx";
-import { DialogHost } from "../components/modal/DialogHost.tsx";
+import { CLICK_THROUGH_WAITING_FOR_TYPES, DialogHost } from "../components/modal/DialogHost.tsx";
 import { EvokeCostModal } from "../components/modal/EvokeCostModal.tsx";
 import { BestowCostModal } from "../components/modal/BestowCostModal.tsx";
+import { OverloadCostModal } from "../components/modal/OverloadCostModal.tsx";
 import { PermanentTypeSlotModal } from "../components/modal/PermanentTypeSlotModal.tsx";
 import { StackDisplay } from "../components/stack/StackDisplay.tsx";
 import { TargetingOverlay } from "../components/targeting/TargetingOverlay.tsx";
@@ -1187,7 +1188,7 @@ function GamePageContent({
           new WaitingFor so a fresh prompt is always visible. */}
       <DialogHost>
         {waitingFor != null &&
-          (["TargetSelection", "TriggerTargetSelection", "CopyTargetChoice", "ExploreChoice", "TapCreaturesForManaAbility", "TapCreaturesForSpellCost"] as const).includes(waitingFor.type as never) &&
+          CLICK_THROUGH_WAITING_FOR_TYPES.has(waitingFor.type) &&
           canActForWaitingState && <TargetingOverlay />}
         {waitingFor?.type === "ManaPayment" &&
           canActForWaitingState && <ManaPaymentUI />}
@@ -1202,6 +1203,7 @@ function GamePageContent({
         <CombatTaxModal />
         <EvokeCostModal />
         <BestowCostModal />
+        <OverloadCostModal />
         <PermanentTypeSlotModal />
         <ModeChoiceModal />
         <ChooseOneOfBranchModal />
@@ -1245,6 +1247,12 @@ function GamePageContent({
           canActForWaitingState && (
             <UnlessPaymentModal />
           )}
+
+        {/* CR 118.12a: Disjunctive unless-cost choice (Tergrid's Lantern). */}
+        {waitingFor?.type === "UnlessPaymentChooseCost" &&
+          canActForWaitingState && (
+            <UnlessPaymentChooseCostModal />
+          )}
       </DialogHost>
 
       {waitingFor?.type === "CompanionReveal" &&
@@ -1272,6 +1280,16 @@ function GamePageContent({
             />
           );
         })()}
+
+      {waitingFor?.type === "MulliganDecision" &&
+        !waitingFor.data.pending.some((e) => e.player === playerId) && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center">
+            <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(31,41,55,0.55),rgba(2,6,23,0.92)_58%,rgba(2,6,23,0.98))]" />
+            <div className="relative text-center">
+              <p className="text-base font-semibold text-white">Opponent is deciding their opening hand…</p>
+            </div>
+          </div>
+        )}
 
       {waitingFor?.type === "MulliganBottomCards" &&
         (() => {
@@ -1451,7 +1469,14 @@ function MulliganDecisionPrompt({
   const objects = useGameStore((s) => s.gameState?.objects);
   const legalActions = useGameStore((s) => s.legalActions);
   const hoverProps = useInspectHoverProps();
-  const [buttonsVisible, setButtonsVisible] = useState(false);
+  // `animationDone` is the raw signal from Framer's `onAnimationComplete`
+  // on the last card. `buttonsVisible` is the derived predicate — buttons
+  // show once card-deal animations finish *or* immediately when the hand
+  // is empty and there's nothing to animate (mulligan-to-zero path), so the
+  // last-card callback never fires.
+  const [animationDone, setAnimationDone] = useState(false);
+  const handCount = player?.hand.length ?? 0;
+  const buttonsVisible = animationDone || handCount === 0;
 
   // Engine rule (CR 103.5 + 103.5c): bottom_count_on_keep = mulligan_count - (free_first ? 1 : 0).
   // The *next* mulligan is "free" iff applying that formula at mulligan_count + 1 yields 0.
@@ -1587,7 +1612,7 @@ function MulliganDecisionPrompt({
                 }}
                 whileHover={{ scale: 1.06, y: -12 }}
                 onAnimationComplete={() => {
-                  if (index === handObjects.length - 1) setButtonsVisible(true);
+                  if (index === handObjects.length - 1) setAnimationDone(true);
                 }}
                 {...hoverProps(obj.id)}
               >
@@ -2223,22 +2248,36 @@ function formatManaCost(cost: { type: string; shards?: string[]; generic?: numbe
   return parts.join("") || "0";
 }
 
-function formatUnlessCost(cost: { type: string; cost?: { type: string; shards?: string[]; generic?: number }; amount?: number }): string {
+function formatUnlessCost(cost: { type: string; cost?: { type: string; shards?: string[]; generic?: number }; amount?: number; count?: number }): string {
   switch (cost.type) {
+    // Legacy `UnlessCost` JSON (pre-2026-05-09 fold) — preserved for
+    // saved-game compat.
     case "Fixed":
       return cost.cost ? formatManaCost(cost.cost) : "0";
-    case "PayLife":
-      return `${cost.amount ?? 0} life`;
     case "DiscardCard":
       return "discard a card";
+    // Unified `AbilityCost` JSON (post-fold). Used by all newly produced
+    // unless-payments, including the per-branch entries of `OneOf`.
+    case "Mana":
+      return cost.cost ? formatManaCost(cost.cost) : "0";
+    case "Discard":
+      return "discard a card";
+    case "PayLife": {
+      const amount = typeof cost.amount === "number"
+        ? cost.amount
+        : (cost as { amount?: { type: string; value?: number } }).amount?.value ?? 0;
+      return `${amount} life`;
+    }
     case "Sacrifice": {
-      const n = (cost as { count?: number }).count ?? 1;
+      const n = cost.count ?? 1;
       return n > 1 ? `sacrifice ${n} permanents` : "sacrifice a permanent";
     }
     case "ReturnToHand": {
-      const n = (cost as { count?: number }).count ?? 1;
+      const n = cost.count ?? 1;
       return n > 1 ? `return ${n} permanents to hand` : "return a permanent to hand";
     }
+    case "PayEnergy":
+      return `${cost.amount ?? 0} energy`;
     default:
       return "a cost";
   }
@@ -2264,6 +2303,55 @@ function UnlessPaymentModal() {
       onChoose={(id) =>
         dispatch({ type: "PayUnlessCost", data: { pay: id === "pay" } })
       }
+    />
+  );
+}
+
+// CR 118.12a: Disjunctive unless-cost choice \u2014 the player picks **which**
+// sub-cost branch to pay (or declines all branches). Mirrors
+// `UnlessPaymentModal` but enumerates one option per sub-cost plus a
+// decline. Drives Tergrid's Lantern's "sacrifice ... or discard ..."
+// punisher pattern.
+function UnlessPaymentChooseCostModal() {
+  const dispatch = useGameDispatch();
+  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+
+  if (waitingFor?.type !== "UnlessPaymentChooseCost") return null;
+
+  const costs = waitingFor.data.costs as Array<{
+    type: string;
+    cost?: { type: string; shards?: string[]; generic?: number };
+    amount?: number;
+    count?: number;
+  }>;
+  const description = waitingFor.data.effect_description ?? "Choose a cost";
+  const title = description.charAt(0).toUpperCase() + description.slice(1);
+
+  const branchOptions = costs.map((cost, idx) => ({
+    id: String(idx),
+    label: formatUnlessCost(cost),
+  }));
+
+  return (
+    <ChoiceModal
+      title={`${title} Unless You Pay One`}
+      options={[
+        ...branchOptions,
+        { id: "decline", label: "Take the Effect" },
+      ]}
+      onChoose={(id) => {
+        // CR 118.12a: Typed `UnlessCostBranch` discriminant — `Decline`
+        // falls through to the effect, `Pay { index }` selects the
+        // sub-cost. Mirrors the Rust enum exactly.
+        const choice =
+          id === "decline"
+            ? ({ type: "Decline" } as const)
+            : ({ type: "Pay", data: { index: Number.parseInt(id, 10) } } as const);
+        dispatch({
+          type: "ChooseUnlessCostBranch",
+          data: { choice },
+        });
+      }}
     />
   );
 }

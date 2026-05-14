@@ -17,6 +17,10 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    // CR 707.10 / CR 702.153a (Casualty): resolve which stack entry to copy.
+    // The helper handles explicit object targets (Twincast / Gogo), SelfRef
+    // (Casualty triggers whose intermediate stack pushes would make stack.last()
+    // wrong), and untargeted fallback (top of stack).
     let top_entry = copy_source_entry(state, ability).ok_or_else(|| {
         EffectError::MissingParam("No spell or ability on stack to copy".to_string())
     })?;
@@ -46,13 +50,33 @@ pub fn resolve(
         state.objects.insert(copy_id, copy_obj);
     }
 
-    let mut copy_kind = top_entry.kind.clone();
-    set_copied_kind_controller(&mut copy_kind, ability.controller);
+    // CR 707.10: The copy has the same characteristics as the original, but its
+    // identity is distinct.
+    //   - Reset additional_cost_paid + kickers_paid so any "if its [additional]
+    //     cost was paid" triggers (Offspring ETB, Casualty) do not fire for the
+    //     copy — the copy is placed on the stack, not cast.
+    //   - Update internal source_id references on the Spell variant to copy_id.
+    //   - Re-controller the resolved ability chain so opponent-controlled copies
+    //     (Twincast, Gogo) resolve under the copying player.
+    let copy_kind = {
+        let mut kind = top_entry.kind.clone();
+        if let StackEntryKind::Spell {
+            ability: Some(ref mut a),
+            ..
+        } = kind
+        {
+            a.source_id = copy_id;
+            a.context.additional_cost_paid = false;
+            a.context.kickers_paid.clear();
+        }
+        set_copied_kind_controller(&mut kind, ability.controller);
+        kind
+    };
 
-    // Create the copy with a new ID but same kind.
-    let copy_entry = crate::types::game_state::StackEntry {
+    // CR 707.10: The copy's source_id is its own id (not the original's).
+    let copy_entry = StackEntry {
         id: copy_id,
-        source_id: top_entry.source_id,
+        source_id: copy_id,
         controller: ability.controller,
         kind: copy_kind,
     };
@@ -67,13 +91,32 @@ pub fn resolve(
         .unwrap_or_default();
 
     if !copy_targets.is_empty() {
-        // Build target slots — each slot shows current target. Legal alternatives
-        // are not computed here (the engine handler validates at selection time).
+        // Compute legal alternatives for each slot so the UI can present valid
+        // choices. If build_target_slots fails (no legal targets exist for the
+        // copy), fall back to empty alternatives — the copy still goes on the
+        // stack and will fizzle at resolution per CR 608.2b if all targets remain
+        // illegal.
+        // Use the copy's ability (with copy_id as source_id) so protection and
+        // hexproof checks reflect the copy's identity, not the original's.
+        let selection_slots = top_entry
+            .ability()
+            .map(|a| {
+                let mut copy_ability = a.clone();
+                copy_ability.source_id = copy_id;
+                copy_ability
+            })
+            .and_then(|a| super::super::ability_utils::build_target_slots(state, &a).ok())
+            .unwrap_or_default();
+
         let target_slots: Vec<CopyTargetSlot> = copy_targets
             .iter()
-            .map(|t| CopyTargetSlot {
+            .enumerate()
+            .map(|(i, t)| CopyTargetSlot {
                 current: t.clone(),
-                legal_alternatives: Vec::new(),
+                legal_alternatives: selection_slots
+                    .get(i)
+                    .map(|s| s.legal_targets.clone())
+                    .unwrap_or_default(),
             })
             .collect();
 
@@ -81,6 +124,7 @@ pub fn resolve(
             player: ability.controller,
             copy_id,
             target_slots,
+            current_slot: 0,
         };
         // EffectResolved deferred until after retarget choice completes.
         return Ok(());
@@ -109,7 +153,8 @@ fn copy_source_entry(state: &GameState, ability: &ResolvedAbility) -> Option<Sta
     if matches!(
         &ability.effect,
         Effect::CopySpell {
-            target: TargetFilter::SelfRef
+            target: TargetFilter::SelfRef,
+            ..
         }
     ) {
         return state
@@ -377,6 +422,136 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::EffectResolved { .. })));
+    }
+
+    /// Helper: push a triggered ability onto the stack (no targets).
+    fn push_trigger(
+        state: &mut GameState,
+        obj_id: ObjectId,
+        card_id: CardId,
+        owner: PlayerId,
+        ability: ResolvedAbility,
+    ) {
+        let obj = crate::game::game_object::GameObject::new(
+            obj_id,
+            card_id,
+            owner,
+            "Trigger Token".to_string(),
+            Zone::Stack,
+        );
+        state.objects.insert(obj_id, obj);
+        state.stack.push_back(StackEntry {
+            id: obj_id,
+            source_id: obj_id,
+            controller: owner,
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: obj_id,
+                ability: Box::new(ability),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+            },
+        });
+    }
+
+    /// CR 702.153a (Casualty): When another trigger sits between the original
+    /// spell and the Casualty copy trigger, SelfRef lookup must find the spell
+    /// by source_id rather than using stack.last().
+    #[test]
+    fn test_copy_spell_selfref_finds_spell_past_intermediate_trigger() {
+        let mut state = GameState::new_two_player(42);
+
+        // Push original targeted spell (Anguished Unmaking-style)
+        let original_ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: None,
+                destination: crate::types::zones::Zone::Exile,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![TargetRef::Object(ObjectId(99))],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        push_spell(
+            &mut state,
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Anguished Unmaking",
+            original_ability.clone(),
+            CastingVariant::Normal,
+        );
+
+        // Push an intermediate triggered ability (e.g. Monastery Mentor token trigger)
+        let mentor_ability = ResolvedAbility::new(
+            Effect::Token {
+                name: "Monk".to_string(),
+                power: crate::types::ability::PtValue::Fixed(1),
+                toughness: crate::types::ability::PtValue::Fixed(1),
+                types: vec![],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+            vec![],
+            ObjectId(11),
+            PlayerId(0),
+        );
+        push_trigger(
+            &mut state,
+            ObjectId(11),
+            CardId(2),
+            PlayerId(0),
+            mentor_ability,
+        );
+
+        // Simulate resolve_top popping the Casualty copy trigger (top of stack).
+        // The Casualty ability has source_id = 10 (Anguished Unmaking) and SelfRef target.
+        let casualty_ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::SelfRef,
+            },
+            vec![],
+            ObjectId(10), // source_id = original spell
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        // Stack is now: [Anguished Unmaking (10), Mentor trigger (11)]
+        // copy_spell::resolve should find ObjectId(10) via source_id, not stack.last() (=11)
+        resolve(&mut state, &casualty_ability, &mut events).unwrap();
+
+        // Should have entered CopyRetarget (original had targets) with the copy of the spell
+        assert!(
+            matches!(state.waiting_for, WaitingFor::CopyRetarget { .. }),
+            "Expected CopyRetarget but got {:?}",
+            state.waiting_for
+        );
+        // Stack: original + mentor trigger + copy = 3 entries
+        assert_eq!(state.stack.len(), 3);
+        // The copy should be a copy of Anguished Unmaking (ChangeZone), not the Mentor trigger
+        let copy_entry = state.stack.back().unwrap();
+        assert!(
+            copy_entry
+                .ability()
+                .is_some_and(|a| matches!(a.effect, Effect::ChangeZone { .. })),
+            "Copy should replicate ChangeZone (Anguished Unmaking), not the trigger"
+        );
     }
 
     #[test]

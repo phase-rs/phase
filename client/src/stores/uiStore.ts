@@ -40,6 +40,14 @@ interface UiStoreState {
   debugPanelOpen: boolean;
   debugInteractionMode: boolean;
   debugContextMenu: { objectId: ObjectId; x: number; y: number } | null;
+  /** Object currently being "previewed" by a debug-panel control (e.g. an
+   *  ObjectSelect dropdown option under the cursor). Drives a distinct,
+   *  always-obvious highlight on the board permanent / player avatar that is
+   *  intentionally separate from `hoveredObjectId` — most board elements
+   *  don't visibly react to plain hover, so a debug-panel preview needs its
+   *  own loud signal. */
+  debugHighlightedObjectId: ObjectId | null;
+  debugHighlightedPlayerId: number | null;
   logPanelOpen: boolean;
 }
 
@@ -73,6 +81,10 @@ interface UiStoreActions {
   toggleDebugInteractionMode: () => void;
   openDebugContextMenu: (menu: { objectId: ObjectId; x: number; y: number }) => void;
   closeDebugContextMenu: () => void;
+  /** Set or clear the debug-panel preview highlight for an object. */
+  setDebugHighlightedObjectId: (id: ObjectId | null) => void;
+  /** Set or clear the debug-panel preview highlight for a player. */
+  setDebugHighlightedPlayerId: (id: number | null) => void;
   setLogPanelOpen: (open: boolean) => void;
   toggleLogPanel: () => void;
 }
@@ -103,10 +115,14 @@ export const useUiStore = create<UiStore>()((set) => ({
   debugPanelOpen: false,
   debugInteractionMode: false,
   debugContextMenu: null,
+  debugHighlightedObjectId: null,
+  debugHighlightedPlayerId: null,
   logPanelOpen: false,
 
   selectObject: (id) => set({ selectedObjectId: id }),
   hoverObject: (id) => set({ hoveredObjectId: id }),
+  setDebugHighlightedObjectId: (id) => set({ debugHighlightedObjectId: id }),
+  setDebugHighlightedPlayerId: (id) => set({ debugHighlightedPlayerId: id }),
   setAltHeld: (held) => set({ altHeld: held }),
   inspectObject: (id, faceIndex) => {
     if (id != null) {

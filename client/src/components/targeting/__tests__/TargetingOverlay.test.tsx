@@ -263,6 +263,73 @@ describe("TargetingOverlay", () => {
     expect(screen.getByText("up to one nonland permanent")).toBeInTheDocument();
   });
 
+  it("shows Keep Current Targets button for CopyRetarget and dispatches KeepAllCopyTargets", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const gameState = createGameState({
+      waiting_for: {
+        type: "CopyRetarget",
+        data: {
+          player: 0,
+          copy_id: 233,
+          target_slots: [
+            { current: { Player: 0 }, legal_alternatives: [{ Player: 0 }, { Player: 1 }] },
+          ],
+          current_slot: 0,
+        },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+
+    const btn = screen.getByRole("button", { name: "Keep Current Targets" });
+    expect(btn).toBeInTheDocument();
+    fireEvent.click(btn);
+
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "KeepAllCopyTargets",
+    });
+  });
+
+  it("hides Keep Current Targets button when current target is not in legal_alternatives", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const gameState = createGameState({
+      waiting_for: {
+        type: "CopyRetarget",
+        data: {
+          player: 0,
+          copy_id: 231,
+          target_slots: [
+            {
+              current: { Object: 227 },
+              legal_alternatives: [{ Object: 61 }, { Object: 91 }],
+            },
+          ],
+          current_slot: 0,
+        },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+
+    expect(screen.queryByRole("button", { name: "Keep Current Targets" })).toBeNull();
+  });
+
   it("renders mana symbols in trigger descriptions", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
     const sourceObject = buildGameObjectWithCoreTypes(["Instant"], {

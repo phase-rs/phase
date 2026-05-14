@@ -687,6 +687,12 @@ pub struct PendingCast {
     /// during the normal cost-payment step after targets are chosen.
     #[serde(default)]
     pub deferred_target_selection: bool,
+    /// CR 601.2b: Set to `true` once an optional additional cost (e.g. Casualty)
+    /// that was deferred before target selection has been decided (paid or declined).
+    /// Guards `finish_pending_cast_cost_or_pay` from re-presenting the same cost
+    /// after the player selects targets.
+    #[serde(default)]
+    pub additional_cost_decided: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub declared_kickers_to_pay: Vec<KickerVariant>,
     /// CR 702.33f: Non-repeatable kicker options the player has declined in
@@ -729,6 +735,7 @@ impl PendingCast {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
@@ -1650,6 +1657,31 @@ pub enum WaitingFor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effect_description: Option<String>,
     },
+    /// CR 118.12a: Player must choose **which** sub-cost to pay from a
+    /// disjunctive ("unless they X or Y") unless-cost. Once a sub-cost is
+    /// chosen, the resolver re-enters `handle_unless_payment` with that
+    /// single cost as if the OR had never been there. Declining surfaces
+    /// the cost-payment-failure path (the original effect happens).
+    ///
+    /// Drives Tergrid's Lantern ("unless they sacrifice a nonland permanent
+    /// of their choice or discard a card") and the broader punisher-disjunction
+    /// class.
+    UnlessPaymentChooseCost {
+        player: PlayerId,
+        /// The sub-costs the paying player may choose between.
+        /// Stored as the unified `AbilityCost` taxonomy; forward-compatible
+        /// deserialization accepts the legacy `UnlessCost` JSON shape per-item.
+        costs: Vec<AbilityCost>,
+        /// The pending effect (with `unless_pay` already stripped) to apply if
+        /// the player declines to pay any branch.
+        pending_effect: Box<ResolvedAbility>,
+        /// Trigger event context to restore.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger_event: Option<GameEvent>,
+        /// Human-readable description for the frontend.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effect_description: Option<String>,
+    },
     /// CR 702.21a: Player must choose a card to discard as ward cost payment.
     WardDiscardChoice {
         player: PlayerId,
@@ -2029,6 +2061,9 @@ pub enum WaitingFor {
         player: PlayerId,
         copy_id: ObjectId,
         target_slots: Vec<CopyTargetSlot>,
+        /// Index of the slot currently awaiting a ChooseTarget action.
+        #[serde(default)]
+        current_slot: usize,
     },
     /// CR 510.1c: Attacker with multiple blockers — controller divides damage as they choose.
     /// CR 702.19b/c: Trample requires lethal to each blocker before excess to defending player.
@@ -2283,6 +2318,7 @@ impl WaitingFor {
             | WaitingFor::OpponentMayChoice { player, .. }
             | WaitingFor::TributeChoice { player, .. }
             | WaitingFor::UnlessPayment { player, .. }
+            | WaitingFor::UnlessPaymentChooseCost { player, .. }
             | WaitingFor::DiscoverChoice { player, .. }
             | WaitingFor::CascadeChoice { player, .. }
             | WaitingFor::TopOrBottomChoice { player, .. }
@@ -4148,6 +4184,7 @@ mod tests {
                 additional_cost_flow: None,
                 deferred_modal_choice: None,
                 deferred_target_selection: false,
+                additional_cost_decided: false,
                 declared_kickers_to_pay: Vec::new(),
                 declined_kickers: Vec::new(),
                 convoked_creatures: Vec::new(),
@@ -4425,6 +4462,7 @@ mod tests {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),

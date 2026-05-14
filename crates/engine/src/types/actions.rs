@@ -11,6 +11,7 @@ use super::phase::Phase;
 use super::player::PlayerId;
 use super::zones::Zone;
 use crate::game::combat::AttackTarget;
+use crate::game::game_object::AttachTarget;
 
 /// CR 701.57a + CR 702.85a: Player decision for any "you may cast that card
 /// without paying its mana cost" mid-resolution choice (Discover, Cascade).
@@ -52,6 +53,31 @@ pub enum MulliganChoice {
     UseSerumPowder {
         object_id: ObjectId,
     },
+}
+
+/// CR 702.96a: Player decision at a `WaitingFor::OverloadCostChoice` prompt —
+/// pay the normal mana cost or the Overload cost. Typed enum (not `bool`) so
+/// new branches can be added without breaking exhaustive match.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum OverloadChoice {
+    /// Pay the spell's printed mana cost; targets resolve normally.
+    Normal,
+    /// CR 702.96b-c: Pay the overload cost; every "target" becomes "each".
+    Overload,
+}
+
+/// CR 118.12a: Player decision at an `UnlessPaymentChooseCost` prompt — the
+/// disjunctive ("unless they X or Y") unless-cost choice. `Decline` falls
+/// through to the effect happening (mirrors `PayUnlessCost { pay: false }`);
+/// `Pay { index }` selects the sub-cost by its position in
+/// `WaitingFor::UnlessPaymentChooseCost::costs` and routes back into the
+/// standard single-cost `handle_unless_payment` path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum UnlessCostBranch {
+    Decline,
+    Pay { index: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, strum::IntoStaticStr)]
@@ -212,12 +238,16 @@ pub enum GameAction {
     ChooseEvokeCost {
         use_evoke: bool,
     },
-    /// CR 702.96a: Choose normal cast (false) or Overload cast (true) from hand.
-    /// Overload cast substitutes the overload mana cost and transforms every
-    /// "target" in the spell's text to "each" (CR 702.96b-c).
+    /// CR 702.96a: Choose between paying the normal mana cost or the Overload
+    /// cost from hand. Overload cast substitutes the overload mana cost and
+    /// transforms every "target" in the spell's text to "each" (CR 702.96b-c).
     ChooseOverloadCost {
-        use_overload: bool,
+        choice: OverloadChoice,
     },
+    /// CR 707.10c: Resolve a `WaitingFor::CopyRetarget` by leaving every
+    /// remaining slot's target unchanged. Single action so the UI can offer
+    /// "Keep Current Targets" without N round-trips through `ChooseTarget`.
+    KeepAllCopyTargets,
     /// CR 702.103a: Choose normal cast (false) or Bestow cast (true) from hand.
     /// Bestow cast substitutes the bestow mana cost and turns the spell into an
     /// Aura with `enchant creature` (CR 702.103b).
@@ -301,6 +331,14 @@ pub enum GameAction {
     /// CR 118.12: Pay or decline an "unless pays" cost (e.g., Mana Leak, No More Lies).
     PayUnlessCost {
         pay: bool,
+    },
+    /// CR 118.12a: Choose **which** sub-cost branch to pay from a disjunctive
+    /// unless-cost ("unless they X or Y"). The `UnlessCostBranch` discriminant
+    /// is `Decline` (fall through to the effect) or `Pay { index }` (re-enter
+    /// the standard single-cost payment path with the chosen sub-cost).
+    /// Drives Tergrid's Lantern's "sacrifice ... or discard ..." disjunction.
+    ChooseUnlessCostBranch {
+        choice: UnlessCostBranch,
     },
     /// CR 508.1d + CR 508.1h + CR 509.1c + CR 509.1d: Pay or decline the aggregate
     /// combat tax (Ghostly Prison, Propaganda, Sphere of Safety, Windborn Muse).
@@ -526,10 +564,17 @@ pub enum DebugAction {
     },
     /// Create a new card object by name. Resolved against CardDatabase at the
     /// WASM layer; the engine returns InvalidAction if this reaches apply().
+    ///
+    /// `attach_to` is consulted only when `zone == Battlefield` and the card is
+    /// an Aura/Equipment-style attachment. When set, the object's `attached_to`
+    /// is populated before the ETB pipeline runs, so the SBA pass (CR 704.5n)
+    /// sees a legal host instead of an orphan. Ignored for non-Battlefield zones.
     CreateCard {
         card_name: String,
         owner: PlayerId,
         zone: Zone,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attach_to: Option<AttachTarget>,
     },
     /// Remove an object from the game entirely.
     RemoveObject { object_id: ObjectId },
@@ -571,10 +616,13 @@ pub enum DebugAction {
         transformed: Option<bool>,
         flipped: Option<bool>,
     },
-    /// Attach an object (equipment/aura) to a target permanent.
+    /// Attach an object (equipment/aura) to a target permanent or player.
+    /// CR 301.5 / CR 303.4f: Equipment hosts must be `Object`; player-attachable
+    /// Auras (Curse cycle, Faith's Fetters-class) use `Player`. The handler
+    /// dispatches to `attach_to` vs `attach_to_player` accordingly.
     Attach {
         object_id: ObjectId,
-        target_id: ObjectId,
+        target: AttachTarget,
     },
     /// Detach an object from whatever it's attached to.
     Detach { object_id: ObjectId },
@@ -610,9 +658,21 @@ pub enum DebugAction {
     /// `characteristics` is the same body shape used by `TokenSpec` and
     /// `TokenPreset`; the WASM handler fills in runtime fields (script_name,
     /// source_id, controller, tapped, etc.) at create-time.
+    ///
+    /// `enter_with_counters` is plumbed straight through to
+    /// `TokenSpec::enter_with_counters` and travels the same replacement
+    /// pipeline as engine-driven token creation, so debug spawns of bodies
+    /// that need counters to survive (0/0 creature tokens, Hangarback /
+    /// Hydra shapes) can produce viable objects without the FE inferring
+    /// rules state. See `ProposedEvent::CreateToken` and
+    /// `TokenSpec::enter_with_counters` — same semantics, real pipeline.
+    /// CR 122.6a (counters placed at ETB), CR 614.1 (replacement window),
+    /// CR 704.5f (0-toughness SBA — why this field exists).
     CreateToken {
         owner: PlayerId,
         characteristics: super::proposed_event::TokenCharacteristics,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        enter_with_counters: Vec<(CounterType, u32)>,
     },
 }
 
@@ -645,12 +705,23 @@ impl DebugAction {
                 card_name,
                 owner,
                 zone,
-            } => format!(
-                "CreateCard ({} for {} in {:?})",
-                card_name,
-                player_label(*owner),
-                zone
-            ),
+                attach_to,
+            } => {
+                let attach_suffix = match attach_to {
+                    Some(AttachTarget::Object(id)) => format!(" attached to {}", obj(*id)),
+                    Some(AttachTarget::Player(pid)) => {
+                        format!(" attached to {}", player_label(*pid))
+                    }
+                    None => String::new(),
+                };
+                format!(
+                    "CreateCard ({} for {} in {:?}{})",
+                    card_name,
+                    player_label(*owner),
+                    zone,
+                    attach_suffix,
+                )
+            }
             DebugAction::RemoveObject { object_id } => {
                 format!("RemoveObject ({})", obj(*object_id))
             }
@@ -713,10 +784,13 @@ impl DebugAction {
                 transformed,
                 flipped
             ),
-            DebugAction::Attach {
-                object_id,
-                target_id,
-            } => format!("Attach ({} → {})", obj(*object_id), obj(*target_id)),
+            DebugAction::Attach { object_id, target } => {
+                let target_label = match target {
+                    AttachTarget::Object(id) => obj(*id),
+                    AttachTarget::Player(pid) => player_label(*pid),
+                };
+                format!("Attach ({} → {})", obj(*object_id), target_label)
+            }
             DebugAction::Detach { object_id } => format!("Detach ({})", obj(*object_id)),
             DebugAction::GrantKeyword { object_id, keyword } => {
                 format!("GrantKeyword ({} gains {:?})", obj(*object_id), keyword)
@@ -742,11 +816,22 @@ impl DebugAction {
             DebugAction::CreateToken {
                 owner,
                 characteristics,
+                enter_with_counters,
             } => {
+                let counters = if enter_with_counters.is_empty() {
+                    String::new()
+                } else {
+                    let parts: Vec<String> = enter_with_counters
+                        .iter()
+                        .map(|(ct, n)| format!("{n} {}", ct.as_str()))
+                        .collect();
+                    format!(" with {}", parts.join(", "))
+                };
                 format!(
-                    "CreateToken ({} for {})",
+                    "CreateToken ({} for {}{})",
                     characteristics.display_name,
-                    player_label(*owner)
+                    player_label(*owner),
+                    counters
                 )
             }
         }
@@ -842,11 +927,13 @@ impl GameAction {
             | GameAction::ChooseWarpCost { .. }
             | GameAction::ChooseEvokeCost { .. }
             | GameAction::ChooseOverloadCost { .. }
+            | GameAction::KeepAllCopyTargets
             | GameAction::ChooseBestowCost { .. }
             | GameAction::ChoosePermanentTypeSlot { .. }
             | GameAction::DecideOptionalEffect { .. }
             | GameAction::DecideOptionalEffectAndRemember { .. }
             | GameAction::PayUnlessCost { .. }
+            | GameAction::ChooseUnlessCostBranch { .. }
             | GameAction::PayCombatTax { .. }
             | GameAction::ChooseDungeon { .. }
             | GameAction::ChooseDungeonRoom { .. }

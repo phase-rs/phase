@@ -11,14 +11,13 @@ import { DialogPeekCtx, type DialogPeekContext } from "./dialogPeekContext.ts";
 // `WaitingFor` variants that do NOT render a centered dialog/overlay.
 // Board-level interactions (Priority, combat declarations) and pre-game
 // flows render inline on the board rather than as a centered modal.
-const NON_DIALOG_WAITING_FOR_TYPES = new Set<string>([
+const NON_DIALOG_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> = new Set<WaitingFor["type"]>([
   "Priority",
   "DeclareAttackers",
   "DeclareBlockers",
   "AssignCombatDamage",
   "MulliganDecision",
   "MulliganBottomCards",
-  "ChoosePlayDraw",
   "BetweenGamesSideboard",
   "BetweenGamesChoosePlayDraw",
   "GameOver",
@@ -30,10 +29,15 @@ const NON_DIALOG_WAITING_FOR_TYPES = new Set<string>([
 // `fixed inset-0` host would intercept clicks before they reach the board.
 // These dialogs also don't surface a peek button (the overlay is already
 // translucent and click-through), so peek isn't relevant for them.
-const CLICK_THROUGH_WAITING_FOR_TYPES = new Set<string>([
+//
+// Exported so `GamePage` can use the same predicate to gate `<TargetingOverlay />`
+// (single source of truth — adding a new click-through WaitingFor only needs
+// editing one place, and the typed set forces compile-time validity).
+export const CLICK_THROUGH_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> = new Set<WaitingFor["type"]>([
   "TargetSelection",
   "TriggerTargetSelection",
   "CopyTargetChoice",
+  "CopyRetarget",
   "ExploreChoice",
   "TapCreaturesForManaAbility",
   "TapCreaturesForSpellCost",

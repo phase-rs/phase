@@ -108,7 +108,7 @@ describe("partitionByType", () => {
       makeGameObject({ id: 1, card_types: { supertypes: [], core_types: ["Creature"], subtypes: [] } }),
       makeGameObject({
         id: 99,
-        attached_to: 1,
+        attached_to: { type: "Object", data: 1 },
         card_types: { supertypes: [], core_types: ["Artifact"], subtypes: ["Equipment"] },
       }),
     ];
@@ -127,7 +127,7 @@ describe("partitionByType", () => {
       makeGameObject({ id: 1, card_types: { supertypes: [], core_types: ["Creature"], subtypes: [] } }),
       makeGameObject({
         id: 99,
-        attached_to: 1,
+        attached_to: { type: "Object", data: 1 },
         card_types: { supertypes: [], core_types: ["Enchantment"], subtypes: ["Aura"] },
       }),
     ];
@@ -144,7 +144,7 @@ describe("partitionByType", () => {
       makeGameObject({
         id: 99,
         card_id: 0,
-        attached_to: 1,
+        attached_to: { type: "Object", data: 1 },
         card_types: { supertypes: [], core_types: ["Artifact"], subtypes: ["Equipment"] },
       }),
     ];
@@ -163,7 +163,7 @@ describe("partitionByType", () => {
       makeGameObject({ id: 1, card_types: { supertypes: [], core_types: ["Creature"], subtypes: [] } }),
       makeGameObject({
         id: 99,
-        attached_to: 1,
+        attached_to: { type: "Object", data: 1 },
         card_types: {
           supertypes: [],
           core_types: ["Creature", "Enchantment"],

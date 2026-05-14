@@ -1,5 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 100
 expression: "&ir"
 ---
 {
@@ -40,7 +41,9 @@ expression: "&ir"
         "condition": null,
         "affected_zone": null,
         "effect_zone": null,
-        "active_zones": [],
+        "active_zones": [
+          "Battlefield"
+        ],
         "characteristic_defining": false,
         "description": "You may cast spells as though they had flash."
       }

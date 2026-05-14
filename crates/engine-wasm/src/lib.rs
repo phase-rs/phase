@@ -556,9 +556,10 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
         ref card_name,
         owner,
         zone,
+        attach_to,
     }) = action
     {
-        return handle_debug_create_card(card_name, owner, zone);
+        return handle_debug_create_card(card_name, owner, zone, attach_to);
     }
 
     match with_state_mut(|state| match apply(state, actor, action) {
@@ -577,6 +578,7 @@ fn handle_debug_create_card(
     card_name: &str,
     owner: PlayerId,
     zone: engine::types::zones::Zone,
+    attach_to: Option<engine::game::game_object::AttachTarget>,
 ) -> JsValue {
     let face = CARD_DB.with(|cell| {
         let db = cell.borrow();
@@ -623,6 +625,40 @@ fn handle_debug_create_card(
         let obj = state.objects.get_mut(&obj_id).expect("just created");
         engine::game::printed_cards::apply_card_face_to_object(obj, &face);
         state.layers_dirty = true;
+
+        // CR 303.4f + CR 704.5n: When the user picks an attachment target,
+        // wire the host through the engine's attach resolvers BEFORE routing
+        // through the ETB pipeline. The resolvers (`attach_to`,
+        // `attach_to_player`) own all legality checks (CR 301.5 / 303.4i,
+        // `CantBeAttached` / `CantBeEnchanted` / `CantBeEquipped` statics) and
+        // back-link bookkeeping (host's `attachments` list, `layers_dirty`),
+        // so the WASM bridge stays a thin transport layer with zero attachment
+        // logic. Doing this pre-ETB means the post-ETB SBA pass sees the
+        // attachment with a legal host instead of an orphan (CR 704.5n) and
+        // any "becomes attached" trigger fires from the same resolved state
+        // a real cast would produce. Only honored for Battlefield spawns —
+        // Auras in Hand/Library/Exile/Graveyard have no battlefield host.
+        if zone == engine::types::zones::Zone::Battlefield {
+            if let Some(target) = attach_to {
+                use engine::game::game_object::AttachTarget;
+                match target {
+                    AttachTarget::Object(target_id) => {
+                        if state.objects.contains_key(&target_id) {
+                            engine::game::effects::attach::attach_to(state, obj_id, target_id);
+                        }
+                    }
+                    AttachTarget::Player(target_player) => {
+                        if state.players.iter().any(|p| p.id == target_player) {
+                            engine::game::effects::attach::attach_to_player(
+                                state,
+                                obj_id,
+                                target_player,
+                            );
+                        }
+                    }
+                }
+            }
+        }
 
         let result = if zone == engine::types::zones::Zone::Battlefield {
             engine::game::route_debug_create_to_battlefield(state, obj_id)

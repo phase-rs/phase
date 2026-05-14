@@ -140,7 +140,30 @@ pub fn attach_to(state: &mut GameState, attachment_id: ObjectId, target_id: Obje
 /// Fetters-class). Mirrors `attach_to`'s "detach from previous host" cleanup
 /// for Object hosts, but no host-side `attachments` list is touched (a player
 /// is not a `GameObject` and has no such field).
+///
+/// CR 301.5 + CR 303.4i: Equipment / Fortification cannot legally be attached
+/// to a player. Mirroring `attach_to`'s silent-no-op gating pattern, an
+/// illegal Aura/Equipment pairing here is a no-op rather than an error: a
+/// caller that has already validated the source (the cast pipeline, the
+/// debug spawn-attached path) sees no change in state, and a buggy caller
+/// that hasn't validated cannot drive the engine into an illegal state.
 pub fn attach_to_player(state: &mut GameState, attachment_id: ObjectId, target_player: PlayerId) {
+    // CR 301.5: Equipment / Fortification cannot attach to a player.
+    // CR 303.4: Only Auras may have a player host. Any non-Aura attachment is
+    // silently rejected here so the only paths into a `Player` `attached_to`
+    // value are legitimate Aura attachments. The Equipment/Fortification check
+    // is redundant given the Aura whitelist but is named explicitly so future
+    // attachment subtypes (CR 702.6 / CR 702.114) cannot slip through by
+    // accident — the contract is "Auras only", not "anything that isn't
+    // currently equipment".
+    let is_aura = state
+        .objects
+        .get(&attachment_id)
+        .is_some_and(|obj| obj.card_types.subtypes.iter().any(|s| s == "Aura"));
+    if !is_aura {
+        return;
+    }
+
     // CR 701.3a: If already attached to an object, detach from that object's
     // `attachments` list. Re-attaching to a player has no symmetric cleanup —
     // the previous Player host has no list to clear.

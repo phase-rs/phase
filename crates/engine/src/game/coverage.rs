@@ -1343,7 +1343,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::GainControl { target }
         | Effect::Attach { target, .. }
         | Effect::Fight { target, .. }
-        | Effect::CopySpell { target }
+        | Effect::CopySpell { target, .. }
         | Effect::BecomeCopy { target, .. }
         | Effect::Suspect { target }
         | Effect::Connive { target, .. }

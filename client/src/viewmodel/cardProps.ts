@@ -1,4 +1,4 @@
-import type { CardType, GameObject, Keyword, ManaColor, ObjectId } from "../adapter/types";
+import type { AttachTarget, CardType, GameObject, Keyword, ManaColor, ObjectId } from "../adapter/types";
 
 const ROMAN = ["", "I", "II", "III", "IV", "V"] as const;
 export const FACE_DOWN_CARD_NAME = "Face-down card";
@@ -22,7 +22,7 @@ export interface CardViewProps {
   counters: Array<{ type: string; count: number }>;
   isCreature: boolean;
   isLand: boolean;
-  attachedTo: ObjectId | null;
+  attachedTo: AttachTarget | null;
   attachmentIds: ObjectId[];
   keywords: Keyword[];
   colorIdentity: ManaColor[];

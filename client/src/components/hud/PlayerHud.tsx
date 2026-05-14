@@ -11,6 +11,7 @@ import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { PhaseIndicatorLeft, PhaseIndicatorRight } from "../controls/PhaseStopBar.tsx";
 import { CityBlessingBadge, CounterBadge, DungeonBadge, InitiativeBadge, MonarchBadge, StatusBadge } from "./HudBadges.tsx";
 import { HudPlate } from "./HudPlate.tsx";
+import { PlayerAttachedAuras } from "./PlayerAttachedAuras.tsx";
 
 export function PlayerHud() {
   const playerId = usePerspectivePlayerId();
@@ -35,9 +36,14 @@ export function PlayerHud() {
   const isHumanTargetSelection =
     (waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection")
     && waitingFor.data.player === playerId;
-  const isValidTarget = isHumanTargetSelection && (waitingFor.data.selection?.current_legal_targets ?? []).some(
+  const isCopyRetargetForMe = waitingFor?.type === "CopyRetarget" && waitingFor.data.player === playerId;
+  const copyRetargetCurrentSlotHasMe = isCopyRetargetForMe && (() => {
+    const slot = waitingFor.data.target_slots[waitingFor.data.current_slot ?? 0];
+    return (slot?.legal_alternatives ?? []).some((t) => "Player" in t && t.Player === playerId);
+  })();
+  const isValidTarget = (isHumanTargetSelection && (waitingFor.data.selection?.current_legal_targets ?? []).some(
     (target) => "Player" in target && target.Player === playerId,
-  );
+  )) || copyRetargetCurrentSlotHasMe;
 
   const handleTargetClick = useCallback(() => {
     if (isValidTarget) {
@@ -58,6 +64,7 @@ export function PlayerHud() {
       }`}
     >
       <PhaseIndicatorLeft />
+      <PlayerAttachedAuras playerId={playerId} />
       <HudPlate
         label={getPlayerDisplayName(playerId, playerId)}
         tone={hudTone}
@@ -65,6 +72,7 @@ export function PlayerHud() {
         seatColor={seatColor}
         underAttack={isUnderAttack}
         avatarUrl={avatarUrl}
+        playerId={playerId}
         onClick={isValidTarget ? handleTargetClick : undefined}
         trailing={
           <>

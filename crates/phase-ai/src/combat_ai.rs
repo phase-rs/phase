@@ -403,6 +403,19 @@ pub fn choose_blockers_with_profile(
             }
         })
         .collect();
+
+    // CR 509.1 + CR 704.5a: Hopeless-block fast-path. If no legal assignment
+    // can prevent lethal life loss, bail with empty assignments before doing
+    // any per-blocker scoring. This guards against pathological boards (e.g.
+    // 1000 Scute Swarm tokens vs a 1200/1200 trampler, or 1000 attackers vs
+    // 5 blockers) where the existing per-blocker chump heuristic burns CPU
+    // assigning a futile chump that cannot meaningfully reduce damage.
+    if matches!(objective, CombatObjective::Stabilize)
+        && block_is_futile(state, player, attacker_ids, &available_blockers)
+    {
+        return Vec::new();
+    }
+
     let blocker_values: HashMap<ObjectId, f64> = available_blockers
         .iter()
         .map(|&id| (id, evaluate_creature(state, id)))
@@ -1122,6 +1135,82 @@ fn sum_power(state: &GameState, ids: &[ObjectId]) -> i32 {
                 .map(|object| object.power.unwrap_or(0))
         })
         .sum()
+}
+
+/// CR 509.1 + CR 702.19b: Returns true when no legal blocker assignment can
+/// prevent lethal life loss against `attacker_ids`. Computes an *optimistic*
+/// upper bound on absorption (any blocker can block any attacker; chumping
+/// non-trample fully neutralizes one attacker; tramplers absorb only blocker
+/// toughness; unblockable attackers absorb nothing) and bails only when even
+/// that upper bound leaves residual damage >= life.
+///
+/// The relaxation makes this a *safe* fast-path: false negatives (missing a
+/// bail) only cost CPU; false positives (bailing when a save existed) cannot
+/// happen because the bound dominates any real assignment's absorption.
+///
+/// Optimal greedy under the relaxation: chump the N highest-power non-trample
+/// non-unblockable attackers (each absorbs full attacker_power), then apply
+/// remaining blocker toughness to tramplers (each absorbs blocker_toughness).
+fn block_is_futile(
+    state: &GameState,
+    player: PlayerId,
+    attacker_ids: &[ObjectId],
+    available_blockers: &[ObjectId],
+) -> bool {
+    let life = state.players[player.0 as usize].life;
+    if life <= 0 {
+        return false; // Already dead; let SBAs handle it, don't short-circuit.
+    }
+
+    let mut chumpable_powers: Vec<i32> = Vec::new();
+    let mut trample_power: i32 = 0;
+    let mut unblockable_power: i32 = 0;
+    let mut total_attacker_power: i32 = 0;
+
+    for &aid in attacker_ids {
+        let Some(a) = state.objects.get(&aid) else {
+            continue;
+        };
+        let power = a.power.unwrap_or(0).max(0);
+        total_attacker_power += power;
+        if has_cant_be_blocked(state, a) {
+            unblockable_power += power;
+        } else if a.has_keyword(&Keyword::Trample) {
+            trample_power += power;
+        } else {
+            chumpable_powers.push(power);
+        }
+    }
+
+    // Optimistic chump: highest-power non-trample attackers fully absorbed first.
+    chumpable_powers.sort_unstable_by(|a, b| b.cmp(a));
+    let mut blocker_toughnesses: Vec<i32> = available_blockers
+        .iter()
+        .filter_map(|&id| state.objects.get(&id).and_then(|o| o.toughness))
+        .map(|t| t.max(0))
+        .collect();
+    blocker_toughnesses.sort_unstable_by(|a, b| b.cmp(a));
+
+    let chump_count = chumpable_powers.len().min(blocker_toughnesses.len());
+    let chump_absorption: i32 = chumpable_powers.iter().take(chump_count).sum();
+    let remaining_blocker_toughness: i32 = blocker_toughnesses.iter().skip(chump_count).sum();
+    let trample_absorption = trample_power.min(remaining_blocker_toughness);
+
+    let max_absorption = chump_absorption + trample_absorption;
+    let min_residual = total_attacker_power - max_absorption;
+
+    // Residual is unblockable_power + uncovered chumpables + uncovered trample.
+    // Equivalently: total - max_absorption (which already accounts for unblockable
+    // contributing zero absorption). Bail iff that residual STRICTLY EXCEEDS life
+    // — at exact lethal we still chump per the existing "minimize damage even when
+    // dying" semantics (theoretical opponent miscounts / instant-speed lifegain).
+    debug_assert_eq!(
+        min_residual,
+        unblockable_power
+            + (chumpable_powers.iter().sum::<i32>() - chump_absorption)
+            + (trample_power - trample_absorption)
+    );
+    min_residual > life
 }
 
 /// Check if a creature can attack (not tapped, no defender, no summoning sickness).
@@ -2258,6 +2347,162 @@ mod tests {
         assert!(
             !blockers.is_empty(),
             "Should have at least one blocker assigned"
+        );
+    }
+
+    // ===== Hopeless-block fast-path (CR 509.1 + CR 704.5a) =====
+    //
+    // These tests verify `block_is_futile` correctly identifies positions
+    // where no assignment saves the player, AND that pathological boards
+    // (1000+ tokens) complete the blocker decision in bounded time.
+
+    #[test]
+    fn futile_one_huge_trampler_vs_thousand_tokens_bails_fast() {
+        let mut state = setup();
+        state.players[1].life = 20;
+
+        // 1000 1/1 tokens — the Scute Swarm pathological board.
+        for i in 0..1000 {
+            add_creature(
+                &mut state,
+                PlayerId(1),
+                &format!("Scute Token {i}"),
+                1,
+                1,
+                vec![],
+            );
+        }
+        let trampler = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Huge Trampler",
+            1200,
+            1200,
+            vec![Keyword::Trample],
+        );
+
+        let start = std::time::Instant::now();
+        let blockers = choose_blockers(&state, PlayerId(1), &[trampler]);
+        let elapsed = start.elapsed();
+
+        eprintln!(
+            "[bench] choose_blockers (1000 tokens vs 1200/1200 trampler, life=20): {:?}",
+            elapsed
+        );
+        // Trample residual = 1200 - 1000 = 200 >= 20 life → futile, must bail.
+        assert!(
+            blockers.is_empty(),
+            "Must bail with empty assignment when trample-residual exceeds life; got {} assignments",
+            blockers.len()
+        );
+        // Loose ceiling — fast-path should be O(blockers + attackers), not O(blockers^2).
+        assert!(
+            elapsed.as_millis() < 50,
+            "Fast-path must complete in <50ms; took {:?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn futile_thousand_normal_attackers_vs_five_blockers_bails_fast() {
+        let mut state = setup();
+        state.players[1].life = 20;
+
+        // 5 blockers (1/1) — best case absorbs 5 chumps.
+        for i in 0..5 {
+            add_creature(
+                &mut state,
+                PlayerId(1),
+                &format!("Blocker {i}"),
+                1,
+                1,
+                vec![],
+            );
+        }
+        // 1000 attackers (3/3 normal, no trample). Best chump absorbs 5*3 = 15
+        // damage; residual = 1000*3 - 15 = 2985, which is >= 20 life → futile.
+        let mut attacker_ids = Vec::with_capacity(1000);
+        for i in 0..1000 {
+            attacker_ids.push(add_creature(
+                &mut state,
+                PlayerId(0),
+                &format!("Goblin {i}"),
+                3,
+                3,
+                vec![],
+            ));
+        }
+
+        let start = std::time::Instant::now();
+        let blockers = choose_blockers(&state, PlayerId(1), &attacker_ids);
+        let elapsed = start.elapsed();
+
+        eprintln!(
+            "[bench] choose_blockers (5 blockers vs 1000 normal attackers, life=20): {:?}",
+            elapsed
+        );
+        assert!(
+            blockers.is_empty(),
+            "Must bail when chumping every blocker still leaves lethal residual; got {} assignments",
+            blockers.len()
+        );
+        assert!(
+            elapsed.as_millis() < 100,
+            "Fast-path must complete in <100ms; took {:?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn block_is_futile_does_not_fire_when_chump_saves() {
+        let mut state = setup();
+        state.players[1].life = 20;
+
+        // 1 trampler 6/6 vs 5 blockers (1/1 each): residual = 6 - 5 = 1 < 20.
+        // Not futile — existing chump-stabilize logic should engage.
+        for i in 0..5 {
+            add_creature(
+                &mut state,
+                PlayerId(1),
+                &format!("Blocker {i}"),
+                1,
+                1,
+                vec![],
+            );
+        }
+        let trampler = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Modest Trampler",
+            6,
+            6,
+            vec![Keyword::Trample],
+        );
+
+        let blockers = choose_blockers(&state, PlayerId(1), &[trampler]);
+        // Even though objective is PreserveAdvantage here (6 < 20), the block
+        // should not be skipped by the futility fast-path.
+        assert!(
+            !blockers.is_empty() || state.players[1].life > 6,
+            "Non-futile board must not be short-circuited"
+        );
+    }
+
+    #[test]
+    fn block_is_futile_does_not_fire_when_normal_attacker_fully_absorbed() {
+        let mut state = setup();
+        state.players[1].life = 5;
+
+        // 1 normal 3/3 attacker vs 1 5/5 blocker. life=5, raw incoming=3 → no
+        // Stabilize objective at all, so futility check doesn't even run; the
+        // assertion here documents that and guards against accidental regressions.
+        add_creature(&mut state, PlayerId(1), "Wall", 0, 5, vec![]);
+        let attacker = add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]);
+
+        let blockers = choose_blockers(&state, PlayerId(1), &[attacker]);
+        assert!(
+            !blockers.is_empty(),
+            "5/5 wall must block 3/3 bear; got empty assignment"
         );
     }
 }

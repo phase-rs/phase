@@ -3796,6 +3796,23 @@ pub enum AbilityCost {
     Composite {
         costs: Vec<AbilityCost>,
     },
+    /// CR 118.12a + CR 118.12: "Unless they X or Y" — the paying player chooses
+    /// **one** of `costs` to pay. Distinct from `Composite` (which requires
+    /// paying ALL listed sub-costs). Used by the punisher class — e.g. Tergrid's
+    /// Lantern ("Target player loses 3 life unless they sacrifice a nonland
+    /// permanent of their choice or discard a card") and 30+ similar cards.
+    ///
+    /// Sibling rationale (CLAUDE.md "Parameterize, don't proliferate"):
+    /// `Composite` is the AND-composition; `OneOf` is the OR-composition.
+    /// These are categorically distinct payment shapes (single CR rule
+    /// section 118), so a parameterized `Composite { mode, costs }` was
+    /// considered but rejected today — at two compositional modes the
+    /// sibling form remains the smaller change and keeps existing
+    /// `Composite` call sites untouched. If a third compositional mode is
+    /// ever needed, refactor to a `mode`-parameterized form then.
+    OneOf {
+        costs: Vec<AbilityCost>,
+    },
     /// Waterbend {N}: pay N generic mana, allowing tap-to-pay with creatures/artifacts.
     Waterbend {
         cost: ManaCost,
@@ -3883,6 +3900,22 @@ impl AbilityCost {
                 }
             }
             AbilityCost::Composite { costs } => {
+                let mut out = Vec::with_capacity(costs.len());
+                for cost in costs {
+                    for cat in cost.categories() {
+                        if !out.contains(&cat) {
+                            out.push(cat);
+                        }
+                    }
+                }
+                out
+            }
+            // CR 118.12a: A `OneOf` cost will only resolve into one branch's
+            // categories at runtime, but the AI / coverage classifier needs to
+            // know what categories the cost *could* belong to. Flatten over
+            // all sub-costs the same way `Composite` does — semantically this
+            // is "any of these may be chosen".
+            AbilityCost::OneOf { costs } => {
                 let mut out = Vec::with_capacity(costs.len());
                 for cost in costs {
                     for cat in cost.categories() {

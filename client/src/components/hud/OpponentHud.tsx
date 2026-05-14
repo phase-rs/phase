@@ -17,6 +17,7 @@ import { ScoreBadge } from "../draft/ScoreBadge.tsx";
 import { CityBlessingBadge, CounterBadge, DungeonBadge, InitiativeBadge, MonarchBadge, StatusBadge } from "./HudBadges.tsx";
 import { AvatarHoverPreview } from "./AvatarHoverPreview.tsx";
 import { HudPlate } from "./HudPlate.tsx";
+import { PlayerAttachedAuras } from "./PlayerAttachedAuras.tsx";
 import { IncomingAttackersPopover } from "./IncomingAttackersPopover.tsx";
 import { KickConfirmDialog } from "./KickConfirmDialog.tsx";
 import { UnderAttackOverlay } from "./UnderAttackOverlay.tsx";
@@ -119,12 +120,21 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
   const isHumanTargetSelection =
     (waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection")
     && waitingFor.data.player === playerId;
+  const isCopyRetargetForMe = waitingFor?.type === "CopyRetarget" && waitingFor.data.player === playerId;
   const validPlayerTargetIds = useMemo(() => {
-    if (!isHumanTargetSelection) return [] as number[];
-    return (waitingFor.data.selection?.current_legal_targets ?? [])
-      .filter((target): target is { Player: number } => "Player" in target)
-      .map((target) => target.Player);
-  }, [isHumanTargetSelection, waitingFor]);
+    if (isHumanTargetSelection) {
+      return (waitingFor.data.selection?.current_legal_targets ?? [])
+        .filter((target): target is { Player: number } => "Player" in target)
+        .map((target) => target.Player);
+    }
+    if (isCopyRetargetForMe) {
+      const slot = waitingFor.data.target_slots[waitingFor.data.current_slot ?? 0];
+      return (slot?.legal_alternatives ?? [])
+        .filter((t): t is { Player: number } => "Player" in t)
+        .map((t) => t.Player);
+    }
+    return [] as number[];
+  }, [isHumanTargetSelection, isCopyRetargetForMe, waitingFor]);
 
   const handlePlayerTarget = useCallback(
     (targetPlayerId: number) => {
@@ -172,7 +182,7 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
       <div
         data-player-hud={String(opponentId)}
         data-phased-out={isOpponentPhasedOut ? "true" : undefined}
-        className={`relative flex items-center py-1 ${
+        className={`relative flex items-center gap-1.5 py-1 ${
           isOpponentPhasedOut ? "opacity-40 grayscale" : ""
         }`}
       >
@@ -183,6 +193,7 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
           seatColor={opponentSeatColor}
           underAttack={isOpponentUnderAttack}
           avatarUrl={opponentAvatarUrl}
+          playerId={opponentId}
           onClick={isValidTarget ? () => handlePlayerTarget(opponentId) : undefined}
           trailing={matchScore || opponentDesignations.hasAny || opponentPoisonCounters > 0 || opponentRadCounters > 0 || opponentSpeed > 0 || opponentCompanion || isOnline || isOpponentPhasedOut ? (
             <>
@@ -209,6 +220,7 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
             <ManaPoolSummary playerId={opponentId} />
           </div>
         </HudPlate>
+        <PlayerAttachedAuras playerId={opponentId} />
       </div>
     );
   }

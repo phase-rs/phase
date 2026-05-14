@@ -325,6 +325,14 @@ fn rewrite_bound_x_in_ability_cost(cost: &mut AbilityCost, binding: &QuantityExp
             .iter_mut()
             .map(|cost| rewrite_bound_x_in_ability_cost(cost, binding))
             .sum(),
+        // CR 118.12a: `OneOf` (disjunctive unless-cost) shares the
+        // recursive X-rewrite shape with `Composite` — each sub-cost may
+        // independently carry a `QuantityRef::Variable { name: "X" }` that
+        // must be rebound to the casting-time X expression.
+        AbilityCost::OneOf { costs } => costs
+            .iter_mut()
+            .map(|cost| rewrite_bound_x_in_ability_cost(cost, binding))
+            .sum(),
         AbilityCost::Mana { .. }
         | AbilityCost::Tap
         | AbilityCost::Untap
