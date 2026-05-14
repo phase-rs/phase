@@ -1,8 +1,8 @@
 import { useState } from "react";
 
-import type { BracketEstimate, BracketAxis, CommanderBracketTier } from "../../adapter/types";
+import type { BracketEstimate, BracketAxis } from "../../adapter/types";
 import { BRACKET_TIER_NUMERIC } from "../../adapter/types";
-import { BRACKET_LABEL, type CommanderBracket } from "../../types/bracket";
+import { BRACKET_LABEL, BRACKET_TIER_CHIP_CLASS, type CommanderBracket } from "../../types/bracket";
 
 interface Props {
   estimate: BracketEstimate | null;
@@ -12,14 +12,6 @@ interface Props {
   emptyReason?: "not-commander" | "no-commander";
 }
 
-const TIER_CHIP_CLASS: Record<CommanderBracketTier, string> = {
-  exhibition: "border-slate-300/60 bg-slate-500/30 text-slate-100",
-  core:       "border-emerald-300/60 bg-emerald-500/30 text-emerald-100",
-  upgraded:   "border-indigo-300/60 bg-indigo-500/30 text-indigo-100",
-  optimized:  "border-amber-300/60 bg-amber-500/30 text-amber-100",
-  cedh:       "border-rose-300/60 bg-rose-500/30 text-rose-100",
-};
-
 const AXIS_LABEL: Record<BracketAxis, string> = {
   game_changers: "Game Changers",
   mass_land_denial: "Mass Land Denial",
@@ -27,11 +19,11 @@ const AXIS_LABEL: Record<BracketAxis, string> = {
   efficient_tutors: "Efficient Tutors",
 };
 
-const AXIS_CAPS: Record<BracketAxis, [number, number, number, number]> = {
-  game_changers: [0, 0, 3, Infinity],
-  mass_land_denial: [0, 0, 0, Infinity],
-  extra_turns: [0, 0, Infinity, Infinity],
-  efficient_tutors: [0, 2, Infinity, Infinity],
+const AXIS_CAPS: Record<BracketAxis, [number, number, number, number, number]> = {
+  game_changers: [0, 0, 3, Infinity, Infinity],
+  mass_land_denial: [0, 0, 0, Infinity, Infinity],
+  extra_turns: [0, 0, Infinity, Infinity, Infinity],
+  efficient_tutors: [0, 2, Infinity, Infinity, Infinity],
 };
 
 export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyReason }: Props) {
@@ -54,7 +46,7 @@ export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyR
     <div className="rounded-md border border-white/10 bg-black/20 px-3 py-2">
       <div className="flex flex-wrap items-center gap-1.5">
         <span
-          className={`rounded-full border px-2.5 py-1 text-xs font-medium ${TIER_CHIP_CLASS[estimate.tier]}`}
+          className={`rounded-full border px-2.5 py-1 text-xs font-medium ${BRACKET_TIER_CHIP_CLASS[estimate.tier]}`}
         >
           Estimated: B{tierNum} {tierLabel}
         </span>
