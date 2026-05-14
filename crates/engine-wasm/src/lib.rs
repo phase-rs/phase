@@ -1223,6 +1223,7 @@ mod tests {
             solve_condition: None,
             strive_cost: None,
             brawl_commander: false,
+            is_commander: false,
             metadata: Default::default(),
         }
     }

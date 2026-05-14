@@ -41,8 +41,9 @@ fn advanced_reconstruction_randomly_exiles_and_grants_play_permission() {
     runner.state_mut().priority_player = P0;
     runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
 
-    let mut events = Vec::new();
-    let waiting = engine::game::turns::auto_advance(runner.state_mut(), &mut events);
+    // CR 117.1c: priority opens during Upkeep + Draw, so we use the
+    // helper that drains them after `auto_advance` to land in PreCombatMain.
+    let waiting = runner.auto_advance_to_main_phase();
 
     assert_eq!(runner.state().phase, Phase::PreCombatMain);
     assert!(

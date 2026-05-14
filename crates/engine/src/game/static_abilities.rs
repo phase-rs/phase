@@ -6,7 +6,6 @@ use crate::game::layers::{evaluate_condition, evaluate_condition_with_recipient}
 use crate::types::ability::{TargetFilter, TypedFilter};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
-use crate::types::mana::StepEndManaHandler;
 use crate::types::player::PlayerId;
 use crate::types::statics::{CostPaymentProhibition, ProhibitionScope, StaticMode};
 
@@ -576,102 +575,6 @@ pub fn player_has_cant_lose_life(state: &GameState, player_id: PlayerId) -> bool
             ..Default::default()
         },
     )
-}
-
-/// CR 106.4 + CR 500.5 + CR 614.1a + CR 703.4q: Return active step-end
-/// unspent-mana handlers applying to `player_id`. Unifies the retention class
-/// (Upwelling, Electro, Omnath Locus of Mana, The Last Agni Kai) and the
-/// transformation class (Horizon Stone, Kruphix, Omnath Locus of All, Ozai)
-/// since both replace the same CR 703.4q step-end empty event.
-///
-/// Scans printed statics on battlefield permanents and transient continuous
-/// effects pinned to the player via `SpecificPlayer` (spell-installed
-/// handlers like The Last Agni Kai's "Until end of turn, …" clause).
-///
-/// **Forward-compatible scan over both `Retain` and `Transform` actions.**
-/// The TCE pass below collects any `AddStaticMode { StepEndUnspentMana { .. } }`
-/// regardless of `action`. Today no spell-effect parser arm constructs a
-/// transient `Transform(_)` — only `oracle_static.rs` builds `Transform`,
-/// and it does so on the printed-static path (Horizon Stone et al.), which
-/// flows through `battlefield_active_statics` above rather than through
-/// `transient_continuous_effects`. The Transform arm of this TCE scan is
-/// therefore dormant in the current corpus.
-///
-/// The path is intentional: a future spell with "Until end of turn, if you
-/// would lose unspent mana, that mana becomes red instead" (or similar
-/// turn-scoped transformation rider) installs through the same channel as
-/// The Last Agni Kai's retention rider — `register_transient_effect` with
-/// `affected: SpecificPlayer { id }` and `AddStaticMode { StepEndUnspentMana
-/// { _, Transform(_) } }` — and this scan picks it up with no further
-/// plumbing. If that future printing never materializes the Transform arm
-/// is dead code, but the cost is zero: the match in
-/// `ManaPool::clear_step_transition` is exhaustive on `StepEndManaAction`
-/// either way, and removing the arm would re-fragment the unified handler
-/// shape the H3 parameterization established. See `StepEndManaAction` in
-/// `types/mana.rs` for the sibling-cluster trip-trigger that gates further
-/// action variants.
-pub fn player_step_end_mana_handlers(
-    state: &GameState,
-    player_id: PlayerId,
-) -> Vec<StepEndManaHandler> {
-    use crate::types::ability::ContinuousModification;
-
-    let context = StaticCheckContext {
-        player_id: Some(player_id),
-        ..Default::default()
-    };
-
-    let mut handlers: Vec<StepEndManaHandler> = battlefield_active_statics(state)
-        .filter_map(|(source_obj, def)| {
-            let StaticMode::StepEndUnspentMana { filter, action } = &def.mode else {
-                return None;
-            };
-            if let Some(ref affected) = def.affected {
-                if !static_filter_matches(state, &context, affected, source_obj.id) {
-                    return None;
-                }
-            }
-            Some(StepEndManaHandler {
-                filter: *filter,
-                action: *action,
-            })
-        })
-        .collect();
-
-    // CR 611.2b: Spell-installed handlers live in `transient_continuous_effects`
-    // with `affected: SpecificPlayer { id }` and an explicit `Duration`. Mirrors
-    // the `player_has_protection_from_everything` scan pattern.
-    for tce in &state.transient_continuous_effects {
-        let TargetFilter::SpecificPlayer { id: affected_id } = tce.affected else {
-            continue;
-        };
-        if affected_id != player_id {
-            continue;
-        }
-        if let crate::types::ability::Duration::ForAsLongAs { ref condition } = tce.duration {
-            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
-        }
-        if let Some(ref condition) = tce.condition {
-            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
-        }
-        for modification in &tce.modifications {
-            if let ContinuousModification::AddStaticMode {
-                mode: StaticMode::StepEndUnspentMana { filter, action },
-            } = modification
-            {
-                handlers.push(StepEndManaHandler {
-                    filter: *filter,
-                    action: *action,
-                });
-            }
-        }
-    }
-
-    handlers
 }
 
 /// CR 118.3 + CR 119.4b + CR 601.2h + CR 602.2b: Check whether a static

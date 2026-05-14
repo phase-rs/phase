@@ -5749,13 +5749,29 @@ mod tests {
         assert_eq!(state.rng_seed, 42);
     }
 
+    /// CR 117.1c + CR 503.2: After Untap (no priority), the active player
+    /// receives priority during their Upkeep step. CR 103.7a skips the
+    /// first-turn Draw step entirely, so passing both priorities through
+    /// Upkeep lands at PreCombatMain.
     #[test]
-    fn start_game_advances_to_precombat_main() {
+    fn start_game_pauses_at_first_turn_upkeep_priority() {
         let mut state = new_game(42);
         let result = start_game_with_starting_player(&mut state, PlayerId(0));
 
-        assert_eq!(state.phase, Phase::PreCombatMain);
+        // CR 117.1c: starting player receives priority during Upkeep first.
+        assert_eq!(state.phase, Phase::Upkeep);
         assert_eq!(state.turn_number, 1);
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
+
+        // Both players pass through Upkeep → CR 103.7a skips Draw → PreCombatMain.
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        let result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        assert_eq!(state.phase, Phase::PreCombatMain);
         assert!(matches!(
             result.waiting_for,
             WaitingFor::Priority {
@@ -5826,10 +5842,18 @@ mod tests {
     fn integration_full_turn_cycle() {
         let mut state = new_game(42);
 
-        // Start game (turn 1, player 0)
+        // Start game (turn 1, player 0) — engine pauses at Upkeep priority per
+        // CR 117.1c. CR 103.7a skips the first-turn Draw step entirely.
+        // (Libraries are empty, which is fine because the first-turn player
+        // never draws and we stop the test before turn 2's draw step.)
         let _result = start_game_with_starting_player(&mut state, PlayerId(0));
-        assert_eq!(state.phase, Phase::PreCombatMain);
+        assert_eq!(state.phase, Phase::Upkeep);
         assert_eq!(state.turn_number, 1);
+
+        // Pass through Upkeep (both players) — lands at PreCombatMain (Draw skipped).
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        assert_eq!(state.phase, Phase::PreCombatMain);
 
         // Pass priority from player 0 (pre-combat main)
         let result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
@@ -5851,11 +5875,13 @@ mod tests {
         // Should advance to End step
         assert_eq!(state.phase, Phase::End);
 
-        // Pass through end step
+        // Pass through end step → cleanup → next turn. Turn 2 is player 1's
+        // turn; the engine pauses at P1's Upkeep priority (CR 117.1c).
+        // (We stop here rather than draining Draw, because empty libraries
+        // would trigger the CR 704.5b loss when P1 tries to draw.)
         let _result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         let _result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
-        // Should advance through cleanup to next turn, then auto-advance to PreCombatMain
-        assert_eq!(state.phase, Phase::PreCombatMain);
+        assert_eq!(state.phase, Phase::Upkeep);
         assert_eq!(state.turn_number, 2);
         assert_eq!(state.active_player, PlayerId(1));
     }
@@ -5864,6 +5890,8 @@ mod tests {
     fn monarch_end_step_draws_exactly_one_card() {
         let mut state = new_game(42);
         let _result = start_game_with_starting_player(&mut state, PlayerId(0));
+        // Test starts mid-turn at PostCombatMain — bypass the natural Upkeep
+        // priority window via direct state setup (test fixture pattern).
         state.phase = Phase::PostCombatMain;
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
@@ -5897,9 +5925,15 @@ mod tests {
         assert_eq!(state.players[0].hand.len(), 1);
         assert_eq!(state.players[0].library.len(), 1);
 
+        // End → cleanup → next turn. Turn 2 is P1's; engine pauses at P1's
+        // Upkeep priority per CR 117.1c. We stop here rather than draining
+        // Draw because P1's library is empty in this test fixture (CR 704.5b
+        // game-loss not under test). The monarch's end-step draw (P0, on turn
+        // 1) is what the test exercises and we've already validated above.
         apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         apply_as_current(&mut state, GameAction::PassPriority).unwrap();
-        assert_eq!(state.phase, Phase::PreCombatMain);
+        assert_eq!(state.phase, Phase::Upkeep);
+        assert_eq!(state.turn_number, 2);
         assert_eq!(state.players[0].hand.len(), 1);
         assert_eq!(state.players[0].library.len(), 1);
     }
@@ -5908,6 +5942,13 @@ mod tests {
     fn integration_play_land_then_pass() {
         let mut state = new_game(42);
         start_game_with_starting_player(&mut state, PlayerId(0));
+
+        // CR 305.3 + CR 117.1c: lands are sorcery-speed, so pass Upkeep
+        // priority (both players) to reach PreCombatMain before playing.
+        // CR 103.7a skips first-turn Draw so two passes is enough.
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        assert_eq!(state.phase, Phase::PreCombatMain);
 
         // Create a land in player 0's hand
         let land_id = create_object(
@@ -6967,7 +7008,7 @@ mod tests {
         ));
 
         // Player 1 keeps (apply_as_current now picks P1 since P0 was removed)
-        // -> game starts, auto-advances to PreCombatMain
+        // → game starts, lands at Upkeep priority for P0 (CR 117.1c).
         let result = apply_as_current(
             &mut state,
             GameAction::MulliganDecision {
@@ -6981,6 +7022,11 @@ mod tests {
                 player: PlayerId(0),
             }
         ));
+        assert_eq!(state.phase, Phase::Upkeep);
+
+        // Drain Upkeep priority (turn 1 skips Draw per CR 103.7a) to reach Main.
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         assert_eq!(state.phase, Phase::PreCombatMain);
 
         // Play a land from hand
@@ -7037,12 +7083,19 @@ mod tests {
         apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         assert_eq!(state.phase, Phase::End);
 
-        // End: both pass -> Cleanup -> next turn
+        // End: both pass → Cleanup → next turn. P1's Upkeep priority opens
+        // first (CR 117.1c); turn 2 doesn't skip Draw, so drain Upkeep + Draw.
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        assert_eq!(state.phase, Phase::Upkeep);
+        assert_eq!(state.turn_number, 2);
+        assert_eq!(state.active_player, PlayerId(1));
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        assert_eq!(state.phase, Phase::Draw);
         apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         apply_as_current(&mut state, GameAction::PassPriority).unwrap();
         assert_eq!(state.phase, Phase::PreCombatMain);
-        assert_eq!(state.turn_number, 2);
-        assert_eq!(state.active_player, PlayerId(1));
     }
 
     #[test]

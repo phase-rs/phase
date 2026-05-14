@@ -1444,24 +1444,21 @@ fn summarize_cards(prefix: &str, cards: &BTreeSet<String>, max_names: usize) -> 
     format!("{prefix}: {}", listed.join(", "))
 }
 
-/// CR 903.3: A card is eligible to be a commander if it is a legendary creature,
-/// a legendary background enchantment, or has "can be your commander" in its rules text.
+/// CR 903.3: A card is eligible to be a commander if it is a legendary creature
+/// (903.3a), a legendary Vehicle (903.3b), a legendary Spacecraft with one or more
+/// power/toughness boxes (903.3c), a legendary Background enchantment (CR 702.124),
+/// or has "can be your commander" in its rules text (903.3a override).
+///
+/// Reads the pre-computed `face.is_commander` field (union of MTGJSON
+/// `leadershipSkills.commander` and our own type-line analysis, synthesized at
+/// card-data build time). Falls back to a live type-line check for cards loaded
+/// from test fixtures that may not have the field set — mirrors
+/// `is_brawl_commander_eligible`.
 pub fn is_commander_eligible(face: &CardFace) -> bool {
-    let is_legendary = face.card_type.supertypes.contains(&Supertype::Legendary);
-    let is_creature = face.card_type.core_types.contains(&CoreType::Creature);
-    let explicitly_allowed = face
-        .oracle_text
-        .as_ref()
-        .is_some_and(|text| oracle_text_allows_commander(text, &face.name));
-    // CR 702.124: Background enchantments are eligible as commanders
-    // (pairing validation is handled separately by are_valid_partners)
-    let is_background = face
-        .card_type
-        .subtypes
-        .iter()
-        .any(|s| s.eq_ignore_ascii_case("Background"));
-
-    (is_legendary && is_creature) || explicitly_allowed || (is_legendary && is_background)
+    if face.is_commander {
+        return true;
+    }
+    crate::database::synthesis::type_line_commander_eligible(face)
 }
 
 fn is_pauper_commander_eligible(face: &CardFace) -> bool {
@@ -2632,6 +2629,100 @@ mod tests {
 
         face.oracle_text = Some("Teferi, Temporal Archmage can't be your commander.".to_string());
         assert!(!is_commander_eligible(&face));
+    }
+
+    /// CR 903.3(c): A legendary Spacecraft with one or more power/toughness boxes
+    /// is commander-eligible. Hearthhull, the Worldseed is the motivating case
+    /// (Legendary Artifact — Spacecraft with printed P/T 6/7).
+    #[test]
+    fn commander_eligibility_accepts_legendary_spacecraft_with_pt() {
+        use crate::types::ability::PtValue;
+
+        let face = CardFace {
+            name: "Hearthhull, the Worldseed".to_string(),
+            card_type: crate::types::card_type::CardType {
+                supertypes: vec![Supertype::Legendary],
+                core_types: vec![CoreType::Artifact],
+                subtypes: vec!["Spacecraft".to_string()],
+            },
+            power: Some(PtValue::Fixed(6)),
+            toughness: Some(PtValue::Fixed(7)),
+            ..CardFace::default()
+        };
+        assert!(is_commander_eligible(&face));
+
+        // CR 903.3(c) explicitly requires a power/toughness box. A Spacecraft
+        // without P/T is *not* eligible (no such card exists today; the guard is
+        // load-bearing for forward compatibility).
+        let face_no_pt = CardFace {
+            power: None,
+            toughness: None,
+            ..face.clone()
+        };
+        assert!(!is_commander_eligible(&face_no_pt));
+    }
+
+    /// CR 903.3(b): A legendary Vehicle is commander-eligible regardless of
+    /// whether it is currently a creature. Verifies the type-line path catches
+    /// legendary Vehicles independent of MTGJSON's leadershipSkills bit.
+    #[test]
+    fn commander_eligibility_accepts_legendary_vehicle() {
+        let face = CardFace {
+            name: "Parnesse, the Subtle Brush".to_string(),
+            card_type: crate::types::card_type::CardType {
+                supertypes: vec![Supertype::Legendary],
+                core_types: vec![CoreType::Artifact],
+                subtypes: vec!["Vehicle".to_string()],
+            },
+            ..CardFace::default()
+        };
+        assert!(is_commander_eligible(&face));
+    }
+
+    /// Non-legendary Spacecraft / Vehicle must NOT be commander-eligible —
+    /// the legendary supertype is required by every clause of CR 903.3.
+    #[test]
+    fn commander_eligibility_rejects_non_legendary_spacecraft_or_vehicle() {
+        use crate::types::ability::PtValue;
+
+        let spacecraft = CardFace {
+            name: "Hypothetical Common Spacecraft".to_string(),
+            card_type: crate::types::card_type::CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Artifact],
+                subtypes: vec!["Spacecraft".to_string()],
+            },
+            power: Some(PtValue::Fixed(2)),
+            toughness: Some(PtValue::Fixed(2)),
+            ..CardFace::default()
+        };
+        assert!(!is_commander_eligible(&spacecraft));
+
+        let vehicle = CardFace {
+            name: "Smuggler's Copter".to_string(),
+            card_type: crate::types::card_type::CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Artifact],
+                subtypes: vec!["Vehicle".to_string()],
+            },
+            ..CardFace::default()
+        };
+        assert!(!is_commander_eligible(&vehicle));
+    }
+
+    /// `face.is_commander` precomputed by synthesis (MTGJSON `leadershipSkills.commander`)
+    /// must short-circuit the type-line analysis — catches cards MTGJSON has
+    /// blessed that our type-line check might not yet recognize.
+    #[test]
+    fn commander_eligibility_honors_precomputed_field() {
+        let face = CardFace {
+            name: "Future Commander With No Type-Line Match".to_string(),
+            is_commander: true,
+            // No legendary supertype, no creature/vehicle/spacecraft, no permission text:
+            // type-line analysis would reject this, but the synthesized field overrides.
+            ..CardFace::default()
+        };
+        assert!(is_commander_eligible(&face));
     }
 
     #[test]

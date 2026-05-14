@@ -108,6 +108,15 @@ pub struct CardFace {
     /// (legendary creature, legendary planeswalker, or "can be your commander").
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub brawl_commander: bool,
+    /// CR 903.3: Whether this card can serve as a Commander.
+    /// Derived from MTGJSON `leadershipSkills.commander` (covers Vehicles,
+    /// Spacecraft, Backgrounds, "can be your commander" cards) UNION
+    /// our own type-line analysis (legendary creature, legendary Vehicle,
+    /// legendary Spacecraft with a P/T box, legendary Background, or
+    /// "can be your commander" Oracle text). The union mirrors
+    /// `brawl_commander` so we stay correct when MTGJSON is missing or stale.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_commander: bool,
     /// Parser diagnostic warnings — silent fallbacks, ignored remainders, bare filters.
     /// Populated at build time by the Oracle parser warning accumulator.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

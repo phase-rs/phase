@@ -127,7 +127,9 @@ fn categorize(event: &GameEvent) -> LogCategory {
 
         GameEvent::LifeChanged { .. } => LogCategory::Life,
 
-        GameEvent::ManaAdded { .. } => LogCategory::Mana,
+        GameEvent::ManaAdded { .. }
+        | GameEvent::ManaPoolEmptied { .. }
+        | GameEvent::ManaRecolored { .. } => LogCategory::Mana,
 
         GameEvent::PermanentTapped { .. }
         | GameEvent::PermanentUntapped { .. }
@@ -482,6 +484,27 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(" adds "),
             LogSegment::Mana(format!("{mana_type:?}")),
             text(" mana"),
+        ],
+        // CR 500.5 + CR 703.4q: A unit was emptied from a pool at step end.
+        GameEvent::ManaPoolEmptied {
+            player_id, color, ..
+        } => vec![
+            player_seg(state, *player_id),
+            text(" loses "),
+            LogSegment::Mana(format!("{color:?}")),
+            text(" mana"),
+        ],
+        // CR 614.1a + CR 703.4q: A Transform handler recolored a unit at step end.
+        GameEvent::ManaRecolored {
+            player_id,
+            from,
+            to,
+        } => vec![
+            player_seg(state, *player_id),
+            text("'s "),
+            LogSegment::Mana(format!("{from:?}")),
+            text(" mana becomes "),
+            LogSegment::Mana(format!("{to:?}")),
         ],
 
         GameEvent::PermanentTapped { object_id, .. } => {

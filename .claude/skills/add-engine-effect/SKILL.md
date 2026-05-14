@@ -264,11 +264,12 @@ Only needed if the effect reveals or hides information (hands, face-down cards, 
 
 ### Phase 8 — Verification
 
-- [ ] **`cargo test -p engine`** — All existing tests pass.
-- [ ] **`cargo clippy --all-targets -- -D warnings`** — No warnings.
-- [ ] **`cargo fmt --all`** — Formatted.
+Tilt-preferred / direct-cargo fallback (see CLAUDE.md § "Canonical verification pattern"):
+
+- [ ] **`cargo fmt --all`** — Always direct (Tilt doesn't auto-format).
+- [ ] **Clippy + tests** — If `tilt get uiresource clippy >/dev/null 2>&1` succeeds: `./scripts/tilt-wait.sh --timeout 240 clippy test-engine`. Otherwise: `cargo clippy --all-targets -- -D warnings` followed by `cargo test -p engine`.
 - [ ] **Snapshot test** — If the effect changes a card's parsed abilities, update or add an `insta` snapshot in `crates/engine/tests/oracle_parser.rs`.
-- [ ] **`cargo coverage`** — Run the coverage report to verify the new effect reduces `Unimplemented` count for the target cards.
+- [ ] **`cargo coverage`** — One-shot binary (always direct). Verifies the new effect reduces `Unimplemented` count for the target cards.
 
 ---
 

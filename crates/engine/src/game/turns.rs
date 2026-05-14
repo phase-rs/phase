@@ -82,12 +82,24 @@ pub fn advance_phase(state: &mut GameState, events: &mut Vec<GameEvent>) {
     enter_phase(state, next, events);
 }
 
-/// Enter a phase directly: set phase, clear mana pools (CR 500.5), reset
-/// priority (CR 117.3a), invalidate LKI (CR 400.7), emit PhaseChanged.
+/// Enter a phase directly: set phase, run the CR 703.4q step-end empty
+/// unspent mana event for each player in APNAP order through the replacement
+/// pipeline, then (when the queue empties) reset priority (CR 117.3a),
+/// invalidate LKI (CR 400.7), and emit `PhaseChanged`.
+///
 /// Called by `advance_phase` after extra-phase/replacement resolution, and
 /// directly by callers that need to skip intermediate phases (e.g.,
 /// CR 508.8 combat-skip when no attackers are possible).
+///
+/// CR 616.1 / CR 616.1e: When ≥2 step-end mana handlers apply to the same
+/// emptying event, the affected player chooses ordering. Choices serialize
+/// across players in APNAP order. On a pause (a player must choose), the
+/// drain stores progress in `state.pending_phase_transition_progress` and
+/// sets `state.waiting_for`; resume happens via the `EmptyManaPool` arm of
+/// `handle_replacement_choice`, which re-calls `drain_pending_phase_transition_progress`.
 fn enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameEvent>) {
+    use std::collections::VecDeque;
+
     state.phase = next;
     if next == Phase::BeginCombat {
         state.combat_phases_started_this_turn =
@@ -105,19 +117,220 @@ fn enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameEvent>) 
             | Phase::EndCombat
     );
     let entering_cleanup = next == Phase::Cleanup;
-    let step_end_handlers: Vec<_> = state
-        .players
-        .iter()
-        .map(|player| super::static_abilities::player_step_end_mana_handlers(state, player.id))
-        .collect();
-    for (player, handlers) in state.players.iter_mut().zip(step_end_handlers.iter()) {
-        player
-            .mana_pool
-            .clear_step_transition(in_combat, entering_cleanup, handlers);
-        // CR 121.1 + CR 504.1: `cards_drawn_this_step` resets on every step
-        // transition so `ExceptFirstDrawInDrawStep` conditions can identify
-        // the first card drawn during the new step (most importantly, the
-        // draw step's mandatory turn-based draw).
+
+    state.pending_phase_transition_progress =
+        Some(crate::types::game_state::PhaseTransitionProgress {
+            remaining_players: VecDeque::from(super::players::apnap_order(state)),
+            next_phase: next,
+            in_combat,
+            entering_cleanup,
+        });
+    drain_pending_phase_transition_progress(state, events);
+}
+
+/// CR 703.4q + CR 616.1: Per-phase APNAP-queue drain. Pops players one at a
+/// time, runs `clear_expiring_at_step_end` first (H2 invariant —
+/// expiry-bound units never enter the replacement pipeline), scans active
+/// step-end mana handlers for that player, builds and dispatches a
+/// `ProposedEvent::EmptyManaPool` through `replace_event`. On `Execute`,
+/// applies decisions and continues. On `NeedsChoice`, sets `state.waiting_for`
+/// and returns — `pending_phase_transition_progress` retains the rest of the
+/// queue so the resume arm can pick up where this paused. When the queue
+/// empties, calls `finish_enter_phase` to complete priority/LKI/PhaseChanged.
+pub(super) fn drain_pending_phase_transition_progress(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) {
+    while let Some(progress) = state.pending_phase_transition_progress.as_mut() {
+        let Some(player_id) = progress.remaining_players.pop_front() else {
+            // Queue empty: complete the phase entry.
+            let next_phase = progress.next_phase;
+            state.pending_phase_transition_progress = None;
+            finish_enter_phase(state, next_phase, events);
+            return;
+        };
+        let in_combat = progress.in_combat;
+        let entering_cleanup = progress.entering_cleanup;
+
+        // CR 500.5 + CR 614.6 (H2 invariant): Drop only expiry-bound units
+        // whose own rule fires on this transition. Non-expiry units flow
+        // into the replacement pipeline as Drop-disposition decisions.
+        if let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) {
+            player
+                .mana_pool
+                .clear_expiring_at_step_end(in_combat, entering_cleanup);
+        }
+
+        // Scan active step-end mana handlers for this player. Inlines the
+        // logic previously in `static_abilities::player_step_end_mana_handlers`:
+        // printed statics via `battlefield_active_statics`, then spell-installed
+        // riders via `transient_continuous_effects` keyed on `SpecificPlayer`.
+        let scan_entries = scan_step_end_mana_handlers(state, player_id);
+        state.pending_step_end_mana_handlers = scan_entries;
+
+        // Build per-unit decision payload from the player's surviving (non-expiry) pool.
+        let units: Vec<crate::types::mana::UnitDecision> = state
+            .players
+            .iter()
+            .find(|p| p.id == player_id)
+            .map(|p| {
+                p.mana_pool
+                    .mana
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, u)| crate::types::mana::UnitDecision {
+                        pool_index: idx,
+                        color: u.color,
+                        disposition: crate::types::mana::UnitDisposition::Drop,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let proposed = ProposedEvent::EmptyManaPool {
+            player_id,
+            units,
+            applied: HashSet::new(),
+        };
+
+        match replacement::replace_event(state, proposed, events) {
+            ReplacementResult::Execute(event) => {
+                if let ProposedEvent::EmptyManaPool {
+                    player_id, units, ..
+                } = event
+                {
+                    crate::types::mana::apply_empty_mana_pool_decisions(
+                        state, player_id, &units, events,
+                    );
+                }
+                state.pending_step_end_mana_handlers.clear();
+                // Continue to next player.
+            }
+            ReplacementResult::NeedsChoice(choosing_player) => {
+                // CR 616.1: Affected player chooses ordering. Surface the
+                // prompt and return — the queue (with subsequent players)
+                // remains in `pending_phase_transition_progress` for resume
+                // via `handle_replacement_choice`'s EmptyManaPool arm.
+                state.waiting_for =
+                    replacement::replacement_choice_waiting_for(choosing_player, state);
+                return;
+            }
+            ReplacementResult::Prevented => {
+                // CR 614.5: Step-end mana handlers do not Prevent — they
+                // flip dispositions on the rebuilt event. A Prevent here
+                // would indicate a registry-level prevention shield aimed
+                // at `LoseMana`, which no card on the current corpus
+                // produces. If a future card ever prevents step-end empty-
+                // mana (e.g., a hypothetical "mana doesn't empty this
+                // step" replacement), this arm must be reworked to leave
+                // the pool intact and continue draining the remaining
+                // queue, rather than silently clearing handler scratch.
+                // TODO(CR-616.1): re-evaluate when such a card lands.
+                debug_assert!(
+                    false,
+                    "ReplacementResult::Prevented unexpected for EmptyManaPool event"
+                );
+                state.pending_step_end_mana_handlers.clear();
+            }
+        }
+    }
+}
+
+/// CR 703.4q + CR 616.1 + CR 611.2b: Scan active step-end mana handlers for
+/// `player_id`. Combines printed statics on battlefield permanents and
+/// spell-installed riders via `transient_continuous_effects` keyed on
+/// `SpecificPlayer`. Inlined here (rather than a separate `static_abilities`
+/// helper) because the only consumer is the drain loop above.
+fn scan_step_end_mana_handlers(
+    state: &GameState,
+    player_id: PlayerId,
+) -> Vec<crate::types::game_state::StepEndManaScanEntry> {
+    use crate::types::ability::{ContinuousModification, Duration, TargetFilter};
+    use crate::types::game_state::StepEndManaScanEntry;
+
+    let context = super::static_abilities::StaticCheckContext {
+        player_id: Some(player_id),
+        ..Default::default()
+    };
+
+    let mut entries: Vec<StepEndManaScanEntry> =
+        super::functioning_abilities::battlefield_active_statics(state)
+            .filter_map(|(source_obj, def)| {
+                let StaticMode::StepEndUnspentMana { filter, action } = &def.mode else {
+                    return None;
+                };
+                if let Some(ref affected) = def.affected {
+                    if !super::static_abilities::static_filter_matches(
+                        state,
+                        &context,
+                        affected,
+                        source_obj.id,
+                    ) {
+                        return None;
+                    }
+                }
+                let description = def
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| format!("{action}"));
+                Some(StepEndManaScanEntry {
+                    source: source_obj.id,
+                    controller: player_id,
+                    filter: *filter,
+                    action: *action,
+                    description,
+                })
+            })
+            .collect();
+
+    // CR 611.2b: Spell-installed handlers live in `transient_continuous_effects`
+    // with `affected: SpecificPlayer { id }` and an explicit `Duration`.
+    for tce in &state.transient_continuous_effects {
+        let TargetFilter::SpecificPlayer { id: affected_id } = tce.affected else {
+            continue;
+        };
+        if affected_id != player_id {
+            continue;
+        }
+        if let Duration::ForAsLongAs { ref condition } = tce.duration {
+            if !super::layers::evaluate_condition(state, condition, tce.controller, tce.source_id) {
+                continue;
+            }
+        }
+        if let Some(ref condition) = tce.condition {
+            if !super::layers::evaluate_condition(state, condition, tce.controller, tce.source_id) {
+                continue;
+            }
+        }
+        for modification in &tce.modifications {
+            if let ContinuousModification::AddStaticMode {
+                mode: StaticMode::StepEndUnspentMana { filter, action },
+            } = modification
+            {
+                entries.push(StepEndManaScanEntry {
+                    source: tce.source_id,
+                    controller: tce.controller,
+                    filter: *filter,
+                    action: *action,
+                    description: format!("{} ({action})", tce.source_name),
+                });
+            }
+        }
+    }
+
+    entries
+}
+
+/// CR 117.3a + CR 400.7: Complete a phase entry after the per-player empty-
+/// mana drain has resolved. Resets priority, invalidates LKI, clears the
+/// per-step draw counter (bookkeeping for `ExceptFirstDrawInDrawStep`
+/// condition machinery — not a CR rule itself), and emits `PhaseChanged`.
+fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameEvent>) {
+    for player in state.players.iter_mut() {
+        // Bookkeeping (not a CR rule): `cards_drawn_this_step` is the
+        // counter the `ExceptFirstDrawInDrawStep` parser-level condition
+        // tests against. Reset on every step transition so the next step
+        // identifies its own first draw cleanly.
         player.cards_drawn_this_step = 0;
     }
 
@@ -1025,6 +1238,13 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
         if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
             return state.waiting_for.clone();
         }
+        // CR 703.4q + CR 616.1: A step-end empty-mana drain paused on a
+        // player's CR 616.1 choice. Surface the prompt so the engine round-
+        // trips through `GameAction::ChooseReplacement`; the drain resumes
+        // via the `EmptyManaPool` arm of `handle_replacement_choice`.
+        if state.pending_phase_transition_progress.is_some() {
+            return state.waiting_for.clone();
+        }
 
         // CR 800.4: If the active player has been eliminated, skip their
         // remaining phases and proceed to the next player's turn.
@@ -1058,27 +1278,37 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     continue;
                 }
                 // CR 503.1a: "At the beginning of [your] upkeep" triggers fire here.
-                if process_phase_triggers(state) {
-                    return WaitingFor::Priority {
-                        player: state.active_player,
-                    };
-                }
-                advance_phase(state, events);
+                process_phase_triggers(state);
+                // CR 503.2 + CR 117.1c: The active player ALWAYS receives priority
+                // during the upkeep step, regardless of whether triggers fired.
+                // Whether to auto-pass through this priority window (or honor the
+                // user's `phase_stops` / full-control preferences) is decided by
+                // `run_auto_pass_loop` and the frontend, not by skipping the step
+                // here. Mirrors the pattern in PreCombatMain and DeclareBlockers.
+                return WaitingFor::Priority {
+                    player: state.active_player,
+                };
             }
             Phase::Draw => {
-                let skip_draw = state.turn_number == 1 || should_skip_step_now(state, Phase::Draw);
-                if !skip_draw {
-                    if let Some(wf) = execute_draw(state, events) {
-                        return wf;
-                    }
+                // CR 103.7a: The first player skips their first-turn draw step
+                // entirely — no draw, no triggers, no priority.
+                // CR 614.10a + CR 614.1b: Other "skip your draw step" effects
+                // (replacements or static abilities) also remove the whole step.
+                if state.turn_number == 1 || should_skip_step_now(state, Phase::Draw) {
+                    advance_phase(state, events);
+                    continue;
+                }
+                if let Some(wf) = execute_draw(state, events) {
+                    return wf;
                 }
                 // CR 504.2: "At the beginning of [your] draw step" triggers fire here.
-                if process_phase_triggers(state) {
-                    return WaitingFor::Priority {
-                        player: state.active_player,
-                    };
-                }
-                advance_phase(state, events);
+                process_phase_triggers(state);
+                // CR 504.3 + CR 117.1c: The active player ALWAYS receives priority
+                // during the draw step (after the turn-based draw and any triggers).
+                // See the Upkeep arm above for the rationale — same pattern.
+                return WaitingFor::Priority {
+                    player: state.active_player,
+                };
             }
             Phase::PreCombatMain | Phase::PostCombatMain => {
                 // CR 714.3b: As the precombat main phase begins, add a lore counter
@@ -1811,6 +2041,474 @@ mod tests {
 
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 1);
         assert_eq!(state.players[1].mana_pool.count_color(ManaType::Blue), 1);
+    }
+
+    // -----------------------------------------------------------------
+    // CR 616.1 step-end mana RUNTIME tests (commit 2 cutover).
+    //
+    // Test list (from /tmp/cr616/plan-v2.md "Tests" section):
+    //   #1  single_retention_no_pause                — covered by
+    //       `advance_phase_retains_only_static_matching_controller_mana`
+    //       above; RUNTIME path identical under the new pipeline.
+    //   #2  single_transform_no_pause                — covered by
+    //       `advance_phase_transforms_unspent_mana_to_target_type`.
+    //   #3  two_player_apnap_independent_no_pause   — covered by
+    //       `static_player_scope_retention_covers_every_player`.
+    //   #8  transient_continuous_handler_via_last_agni_kai_pattern — covered
+    //       by `transient_retention_drives_player_retained_mana_query`.
+    //
+    // The five tests below cover the genuinely new behavior in commit 2:
+    // CR 616.1 player-choice ordering when ≥2 handlers apply to the same
+    // emptying event (#4), APNAP serialization across players (#5, #9),
+    // the no-handler-default path (#10), and the Drop-disposition matcher
+    // gate (#11).
+    //
+    // Expiry-bound interaction tests (#6, #7) live in `types/mana.rs` as
+    // shape tests on `clear_expiring_at_step_end` since that helper runs
+    // before the pipeline starts (H2 invariant — expiry-bound units never
+    // enter the replacement path).
+    // -----------------------------------------------------------------
+
+    /// CR 616.1 (#4): When two `Retain` handlers on a single player both
+    /// match a unit, the affected player chooses ordering via
+    /// `GameAction::ChooseReplacement`. Either choice resolves to the same
+    /// observable pool state (both keep the unit), so the test asserts the
+    /// pause + resume mechanics rather than ordering side-effects: a
+    /// `ReplacementChoice` waiting_for surfaces, and after a choice both
+    /// handlers apply (CR 614.5 one-opportunity-per-event tracking via
+    /// `ProposedEvent::applied`).
+    #[test]
+    fn step_end_mana_two_retention_handlers_pause_for_player_choice() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::ability::{StaticDefinition, TargetFilter};
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::WaitingFor;
+        use crate::types::mana::{ManaType, ManaUnit};
+        use crate::types::statics::StaticMode;
+
+        use crate::types::mana::ManaColor;
+
+        let mut state = setup();
+        state.phase = Phase::PreCombatMain;
+        // Two filtered `Retain` handlers on player 0's battlefield: one
+        // accepts Green only, the other Blue only. Pool seeded with one
+        // Green + one Blue Drop unit. The initial scan finds both
+        // handlers applicable (each sees ≥1 Drop unit overall). After
+        // the chosen handler runs and flips its colored unit to Keep,
+        // the other handler's matcher still returns true (the opposite-
+        // color unit is still Drop) and auto-applies. This setup is the
+        // only way to distinguish "1 handler fired" from "2 handlers
+        // fired" using observable end state: count(Green)==1 alone
+        // would be consistent with either outcome under a single-unit
+        // setup; here count(Green)==1 AND count(Blue)==1 prove both ran.
+        let handler_specs = [(1u64, ManaColor::Green), (2u64, ManaColor::Blue)];
+        for (n, color) in handler_specs {
+            let source = create_object(
+                &mut state,
+                CardId(n),
+                PlayerId(0),
+                format!("Retention Source {n}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&source)
+                .unwrap()
+                .static_definitions
+                .push(
+                    StaticDefinition::new(StaticMode::StepEndUnspentMana {
+                        filter: Some(color),
+                        action: crate::types::mana::StepEndManaAction::Retain,
+                    })
+                    .affected(TargetFilter::Controller),
+                );
+        }
+        state.players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Green,
+            ObjectId(99),
+            false,
+            Vec::new(),
+        ));
+        state.players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Blue,
+            ObjectId(98),
+            false,
+            Vec::new(),
+        ));
+
+        let mut events = Vec::new();
+        advance_phase(&mut state, &mut events);
+
+        // CR 616.1: pipeline paused on a multi-handler choice for player 0.
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::ReplacementChoice {
+                    player: PlayerId(0),
+                    candidate_count: 2,
+                    ..
+                }
+            ),
+            "expected multi-handler ReplacementChoice, got {:?}",
+            state.waiting_for
+        );
+        assert!(state.pending_phase_transition_progress.is_some());
+
+        // Player 0 chooses the first (Green) handler; the second (Blue)
+        // handler then applies on the rebuilt event. Both flip their
+        // respective unit to Keep, so both colors survive.
+        state.priority_player = PlayerId(0);
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("choose first handler");
+
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Green),
+            1,
+            "Green should have been retained by the first handler"
+        );
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Blue),
+            1,
+            "Blue should have been retained by the second handler — \
+             count(Blue)==0 here means only the chosen handler fired \
+             and CR 616.1f continuation was skipped"
+        );
+        assert!(state.pending_phase_transition_progress.is_none());
+    }
+
+    /// CR 616.1 (#5 + #9): With handlers on both players, APNAP order
+    /// determines whose choice comes first. The active player's CR 616.1
+    /// prompt surfaces before the non-active player's drain runs; the
+    /// non-active player's drain runs only after the active player resumes.
+    #[test]
+    fn step_end_mana_multi_player_choice_serializes_in_apnap_order() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::ability::{StaticDefinition, TargetFilter};
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::WaitingFor;
+        use crate::types::mana::{ManaType, ManaUnit};
+        use crate::types::statics::StaticMode;
+
+        let mut state = setup();
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+
+        // Each player has two Retain handlers (multi-handler conflict on
+        // both pools) and a unit in their own pool.
+        for player_idx in [0u8, 1] {
+            for n in 1u64..=2 {
+                let source = create_object(
+                    &mut state,
+                    CardId((u64::from(player_idx) + 1) * 10 + n),
+                    PlayerId(player_idx),
+                    format!("Retention {player_idx}/{n}"),
+                    Zone::Battlefield,
+                );
+                state
+                    .objects
+                    .get_mut(&source)
+                    .unwrap()
+                    .static_definitions
+                    .push(
+                        StaticDefinition::new(StaticMode::StepEndUnspentMana {
+                            filter: None,
+                            action: crate::types::mana::StepEndManaAction::Retain,
+                        })
+                        .affected(TargetFilter::Controller),
+                    );
+            }
+            state.players[player_idx as usize]
+                .mana_pool
+                .add(ManaUnit::new(
+                    ManaType::Green,
+                    ObjectId(900 + u64::from(player_idx)),
+                    false,
+                    Vec::new(),
+                ));
+        }
+
+        let mut events = Vec::new();
+        advance_phase(&mut state, &mut events);
+
+        // CR 616.1: APNAP order — active player (PlayerId(0)) chooses first.
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::ReplacementChoice {
+                    player: PlayerId(0),
+                    ..
+                }
+            ),
+            "active player must be prompted first under APNAP; got {:?}",
+            state.waiting_for
+        );
+
+        // Player 0 resolves; queue advances to player 1 who also needs to
+        // choose. The drain in `handle_replacement_choice` propagates the
+        // next prompt without returning to Priority in between.
+        state.priority_player = PlayerId(0);
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("player 0 chooses");
+
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::ReplacementChoice {
+                    player: PlayerId(1),
+                    ..
+                }
+            ),
+            "after active player resolves, next APNAP player chooses; got {:?}",
+            state.waiting_for
+        );
+
+        // Player 1 resolves; both pools survive.
+        state.priority_player = PlayerId(1);
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("player 1 chooses");
+
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 1);
+        assert_eq!(state.players[1].mana_pool.count_color(ManaType::Green), 1);
+        assert!(state.pending_phase_transition_progress.is_none());
+    }
+
+    /// CR 616.1g (#10): A player with no applicable handlers drains through
+    /// the pipeline without pausing — their pool empties as normal. With a
+    /// second player who DOES have handlers, the no-handler player's drain
+    /// completes silently and the handler-owning player is then processed.
+    #[test]
+    fn step_end_mana_player_with_no_handlers_drains_default() {
+        use crate::types::ability::{StaticDefinition, TargetFilter};
+        use crate::types::mana::{ManaType, ManaUnit};
+        use crate::types::statics::StaticMode;
+
+        let mut state = setup();
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+
+        // Only player 1 has a retention handler. Player 0 has no handlers.
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Retention".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::StepEndUnspentMana {
+                    filter: None,
+                    action: crate::types::mana::StepEndManaAction::Retain,
+                })
+                .affected(TargetFilter::Controller),
+            );
+        state.players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Red,
+            ObjectId(10),
+            false,
+            Vec::new(),
+        ));
+        state.players[1].mana_pool.add(ManaUnit::new(
+            ManaType::Blue,
+            ObjectId(11),
+            false,
+            Vec::new(),
+        ));
+
+        advance_phase(&mut state, &mut Vec::new());
+
+        // Player 0 has no handlers — pool empties.
+        assert_eq!(state.players[0].mana_pool.total(), 0);
+        // Player 1's handler matched (single handler, no choice needed).
+        assert_eq!(state.players[1].mana_pool.count_color(ManaType::Blue), 1);
+        // Queue completed without pausing.
+        assert!(state.pending_phase_transition_progress.is_none());
+    }
+
+    /// CR 614.5 secondary correctness (#11): The matcher gate is "Drop
+    /// disposition AND filter color match" — not "filter color match alone".
+    /// After a `Transform(Red)` handler recolors a Blue unit to Red, a
+    /// `Retain(filter=Red)` handler must NOT match the recolored unit
+    /// (disposition is now `Recolor(Red)`, not `Drop`).
+    ///
+    /// Scenario: pool has a single Blue unit. Two handlers on the same
+    /// player — Transform(Blue→Red) and Retain(filter=Red). The Transform
+    /// matches first (filter=None / matches Blue). After Transform, the
+    /// unit's disposition is `Recolor(Red)`, not `Drop`. Retain(filter=Red)'s
+    /// matcher inspects the rebuilt event and finds no `Drop` units it can
+    /// claim, so it is NOT a candidate on the second iteration. Result: one
+    /// Red unit survives in the pool.
+    #[test]
+    fn step_end_mana_recolor_then_retain_filter_does_not_match_new_color() {
+        use crate::types::ability::{StaticDefinition, TargetFilter};
+        use crate::types::mana::{ManaColor, ManaType, ManaUnit};
+        use crate::types::statics::StaticMode;
+
+        let mut state = setup();
+        state.phase = Phase::PreCombatMain;
+
+        // Transform handler: unfiltered → recolor every Drop unit to Red.
+        let xform = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Recolorer".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&xform)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::StepEndUnspentMana {
+                    filter: None,
+                    action: crate::types::mana::StepEndManaAction::Transform(ManaType::Red),
+                })
+                .affected(TargetFilter::Controller),
+            );
+        // Retention handler: only on Red units.
+        let retain = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Red Keeper".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&retain)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::StepEndUnspentMana {
+                    filter: Some(ManaColor::Red),
+                    action: crate::types::mana::StepEndManaAction::Retain,
+                })
+                .affected(TargetFilter::Controller),
+            );
+        state.players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Blue,
+            ObjectId(10),
+            false,
+            Vec::new(),
+        ));
+
+        let mut events = Vec::new();
+        advance_phase(&mut state, &mut events);
+
+        // CR 614.5 secondary: after Transform recolors the Blue unit to Red,
+        // its disposition is `Recolor(Red)`, NOT `Drop`. The Retain handler
+        // requires a `Drop` unit; the matcher rejects, so Retain is not a
+        // candidate and the pipeline never pauses. Pool ends with one Red.
+        //
+        // But: if `Retain` HAD matched on filter-alone, this would have
+        // been a multi-handler conflict that paused for choice. The
+        // absence of a pause is the load-bearing signal here.
+        assert!(state.pending_phase_transition_progress.is_none());
+        assert_eq!(state.players[0].mana_pool.total(), 1);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 1);
+    }
+
+    /// CR 616.1 (#4 ordering — secondary): When the same affected player is
+    /// offered Retain vs Transform on a single unit, choosing one observably
+    /// distinguishes from the other. Asserts that `chosen_index` 0 vs 1
+    /// produces different pool outcomes (Keep vs Recolor).
+    #[test]
+    fn step_end_mana_choice_index_distinguishes_retain_from_transform() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::ability::{StaticDefinition, TargetFilter};
+        use crate::types::actions::GameAction;
+        use crate::types::mana::{ManaType, ManaUnit};
+        use crate::types::statics::StaticMode;
+
+        fn run(choose: usize) -> ManaType {
+            let mut state = setup();
+            state.phase = Phase::PreCombatMain;
+            // Retain (unfiltered) and Transform(Blue) both apply to every
+            // Drop unit — two-handler choice.
+            let retain = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Retainer".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&retain)
+                .unwrap()
+                .static_definitions
+                .push(
+                    StaticDefinition::new(StaticMode::StepEndUnspentMana {
+                        filter: None,
+                        action: crate::types::mana::StepEndManaAction::Retain,
+                    })
+                    .affected(TargetFilter::Controller),
+                );
+            let xform = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Recolorer".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&xform)
+                .unwrap()
+                .static_definitions
+                .push(
+                    StaticDefinition::new(StaticMode::StepEndUnspentMana {
+                        filter: None,
+                        action: crate::types::mana::StepEndManaAction::Transform(ManaType::Blue),
+                    })
+                    .affected(TargetFilter::Controller),
+                );
+            state.players[0].mana_pool.add(ManaUnit::new(
+                ManaType::Red,
+                ObjectId(10),
+                false,
+                Vec::new(),
+            ));
+
+            let mut events = Vec::new();
+            advance_phase(&mut state, &mut events);
+            state.priority_player = PlayerId(0);
+            apply_as_current(&mut state, GameAction::ChooseReplacement { index: choose })
+                .expect("choose");
+
+            // After both handlers have applied (or the chosen-first one then
+            // the other), the unit's final color is the survivor.
+            state.players[0]
+                .mana_pool
+                .mana
+                .first()
+                .map(|u| u.color)
+                .expect("unit survived")
+        }
+
+        // Order of handler enumeration in the scan determines `candidates`
+        // ordering. Both ordering outcomes leave one unit in the pool
+        // (Retain keeps; Transform after Retain has no Drop unit to recolor,
+        // OR Transform recolors then Retain keeps the recolored unit). We
+        // assert the choice index is observable: one choice yields the
+        // original Red (Retain wins on first iteration; Transform's matcher
+        // then rejects since disposition is `Keep`), the other yields Blue
+        // (Transform wins on first iteration; Retain's matcher then rejects
+        // since disposition is `Recolor(Blue)`).
+        let outcome_0 = run(0);
+        let outcome_1 = run(1);
+        assert_ne!(
+            outcome_0, outcome_1,
+            "choice index must produce observably different outcomes (Retain vs Transform)"
+        );
+        assert!(matches!(outcome_0, ManaType::Red | ManaType::Blue));
+        assert!(matches!(outcome_1, ManaType::Red | ManaType::Blue));
     }
 
     #[test]
@@ -2581,13 +3279,20 @@ mod tests {
         assert_eq!(state.objects[&id].damage_marked, 0);
     }
 
+    /// CR 117.1c + CR 503.2: After Untap (no priority), the engine must hand
+    /// the active player priority during Upkeep — even when no triggers fired.
+    /// Previously `auto_advance` skipped past empty Upkeep/Draw windows, which
+    /// silently broke phase-stop and full-control honoring (the FE never got a
+    /// priority prompt to override). The skip happens at a higher layer now:
+    /// the FE auto-pass loop and `run_auto_pass_loop` decide whether to drain
+    /// the priority window based on `phase_stops` and `auto_pass_recommended`.
     #[test]
-    fn auto_advance_skips_to_precombat_main() {
+    fn auto_advance_pauses_at_upkeep_priority() {
         let mut state = setup();
         state.phase = Phase::Untap;
-        state.turn_number = 2; // Not first turn, so draw happens
+        state.turn_number = 2; // Not first turn, so the Draw step is not skipped.
 
-        // Add a card to library so draw works
+        // Add a card to library so draw works (when Draw priority is eventually drained).
         create_object(
             &mut state,
             CardId(1),
@@ -2599,7 +3304,8 @@ mod tests {
         let mut events = Vec::new();
         let waiting = auto_advance(&mut state, &mut events);
 
-        assert_eq!(state.phase, Phase::PreCombatMain);
+        // CR 117.1c: priority returned to active player during Upkeep.
+        assert_eq!(state.phase, Phase::Upkeep);
         assert!(matches!(
             waiting,
             WaitingFor::Priority {
@@ -2611,8 +3317,12 @@ mod tests {
     #[test]
     fn auto_advance_processes_precombat_main_triggers_before_priority() {
         let mut state = setup();
-        state.phase = Phase::Untap;
+        // Start mid-turn at the boundary entering PreCombatMain. `auto_advance`
+        // is now CR-117-strict (priority at every step), so testing the
+        // PreCombatMain-specific trigger path requires entering directly.
+        state.phase = Phase::Draw;
         state.turn_number = 2;
+        advance_phase(&mut state, &mut Vec::new()); // Draw → PreCombatMain
 
         create_object(
             &mut state,

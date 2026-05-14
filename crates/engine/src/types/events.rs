@@ -108,6 +108,23 @@ pub enum GameEvent {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         tapped_for_mana: bool,
     },
+    /// CR 500.5 + CR 703.4q: A single mana unit was emptied from a player's
+    /// pool during the step-end empty event after the CR 616.1 replacement
+    /// pipeline resolved. `source_id` is the unit's original producer
+    /// (mirrors `ManaAdded::source_id`).
+    ManaPoolEmptied {
+        player_id: PlayerId,
+        source_id: ObjectId,
+        color: ManaType,
+    },
+    /// CR 614.1a + CR 703.4q: A `Transform(_)` step-end mana handler (Horizon
+    /// Stone, Kruphix, Omnath, Ozai) recolored a unit in place during the
+    /// step-end empty event. The unit stays in the pool with its new color.
+    ManaRecolored {
+        player_id: PlayerId,
+        from: ManaType,
+        to: ManaType,
+    },
     PermanentTapped {
         object_id: ObjectId,
         /// The source that caused the tap, if tapped by an external effect.
