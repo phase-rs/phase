@@ -2225,4 +2225,57 @@ mod tests {
             other => panic!("expected SelectCards, got {other:?}"),
         }
     }
+
+    /// Regression guard: AI priority decision against 1000-token opponent
+    /// board must complete in single-digit milliseconds. The combination of
+    /// `ranked.truncate(branching)`, the deadline mechanism, and the
+    /// `im::HashMap` structural sharing in `apply_candidate` keeps priority
+    /// decisions cheap even on Scute Swarm-class boards. If this test ever
+    /// regresses past 100ms, something started doing per-opponent-creature
+    /// work inside `evaluate_after_action` or the candidate scoring loop —
+    /// hunt that down rather than relax this bound.
+    #[test]
+    fn priority_decision_vs_thousand_opponent_tokens_stays_fast() {
+        let mut state = make_state();
+        // 1000 1/1 opponent tokens — the pathological board.
+        for _ in 0..1000 {
+            add_creature(&mut state, PlayerId(1), 1, 1);
+        }
+        // AI has 5 untapped lands available (so legal_actions has some real
+        // candidates: PassPriority + maybe land-tap mana abilities).
+        for _ in 0..5 {
+            let cid = CardId(state.next_object_id);
+            let id = create_object(
+                &mut state,
+                cid,
+                PlayerId(0),
+                "Forest".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+        }
+
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let mut rng = SmallRng::seed_from_u64(42);
+
+        let start = std::time::Instant::now();
+        let action = choose_action(&state, PlayerId(0), &config, &mut rng);
+        let elapsed = start.elapsed();
+
+        eprintln!(
+            "[bench] choose_action priority-pass (1000 opponent tokens, AI difficulty=Hard): {:?}",
+            elapsed
+        );
+        assert!(action.is_some(), "AI must produce some action");
+        // Empirical baseline ~5ms in debug. 100ms is a generous ceiling that
+        // catches a 20× regression while staying robust to CI-runner noise.
+        assert!(
+            elapsed.as_millis() < 100,
+            "Priority decision regressed past 100ms ceiling: {:?}; \
+             investigate per-opponent-creature work in score_candidates / \
+             evaluate_after_action before relaxing this bound.",
+            elapsed
+        );
+    }
 }

@@ -62,7 +62,7 @@ function objectImageProps(obj: GameObject) {
     oracleId,
     faceName,
     isToken,
-    tokenFilters: isToken ? { power: obj.power, toughness: obj.toughness, colors: obj.color } : undefined,
+    tokenFilters: isToken ? { power: obj.power, toughness: obj.toughness, colors: obj.color, subtypes: obj.card_types?.subtypes } : undefined,
   };
 }
 

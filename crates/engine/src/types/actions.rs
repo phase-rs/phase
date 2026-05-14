@@ -647,9 +647,21 @@ pub enum DebugAction {
     /// `characteristics` is the same body shape used by `TokenSpec` and
     /// `TokenPreset`; the WASM handler fills in runtime fields (script_name,
     /// source_id, controller, tapped, etc.) at create-time.
+    ///
+    /// `enter_with_counters` is plumbed straight through to
+    /// `TokenSpec::enter_with_counters` and travels the same replacement
+    /// pipeline as engine-driven token creation, so debug spawns of bodies
+    /// that need counters to survive (0/0 creature tokens, Hangarback /
+    /// Hydra shapes) can produce viable objects without the FE inferring
+    /// rules state. See `ProposedEvent::CreateToken` and
+    /// `TokenSpec::enter_with_counters` — same semantics, real pipeline.
+    /// CR 122.6a (counters placed at ETB), CR 614.1 (replacement window),
+    /// CR 704.5f (0-toughness SBA — why this field exists).
     CreateToken {
         owner: PlayerId,
         characteristics: super::proposed_event::TokenCharacteristics,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        enter_with_counters: Vec<(CounterType, u32)>,
     },
 }
 
@@ -779,11 +791,22 @@ impl DebugAction {
             DebugAction::CreateToken {
                 owner,
                 characteristics,
+                enter_with_counters,
             } => {
+                let counters = if enter_with_counters.is_empty() {
+                    String::new()
+                } else {
+                    let parts: Vec<String> = enter_with_counters
+                        .iter()
+                        .map(|(ct, n)| format!("{n} {}", ct.as_str()))
+                        .collect();
+                    format!(" with {}", parts.join(", "))
+                };
                 format!(
-                    "CreateToken ({} for {})",
+                    "CreateToken ({} for {}{})",
                     characteristics.display_name,
-                    player_label(*owner)
+                    player_label(*owner),
+                    counters
                 )
             }
         }

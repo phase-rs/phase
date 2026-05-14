@@ -989,7 +989,14 @@ export type DebugAction =
   | { type: "AddMana"; data: { player_id: PlayerId; mana: ManaType[] } }
   | { type: "SetPhase"; data: { phase: Phase; active_player: PlayerId } }
   | { type: "RunStateBasedActions" }
-  | { type: "CreateToken"; data: { owner: PlayerId; characteristics: TokenCharacteristics } };
+  | {
+      type: "CreateToken";
+      data: {
+        owner: PlayerId;
+        characteristics: TokenCharacteristics;
+        enter_with_counters?: [CounterType, number][];
+      };
+    };
 
 export type GameAction =
   | { type: "PassPriority" }

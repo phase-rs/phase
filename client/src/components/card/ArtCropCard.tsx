@@ -42,7 +42,7 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
     size: "art_crop",
     faceIndex: imageLookup.faceIndex,
     isToken: obj?.face_down ? false : isToken,
-    tokenFilters: !obj?.face_down && isToken ? { power: obj?.power, toughness: obj?.toughness, colors: obj?.color } : undefined,
+    tokenFilters: !obj?.face_down && isToken ? { power: obj?.power, toughness: obj?.toughness, colors: obj?.color, subtypes: obj?.card_types?.subtypes } : undefined,
     oracleId: obj?.face_down ? undefined : imageLookup.oracleId,
     faceName: obj?.face_down ? undefined : imageLookup.faceName,
   });
