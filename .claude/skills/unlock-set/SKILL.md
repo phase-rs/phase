@@ -271,7 +271,7 @@ For each cluster in priority order:
 
 1. **Spawn `engine-implementer`** (not `general-purpose`, not `feature-architect`). This agent runs plan → implement → review internally (per `feedback_engine_implementer_runs_review`), so do not spawn an external reviewer after it finishes.
 2. **Brief the agent with the template below.** Under-briefed agents produce inconsistent work.
-3. **After the agent returns**, verify the commit exists (`git log -1`) and that tests pass. The agent is responsible for running `cargo fmt / clippy-strict / test -p engine / coverage` before committing.
+3. **After the agent returns**, verify the commit exists (`git log -1`) and that tests pass. The agent is responsible for verification before committing using the Tilt-preferred / direct-cargo-fallback pattern (`cargo fmt` → `tilt-wait.sh clippy test-engine` if Tilt up, else `clippy-strict` + `test -p engine`; then one-shot `cargo coverage`). See CLAUDE.md § "Canonical verification pattern".
 4. **Commit between clusters** is the agent's responsibility per the brief. Do not amend prior commits.
 5. **Handle deferrals** per Phase 6 if the agent returns with a deferral recommendation.
 
@@ -339,12 +339,12 @@ Deliverables
    - Parser: <class-level tests, not per-card>.
    - Runtime: <scenarios covering the primitive's full input range>.
 4. CR annotations grep-verified.
-5. Verification gate:
-   - `cargo fmt --all`
-   - `cargo clippy --all-targets -- -D warnings`
-   - `cargo test -p engine`
-   - `cargo coverage`
-   - `cargo semantic-audit` (check no new findings for the target cards).
+5. Verification gate (Tilt-preferred; see CLAUDE.md § "Canonical verification pattern"):
+   - `cargo fmt --all` (always direct)
+   - If Tilt is up (`tilt get uiresource clippy >/dev/null 2>&1`): `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data`
+   - Else: `cargo clippy --all-targets -- -D warnings` + `cargo test -p engine` + `./scripts/gen-card-data.sh`
+   - `cargo coverage` (one-shot binary — always direct)
+   - `cargo semantic-audit` (one-shot — always direct; check no new findings for the target cards).
 6. Commit message: `feat(engine): <SET> Tier <N>.<M> — <one-line primitive>\n\n<body>`.
    Do not amend prior commits.
 

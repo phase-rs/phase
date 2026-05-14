@@ -151,7 +151,7 @@ ReplacementResult::Execute(modified_event) → caller processes the event
 - [ ] Parser test: Oracle text → correct `ReplacementDefinition`
 - [ ] Pipeline test: proposed event → replacement applies → modified event
 - [ ] Engine flow test: full game action → replacement → zone change → post-effect
-- [ ] `cargo test -p engine && cargo clippy --all-targets -- -D warnings`
+- [ ] Verify per CLAUDE.md § "Canonical verification pattern" — `cargo fmt --all`, then if `tilt get uiresource clippy >/dev/null 2>&1`: `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data`; else: `cargo clippy --all-targets -- -D warnings` + `cargo test -p engine` + `./scripts/gen-card-data.sh`.
 
 ---
 

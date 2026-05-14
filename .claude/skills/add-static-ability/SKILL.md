@@ -216,7 +216,7 @@ If your static uses a mode other than `Continuous`, it's evaluated outside the l
 - [ ] Layer test: create objects with static definitions, run `evaluate_layers()`, assert final characteristics
 - [ ] Condition test: verify static is active/inactive based on condition (if conditional)
 - [ ] Snapshot test: update `crates/engine/tests/oracle_parser.rs` if card parsing changed
-- [ ] `cargo test -p engine && cargo clippy --all-targets -- -D warnings`
+- [ ] Verify per CLAUDE.md § "Canonical verification pattern" — `cargo fmt --all`, then if `tilt get uiresource clippy >/dev/null 2>&1`: `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data`; else: `cargo clippy --all-targets -- -D warnings` + `cargo test -p engine` + `./scripts/gen-card-data.sh`.
 
 ---
 

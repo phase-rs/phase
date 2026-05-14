@@ -101,12 +101,21 @@ Apply **all three** checks:
 
 **Developer track** — run in this order. On any failure, fix in-loop (max 2 retries) before proceeding. If still failing after retries, record the failure in the PR body under "CI Failures" and continue to Step 7 — do not abort.
 
+If Tilt is running locally (`tilt get uiresource clippy >/dev/null 2>&1` succeeds), prefer `tilt-wait.sh` for clippy/tests/card-data — it reuses Tilt's already-warm rebuild loop instead of fighting it for the cargo target lock. See CLAUDE.md § "Canonical verification pattern".
+
 ```bash
-cargo fmt --all
-cargo clippy-strict
-./scripts/check-parser-combinators.sh         # nom-mandate gate (also runs in pre-commit + CI)
-cargo test -p engine
-./scripts/gen-card-data.sh
+cargo fmt --all                               # always direct — Tilt doesn't auto-format
+./scripts/check-parser-combinators.sh         # nom-mandate gate (one-shot — direct in both modes)
+
+if tilt get uiresource clippy >/dev/null 2>&1; then
+  ./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data
+else
+  cargo clippy-strict
+  cargo test -p engine
+  ./scripts/gen-card-data.sh
+fi
+
+# One-shot audit binaries (always direct — not Tilt resources):
 cargo coverage                                # confirm the named card now has supported: true, gap_count: 0
 cargo semantic-audit                          # confirm the named card surfaces zero findings
 ```

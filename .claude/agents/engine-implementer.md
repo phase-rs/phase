@@ -46,44 +46,40 @@ Implement the reviewed plan step by step.
 5. **CR annotations verified.** Run `grep -n "^{rule_number}" docs/MagicCompRules.txt` for every CR number before writing it into code. The `/validate-cr-annotations` skill and `mtg-rules-auditor` agent are the canonical tools for bulk verification and retroactive audits.
 6. **Architecture checkpoint.** If at any point something doesn't slot cleanly into existing patterns — **STOP** and report back to the parent. Do not hack around it. Do not silently rewrite the plan to make the friction go away. The parent will route the revision through its planner sub-agent if needed.
 
-### Verification (Tilt-driven, not direct cargo)
+### Verification (Tilt-preferred, direct-cargo fallback)
 
-**Tilt is always running and continuously rebuilds on file changes.** Do NOT run `cargo build`, `cargo clippy`, `cargo test -p engine`, `pnpm type-check`, or `pnpm lint` directly — they compete for cargo target locks and queue up redundant builds.
+**Default to Tilt when it's running; fall back to direct cargo/pnpm only when Tilt is not up.** Tilt is the preferred path because it continuously rebuilds and avoids target-lock contention, but it is not always running (fresh clones, CI shells, headless invocations). Detect once per verification block with `tilt get uiresource clippy >/dev/null 2>&1` and pick the correct branch — see `CLAUDE.md` § "Canonical verification pattern" for the authoritative template.
 
-After saving files, run `cargo fmt --all` (the one direct cargo exception — Tilt doesn't auto-format), then wait for Tilt to settle:
+Always run formatting directly (Tilt doesn't auto-format), then verify:
 
 ```bash
 cargo fmt --all
-./scripts/tilt-wait.sh --timeout 240 clippy test-engine
+
+# Engine + parser work (engine src changes invalidate card-data per Tiltfile,
+# so wait on card-data unconditionally):
+if tilt get uiresource clippy >/dev/null 2>&1; then
+  ./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data
+else
+  cargo clippy --all-targets -- -D warnings
+  cargo test -p engine
+  ./scripts/gen-card-data.sh
+fi
+
+# Frontend work:
+if tilt get uiresource clippy >/dev/null 2>&1; then
+  ./scripts/tilt-wait.sh --timeout 180 check-frontend
+else
+  (cd client && pnpm run type-check && pnpm lint)
+fi
 ```
 
-If parser changes were made, also wait on the data pipeline:
+After a `tilt-wait.sh` non-zero exit, fetch detail with `tilt logs <resource> --tail 50 --since 2m`. After a direct cargo/pnpm failure, the diagnostics are already on stdout. Fix and re-verify.
 
-```bash
-./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data
-```
-
-After `tilt-wait.sh` returns 0, the resources are green. After exit 1, fetch details:
-
-```bash
-tilt logs clippy --tail 50 --since 2m
-tilt logs test-engine --tail 50 --since 2m
-tilt logs card-data --tail 20 --since 1m
-```
-
-Fix failures and re-wait. For parser work, also run the audit binaries manually after Tilt settles:
+For parser work, also run the one-shot audit binaries — these are not continuous Tilt resources, so invoke directly in both modes:
 
 ```bash
 cargo coverage          # newly-supported cards + Unimplemented gaps
-cargo semantic-audit    # misparses that coverage cannot see
-```
-
-These are one-shot binaries, not continuous Tilt resources, so direct invocation is correct.
-
-For frontend changes (anything under `client/`):
-
-```bash
-./scripts/tilt-wait.sh --timeout 180 check-frontend
+cargo semantic-audit    # misparses coverage cannot see
 ```
 
 TypeScript errors and lint failures must not be committed.

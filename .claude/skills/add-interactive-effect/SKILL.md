@@ -230,7 +230,7 @@ When the continuation is created, parent targets propagate down if the sub-abili
 - [ ] Engine round-trip test: set up waiting state → submit action → verify state change
 - [ ] Continuation test: effect with sub_ability → interactive pause → resume → sub_ability executes
 - [ ] AI test: `get_legal_actions()` returns valid options for the waiting state
-- [ ] `cargo test -p engine && cargo clippy --all-targets -- -D warnings`
+- [ ] Verify per CLAUDE.md § "Canonical verification pattern" — `cargo fmt --all`, then if `tilt get uiresource clippy >/dev/null 2>&1`: `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data`; else: `cargo clippy --all-targets -- -D warnings` + `cargo test -p engine` + `./scripts/gen-card-data.sh`.
 
 ---
 
