@@ -139,7 +139,6 @@ export class TauriAdapter implements EngineAdapter {
     );
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   estimateBracket(_deck: {
     commander: string[];
     main_deck: string[];
@@ -150,7 +149,7 @@ export class TauriAdapter implements EngineAdapter {
     // command. When Tauri parity is needed, add a Tauri command in
     // client/src-tauri/src/main.rs and invoke it here.
     throw new AdapterError(
-      "bracket-estimation/unsupported",
+      AdapterErrorCode.BRACKET_ESTIMATION_UNSUPPORTED,
       "Bracket estimation is not yet available in the Tauri desktop build.",
       false,
     );

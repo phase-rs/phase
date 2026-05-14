@@ -1389,6 +1389,7 @@ export const AdapterErrorCode = {
   ENGINE_PANIC: "ENGINE_PANIC",
   WASM_ERROR: "WASM_ERROR",
   INVALID_ACTION: "INVALID_ACTION",
+  BRACKET_ESTIMATION_UNSUPPORTED: "bracket-estimation/unsupported",
 } as const;
 
 /**
