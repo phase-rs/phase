@@ -332,8 +332,9 @@ fn main() {
         None => match &data_dir {
             Some(d) => d.join("mtgjson/AtomicCards.json"),
             None => {
-                eprintln!("Usage: oracle-gen <data-dir> [--mtgjson <path>] [--stats]");
+                eprintln!("Usage: oracle-gen <data-dir> [--mtgjson <path>] [--stats] [--output <path>]");
                 eprintln!("  Parses Oracle text from MTGJSON and outputs card-data export JSON");
+                eprintln!("  --output <path>  Write the export to a file instead of stdout");
                 process::exit(1);
             }
         },
@@ -403,7 +404,7 @@ fn main() {
             Some(idx)
         } else if explicit {
             // Only warn if the user explicitly requested a path that doesn't exist.
-            eprintln!("Warning: Forge path {} not found, skipping", path.display());
+            eprintln!("warning: Forge path {} not found, skipping", path.display());
             None
         } else {
             None
