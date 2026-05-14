@@ -1476,3 +1476,64 @@ export interface EngineAdapter {
   restoreState(state: GameState): void | Promise<void>;
   dispose(): void;
 }
+
+// ── Bracket Estimate ───────────────────────────────────────────────────
+
+/**
+ * Commander bracket tier returned by the engine estimator. Mirrors
+ * `engine::game::bracket_estimate::CommanderBracketTier`. The estimator
+ * never returns "cedh" — that tier is reserved for manual declaration only.
+ */
+export type CommanderBracketTier =
+  | "exhibition"
+  | "core"
+  | "upgraded"
+  | "optimized"
+  | "cedh";
+
+export type BracketAxis =
+  | "game_changers"
+  | "mass_land_denial"
+  | "extra_turns"
+  | "efficient_tutors";
+
+export interface BracketAxisCounts {
+  game_changers: number;
+  mass_land_denial: number;
+  extra_turns: number;
+  efficient_tutors: number;
+}
+
+export interface BracketContributingCards {
+  game_changers: string[];
+  mass_land_denial: string[];
+  extra_turns: string[];
+  efficient_tutors: string[];
+}
+
+export interface BracketViolation {
+  axis: BracketAxis;
+  count: number;
+  prior_cap: number;
+  forced_floor: CommanderBracketTier;
+}
+
+export interface BracketEstimate {
+  tier: CommanderBracketTier;
+  axes: BracketAxisCounts;
+  contributing: BracketContributingCards;
+  violations: BracketViolation[];
+  data_version: string;
+}
+
+/**
+ * Maps tier strings to the existing `CommanderBracket` numeric values
+ * (1..5) used by `BracketPicker`.
+ */
+export const BRACKET_TIER_NUMERIC: Record<CommanderBracketTier, 1 | 2 | 3 | 4 | 5> = {
+  exhibition: 1,
+  core: 2,
+  upgraded: 3,
+  optimized: 4,
+  cedh: 5,
+};
