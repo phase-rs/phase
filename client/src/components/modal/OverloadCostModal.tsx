@@ -1,11 +1,9 @@
-import type { GameAction, ManaCost, WaitingFor } from "../../adapter/types.ts";
+import type { GameAction, ManaCost } from "../../adapter/types.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { ManaCostSymbols } from "../mana/ManaCostSymbols.tsx";
 import { CardTextboxPreview } from "./CardTextboxPreview.tsx";
 import { DialogShell } from "./DialogShell.tsx";
-
-type OverloadCostChoice = Extract<WaitingFor, { type: "OverloadCostChoice" }>;
 
 export function OverloadCostModal() {
   const canActForWaitingState = useCanActForWaitingState();
@@ -15,13 +13,14 @@ export function OverloadCostModal() {
   if (waitingFor?.type !== "OverloadCostChoice") return null;
   if (!canActForWaitingState) return null;
 
-  const data = waitingFor.data as OverloadCostChoice["data"];
+  // Discriminated-union narrowing makes `waitingFor.data` the correct shape.
+  const { object_id, normal_cost, overload_cost } = waitingFor.data;
 
   return (
     <OverloadCostContent
-      objectId={data.object_id}
-      normalCost={data.normal_cost}
-      overloadCost={data.overload_cost}
+      objectId={object_id}
+      normalCost={normal_cost}
+      overloadCost={overload_cost}
       dispatch={dispatch}
     />
   );
