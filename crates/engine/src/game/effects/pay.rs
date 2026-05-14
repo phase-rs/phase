@@ -378,6 +378,12 @@ fn can_pay_resolution_ability_cost(
         AbilityCost::Composite { costs } => costs
             .iter()
             .all(|cost| can_pay_resolution_ability_cost(state, ability, payer, cost)),
+        // CR 118.12a: Disjunctive — payable iff any sub-cost is payable. The
+        // choice is made interactively via `UnlessPaymentChooseCost`; the
+        // unconditional pre-flight check only needs at least one branch.
+        AbilityCost::OneOf { costs } => costs
+            .iter()
+            .any(|cost| can_pay_resolution_ability_cost(state, ability, payer, cost)),
         // Variants below are not yet supported as resolution-time costs.
         // The matching arms in `resolve_ability_cost_payment` return
         // `EffectError::InvalidParam`; refusing here is the conservative

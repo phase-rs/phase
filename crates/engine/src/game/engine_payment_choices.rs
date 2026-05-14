@@ -8,6 +8,7 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
+use crate::types::mana::ManaCost;
 use crate::types::zones::Zone;
 
 use super::casting;
@@ -214,6 +215,77 @@ pub(super) fn handle_tribute_choice(
     Ok(action_result(events, state.waiting_for.clone()))
 }
 
+/// CR 118.12a: Resolve the player's choice between sub-costs of a disjunctive
+/// unless-cost. `UnlessCostBranch::Pay { index }` re-enters
+/// `handle_unless_payment` with the chosen single cost as `pay: true`;
+/// `UnlessCostBranch::Decline` declines all branches (effect happens),
+/// mirroring `PayUnlessCost { pay: false }`.
+pub(super) fn handle_unless_payment_choose_cost(
+    state: &mut GameState,
+    waiting_for: WaitingFor,
+    choice: crate::types::actions::UnlessCostBranch,
+    events: &mut Vec<GameEvent>,
+) -> Result<ActionResult, EngineError> {
+    use crate::types::actions::UnlessCostBranch;
+    let WaitingFor::UnlessPaymentChooseCost {
+        player,
+        costs,
+        pending_effect,
+        trigger_event,
+        effect_description,
+    } = waiting_for
+    else {
+        return Err(EngineError::InvalidAction(
+            "Not waiting for unless-payment cost branch".to_string(),
+        ));
+    };
+
+    match choice {
+        UnlessCostBranch::Pay { index } => {
+            let chosen = costs.get(index).cloned().ok_or_else(|| {
+                EngineError::InvalidAction(format!(
+                    "ChooseUnlessCostBranch index {index} out of range \
+                     (have {} sub-costs)",
+                    costs.len()
+                ))
+            })?;
+            // Re-enter the standard single-cost path with `pay: true`. The
+            // pending_effect already has `unless_pay = None` (cleared by
+            // `surface_unless_payment`).
+            let next = WaitingFor::UnlessPayment {
+                player,
+                cost: chosen,
+                pending_effect,
+                trigger_event,
+                effect_description,
+            };
+            handle_unless_payment(state, next, true, events)
+        }
+        UnlessCostBranch::Decline => {
+            // CR 118.12: Declining the choice is identical to declining a
+            // single-cost `PayUnlessCost { pay: false }` — re-enter
+            // `handle_unless_payment` with `pay: false` and any
+            // representative cost (the cost is unused on the decline path:
+            // `handle_unless_payment` line 570 routes straight to
+            // `resolve_ability_chain` on the `!pay || payment_failed`
+            // branch, never reading `cost`). Use the first sub-cost as a
+            // stand-in so the WaitingFor shape is valid even though the
+            // cost itself is not consulted.
+            let stand_in_cost = costs.into_iter().next().unwrap_or(AbilityCost::Mana {
+                cost: ManaCost::zero(),
+            });
+            let next = WaitingFor::UnlessPayment {
+                player,
+                cost: stand_in_cost,
+                pending_effect,
+                trigger_event,
+                effect_description,
+            };
+            handle_unless_payment(state, next, false, events)
+        }
+    }
+}
+
 pub(super) fn handle_unless_payment(
     state: &mut GameState,
     waiting_for: WaitingFor,
@@ -418,6 +490,21 @@ pub(super) fn handle_unless_payment(
             // unless branch fails and the effect happens unconditionally.
             // Listed exhaustively (no wildcard) so future cost additions
             // force a deliberate decision here.
+            // CR 118.12a: `OneOf` — surface a sub-cost choice. Once the
+            // player picks an index, the resolver re-enters `handle_unless_payment`
+            // with the chosen single cost via
+            // `handle_unless_payment_choose_cost`. Reaching this arm means
+            // the choice was not made yet — that is an engine invariant
+            // bug, not a runtime condition. The choice transition happens
+            // in `surface_unless_payment` (effects/mod.rs) before this
+            // function is ever called with a `OneOf` cost.
+            AbilityCost::OneOf { .. } => {
+                unreachable!(
+                    "OneOf unless-cost should have been resolved to a single \
+                     AbilityCost by handle_unless_payment_choose_cost before \
+                     reaching handle_unless_payment"
+                );
+            }
             AbilityCost::Tap
             | AbilityCost::Untap
             | AbilityCost::Unattach
@@ -1088,6 +1175,144 @@ mod tests {
         assert_eq!(state.players[0].energy, 3);
         // Pending GainLife was skipped because payment succeeded — life unchanged.
         assert_eq!(state.players[0].life, 20);
+    }
+
+    /// CR 118.12a: **Runtime test** — choosing the PayLife branch of a
+    /// disjunctive unless-cost re-enters the standard `handle_unless_payment`
+    /// path, deducts life, and suppresses the pending effect. Drives the
+    /// inner handler directly (not via `apply_action`); see the
+    /// `unless_payment_choose_cost_via_apply_action_*` tests below for the
+    /// public-surface contract.
+    #[test]
+    fn unless_payment_choose_cost_branch_zero_routes_to_chosen_cost() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 20;
+        let pending = ResolvedAbility::new(gain_life(7), vec![], ObjectId(100), PlayerId(0));
+        state.waiting_for = WaitingFor::UnlessPaymentChooseCost {
+            player: PlayerId(0),
+            costs: vec![
+                AbilityCost::PayLife {
+                    amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
+                },
+                AbilityCost::Discard {
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                    filter: None,
+                    random: false,
+                    self_ref: false,
+                },
+            ],
+            pending_effect: Box::new(pending),
+            trigger_event: None,
+            effect_description: None,
+        };
+
+        let mut events = Vec::new();
+        let waiting_for = state.waiting_for.clone();
+        handle_unless_payment_choose_cost(
+            &mut state,
+            waiting_for,
+            crate::types::actions::UnlessCostBranch::Pay { index: 0 },
+            &mut events,
+        )
+        .expect("choose-cost dispatch should resolve");
+        // PayLife branch was chosen and paid — life drops by 3, pending GainLife
+        // was suppressed (post-fold the pending_effect's unless_pay is cleared
+        // by surface_unless_payment, and the success path skips the effect).
+        assert_eq!(state.players[0].life, 17);
+    }
+
+    /// CR 118.12a: **Runtime test** — declining all branches of a
+    /// disjunctive unless-cost falls through to the effect happening,
+    /// equivalent to `PayUnlessCost { pay: false }` on the single-cost
+    /// path. Drives the inner handler directly; see the
+    /// `unless_payment_choose_cost_via_apply_action_*` tests below for the
+    /// public-surface contract.
+    #[test]
+    fn unless_payment_choose_cost_decline_runs_pending_effect() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 20;
+        let pending = ResolvedAbility::new(gain_life(7), vec![], ObjectId(100), PlayerId(0));
+        state.waiting_for = WaitingFor::UnlessPaymentChooseCost {
+            player: PlayerId(0),
+            costs: vec![AbilityCost::PayLife {
+                amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
+            }],
+            pending_effect: Box::new(pending),
+            trigger_event: None,
+            effect_description: None,
+        };
+
+        let mut events = Vec::new();
+        let waiting_for = state.waiting_for.clone();
+        handle_unless_payment_choose_cost(
+            &mut state,
+            waiting_for,
+            crate::types::actions::UnlessCostBranch::Decline,
+            &mut events,
+        )
+        .expect("choose-cost decline should resolve");
+        // Effect happens: gain 7 life from 20 → 27.
+        assert_eq!(state.players[0].life, 27);
+    }
+
+    /// CR 118.12a: **Public-surface test** — drives the choose-cost
+    /// transition through `engine::apply` with a real `GameAction`. Exercises
+    /// the dispatcher in `engine.rs` (the contract that actually ships) end-
+    /// to-end, not just the inner handler.
+    #[test]
+    fn unless_payment_choose_cost_via_apply_action_pay_branch() {
+        use crate::types::actions::{GameAction, UnlessCostBranch};
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 20;
+        let pending = ResolvedAbility::new(gain_life(7), vec![], ObjectId(100), PlayerId(0));
+        state.waiting_for = WaitingFor::UnlessPaymentChooseCost {
+            player: PlayerId(0),
+            costs: vec![AbilityCost::PayLife {
+                amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
+            }],
+            pending_effect: Box::new(pending),
+            trigger_event: None,
+            effect_description: None,
+        };
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseUnlessCostBranch {
+                choice: UnlessCostBranch::Pay { index: 0 },
+            },
+        )
+        .expect("apply_action should resolve the choose-cost prompt");
+        // PayLife branch paid → life 20 − 3 = 17, pending GainLife suppressed.
+        assert_eq!(state.players[0].life, 17);
+    }
+
+    /// CR 118.12a: **Public-surface test** — declining via `engine::apply`
+    /// runs the pending effect.
+    #[test]
+    fn unless_payment_choose_cost_via_apply_action_decline() {
+        use crate::types::actions::{GameAction, UnlessCostBranch};
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 20;
+        let pending = ResolvedAbility::new(gain_life(7), vec![], ObjectId(100), PlayerId(0));
+        state.waiting_for = WaitingFor::UnlessPaymentChooseCost {
+            player: PlayerId(0),
+            costs: vec![AbilityCost::PayLife {
+                amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
+            }],
+            pending_effect: Box::new(pending),
+            trigger_event: None,
+            effect_description: None,
+        };
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseUnlessCostBranch {
+                choice: UnlessCostBranch::Decline,
+            },
+        )
+        .expect("apply_action should resolve the decline");
+        // Effect happens: 20 + 7 = 27.
+        assert_eq!(state.players[0].life, 27);
     }
 
     /// CR 118.12 (M1 fold + Harvest Wurm shape): An unless ReturnToHand cost

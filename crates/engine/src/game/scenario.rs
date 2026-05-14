@@ -1206,6 +1206,7 @@ impl GameRunner {
             WaitingFor::OpponentMayChoice { .. } => "OpponentMayChoice",
             WaitingFor::TributeChoice { .. } => "TributeChoice",
             WaitingFor::UnlessPayment { .. } => "UnlessPayment",
+            WaitingFor::UnlessPaymentChooseCost { .. } => "UnlessPaymentChooseCost",
             WaitingFor::CompanionReveal { .. } => "CompanionReveal",
             WaitingFor::ChooseRingBearer { .. } => "ChooseRingBearer",
             WaitingFor::DiscardForCost { .. } => "DiscardForCost",

@@ -66,6 +66,19 @@ pub enum OverloadChoice {
     Overload,
 }
 
+/// CR 118.12a: Player decision at an `UnlessPaymentChooseCost` prompt — the
+/// disjunctive ("unless they X or Y") unless-cost choice. `Decline` falls
+/// through to the effect happening (mirrors `PayUnlessCost { pay: false }`);
+/// `Pay { index }` selects the sub-cost by its position in
+/// `WaitingFor::UnlessPaymentChooseCost::costs` and routes back into the
+/// standard single-cost `handle_unless_payment` path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum UnlessCostBranch {
+    Decline,
+    Pay { index: usize },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, strum::IntoStaticStr)]
 #[serde(tag = "type", content = "data")]
 pub enum GameAction {
@@ -317,6 +330,14 @@ pub enum GameAction {
     /// CR 118.12: Pay or decline an "unless pays" cost (e.g., Mana Leak, No More Lies).
     PayUnlessCost {
         pay: bool,
+    },
+    /// CR 118.12a: Choose **which** sub-cost branch to pay from a disjunctive
+    /// unless-cost ("unless they X or Y"). The `UnlessCostBranch` discriminant
+    /// is `Decline` (fall through to the effect) or `Pay { index }` (re-enter
+    /// the standard single-cost payment path with the chosen sub-cost).
+    /// Drives Tergrid's Lantern's "sacrifice ... or discard ..." disjunction.
+    ChooseUnlessCostBranch {
+        choice: UnlessCostBranch,
     },
     /// CR 508.1d + CR 508.1h + CR 509.1c + CR 509.1d: Pay or decline the aggregate
     /// combat tax (Ghostly Prison, Propaganda, Sphere of Safety, Windborn Muse).
@@ -864,6 +885,7 @@ impl GameAction {
             | GameAction::DecideOptionalEffect { .. }
             | GameAction::DecideOptionalEffectAndRemember { .. }
             | GameAction::PayUnlessCost { .. }
+            | GameAction::ChooseUnlessCostBranch { .. }
             | GameAction::PayCombatTax { .. }
             | GameAction::ChooseDungeon { .. }
             | GameAction::ChooseDungeonRoom { .. }

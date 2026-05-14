@@ -362,6 +362,12 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
 
         // Unless payment: decline to pay (let the effect resolve).
         WaitingFor::UnlessPayment { .. } => Some(GameAction::PayUnlessCost { pay: false }),
+        // CR 118.12a: Disjunctive unless-cost choice. Fallback is to decline
+        // the choice (let the effect resolve), mirroring `UnlessPayment`'s
+        // pessimistic-default policy.
+        WaitingFor::UnlessPaymentChooseCost { .. } => Some(GameAction::ChooseUnlessCostBranch {
+            choice: engine::types::actions::UnlessCostBranch::Decline,
+        }),
 
         // Combat tax: decline to pay.
         WaitingFor::CombatTaxPayment { .. } => Some(GameAction::PayCombatTax { accept: false }),

@@ -130,6 +130,9 @@ export function GameBoard({ oppHud, playerHud }: GameBoardProps) {
         (waitingFor.type === "Priority" && canActForWaitingState)
         || (waitingFor.type === "ManaPayment" && canActForWaitingState)
         || (waitingFor.type === "UnlessPayment" && canActForWaitingState)
+        // CR 118.12a: Disjunctive unless-cost — same input enablement as
+        // UnlessPayment (player chooses among sub-costs).
+        || (waitingFor.type === "UnlessPaymentChooseCost" && canActForWaitingState)
       );
 
     if (waitingFor?.type === "Priority" && canActForWaitingState) {
