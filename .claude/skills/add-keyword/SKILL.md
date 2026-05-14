@@ -164,7 +164,7 @@ Some keywords require synthesis in `synthesis.rs` — converting the keyword int
 
 - [ ] **Runtime behavior tests** in the relevant game module (combat, targeting, etc.)
 
-- [ ] **`cargo test -p engine && cargo clippy --all-targets -- -D warnings`**
+- [ ] **Verify** per CLAUDE.md § "Canonical verification pattern" — `cargo fmt --all`, then if `tilt get uiresource clippy >/dev/null 2>&1`: `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data`; else: `cargo clippy --all-targets -- -D warnings` + `cargo test -p engine` + `./scripts/gen-card-data.sh`.
 
 ---
 

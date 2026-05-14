@@ -86,14 +86,21 @@ When a teammate finishes implementing, direct them through these steps **in orde
 4. When the teammate finishes fixes, **you spawn another review subagent** (model: opus)
 5. Repeat until the reviewer finds no gaps (max 3 rounds)
 
-**Step 2 — Run verification:**
+**Step 2 — Run verification (prefer Tilt; fall back to direct cargo when Tilt is down — see CLAUDE.md § 'Canonical verification pattern'):**
 > "Run these commands and fix any failures:
-> 1. `cargo fmt --all`
-> 2. `cargo clippy --all-targets -- -D warnings`
-> 3. `cargo test -p engine`
-> 4. If you added or changed parser output, accept new snapshots: `cargo insta accept`
-> 5. Regenerate card data: `./scripts/gen-card-data.sh`
-> 6. Run coverage: `cargo coverage`"
+> 1. `cargo fmt --all` (always direct)
+> 2. Verify clippy + tests:
+>    ```bash
+>    if tilt get uiresource clippy >/dev/null 2>&1; then
+>      ./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data
+>    else
+>      cargo clippy --all-targets -- -D warnings
+>      cargo test -p engine
+>      ./scripts/gen-card-data.sh
+>    fi
+>    ```
+> 3. If you added or changed parser output, accept new snapshots: `cargo insta accept`
+> 4. Run coverage (one-shot, always direct): `cargo coverage`"
 
 **Step 3 — Update tracking:**
 > "Edit `.planning/rules-audit/UNIMPLEMENTED-MECHANICS.md` — remove every item you've successfully implemented. Update the Summary Statistics table."
@@ -104,8 +111,16 @@ When a teammate finishes implementing, direct them through these steps **in orde
 ### Phase 5 — Cleanup
 
 After all groups are complete:
-1. Run `cargo test --all` to verify nothing is broken across crates
-2. Run `cargo coverage` to verify reduced Unimplemented count
+1. Verify the workspace:
+   ```bash
+   if tilt get uiresource clippy >/dev/null 2>&1; then
+     ./scripts/tilt-wait.sh --timeout 300 clippy test-engine card-data
+   else
+     cargo test --all
+     ./scripts/gen-card-data.sh
+   fi
+   ```
+2. Run `cargo coverage` (one-shot binary, always direct) to verify reduced Unimplemented count
 3. Report results to the user: which mechanics were implemented, coverage delta, any items that couldn't be completed
 4. Clean up the team
 

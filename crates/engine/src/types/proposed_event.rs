@@ -49,6 +49,30 @@ impl EtbTapState {
     }
 }
 
+/// CR 111.1 + CR 111.4 + CR 111.10: The body characteristics of a token —
+/// the fields that constitute its identity as a permanent, independent of
+/// the runtime context in which it's created.
+///
+/// Shared by `TokenSpec` (runtime/resolved token creation), `TokenPreset`
+/// (debug catalog entries), and `DebugAction::CreateToken` (debug-create
+/// payload). Single source of truth for the token body shape — no parallel
+/// field lists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenCharacteristics {
+    /// CR 111.4: The token's display name (same as its subtype(s) + "Token"
+    /// unless the creating effect specifies otherwise).
+    pub display_name: String,
+    /// CR 208.2: Fixed power, or `None` for non-creature tokens.
+    pub power: Option<i32>,
+    /// CR 208.2: Fixed toughness, or `None` for non-creature tokens.
+    pub toughness: Option<i32>,
+    pub core_types: Vec<CoreType>,
+    pub subtypes: Vec<String>,
+    pub supertypes: Vec<Supertype>,
+    pub colors: Vec<ManaColor>,
+    pub keywords: Vec<Keyword>,
+}
+
 /// CR 111.1 + CR 111.4 + CR 111.10: Fully-resolved token creation specification.
 ///
 /// `Effect::Token` carries authoring-time fields (`PtValue`, `QuantityExpr`,
@@ -59,22 +83,11 @@ impl EtbTapState {
 /// characteristics of the token that's about to be created.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenSpec {
-    /// CR 111.4: The token's display name (same as its subtype(s) + "Token"
-    /// unless the creating effect specifies otherwise).
-    pub display_name: String,
+    pub characteristics: TokenCharacteristics,
     /// Original Forge-style script name (or custom name) used by the token
     /// parser on the apply path to re-derive attributes. Preserved so the
     /// existing `parse_token_script` dispatch still fires after widening.
     pub script_name: String,
-    /// CR 208.2: Fixed power, or `None` for non-creature tokens.
-    pub power: Option<i32>,
-    /// CR 208.2: Fixed toughness, or `None` for non-creature tokens.
-    pub toughness: Option<i32>,
-    pub core_types: Vec<CoreType>,
-    pub subtypes: Vec<String>,
-    pub supertypes: Vec<Supertype>,
-    pub colors: Vec<ManaColor>,
-    pub keywords: Vec<Keyword>,
     /// CR 113.3d: Static abilities granted to the token (e.g., "This token
     /// can't block.").
     pub static_abilities: Vec<StaticDefinition>,
@@ -544,15 +557,17 @@ mod tests {
             ProposedEvent::CreateToken {
                 owner: PlayerId(0),
                 spec: Box::new(TokenSpec {
-                    display_name: "Soldier".to_string(),
+                    characteristics: TokenCharacteristics {
+                        display_name: "Soldier".to_string(),
+                        power: Some(1),
+                        toughness: Some(1),
+                        core_types: Vec::new(),
+                        subtypes: Vec::new(),
+                        supertypes: Vec::new(),
+                        colors: Vec::new(),
+                        keywords: Vec::new(),
+                    },
                     script_name: "w_1_1_soldier".to_string(),
-                    power: Some(1),
-                    toughness: Some(1),
-                    core_types: Vec::new(),
-                    subtypes: Vec::new(),
-                    supertypes: Vec::new(),
-                    colors: Vec::new(),
-                    keywords: Vec::new(),
                     static_abilities: Vec::new(),
                     enter_with_counters: Vec::new(),
                     tapped: false,

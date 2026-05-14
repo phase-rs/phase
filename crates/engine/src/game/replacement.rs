@@ -1090,8 +1090,9 @@ fn create_token_applier(
                 .map(|o| o.controller)
                 .unwrap_or(owner);
             for mut extra in specs {
-                let already_present = extra.subtypes.iter().any(|s| {
-                    spec.subtypes
+                let already_present = extra.characteristics.subtypes.iter().any(|s| {
+                    spec.characteristics
+                        .subtypes
                         .iter()
                         .any(|already| already.eq_ignore_ascii_case(s))
                 });
@@ -1218,22 +1219,29 @@ fn empty_mana_pool_matcher(event: &ProposedEvent, _source: ObjectId, state: &Gam
         .any(|u| matches!(u.disposition, UnitDisposition::Drop))
 }
 
-/// CR 703.4q + CR 614.1a: Stub applier for the `LoseMana` registry slot. The
-/// real disposition mutation happens in `apply_empty_mana_pool_replacement`
-/// (the carve-out branch at the top of `apply_single_replacement`), which
-/// early-returns before this applier is dispatched. If this function is ever
-/// reached the discriminator has regressed.
+/// CR 703.4q + CR 614.1a: Dead applier for the `LoseMana` registry slot.
+/// `apply_single_replacement` discriminates `ProposedEvent::EmptyManaPool`
+/// to `apply_empty_mana_pool_replacement` (the Path A carve-out) before
+/// registry dispatch, so this function is never invoked at runtime. The
+/// matcher + applier pair exist only to occupy the `LoseMana` slot in the
+/// `ReplacementEvent` enum — `build_replacement_registry`'s exhaustive
+/// match would otherwise fail to compile, and a `None` entry would mask
+/// the slot's "structurally registered, dispatched out-of-band" intent.
+///
+/// Reaching this code path is a discriminator regression: either the
+/// carve-out branch was removed, or a new ProposedEvent variant was added
+/// that routes through `LoseMana` instead of past it.
 fn empty_mana_pool_applier(
-    event: ProposedEvent,
+    _event: ProposedEvent,
     _rid: ReplacementId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    debug_assert!(
-        false,
-        "empty_mana_pool_applier reached: apply_single_replacement discriminator should have routed to apply_empty_mana_pool_replacement"
+    unreachable!(
+        "empty_mana_pool_applier reached: apply_single_replacement \
+         discriminator should have routed to apply_empty_mana_pool_replacement \
+         (Path A carve-out for ProposedEvent::EmptyManaPool)"
     );
-    ApplyResult::Modified(event)
 }
 
 /// CR 703.4q + CR 614.1a + CR 614.5 + CR 614.6: Path A carve-out applier for
@@ -2151,7 +2159,8 @@ fn evaluate_replacement_condition(
         // listed subtype. Non-CreateToken events never match this condition.
         ReplacementCondition::TokenSubtypeMatches { subtypes } => match event {
             ProposedEvent::CreateToken { spec, .. } => subtypes.iter().any(|wanted| {
-                spec.subtypes
+                spec.characteristics
+                    .subtypes
                     .iter()
                     .any(|got| got.eq_ignore_ascii_case(wanted))
             }),
@@ -4237,16 +4246,19 @@ mod tests {
         owner_controller: PlayerId,
         core_type: crate::types::card_type::CoreType,
     ) -> TokenSpec {
+        use crate::types::proposed_event::TokenCharacteristics;
         TokenSpec {
-            display_name: "Test Token".to_string(),
+            characteristics: TokenCharacteristics {
+                display_name: "Test Token".to_string(),
+                power: Some(1),
+                toughness: Some(1),
+                core_types: vec![core_type],
+                subtypes: vec!["Soldier".to_string()],
+                supertypes: Vec::new(),
+                colors: vec![crate::types::mana::ManaColor::White],
+                keywords: Vec::new(),
+            },
             script_name: "w_1_1_soldier".to_string(),
-            power: Some(1),
-            toughness: Some(1),
-            core_types: vec![core_type],
-            subtypes: vec!["Soldier".to_string()],
-            supertypes: Vec::new(),
-            colors: vec![crate::types::mana::ManaColor::White],
-            keywords: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
             tapped: false,
@@ -4745,11 +4757,11 @@ mod tests {
         let mut events = Vec::new();
         let mut spec = test_token_spec(PlayerId(1), crate::types::card_type::CoreType::Land);
         spec.tapped = true;
-        spec.power = None;
-        spec.toughness = None;
+        spec.characteristics.power = None;
+        spec.characteristics.toughness = None;
         spec.script_name = "c_a_clue".to_string();
-        spec.display_name = "Land Token".to_string();
-        spec.subtypes.clear();
+        spec.characteristics.display_name = "Land Token".to_string();
+        spec.characteristics.subtypes.clear();
 
         let proposed = ProposedEvent::CreateToken {
             owner: PlayerId(0),
@@ -6121,17 +6133,20 @@ mod tests {
     /// plus two Squirrel tokens, all under the primary owner's control.
     #[test]
     fn create_token_applier_emits_additional_token_spec_batch() {
+        use crate::types::proposed_event::TokenCharacteristics;
         let chatterfang = ObjectId(500);
         let squirrel_spec = TokenSpec {
-            display_name: "Squirrel".to_string(),
+            characteristics: TokenCharacteristics {
+                display_name: "Squirrel".to_string(),
+                power: Some(1),
+                toughness: Some(1),
+                core_types: vec![crate::types::card_type::CoreType::Creature],
+                subtypes: vec!["Squirrel".to_string()],
+                supertypes: Vec::new(),
+                colors: vec![crate::types::mana::ManaColor::Green],
+                keywords: Vec::new(),
+            },
             script_name: "Squirrel".to_string(),
-            power: Some(1),
-            toughness: Some(1),
-            core_types: vec![crate::types::card_type::CoreType::Creature],
-            subtypes: vec!["Squirrel".to_string()],
-            supertypes: Vec::new(),
-            colors: vec![crate::types::mana::ManaColor::Green],
-            keywords: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
             tapped: false,
@@ -6147,15 +6162,17 @@ mod tests {
         let mut events = Vec::new();
 
         let plant_spec = TokenSpec {
-            display_name: "Plant".to_string(),
+            characteristics: TokenCharacteristics {
+                display_name: "Plant".to_string(),
+                power: Some(0),
+                toughness: Some(2),
+                core_types: vec![crate::types::card_type::CoreType::Creature],
+                subtypes: vec!["Plant".to_string()],
+                supertypes: Vec::new(),
+                colors: vec![crate::types::mana::ManaColor::Green],
+                keywords: Vec::new(),
+            },
             script_name: "Plant".to_string(),
-            power: Some(0),
-            toughness: Some(2),
-            core_types: vec![crate::types::card_type::CoreType::Creature],
-            subtypes: vec!["Plant".to_string()],
-            supertypes: Vec::new(),
-            colors: vec![crate::types::mana::ManaColor::Green],
-            keywords: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
             tapped: false,
@@ -6213,16 +6230,19 @@ mod tests {
     #[test]
     fn create_token_applier_ensure_specs_emits_only_missing_subtypes_cr_614_1a() {
         fn artifact_spec(name: &str) -> TokenSpec {
+            use crate::types::proposed_event::TokenCharacteristics;
             TokenSpec {
-                display_name: name.to_string(),
+                characteristics: TokenCharacteristics {
+                    display_name: name.to_string(),
+                    power: None,
+                    toughness: None,
+                    core_types: vec![crate::types::card_type::CoreType::Artifact],
+                    subtypes: vec![name.to_string()],
+                    supertypes: Vec::new(),
+                    colors: Vec::new(),
+                    keywords: Vec::new(),
+                },
                 script_name: name.to_string(),
-                power: None,
-                toughness: None,
-                core_types: vec![crate::types::card_type::CoreType::Artifact],
-                subtypes: vec![name.to_string()],
-                supertypes: Vec::new(),
-                colors: Vec::new(),
-                keywords: Vec::new(),
                 static_abilities: Vec::new(),
                 enter_with_counters: Vec::new(),
                 tapped: false,

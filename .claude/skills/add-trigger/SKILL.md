@@ -221,7 +221,7 @@ The trigger pipeline responds to `GameEvent` variants. If no existing event cove
 - [ ] Integration test: full game flow → event fires → trigger on stack → resolves
 - [ ] APNAP test: multiple player triggers → correct stack order
 - [ ] Constraint test: "once per turn" fires once, not twice
-- [ ] `cargo test -p engine && cargo clippy --all-targets -- -D warnings`
+- [ ] Verify per CLAUDE.md § "Canonical verification pattern" — `cargo fmt --all`, then if `tilt get uiresource clippy >/dev/null 2>&1`: `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data`; else: `cargo clippy --all-targets -- -D warnings` + `cargo test -p engine` + `./scripts/gen-card-data.sh`.
 
 ---
 

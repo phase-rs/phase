@@ -348,6 +348,24 @@ export type CounterType =
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type Keyword = string | Record<string, any>;
 
+// ── Token body characteristics ──────────────────────────────────────────
+// Shared by TokenSpec (runtime), TokenPreset (catalog), and
+// DebugAction::CreateToken (debug payload). Single source of truth on
+// the Rust side; this mirrors `engine::types::proposed_event::TokenCharacteristics`.
+
+export type Supertype = "Legendary" | "Basic" | "Snow" | "World" | "Ongoing";
+
+export interface TokenCharacteristics {
+  display_name: string;
+  power: number | null;
+  toughness: number | null;
+  core_types: CoreType[];
+  subtypes: string[];
+  supertypes: Supertype[];
+  colors: ManaColor[];
+  keywords: Keyword[];
+}
+
 // ── CR 701.57a + CR 702.85a: Cast/decline choice for Discover and Cascade ──
 
 export type CastChoice = { type: "Cast" } | { type: "Decline" };
@@ -954,7 +972,7 @@ export type DebugAction =
   | { type: "AddMana"; data: { player_id: PlayerId; mana: ManaType[] } }
   | { type: "SetPhase"; data: { phase: Phase; active_player: PlayerId } }
   | { type: "RunStateBasedActions" }
-  | { type: "CreateToken"; data: { owner: PlayerId; name: string; power?: number; toughness?: number; core_types: CoreType[]; subtypes: string[]; colors: ManaColor[]; keywords: Keyword[] } };
+  | { type: "CreateToken"; data: { owner: PlayerId; characteristics: TokenCharacteristics } };
 
 export type GameAction =
   | { type: "PassPriority" }
