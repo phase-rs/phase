@@ -1117,21 +1117,23 @@ mod tests {
         use crate::types::card_type::CoreType;
         use crate::types::keywords::Keyword;
         use crate::types::mana::ManaColor;
-        use crate::types::proposed_event::TokenSpec;
+        use crate::types::proposed_event::{TokenCharacteristics, TokenSpec};
 
         let mut state = GameState::new_two_player(42);
         install_optional_replacement(&mut state, ReplacementEvent::CreateToken);
 
         let spec = TokenSpec {
-            display_name: "Soldier".to_string(),
+            characteristics: TokenCharacteristics {
+                display_name: "Soldier".to_string(),
+                power: Some(2),
+                toughness: Some(2),
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Soldier".to_string()],
+                supertypes: Vec::new(),
+                colors: vec![ManaColor::White],
+                keywords: vec![Keyword::Flying],
+            },
             script_name: "w_2_2_soldier_flying".to_string(),
-            power: Some(2),
-            toughness: Some(2),
-            core_types: vec![CoreType::Creature],
-            subtypes: vec!["Soldier".to_string()],
-            supertypes: Vec::new(),
-            colors: vec![ManaColor::White],
-            keywords: vec![Keyword::Flying],
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
             tapped: false,

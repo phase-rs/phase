@@ -1,12 +1,11 @@
 use serde::{Deserialize, Serialize};
 
 use super::ability::TargetRef;
-use super::card_type::CoreType;
 use super::counter::CounterType;
 use super::game_state::{AutoMayChoice, AutoPassRequest, CombatDamageAssignmentMode, ShardChoice};
 use super::identifiers::{CardId, ObjectId};
 use super::keywords::Keyword;
-use super::mana::{ManaColor, ManaType};
+use super::mana::ManaType;
 use super::match_config::DeckCardCount;
 use super::phase::Phase;
 use super::player::PlayerId;
@@ -608,15 +607,12 @@ pub enum DebugAction {
     /// Explicitly run state-based actions. Use after a batch of raw mutations.
     RunStateBasedActions,
     /// Create a token with explicit characteristics on the battlefield.
+    /// `characteristics` is the same body shape used by `TokenSpec` and
+    /// `TokenPreset`; the WASM handler fills in runtime fields (script_name,
+    /// source_id, controller, tapped, etc.) at create-time.
     CreateToken {
         owner: PlayerId,
-        name: String,
-        power: Option<i32>,
-        toughness: Option<i32>,
-        core_types: Vec<CoreType>,
-        subtypes: Vec<String>,
-        colors: Vec<ManaColor>,
-        keywords: Vec<Keyword>,
+        characteristics: super::proposed_event::TokenCharacteristics,
     },
 }
 
@@ -743,8 +739,15 @@ impl DebugAction {
                 player_label(*active_player)
             ),
             DebugAction::RunStateBasedActions => "RunStateBasedActions".to_string(),
-            DebugAction::CreateToken { owner, name, .. } => {
-                format!("CreateToken ({} for {})", name, player_label(*owner))
+            DebugAction::CreateToken {
+                owner,
+                characteristics,
+            } => {
+                format!(
+                    "CreateToken ({} for {})",
+                    characteristics.display_name,
+                    player_label(*owner)
+                )
             }
         }
     }

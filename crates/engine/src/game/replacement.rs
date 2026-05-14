@@ -1090,8 +1090,9 @@ fn create_token_applier(
                 .map(|o| o.controller)
                 .unwrap_or(owner);
             for mut extra in specs {
-                let already_present = extra.subtypes.iter().any(|s| {
-                    spec.subtypes
+                let already_present = extra.characteristics.subtypes.iter().any(|s| {
+                    spec.characteristics
+                        .subtypes
                         .iter()
                         .any(|already| already.eq_ignore_ascii_case(s))
                 });
@@ -2158,7 +2159,8 @@ fn evaluate_replacement_condition(
         // listed subtype. Non-CreateToken events never match this condition.
         ReplacementCondition::TokenSubtypeMatches { subtypes } => match event {
             ProposedEvent::CreateToken { spec, .. } => subtypes.iter().any(|wanted| {
-                spec.subtypes
+                spec.characteristics
+                    .subtypes
                     .iter()
                     .any(|got| got.eq_ignore_ascii_case(wanted))
             }),
@@ -4244,16 +4246,19 @@ mod tests {
         owner_controller: PlayerId,
         core_type: crate::types::card_type::CoreType,
     ) -> TokenSpec {
+        use crate::types::proposed_event::TokenCharacteristics;
         TokenSpec {
-            display_name: "Test Token".to_string(),
+            characteristics: TokenCharacteristics {
+                display_name: "Test Token".to_string(),
+                power: Some(1),
+                toughness: Some(1),
+                core_types: vec![core_type],
+                subtypes: vec!["Soldier".to_string()],
+                supertypes: Vec::new(),
+                colors: vec![crate::types::mana::ManaColor::White],
+                keywords: Vec::new(),
+            },
             script_name: "w_1_1_soldier".to_string(),
-            power: Some(1),
-            toughness: Some(1),
-            core_types: vec![core_type],
-            subtypes: vec!["Soldier".to_string()],
-            supertypes: Vec::new(),
-            colors: vec![crate::types::mana::ManaColor::White],
-            keywords: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
             tapped: false,
@@ -4752,11 +4757,11 @@ mod tests {
         let mut events = Vec::new();
         let mut spec = test_token_spec(PlayerId(1), crate::types::card_type::CoreType::Land);
         spec.tapped = true;
-        spec.power = None;
-        spec.toughness = None;
+        spec.characteristics.power = None;
+        spec.characteristics.toughness = None;
         spec.script_name = "c_a_clue".to_string();
-        spec.display_name = "Land Token".to_string();
-        spec.subtypes.clear();
+        spec.characteristics.display_name = "Land Token".to_string();
+        spec.characteristics.subtypes.clear();
 
         let proposed = ProposedEvent::CreateToken {
             owner: PlayerId(0),
@@ -6128,17 +6133,20 @@ mod tests {
     /// plus two Squirrel tokens, all under the primary owner's control.
     #[test]
     fn create_token_applier_emits_additional_token_spec_batch() {
+        use crate::types::proposed_event::TokenCharacteristics;
         let chatterfang = ObjectId(500);
         let squirrel_spec = TokenSpec {
-            display_name: "Squirrel".to_string(),
+            characteristics: TokenCharacteristics {
+                display_name: "Squirrel".to_string(),
+                power: Some(1),
+                toughness: Some(1),
+                core_types: vec![crate::types::card_type::CoreType::Creature],
+                subtypes: vec!["Squirrel".to_string()],
+                supertypes: Vec::new(),
+                colors: vec![crate::types::mana::ManaColor::Green],
+                keywords: Vec::new(),
+            },
             script_name: "Squirrel".to_string(),
-            power: Some(1),
-            toughness: Some(1),
-            core_types: vec![crate::types::card_type::CoreType::Creature],
-            subtypes: vec!["Squirrel".to_string()],
-            supertypes: Vec::new(),
-            colors: vec![crate::types::mana::ManaColor::Green],
-            keywords: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
             tapped: false,
@@ -6154,15 +6162,17 @@ mod tests {
         let mut events = Vec::new();
 
         let plant_spec = TokenSpec {
-            display_name: "Plant".to_string(),
+            characteristics: TokenCharacteristics {
+                display_name: "Plant".to_string(),
+                power: Some(0),
+                toughness: Some(2),
+                core_types: vec![crate::types::card_type::CoreType::Creature],
+                subtypes: vec!["Plant".to_string()],
+                supertypes: Vec::new(),
+                colors: vec![crate::types::mana::ManaColor::Green],
+                keywords: Vec::new(),
+            },
             script_name: "Plant".to_string(),
-            power: Some(0),
-            toughness: Some(2),
-            core_types: vec![crate::types::card_type::CoreType::Creature],
-            subtypes: vec!["Plant".to_string()],
-            supertypes: Vec::new(),
-            colors: vec![crate::types::mana::ManaColor::Green],
-            keywords: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
             tapped: false,
@@ -6220,16 +6230,19 @@ mod tests {
     #[test]
     fn create_token_applier_ensure_specs_emits_only_missing_subtypes_cr_614_1a() {
         fn artifact_spec(name: &str) -> TokenSpec {
+            use crate::types::proposed_event::TokenCharacteristics;
             TokenSpec {
-                display_name: name.to_string(),
+                characteristics: TokenCharacteristics {
+                    display_name: name.to_string(),
+                    power: None,
+                    toughness: None,
+                    core_types: vec![crate::types::card_type::CoreType::Artifact],
+                    subtypes: vec![name.to_string()],
+                    supertypes: Vec::new(),
+                    colors: Vec::new(),
+                    keywords: Vec::new(),
+                },
                 script_name: name.to_string(),
-                power: None,
-                toughness: None,
-                core_types: vec![crate::types::card_type::CoreType::Artifact],
-                subtypes: vec![name.to_string()],
-                supertypes: Vec::new(),
-                colors: Vec::new(),
-                keywords: Vec::new(),
                 static_abilities: Vec::new(),
                 enter_with_counters: Vec::new(),
                 tapped: false,

@@ -1,0 +1,10170 @@
+[[token]]
+id = "alien-0-0-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Alien"
+power = 0
+toughness = 0
+core_types = ["Creature"]
+subtypes = ["Alien"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "alien-2-2-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Alien"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Alien"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "alien-angel-2-2-b"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Alien Angel"
+power = 2
+toughness = 2
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = [
+    "Alien",
+    "Angel",
+]
+supertypes = []
+colors = ["Black"]
+keywords = [
+    "FirstStrike",
+    "Vigilance",
+]
+
+[[token]]
+id = "alien-insect-1-1-wg"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Alien Insect"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Alien",
+    "Insect",
+]
+supertypes = []
+colors = [
+    "White",
+    "Green",
+]
+keywords = ["Flying"]
+
+[[token]]
+id = "alien-rhino-4-4-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Alien Rhino"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = [
+    "Alien",
+    "Rhino",
+]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "alien-salamander-2-2-g"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Alien Salamander"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = [
+    "Alien",
+    "Salamander",
+]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "alien-warrior-2-2-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Alien Warrior"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = [
+    "Alien",
+    "Warrior",
+]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "ally-1-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Ally"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Ally"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "angel-3-3-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Angel"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Angel"]
+supertypes = []
+colors = ["Black"]
+keywords = ["Flying"]
+
+[[token]]
+id = "angel-3-3-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Angel"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Angel"]
+supertypes = []
+colors = ["White"]
+keywords = ["Flying"]
+
+[[token]]
+id = "angel-4-4-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Angel"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Angel"]
+supertypes = []
+colors = ["White"]
+keywords = [
+    "Flying",
+    "Vigilance",
+]
+
+[[token]]
+id = "angel-4-4-w-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Angel"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Angel"]
+supertypes = []
+colors = ["White"]
+keywords = ["Flying"]
+
+[[token]]
+id = "angel-warrior-4-4-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Angel Warrior"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = [
+    "Angel",
+    "Warrior",
+]
+supertypes = []
+colors = ["White"]
+keywords = [
+    "Flying",
+    "Vigilance",
+]
+
+[[token]]
+id = "angel-warrior-4-4-w-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Angel Warrior"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = [
+    "Angel",
+    "Warrior",
+]
+supertypes = []
+colors = ["White"]
+keywords = ["Flying"]
+
+[[token]]
+id = "antelope-2-3-g"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Antelope"
+power = 2
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Antelope"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "ape-3-3-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Ape"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Ape"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "assassin-1-1-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Assassin"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Assassin"]
+supertypes = []
+colors = ["Black"]
+keywords = [
+    "Deathtouch",
+    "Haste",
+]
+
+[[token]]
+id = "assassin-1-1-b-2"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Assassin"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Assassin"]
+supertypes = []
+colors = ["Black"]
+keywords = ["Deathtouch"]
+
+[[token]]
+id = "assassin-1-1-b-3"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Assassin"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Assassin"]
+supertypes = []
+colors = ["Black"]
+keywords = ["Menace"]
+
+[[token]]
+id = "assassin-1-1-b-4"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Assassin"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Assassin"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "assemblyworker-2-2-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "AssemblyWorker"
+power = 2
+toughness = 2
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["AssemblyWorker"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "astartes-warrior-2-2-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Astartes Warrior"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = [
+    "Astartes",
+    "Warrior",
+]
+supertypes = []
+colors = ["Black"]
+keywords = ["Menace"]
+
+[[token]]
+id = "astartes-warrior-2-2-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Astartes Warrior"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = [
+    "Astartes",
+    "Warrior",
+]
+supertypes = []
+colors = ["White"]
+keywords = ["Vigilance"]
+
+[[token]]
+id = "avatar-0-0-w"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Avatar"
+power = 0
+toughness = 0
+core_types = ["Creature"]
+subtypes = ["Avatar"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "avatar-3-6-br"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Avatar"
+power = 3
+toughness = 6
+core_types = ["Creature"]
+subtypes = ["Avatar"]
+supertypes = []
+colors = [
+    "Black",
+    "Red",
+]
+keywords = ["Haste"]
+
+[[token]]
+id = "avatar-4-4-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Avatar"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Avatar"]
+supertypes = []
+colors = ["White"]
+keywords = ["Flying"]
+
+[[token]]
+id = "badger-3-3-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Badger"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Badger"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "balloon-1-1-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Balloon"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Balloon"]
+supertypes = []
+colors = ["Red"]
+keywords = ["Flying"]
+
+[[token]]
+id = "bat-1-1-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Bat"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Bat"]
+supertypes = []
+colors = ["Black"]
+keywords = ["Flying"]
+
+[[token]]
+id = "bat-1-2-b"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Bat"
+power = 1
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Bat"]
+supertypes = []
+colors = ["Black"]
+keywords = ["Flying"]
+
+[[token]]
+id = "bat-2-1-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Bat"
+power = 2
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Bat"]
+supertypes = []
+colors = ["Black"]
+keywords = ["Flying"]
+
+[[token]]
+id = "bear-2-2-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Bear"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Bear"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "bear-4-4-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Bear"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Bear"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "beast-2-2-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Beast"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Beast"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "beast-3-3-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Beast"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Beast"]
+supertypes = []
+colors = ["Black"]
+keywords = ["Deathtouch"]
+
+[[token]]
+id = "beast-3-3-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Beast"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Beast"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "beast-4-2-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Beast"
+power = 4
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Beast"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "beast-4-4-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Beast"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Beast"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "beast-4-4-rg"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Beast"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Beast"]
+supertypes = []
+colors = [
+    "Red",
+    "Green",
+]
+keywords = ["Trample"]
+
+[[token]]
+id = "beast-4-4-w"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Beast"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Beast"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "beast-5-5-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Beast"
+power = 5
+toughness = 5
+core_types = ["Creature"]
+subtypes = ["Beast"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "beast-5-5-g-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Beast"
+power = 5
+toughness = 5
+core_types = ["Creature"]
+subtypes = ["Beast"]
+supertypes = []
+colors = ["Green"]
+keywords = ["Trample"]
+
+[[token]]
+id = "beast-6-6-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Beast"
+power = 6
+toughness = 6
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Beast"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "beast-8-8-wrg"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Beast"
+power = 8
+toughness = 8
+core_types = ["Creature"]
+subtypes = ["Beast"]
+supertypes = []
+colors = [
+    "White",
+    "Red",
+    "Green",
+]
+keywords = []
+
+[[token]]
+id = "bird-1-1-b"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Bird"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Bird"]
+supertypes = []
+colors = ["Black"]
+keywords = ["Flying"]
+
+[[token]]
+id = "bird-1-1-u"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Bird"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Bird"]
+supertypes = []
+colors = ["Blue"]
+keywords = ["Flying"]
+
+[[token]]
+id = "bird-1-1-u-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Bird"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Bird"]
+supertypes = []
+colors = ["Blue"]
+keywords = [
+    "Flying",
+    "Vigilance",
+]
+
+[[token]]
+id = "bird-1-1-u-3"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Bird"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Bird"]
+supertypes = []
+colors = ["Blue"]
+keywords = ["Flying"]
+
+[[token]]
+id = "bird-1-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Bird"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Bird"]
+supertypes = []
+colors = ["White"]
+keywords = ["Flying"]
+
+[[token]]
+id = "bird-1-1-wu"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Bird"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Bird"]
+supertypes = []
+colors = [
+    "White",
+    "Blue",
+]
+keywords = ["Flying"]
+
+[[token]]
+id = "bird-2-2-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Bird"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Bird"]
+supertypes = []
+colors = ["Black"]
+keywords = ["Flying"]
+
+[[token]]
+id = "bird-2-2-g"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Bird"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Bird"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "bird-2-2-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Bird"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Bird"]
+supertypes = []
+colors = ["Blue"]
+keywords = ["Flying"]
+
+[[token]]
+id = "bird-2-2-u-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Bird"
+power = 2
+toughness = 2
+core_types = [
+    "Enchantment",
+    "Creature",
+]
+subtypes = ["Bird"]
+supertypes = []
+colors = ["Blue"]
+keywords = ["Flying"]
+
+[[token]]
+id = "bird-3-3-w"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Bird"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Bird"]
+supertypes = []
+colors = ["White"]
+keywords = ["Flying"]
+
+[[token]]
+id = "bird-3-3-w-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Bird"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Bird"]
+supertypes = []
+colors = ["White"]
+keywords = ["Flying"]
+
+[[token]]
+id = "bird-3-4-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Bird"
+power = 3
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Bird"]
+supertypes = []
+colors = ["White"]
+keywords = ["Flying"]
+
+[[token]]
+id = "bird-4-4-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Bird"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Bird"]
+supertypes = []
+colors = ["Red"]
+keywords = ["Flying"]
+
+[[token]]
+id = "bird-illusion-1-1-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Bird Illusion"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Bird",
+    "Illusion",
+]
+supertypes = []
+colors = ["Blue"]
+keywords = ["Flying"]
+
+[[token]]
+id = "bird-soldier-1-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Bird Soldier"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Bird",
+    "Soldier",
+]
+supertypes = []
+colors = ["White"]
+keywords = ["Flying"]
+
+[[token]]
+id = "boar-1-1-g"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Boar"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Boar"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "boar-2-2-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Boar"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Boar"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "boar-3-1-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Boar"
+power = 3
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Boar"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "boar-3-3-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Boar"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Boar"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "camarid-1-1-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Camarid"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Camarid"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "caribou-0-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Caribou"
+power = 0
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Caribou"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "cat-1-1-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Cat"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Cat"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "cat-1-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Cat"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Cat"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "cat-1-1-w-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Cat"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Cat"]
+supertypes = []
+colors = ["White"]
+keywords = ["Lifelink"]
+
+[[token]]
+id = "cat-2-1-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Cat"
+power = 2
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Cat"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "cat-2-2-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Cat"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Cat"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "cat-2-2-g-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Cat"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Cat"]
+supertypes = []
+colors = ["Green"]
+keywords = ["Haste"]
+
+[[token]]
+id = "cat-2-2-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Cat"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Cat"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "cat-3-2-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Cat"
+power = 3
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Cat"]
+supertypes = []
+colors = ["Green"]
+keywords = ["Shroud"]
+
+[[token]]
+id = "cat-beast-2-2-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Cat Beast"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = [
+    "Cat",
+    "Beast",
+]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "cat-bird-1-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Cat Bird"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Cat",
+    "Bird",
+]
+supertypes = []
+colors = ["White"]
+keywords = ["Flying"]
+
+[[token]]
+id = "cat-dragon-3-3-brg"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Cat Dragon"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = [
+    "Cat",
+    "Dragon",
+]
+supertypes = []
+colors = [
+    "Black",
+    "Red",
+    "Green",
+]
+keywords = ["Flying"]
+
+[[token]]
+id = "cat-soldier-1-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Cat Soldier"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Cat",
+    "Soldier",
+]
+supertypes = []
+colors = ["White"]
+keywords = ["Vigilance"]
+
+[[token]]
+id = "cat-warrior-2-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Cat Warrior"
+power = 2
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Cat",
+    "Warrior",
+]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "cat-warrior-2-2-g"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Cat Warrior"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = [
+    "Cat",
+    "Warrior",
+]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "centaur-3-3-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Centaur"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Centaur"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "centaur-3-3-g-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Centaur"
+power = 3
+toughness = 3
+core_types = [
+    "Enchantment",
+    "Creature",
+]
+subtypes = ["Centaur"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "centaur-3-3-g-3"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Centaur"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Centaur"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "citizen-1-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Citizen"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Citizen"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "citizen-1-1-wg"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Citizen"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Citizen"]
+supertypes = []
+colors = [
+    "White",
+    "Green",
+]
+keywords = []
+
+[[token]]
+id = "citizen-2-2-wubrg"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Citizen"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Citizen"]
+supertypes = []
+colors = [
+    "White",
+    "Blue",
+    "Black",
+    "Red",
+    "Green",
+]
+keywords = []
+
+[[token]]
+id = "cleric-0-1-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Cleric"
+power = 0
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Cleric"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "cleric-1-1-wb"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Cleric"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Cleric"]
+supertypes = []
+colors = [
+    "White",
+    "Black",
+]
+keywords = []
+
+[[token]]
+id = "cleric-2-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Cleric"
+power = 2
+toughness = 1
+core_types = [
+    "Enchantment",
+    "Creature",
+]
+subtypes = ["Cleric"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "clown-robot-1-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Clown Robot"
+power = 1
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = [
+    "Clown",
+    "Robot",
+]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "construct-0-0-c"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Construct"
+power = 0
+toughness = 0
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Construct"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "construct-1-1-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Construct"
+power = 1
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Construct"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "construct-1-1-c-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Construct"
+power = 1
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Construct"]
+supertypes = []
+colors = []
+keywords = ["Defender"]
+
+[[token]]
+id = "construct-2-2-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Construct"
+power = 2
+toughness = 2
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Construct"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "construct-3-1-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Construct"
+power = 3
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Construct"]
+supertypes = []
+colors = ["Red"]
+keywords = ["Haste"]
+
+[[token]]
+id = "construct-4-4-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Construct"
+power = 4
+toughness = 4
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Construct"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "construct-6-12-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Construct"
+power = 6
+toughness = 12
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Construct"]
+supertypes = []
+colors = []
+keywords = ["Trample"]
+
+[[token]]
+id = "crab-0-3-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Crab"
+power = 0
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Crab"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "dalek-3-3-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Dalek"
+power = 3
+toughness = 3
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Dalek"]
+supertypes = []
+colors = ["Black"]
+keywords = ["Menace"]
+
+[[token]]
+id = "demon-3-3-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Demon"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Demon"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "demon-5-5-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Demon"
+power = 5
+toughness = 5
+core_types = ["Creature"]
+subtypes = ["Demon"]
+supertypes = []
+colors = ["Black"]
+keywords = ["Flying"]
+
+[[token]]
+id = "demon-6-6-b"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Demon"
+power = 6
+toughness = 6
+core_types = ["Creature"]
+subtypes = ["Demon"]
+supertypes = []
+colors = ["Black"]
+keywords = [
+    "Flying",
+    "Trample",
+]
+
+[[token]]
+id = "demon-6-6-b-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Demon"
+power = 6
+toughness = 6
+core_types = ["Creature"]
+subtypes = ["Demon"]
+supertypes = []
+colors = ["Black"]
+keywords = ["Flying"]
+
+[[token]]
+id = "demon-berserker-2-3-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Demon Berserker"
+power = 2
+toughness = 3
+core_types = ["Creature"]
+subtypes = [
+    "Demon",
+    "Berserker",
+]
+supertypes = []
+colors = ["Red"]
+keywords = ["Menace"]
+
+[[token]]
+id = "deserter-0-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Deserter"
+power = 0
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Deserter"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "detective-2-2-wu"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Detective"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Detective"]
+supertypes = []
+colors = [
+    "White",
+    "Blue",
+]
+keywords = []
+
+[[token]]
+id = "devil-1-1-r"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Devil"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Devil"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "dinosaur-1-1-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Dinosaur"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Dinosaur"]
+supertypes = []
+colors = ["Red"]
+keywords = ["Haste"]
+
+[[token]]
+id = "dinosaur-2-2-wr"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Dinosaur"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Dinosaur"]
+supertypes = []
+colors = [
+    "White",
+    "Red",
+]
+keywords = [
+    "Flying",
+    "Haste",
+]
+
+[[token]]
+id = "dinosaur-3-1-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Dinosaur"
+power = 3
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Dinosaur"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "dinosaur-3-3-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Dinosaur"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Dinosaur"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "dinosaur-3-3-g-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Dinosaur"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Dinosaur"]
+supertypes = []
+colors = ["Green"]
+keywords = ["Trample"]
+
+[[token]]
+id = "dinosaur-cat-2-2-wr"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Dinosaur Cat"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = [
+    "Dinosaur",
+    "Cat",
+]
+supertypes = []
+colors = [
+    "White",
+    "Red",
+]
+keywords = []
+
+[[token]]
+id = "dinosaur-dragon-4-4-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Dinosaur Dragon"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = [
+    "Dinosaur",
+    "Dragon",
+]
+supertypes = []
+colors = ["Red"]
+keywords = ["Flying"]
+
+[[token]]
+id = "dinosaur-egg-0-1-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Dinosaur Egg"
+power = 0
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Dinosaur",
+    "Egg",
+]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "dinosaur-soldier-2-2-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Dinosaur Soldier"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = [
+    "Dinosaur",
+    "Soldier",
+]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "djinn-5-5-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Djinn"
+power = 5
+toughness = 5
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Djinn"]
+supertypes = []
+colors = []
+keywords = ["Flying"]
+
+[[token]]
+id = "djinn-monk-2-2-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Djinn Monk"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = [
+    "Djinn",
+    "Monk",
+]
+supertypes = []
+colors = ["Blue"]
+keywords = ["Flying"]
+
+[[token]]
+id = "dog-1-1-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Dog"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Dog"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "dog-1-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Dog"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Dog"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "dog-3-1-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Dog"
+power = 3
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Dog"]
+supertypes = []
+colors = ["Green"]
+keywords = ["Vigilance"]
+
+[[token]]
+id = "dog-illusion-0-0-u"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Dog Illusion"
+power = 0
+toughness = 0
+core_types = ["Creature"]
+subtypes = [
+    "Dog",
+    "Illusion",
+]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "dragon-1-1-rg"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Dragon"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Dragon"]
+supertypes = []
+colors = [
+    "Red",
+    "Green",
+]
+keywords = ["Flying"]
+
+[[token]]
+id = "dragon-2-2-r"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Dragon"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Dragon"]
+supertypes = []
+colors = ["Red"]
+keywords = ["Flying"]
+
+[[token]]
+id = "dragon-4-4-r"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Dragon"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Dragon"]
+supertypes = []
+colors = ["Red"]
+keywords = ["Flying"]
+
+[[token]]
+id = "dragon-4-4-r-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Dragon"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Dragon"]
+supertypes = []
+colors = ["Red"]
+keywords = ["Flying"]
+
+[[token]]
+id = "dragon-5-5-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Dragon"
+power = 5
+toughness = 5
+core_types = ["Creature"]
+subtypes = ["Dragon"]
+supertypes = []
+colors = ["Red"]
+keywords = ["Flying"]
+
+[[token]]
+id = "dragon-6-6-br"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Dragon"
+power = 6
+toughness = 6
+core_types = ["Creature"]
+subtypes = ["Dragon"]
+supertypes = []
+colors = [
+    "Black",
+    "Red",
+]
+keywords = [
+    "Flying",
+    "Menace",
+]
+
+[[token]]
+id = "dragon-6-6-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Dragon"
+power = 6
+toughness = 6
+core_types = ["Creature"]
+subtypes = ["Dragon"]
+supertypes = []
+colors = ["Red"]
+keywords = ["Flying"]
+
+[[token]]
+id = "dragon-egg-0-2-r"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Dragon Egg"
+power = 0
+toughness = 2
+core_types = ["Creature"]
+subtypes = [
+    "Dragon",
+    "Egg",
+]
+supertypes = []
+colors = ["Red"]
+keywords = ["Defender"]
+
+[[token]]
+id = "dragon-elemental-4-4-r"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Dragon Elemental"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = [
+    "Dragon",
+    "Elemental",
+]
+supertypes = []
+colors = ["Red"]
+keywords = ["Flying"]
+
+[[token]]
+id = "dragon-spirit-5-4-rg"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Dragon Spirit"
+power = 5
+toughness = 4
+core_types = ["Creature"]
+subtypes = [
+    "Dragon",
+    "Spirit",
+]
+supertypes = []
+colors = [
+    "Red",
+    "Green",
+]
+keywords = []
+
+[[token]]
+id = "dragon-spirit-5-5-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Dragon Spirit"
+power = 5
+toughness = 5
+core_types = ["Creature"]
+subtypes = [
+    "Dragon",
+    "Spirit",
+]
+supertypes = []
+colors = ["Red"]
+keywords = ["Flying"]
+
+[[token]]
+id = "dragon-spirit-5-5-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Dragon Spirit"
+power = 5
+toughness = 5
+core_types = ["Creature"]
+subtypes = [
+    "Dragon",
+    "Spirit",
+]
+supertypes = []
+colors = ["Blue"]
+keywords = ["Flying"]
+
+[[token]]
+id = "drake-2-2-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Drake"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Drake"]
+supertypes = []
+colors = ["Blue"]
+keywords = ["Flying"]
+
+[[token]]
+id = "drake-2-2-ug"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Drake"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Drake"]
+supertypes = []
+colors = [
+    "Blue",
+    "Green",
+]
+keywords = ["Flying"]
+
+[[token]]
+id = "drone-1-1-c"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Drone"
+power = 1
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Drone"]
+supertypes = []
+colors = []
+keywords = ["Flying"]
+
+[[token]]
+id = "drone-2-2-c"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Drone"
+power = 2
+toughness = 2
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Drone"]
+supertypes = []
+colors = []
+keywords = ["Deathtouch"]
+
+[[token]]
+id = "dwarf-1-1-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Dwarf"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Dwarf"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "dwarf-2-2-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Dwarf"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Dwarf"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "dwarf-berserker-2-1-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Dwarf Berserker"
+power = 2
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Dwarf",
+    "Berserker",
+]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "egg-0-1-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Egg"
+power = 0
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Egg"]
+supertypes = []
+colors = ["Green"]
+keywords = ["Defender"]
+
+[[token]]
+id = "eldrazi-10-10-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Eldrazi"
+power = 10
+toughness = 10
+core_types = ["Creature"]
+subtypes = ["Eldrazi"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "eldrazi-7-7-c"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Eldrazi"
+power = 7
+toughness = 7
+core_types = ["Creature"]
+subtypes = ["Eldrazi"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "eldrazi-angel-4-4-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Eldrazi Angel"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = [
+    "Eldrazi",
+    "Angel",
+]
+supertypes = []
+colors = []
+keywords = [
+    "Flying",
+    "Vigilance",
+]
+
+[[token]]
+id = "eldrazi-horror-3-2-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Eldrazi Horror"
+power = 3
+toughness = 2
+core_types = ["Creature"]
+subtypes = [
+    "Eldrazi",
+    "Horror",
+]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "eldrazi-scion-1-1-c"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Eldrazi Scion"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Eldrazi",
+    "Scion",
+]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "eldrazi-spawn-0-1-c"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Eldrazi Spawn"
+power = 0
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Eldrazi",
+    "Spawn",
+]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "elemental-0-0-r"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Elemental"
+power = 0
+toughness = 0
+core_types = ["Creature"]
+subtypes = ["Elemental"]
+supertypes = []
+colors = ["Red"]
+keywords = ["Trample"]
+
+[[token]]
+id = "elemental-0-0-wg"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Elemental"
+power = 0
+toughness = 0
+core_types = ["Creature"]
+subtypes = ["Elemental"]
+supertypes = []
+colors = [
+    "White",
+    "Green",
+]
+keywords = []
+
+[[token]]
+id = "elemental-0-1-r"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Elemental"
+power = 0
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Elemental"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "elemental-1-0-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elemental"
+power = 1
+toughness = 0
+core_types = ["Creature"]
+subtypes = ["Elemental"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "elemental-1-1-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elemental"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Elemental"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "elemental-1-1-r-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elemental"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Elemental"]
+supertypes = []
+colors = ["Red"]
+keywords = ["Haste"]
+
+[[token]]
+id = "elemental-1-1-r-3"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Elemental"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Elemental"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "elemental-1-1-ur"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elemental"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Elemental"]
+supertypes = []
+colors = [
+    "Blue",
+    "Red",
+]
+keywords = []
+
+[[token]]
+id = "elemental-2-1-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elemental"
+power = 2
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Elemental"]
+supertypes = []
+colors = ["Red"]
+keywords = [
+    "Trample",
+    "Haste",
+]
+
+[[token]]
+id = "elemental-2-2-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elemental"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Elemental"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "elemental-2-2-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elemental"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Elemental"]
+supertypes = []
+colors = ["Blue"]
+keywords = ["Flying"]
+
+[[token]]
+id = "elemental-2-2-wubrg"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elemental"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Elemental"]
+supertypes = []
+colors = [
+    "White",
+    "Blue",
+    "Black",
+    "Red",
+    "Green",
+]
+keywords = []
+
+[[token]]
+id = "elemental-3-1-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elemental"
+power = 3
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Elemental"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "elemental-3-1-r-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elemental"
+power = 3
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Elemental"]
+supertypes = []
+colors = ["Red"]
+keywords = ["Haste"]
+
+[[token]]
+id = "elemental-3-1-r-3"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elemental"
+power = 3
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Elemental"]
+supertypes = []
+colors = ["Red"]
+keywords = [
+    "Trample",
+    "Haste",
+]
+
+[[token]]
+id = "elemental-3-1-r-4"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elemental"
+power = 3
+toughness = 1
+core_types = [
+    "Enchantment",
+    "Creature",
+]
+subtypes = ["Elemental"]
+supertypes = []
+colors = ["Red"]
+keywords = ["Haste"]
+
+[[token]]
+id = "elemental-3-3-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elemental"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Elemental"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "elemental-3-3-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elemental"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Elemental"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "elemental-3-3-ur"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elemental"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Elemental"]
+supertypes = []
+colors = [
+    "Blue",
+    "Red",
+]
+keywords = ["Flying"]
+
+[[token]]
+id = "elemental-4-4-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elemental"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Elemental"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "elemental-4-4-ur"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elemental"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Elemental"]
+supertypes = []
+colors = [
+    "Blue",
+    "Red",
+]
+keywords = []
+
+[[token]]
+id = "elemental-4-4-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elemental"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Elemental"]
+supertypes = []
+colors = ["White"]
+keywords = ["Flying"]
+
+[[token]]
+id = "elemental-4-4-wu"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elemental"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Elemental"]
+supertypes = []
+colors = [
+    "White",
+    "Blue",
+]
+keywords = []
+
+[[token]]
+id = "elemental-5-3-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elemental"
+power = 5
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Elemental"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "elemental-5-5-br"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elemental"
+power = 5
+toughness = 5
+core_types = ["Creature"]
+subtypes = ["Elemental"]
+supertypes = []
+colors = [
+    "Black",
+    "Red",
+]
+keywords = []
+
+[[token]]
+id = "elemental-5-5-rg"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elemental"
+power = 5
+toughness = 5
+core_types = ["Creature"]
+subtypes = ["Elemental"]
+supertypes = []
+colors = [
+    "Red",
+    "Green",
+]
+keywords = []
+
+[[token]]
+id = "elemental-5-5-ur"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elemental"
+power = 5
+toughness = 5
+core_types = ["Creature"]
+subtypes = ["Elemental"]
+supertypes = []
+colors = [
+    "Blue",
+    "Red",
+]
+keywords = ["Flying"]
+
+[[token]]
+id = "elemental-7-1-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elemental"
+power = 7
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Elemental"]
+supertypes = []
+colors = ["Red"]
+keywords = [
+    "Trample",
+    "Haste",
+]
+
+[[token]]
+id = "elemental-7-7-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elemental"
+power = 7
+toughness = 7
+core_types = ["Creature"]
+subtypes = ["Elemental"]
+supertypes = []
+colors = ["Green"]
+keywords = ["Trample"]
+
+[[token]]
+id = "elemental-8-8-wg"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elemental"
+power = 8
+toughness = 8
+core_types = ["Creature"]
+subtypes = ["Elemental"]
+supertypes = []
+colors = [
+    "White",
+    "Green",
+]
+keywords = ["Vigilance"]
+
+[[token]]
+id = "elemental-bird-4-4-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elemental Bird"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = [
+    "Elemental",
+    "Bird",
+]
+supertypes = []
+colors = ["Blue"]
+keywords = ["Flying"]
+
+[[token]]
+id = "elemental-cat-1-1-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elemental Cat"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Elemental",
+    "Cat",
+]
+supertypes = []
+colors = ["Red"]
+keywords = ["Haste"]
+
+[[token]]
+id = "elemental-shaman-3-1-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elemental Shaman"
+power = 3
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Elemental",
+    "Shaman",
+]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "elemental-shaman-3-1-r-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elemental Shaman"
+power = 3
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Elemental",
+    "Shaman",
+]
+supertypes = []
+colors = ["Red"]
+keywords = ["Haste"]
+
+[[token]]
+id = "elephant-0-0-g"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Elephant"
+power = 0
+toughness = 0
+core_types = ["Creature"]
+subtypes = ["Elephant"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "elephant-3-3-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elephant"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Elephant"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "elephant-5-5-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elephant"
+power = 5
+toughness = 5
+core_types = ["Creature"]
+subtypes = ["Elephant"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "elf-1-1-g"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Elf"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Elf"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "elf-2-2-bg"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elf"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Elf"]
+supertypes = []
+colors = [
+    "Black",
+    "Green",
+]
+keywords = []
+
+[[token]]
+id = "elf-druid-1-1-g"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Elf Druid"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Elf",
+    "Druid",
+]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "elf-knight-2-2-wg"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elf Knight"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = [
+    "Elf",
+    "Knight",
+]
+supertypes = []
+colors = [
+    "White",
+    "Green",
+]
+keywords = ["Vigilance"]
+
+[[token]]
+id = "elf-warrior-1-1-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elf Warrior"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Elf",
+    "Warrior",
+]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "elf-warrior-1-1-wg"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elf Warrior"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Elf",
+    "Warrior",
+]
+supertypes = []
+colors = [
+    "White",
+    "Green",
+]
+keywords = []
+
+[[token]]
+id = "elk-3-3-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Elk"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Elk"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "employee-1-1-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Employee"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Employee"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "faerie-1-1-u"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Faerie"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Faerie"]
+supertypes = []
+colors = ["Blue"]
+keywords = ["Flying"]
+
+[[token]]
+id = "faerie-1-1-u-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Faerie"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Faerie"]
+supertypes = []
+colors = ["Blue"]
+keywords = ["Flying"]
+
+[[token]]
+id = "faerie-1-1-ub"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Faerie"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Faerie"]
+supertypes = []
+colors = [
+    "Blue",
+    "Black",
+]
+keywords = ["Flying"]
+
+[[token]]
+id = "faerie-dragon-1-1-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Faerie Dragon"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Faerie",
+    "Dragon",
+]
+supertypes = []
+colors = ["Blue"]
+keywords = ["Flying"]
+
+[[token]]
+id = "faerie-rogue-1-1-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Faerie Rogue"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Faerie",
+    "Rogue",
+]
+supertypes = []
+colors = ["Black"]
+keywords = ["Flying"]
+
+[[token]]
+id = "faerie-rogue-1-1-ub"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Faerie Rogue"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Faerie",
+    "Rogue",
+]
+supertypes = []
+colors = [
+    "Blue",
+    "Black",
+]
+keywords = ["Flying"]
+
+[[token]]
+id = "fish-1-1-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Fish"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Fish"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "fish-1-1-u-2"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Fish"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Fish"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "fish-3-3-u"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Fish"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Fish"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "forest-dryad-1-1-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Forest Dryad"
+power = 1
+toughness = 1
+core_types = [
+    "Land",
+    "Creature",
+]
+subtypes = [
+    "Forest",
+    "Dryad",
+]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "fox-2-2-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Fox"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Fox"]
+supertypes = []
+colors = ["White"]
+keywords = ["Vigilance"]
+
+[[token]]
+id = "fractal-0-0-ug"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Fractal"
+power = 0
+toughness = 0
+core_types = ["Creature"]
+subtypes = ["Fractal"]
+supertypes = []
+colors = [
+    "Blue",
+    "Green",
+]
+keywords = []
+
+[[token]]
+id = "frog-1-1-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Frog"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Frog"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "frog-lizard-3-3-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Frog Lizard"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = [
+    "Frog",
+    "Lizard",
+]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "fungus-1-1-b"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Fungus"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Fungus"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "fungus-beast-4-4-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Fungus Beast"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = [
+    "Fungus",
+    "Beast",
+]
+supertypes = []
+colors = ["Green"]
+keywords = ["Trample"]
+
+[[token]]
+id = "gargoyle-3-4-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Gargoyle"
+power = 3
+toughness = 4
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Gargoyle"]
+supertypes = []
+colors = []
+keywords = ["Flying"]
+
+[[token]]
+id = "giant-4-4-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Giant"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Giant"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "giant-7-7-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Giant"
+power = 7
+toughness = 7
+core_types = ["Creature"]
+subtypes = ["Giant"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "giant-warrior-4-4-rg"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Giant Warrior"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = [
+    "Giant",
+    "Warrior",
+]
+supertypes = []
+colors = [
+    "Red",
+    "Green",
+]
+keywords = ["Haste"]
+
+[[token]]
+id = "giant-warrior-5-5-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Giant Warrior"
+power = 5
+toughness = 5
+core_types = ["Creature"]
+subtypes = [
+    "Giant",
+    "Warrior",
+]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "giant-wizard-4-4-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Giant Wizard"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = [
+    "Giant",
+    "Wizard",
+]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "glimmer-1-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Glimmer"
+power = 1
+toughness = 1
+core_types = [
+    "Enchantment",
+    "Creature",
+]
+subtypes = ["Glimmer"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "gnome-1-1-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Gnome"
+power = 1
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Gnome"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "gnome-soldier-0-0-w"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Gnome Soldier"
+power = 0
+toughness = 0
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = [
+    "Gnome",
+    "Soldier",
+]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "goat-0-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Goat"
+power = 0
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Goat"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "goblin-1-1-br"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Goblin"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Goblin"]
+supertypes = []
+colors = [
+    "Black",
+    "Red",
+]
+keywords = []
+
+[[token]]
+id = "goblin-1-1-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Goblin"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Goblin"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "goblin-1-1-r-2"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Goblin"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Goblin"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "goblin-1-1-r-3"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Goblin"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Goblin"]
+supertypes = []
+colors = ["Red"]
+keywords = ["Haste"]
+
+[[token]]
+id = "goblin-1-1-r-4"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Goblin"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Goblin"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "goblin-2-1-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Goblin"
+power = 2
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Goblin"]
+supertypes = []
+colors = ["Red"]
+keywords = ["Haste"]
+
+[[token]]
+id = "goblin-construct-0-1-c"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Goblin Construct"
+power = 0
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = [
+    "Goblin",
+    "Construct",
+]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "goblin-rogue-1-1-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Goblin Rogue"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Goblin",
+    "Rogue",
+]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "goblin-scout-1-1-r"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Goblin Scout"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Goblin",
+    "Scout",
+]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "goblin-shaman-2-2-r"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Goblin Shaman"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = [
+    "Goblin",
+    "Shaman",
+]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "goblin-soldier-1-1-wr"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Goblin Soldier"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Goblin",
+    "Soldier",
+]
+supertypes = []
+colors = [
+    "White",
+    "Red",
+]
+keywords = []
+
+[[token]]
+id = "goblin-warrior-1-1-rg"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Goblin Warrior"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Goblin",
+    "Warrior",
+]
+supertypes = []
+colors = [
+    "Red",
+    "Green",
+]
+keywords = []
+
+[[token]]
+id = "goblin-wizard-1-1-r"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Goblin Wizard"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Goblin",
+    "Wizard",
+]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "golem-3-3-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Golem"
+power = 3
+toughness = 3
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Golem"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "golem-3-3-c-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Golem"
+power = 3
+toughness = 3
+core_types = [
+    "Enchantment",
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Golem"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "golem-3-3-c-3"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Golem"
+power = 3
+toughness = 3
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Golem"]
+supertypes = []
+colors = []
+keywords = ["Flying"]
+
+[[token]]
+id = "golem-3-3-c-4"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Golem"
+power = 3
+toughness = 3
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Golem"]
+supertypes = []
+colors = []
+keywords = ["Trample"]
+
+[[token]]
+id = "golem-3-3-c-5"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Golem"
+power = 3
+toughness = 3
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Golem"]
+supertypes = []
+colors = []
+keywords = ["Vigilance"]
+
+[[token]]
+id = "golem-4-4-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Golem"
+power = 4
+toughness = 4
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Golem"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "golem-4-4-wr"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Golem"
+power = 4
+toughness = 4
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Golem"]
+supertypes = []
+colors = [
+    "White",
+    "Red",
+]
+keywords = []
+
+[[token]]
+id = "golem-4-4-wu"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Golem"
+power = 4
+toughness = 4
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Golem"]
+supertypes = []
+colors = [
+    "White",
+    "Blue",
+]
+keywords = []
+
+[[token]]
+id = "golem-4-6-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Golem"
+power = 4
+toughness = 6
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Golem"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "golem-9-9-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Golem"
+power = 9
+toughness = 9
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Golem"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "graveborn-3-1-br"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Graveborn"
+power = 3
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Graveborn"]
+supertypes = []
+colors = [
+    "Black",
+    "Red",
+]
+keywords = ["Haste"]
+
+[[token]]
+id = "gremlin-0-0-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Gremlin"
+power = 0
+toughness = 0
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Gremlin"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "gremlin-1-1-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Gremlin"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Gremlin"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "gremlin-2-2-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Gremlin"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Gremlin"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "griffin-2-2-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Griffin"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Griffin"]
+supertypes = []
+colors = ["White"]
+keywords = ["Flying"]
+
+[[token]]
+id = "halfling-1-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Halfling"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Halfling"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "hamster-1-1-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Hamster"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Hamster"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "harpy-1-1-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Harpy"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Harpy"]
+supertypes = []
+colors = ["Black"]
+keywords = ["Flying"]
+
+[[token]]
+id = "hellion-4-4-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Hellion"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Hellion"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "hellion-4-4-r-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Hellion"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Hellion"]
+supertypes = []
+colors = ["Red"]
+keywords = ["Haste"]
+
+[[token]]
+id = "hero-1-1-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Hero"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Hero"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "hippo-1-1-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Hippo"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Hippo"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "hippo-3-3-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Hippo"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Hippo"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "homunculus-0-1-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Homunculus"
+power = 0
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Homunculus"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "homunculus-2-2-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Homunculus"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Homunculus"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "horror-1-1-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Horror"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Horror"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "horror-1-1-ub"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Horror"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Horror"]
+supertypes = []
+colors = [
+    "Blue",
+    "Black",
+]
+keywords = ["Flying"]
+
+[[token]]
+id = "horror-2-2-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Horror"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Horror"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "horror-2-2-b-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Horror"
+power = 2
+toughness = 2
+core_types = [
+    "Enchantment",
+    "Creature",
+]
+subtypes = ["Horror"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "horror-3-3-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Horror"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Horror"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "horror-4-4-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Horror"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Horror"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "horse-2-2-w"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Horse"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Horse"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "horse-5-5-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Horse"
+power = 5
+toughness = 5
+core_types = ["Creature"]
+subtypes = ["Horse"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "human-1-1-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Human"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Human"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "human-1-1-r-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Human"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Human"]
+supertypes = []
+colors = ["Red"]
+keywords = ["Haste"]
+
+[[token]]
+id = "human-1-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Human"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Human"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "human-1-1-w-2"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Human"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Human"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "human-1-1-w-3"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Human"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Human"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "human-citizen-1-1-wg"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Human Citizen"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Human",
+    "Citizen",
+]
+supertypes = []
+colors = [
+    "White",
+    "Green",
+]
+keywords = []
+
+[[token]]
+id = "human-cleric-1-1-wb"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Human Cleric"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Human",
+    "Cleric",
+]
+supertypes = []
+colors = [
+    "White",
+    "Black",
+]
+keywords = []
+
+[[token]]
+id = "human-cleric-2-1-wr"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Human Cleric"
+power = 2
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Human",
+    "Cleric",
+]
+supertypes = []
+colors = [
+    "White",
+    "Red",
+]
+keywords = [
+    "Lifelink",
+    "Haste",
+]
+
+[[token]]
+id = "human-knight-2-2-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Human Knight"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = [
+    "Human",
+    "Knight",
+]
+supertypes = []
+colors = ["Red"]
+keywords = [
+    "Trample",
+    "Haste",
+]
+
+[[token]]
+id = "human-knight-2-2-w"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Human Knight"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = [
+    "Human",
+    "Knight",
+]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "human-monk-1-1-g"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Human Monk"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Human",
+    "Monk",
+]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "human-noble-1-1-w"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Human Noble"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Human",
+    "Noble",
+]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "human-rogue-1-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Human Rogue"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Human",
+    "Rogue",
+]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "human-rogue-1-2-wr"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Human Rogue"
+power = 1
+toughness = 2
+core_types = ["Creature"]
+subtypes = [
+    "Human",
+    "Rogue",
+]
+supertypes = []
+colors = [
+    "White",
+    "Red",
+]
+keywords = ["Haste"]
+
+[[token]]
+id = "human-rogue-2-2-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Human Rogue"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = [
+    "Human",
+    "Rogue",
+]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "human-soldier-1-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Human Soldier"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Human",
+    "Soldier",
+]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "human-soldier-1-1-wg"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Human Soldier"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Human",
+    "Soldier",
+]
+supertypes = []
+colors = [
+    "White",
+    "Green",
+]
+keywords = []
+
+[[token]]
+id = "human-warrior-1-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Human Warrior"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Human",
+    "Warrior",
+]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "human-warrior-3-1-wr"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Human Warrior"
+power = 3
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Human",
+    "Warrior",
+]
+supertypes = []
+colors = [
+    "White",
+    "Red",
+]
+keywords = [
+    "Trample",
+    "Haste",
+]
+
+[[token]]
+id = "human-wizard-1-1-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Human Wizard"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Human",
+    "Wizard",
+]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "hydra-0-0-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Hydra"
+power = 0
+toughness = 0
+core_types = ["Creature"]
+subtypes = ["Hydra"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "illusion-0-2-u"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Illusion"
+power = 0
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Illusion"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "illusion-1-1-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Illusion"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Illusion"]
+supertypes = []
+colors = ["Blue"]
+keywords = ["Flying"]
+
+[[token]]
+id = "illusion-1-1-u-2"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Illusion"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Illusion"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "illusion-2-2-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Illusion"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Illusion"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "illusion-2-2-u-2"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Illusion"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Illusion"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "illusion-villain-3-3-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Illusion Villain"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = [
+    "Illusion",
+    "Villain",
+]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "imp-2-2-r"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Imp"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Imp"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "inkling-1-1-wb"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Inkling"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Inkling"]
+supertypes = []
+colors = [
+    "White",
+    "Black",
+]
+keywords = ["Flying"]
+
+[[token]]
+id = "inkling-2-1-wb"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Inkling"
+power = 2
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Inkling"]
+supertypes = []
+colors = [
+    "White",
+    "Black",
+]
+keywords = ["Flying"]
+
+[[token]]
+id = "insect-0-1-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Insect"
+power = 0
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Insect"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "insect-1-1-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Insect"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Insect"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "insect-1-1-b-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Insect"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Insect"]
+supertypes = []
+colors = ["Black"]
+keywords = ["Flying"]
+
+[[token]]
+id = "insect-1-1-bg"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Insect"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Insect"]
+supertypes = []
+colors = [
+    "Black",
+    "Green",
+]
+keywords = []
+
+[[token]]
+id = "insect-1-1-bg-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Insect"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Insect"]
+supertypes = []
+colors = [
+    "Black",
+    "Green",
+]
+keywords = ["Flying"]
+
+[[token]]
+id = "insect-1-1-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Insect"
+power = 1
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Insect"]
+supertypes = []
+colors = []
+keywords = ["Flying"]
+
+[[token]]
+id = "insect-1-1-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Insect"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Insect"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "insect-1-1-g-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Insect"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Insect"]
+supertypes = []
+colors = ["Green"]
+keywords = [
+    "Flying",
+    "Deathtouch",
+]
+
+[[token]]
+id = "insect-1-1-ur"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Insect"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Insect"]
+supertypes = []
+colors = [
+    "Blue",
+    "Red",
+]
+keywords = [
+    "Flying",
+    "Haste",
+]
+
+[[token]]
+id = "insect-2-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Insect"
+power = 2
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Insect"]
+supertypes = []
+colors = ["White"]
+keywords = ["Flying"]
+
+[[token]]
+id = "insect-3-3-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Insect"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Insect"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "insect-6-1-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Insect"
+power = 6
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Insect"]
+supertypes = []
+colors = ["Green"]
+keywords = ["Shroud"]
+
+[[token]]
+id = "insect-warrior-1-1-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Insect Warrior"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Insect",
+    "Warrior",
+]
+supertypes = []
+colors = ["Black"]
+keywords = ["Flying"]
+
+[[token]]
+id = "jellyfish-1-1-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Jellyfish"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Jellyfish"]
+supertypes = []
+colors = ["Blue"]
+keywords = ["Flying"]
+
+[[token]]
+id = "kavu-3-3-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Kavu"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Kavu"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "kavu-3-3-wubrg"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Kavu"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Kavu"]
+supertypes = []
+colors = [
+    "White",
+    "Blue",
+    "Black",
+    "Red",
+    "Green",
+]
+keywords = ["Trample"]
+
+[[token]]
+id = "kithkin-1-1-wg"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Kithkin"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Kithkin"]
+supertypes = []
+colors = [
+    "White",
+    "Green",
+]
+keywords = []
+
+[[token]]
+id = "kithkin-soldier-1-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Kithkin Soldier"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Kithkin",
+    "Soldier",
+]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "knight-1-1-w"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Knight"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Knight"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "knight-2-2-b"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Knight"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Knight"]
+supertypes = []
+colors = ["Black"]
+keywords = ["Haste"]
+
+[[token]]
+id = "knight-2-2-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Knight"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Knight"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "knight-2-2-w-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Knight"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Knight"]
+supertypes = []
+colors = ["White"]
+keywords = ["FirstStrike"]
+
+[[token]]
+id = "knight-2-2-w-3"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Knight"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Knight"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "knight-2-2-w-4"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Knight"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Knight"]
+supertypes = []
+colors = ["White"]
+keywords = ["Vigilance"]
+
+[[token]]
+id = "knight-2-2-wu"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Knight"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Knight"]
+supertypes = []
+colors = [
+    "White",
+    "Blue",
+]
+keywords = ["Vigilance"]
+
+[[token]]
+id = "knight-3-1-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Knight"
+power = 3
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Knight"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "knight-3-3-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Knight"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Knight"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "knight-ally-2-2-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Knight Ally"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = [
+    "Knight",
+    "Ally",
+]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "kor-ally-1-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Kor Ally"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Kor",
+    "Ally",
+]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "kor-soldier-1-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Kor Soldier"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Kor",
+    "Soldier",
+]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "kor-warrior-1-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Kor Warrior"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Kor",
+    "Warrior",
+]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "kraken-1-1-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Kraken"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Kraken"]
+supertypes = []
+colors = ["Blue"]
+keywords = ["Trample"]
+
+[[token]]
+id = "kraken-8-8-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Kraken"
+power = 8
+toughness = 8
+core_types = ["Creature"]
+subtypes = ["Kraken"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "kraken-8-8-u-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Kraken"
+power = 8
+toughness = 8
+core_types = ["Creature"]
+subtypes = ["Kraken"]
+supertypes = []
+colors = ["Blue"]
+keywords = ["Hexproof"]
+
+[[token]]
+id = "kraken-9-9-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Kraken"
+power = 9
+toughness = 9
+core_types = ["Creature"]
+subtypes = ["Kraken"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "lizard-2-2-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Lizard"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Lizard"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "lizard-8-8-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Lizard"
+power = 8
+toughness = 8
+core_types = ["Creature"]
+subtypes = ["Lizard"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "mercenary-1-1-r"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Mercenary"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Mercenary"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "merfolk-1-1-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Merfolk"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Merfolk"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "merfolk-1-1-u-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Merfolk"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Merfolk"]
+supertypes = []
+colors = ["Blue"]
+keywords = ["Hexproof"]
+
+[[token]]
+id = "merfolk-1-1-wu"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Merfolk"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Merfolk"]
+supertypes = []
+colors = [
+    "White",
+    "Blue",
+]
+keywords = []
+
+[[token]]
+id = "merfolk-wizard-1-1-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Merfolk Wizard"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Merfolk",
+    "Wizard",
+]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "minion-1-1-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Minion"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Minion"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "minotaur-2-3-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Minotaur"
+power = 2
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Minotaur"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "minotaur-2-3-r-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Minotaur"
+power = 2
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Minotaur"]
+supertypes = []
+colors = ["Red"]
+keywords = ["Haste"]
+
+[[token]]
+id = "monk-1-1-r"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Monk"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Monk"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "monk-1-1-w"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Monk"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Monk"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "monkey-2-2-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Monkey"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Monkey"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "moogle-1-2-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Moogle"
+power = 1
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Moogle"]
+supertypes = []
+colors = ["White"]
+keywords = ["Lifelink"]
+
+[[token]]
+id = "moonfolk-1-2-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Moonfolk"
+power = 1
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Moonfolk"]
+supertypes = []
+colors = ["Blue"]
+keywords = ["Flying"]
+
+[[token]]
+id = "mouse-1-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Mouse"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Mouse"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "mutant-2-2-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Mutant"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Mutant"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "mutant-3-3-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Mutant"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Mutant"]
+supertypes = []
+colors = ["Green"]
+keywords = ["Deathtouch"]
+
+[[token]]
+id = "myr-1-1-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Myr"
+power = 1
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Myr"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "necron-warrior-2-2-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Necron Warrior"
+power = 2
+toughness = 2
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = [
+    "Necron",
+    "Warrior",
+]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "nightmare-1-1-b"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Nightmare"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Nightmare"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "nightmare-2-3-ub"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Nightmare"
+power = 2
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Nightmare"]
+supertypes = []
+colors = [
+    "Blue",
+    "Black",
+]
+keywords = []
+
+[[token]]
+id = "ninja-1-1-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Ninja"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Ninja"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "ninja-1-1-u"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Ninja"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Ninja"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "ninja-2-1-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Ninja"
+power = 2
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Ninja"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "ninja-turtle-spirit-1-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Ninja Turtle Spirit"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Ninja",
+    "Turtle",
+    "Spirit",
+]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "nymph-2-2-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Nymph"
+power = 2
+toughness = 2
+core_types = [
+    "Enchantment",
+    "Creature",
+]
+subtypes = ["Nymph"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "octopus-8-8-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Octopus"
+power = 8
+toughness = 8
+core_types = ["Creature"]
+subtypes = ["Octopus"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "ogre-3-3-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Ogre"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Ogre"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "ogre-4-4-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Ogre"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Ogre"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "ogre-warrior-4-3-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Ogre Warrior"
+power = 4
+toughness = 3
+core_types = ["Creature"]
+subtypes = [
+    "Ogre",
+    "Warrior",
+]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "ooze-0-0-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Ooze"
+power = 0
+toughness = 0
+core_types = ["Creature"]
+subtypes = ["Ooze"]
+supertypes = []
+colors = ["Green"]
+keywords = ["Trample"]
+
+[[token]]
+id = "ooze-0-0-g-2"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Ooze"
+power = 0
+toughness = 0
+core_types = ["Creature"]
+subtypes = ["Ooze"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "ooze-0-0-g-3"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Ooze"
+power = 0
+toughness = 0
+core_types = ["Creature"]
+subtypes = ["Ooze"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "ooze-1-1-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Ooze"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Ooze"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "ooze-2-2-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Ooze"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Ooze"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "ooze-2-2-g-2"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Ooze"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Ooze"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "ooze-3-3-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Ooze"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Ooze"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "otter-1-1-ur"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Otter"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Otter"]
+supertypes = []
+colors = [
+    "Blue",
+    "Red",
+]
+keywords = []
+
+[[token]]
+id = "ox-2-2-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Ox"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Ox"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "ox-2-4-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Ox"
+power = 2
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Ox"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "ox-4-4-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Ox"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Ox"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "pegasus-1-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Pegasus"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Pegasus"]
+supertypes = []
+colors = ["White"]
+keywords = ["Flying"]
+
+[[token]]
+id = "pegasus-2-2-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Pegasus"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Pegasus"]
+supertypes = []
+colors = ["White"]
+keywords = ["Flying"]
+
+[[token]]
+id = "pentavite-1-1-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Pentavite"
+power = 1
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Pentavite"]
+supertypes = []
+colors = []
+keywords = ["Flying"]
+
+[[token]]
+id = "pest-0-1-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Pest"
+power = 0
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Pest"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "pest-1-1-bg"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Pest"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Pest"]
+supertypes = []
+colors = [
+    "Black",
+    "Green",
+]
+keywords = []
+
+[[token]]
+id = "pest-1-1-bg-2"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Pest"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Pest"]
+supertypes = []
+colors = [
+    "Black",
+    "Green",
+]
+keywords = []
+
+[[token]]
+id = "phyrexian-2-2-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Phyrexian"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Phyrexian"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "phyrexian-beast-3-3-g"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Phyrexian Beast"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = [
+    "Phyrexian",
+    "Beast",
+]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "phyrexian-beast-4-4-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Phyrexian Beast"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = [
+    "Phyrexian",
+    "Beast",
+]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "phyrexian-germ-0-0-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Phyrexian Germ"
+power = 0
+toughness = 0
+core_types = ["Creature"]
+subtypes = [
+    "Phyrexian",
+    "Germ",
+]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "phyrexian-goblin-1-1-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Phyrexian Goblin"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Phyrexian",
+    "Goblin",
+]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "phyrexian-goblin-1-1-r-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Phyrexian Goblin"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Phyrexian",
+    "Goblin",
+]
+supertypes = []
+colors = ["Red"]
+keywords = ["Haste"]
+
+[[token]]
+id = "phyrexian-golem-3-3-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Phyrexian Golem"
+power = 3
+toughness = 3
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = [
+    "Phyrexian",
+    "Golem",
+]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "phyrexian-hydra-3-3-wg"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Phyrexian Hydra"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = [
+    "Phyrexian",
+    "Hydra",
+]
+supertypes = []
+colors = [
+    "White",
+    "Green",
+]
+keywords = ["Lifelink"]
+
+[[token]]
+id = "phyrexian-hydra-3-3-wg-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Phyrexian Hydra"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = [
+    "Phyrexian",
+    "Hydra",
+]
+supertypes = []
+colors = [
+    "White",
+    "Green",
+]
+keywords = ["Reach"]
+
+[[token]]
+id = "phyrexian-insect-1-1-g"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Phyrexian Insect"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Phyrexian",
+    "Insect",
+]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "phyrexian-mite-1-1-c"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Phyrexian Mite"
+power = 1
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = [
+    "Phyrexian",
+    "Mite",
+]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "phyrexian-myr-1-1-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Phyrexian Myr"
+power = 1
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = [
+    "Phyrexian",
+    "Myr",
+]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "phyrexian-myr-2-1-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Phyrexian Myr"
+power = 2
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = [
+    "Phyrexian",
+    "Myr",
+]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "phyrexian-saproling-1-1-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Phyrexian Saproling"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Phyrexian",
+    "Saproling",
+]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "phyrexian-wurm-1-2-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Phyrexian Wurm"
+power = 1
+toughness = 2
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = [
+    "Phyrexian",
+    "Wurm",
+]
+supertypes = []
+colors = ["Black"]
+keywords = ["Deathtouch"]
+
+[[token]]
+id = "phyrexian-wurm-2-1-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Phyrexian Wurm"
+power = 2
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = [
+    "Phyrexian",
+    "Wurm",
+]
+supertypes = []
+colors = ["Black"]
+keywords = ["Lifelink"]
+
+[[token]]
+id = "phyrexian-wurm-3-3-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Phyrexian Wurm"
+power = 3
+toughness = 3
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = [
+    "Phyrexian",
+    "Wurm",
+]
+supertypes = []
+colors = []
+keywords = ["Deathtouch"]
+
+[[token]]
+id = "phyrexian-wurm-3-3-c-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Phyrexian Wurm"
+power = 3
+toughness = 3
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = [
+    "Phyrexian",
+    "Wurm",
+]
+supertypes = []
+colors = []
+keywords = ["Lifelink"]
+
+[[token]]
+id = "phyrexian-zombie-2-2-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Phyrexian Zombie"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = [
+    "Phyrexian",
+    "Zombie",
+]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "pilot-1-1-c"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Pilot"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Pilot"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "pilot-1-1-c-2"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Pilot"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Pilot"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "pincher-2-2-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Pincher"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Pincher"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "pirate-1-1-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Pirate"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Pirate"]
+supertypes = []
+colors = ["Red"]
+keywords = [
+    "Menace",
+    "Haste",
+]
+
+[[token]]
+id = "pirate-1-1-r-2"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Pirate"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Pirate"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "pirate-2-2-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Pirate"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Pirate"]
+supertypes = []
+colors = ["Black"]
+keywords = ["Menace"]
+
+[[token]]
+id = "pirate-4-2-r"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Pirate"
+power = 4
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Pirate"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "plant-0-1-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Plant"
+power = 0
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Plant"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "plant-0-2-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Plant"
+power = 0
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Plant"]
+supertypes = []
+colors = ["Green"]
+keywords = ["Defender"]
+
+[[token]]
+id = "plant-1-1-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Plant"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Plant"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "plant-warrior-4-2-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Plant Warrior"
+power = 4
+toughness = 2
+core_types = ["Creature"]
+subtypes = [
+    "Plant",
+    "Warrior",
+]
+supertypes = []
+colors = ["Green"]
+keywords = ["Reach"]
+
+[[token]]
+id = "prism-0-1-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Prism"
+power = 0
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Prism"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "rabbit-1-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Rabbit"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Rabbit"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "raccoon-3-3-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Raccoon"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Raccoon"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "rat-1-1-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Rat"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Rat"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "rat-1-1-b-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Rat"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Rat"]
+supertypes = []
+colors = ["Black"]
+keywords = ["Deathtouch"]
+
+[[token]]
+id = "rat-1-1-b-3"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Rat"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Rat"]
+supertypes = []
+colors = ["Black"]
+keywords = ["Lifelink"]
+
+[[token]]
+id = "rat-1-1-b-4"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Rat"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Rat"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "rat-1-1-b-5"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Rat"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Rat"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "rat-rogue-1-1-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Rat Rogue"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Rat",
+    "Rogue",
+]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "rebel-2-2-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Rebel"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Rebel"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "reflection-2-2-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Reflection"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Reflection"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "reflection-3-2-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Reflection"
+power = 3
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Reflection"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "rhino-4-4-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Rhino"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Rhino"]
+supertypes = []
+colors = ["Green"]
+keywords = ["Trample"]
+
+[[token]]
+id = "rhino-warrior-4-4-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Rhino Warrior"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = [
+    "Rhino",
+    "Warrior",
+]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "robot-1-1-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Robot"
+power = 1
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Robot"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "robot-1-1-c-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Robot"
+power = 1
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Robot"]
+supertypes = []
+colors = []
+keywords = ["Flying"]
+
+[[token]]
+id = "robot-2-2-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Robot"
+power = 2
+toughness = 2
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Robot"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "robot-3-3-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Robot"
+power = 3
+toughness = 3
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Robot"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "robot-4-4-c"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Robot"
+power = 4
+toughness = 4
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Robot"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "robot-warrior-3-3-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Robot Warrior"
+power = 3
+toughness = 3
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = [
+    "Robot",
+    "Warrior",
+]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "rogue-2-2-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Rogue"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Rogue"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "salamander-warrior-4-3-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Salamander Warrior"
+power = 4
+toughness = 3
+core_types = ["Creature"]
+subtypes = [
+    "Salamander",
+    "Warrior",
+]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "samurai-2-2-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Samurai"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Samurai"]
+supertypes = []
+colors = ["White"]
+keywords = ["DoubleStrike"]
+
+[[token]]
+id = "samurai-2-2-w-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Samurai"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Samurai"]
+supertypes = []
+colors = ["White"]
+keywords = ["Vigilance"]
+
+[[token]]
+id = "sand-1-1-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Sand"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Sand"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "sand-warrior-1-1-wrg"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Sand Warrior"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Sand",
+    "Warrior",
+]
+supertypes = []
+colors = [
+    "White",
+    "Red",
+    "Green",
+]
+keywords = []
+
+[[token]]
+id = "saproling-0-0-g"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Saproling"
+power = 0
+toughness = 0
+core_types = ["Creature"]
+subtypes = ["Saproling"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "saproling-1-1-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Saproling"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Saproling"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "satyr-1-1-r"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Satyr"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Satyr"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "satyr-2-2-rg"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Satyr"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Satyr"]
+supertypes = []
+colors = [
+    "Red",
+    "Green",
+]
+keywords = ["Haste"]
+
+[[token]]
+id = "scarecrow-2-2-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Scarecrow"
+power = 2
+toughness = 2
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Scarecrow"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "scarecrow-4-4-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Scarecrow"
+power = 4
+toughness = 4
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Scarecrow"]
+supertypes = []
+colors = []
+keywords = ["Vigilance"]
+
+[[token]]
+id = "scorpion-dragon-4-4-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Scorpion Dragon"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = [
+    "Scorpion",
+    "Dragon",
+]
+supertypes = []
+colors = ["Red"]
+keywords = [
+    "Flying",
+    "Haste",
+]
+
+[[token]]
+id = "sculpture-0-0-c"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Sculpture"
+power = 0
+toughness = 0
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Sculpture"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "serf-0-1-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Serf"
+power = 0
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Serf"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "servo-1-1-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Servo"
+power = 1
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Servo"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "shapeshifter-1-1-c"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Shapeshifter"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Shapeshifter"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "shapeshifter-2-2-c"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Shapeshifter"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Shapeshifter"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "shapeshifter-2-2-u"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Shapeshifter"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Shapeshifter"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "shapeshifter-3-2-c"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Shapeshifter"
+power = 3
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Shapeshifter"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "shark-3-3-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Shark"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Shark"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "sheep-0-1-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Sheep"
+power = 0
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Sheep"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "sheep-1-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Sheep"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Sheep"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "shrine-1-1-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Shrine"
+power = 1
+toughness = 1
+core_types = [
+    "Enchantment",
+    "Creature",
+]
+subtypes = ["Shrine"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "skeleton-1-1-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Skeleton"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Skeleton"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "skeleton-1-1-b-2"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Skeleton"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Skeleton"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "skeleton-2-1-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Skeleton"
+power = 2
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Skeleton"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "skeleton-4-1-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Skeleton"
+power = 4
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Skeleton"]
+supertypes = []
+colors = ["Black"]
+keywords = ["Menace"]
+
+[[token]]
+id = "skeleton-pirate-2-2-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Skeleton Pirate"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = [
+    "Skeleton",
+    "Pirate",
+]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "sliver-1-1-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Sliver"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Sliver"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "slug-1-1-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Slug"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Slug"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "snail-1-1-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Snail"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Snail"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "snake-1-1-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Snake"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Snake"]
+supertypes = []
+colors = ["Black"]
+keywords = ["Deathtouch"]
+
+[[token]]
+id = "snake-1-1-bg"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Snake"
+power = 1
+toughness = 1
+core_types = [
+    "Enchantment",
+    "Creature",
+]
+subtypes = ["Snake"]
+supertypes = []
+colors = [
+    "Black",
+    "Green",
+]
+keywords = ["Deathtouch"]
+
+[[token]]
+id = "snake-1-1-c"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Snake"
+power = 1
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Snake"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "snake-1-1-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Snake"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Snake"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "snake-1-1-g-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Snake"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Snake"]
+supertypes = []
+colors = ["Green"]
+keywords = ["Deathtouch"]
+
+[[token]]
+id = "snake-1-1-ug"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Snake"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Snake"]
+supertypes = []
+colors = [
+    "Blue",
+    "Green",
+]
+keywords = []
+
+[[token]]
+id = "snake-5-4-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Snake"
+power = 5
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Snake"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "soldier-1-1-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Soldier"
+power = 1
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Soldier"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "soldier-1-1-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Soldier"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Soldier"]
+supertypes = []
+colors = ["Red"]
+keywords = ["Haste"]
+
+[[token]]
+id = "soldier-1-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Soldier"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Soldier"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "soldier-1-1-w-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Soldier"
+power = 1
+toughness = 1
+core_types = [
+    "Enchantment",
+    "Creature",
+]
+subtypes = ["Soldier"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "soldier-1-1-w-3"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Soldier"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Soldier"]
+supertypes = []
+colors = ["White"]
+keywords = ["Lifelink"]
+
+[[token]]
+id = "soldier-1-1-wr"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Soldier"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Soldier"]
+supertypes = []
+colors = [
+    "White",
+    "Red",
+]
+keywords = ["Haste"]
+
+[[token]]
+id = "soldier-1-2-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Soldier"
+power = 1
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Soldier"]
+supertypes = []
+colors = ["White"]
+keywords = ["Defender"]
+
+[[token]]
+id = "soldier-2-2-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Soldier"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Soldier"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "soldier-2-2-r-2"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Soldier"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Soldier"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "soldier-2-2-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Soldier"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Soldier"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "soldier-2-2-w-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Soldier"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Soldier"]
+supertypes = []
+colors = ["White"]
+keywords = ["Vigilance"]
+
+[[token]]
+id = "soldier-ally-1-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Soldier Ally"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Soldier",
+    "Ally",
+]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "spawn-2-2-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Spawn"
+power = 2
+toughness = 2
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Spawn"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "spawn-3-3-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Spawn"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Spawn"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "sphinx-4-4-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Sphinx"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Sphinx"]
+supertypes = []
+colors = ["Blue"]
+keywords = ["Flying"]
+
+[[token]]
+id = "sphinx-4-4-wu"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Sphinx"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Sphinx"]
+supertypes = []
+colors = [
+    "White",
+    "Blue",
+]
+keywords = [
+    "Flying",
+    "Vigilance",
+]
+
+[[token]]
+id = "spider-1-2-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Spider"
+power = 1
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Spider"]
+supertypes = []
+colors = ["Green"]
+keywords = ["Reach"]
+
+[[token]]
+id = "spider-1-3-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Spider"
+power = 1
+toughness = 3
+core_types = [
+    "Enchantment",
+    "Creature",
+]
+subtypes = ["Spider"]
+supertypes = []
+colors = ["Green"]
+keywords = ["Reach"]
+
+[[token]]
+id = "spider-2-1-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Spider"
+power = 2
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Spider"]
+supertypes = []
+colors = ["Black"]
+keywords = [
+    "Menace",
+    "Reach",
+]
+
+[[token]]
+id = "spider-2-1-bg"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Spider"
+power = 2
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Spider"]
+supertypes = []
+colors = [
+    "Black",
+    "Green",
+]
+keywords = [
+    "Menace",
+    "Reach",
+]
+
+[[token]]
+id = "spider-2-1-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Spider"
+power = 2
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Spider"]
+supertypes = []
+colors = ["Green"]
+keywords = ["Reach"]
+
+[[token]]
+id = "spider-2-2-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Spider"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Spider"]
+supertypes = []
+colors = ["Green"]
+keywords = ["Reach"]
+
+[[token]]
+id = "spider-2-4-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Spider"
+power = 2
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Spider"]
+supertypes = []
+colors = ["Black"]
+keywords = ["Reach"]
+
+[[token]]
+id = "spike-1-1-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Spike"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Spike"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "spirit-0-0-wb"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Spirit"
+power = 0
+toughness = 0
+core_types = [
+    "Enchantment",
+    "Creature",
+]
+subtypes = ["Spirit"]
+supertypes = []
+colors = [
+    "White",
+    "Black",
+]
+keywords = []
+
+[[token]]
+id = "spirit-1-1-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Spirit"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Spirit"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "spirit-1-1-c-2"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Spirit"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Spirit"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "spirit-1-1-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Spirit"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Spirit"]
+supertypes = []
+colors = ["Blue"]
+keywords = ["Flying"]
+
+[[token]]
+id = "spirit-1-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Spirit"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Spirit"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "spirit-1-1-w-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Spirit"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Spirit"]
+supertypes = []
+colors = ["White"]
+keywords = ["Flying"]
+
+[[token]]
+id = "spirit-1-1-w-3"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Spirit"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Spirit"]
+supertypes = []
+colors = ["White"]
+keywords = ["Lifelink"]
+
+[[token]]
+id = "spirit-1-1-wb"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Spirit"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Spirit"]
+supertypes = []
+colors = [
+    "White",
+    "Black",
+]
+keywords = ["Flying"]
+
+[[token]]
+id = "spirit-2-2-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Spirit"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Spirit"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "spirit-2-2-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Spirit"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Spirit"]
+supertypes = []
+colors = ["Red"]
+keywords = ["Menace"]
+
+[[token]]
+id = "spirit-2-2-u"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Spirit"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Spirit"]
+supertypes = []
+colors = ["Blue"]
+keywords = ["Vigilance"]
+
+[[token]]
+id = "spirit-2-2-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Spirit"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Spirit"]
+supertypes = []
+colors = ["White"]
+keywords = ["Flying"]
+
+[[token]]
+id = "spirit-2-2-wr"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Spirit"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Spirit"]
+supertypes = []
+colors = [
+    "White",
+    "Red",
+]
+keywords = []
+
+[[token]]
+id = "spirit-3-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Spirit"
+power = 3
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Spirit"]
+supertypes = []
+colors = ["White"]
+keywords = ["Flying"]
+
+[[token]]
+id = "spirit-3-2-wr"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Spirit"
+power = 3
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Spirit"]
+supertypes = []
+colors = [
+    "White",
+    "Red",
+]
+keywords = []
+
+[[token]]
+id = "spirit-3-3-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Spirit"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Spirit"]
+supertypes = []
+colors = ["White"]
+keywords = ["Flying"]
+
+[[token]]
+id = "spirit-4-4-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Spirit"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Spirit"]
+supertypes = []
+colors = ["White"]
+keywords = ["Flying"]
+
+[[token]]
+id = "spirit-4-5-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Spirit"
+power = 4
+toughness = 5
+core_types = ["Creature"]
+subtypes = ["Spirit"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "spirit-cleric-0-0-w"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Spirit Cleric"
+power = 0
+toughness = 0
+core_types = ["Creature"]
+subtypes = [
+    "Spirit",
+    "Cleric",
+]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "splinter-1-1-g"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Splinter"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Splinter"]
+supertypes = []
+colors = ["Green"]
+keywords = ["Flying"]
+
+[[token]]
+id = "squid-1-1-u"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Squid"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Squid"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "squirrel-1-1-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Squirrel"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Squirrel"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "starfish-0-1-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Starfish"
+power = 0
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Starfish"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "survivor-1-1-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Survivor"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Survivor"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "tentacle-1-1-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Tentacle"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Tentacle"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "tetravite-1-1-c"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Tetravite"
+power = 1
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Tetravite"]
+supertypes = []
+colors = []
+keywords = ["Flying"]
+
+[[token]]
+id = "thopter-0-0-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Thopter"
+power = 0
+toughness = 0
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Thopter"]
+supertypes = []
+colors = []
+keywords = ["Flying"]
+
+[[token]]
+id = "thopter-1-1-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Thopter"
+power = 1
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Thopter"]
+supertypes = []
+colors = []
+keywords = ["Flying"]
+
+[[token]]
+id = "thopter-1-1-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Thopter"
+power = 1
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Thopter"]
+supertypes = []
+colors = ["Blue"]
+keywords = ["Flying"]
+
+[[token]]
+id = "thrull-0-1-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Thrull"
+power = 0
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Thrull"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "thrull-1-1-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Thrull"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Thrull"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "toy-1-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Toy"
+power = 1
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Toy"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "treefolk-0-0-g"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Treefolk"
+power = 0
+toughness = 0
+core_types = ["Creature"]
+subtypes = ["Treefolk"]
+supertypes = []
+colors = ["Green"]
+keywords = ["Reach"]
+
+[[token]]
+id = "treefolk-3-4-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Treefolk"
+power = 3
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Treefolk"]
+supertypes = []
+colors = ["Green"]
+keywords = ["Reach"]
+
+[[token]]
+id = "treefolk-shaman-2-5-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Treefolk Shaman"
+power = 2
+toughness = 5
+core_types = ["Creature"]
+subtypes = [
+    "Treefolk",
+    "Shaman",
+]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "treefolk-warrior-0-0-g"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Treefolk Warrior"
+power = 0
+toughness = 0
+core_types = ["Creature"]
+subtypes = [
+    "Treefolk",
+    "Warrior",
+]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "triskelavite-1-1-c"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Triskelavite"
+power = 1
+toughness = 1
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Triskelavite"]
+supertypes = []
+colors = []
+keywords = ["Flying"]
+
+[[token]]
+id = "troll-warrior-4-4-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Troll Warrior"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = [
+    "Troll",
+    "Warrior",
+]
+supertypes = []
+colors = ["Green"]
+keywords = ["Trample"]
+
+[[token]]
+id = "tyranid-1-1-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Tyranid"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Tyranid"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "tyranid-5-5-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Tyranid"
+power = 5
+toughness = 5
+core_types = ["Creature"]
+subtypes = ["Tyranid"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "tyranid-gargoyle-1-1-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Tyranid Gargoyle"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Tyranid",
+    "Gargoyle",
+]
+supertypes = []
+colors = ["Blue"]
+keywords = ["Flying"]
+
+[[token]]
+id = "tyranid-warrior-3-3-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Tyranid Warrior"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = [
+    "Tyranid",
+    "Warrior",
+]
+supertypes = []
+colors = ["Green"]
+keywords = ["Trample"]
+
+[[token]]
+id = "unicorn-2-2-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Unicorn"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Unicorn"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "vampire-1-1-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Vampire"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Vampire"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "vampire-1-1-b-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Vampire"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Vampire"]
+supertypes = []
+colors = ["Black"]
+keywords = ["Lifelink"]
+
+[[token]]
+id = "vampire-1-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Vampire"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Vampire"]
+supertypes = []
+colors = ["White"]
+keywords = ["Lifelink"]
+
+[[token]]
+id = "vampire-1-1-wb"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Vampire"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Vampire"]
+supertypes = []
+colors = [
+    "White",
+    "Black",
+]
+keywords = ["Lifelink"]
+
+[[token]]
+id = "vampire-2-2-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Vampire"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Vampire"]
+supertypes = []
+colors = ["Black"]
+keywords = ["Flying"]
+
+[[token]]
+id = "vampire-2-3-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Vampire"
+power = 2
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Vampire"]
+supertypes = []
+colors = ["Black"]
+keywords = [
+    "Flying",
+    "Lifelink",
+]
+
+[[token]]
+id = "vampire-3-1-br"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Vampire"
+power = 3
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Vampire"]
+supertypes = []
+colors = [
+    "Black",
+    "Red",
+]
+keywords = [
+    "Trample",
+    "Lifelink",
+    "Haste",
+]
+
+[[token]]
+id = "vampire-demon-4-3-wb"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Vampire Demon"
+power = 4
+toughness = 3
+core_types = ["Creature"]
+subtypes = [
+    "Vampire",
+    "Demon",
+]
+supertypes = []
+colors = [
+    "White",
+    "Black",
+]
+keywords = ["Flying"]
+
+[[token]]
+id = "vampire-knight-1-1-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Vampire Knight"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Vampire",
+    "Knight",
+]
+supertypes = []
+colors = ["Black"]
+keywords = ["Lifelink"]
+
+[[token]]
+id = "vampire-rogue-1-1-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Vampire Rogue"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Vampire",
+    "Rogue",
+]
+supertypes = []
+colors = ["Black"]
+keywords = ["Lifelink"]
+
+[[token]]
+id = "varmint-2-1-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Varmint"
+power = 2
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Varmint"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "wall-0-2-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Wall"
+power = 0
+toughness = 2
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Wall"]
+supertypes = []
+colors = []
+keywords = ["Defender"]
+
+[[token]]
+id = "wall-0-3-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Wall"
+power = 0
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Wall"]
+supertypes = []
+colors = []
+keywords = [
+    "Defender",
+    "Reach",
+]
+
+[[token]]
+id = "wall-0-3-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Wall"
+power = 0
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Wall"]
+supertypes = []
+colors = ["White"]
+keywords = ["Defender"]
+
+[[token]]
+id = "wall-0-4-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Wall"
+power = 0
+toughness = 4
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Wall"]
+supertypes = []
+colors = []
+keywords = ["Defender"]
+
+[[token]]
+id = "wall-0-4-c-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Wall"
+power = 0
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Wall"]
+supertypes = []
+colors = []
+keywords = ["Defender"]
+
+[[token]]
+id = "wall-0-4-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Wall"
+power = 0
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Wall"]
+supertypes = []
+colors = ["White"]
+keywords = [
+    "Defender",
+    "Flying",
+]
+
+[[token]]
+id = "wall-0-4-w-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Wall"
+power = 0
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Wall"]
+supertypes = []
+colors = ["White"]
+keywords = ["Defender"]
+
+[[token]]
+id = "wall-1-3-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Wall"
+power = 1
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Wall"]
+supertypes = []
+colors = ["White"]
+keywords = ["Defender"]
+
+[[token]]
+id = "wall-5-5-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Wall"
+power = 5
+toughness = 5
+core_types = ["Creature"]
+subtypes = ["Wall"]
+supertypes = []
+colors = ["Blue"]
+keywords = ["Defender"]
+
+[[token]]
+id = "warrior-1-1-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Warrior"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Warrior"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "warrior-1-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Warrior"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Warrior"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "warrior-1-1-w-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Warrior"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Warrior"]
+supertypes = []
+colors = ["White"]
+keywords = ["Vigilance"]
+
+[[token]]
+id = "warrior-2-1-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Warrior"
+power = 2
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Warrior"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "warrior-3-2-wr"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Warrior"
+power = 3
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Warrior"]
+supertypes = []
+colors = [
+    "White",
+    "Red",
+]
+keywords = []
+
+[[token]]
+id = "weird-3-3-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Weird"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Weird"]
+supertypes = []
+colors = ["Blue"]
+keywords = [
+    "Defender",
+    "Flying",
+]
+
+[[token]]
+id = "whale-6-6-u"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Whale"
+power = 6
+toughness = 6
+core_types = ["Creature"]
+subtypes = ["Whale"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "wizard-0-1-b"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Wizard"
+power = 0
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Wizard"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "wizard-1-1-r"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Wizard"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Wizard"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "wizard-1-1-u"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Wizard"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Wizard"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "wizard-2-2-u"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Wizard"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Wizard"]
+supertypes = []
+colors = ["Blue"]
+keywords = []
+
+[[token]]
+id = "wolf-1-1-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Wolf"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Wolf"]
+supertypes = []
+colors = ["Black"]
+keywords = ["Deathtouch"]
+
+[[token]]
+id = "wolf-1-1-g"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Wolf"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Wolf"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "wolf-2-2-bg"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Wolf"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Wolf"]
+supertypes = []
+colors = [
+    "Black",
+    "Green",
+]
+keywords = []
+
+[[token]]
+id = "wolf-2-2-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Wolf"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Wolf"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "wolf-3-2-r"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Wolf"
+power = 3
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Wolf"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "worm-1-1-bg"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Worm"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Worm"]
+supertypes = []
+colors = [
+    "Black",
+    "Green",
+]
+keywords = []
+
+[[token]]
+id = "wraith-3-3-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Wraith"
+power = 3
+toughness = 3
+core_types = ["Creature"]
+subtypes = ["Wraith"]
+supertypes = []
+colors = ["Black"]
+keywords = ["Menace"]
+
+[[token]]
+id = "wurm-4-4-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Wurm"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = ["Wurm"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "wurm-5-5-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Wurm"
+power = 5
+toughness = 5
+core_types = ["Creature"]
+subtypes = ["Wurm"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "wurm-5-5-g-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Wurm"
+power = 5
+toughness = 5
+core_types = ["Creature"]
+subtypes = ["Wurm"]
+supertypes = []
+colors = ["Green"]
+keywords = ["Trample"]
+
+[[token]]
+id = "wurm-6-6-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Wurm"
+power = 6
+toughness = 6
+core_types = ["Creature"]
+subtypes = ["Wurm"]
+supertypes = []
+colors = ["Black"]
+keywords = ["Trample"]
+
+[[token]]
+id = "wurm-6-6-g"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Wurm"
+power = 6
+toughness = 6
+core_types = ["Creature"]
+subtypes = ["Wurm"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "zombie-1-1-w"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Zombie"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = ["Zombie"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "zombie-2-2-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Zombie"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Zombie"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "zombie-2-2-b-2"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Zombie"
+power = 2
+toughness = 2
+core_types = [
+    "Enchantment",
+    "Creature",
+]
+subtypes = ["Zombie"]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "zombie-2-2-b-3"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Zombie"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Zombie"]
+supertypes = []
+colors = ["Black"]
+keywords = ["Decayed"]
+
+[[token]]
+id = "zombie-3-3-c"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Zombie"
+power = 3
+toughness = 3
+core_types = [
+    "Artifact",
+    "Creature",
+]
+subtypes = ["Zombie"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "zombie-berserker-2-2-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Zombie Berserker"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = [
+    "Zombie",
+    "Berserker",
+]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "zombie-druid-2-2-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Zombie Druid"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = [
+    "Zombie",
+    "Druid",
+]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "zombie-employee-2-2-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Zombie Employee"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = [
+    "Zombie",
+    "Employee",
+]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "zombie-giant-5-5-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Zombie Giant"
+power = 5
+toughness = 5
+core_types = ["Creature"]
+subtypes = [
+    "Zombie",
+    "Giant",
+]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "zombie-knight-2-2-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Zombie Knight"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = [
+    "Zombie",
+    "Knight",
+]
+supertypes = []
+colors = ["Black"]
+keywords = ["Menace"]
+
+[[token]]
+id = "zombie-mutant-2-2-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Zombie Mutant"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = [
+    "Zombie",
+    "Mutant",
+]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token]]
+id = "zombie-rogue-2-2-ub"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Zombie Rogue"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = [
+    "Zombie",
+    "Rogue",
+]
+supertypes = []
+colors = [
+    "Blue",
+    "Black",
+]
+keywords = []
+
+[[token]]
+id = "zombie-warrior-4-4-b"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Zombie Warrior"
+power = 4
+toughness = 4
+core_types = ["Creature"]
+subtypes = [
+    "Zombie",
+    "Warrior",
+]
+supertypes = []
+colors = ["Black"]
+keywords = ["Vigilance"]
+
+[[token]]
+id = "zombie-wizard-1-1-ub"
+category = "Creature"
+fidelity = "Full"
+
+[token.body]
+display_name = "Zombie Wizard"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Zombie",
+    "Wizard",
+]
+supertypes = []
+colors = [
+    "Blue",
+    "Black",
+]
+keywords = []
+
+[[token]]
+id = "contract-w"
+category = "Aura"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Contract"
+core_types = ["Enchantment"]
+subtypes = ["Aura"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "mark-of-the-rani-r"
+category = "Aura"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Mark of the Rani"
+core_types = ["Enchantment"]
+subtypes = ["Aura"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "mask-w"
+category = "Aura"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Mask"
+core_types = ["Enchantment"]
+subtypes = ["Aura"]
+supertypes = []
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "settlement-g"
+category = "Aura"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Settlement"
+core_types = ["Enchantment"]
+subtypes = ["Aura"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token]]
+id = "smoke-blessing-r"
+category = "Aura"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Smoke Blessing"
+core_types = ["Enchantment"]
+subtypes = ["Aura"]
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "cragflame-c"
+category = "Equipment"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Cragflame"
+core_types = ["Artifact"]
+subtypes = ["Equipment"]
+supertypes = ["Legendary"]
+colors = []
+keywords = []
+
+[[token]]
+id = "icingdeath-frost-tongue-w"
+category = "Equipment"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Icingdeath, Frost Tongue"
+core_types = ["Artifact"]
+subtypes = ["Equipment"]
+supertypes = ["Legendary"]
+colors = ["White"]
+keywords = []
+
+[[token]]
+id = "rock-c"
+category = "Equipment"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Rock"
+core_types = ["Artifact"]
+subtypes = ["Equipment"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "stoneforged-blade-c"
+category = "Equipment"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Stoneforged Blade"
+core_types = ["Artifact"]
+subtypes = ["Equipment"]
+supertypes = []
+colors = []
+keywords = ["Indestructible"]
+
+[[token]]
+id = "sword-c"
+category = "Equipment"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Sword"
+core_types = ["Artifact"]
+subtypes = ["Equipment"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "wasteland-survival-guide-c"
+category = "Equipment"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Wasteland Survival Guide"
+core_types = ["Artifact"]
+subtypes = [
+    "Book",
+    "Equipment",
+]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "the-blackjack-3-3-c"
+category = "Vehicle"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "The Blackjack"
+power = 3
+toughness = 3
+core_types = ["Artifact"]
+subtypes = ["Vehicle"]
+supertypes = ["Legendary"]
+colors = []
+keywords = ["Flying"]
+
+[[token]]
+id = "vehicle-3-2-c"
+category = "Vehicle"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Vehicle"
+power = 3
+toughness = 2
+core_types = ["Artifact"]
+subtypes = ["Vehicle"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "zeppelin-5-5-c"
+category = "Vehicle"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Zeppelin"
+power = 5
+toughness = 5
+core_types = ["Artifact"]
+subtypes = ["Vehicle"]
+supertypes = []
+colors = []
+keywords = ["Flying"]
+
+[[token]]
+id = "banana-c"
+category = "Artifact"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Banana"
+core_types = ["Artifact"]
+subtypes = []
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "etherium-cell-c"
+category = "Artifact"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Etherium Cell"
+core_types = ["Artifact"]
+subtypes = []
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "feather-r"
+category = "Artifact"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Feather"
+core_types = ["Artifact"]
+subtypes = []
+supertypes = []
+colors = ["Red"]
+keywords = []
+
+[[token]]
+id = "icy-manalith-c"
+category = "Artifact"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Icy Manalith"
+core_types = ["Artifact"]
+subtypes = []
+supertypes = ["Snow"]
+colors = []
+keywords = []
+
+[[token]]
+id = "land-mine-c"
+category = "Artifact"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Land Mine"
+core_types = ["Artifact"]
+subtypes = []
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "meteorite-c"
+category = "Artifact"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Meteorite"
+core_types = ["Artifact"]
+subtypes = []
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "munitions-c"
+category = "Artifact"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Munitions"
+core_types = ["Artifact"]
+subtypes = []
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "replicated-ring-c"
+category = "Artifact"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Replicated Ring"
+core_types = ["Artifact"]
+subtypes = []
+supertypes = ["Snow"]
+colors = []
+keywords = []
+
+[[token]]
+id = "scrap-c"
+category = "Artifact"
+fidelity = "Full"
+
+[token.body]
+display_name = "Scrap"
+core_types = ["Artifact"]
+subtypes = []
+supertypes = []
+colors = []
+keywords = []
+
+[[token]]
+id = "tamiyo-s-notebook-c"
+category = "Artifact"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Tamiyo's Notebook"
+core_types = ["Artifact"]
+subtypes = ["Book"]
+supertypes = ["Legendary"]
+colors = []
+keywords = []
+
+[[token]]
+id = "volo-s-journal-c"
+category = "Artifact"
+fidelity = "PartialMissingAbilities"
+
+[token.body]
+display_name = "Volo's Journal"
+core_types = ["Artifact"]
+subtypes = ["Book"]
+supertypes = ["Legendary"]
+colors = []
+keywords = ["Hexproof"]

@@ -690,27 +690,28 @@ fn build_battlefield_entry_token_object(
     spec: &TokenSpec,
     enter_tapped: EtbTapState,
 ) -> GameObject {
+    let ch = &spec.characteristics;
     let mut obj = GameObject::new(
         ObjectId(u64::MAX),
         CardId(0),
         owner,
-        spec.display_name.clone(),
+        ch.display_name.clone(),
         Zone::Battlefield,
     );
     obj.controller = owner;
     obj.is_token = true;
-    obj.power = spec.power;
-    obj.toughness = spec.toughness;
-    obj.base_power = spec.power;
-    obj.base_toughness = spec.toughness;
-    obj.card_types.core_types = spec.core_types.clone();
-    obj.card_types.subtypes = spec.subtypes.clone();
-    obj.card_types.supertypes = spec.supertypes.clone();
+    obj.power = ch.power;
+    obj.toughness = ch.toughness;
+    obj.base_power = ch.power;
+    obj.base_toughness = ch.toughness;
+    obj.card_types.core_types = ch.core_types.clone();
+    obj.card_types.subtypes = ch.subtypes.clone();
+    obj.card_types.supertypes = ch.supertypes.clone();
     obj.base_card_types = obj.card_types.clone();
-    obj.color = spec.colors.clone();
-    obj.base_color = spec.colors.clone();
-    obj.keywords = spec.keywords.clone();
-    obj.base_keywords = spec.keywords.clone();
+    obj.color = ch.colors.clone();
+    obj.base_color = ch.colors.clone();
+    obj.keywords = ch.keywords.clone();
+    obj.base_keywords = ch.keywords.clone();
     for static_def in &spec.static_abilities {
         obj.static_definitions.push(static_def.clone());
     }
