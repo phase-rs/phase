@@ -110,11 +110,13 @@ impl BracketLists {
     /// Iterate every distinct card name across all four lists, used by the
     /// export pipeline to warn on names that don't match any printed card.
     pub fn all_names(&self) -> impl Iterator<Item = &str> {
+        let mut seen = HashSet::new();
         self.game_changers
             .iter()
             .chain(self.mass_land_denial.iter())
             .chain(self.extra_turns.iter())
             .chain(self.efficient_tutors.iter())
+            .filter(move |s| seen.insert(s.as_str()))
             .map(String::as_str)
     }
 }

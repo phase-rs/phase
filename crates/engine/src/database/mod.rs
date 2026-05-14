@@ -7,6 +7,7 @@ pub mod mtgjson;
 pub mod oracle_loader;
 pub mod synthesis;
 
+pub use bracket_lists::{BracketLists, BracketSignals};
 pub use card_db::CardDatabase;
 
 /// Single authority for "is this card runnable by the engine right now?"
