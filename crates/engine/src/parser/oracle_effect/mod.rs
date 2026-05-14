@@ -14241,10 +14241,11 @@ mod tests {
         assert_eq!(normalize_verb_token("searches"), "search");
     }
 
-    /// CR 104.2a + CR 117.1 + CR 201.2 + CR 603.4 + CR 608.2c:
+    /// CR 104.2b + CR 117.1 + CR 201.2 + CR 603.4 + CR 608.2c:
     /// Approach prints "If this spell was cast from your hand and you've cast
-    /// another spell named ~ this game, you win the game.  Otherwise, put ~
-    /// into its owner's library seventh from the top and you gain 7 life."
+    /// another spell named Approach of the Second Sun this game, you win the
+    /// game.  Otherwise, put Approach of the Second Sun into its owner's
+    /// library seventh from the top and you gain 7 life."
     /// The parser must:
     ///   1. Recognise the compound `And { CastFromZone(Hand),
     ///      QuantityCheck(SpellsCastThisGame{filter=Named} >= 2) }` so the
@@ -14255,10 +14256,18 @@ mod tests {
     ///      7) onto `else_ability`, keeping the "and you gain 7 life"
     ///      inside the Otherwise body rather than chaining it onto the win
     ///      effect.
+    ///
+    /// Feeds the parser the un-tilde'd "named X" text the way production
+    /// sees it after `normalize_card_name_refs`' `"named ~"` → `"named
+    /// CardName"` restore (`oracle_util.rs:1553`). Asserting the literal
+    /// `FilterProp::Named { name }` value catches a regression in that
+    /// restore step, which would otherwise produce `name: "~"` at parse
+    /// time and silently mis-match against records whose `name` is the
+    /// printed card name at resolution time.
     #[test]
     fn approach_of_the_second_sun_parses_compound_condition_and_otherwise_branch() {
         let def = parse_effect_chain(
-            "If this spell was cast from your hand and you've cast another spell named ~ this game, you win the game.\nOtherwise, put ~ into its owner's library seventh from the top and you gain 7 life.",
+            "If this spell was cast from your hand and you've cast another spell named Approach of the Second Sun this game, you win the game.\nOtherwise, put ~ into its owner's library seventh from the top and you gain 7 life.",
             AbilityKind::Spell,
         );
 
@@ -14296,10 +14305,20 @@ mod tests {
                     },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 2 },
-            } if tf
-                .properties
-                .iter()
-                .any(|p| matches!(p, FilterProp::Named { .. })) => {}
+            } => {
+                // CR 201.2: name compare is case-insensitive — the parser
+                // lowercases input before extraction, so the stored name is
+                // lowercase. Runtime matches against `record.name` (printed
+                // case) via `eq_ignore_ascii_case`.
+                let printed_name_match = tf.properties.iter().any(|p| {
+                    matches!(p, FilterProp::Named { name } if name == "approach of the second sun")
+                });
+                assert!(
+                    printed_name_match,
+                    "Named filter must carry the printed card name (lowercased), got properties: {:?}",
+                    tf.properties
+                );
+            }
             other => panic!(
                 "second conjunct must be SpellsCastThisGame filtered by Named >= 2, got: {other:?}"
             ),

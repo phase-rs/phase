@@ -445,9 +445,19 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                     // its owner's library seventh from the top and you gain
                     // 7 life" where "you gain 7 life" must stay inside the
                     // otherwise branch.
-                    let inside_otherwise_body = tag::<_, _, OracleError<'_>>("otherwise")
-                        .parse(before_lower.trim_start())
-                        .is_ok();
+                    //
+                    // Match only the printed Oracle-text shapes ("otherwise,
+                    // " and "otherwise "), mirroring the otherwise-prefix
+                    // table in `starts_prefix_clause`. This rejects accidental
+                    // prefix overlap from any future text whose first word
+                    // shares those letters but is not the conditional fallback
+                    // keyword.
+                    let inside_otherwise_body = alt((
+                        tag::<_, _, OracleError<'_>>("otherwise, "),
+                        tag("otherwise "),
+                    ))
+                    .parse(before_lower.trim_start())
+                    .is_ok();
                     let suppress = nom_primitives::scan_contains(&before_lower, "from among")
                         || is_inside_temporal_prefix(&before_lower)
                         || targeted_compound_continuation

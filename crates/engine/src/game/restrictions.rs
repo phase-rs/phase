@@ -2184,4 +2184,95 @@ mod tests {
             "printed Flash keyword must short-circuit the target-dependent flash check"
         );
     }
+
+    /// CR 117.1 + CR 201.2 + CR 601.2: Cast-pipeline integration for Approach
+    /// of the Second Sun's "another spell named ~ this game" gate. Exercises
+    /// the full path: `record_spell_cast_from_zone` → `SpellCastRecord.name`
+    /// populated on the game-scope history → name-filtered
+    /// `QuantityRef::SpellsCastThisGame` resolves correctly.
+    ///
+    /// The earlier `resolve_quantity_spells_cast_this_game_filtered_by_name`
+    /// test hand-populates `spells_cast_this_game_by_player`, bypassing the
+    /// pipeline hook. This test fails if any future cast path forks the
+    /// recording flow (alt-cost, free cast, escape, etc.) and forgets to
+    /// invoke `record_spell_cast_from_zone`, or if the `name` field stops
+    /// being captured from the cast object — both regressions Approach of
+    /// the Second Sun would silently inherit otherwise.
+    #[test]
+    fn approach_of_the_second_sun_round_trips_through_record_spell_cast() {
+        use crate::game::game_object::GameObject;
+        use crate::game::quantity::resolve_quantity;
+        use crate::types::ability::{
+            CountScope, FilterProp, QuantityExpr, QuantityRef, TargetFilter, TypedFilter,
+        };
+
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let caster = PlayerId(0);
+
+        // Build an Approach `GameObject` shaped the way the cast pipeline
+        // would hand it to `record_spell_cast_from_zone`.
+        let approach = GameObject::new(
+            ObjectId(10),
+            CardId(10),
+            caster,
+            "Approach of the Second Sun".to_string(),
+            Zone::Stack,
+        );
+
+        // Mirror the parser's emitted filter exactly: lowercased name match
+        // against `SpellCastRecord.name` via `eq_ignore_ascii_case`.
+        let approach_filter =
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Named {
+                name: "approach of the second sun".to_string(),
+            }]));
+        let approach_count = QuantityExpr::Ref {
+            qty: QuantityRef::SpellsCastThisGame {
+                scope: CountScope::Controller,
+                filter: Some(approach_filter),
+            },
+        };
+
+        // Pre-cast: no Approaches recorded → count is 0, gate fails.
+        assert_eq!(
+            resolve_quantity(&state, &approach_count, caster, ObjectId(10)),
+            0,
+            "no casts recorded yet"
+        );
+
+        // First cast: pipeline records the spell.
+        record_spell_cast(&mut state, caster, &approach);
+        let history = state
+            .spells_cast_this_game_by_player
+            .get(&caster)
+            .expect("first cast must populate the game-scope history");
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history[0].name, "Approach of the Second Sun",
+            "record_spell_cast must capture `obj.name` so name filters can match it"
+        );
+        assert_eq!(
+            resolve_quantity(&state, &approach_count, caster, ObjectId(10)),
+            1,
+            "first Approach must register against the named-filter count"
+        );
+
+        // Second cast: same name, same player. The "another" gate (>= 2)
+        // is now satisfied.
+        record_spell_cast(&mut state, caster, &approach);
+        assert_eq!(
+            resolve_quantity(&state, &approach_count, caster, ObjectId(10)),
+            2,
+            "second Approach must bring the count to 2 — `another spell named ~ this game` becomes true"
+        );
+
+        // Cross-player scope safety: a different player's casts of the same
+        // name must NOT count toward the caster's controller-scoped gate.
+        let opponent = PlayerId(1);
+        record_spell_cast(&mut state, opponent, &approach);
+        assert_eq!(
+            resolve_quantity(&state, &approach_count, caster, ObjectId(10)),
+            2,
+            "controller-scoped count must ignore an opponent's named-Approach casts"
+        );
+    }
 }

@@ -5066,11 +5066,10 @@ mod tests {
             ],
         );
 
-        let filter = TargetFilter::Typed(TypedFilter::default().properties(vec![
-            FilterProp::Named {
+        let filter =
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Named {
                 name: "approach of the second sun".to_string(),
-            },
-        ]));
+            }]));
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::SpellsCastThisGame {
                 scope: CountScope::Controller,

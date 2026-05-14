@@ -1978,9 +1978,7 @@ pub(super) fn try_nom_condition_as_ability_condition(
             // the compound to bind — partial recognition falls through to the
             // bare-CastFromZone path is intentionally rejected here, since
             // running with only half the gate is unsafe.
-            if let Ok((second_text, _)) =
-                tag::<_, _, OracleError<'_>>("and ").parse(trimmed)
-            {
+            if let Ok((second_text, _)) = tag::<_, _, OracleError<'_>>("and ").parse(trimmed) {
                 if let Some(second) =
                     parse_youve_cast_another_named_this_game_condition(second_text)
                 {
@@ -1991,6 +1989,12 @@ pub(super) fn try_nom_condition_as_ability_condition(
             }
             // Fallback: zone alone is still a valid condition if the suffix
             // is unrecognised but starts with a period / punctuation.
+            // allow-noncombinator: structural punctuation guard on the
+            // already-tokenized remainder, not parsing dispatch — we are
+            // distinguishing "clause boundary follows" from "more content
+            // follows we couldn't recognise". A `char(...)` combinator would
+            // require an extra wrapper and adds no precision over a
+            // 2-element char-class check.
             if trimmed.starts_with(['.', ',']) {
                 return Some(AbilityCondition::CastFromZone { zone });
             }
@@ -2530,9 +2534,17 @@ fn parse_youve_cast_another_named_this_game_condition(lower: &str) -> Option<Abi
     ))
     .parse(lower)
     .ok()?;
-    let anchor = " this game";
-    let pos = rest.find(anchor)?;
-    let name = rest[..pos].trim();
+    // CR 201.2: Consume the name up to the trailing " this game" anchor via
+    // `take_until`. The anchor itself is then consumed with `tag` so callers
+    // see the remainder after " this game", which they may further inspect.
+    let (_after_anchor, name_text): (&str, &str) = (
+        take_until::<_, _, OracleError<'_>>(" this game"),
+        tag(" this game"),
+    )
+        .parse(rest)
+        .ok()
+        .map(|(after, (name, _anchor))| (after, name))?;
+    let name = name_text.trim();
     if name.is_empty() {
         return None;
     }
