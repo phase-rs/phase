@@ -206,7 +206,7 @@ export function CardChoiceModal() {
       return <SacrificeForManaAbilityModal data={waitingFor.data} />;
     case "DiscardForManaAbility":
       if (!canActForWaitingState) return null;
-      return <DiscardForManaAbilityModal data={waitingFor.data} />;
+      return <DiscardModal data={waitingFor.data} title="Discard for mana ability" />;
     case "ExileFromBattlefieldForManaAbility":
       if (!canActForWaitingState) return null;
       return <ExileFromBattlefieldForManaAbilityModal data={waitingFor.data} />;
@@ -1336,70 +1336,6 @@ function SacrificeForManaAbilityModal({ data }: { data: SacrificeForManaAbility[
               {isSelected && (
                 <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-red-500/20">
                   <span className="rounded-full bg-red-500/90 px-3 py-1 text-xs font-bold text-white">Sacrifice</span>
-                </div>
-              )}
-            </motion.button>
-          );
-        })}
-      </ScrollableCardStrip>
-    </ChoiceOverlay>
-  );
-}
-
-// ── Discard For Mana Ability Modal ───────────────────────────────────────────
-
-function DiscardForManaAbilityModal({ data }: { data: DiscardForManaAbility["data"] }) {
-  const dispatch = useGameDispatch();
-  const objects = useGameStore((s) => s.gameState?.objects);
-  const hoverProps = useInspectHoverProps();
-  const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
-
-  const toggleSelect = useCallback(
-    (id: ObjectId) => {
-      setSelected((prev) => {
-        const next = new Set(prev);
-        if (next.has(id)) next.delete(id);
-        else if (next.size < data.count) next.add(id);
-        return next;
-      });
-    },
-    [data.count],
-  );
-
-  const handleConfirm = useCallback(() => {
-    dispatch({ type: "SelectCards", data: { cards: Array.from(selected) } });
-  }, [dispatch, selected]);
-
-  if (!objects) return null;
-
-  const isReady = selected.size === data.count;
-
-  return (
-    <ChoiceOverlay
-      title="Discard"
-      subtitle={`Discard ${data.count} card${data.count > 1 ? "s" : ""} to pay the mana ability cost`}
-      footer={<ConfirmButton onClick={handleConfirm} disabled={!isReady} label={`Discard (${selected.size}/${data.count})`} />}
-    >
-      <ScrollableCardStrip>
-        {data.cards.map((id, index) => {
-          const obj = objects[id];
-          if (!obj) return null;
-          const isSelected = selected.has(id);
-          return (
-            <motion.button
-              key={id}
-              className={`relative rounded-lg transition ${isSelected ? "z-10 ring-2 ring-purple-400/80" : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"}`}
-              initial={{ opacity: 0, y: 60, scale: 0.85 }}
-              animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
-              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
-              whileHover={{ scale: 1.05, y: -6 }}
-              onClick={() => toggleSelect(id)}
-              {...hoverProps(id)}
-            >
-              <CardImage {...objectImageProps(obj)} size="normal" className={CHOICE_CARD_IMAGE_CLASS} />
-              {isSelected && (
-                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-purple-500/20">
-                  <span className="rounded-full bg-purple-500/90 px-3 py-1 text-xs font-bold text-white">Discard</span>
                 </div>
               )}
             </motion.button>
