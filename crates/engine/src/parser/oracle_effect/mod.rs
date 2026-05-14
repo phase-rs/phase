@@ -1702,27 +1702,34 @@ fn try_parse_unless_three_branch_choice(
     // scanning. The grammar is:
     //   <default> " unless " ("that player " | "they ") <alt1> " or " <alt2>
     use nom::Parser;
-    let parsed = nom_on_lower(tp.original, tp.lower, |i| {
-        let (i, default) = take_until(" unless ").parse(i)?;
-        let (i, _) = tag(" unless ").parse(i)?;
-        let (i, _) = alt((tag("that player "), tag("they "))).parse(i)?;
-        let (i, alt1) = take_until(" or ").parse(i)?;
-        let (i, _) = tag(" or ").parse(i)?;
-        // Reject 3+ alternatives — a second " or " in the remainder means the
-        // top-level split was ambiguous and this isn't the binary "A or B" form.
-        if nom::bytes::complete::take_until::<_, _, nom::error::Error<&str>>(" or ")
-            .parse(i)
-            .is_ok()
-        {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                i,
-                nom::error::ErrorKind::Verify,
-            )));
-        }
-        Ok((i, (default.len(), alt1.len(), i.len())))
-    });
+    // Try " unless that player " first (most specific); fall back to " unless they ".
+    // Mirrors the original priority ordering — `split_around` matched the full
+    // needle, so a "that player" form embedded after a "they" form (rare) is
+    // still found via the first attempt.
+    let try_split = |needle: &'static str| -> Option<(usize, usize, usize)> {
+        nom_on_lower(tp.original, tp.lower, |i| {
+            let (i, default) = take_until(needle).parse(i)?;
+            let (i, _) = tag(needle).parse(i)?;
+            let (i, alt1) = take_until(" or ").parse(i)?;
+            let (i, _) = tag(" or ").parse(i)?;
+            // Reject 3+ alternatives — a second " or " means the top-level
+            // split was ambiguous and this isn't the binary "A or B" form.
+            if nom::bytes::complete::take_until::<_, _, nom::error::Error<&str>>(" or ")
+                .parse(i)
+                .is_ok()
+            {
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    i,
+                    nom::error::ErrorKind::Verify,
+                )));
+            }
+            Ok((i, (default.len(), alt1.len(), i.len())))
+        })
+        .map(|(lens, _)| lens)
+    };
 
-    let (default_len, alt1_len, alt2_len) = parsed?.0;
+    let (default_len, alt1_len, alt2_len) =
+        try_split(" unless that player ").or_else(|| try_split(" unless they "))?;
     // Oracle text is ASCII so byte positions in `tp.original` and `tp.lower` match.
     let alts_start = tp.original.len() - alt2_len - " or ".len() - alt1_len;
     let alt2_start = alts_start + alt1_len + " or ".len();
