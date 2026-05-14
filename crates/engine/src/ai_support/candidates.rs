@@ -1700,9 +1700,11 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                     .collect()
             }
         }
-        // CR 707.10c: Copy retargeting — one candidate per legal alternative in
-        // the current slot. Falls back to keeping `current` when no
-        // alternatives are exposed (classic copy_spell::resolve path).
+        // CR 707.10c: Copy retargeting — slot-by-slot via `ChooseTarget`. One
+        // candidate per legal alternative in the current slot, plus a "keep
+        // current" via `ChooseTarget { target: None }`. `KeepAllCopyTargets`
+        // is exposed as an additional candidate that short-circuits every
+        // remaining slot in one action (useful when no slot has alternatives).
         WaitingFor::CopyRetarget {
             player,
             target_slots,
@@ -1710,21 +1712,30 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             ..
         } => {
             let slot = &target_slots[*current_slot];
-            let alternatives = if slot.legal_alternatives.is_empty() {
-                vec![slot.current.clone()]
-            } else {
-                slot.legal_alternatives.clone()
-            };
-            alternatives
-                .into_iter()
+            let mut out: Vec<_> = slot
+                .legal_alternatives
+                .iter()
                 .map(|alt| {
                     candidate(
-                        GameAction::SelectTargets { targets: vec![alt] },
+                        GameAction::ChooseTarget {
+                            target: Some(alt.clone()),
+                        },
                         TacticalClass::Selection,
                         Some(*player),
                     )
                 })
-                .collect()
+                .collect();
+            out.push(candidate(
+                GameAction::ChooseTarget { target: None },
+                TacticalClass::Selection,
+                Some(*player),
+            ));
+            out.push(candidate(
+                GameAction::KeepAllCopyTargets,
+                TacticalClass::Selection,
+                Some(*player),
+            ));
+            out
         }
         // CR 510.1c/d: Assign combat damage — greedy (lethal to each in order, remainder to last).
         WaitingFor::AssignCombatDamage {

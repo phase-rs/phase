@@ -913,6 +913,31 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
     }
 }
 
+/// CR 707.10c: Finalize a `CopyRetarget` flow — write the slot-derived targets
+/// back onto the copy's stack entry, emit `EffectResolved`, hand priority back
+/// to the chooser, and drain any pending continuation queued during resolution.
+fn finalize_copy_retarget(
+    state: &mut GameState,
+    player: PlayerId,
+    copy_id: ObjectId,
+    slots: &[crate::types::game_state::CopyTargetSlot],
+    events: &mut Vec<GameEvent>,
+) {
+    let targets: Vec<_> = slots.iter().map(|s| s.current.clone()).collect();
+    if let Some(entry) = state.stack.iter_mut().find(|e| e.id == copy_id) {
+        if let Some(ability) = entry.ability_mut() {
+            ability.targets = targets;
+        }
+    }
+    events.push(GameEvent::EffectResolved {
+        kind: crate::types::ability::EffectKind::CopySpell,
+        source_id: copy_id,
+    });
+    state.waiting_for = WaitingFor::Priority { player };
+    state.priority_player = player;
+    effects::drain_pending_continuation(state, events);
+}
+
 fn apply_action(
     state: &mut GameState,
     actor: PlayerId,
@@ -3132,7 +3157,12 @@ fn apply_action(
             let slot_idx = *current_slot;
             if let Some(ref t) = target {
                 let slot = &target_slots[slot_idx];
-                if !slot.legal_alternatives.is_empty() && !slot.legal_alternatives.contains(t) {
+                // CR 707.10c: A retarget choice must produce a legal target. Both
+                // `prepare::open_copy_target_selection` and `copy_spell::resolve`
+                // populate `legal_alternatives` from `build_target_slots`, so an
+                // empty list means "no legal alternative exists" — the caller
+                // must use `KeepAllCopyTargets` (or send `target: None`).
+                if !slot.legal_alternatives.contains(t) {
                     return Err(EngineError::InvalidAction(format!(
                         "Target {t:?} not a legal alternative for copy slot {slot_idx}"
                     )));
@@ -3151,19 +3181,7 @@ fn apply_action(
                     current_slot: next_slot,
                 };
             } else {
-                let targets: Vec<_> = updated_slots.iter().map(|s| s.current.clone()).collect();
-                if let Some(entry) = state.stack.iter_mut().find(|e| e.id == cid) {
-                    if let Some(ability) = entry.ability_mut() {
-                        ability.targets = targets;
-                    }
-                }
-                events.push(GameEvent::EffectResolved {
-                    kind: crate::types::ability::EffectKind::CopySpell,
-                    source_id: cid,
-                });
-                state.waiting_for = WaitingFor::Priority { player: p };
-                state.priority_player = p;
-                effects::drain_pending_continuation(state, &mut events);
+                finalize_copy_retarget(state, p, cid, &updated_slots, &mut events);
             }
             state.waiting_for.clone()
         }
@@ -3184,19 +3202,8 @@ fn apply_action(
         ) => {
             let p = *player;
             let cid = *copy_id;
-            let targets: Vec<_> = target_slots.iter().map(|s| s.current.clone()).collect();
-            if let Some(entry) = state.stack.iter_mut().find(|e| e.id == cid) {
-                if let Some(ability) = entry.ability_mut() {
-                    ability.targets = targets;
-                }
-            }
-            events.push(GameEvent::EffectResolved {
-                kind: crate::types::ability::EffectKind::CopySpell,
-                source_id: cid,
-            });
-            state.waiting_for = WaitingFor::Priority { player: p };
-            state.priority_player = p;
-            effects::drain_pending_continuation(state, &mut events);
+            let slots = target_slots.clone();
+            finalize_copy_retarget(state, p, cid, &slots, &mut events);
             state.waiting_for.clone()
         }
         // CR 510.1c/d: Combat damage assignment from attacker to blockers.
