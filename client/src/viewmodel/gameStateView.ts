@@ -52,6 +52,10 @@ export function getWaitingForObjectChoiceIds(
       );
     case "CopyTargetChoice":
       return waitingFor.data.valid_targets;
+    case "CopyRetarget": {
+      const slot = waitingFor.data.target_slots[waitingFor.data.current_slot ?? 0];
+      return (slot?.legal_alternatives ?? []).flatMap((t) => "Object" in t ? [t.Object] : []);
+    }
     case "ExploreChoice":
       return waitingFor.data.choosable;
     case "PairChoice":

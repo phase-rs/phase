@@ -15,7 +15,7 @@ import { VoteChoiceModal } from "./VoteChoiceModal.tsx";
 import { DungeonChoiceModal, RoomChoiceModal } from "./DungeonChoiceModal.tsx";
 import { DamageAssignmentModal } from "../combat/DamageAssignmentModal.tsx";
 import { DistributeAmongModal } from "./DistributeAmongModal.tsx";
-import { CopyRetargetModal, RetargetChoiceModal } from "./RetargetChoiceModal.tsx";
+import { RetargetChoiceModal } from "./RetargetChoiceModal.tsx";
 import { ProliferateModal } from "./ProliferateModal.tsx";
 
 type ScryChoice = Extract<WaitingFor, { type: "ScryChoice" }>;
@@ -29,14 +29,16 @@ type EffectZoneChoice = Extract<WaitingFor, { type: "EffectZoneChoice" }>;
 type DrawnThisTurnTopdeckChoice = Extract<WaitingFor, { type: "DrawnThisTurnTopdeckChoice" }>;
 type DiscardToHandSize = Extract<WaitingFor, { type: "DiscardToHandSize" }>;
 type SacrificeForCost = Extract<WaitingFor, { type: "SacrificeForCost" }>;
+type SacrificeForManaAbility = Extract<WaitingFor, { type: "SacrificeForManaAbility" }>;
+type DiscardForManaAbility = Extract<WaitingFor, { type: "DiscardForManaAbility" }>;
+type ExileFromBattlefieldForManaAbility = Extract<WaitingFor, { type: "ExileFromBattlefieldForManaAbility" }>;
+type MultiTargetSelection = Extract<WaitingFor, { type: "MultiTargetSelection" }>;
+type ParadigmCastOffer = Extract<WaitingFor, { type: "ParadigmCastOffer" }>;
+type PayManaAbilityMana = Extract<WaitingFor, { type: "PayManaAbilityMana" }>;
 type ReturnToHandForCost = Extract<WaitingFor, { type: "ReturnToHandForCost" }>;
 type BlightChoice = Extract<WaitingFor, { type: "BlightChoice" }>;
 type BeholdForCost = Extract<WaitingFor, { type: "BeholdForCost" }>;
 type ExileForCost = Extract<WaitingFor, { type: "ExileForCost" }>;
-type DiscardForManaAbility = Extract<WaitingFor, { type: "DiscardForManaAbility" }>;
-type ExileFromBattlefieldForManaAbility = Extract<WaitingFor, { type: "ExileFromBattlefieldForManaAbility" }>;
-type SacrificeForManaAbility = Extract<WaitingFor, { type: "SacrificeForManaAbility" }>;
-type PayManaAbilityMana = Extract<WaitingFor, { type: "PayManaAbilityMana" }>;
 type CollectEvidenceChoice = Extract<WaitingFor, { type: "CollectEvidenceChoice" }>;
 type HarmonizeTapChoice = Extract<WaitingFor, { type: "HarmonizeTapChoice" }>;
 type PairChoice = Extract<WaitingFor, { type: "PairChoice" }>;
@@ -198,10 +200,31 @@ export function CardChoiceModal() {
       return <DiscardModal data={waitingFor.data} title="Discard as additional cost" canCancel />;
     case "SacrificeForCost":
       if (!canActForWaitingState) return null;
-      return <SacrificeModal data={waitingFor.data} />;
+      return <SacrificeModal key={waitingFor.data.permanents.join(",")} data={waitingFor.data} />;
+    case "SacrificeForManaAbility":
+      if (!canActForWaitingState) return null;
+      return <SacrificeForManaAbilityModal data={waitingFor.data} />;
+    case "DiscardForManaAbility":
+      if (!canActForWaitingState) return null;
+      return <DiscardModal data={waitingFor.data} title="Discard for mana ability" />;
+    case "ExileFromBattlefieldForManaAbility":
+      if (!canActForWaitingState) return null;
+      return <ExileFromBattlefieldForManaAbilityModal data={waitingFor.data} />;
+    case "MultiTargetSelection":
+      if (!canActForWaitingState) return null;
+      return <MultiTargetSelectionModal data={waitingFor.data} />;
+    case "ParadigmCastOffer":
+      if (!canActForWaitingState) return null;
+      return <ParadigmCastOfferModal data={waitingFor.data} />;
+    case "PayManaAbilityMana":
+      if (!canActForWaitingState) return null;
+      return <PayManaAbilityManaModal data={waitingFor.data} />;
+    case "CopyRetarget":
+      // Handled by TargetingOverlay + battlefield clicks (ChooseTarget slot-by-slot).
+      return null;
     case "ReturnToHandForCost":
       if (!canActForWaitingState) return null;
-      return <ReturnToHandModal data={waitingFor.data} />;
+      return <ReturnToHandModal key={waitingFor.data.permanents.join(",")} data={waitingFor.data} />;
     case "BlightChoice":
       if (!canActForWaitingState) return null;
       return <BlightModal data={waitingFor.data} />;
@@ -220,36 +243,6 @@ export function CardChoiceModal() {
     case "ExileForCost":
       if (!canActForWaitingState) return null;
       return <ExileForCostDispatch data={waitingFor.data} />;
-    case "DiscardForManaAbility":
-      if (!canActForWaitingState) return null;
-      return <DiscardModal data={waitingFor.data} title="Discard for mana ability" />;
-    case "ExileFromBattlefieldForManaAbility":
-      if (!canActForWaitingState) return null;
-      return <PermanentCostModal
-        data={waitingFor.data}
-        choices={waitingFor.data.permanents}
-        title="Exile"
-        subtitle={`Choose ${waitingFor.data.count} permanent${waitingFor.data.count > 1 ? "s" : ""} to exile`}
-        label="Exile"
-        selectedClassName="z-10 ring-2 ring-violet-300/80"
-        overlayClassName="absolute inset-0 flex items-center justify-center rounded-lg bg-violet-500/20"
-        badgeClassName="rounded-full bg-violet-500/90 px-3 py-1 text-xs font-bold text-white"
-      />;
-    case "SacrificeForManaAbility":
-      if (!canActForWaitingState) return null;
-      return <PermanentCostModal
-        data={waitingFor.data}
-        choices={waitingFor.data.permanents}
-        title="Sacrifice"
-        subtitle={`Choose ${waitingFor.data.count} permanent${waitingFor.data.count > 1 ? "s" : ""} to sacrifice`}
-        label="Sacrifice"
-        selectedClassName="z-10 ring-2 ring-red-400/80"
-        overlayClassName="absolute inset-0 flex items-center justify-center rounded-lg bg-red-500/20"
-        badgeClassName="rounded-full bg-red-500/90 px-3 py-1 text-xs font-bold text-white"
-      />;
-    case "PayManaAbilityMana":
-      if (!canActForWaitingState) return null;
-      return <PayManaAbilityManaModal data={waitingFor.data} />;
     case "CollectEvidenceChoice":
       if (!canActForWaitingState) return null;
       return <CollectEvidenceModal data={waitingFor.data} />;
@@ -289,9 +282,6 @@ export function CardChoiceModal() {
     case "RetargetChoice":
       if (!canActForWaitingState) return null;
       return <RetargetChoiceModal data={waitingFor.data} />;
-    case "CopyRetarget":
-      if (!canActForWaitingState) return null;
-      return <CopyRetargetModal data={waitingFor.data} />;
     case "ProliferateChoice":
       if (!canActForWaitingState) return null;
       return <ProliferateModal data={waitingFor.data} />;
@@ -1282,6 +1272,266 @@ function SacrificeModal({ data }: { data: SacrificeForCost["data"] }) {
     />
   );
 }
+
+function SacrificeForManaAbilityModal({ data }: { data: SacrificeForManaAbility["data"] }) {
+  const dispatch = useGameDispatch();
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const hoverProps = useInspectHoverProps();
+  const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
+
+  const toggleSelect = useCallback(
+    (id: ObjectId) => {
+      setSelected((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) {
+          next.delete(id);
+        } else if (next.size < data.count) {
+          next.add(id);
+        }
+        return next;
+      });
+    },
+    [data.count],
+  );
+
+  const handleConfirm = useCallback(() => {
+    dispatch({ type: "SelectCards", data: { cards: Array.from(selected) } });
+  }, [dispatch, selected]);
+
+  if (!objects) return null;
+
+  const isReady = selected.size === data.count;
+
+  return (
+    <ChoiceOverlay
+      title="Sacrifice"
+      subtitle={`Choose ${data.count} permanent${data.count > 1 ? "s" : ""} to sacrifice`}
+      footer={<ConfirmButton onClick={handleConfirm} disabled={!isReady} label={`Sacrifice (${selected.size}/${data.count})`} />}
+    >
+      <ScrollableCardStrip>
+        {data.permanents.map((id, index) => {
+          const obj = objects[id];
+          if (!obj) return null;
+          const isSelected = selected.has(id);
+          return (
+            <motion.button
+              key={id}
+              className={`relative rounded-lg transition ${
+                isSelected
+                  ? "z-10 ring-2 ring-red-400/80"
+                  : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
+              }`}
+              initial={{ opacity: 0, y: 60, scale: 0.85 }}
+              animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
+              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
+              whileHover={{ scale: 1.05, y: -6 }}
+              onClick={() => toggleSelect(id)}
+              {...hoverProps(id)}
+            >
+              <CardImage
+                {...objectImageProps(obj)}
+                size="normal"
+                className={CHOICE_CARD_IMAGE_CLASS}
+              />
+              {isSelected && (
+                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-red-500/20">
+                  <span className="rounded-full bg-red-500/90 px-3 py-1 text-xs font-bold text-white">Sacrifice</span>
+                </div>
+              )}
+            </motion.button>
+          );
+        })}
+      </ScrollableCardStrip>
+    </ChoiceOverlay>
+  );
+}
+
+// ── Exile From Battlefield For Mana Ability Modal ─────────────────────────────
+
+function ExileFromBattlefieldForManaAbilityModal({ data }: { data: ExileFromBattlefieldForManaAbility["data"] }) {
+  const dispatch = useGameDispatch();
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const hoverProps = useInspectHoverProps();
+  const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
+
+  const toggleSelect = useCallback(
+    (id: ObjectId) => {
+      setSelected((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id);
+        else if (next.size < data.count) next.add(id);
+        return next;
+      });
+    },
+    [data.count],
+  );
+
+  const handleConfirm = useCallback(() => {
+    dispatch({ type: "SelectCards", data: { cards: Array.from(selected) } });
+  }, [dispatch, selected]);
+
+  if (!objects) return null;
+
+  const isReady = selected.size === data.count;
+
+  return (
+    <ChoiceOverlay
+      title="Exile"
+      subtitle={`Choose ${data.count} permanent${data.count > 1 ? "s" : ""} to exile`}
+      footer={<ConfirmButton onClick={handleConfirm} disabled={!isReady} label={`Exile (${selected.size}/${data.count})`} />}
+    >
+      <ScrollableCardStrip>
+        {data.permanents.map((id, index) => {
+          const obj = objects[id];
+          if (!obj) return null;
+          const isSelected = selected.has(id);
+          return (
+            <motion.button
+              key={id}
+              className={`relative rounded-lg transition ${isSelected ? "z-10 ring-2 ring-amber-400/80" : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"}`}
+              initial={{ opacity: 0, y: 60, scale: 0.85 }}
+              animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
+              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
+              whileHover={{ scale: 1.05, y: -6 }}
+              onClick={() => toggleSelect(id)}
+              {...hoverProps(id)}
+            >
+              <CardImage {...objectImageProps(obj)} size="normal" className={CHOICE_CARD_IMAGE_CLASS} />
+              {isSelected && (
+                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-amber-500/20">
+                  <span className="rounded-full bg-amber-500/90 px-3 py-1 text-xs font-bold text-white">Exile</span>
+                </div>
+              )}
+            </motion.button>
+          );
+        })}
+      </ScrollableCardStrip>
+    </ChoiceOverlay>
+  );
+}
+
+// ── Multi-Target Selection Modal ──────────────────────────────────────────────
+
+function MultiTargetSelectionModal({ data }: { data: MultiTargetSelection["data"] }) {
+  const dispatch = useGameDispatch();
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const hoverProps = useInspectHoverProps();
+  const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
+
+  const toggleSelect = useCallback(
+    (id: ObjectId) => {
+      setSelected((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id);
+        else if (next.size < data.max_targets) next.add(id);
+        return next;
+      });
+    },
+    [data.max_targets],
+  );
+
+  const handleConfirm = useCallback(() => {
+    dispatch({ type: "SelectCards", data: { cards: Array.from(selected) } });
+  }, [dispatch, selected]);
+
+  if (!objects) return null;
+
+  const isReady = selected.size >= data.min_targets && selected.size <= data.max_targets;
+  const subtitle = data.min_targets === data.max_targets
+    ? `Choose ${data.max_targets} target${data.max_targets > 1 ? "s" : ""}`
+    : `Choose ${data.min_targets}–${data.max_targets} targets`;
+
+  return (
+    <ChoiceOverlay
+      title="Choose Targets"
+      subtitle={subtitle}
+      footer={<ConfirmButton onClick={handleConfirm} disabled={!isReady} label={`Confirm (${selected.size}/${data.max_targets})`} />}
+    >
+      <ScrollableCardStrip>
+        {data.legal_targets.map((id, index) => {
+          const obj = objects[id];
+          if (!obj) return null;
+          const isSelected = selected.has(id);
+          return (
+            <motion.button
+              key={id}
+              className={`relative rounded-lg transition ${isSelected ? "z-10 ring-2 ring-cyan-400/80" : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"}`}
+              initial={{ opacity: 0, y: 60, scale: 0.85 }}
+              animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
+              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
+              whileHover={{ scale: 1.05, y: -6 }}
+              onClick={() => toggleSelect(id)}
+              {...hoverProps(id)}
+            >
+              <CardImage {...objectImageProps(obj)} size="normal" className={CHOICE_CARD_IMAGE_CLASS} />
+              {isSelected && (
+                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-cyan-500/20">
+                  <span className="rounded-full bg-cyan-500/90 px-3 py-1 text-xs font-bold text-white">Target</span>
+                </div>
+              )}
+            </motion.button>
+          );
+        })}
+      </ScrollableCardStrip>
+    </ChoiceOverlay>
+  );
+}
+
+// ── Paradigm Cast Offer Modal ─────────────────────────────────────────────────
+
+function ParadigmCastOfferModal({ data }: { data: ParadigmCastOffer["data"] }) {
+  const dispatch = useGameDispatch();
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const hoverProps = useInspectHoverProps();
+
+  const handleSelect = useCallback(
+    (id: ObjectId) => dispatch({ type: "CastParadigmCopy", data: { source: id } }),
+    [dispatch],
+  );
+  const handlePass = useCallback(
+    () => dispatch({ type: "PassParadigmOffer" }),
+    [dispatch],
+  );
+
+  if (!objects) return null;
+
+  return (
+    <ChoiceOverlay
+      title="Paradigm"
+      subtitle="Cast a copy of one of these spells without paying its mana cost, or pass."
+      footer={
+        <div className="mx-auto flex w-full max-w-xl gap-2">
+          <div className="flex-1">
+            <CancelButton onClick={handlePass} label="Pass" />
+          </div>
+        </div>
+      }
+    >
+      <ScrollableCardStrip>
+        {data.offers.map((id, index) => {
+          const obj = objects[id];
+          if (!obj) return null;
+          return (
+            <motion.button
+              key={id}
+              className="relative rounded-lg transition hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
+              initial={{ opacity: 0, y: 60, scale: 0.85 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
+              whileHover={{ scale: 1.05, y: -6 }}
+              onClick={() => handleSelect(id)}
+              {...hoverProps(id)}
+            >
+              <CardImage {...objectImageProps(obj)} size="normal" className={CHOICE_CARD_IMAGE_CLASS} />
+            </motion.button>
+          );
+        })}
+      </ScrollableCardStrip>
+    </ChoiceOverlay>
+  );
+}
+
+// ── Pay Mana Ability Mana Modal ───────────────────────────────────────────────
 
 function ReturnToHandModal({ data }: { data: ReturnToHandForCost["data"] }) {
   return (

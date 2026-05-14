@@ -119,12 +119,21 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
   const isHumanTargetSelection =
     (waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection")
     && waitingFor.data.player === playerId;
+  const isCopyRetargetForMe = waitingFor?.type === "CopyRetarget" && waitingFor.data.player === playerId;
   const validPlayerTargetIds = useMemo(() => {
-    if (!isHumanTargetSelection) return [] as number[];
-    return (waitingFor.data.selection?.current_legal_targets ?? [])
-      .filter((target): target is { Player: number } => "Player" in target)
-      .map((target) => target.Player);
-  }, [isHumanTargetSelection, waitingFor]);
+    if (isHumanTargetSelection) {
+      return (waitingFor.data.selection?.current_legal_targets ?? [])
+        .filter((target): target is { Player: number } => "Player" in target)
+        .map((target) => target.Player);
+    }
+    if (isCopyRetargetForMe) {
+      const slot = waitingFor.data.target_slots[waitingFor.data.current_slot ?? 0];
+      return (slot?.legal_alternatives ?? [])
+        .filter((t): t is { Player: number } => "Player" in t)
+        .map((t) => t.Player);
+    }
+    return [] as number[];
+  }, [isHumanTargetSelection, isCopyRetargetForMe, waitingFor]);
 
   const handlePlayerTarget = useCallback(
     (targetPlayerId: number) => {

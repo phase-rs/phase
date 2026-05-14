@@ -316,10 +316,26 @@ fn pass_priority_once_with_pipeline(
     let stack_was_empty = state.stack.is_empty();
     let wf = priority::handle_priority_pass(state, events);
     sync_waiting_for(state, &wf);
+
+    // CR 608.2 + CR 117.4: Drain any pending continuation queued during the
+    // priority pass (e.g. effects that chain a sub-resolution after the parent
+    // settles) while the stack is still in its post-resolution state. Without
+    // this drain, a continuation queued after a no-choice effect would sit
+    // until an unrelated action, by which point referenced stack objects may
+    // have left the stack.
+    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        effects::drain_pending_continuation(state, events);
+    }
+
     let skip_triggers =
         stack_was_empty && !state.stack.is_empty() && state.phase == Phase::CombatDamage;
 
-    let wf = engine_priority::run_post_action_pipeline(state, events, &wf, skip_triggers)?;
+    let wf = engine_priority::run_post_action_pipeline(
+        state,
+        events,
+        &state.waiting_for.clone(),
+        skip_triggers,
+    )?;
     sync_waiting_for(state, &wf);
     Ok(wf)
 }
@@ -897,6 +913,31 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
     }
 }
 
+/// CR 707.10c: Finalize a `CopyRetarget` flow — write the slot-derived targets
+/// back onto the copy's stack entry, emit `EffectResolved`, hand priority back
+/// to the chooser, and drain any pending continuation queued during resolution.
+fn finalize_copy_retarget(
+    state: &mut GameState,
+    player: PlayerId,
+    copy_id: ObjectId,
+    slots: &[crate::types::game_state::CopyTargetSlot],
+    events: &mut Vec<GameEvent>,
+) {
+    let targets: Vec<_> = slots.iter().map(|s| s.current.clone()).collect();
+    if let Some(entry) = state.stack.iter_mut().find(|e| e.id == copy_id) {
+        if let Some(ability) = entry.ability_mut() {
+            ability.targets = targets;
+        }
+    }
+    events.push(GameEvent::EffectResolved {
+        kind: crate::types::ability::EffectKind::CopySpell,
+        source_id: copy_id,
+    });
+    state.waiting_for = WaitingFor::Priority { player };
+    state.priority_player = player;
+    effects::drain_pending_continuation(state, events);
+}
+
 fn apply_action(
     state: &mut GameState,
     actor: PlayerId,
@@ -1378,13 +1419,13 @@ fn apply_action(
                 card_id,
                 ..
             },
-            GameAction::ChooseOverloadCost { use_overload },
+            GameAction::ChooseOverloadCost { choice },
         ) => casting::handle_overload_cost_choice(
             state,
             *player,
             *object_id,
             *card_id,
-            use_overload,
+            choice,
             &mut events,
         )?,
         // CR 702.103a: Player chooses normal cast or Bestow cast from hand.
@@ -3100,52 +3141,69 @@ fn apply_action(
             effects::drain_pending_continuation(state, &mut events);
             state.waiting_for.clone()
         }
-        // CR 707.10c: Copy retarget — player chose new targets for the copy.
+        // CR 707.10c: Copy retarget — player chose target for the current slot
+        // via battlefield click. Advances slot-by-slot; finalizes on the last slot.
         (
             WaitingFor::CopyRetarget {
                 player,
                 copy_id,
                 target_slots,
+                current_slot,
             },
-            GameAction::SelectTargets { targets },
+            GameAction::ChooseTarget { target },
         ) => {
             let p = *player;
             let cid = *copy_id;
-            if targets.len() != target_slots.len() {
-                return Err(EngineError::InvalidAction(format!(
-                    "Must provide {} targets, got {}",
-                    target_slots.len(),
-                    targets.len()
-                )));
-            }
-            // CR 707.10c: When `legal_alternatives` is populated (e.g. copies
-            // minted by Prepare/Paradigm where initial target selection needs
-            // legality gating), validate each selected target is in its
-            // slot's alternatives. Slots with empty alternatives pre-date
-            // this check and remain permissive (retargeting an inherited
-            // target per the original CR 707.10c semantics).
-            for (idx, target) in targets.iter().enumerate() {
-                let slot = &target_slots[idx];
-                if !slot.legal_alternatives.is_empty() && !slot.legal_alternatives.contains(target)
-                {
+            let slot_idx = *current_slot;
+            if let Some(ref t) = target {
+                let slot = &target_slots[slot_idx];
+                // CR 707.10c: A retarget choice must produce a legal target. Both
+                // `prepare::open_copy_target_selection` and `copy_spell::resolve`
+                // populate `legal_alternatives` from `build_target_slots`, so an
+                // empty list means "no legal alternative exists" — the caller
+                // must use `KeepAllCopyTargets` (or send `target: None`).
+                if !slot.legal_alternatives.contains(t) {
                     return Err(EngineError::InvalidAction(format!(
-                        "Target {target:?} not a legal alternative for copy slot {idx}"
+                        "Target {t:?} not a legal alternative for copy slot {slot_idx}"
                     )));
                 }
             }
-            // Update the copy's targets on the stack.
-            if let Some(entry) = state.stack.iter_mut().find(|e| e.id == cid) {
-                if let Some(ability) = entry.ability_mut() {
-                    ability.targets = targets;
-                }
+            let mut updated_slots = target_slots.clone();
+            if let Some(t) = target {
+                updated_slots[slot_idx].current = t.clone();
             }
-            events.push(GameEvent::EffectResolved {
-                kind: crate::types::ability::EffectKind::CopySpell,
-                source_id: cid,
-            });
-            state.waiting_for = WaitingFor::Priority { player: p };
-            state.priority_player = p;
-            effects::drain_pending_continuation(state, &mut events);
+            let next_slot = slot_idx + 1;
+            if next_slot < updated_slots.len() {
+                state.waiting_for = WaitingFor::CopyRetarget {
+                    player: p,
+                    copy_id: cid,
+                    target_slots: updated_slots,
+                    current_slot: next_slot,
+                };
+            } else {
+                finalize_copy_retarget(state, p, cid, &updated_slots, &mut events);
+            }
+            state.waiting_for.clone()
+        }
+        // CR 707.10c: "Keep Current Targets" — accept every remaining slot's
+        // current value in one action. Equivalent to dispatching
+        // `ChooseTarget { target: None }` for each remaining slot, but resolved
+        // server-side so the UI doesn't pay N round-trips. The slot-by-slot
+        // `ChooseTarget` path above remains the single authority for the
+        // per-slot legality/advance semantics.
+        (
+            WaitingFor::CopyRetarget {
+                player,
+                copy_id,
+                target_slots,
+                ..
+            },
+            GameAction::KeepAllCopyTargets,
+        ) => {
+            let p = *player;
+            let cid = *copy_id;
+            let slots = target_slots.clone();
+            finalize_copy_retarget(state, p, cid, &slots, &mut events);
             state.waiting_for.clone()
         }
         // CR 510.1c/d: Combat damage assignment from attacker to blockers.
@@ -8400,6 +8458,7 @@ mod tests {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),

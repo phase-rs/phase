@@ -1687,6 +1687,96 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
 /// When this text appears on a permanent as a static ability, the static parser handles it.
 /// When it appears as an effect line in a spell or triggered ability (e.g., Choice of Fortunes),
 /// it needs to create an emblem to produce a persistent game-state effect.
+/// CR 700.2 + CR 608.2d: "[DEFAULT] unless that player [A] or [B]" —
+/// three-branch forced choice. The scoped player picks an avoidance option or
+/// accepts the default consequence. Called before `try_parse_choose_one_of_inline`
+/// to prevent the 2-branch splitter from misreading the left half.
+fn try_parse_unless_three_branch_choice(
+    tp: TextPair<'_>,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    // Nom combinator: split on the "unless" boundary (try "that player" first as
+    // the most specific), then split the alternatives on exactly one top-level
+    // " or ". `take_until` is bounded by the subsequent `tag`, so a match means
+    // the literal boundary token was found in order — no permissive substring
+    // scanning. The grammar is:
+    //   <default> " unless " ("that player " | "they ") <alt1> " or " <alt2>
+    use nom::Parser;
+    // Try " unless that player " first (most specific); fall back to " unless they ".
+    // Mirrors the original priority ordering — `split_around` matched the full
+    // needle, so a "that player" form embedded after a "they" form (rare) is
+    // still found via the first attempt.
+    let try_split = |needle: &'static str| -> Option<(usize, usize, usize)> {
+        nom_on_lower(tp.original, tp.lower, |i| {
+            let (i, default) = take_until(needle).parse(i)?;
+            let (i, _) = tag(needle).parse(i)?;
+            let (i, alt1) = take_until(" or ").parse(i)?;
+            let (i, _) = tag(" or ").parse(i)?;
+            // Reject 3+ alternatives — a second " or " means the top-level
+            // split was ambiguous and this isn't the binary "A or B" form.
+            if nom::bytes::complete::take_until::<_, _, nom::error::Error<&str>>(" or ")
+                .parse(i)
+                .is_ok()
+            {
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    i,
+                    nom::error::ErrorKind::Verify,
+                )));
+            }
+            Ok((i, (default.len(), alt1.len(), i.len())))
+        })
+        .map(|(lens, _)| lens)
+    };
+
+    let (default_len, alt1_len, alt2_len) =
+        try_split(" unless that player ").or_else(|| try_split(" unless they "))?;
+    // Oracle text is ASCII so byte positions in `tp.original` and `tp.lower` match.
+    let alts_start = tp.original.len() - alt2_len - " or ".len() - alt1_len;
+    let alt2_start = alts_start + alt1_len + " or ".len();
+    let default_orig = tp.original[..default_len].trim();
+    let alt1_orig = tp.original[alts_start..alts_start + alt1_len].trim();
+    let alt2_orig = tp.original[alt2_start..].trim().trim_end_matches('.');
+
+    if default_orig.is_empty() || alt1_orig.is_empty() || alt2_orig.is_empty() {
+        return None;
+    }
+
+    // Alternatives use third-person conjugation ("sacrifices", "discards") because
+    // the "that player" subject was stripped. Deconjugate to imperative so effect
+    // parsers recognise them.
+    let alt1_deconj = subject::deconjugate_verb(alt1_orig);
+    let alt2_deconj = subject::deconjugate_verb(alt2_orig);
+
+    let diagnostics_snapshot = ctx.diagnostics.len();
+    let default_clause = parse_effect_clause(default_orig, ctx);
+    let alt1_clause = parse_effect_clause(&alt1_deconj, ctx);
+    let alt2_clause = parse_effect_clause(&alt2_deconj, ctx);
+
+    if matches!(default_clause.effect, Effect::Unimplemented { .. })
+        || matches!(alt1_clause.effect, Effect::Unimplemented { .. })
+        || matches!(alt2_clause.effect, Effect::Unimplemented { .. })
+        || matches!(default_clause.effect, Effect::TargetOnly { .. })
+        || matches!(alt1_clause.effect, Effect::TargetOnly { .. })
+        || matches!(alt2_clause.effect, Effect::TargetOnly { .. })
+    {
+        ctx.diagnostics.truncate(diagnostics_snapshot);
+        return None;
+    }
+
+    let mut default_def = ability_definition_from_clause(AbilityKind::Spell, default_clause);
+    default_def.description = Some(default_orig.to_string());
+    let mut alt1_def = ability_definition_from_clause(AbilityKind::Spell, alt1_clause);
+    alt1_def.description = Some(alt1_deconj);
+    let mut alt2_def = ability_definition_from_clause(AbilityKind::Spell, alt2_clause);
+    alt2_def.description = Some(alt2_deconj);
+
+    // Branch order mirrors oracle text: default consequence first, then avoidance options.
+    Some(parsed_clause(Effect::ChooseOneOf {
+        chooser: PlayerFilter::Controller, // Rebound to scoped opponent via player_scope
+        branches: vec![default_def, alt1_def, alt2_def],
+    }))
+}
+
 /// CR 700.2 + CR 608.2d: Detect inline binary-choice imperatives of the form
 /// "A or B" where both A and B parse independently as supported effects.
 /// Emits `Effect::ChooseOneOf { branches: [A, B] }` so the second branch is
@@ -2295,6 +2385,14 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     }
 
     if let Some(clause) = try_parse_for_each_copy_token_source(text, &lower, ctx) {
+        return clause;
+    }
+
+    // CR 700.2 + CR 608.2d: Three-branch "[DEFAULT] unless that player A or B"
+    // forced choice — checked BEFORE the two-branch splitter so the more-specific
+    // "unless that player" pattern is matched before the left half is misread as
+    // just the default consequence (losing the avoidance alternative).
+    if let Some(clause) = try_parse_unless_three_branch_choice(tp, ctx) {
         return clause;
     }
 
@@ -9081,6 +9179,10 @@ pub(crate) fn parse_effect_chain_ir(
     // chain; the anchor is reset at each top-level call.
     let mut anchor_subject: Option<TargetFilter> = None;
     let mut chunk_diagnostics: Vec<OracleDiagnostic> = Vec::new();
+    // CR 609.3: "Repeat the following process N times." appears as its own
+    // sentence before the body clause. The count is stashed here and applied
+    // to the immediately-following clause so the body executes N times.
+    let mut pending_repeat_for: Option<QuantityExpr> = None;
 
     for (chunk_idx, chunk) in chunks.iter().enumerate() {
         let normalized_text = strip_leading_sequence_connector(&chunk.text).trim();
@@ -9242,6 +9344,21 @@ pub(crate) fn parse_effect_chain_ir(
         })
         .is_some()
         {
+            continue;
+        }
+
+        // CR 609.3: "Repeat the following process N times." — forward-carry
+        // repeat directive. Unlike "repeat this process" (back-reference),
+        // this announces that the NEXT clause executes N times. The count is
+        // stashed in `pending_repeat_for` and applied to the next clause's
+        // `repeat_for` field; the directive itself produces no clause.
+        if nom_on_lower(normalized_text, &lower_check, |i| {
+            value((), tag("repeat the following process")).parse(i)
+        })
+        .is_some()
+        {
+            let (count, _) = strip_repeat_count_suffix(normalized_text);
+            pending_repeat_for = count;
             continue;
         }
 
@@ -9721,7 +9838,9 @@ pub(crate) fn parse_effect_chain_ir(
         } else {
             (None, text)
         };
-        let repeat_for = repeat_for.or(repeat_count);
+        let repeat_for = repeat_for
+            .or(repeat_count)
+            .or_else(|| pending_repeat_for.take());
         let (player_scope, text) = strip_player_scope_subject(&text);
         let carried_player_scope = if player_scope.is_none()
             && !sequence::starts_clause_text(&text)
@@ -17203,7 +17322,7 @@ mod tests {
                 qty: QuantityRef::Variable { ref name }
             }) if name == "X"
         ));
-        let Effect::CopySpell { target } = &*def.effect else {
+        let Effect::CopySpell { target, .. } = &*def.effect else {
             panic!("expected CopySpell, got {:?}", def.effect);
         };
         assert!(matches!(

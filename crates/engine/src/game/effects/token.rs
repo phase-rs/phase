@@ -612,6 +612,12 @@ pub fn apply_create_token_after_replacement(
                 obj.keywords = ch.keywords.clone();
                 obj.base_keywords = ch.keywords.clone();
             }
+            // CR 400.7 + CR 302.6: Tokens enter the battlefield as new objects
+            // and must run the same ETB-state reset as any other permanent
+            // (summoning sickness, echo, damage, loyalty-activated flags).
+            // Delegate to the single authority for summoning sickness and
+            // related transient flags rather than setting them ad-hoc.
+            obj.reset_for_battlefield_entry(state.turn_number);
             obj.tapped = enter_tapped.resolve(spec.tapped);
 
             // CR 113.3d + CR 613.1: Apply static abilities from the token

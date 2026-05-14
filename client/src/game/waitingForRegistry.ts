@@ -36,6 +36,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "WarpCostChoice",
     "EvokeCostChoice",
     "BestowCostChoice",
+    "OverloadCostChoice",
     "ChoosePermanentTypeSlot",
     "DiscardForCost",
     "SacrificeForCost",
@@ -61,6 +62,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     // Triggers / resolution-time choices
     "ReplacementChoice",
     "CopyTargetChoice",
+    "CopyRetarget",
     "ExploreChoice",
     "EquipTarget",
     "CrewVehicle",

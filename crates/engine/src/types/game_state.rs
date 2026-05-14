@@ -687,6 +687,12 @@ pub struct PendingCast {
     /// during the normal cost-payment step after targets are chosen.
     #[serde(default)]
     pub deferred_target_selection: bool,
+    /// CR 601.2b: Set to `true` once an optional additional cost (e.g. Casualty)
+    /// that was deferred before target selection has been decided (paid or declined).
+    /// Guards `finish_pending_cast_cost_or_pay` from re-presenting the same cost
+    /// after the player selects targets.
+    #[serde(default)]
+    pub additional_cost_decided: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub declared_kickers_to_pay: Vec<KickerVariant>,
     /// CR 702.33f: Non-repeatable kicker options the player has declined in
@@ -729,6 +735,7 @@ impl PendingCast {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
@@ -2044,6 +2051,9 @@ pub enum WaitingFor {
         player: PlayerId,
         copy_id: ObjectId,
         target_slots: Vec<CopyTargetSlot>,
+        /// Index of the slot currently awaiting a ChooseTarget action.
+        #[serde(default)]
+        current_slot: usize,
     },
     /// CR 510.1c: Attacker with multiple blockers — controller divides damage as they choose.
     /// CR 702.19b/c: Trample requires lethal to each blocker before excess to defending player.
@@ -4156,6 +4166,7 @@ mod tests {
                 additional_cost_flow: None,
                 deferred_modal_choice: None,
                 deferred_target_selection: false,
+                additional_cost_decided: false,
                 declared_kickers_to_pay: Vec::new(),
                 declined_kickers: Vec::new(),
                 convoked_creatures: Vec::new(),
@@ -4433,6 +4444,7 @@ mod tests {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),

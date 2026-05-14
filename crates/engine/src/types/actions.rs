@@ -54,6 +54,18 @@ pub enum MulliganChoice {
     },
 }
 
+/// CR 702.96a: Player decision at a `WaitingFor::OverloadCostChoice` prompt —
+/// pay the normal mana cost or the Overload cost. Typed enum (not `bool`) so
+/// new branches can be added without breaking exhaustive match.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum OverloadChoice {
+    /// Pay the spell's printed mana cost; targets resolve normally.
+    Normal,
+    /// CR 702.96b-c: Pay the overload cost; every "target" becomes "each".
+    Overload,
+}
+
 /// CR 118.12a: Player decision at an `UnlessPaymentChooseCost` prompt — the
 /// disjunctive ("unless they X or Y") unless-cost choice. `Decline` falls
 /// through to the effect happening (mirrors `PayUnlessCost { pay: false }`);
@@ -225,12 +237,16 @@ pub enum GameAction {
     ChooseEvokeCost {
         use_evoke: bool,
     },
-    /// CR 702.96a: Choose normal cast (false) or Overload cast (true) from hand.
-    /// Overload cast substitutes the overload mana cost and transforms every
-    /// "target" in the spell's text to "each" (CR 702.96b-c).
+    /// CR 702.96a: Choose between paying the normal mana cost or the Overload
+    /// cost from hand. Overload cast substitutes the overload mana cost and
+    /// transforms every "target" in the spell's text to "each" (CR 702.96b-c).
     ChooseOverloadCost {
-        use_overload: bool,
+        choice: OverloadChoice,
     },
+    /// CR 707.10c: Resolve a `WaitingFor::CopyRetarget` by leaving every
+    /// remaining slot's target unchanged. Single action so the UI can offer
+    /// "Keep Current Targets" without N round-trips through `ChooseTarget`.
+    KeepAllCopyTargets,
     /// CR 702.103a: Choose normal cast (false) or Bestow cast (true) from hand.
     /// Bestow cast substitutes the bestow mana cost and turns the spell into an
     /// Aura with `enchant creature` (CR 702.103b).
@@ -886,6 +902,7 @@ impl GameAction {
             | GameAction::ChooseWarpCost { .. }
             | GameAction::ChooseEvokeCost { .. }
             | GameAction::ChooseOverloadCost { .. }
+            | GameAction::KeepAllCopyTargets
             | GameAction::ChooseBestowCost { .. }
             | GameAction::ChoosePermanentTypeSlot { .. }
             | GameAction::DecideOptionalEffect { .. }

@@ -18,11 +18,20 @@ export function TargetingOverlay() {
 
   const isTargetSelection = waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection";
   const isCopyTargetChoice = waitingFor?.type === "CopyTargetChoice";
+  const isCopyRetarget = waitingFor?.type === "CopyRetarget";
+  const canKeepCurrentTargets = isCopyRetarget && waitingFor.data.target_slots.every((slot) =>
+    slot.legal_alternatives.some((alt) =>
+      ("Object" in alt && "Object" in slot.current && alt.Object === slot.current.Object) ||
+      ("Player" in alt && "Player" in slot.current && alt.Player === slot.current.Player),
+    ),
+  );
   const isExploreChoice = waitingFor?.type === "ExploreChoice";
   const isTapCreatureChoice = waitingFor?.type === "TapCreaturesForManaAbility" || waitingFor?.type === "TapCreaturesForSpellCost";
   const targetSlots = isTargetSelection ? waitingFor.data.target_slots : [];
   const selection = isTargetSelection ? waitingFor.data.selection : null;
-  const currentTargetSlot = selection?.current_slot ?? 0;
+  const currentTargetSlot = isCopyRetarget
+    ? (waitingFor.data.current_slot ?? 0)
+    : (selection?.current_slot ?? 0);
   const activeSlot = targetSlots[currentTargetSlot];
   const isOptionalCurrentSlot = activeSlot?.optional === true;
   const sourceId = waitingFor?.type === "TriggerTargetSelection"
@@ -71,7 +80,7 @@ export function TargetingOverlay() {
     return () => clearSelectedCards();
   }, [clearSelectedCards, isTapCreatureChoice]);
 
-  if (!isTargetSelection && !isCopyTargetChoice && !isExploreChoice && !isTapCreatureChoice) return null;
+  if (!isTargetSelection && !isCopyTargetChoice && !isCopyRetarget && !isExploreChoice && !isTapCreatureChoice) return null;
 
   // Only show targeting UI for the human player
   if (!canActForWaitingState) return null;
@@ -98,6 +107,13 @@ export function TargetingOverlay() {
             <div className="rounded-lg bg-gray-900/90 px-6 py-2 text-lg font-semibold text-cyan-400 shadow-lg">
             {isCopyTargetChoice
               ? "Choose a permanent to copy"
+              : isCopyRetarget
+                ? (() => {
+                    const slots = waitingFor.data.target_slots;
+                    return slots.length > 1
+                      ? `Retarget copy: slot ${Math.min(currentTargetSlot + 1, slots.length)} of ${slots.length}`
+                      : "Choose new target for copy";
+                  })()
               : isExploreChoice
                 ? "Choose which creature explores next"
               : isTapCreatureChoice
@@ -133,6 +149,18 @@ export function TargetingOverlay() {
               className="rounded-lg bg-emerald-700 px-6 py-2 font-semibold text-gray-100 shadow-lg transition hover:bg-emerald-600 disabled:cursor-not-allowed disabled:bg-gray-700 disabled:text-gray-400"
             >
               Confirm Tap ({selectedCardIds.length}/{waitingFor.data.count})
+            </button>
+          )}
+          {canKeepCurrentTargets && (
+            <button
+              onClick={() =>
+                dispatch({
+                  type: "KeepAllCopyTargets",
+                })
+              }
+              className="rounded-lg bg-emerald-700 px-6 py-2 font-semibold text-gray-100 shadow-lg transition hover:bg-emerald-600"
+            >
+              Keep Current Targets
             </button>
           )}
           {isOptionalCurrentSlot && (

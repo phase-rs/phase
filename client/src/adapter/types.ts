@@ -615,6 +615,8 @@ export type TargetRef =
   | { Object: ObjectId }
   | { Player: PlayerId };
 
+export type CopyTargetSlot = { current: TargetRef; legal_alternatives: TargetRef[] };
+
 // ── Combat ───────────────────────────────────────────────────────────────
 
 export interface AttackerInfo {
@@ -866,7 +868,6 @@ export type WaitingFor =
   | { type: "DrawnThisTurnTopdeckChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; min_count: number; life_payment: number; source_id: ObjectId } }
   | { type: "RetargetChoice"; data: { player: PlayerId; stack_entry_index: number; scope: RetargetScope; current_targets: TargetRef[]; legal_new_targets: TargetRef[] } }
   | { type: "ProliferateChoice"; data: { player: PlayerId; eligible: TargetRef[] } }
-  | { type: "CopyRetarget"; data: { player: PlayerId; copy_id: ObjectId; target_slots: { current: TargetRef; legal_alternatives: TargetRef[] }[] } }
   | { type: "ConniveDiscard"; data: { player: PlayerId; conniver_id: ObjectId; source_id: ObjectId; cards: ObjectId[]; count: number } }
   | { type: "DiscardChoice"; data: { player: PlayerId; count: number; cards: ObjectId[]; source_id: ObjectId; effect_kind: string; up_to?: boolean; unless_filter?: TargetFilter } }
   | { type: "ManifestDreadChoice"; data: { player: PlayerId; cards: ObjectId[] } }
@@ -892,7 +893,8 @@ export type WaitingFor =
       source_id: ObjectId;
       remaining_players: PlayerId[];
       all_kept: ObjectId[];
-    } };
+    } }
+  | { type: "CopyRetarget"; data: { player: PlayerId; copy_id: ObjectId; target_slots: CopyTargetSlot[]; current_slot?: number } };
 
 // ── Learn ────────────────────────────────────────────────────────────────
 
@@ -1030,7 +1032,8 @@ export type GameAction =
   | { type: "ChooseModalFace"; data: { back_face: boolean } }
   | { type: "ChooseWarpCost"; data: { use_warp: boolean } }
   | { type: "ChooseEvokeCost"; data: { use_evoke: boolean } }
-  | { type: "ChooseOverloadCost"; data: { use_overload: boolean } }
+  | { type: "ChooseOverloadCost"; data: { choice: { type: "Normal" } | { type: "Overload" } } }
+  | { type: "KeepAllCopyTargets" }
   | { type: "ChooseBestowCost"; data: { use_bestow: boolean } }
   | { type: "ChoosePermanentTypeSlot"; data: { slot: CoreType } }
   | { type: "CastSpellForFree"; data: { object_id: ObjectId; card_id: CardId; source_id: ObjectId } }
@@ -1509,7 +1512,7 @@ export interface EngineAdapter {
   submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
   getState(): Promise<GameState>;
   getLegalActions(): Promise<LegalActionsResult>;
-  getAiAction(difficulty: string, playerId: number): Promise<GameAction | null> | GameAction | null;
+  getAiAction(difficulty: string, playerId: number, waitingForType?: WaitingFor["type"]): Promise<GameAction | null> | GameAction | null;
   resolveAll?(
     requester: number,
     aiSeats: { playerId: number; difficulty: string }[],
