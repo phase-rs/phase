@@ -1,14 +1,48 @@
 import { useEffect, useRef, useState } from "react";
 
 import type { BracketEstimate, EngineAdapter, GameFormat } from "../adapter/types";
+import { isCommanderFamilyFormat } from "../types/bracket";
 import type { ParsedDeck } from "../services/deckParser";
 
 const DEBOUNCE_MS = 200;
 
+/**
+ * Cross-instance cache: deck-key → most-recent promise. Lets multiple
+ * hook instances (e.g. one per row on MyDecksPage) share results for
+ * identical decks without each re-hitting the WASM bridge.
+ *
+ * Lives at module scope; survives component unmount. The data_version
+ * stamped onto each BracketEstimate handles bracket_lists.json updates
+ * naturally — a hot-reload of card data will produce new keys.
+ */
+const cache = new Map<string, Promise<BracketEstimate | null>>();
+const CACHE_MAX_ENTRIES = 256;
+
+function readCacheOrFetch(
+  deckKey: string,
+  fetcher: () => Promise<BracketEstimate | null>,
+): Promise<BracketEstimate | null> {
+  const cached = cache.get(deckKey);
+  if (cached) return cached;
+  const promise = fetcher();
+  cache.set(deckKey, promise);
+  // simple LRU cap
+  if (cache.size > CACHE_MAX_ENTRIES) {
+    const firstKey = cache.keys().next().value;
+    if (firstKey !== undefined) cache.delete(firstKey);
+  }
+  return promise;
+}
+
+/** Clears the module-level bracket estimate cache. Use in test afterEach hooks. */
+export function clearBracketEstimateCache(): void {
+  cache.clear();
+}
+
 interface Options {
   deck: ParsedDeck;
   commanders: string[];
-  format: GameFormat;
+  format: GameFormat | undefined;
   adapter: Pick<EngineAdapter, "estimateBracket">;
 }
 
@@ -41,7 +75,7 @@ export function useBracketEstimate({
   /** Latest *scheduled* key — written synchronously, used as the stale-result guard. */
   const pendingKeyRef = useRef<string | null>(null);
 
-  const eligible = format === "Commander" && commanders.length > 0;
+  const eligible = isCommanderFamilyFormat(format) && commanders.length > 0;
 
   const deckKey = (() => {
     if (!eligible) return null;
@@ -66,11 +100,13 @@ export function useBracketEstimate({
     const scheduledKey = deckKey;
     const timer = setTimeout(async () => {
       try {
-        const result = await adapter.estimateBracket({
-          commander: commanders,
-          main_deck: deck.main.flatMap((e) => Array(e.count).fill(e.name)),
-          sideboard: deck.sideboard.flatMap((e) => Array(e.count).fill(e.name)),
-        });
+        const result = await readCacheOrFetch(scheduledKey, () =>
+          adapter.estimateBracket({
+            commander: commanders,
+            main_deck: deck.main.flatMap((e) => Array(e.count).fill(e.name)),
+            sideboard: deck.sideboard.flatMap((e) => Array(e.count).fill(e.name)),
+          }),
+        );
         if (pendingKeyRef.current !== scheduledKey) {
           // A newer effect superseded us; discard this stale result.
           return;

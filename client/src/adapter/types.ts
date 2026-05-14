@@ -1533,11 +1533,24 @@ export interface BracketViolation {
   forced_floor: CommanderBracketTier;
 }
 
+export interface BracketAxisCaps {
+  game_changers: number | null;
+  mass_land_denial: number | null;
+  extra_turns: number | null;
+  efficient_tutors: number | null;
+}
+
 export interface BracketEstimate {
   tier: CommanderBracketTier;
   axes: BracketAxisCounts;
+  axis_caps_at_tier: BracketAxisCaps;
   contributing: BracketContributingCards;
-  violations: BracketViolation[];
+  /**
+   * Per-axis violations recorded for axes whose count exceeded a tier
+   * ceiling. Serialized from Rust `BTreeMap<BracketAxis, BracketViolation>`
+   * — keys are axis names, missing key = axis within bounds.
+   */
+  violations: Partial<Record<BracketAxis, BracketViolation>>;
   data_version: string;
 }
 

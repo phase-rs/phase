@@ -1,19 +1,20 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderHook, act, waitFor } from "@testing-library/react";
-import { useBracketEstimate } from "../useBracketEstimate";
+import { useBracketEstimate, clearBracketEstimateCache } from "../useBracketEstimate";
 import type { BracketEstimate } from "../../adapter/types";
 import type { ParsedDeck } from "../../services/deckParser";
 
 const mockEstimate: BracketEstimate = {
   tier: "upgraded",
   axes: { game_changers: 1, mass_land_denial: 0, extra_turns: 0, efficient_tutors: 2 },
+  axis_caps_at_tier: { game_changers: 3, mass_land_denial: 0, extra_turns: null, efficient_tutors: null },
   contributing: {
     game_changers: ["Smothering Tithe"],
     mass_land_denial: [],
     extra_turns: [],
     efficient_tutors: ["Demonic Tutor", "Vampiric Tutor"],
   },
-  violations: [],
+  violations: {},
   data_version: "test-1",
 };
 
@@ -32,6 +33,8 @@ const deck: ParsedDeck = {
 };
 
 describe("useBracketEstimate", () => {
+  afterEach(() => clearBracketEstimateCache());
+
   it("returns null when format is not Commander", async () => {
     const adapter = makeAdapter();
     const { result } = renderHook(() =>
@@ -146,5 +149,42 @@ describe("useBracketEstimate", () => {
     // Hook should still show the second (newer) estimate.
     expect(result.current.estimate?.tier).toBe("optimized");
     expect(result.current.estimate?.contributing.game_changers).toEqual(["SECOND"]);
+  });
+
+  it("returns an estimate for Brawl format (commander family)", async () => {
+    const adapter = makeAdapter();
+    renderHook(() =>
+      useBracketEstimate({ deck, commanders: ["Atraxa"], format: "Brawl", adapter }),
+    );
+    await waitFor(() => expect(adapter.estimateBracket).toHaveBeenCalledTimes(1));
+  });
+
+  it("returns null for undefined format", async () => {
+    const adapter = makeAdapter();
+    const { result } = renderHook(() =>
+      useBracketEstimate({ deck, commanders: ["Atraxa"], format: undefined, adapter }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.estimate).toBeNull();
+    expect(adapter.estimateBracket).not.toHaveBeenCalled();
+  });
+
+  it("shares results across hook instances via module-level cache", async () => {
+    const adapter = makeAdapter();
+    // Use a deck that the cache hasn't seen — a unique fingerprint per test run.
+    const uniqueDeck: ParsedDeck = {
+      main: [{ name: `Unique-${Date.now()}`, count: 1 }],
+      sideboard: [],
+    };
+    const props = {
+      deck: uniqueDeck,
+      commanders: ["Atraxa"],
+      format: "Commander" as const,
+      adapter,
+    };
+    renderHook(() => useBracketEstimate(props));
+    renderHook(() => useBracketEstimate(props));
+    await new Promise((r) => setTimeout(r, 250));
+    expect(adapter.estimateBracket).toHaveBeenCalledTimes(1);
   });
 });

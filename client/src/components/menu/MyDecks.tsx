@@ -152,7 +152,7 @@ function BracketChipForDeck({ candidate }: { candidate: DeckCatalogCandidate }) 
   const { estimate } = useBracketEstimate({
     deck: candidate.deck,
     commanders: candidate.deck.commander ?? [],
-    format: candidate.knownFormat ?? "Standard",
+    format: candidate.knownFormat,
     adapter: getSharedAdapter(),
   });
   return <BracketEstimateChip tier={estimate?.tier ?? null} />;

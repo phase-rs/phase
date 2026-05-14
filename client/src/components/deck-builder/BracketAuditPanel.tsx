@@ -19,12 +19,6 @@ const AXIS_LABEL: Record<BracketAxis, string> = {
   efficient_tutors: "Efficient Tutors",
 };
 
-const AXIS_CAPS: Record<BracketAxis, [number, number, number, number, number]> = {
-  game_changers: [0, 0, 3, Infinity, Infinity],
-  mass_land_denial: [0, 0, 0, Infinity, Infinity],
-  extra_turns: [0, 0, Infinity, Infinity, Infinity],
-  efficient_tutors: [0, 2, Infinity, Infinity, Infinity],
-};
 
 export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyReason }: Props) {
   const [expanded, setExpanded] = useState(false);
@@ -67,7 +61,7 @@ export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyR
           aria-expanded={expanded}
           aria-label={expanded ? "Hide breakdown" : "Show breakdown"}
           onClick={() => setExpanded((v) => !v)}
-          className="ml-auto rounded-full border border-white/10 bg-black/20 px-2.5 py-1 text-xs font-medium text-slate-400 hover:bg-white/6"
+          className="ml-auto min-h-[44px] rounded-full border border-white/10 bg-black/20 px-2.5 py-1 text-xs font-medium text-slate-400 hover:bg-white/6 sm:min-h-0 sm:py-1"
         >
           {expanded ? "▲ Hide breakdown" : "▼ Show breakdown"}
         </button>
@@ -78,13 +72,13 @@ export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyR
           {(Object.keys(AXIS_LABEL) as BracketAxis[]).map((axis) => {
             const count = estimate.axes[axis];
             const cards = estimate.contributing[axis];
-            const cap = AXIS_CAPS[axis][tierNum - 1];
+            const cap = estimate.axis_caps_at_tier[axis];
             return (
               <div key={axis} className="grid grid-cols-[180px_60px_1fr] items-start gap-2">
                 <dt className="text-slate-300">{AXIS_LABEL[axis]}</dt>
                 <dd className="text-slate-200">
                   {count}
-                  {Number.isFinite(cap) && ` / ${cap}`}
+                  {cap !== null && ` / ${cap}`}
                 </dd>
                 <dd className="text-slate-400">
                   {cards.length === 0 && "—"}
@@ -93,7 +87,7 @@ export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyR
                       <button
                         type="button"
                         onClick={() => onCardClick(name)}
-                        className="text-slate-300 underline-offset-2 hover:underline"
+                        className="min-h-[44px] text-slate-300 underline-offset-2 hover:underline sm:min-h-0"
                       >
                         {name}
                       </button>

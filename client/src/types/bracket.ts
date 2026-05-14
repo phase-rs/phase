@@ -1,4 +1,4 @@
-import type { CommanderBracketTier } from "../adapter/types";
+import type { CommanderBracketTier, GameFormat } from "../adapter/types";
 
 /**
  * WotC Commander bracket tiers (1 Exhibition → 5 cEDH). Used only as
@@ -21,6 +21,24 @@ export const BRACKET_LABEL: Record<CommanderBracket, string> = {
 /** Type guard for arbitrary persisted/external values. */
 export function isCommanderBracket(value: unknown): value is CommanderBracket {
   return value === 1 || value === 2 || value === 3 || value === 4 || value === 5;
+}
+
+/** Format slugs that use a commander zone and singleton deck rules. */
+const COMMANDER_FAMILY_FORMATS: ReadonlySet<GameFormat> = new Set<GameFormat>([
+  "Commander",
+  "DuelCommander",
+  "PauperCommander",
+  "Brawl",
+  "HistoricBrawl",
+]);
+
+/**
+ * Returns true when the format uses a commander zone and would benefit
+ * from bracket analysis. Mirrors the engine's `FormatConfig.uses_commander`
+ * field. Keeps a single source of truth on the frontend.
+ */
+export function isCommanderFamilyFormat(format: GameFormat | undefined | null): boolean {
+  return format != null && COMMANDER_FAMILY_FORMATS.has(format);
 }
 
 /**
