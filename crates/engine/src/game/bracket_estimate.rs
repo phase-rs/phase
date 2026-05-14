@@ -8,6 +8,8 @@
 //! Bracket policy is **not** part of the Comprehensive Rules — it is WotC's
 //! Commander Format Panel guidance. No `// CR` annotations apply.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::database::CardDatabase;
@@ -76,7 +78,7 @@ pub struct BracketViolation {
     pub forced_floor: CommanderBracketTier,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BracketAxis {
     GameChangers,
@@ -85,12 +87,30 @@ pub enum BracketAxis {
     EfficientTutors,
 }
 
+/// Per-axis cap at the resolved tier. `None` means "no cap at this tier"
+/// (i.e. the axis is unrestricted past this point — what was `u8::MAX` in
+/// the internal `CAPS` table).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BracketAxisCaps {
+    pub game_changers: Option<u8>,
+    pub mass_land_denial: Option<u8>,
+    pub extra_turns: Option<u8>,
+    pub efficient_tutors: Option<u8>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BracketEstimate {
     pub tier: CommanderBracketTier,
     pub axes: BracketAxisCounts,
+    /// Per-axis cap at the resolved tier, for UI display ("count / cap"
+    /// in the breakdown panel). `None` per axis = no cap at this tier.
+    pub axis_caps_at_tier: BracketAxisCaps,
     pub contributing: BracketContributingCards,
-    pub violations: Vec<BracketViolation>,
+    /// At most one violation per axis — keyed by `BracketAxis` so the
+    /// invariant is expressed in the type. Iterate in `BracketAxis`
+    /// declaration order (BTreeMap) or sort by `forced_floor` on the
+    /// consumer side.
+    pub violations: BTreeMap<BracketAxis, BracketViolation>,
     /// `BracketLists.version`, passed through from the export pipeline.
     pub data_version: String,
 }
@@ -126,10 +146,12 @@ pub fn estimate_bracket(deck: &PlayerDeckList, db: &CardDatabase) -> Option<Brac
     }
 
     let (tier, violations) = decide_tier(&axes);
+    let axis_caps_at_tier = caps_at_tier(tier);
 
     Some(BracketEstimate {
         tier,
         axes,
+        axis_caps_at_tier,
         contributing,
         violations,
         data_version: db.bracket_lists.version.clone(),
@@ -158,11 +180,17 @@ const TIERS: [CommanderBracketTier; 4] = [
 /// Walks `axes` against the per-axis cap table. For each axis whose count
 /// exceeds at least one tier ceiling, emits exactly one `BracketViolation`
 /// recording the highest ceiling crossed. The returned tier is the max
-/// floor across axes. Violations are sorted by descending `forced_floor`
-/// so the UI can render "Why B3?" rows in priority order.
-fn decide_tier(axes: &BracketAxisCounts) -> (CommanderBracketTier, Vec<BracketViolation>) {
+/// floor across axes. Violations are keyed by `BracketAxis` (at most one
+/// per axis — the type expresses this invariant). Callers that need display
+/// ordering should sort by `forced_floor` on their side.
+fn decide_tier(
+    axes: &BracketAxisCounts,
+) -> (
+    CommanderBracketTier,
+    BTreeMap<BracketAxis, BracketViolation>,
+) {
     let mut floor_index: usize = 0;
-    let mut violations = Vec::new();
+    let mut violations: BTreeMap<BracketAxis, BracketViolation> = BTreeMap::new();
 
     for (axis, caps) in CAPS {
         let count = axes.count_for(*axis);
@@ -177,17 +205,46 @@ fn decide_tier(axes: &BracketAxisCounts) -> (CommanderBracketTier, Vec<BracketVi
             }
         }
         if let Some((cap, forced_floor)) = highest_crossed {
-            violations.push(BracketViolation {
-                axis: *axis,
-                count,
-                prior_cap: cap,
-                forced_floor,
-            });
+            violations.insert(
+                *axis,
+                BracketViolation {
+                    axis: *axis,
+                    count,
+                    prior_cap: cap,
+                    forced_floor,
+                },
+            );
         }
     }
 
-    violations.sort_by_key(|v| std::cmp::Reverse(v.forced_floor.as_u8()));
     (TIERS[floor_index], violations)
+}
+
+/// Computes the per-axis cap values at a given tier for UI display
+/// ("count / cap" in the breakdown panel). Returns `None` for an axis
+/// that has no cap at the given tier (i.e., was `u8::MAX` in `CAPS`).
+fn caps_at_tier(tier: CommanderBracketTier) -> BracketAxisCaps {
+    let tier_idx = match tier {
+        CommanderBracketTier::Exhibition => 0,
+        CommanderBracketTier::Core => 1,
+        CommanderBracketTier::Upgraded => 2,
+        // cEDH caps mirror B4 (no caps at this tier).
+        CommanderBracketTier::Optimized | CommanderBracketTier::Cedh => 3,
+    };
+    let read = |axis: BracketAxis| -> Option<u8> {
+        CAPS.iter()
+            .find(|(a, _)| *a == axis)
+            .and_then(|(_, c)| match c[tier_idx] {
+                u8::MAX => None,
+                v => Some(v),
+            })
+    };
+    BracketAxisCaps {
+        game_changers: read(BracketAxis::GameChangers),
+        mass_land_denial: read(BracketAxis::MassLandDenial),
+        extra_turns: read(BracketAxis::ExtraTurns),
+        efficient_tutors: read(BracketAxis::EfficientTutors),
+    }
 }
 
 #[cfg(test)]
@@ -330,10 +387,10 @@ mod tests {
         let e = estimate_bracket(&d, &db).unwrap();
         assert_eq!(e.tier, CommanderBracketTier::Upgraded);
         assert_eq!(e.axes.game_changers, 1);
-        assert!(e
-            .violations
-            .iter()
-            .any(|v| v.axis == BracketAxis::GameChangers));
+        assert!(
+            e.violations.contains_key(&BracketAxis::GameChangers),
+            "GameChangers violation must be present"
+        );
     }
 
     #[test]
@@ -515,7 +572,7 @@ mod tests {
     }
 
     #[test]
-    fn highest_axis_wins_and_violation_is_first_in_sort() {
+    fn highest_axis_wins_and_violations_recorded_per_axis() {
         let db = db_with_signals(&[
             (
                 "Smothering Tithe",
@@ -535,17 +592,47 @@ mod tests {
         let d = deck(vec!["Cmdr"], vec!["Smothering Tithe", "Armageddon"]);
         let e = estimate_bracket(&d, &db).unwrap();
         assert_eq!(e.tier, CommanderBracketTier::Optimized, "MLD pushes to B4");
-        assert_eq!(e.violations.len(), 2, "one violation per axis");
+        assert_eq!(e.violations.len(), 2, "one violation per crossed axis");
         assert_eq!(
-            e.violations[0].axis,
-            BracketAxis::MassLandDenial,
-            "B4 violation sorts first"
-        );
-        assert_eq!(
-            e.violations[0].forced_floor,
+            e.violations[&BracketAxis::MassLandDenial].forced_floor,
             CommanderBracketTier::Optimized
         );
-        assert_eq!(e.violations[1].axis, BracketAxis::GameChangers);
-        assert_eq!(e.violations[1].forced_floor, CommanderBracketTier::Upgraded);
+        assert_eq!(
+            e.violations[&BracketAxis::GameChangers].forced_floor,
+            CommanderBracketTier::Upgraded
+        );
+    }
+
+    #[test]
+    fn axis_caps_at_tier_shape_per_tier() {
+        // B1 (Exhibition): all axes capped at 0.
+        let b1 = caps_at_tier(CommanderBracketTier::Exhibition);
+        assert_eq!(b1.game_changers, Some(0));
+        assert_eq!(b1.mass_land_denial, Some(0));
+        assert_eq!(b1.extra_turns, Some(0));
+        assert_eq!(b1.efficient_tutors, Some(0));
+
+        // B2 (Core): game_changers=0, mass_land_denial=0, extra_turns=0,
+        //            efficient_tutors=2.
+        let b2 = caps_at_tier(CommanderBracketTier::Core);
+        assert_eq!(b2.game_changers, Some(0));
+        assert_eq!(b2.mass_land_denial, Some(0));
+        assert_eq!(b2.extra_turns, Some(0));
+        assert_eq!(b2.efficient_tutors, Some(2));
+
+        // B3 (Upgraded): game_changers=3, mass_land_denial=0,
+        //                extra_turns=None (uncapped), efficient_tutors=None.
+        let b3 = caps_at_tier(CommanderBracketTier::Upgraded);
+        assert_eq!(b3.game_changers, Some(3));
+        assert_eq!(b3.mass_land_denial, Some(0));
+        assert_eq!(b3.extra_turns, None, "ExtraTurns uncapped at B3");
+        assert_eq!(b3.efficient_tutors, None, "EfficientTutors uncapped at B3");
+
+        // B4 (Optimized): all axes uncapped.
+        let b4 = caps_at_tier(CommanderBracketTier::Optimized);
+        assert_eq!(b4.game_changers, None, "GameChangers uncapped at B4");
+        assert_eq!(b4.mass_land_denial, None, "MassLandDenial uncapped at B4");
+        assert_eq!(b4.extra_turns, None);
+        assert_eq!(b4.efficient_tutors, None);
     }
 }
