@@ -332,7 +332,9 @@ fn main() {
         None => match &data_dir {
             Some(d) => d.join("mtgjson/AtomicCards.json"),
             None => {
-                eprintln!("Usage: oracle-gen <data-dir> [--mtgjson <path>] [--stats] [--output <path>]");
+                eprintln!(
+                    "Usage: oracle-gen <data-dir> [--mtgjson <path>] [--stats] [--output <path>]"
+                );
                 eprintln!("  Parses Oracle text from MTGJSON and outputs card-data export JSON");
                 eprintln!("  --output <path>  Write the export to a file instead of stdout");
                 process::exit(1);
