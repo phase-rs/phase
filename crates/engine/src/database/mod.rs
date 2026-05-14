@@ -1,3 +1,4 @@
+pub mod bracket_lists;
 pub mod card_db;
 #[cfg(feature = "forge")]
 pub mod forge;
