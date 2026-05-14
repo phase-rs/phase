@@ -98,8 +98,40 @@ Exit codes: `0` all ok, `1` a resource is in terminal error (`updateStatus=error
 - Use `--follow` only when you need to stream live output (e.g., waiting for a build in progress).
 - Use `--since` to limit output — don't dump entire build history.
 - If a resource shows errors, fix your code and Tilt will automatically rebuild.
-- Only run cargo/pnpm commands directly if Tilt is confirmed not running (check `tilt status` or `curl -s localhost:10350/api/status`).
+- Only run cargo/pnpm commands directly if Tilt is confirmed not running. Detect with `tilt get uiresource clippy >/dev/null 2>&1` (exit 0 = Tilt up; exit non-zero = Tilt down or unreachable). `tilt status` is **not** a valid subcommand — do not use it.
 - `cargo fmt --all` is the one exception — always run it directly since Tilt doesn't auto-format.
+
+**Canonical verification pattern (use this everywhere — agent, skills, ad-hoc):**
+
+Tilt is the *preferred* path but is not always running (fresh clones, CI shells, headless tooling). Every verification step must default to `tilt-wait.sh` when Tilt is up and fall back to direct cargo/pnpm commands when it is not. Detection is a single shell guard:
+
+```bash
+# Always run fmt directly — Tilt does not auto-format.
+cargo fmt --all
+
+# Rust verification (engine + parser — any engine src change invalidates
+# card-data per Tiltfile, so wait on it unconditionally):
+if tilt get uiresource clippy >/dev/null 2>&1; then
+  ./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data
+else
+  cargo clippy --all-targets -- -D warnings
+  cargo test -p engine
+  ./scripts/gen-card-data.sh
+fi
+
+# Frontend verification:
+if tilt get uiresource clippy >/dev/null 2>&1; then
+  ./scripts/tilt-wait.sh --timeout 180 check-frontend
+else
+  (cd client && pnpm run type-check && pnpm lint)
+fi
+```
+
+After `tilt-wait.sh` returns non-zero, fetch details with `tilt logs <resource> --tail 50 --since 2m`. After direct cargo/pnpm failures, the output is already on stdout.
+
+These blocks are designed for interactive use, where a non-zero exit from `tilt-wait.sh` or a cargo command is surfaced via the printed status line and the operator fixes it before re-verifying. **In a `set -e` shell or scripted/CI harness, the `if` construct will swallow the inner non-zero exit** — wrap each branch with `|| exit $?` (or restructure as `tilt get uiresource clippy >/dev/null 2>&1 && tilt-wait.sh ... || cargo ...`) when copy-pasting into automation.
+
+The one-shot audit binaries (`cargo coverage`, `cargo semantic-audit`, `cargo parser-gaps`, `cargo rules-audit`) are not continuous Tilt resources — invoke them directly in both modes.
 
 ### CRITICAL: Building Blocks and Architecture Purity
 

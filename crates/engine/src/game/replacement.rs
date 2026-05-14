@@ -1218,22 +1218,29 @@ fn empty_mana_pool_matcher(event: &ProposedEvent, _source: ObjectId, state: &Gam
         .any(|u| matches!(u.disposition, UnitDisposition::Drop))
 }
 
-/// CR 703.4q + CR 614.1a: Stub applier for the `LoseMana` registry slot. The
-/// real disposition mutation happens in `apply_empty_mana_pool_replacement`
-/// (the carve-out branch at the top of `apply_single_replacement`), which
-/// early-returns before this applier is dispatched. If this function is ever
-/// reached the discriminator has regressed.
+/// CR 703.4q + CR 614.1a: Dead applier for the `LoseMana` registry slot.
+/// `apply_single_replacement` discriminates `ProposedEvent::EmptyManaPool`
+/// to `apply_empty_mana_pool_replacement` (the Path A carve-out) before
+/// registry dispatch, so this function is never invoked at runtime. The
+/// matcher + applier pair exist only to occupy the `LoseMana` slot in the
+/// `ReplacementEvent` enum — `build_replacement_registry`'s exhaustive
+/// match would otherwise fail to compile, and a `None` entry would mask
+/// the slot's "structurally registered, dispatched out-of-band" intent.
+///
+/// Reaching this code path is a discriminator regression: either the
+/// carve-out branch was removed, or a new ProposedEvent variant was added
+/// that routes through `LoseMana` instead of past it.
 fn empty_mana_pool_applier(
-    event: ProposedEvent,
+    _event: ProposedEvent,
     _rid: ReplacementId,
     _state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    debug_assert!(
-        false,
-        "empty_mana_pool_applier reached: apply_single_replacement discriminator should have routed to apply_empty_mana_pool_replacement"
+    unreachable!(
+        "empty_mana_pool_applier reached: apply_single_replacement \
+         discriminator should have routed to apply_empty_mana_pool_replacement \
+         (Path A carve-out for ProposedEvent::EmptyManaPool)"
     );
-    ApplyResult::Modified(event)
 }
 
 /// CR 703.4q + CR 614.1a + CR 614.5 + CR 614.6: Path A carve-out applier for

@@ -157,9 +157,18 @@ Run when wrapping up or at a natural stopping point (queue empty, pattern family
 
 ```bash
 cargo fmt --all
-cargo clippy -p engine --all-targets -- -D warnings  # engine only — parser changes don't touch downstream crates
-cargo test -p engine                                  # engine suite — parser + game + types
-./scripts/gen-card-data.sh                            # regen for coverage/semantic-audit determinism
+
+# Prefer Tilt when it's running; fall back to direct cargo when it isn't.
+# (See CLAUDE.md § "Canonical verification pattern" for the template.)
+if tilt get uiresource clippy >/dev/null 2>&1; then
+  ./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data
+else
+  cargo clippy -p engine --all-targets -- -D warnings  # engine only — parser changes don't touch downstream crates
+  cargo test -p engine                                  # engine suite — parser + game + types
+  ./scripts/gen-card-data.sh                            # regen card-data.json (Tilt's `card-data` resource handles this when up)
+fi
+
+# One-shot audit binaries (not Tilt resources — direct invocation in both modes):
 cargo coverage                                        # final flip count (reads fresh card-data.json)
 cargo semantic-audit                                  # catch over-matching
 ./scripts/snapshot-regression.sh /tmp/card-data-before.json

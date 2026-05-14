@@ -218,9 +218,14 @@ pub(super) fn drain_pending_phase_transition_progress(
             ReplacementResult::Prevented => {
                 // CR 614.5: Step-end mana handlers do not Prevent — they
                 // flip dispositions on the rebuilt event. A Prevent here
-                // indicates a registry-level prevention shield aimed at
-                // `LoseMana`, which is not on the current corpus. Defensive:
-                // clear handler scratch and continue.
+                // would indicate a registry-level prevention shield aimed
+                // at `LoseMana`, which no card on the current corpus
+                // produces. If a future card ever prevents step-end empty-
+                // mana (e.g., a hypothetical "mana doesn't empty this
+                // step" replacement), this arm must be reworked to leave
+                // the pool intact and continue draining the remaining
+                // queue, rather than silently clearing handler scratch.
+                // TODO(CR-616.1): re-evaluate when such a card lands.
                 debug_assert!(
                     false,
                     "ReplacementResult::Prevented unexpected for EmptyManaPool event"
@@ -316,16 +321,16 @@ fn scan_step_end_mana_handlers(
     entries
 }
 
-/// CR 117.3a + CR 121.1 + CR 400.7 + CR 504.1: Complete a phase entry after
-/// the per-player empty-mana drain has resolved. Resets priority, clears
-/// `cards_drawn_this_step` for every player, invalidates LKI, and emits
-/// `PhaseChanged`.
+/// CR 117.3a + CR 400.7: Complete a phase entry after the per-player empty-
+/// mana drain has resolved. Resets priority, invalidates LKI, clears the
+/// per-step draw counter (bookkeeping for `ExceptFirstDrawInDrawStep`
+/// condition machinery — not a CR rule itself), and emits `PhaseChanged`.
 fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameEvent>) {
     for player in state.players.iter_mut() {
-        // CR 121.1 + CR 504.1: `cards_drawn_this_step` resets on every step
-        // transition so `ExceptFirstDrawInDrawStep` conditions can identify
-        // the first card drawn during the new step (most importantly, the
-        // draw step's mandatory turn-based draw).
+        // Bookkeeping (not a CR rule): `cards_drawn_this_step` is the
+        // counter the `ExceptFirstDrawInDrawStep` parser-level condition
+        // tests against. Reset on every step transition so the next step
+        // identifies its own first draw cleanly.
         player.cards_drawn_this_step = 0;
     }
 
@@ -2081,11 +2086,23 @@ mod tests {
         use crate::types::mana::{ManaType, ManaUnit};
         use crate::types::statics::StaticMode;
 
+        use crate::types::mana::ManaColor;
+
         let mut state = setup();
         state.phase = Phase::PreCombatMain;
-        // Two permanents on player 0's battlefield, each granting an
-        // unfiltered `Retain` step-end mana handler. Both match every unit.
-        for n in 1u64..=2 {
+        // Two filtered `Retain` handlers on player 0's battlefield: one
+        // accepts Green only, the other Blue only. Pool seeded with one
+        // Green + one Blue Drop unit. The initial scan finds both
+        // handlers applicable (each sees ≥1 Drop unit overall). After
+        // the chosen handler runs and flips its colored unit to Keep,
+        // the other handler's matcher still returns true (the opposite-
+        // color unit is still Drop) and auto-applies. This setup is the
+        // only way to distinguish "1 handler fired" from "2 handlers
+        // fired" using observable end state: count(Green)==1 alone
+        // would be consistent with either outcome under a single-unit
+        // setup; here count(Green)==1 AND count(Blue)==1 prove both ran.
+        let handler_specs = [(1u64, ManaColor::Green), (2u64, ManaColor::Blue)];
+        for (n, color) in handler_specs {
             let source = create_object(
                 &mut state,
                 CardId(n),
@@ -2100,7 +2117,7 @@ mod tests {
                 .static_definitions
                 .push(
                     StaticDefinition::new(StaticMode::StepEndUnspentMana {
-                        filter: None,
+                        filter: Some(color),
                         action: crate::types::mana::StepEndManaAction::Retain,
                     })
                     .affected(TargetFilter::Controller),
@@ -2109,6 +2126,12 @@ mod tests {
         state.players[0].mana_pool.add(ManaUnit::new(
             ManaType::Green,
             ObjectId(99),
+            false,
+            Vec::new(),
+        ));
+        state.players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Blue,
+            ObjectId(98),
             false,
             Vec::new(),
         ));
@@ -2131,14 +2154,25 @@ mod tests {
         );
         assert!(state.pending_phase_transition_progress.is_some());
 
-        // Player 0 chooses the first handler; the second handler then
-        // applies on the rebuilt event. Both flip the unit to `Keep`, so
-        // the mana survives.
+        // Player 0 chooses the first (Green) handler; the second (Blue)
+        // handler then applies on the rebuilt event. Both flip their
+        // respective unit to Keep, so both colors survive.
         state.priority_player = PlayerId(0);
         apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
             .expect("choose first handler");
 
-        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 1);
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Green),
+            1,
+            "Green should have been retained by the first handler"
+        );
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Blue),
+            1,
+            "Blue should have been retained by the second handler — \
+             count(Blue)==0 here means only the chosen handler fired \
+             and CR 616.1f continuation was skipped"
+        );
         assert!(state.pending_phase_transition_progress.is_none());
     }
 

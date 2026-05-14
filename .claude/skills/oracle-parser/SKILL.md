@@ -515,7 +515,7 @@ grep -n "^704.5a" docs/MagicCompRules.txt   # Verify SBA rule
 - [ ] Parser unit tests for each new pattern
 - [ ] Snapshot test: `crates/engine/tests/oracle_parser.rs`
 - [ ] `cargo coverage` — Unimplemented count should decrease
-- [ ] `cargo test -p engine && cargo clippy --all-targets -- -D warnings`
+- [ ] Verify per CLAUDE.md § "Canonical verification pattern" — `cargo fmt --all`, then if `tilt get uiresource clippy >/dev/null 2>&1`: `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data`; else: `cargo clippy --all-targets -- -D warnings` + `cargo test -p engine` + `./scripts/gen-card-data.sh`.
 
 ### 9b. Adding a New Effect Type
 
