@@ -1971,14 +1971,13 @@ pub fn resolve_ability_chain(
             });
         } else {
             // CR 609.3: Execute the effect N times when repeat_for is set.
+            // CR 107.3a: Variable("X") must resolve via resolve_quantity_with_targets
+            // so that ability.chosen_x (the paid X value) is passed through. The
+            // plain resolve_quantity path passes chosen_x=None, causing X to always
+            // resolve to 0 and the loop to never execute (Torment of Hailfire bug).
             let iterations = if let Some(ref qty) = ability.repeat_for {
-                crate::game::quantity::resolve_quantity(
-                    state,
-                    qty,
-                    ability.controller,
-                    ability.source_id,
-                )
-                .max(0) as usize
+                crate::game::quantity::resolve_quantity_with_targets(state, qty, ability).max(0)
+                    as usize
             } else {
                 1
             };

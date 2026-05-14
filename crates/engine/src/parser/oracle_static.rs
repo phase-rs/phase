@@ -2019,7 +2019,9 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         || nom_primitives::scan_contains(tp.lower, "as though they had flash")
     {
         return Some(
-            StaticDefinition::new(StaticMode::CastWithFlash).description(text.to_string()),
+            StaticDefinition::new(StaticMode::CastWithFlash)
+                .description(text.to_string())
+                .active_zones(vec![Zone::Battlefield]),
         );
     }
 
@@ -4437,7 +4439,8 @@ fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option<StaticDefi
 
         let mut def = StaticDefinition::new(StaticMode::CastWithKeyword { keyword })
             .affected(affected)
-            .description(text.to_string());
+            .description(text.to_string())
+            .active_zones(vec![Zone::Battlefield]);
         if let Some(condition) = condition.clone() {
             def = def.condition(condition);
         }
@@ -4464,7 +4467,8 @@ fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option<StaticDefi
         };
         let mut def = StaticDefinition::new(StaticMode::CastWithKeyword { keyword })
             .affected(affected)
-            .description(text.to_string());
+            .description(text.to_string())
+            .active_zones(vec![Zone::Battlefield]);
         if let Some(condition) = condition.clone() {
             def = def.condition(condition);
         }

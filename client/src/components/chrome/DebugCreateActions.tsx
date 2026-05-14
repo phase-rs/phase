@@ -1,15 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
 
 import type {
+  AttachTarget,
   CoreType,
   CounterType,
   DebugAction,
   Keyword,
   ManaColor,
+  ObjectId,
   PlayerId,
   Zone,
 } from "../../adapter/types";
 import {
+  getCardFaceData,
   listTokenPresets,
   type TokenCategory,
   type TokenPreset,
@@ -18,8 +21,10 @@ import {
   AccordionItem,
   CardNameAutocomplete,
   CheckboxInput,
+  deriveAttachmentInfo,
   FieldRow,
   NumberInput,
+  ObjectSelect,
   PlayerSelect,
   SelectInput,
   SubmitButton,
@@ -126,10 +131,83 @@ interface Props {
   onDispatch: (action: DebugAction) => void;
 }
 
+// `CardFaceShape` — minimal slice of the engine's `CardFace` returned by
+// `getCardFaceData`. Only the fields the spawn-attached form reads are typed;
+// the wire shape carries more (oracle_text, abilities, triggers, etc.) but
+// those are surfaced elsewhere.
+interface CardFaceShape {
+  keywords?: Keyword[] | null;
+  card_type?: { core_types?: string[]; subtypes?: string[] } | null;
+}
+
 function CreateCardForm({ onDispatch }: Props) {
   const [cardName, setCardName] = useState("");
   const [owner, setOwner] = useState<PlayerId>(0);
   const [zone, setZone] = useState<Zone>("Hand");
+  const [face, setFace] = useState<CardFaceShape | null>(null);
+  const [targetKind, setTargetKind] = useState<"Object" | "Player">("Object");
+  const [targetObjectId, setTargetObjectId] = useState<ObjectId | null>(null);
+  const [targetPlayerId, setTargetPlayerId] = useState<PlayerId>(0);
+
+  // Resolve the face data through the engine's card database (single source
+  // of truth for keywords + subtypes). Loading is async — until it returns,
+  // the attach picker stays hidden and the form behaves as before. We debounce
+  // by trimming and gating on non-empty names so empty typing doesn't spam
+  // the WASM bridge.
+  useEffect(() => {
+    let cancelled = false;
+    const trimmed = cardName.trim();
+    if (!trimmed) {
+      setFace(null);
+      return;
+    }
+    getCardFaceData(trimmed)
+      .then((f) => {
+        if (!cancelled) setFace((f as CardFaceShape | null) ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setFace(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cardName]);
+
+  const info = useMemo(
+    () =>
+      deriveAttachmentInfo({
+        keywords: face?.keywords ?? null,
+        subtypes: face?.card_type?.subtypes ?? null,
+      }),
+    [face],
+  );
+
+  // Show the attach picker only when this card *can* attach AND the spawn
+  // destination is Battlefield (Auras/Equipment in Hand/Exile have no host
+  // until they're cast). When only one kind of target is legal, auto-pin to it.
+  const isAttachmentShape = info.canTargetPlayer || info.canTargetObject;
+  const showAttachPicker = isAttachmentShape && zone === "Battlefield";
+  useEffect(() => {
+    if (info.canTargetPlayer && !info.canTargetObject) setTargetKind("Player");
+    else if (!info.canTargetPlayer && info.canTargetObject) setTargetKind("Object");
+  }, [info.canTargetPlayer, info.canTargetObject]);
+
+  const buildAttachTo = (): AttachTarget | undefined => {
+    if (!showAttachPicker) return undefined;
+    if (targetKind === "Player") return { type: "Player", data: targetPlayerId };
+    if (targetObjectId == null) return undefined;
+    return { type: "Object", data: targetObjectId };
+  };
+
+  // Submit gating: when attach picker is shown, require a host selection so
+  // we never accidentally spawn an orphan Aura that the SBA pass will yank
+  // straight to the graveyard (CR 704.5n). The exception is when the user
+  // intentionally wants an orphan for testing — covered by the "skip attach"
+  // path (zone != Battlefield).
+  const needsHost = showAttachPicker;
+  const hasHost =
+    !needsHost ||
+    (targetKind === "Object" ? targetObjectId != null : true /* PlayerSelect always has a value */);
 
   return (
     <>
@@ -142,11 +220,41 @@ function CreateCardForm({ onDispatch }: Props) {
       <FieldRow label="Zone">
         <SelectInput value={zone} onChange={setZone} options={ZONES} />
       </FieldRow>
+      {showAttachPicker && (
+        <>
+          {info.canTargetPlayer && info.canTargetObject && (
+            <FieldRow label="Host Kind">
+              <SelectInput
+                value={targetKind}
+                onChange={setTargetKind}
+                options={["Object", "Player"] as const}
+              />
+            </FieldRow>
+          )}
+          {targetKind === "Object" && (
+            <ObjectSelect
+              value={targetObjectId}
+              onChange={setTargetObjectId}
+              filter={info.objectFilter}
+              label="Attach To"
+              placeholder="Pick a host…"
+            />
+          )}
+          {targetKind === "Player" && (
+            <FieldRow label="Attach To">
+              <PlayerSelect value={targetPlayerId} onChange={setTargetPlayerId} />
+            </FieldRow>
+          )}
+        </>
+      )}
       <SubmitButton
         onClick={() =>
-          onDispatch({ type: "CreateCard", data: { card_name: cardName, owner, zone } })
+          onDispatch({
+            type: "CreateCard",
+            data: { card_name: cardName, owner, zone, attach_to: buildAttachTo() },
+          })
         }
-        disabled={!cardName.trim()}
+        disabled={!cardName.trim() || !hasHost}
       >
         Create Card
       </SubmitButton>

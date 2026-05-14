@@ -195,7 +195,7 @@ cargo tune-ai                       # Run AI weight tuning (requires --features 
 ./scripts/build-wasm.sh             # Build WASM (release): compile → wasm-bindgen → wasm-opt
 ./scripts/build-wasm.sh debug       # Build WASM (debug)
 ```
-Requires `wasm-bindgen-cli` (v0.2.114) and optionally `wasm-opt` (binaryen). Output goes to `client/src/wasm/` (gitignored, regenerated).
+Requires `wasm-bindgen-cli` (v0.2.121) and optionally `wasm-opt` (binaryen). Output goes to `client/src/wasm/` (gitignored, regenerated).
 
 ### Card Data Pipeline
 ```bash

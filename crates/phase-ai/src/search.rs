@@ -1,7 +1,7 @@
 use rand::Rng;
 
 use engine::ai_support::build_decision_context;
-use engine::types::actions::{GameAction, MulliganChoice};
+use engine::types::actions::{GameAction, MulliganChoice, OverloadChoice};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
@@ -106,7 +106,7 @@ pub fn choose_action(
     // the dedicated scorer). The deterministic path returns the chosen
     // SelectCards directly; only fall through if it produces nothing.
     if matches!(state.waiting_for, WaitingFor::SearchChoice { .. }) {
-        if let Some(action) = deterministic_choice(state, ai_player, config, &[]) {
+        if let Some(action) = deterministic_choice(state, ai_player, config, &[], None) {
             return Some(action);
         }
     }
@@ -464,7 +464,7 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             Some(GameAction::ChooseEvokeCost { use_evoke: false })
         }
         WaitingFor::OverloadCostChoice { .. } => Some(GameAction::ChooseOverloadCost {
-            use_overload: false,
+            choice: OverloadChoice::Normal,
         }),
         WaitingFor::BestowCostChoice { .. } => {
             Some(GameAction::ChooseBestowCost { use_bestow: false })
@@ -782,8 +782,12 @@ pub fn score_candidates(
         return vec![];
     }
 
-    // Deterministic early returns — these don't benefit from search/parallelism
-    if let Some(action) = deterministic_choice(state, ai_player, config, &actions) {
+    // Deterministic early returns — these don't benefit from search/parallelism.
+    // Pass the already-built context so the mulligan branch avoids a second
+    // full deck analysis (DeckProfile + SynergyGraph for both players).
+    if let Some(action) =
+        deterministic_choice(state, ai_player, config, &actions, Some(&services.context))
+    {
         return vec![(action, 1.0)];
     }
 
@@ -958,6 +962,7 @@ pub(crate) fn deterministic_choice(
     ai_player: PlayerId,
     config: &AiConfig,
     actions: &[GameAction],
+    context: Option<&AiContext>,
 ) -> Option<GameAction> {
     if matches!(
         state.waiting_for,
@@ -994,7 +999,14 @@ pub(crate) fn deterministic_choice(
         let entry = pending.iter().find(|e| e.player == ai_player)?;
         let player = entry.player;
         let mulligan_count = entry.mulligan_count;
-        let ctx = build_ai_context(state, player, config);
+        let owned_ctx;
+        let ctx = match context {
+            Some(c) => c,
+            None => {
+                owned_ctx = build_ai_context(state, player, config);
+                &owned_ctx
+            }
+        };
         let default_features = crate::features::DeckFeatures::default();
         let default_plan = crate::plan::PlanSnapshot::default();
         let features = ctx

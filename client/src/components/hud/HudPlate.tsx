@@ -1,6 +1,8 @@
 import type { CSSProperties, ReactNode } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 
+import type { PlayerId } from "../../adapter/types.ts";
+import { useUiStore } from "../../stores/uiStore.ts";
 import { AvatarHoverPreview } from "./AvatarHoverPreview.tsx";
 import { UnderAttackOverlay } from "./UnderAttackOverlay.tsx";
 
@@ -26,6 +28,11 @@ interface HudPlateProps {
   underAttack?: boolean;
   /** Planeswalker art crop URL for the player avatar. */
   avatarUrl?: string | null;
+  /** When set, the plate renders a fuchsia debug-highlight ring iff this
+   *  player matches `useUiStore.debugHighlightedPlayerId`. Threaded through
+   *  by both `PlayerHud` and `OpponentHud`; absence means the plate never
+   *  participates in debug highlighting. */
+  playerId?: PlayerId;
 }
 
 const TONE_CLASSES: Record<HudTone, string> = {
@@ -65,11 +72,15 @@ export function HudPlate({
   seatColor,
   underAttack = false,
   avatarUrl,
+  playerId,
 }: HudPlateProps) {
   const Component = onClick ? "button" : "div";
   const shouldReduceMotion = useReducedMotion();
   const activeRing = active ? ` ${ACTIVE_RING_CLASSES[tone]} ring-offset-2 ring-offset-black/40` : "";
   const [pulseLo, pulseHi] = ACTIVE_PULSE_RGBA[tone];
+  const isDebugHighlighted = useUiStore(
+    (s) => playerId != null && s.debugHighlightedPlayerId === playerId,
+  );
 
   const plate = (
     <Component
@@ -102,6 +113,12 @@ export function HudPlate({
           <UnderAttackOverlay />
           <span className="sr-only">{label} is under attack</span>
         </>
+      )}
+      {isDebugHighlighted && (
+        <div
+          aria-hidden
+          className="pointer-events-none absolute -inset-1 z-30 rounded-2xl ring-4 ring-fuchsia-400 shadow-[0_0_22px_6px_rgba(232,121,249,0.7),inset_0_0_18px_4px_rgba(232,121,249,0.45)] animate-pulse"
+        />
       )}
       <div className="absolute inset-[1px] rounded-[16px] bg-gradient-to-b from-white/8 via-transparent to-black/10" />
       {avatarUrl ? (

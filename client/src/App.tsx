@@ -27,7 +27,7 @@ const DraftPodPage = lazy(() => import("./pages/DraftPodPage").then((m) => ({ de
 
 export function App() {
   return (
-    <BrowserRouter unstable_useTransitions={false}>
+    <BrowserRouter>
       <AppContent />
     </BrowserRouter>
   );

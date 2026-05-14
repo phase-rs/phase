@@ -98,7 +98,23 @@ pub(crate) fn handle_decide_additional_cost(
         }
     };
 
-    let updated_pending = PendingCast { ability, ..pending };
+    let mut updated_pending = PendingCast { ability, ..pending };
+
+    // CR 601.2b: When an optional additional cost (e.g. Casualty) was declared
+    // before targets (deferred_target_selection = true), clear the flow after
+    // the decision so finish_pending_cost_or_cast proceeds to target selection
+    // instead of re-presenting the optional choice. Mark additional_cost_decided
+    // so finish_pending_cast_cost_or_pay skips re-detecting the cost after
+    // the player selects targets.
+    if updated_pending.deferred_target_selection
+        && matches!(
+            updated_pending.additional_cost_flow,
+            Some(AdditionalCost::Optional(_))
+        )
+    {
+        updated_pending.additional_cost_flow = None;
+        updated_pending.additional_cost_decided = true;
+    }
 
     if let Some(cost) = cost_to_pay {
         pay_additional_cost(state, player, cost, updated_pending, events)
@@ -309,6 +325,33 @@ fn finish_pending_cost_or_cast(
         }
     }
 
+    // CR 601.2b: Optional additional costs (Casualty) that must be declared before
+    // targets. When deferred_target_selection is true, present the choice first.
+    // After the choice resolves, additional_cost_flow is cleared by
+    // handle_decide_additional_cost so the general deferred path below fires.
+    if let Some(AdditionalCost::Optional(ref cost)) = pending.additional_cost_flow {
+        if pending.deferred_target_selection {
+            let optional_cost = AdditionalCost::Optional(cost.clone());
+            return Ok(WaitingFor::OptionalCostChoice {
+                player,
+                cost: optional_cost,
+                pending_cast: Box::new(pending),
+            });
+        }
+    }
+
+    // CR 601.2b/c: General deferred target selection — fires after an optional
+    // additional cost (e.g. Casualty sacrifice) has been decided and
+    // additional_cost_flow cleared, so targets are chosen after the cost.
+    if pending.deferred_target_selection
+        && !matches!(
+            pending.additional_cost_flow,
+            Some(AdditionalCost::Kicker { .. })
+        )
+    {
+        return begin_deferred_target_selection(state, player, pending, events);
+    }
+
     if let Some(modal) = pending.deferred_modal_choice.take() {
         let mut capped = modal_choice_for_player(
             state,
@@ -324,6 +367,17 @@ fn finish_pending_cost_or_cast(
             modal: capped,
             pending_cast: Box::new(pending),
         });
+    }
+
+    // CR 601.2b: If a Required additional cost was deferred while an optional cost
+    // (e.g., Casualty) was offered first (Village Rites + Casualty), pay it now.
+    if let Some(AdditionalCost::Required(req_cost)) = pending.additional_cost_flow.take() {
+        if !req_cost.is_payable(state, player, pending.object_id) {
+            return Err(EngineError::ActionNotAllowed(
+                "Cannot pay required additional cost".to_string(),
+            ));
+        }
+        return pay_additional_cost(state, player, req_cost, pending, events);
     }
 
     pay_and_push(
@@ -934,7 +988,11 @@ pub(super) fn finish_pending_cast_cost_or_pay(
 ) -> Result<WaitingFor, EngineError> {
     pending.ability = ability;
     pending.cost = cost;
-    if pending.additional_cost_flow.is_some() {
+    // If an optional additional cost was already decided (paid or declined) in the
+    // deferred-target-selection flow, skip re-detection — the player already made
+    // their choice. Without this guard, check_additional_cost_or_pay_with_distribute
+    // would re-find the cost on obj.additional_cost and prompt for a second sacrifice.
+    if pending.additional_cost_flow.is_some() || pending.additional_cost_decided {
         return finish_pending_cost_or_cast(state, player, pending, events);
     }
     let object_id = pending.object_id;
@@ -1050,6 +1108,34 @@ pub(super) fn begin_target_dependent_additional_cost_declaration(
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
+/// CR 601.2b: Present an optional additional cost (e.g. Casualty) to the player
+/// BEFORE target selection. Creates a PendingCast with deferred_target_selection = true
+/// so targets are chosen after the cost decision and any required sacrifice.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn begin_optional_cost_before_targets(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+    ability: ResolvedAbility,
+    cost: ManaCost,
+    optional_cost: AdditionalCost,
+    casting_variant: CastingVariant,
+    cast_timing_permission: Option<CastTimingPermission>,
+    distribute: Option<DistributionUnit>,
+    origin_zone: Zone,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let mut pending = PendingCast::new(object_id, card_id, ability, cost);
+    pending.casting_variant = casting_variant;
+    pending.cast_timing_permission = cast_timing_permission;
+    pending.distribute = distribute;
+    pending.origin_zone = origin_zone;
+    pending.deferred_target_selection = true;
+    pending.additional_cost_flow = Some(optional_cost);
+    finish_pending_cost_or_cast(state, player, pending, events)
+}
+
 /// CR 601.2d: Extended version of `check_additional_cost_or_pay` that threads the
 /// `distribute` flag through PendingCast creation so X-spell distribution
 /// survives to the `(ManaPayment, PassPriority)` handler.
@@ -1139,12 +1225,35 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
 
     let flash_additional =
         flash_timing_non_mana_additional_cost(state, player, object_id, cast_timing_permission);
-    let additional = state
+    let obj_additional = state
         .objects
         .get(&object_id)
         .and_then(|obj| obj.additional_cost.clone())
-        .or(flash_additional)
-        .or_else(|| effective_casualty_additional_cost(state, player, object_id));
+        .or(flash_additional);
+
+    // CR 601.2b: Optional costs (Casualty) must be declared before required additional
+    // costs. When obj.additional_cost is Required and the spell also has Casualty (e.g.,
+    // Village Rites gaining Casualty via a static effect), offer Casualty first and stash
+    // the Required cost in additional_cost_flow for processing after Casualty resolves.
+    let (additional, deferred_required) = if let Some(AdditionalCost::Required(ref req)) =
+        obj_additional
+    {
+        if let Some(casualty) = effective_casualty_additional_cost(state, player, object_id) {
+            if !req.is_payable(state, player, object_id) {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot pay required additional cost".to_string(),
+                ));
+            }
+            (Some(casualty), obj_additional)
+        } else {
+            (obj_additional, None)
+        }
+    } else {
+        (
+            obj_additional.or_else(|| effective_casualty_additional_cost(state, player, object_id)),
+            None,
+        )
+    };
 
     // CR 118.9 + CR 601.2b/f/h: Oracle text alternative costs are announced
     // before total cost determination and paid rather than the spell's mana
@@ -1214,23 +1323,15 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 pending.cast_timing_permission = cast_timing_permission;
                 pending.distribute = distribute.clone();
                 pending.origin_zone = origin_zone;
+                // When a Required cost was deferred so Casualty could be offered first
+                // (e.g., Village Rites + Casualty), stash it so finish_pending_cost_or_cast
+                // can pay it after the Casualty decision.
+                pending.additional_cost_flow = deferred_required;
                 // CR 601.2b: If the optional additional cost requires a choice
                 // of object and no legal object exists, skip the prompt and
                 // proceed as if the player declined to pay.
                 if !opt_cost.is_payable(state, player, object_id) {
-                    return pay_and_push(
-                        state,
-                        player,
-                        object_id,
-                        card_id,
-                        pending.ability,
-                        &pending.cost,
-                        casting_variant,
-                        cast_timing_permission,
-                        distribute,
-                        origin_zone,
-                        events,
-                    );
+                    return finish_pending_cost_or_cast(state, player, pending, events);
                 }
                 return Ok(WaitingFor::OptionalCostChoice {
                     player,
@@ -1886,7 +1987,7 @@ fn pay_additional_cost(
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
-fn effective_casualty_additional_cost(
+pub(super) fn effective_casualty_additional_cost(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
@@ -3770,6 +3871,7 @@ mod tests {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
@@ -6326,6 +6428,7 @@ mod tests {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
@@ -6441,6 +6544,7 @@ mod tests {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
@@ -6525,6 +6629,7 @@ mod tests {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
@@ -6598,6 +6703,7 @@ mod tests {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
@@ -6704,6 +6810,7 @@ mod tests {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),

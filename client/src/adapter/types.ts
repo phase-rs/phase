@@ -4,6 +4,14 @@ export type ObjectId = number;
 export type CardId = number;
 export type PlayerId = number;
 
+// ── Attachment Target ────────────────────────────────────────────────────
+// Mirrors `engine::game::game_object::AttachTarget`. Auras may attach to a
+// permanent (`Object`) or to a player (`Player`, e.g. Curse cycle); Equipment
+// is `Object`-only by CR 301.5. Serde tag/content format matches the engine.
+export type AttachTarget =
+  | { type: "Object"; data: ObjectId }
+  | { type: "Player"; data: PlayerId };
+
 // ── Dungeon ─────────────────────────────────────────────────────────────
 
 export type DungeonId =
@@ -467,7 +475,11 @@ export interface GameObject {
   transformed: boolean;
   damage_marked: number;
   dealt_deathtouch_damage: boolean;
-  attached_to: ObjectId | null;
+  /** Mirrors engine `Option<AttachTarget>`: null when unattached, otherwise
+   *  a tagged-union pointing at either an Object host (Equipment/most Auras)
+   *  or a Player host (Curse cycle, Faith's Fetters-class). FE consumers must
+   *  inspect `.type` before reading `.data`; do not treat as a bare ObjectId. */
+  attached_to: AttachTarget | null;
   attachments: ObjectId[];
   paired_with?: ObjectId | null;
   counters: Partial<Record<CounterType, number>>;
@@ -614,6 +626,8 @@ export type TargetFilter = Record<string, unknown>;
 export type TargetRef =
   | { Object: ObjectId }
   | { Player: PlayerId };
+
+export type CopyTargetSlot = { current: TargetRef; legal_alternatives: TargetRef[] };
 
 // ── Combat ───────────────────────────────────────────────────────────────
 
@@ -866,7 +880,6 @@ export type WaitingFor =
   | { type: "DrawnThisTurnTopdeckChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; min_count: number; life_payment: number; source_id: ObjectId } }
   | { type: "RetargetChoice"; data: { player: PlayerId; stack_entry_index: number; scope: RetargetScope; current_targets: TargetRef[]; legal_new_targets: TargetRef[] } }
   | { type: "ProliferateChoice"; data: { player: PlayerId; eligible: TargetRef[] } }
-  | { type: "CopyRetarget"; data: { player: PlayerId; copy_id: ObjectId; target_slots: { current: TargetRef; legal_alternatives: TargetRef[] }[] } }
   | { type: "ConniveDiscard"; data: { player: PlayerId; conniver_id: ObjectId; source_id: ObjectId; cards: ObjectId[]; count: number } }
   | { type: "DiscardChoice"; data: { player: PlayerId; count: number; cards: ObjectId[]; source_id: ObjectId; effect_kind: string; up_to?: boolean; unless_filter?: TargetFilter } }
   | { type: "ManifestDreadChoice"; data: { player: PlayerId; cards: ObjectId[] } }
@@ -892,7 +905,8 @@ export type WaitingFor =
       source_id: ObjectId;
       remaining_players: PlayerId[];
       all_kept: ObjectId[];
-    } };
+    } }
+  | { type: "CopyRetarget"; data: { player: PlayerId; copy_id: ObjectId; target_slots: CopyTargetSlot[]; current_slot?: number } };
 
 // ── Learn ────────────────────────────────────────────────────────────────
 
@@ -965,7 +979,15 @@ export interface ActionResult {
 
 export type DebugAction =
   | { type: "MoveToZone"; data: { object_id: ObjectId; to_zone: Zone; simulate?: boolean } }
-  | { type: "CreateCard"; data: { card_name: string; owner: PlayerId; zone: Zone } }
+  | {
+      type: "CreateCard";
+      data: {
+        card_name: string;
+        owner: PlayerId;
+        zone: Zone;
+        attach_to?: AttachTarget;
+      };
+    }
   | { type: "RemoveObject"; data: { object_id: ObjectId } }
   | { type: "DrawCards"; data: { player_id: PlayerId; count: number } }
   | { type: "Mill"; data: { player_id: PlayerId; count: number } }
@@ -976,7 +998,7 @@ export type DebugAction =
   | { type: "SetController"; data: { object_id: ObjectId; controller: PlayerId } }
   | { type: "SetSummoningSickness"; data: { object_id: ObjectId; sick: boolean } }
   | { type: "SetFaceState"; data: { object_id: ObjectId; face_down?: boolean; transformed?: boolean; flipped?: boolean } }
-  | { type: "Attach"; data: { object_id: ObjectId; target_id: ObjectId } }
+  | { type: "Attach"; data: { object_id: ObjectId; target: AttachTarget } }
   | { type: "Detach"; data: { object_id: ObjectId } }
   | { type: "GrantKeyword"; data: { object_id: ObjectId; keyword: Keyword } }
   | { type: "RemoveKeyword"; data: { object_id: ObjectId; keyword: Keyword } }
@@ -1030,7 +1052,8 @@ export type GameAction =
   | { type: "ChooseModalFace"; data: { back_face: boolean } }
   | { type: "ChooseWarpCost"; data: { use_warp: boolean } }
   | { type: "ChooseEvokeCost"; data: { use_evoke: boolean } }
-  | { type: "ChooseOverloadCost"; data: { use_overload: boolean } }
+  | { type: "ChooseOverloadCost"; data: { choice: { type: "Normal" } | { type: "Overload" } } }
+  | { type: "KeepAllCopyTargets" }
   | { type: "ChooseBestowCost"; data: { use_bestow: boolean } }
   | { type: "ChoosePermanentTypeSlot"; data: { slot: CoreType } }
   | { type: "CastSpellForFree"; data: { object_id: ObjectId; card_id: CardId; source_id: ObjectId } }
@@ -1205,6 +1228,16 @@ export interface DerivedViews {
    * `engine::game::derived_views::DerivedViews::stack_display_groups`.
    */
   stack_display_groups?: StackDisplayGroup[];
+  /**
+   * Engine-authored "Auras attached to player X" projection. Players have no
+   * `attachments` back-link on the GameObject side because they aren't
+   * GameObjects — this map is the FE's only legitimate channel for "which
+   * Auras enchant this player." Keyed by PlayerId-as-string per Rust's
+   * BTreeMap<PlayerId, _> serde encoding. Empty/omitted when no Auras
+   * enchant any player. Mirrors
+   * `engine::game::derived_views::DerivedViews::auras_attached_to_player`.
+   */
+  auras_attached_to_player?: Record<string, ObjectId[]>;
 }
 
 export interface GameState {
@@ -1508,7 +1541,7 @@ export interface EngineAdapter {
   submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
   getState(): Promise<GameState>;
   getLegalActions(): Promise<LegalActionsResult>;
-  getAiAction(difficulty: string, playerId: number): Promise<GameAction | null> | GameAction | null;
+  getAiAction(difficulty: string, playerId: number, waitingForType?: WaitingFor["type"]): Promise<GameAction | null> | GameAction | null;
   resolveAll?(
     requester: number,
     aiSeats: { playerId: number; difficulty: string }[],

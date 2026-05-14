@@ -66,7 +66,7 @@ function makeState(): GameState {
   const equipment = makeObject({
     id: 2,
     card_id: 200,
-    attached_to: 1,
+    attached_to: { type: "Object", data: 1 },
     attachments: [3],
     name: "Test Equipment",
     power: null,
@@ -80,7 +80,7 @@ function makeState(): GameState {
   const aura = makeObject({
     id: 3,
     card_id: 300,
-    attached_to: 2,
+    attached_to: { type: "Object", data: 2 },
     attachments: [],
     name: "Test Aura",
     power: null,

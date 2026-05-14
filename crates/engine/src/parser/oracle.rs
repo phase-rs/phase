@@ -7483,7 +7483,7 @@ mod tests {
                 qty: QuantityRef::Variable { ref name }
             }) if name == "X"
         ));
-        let Effect::CopySpell { target } = &*ability.effect else {
+        let Effect::CopySpell { target, .. } = &*ability.effect else {
             panic!("expected CopySpell, got {:?}", ability.effect);
         };
         assert!(matches!(

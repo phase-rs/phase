@@ -9,7 +9,7 @@ use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
-use super::effects::attach::attach_to;
+use super::effects::attach::{attach_to, attach_to_player};
 use super::effects::change_zone::shuffle_library;
 use super::engine::EngineError;
 use super::game_object::AttachTarget;
@@ -196,13 +196,18 @@ pub fn apply_debug_action(
             state.layers_dirty = true;
         }
 
-        DebugAction::Attach {
-            object_id,
-            target_id,
-        } => {
+        DebugAction::Attach { object_id, target } => {
             validate_object(state, object_id)?;
-            validate_object(state, target_id)?;
-            attach_to(state, object_id, target_id);
+            match target {
+                AttachTarget::Object(target_id) => {
+                    validate_object(state, target_id)?;
+                    attach_to(state, object_id, target_id);
+                }
+                AttachTarget::Player(target_player) => {
+                    validate_player(state, target_player)?;
+                    attach_to_player(state, object_id, target_player);
+                }
+            }
             state.layers_dirty = true;
         }
 
@@ -336,9 +341,13 @@ pub fn apply_debug_action(
 /// staging zone (typically `Zone::Hand`) with face data applied. Returns the
 /// resulting events and any new `WaitingFor` (e.g. replacement choice).
 ///
-/// Auras created this way will be put onto the battlefield with `attached_to
-/// = None`; CR 704.5n SBA then moves them to the graveyard. The debug UI
-/// must collect a target separately if the user wants an attached Aura.
+/// CR 303.4f: For Auras / Equipment, the caller is expected to wire
+/// `attached_to` through `attach_to` / `attach_to_player` BEFORE invoking
+/// this function. When that happens, the post-ETB SBA pass (CR 704.5n) sees
+/// the attachment with a legal host and leaves it on the battlefield;
+/// otherwise SBA correctly moves the orphan to its owner's graveyard. Both
+/// behaviors are valid debug spawn paths — the choice belongs at the
+/// caller (the WASM `handle_debug_create_card` bridge).
 pub fn route_debug_create_to_battlefield(
     state: &mut GameState,
     object_id: ObjectId,
