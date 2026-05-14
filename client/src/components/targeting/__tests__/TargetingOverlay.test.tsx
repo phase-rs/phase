@@ -263,7 +263,7 @@ describe("TargetingOverlay", () => {
     expect(screen.getByText("up to one nonland permanent")).toBeInTheDocument();
   });
 
-  it("shows Keep Current Targets button for CopyRetarget and dispatches SelectTargets", () => {
+  it("shows Keep Current Targets button for CopyRetarget and dispatches KeepAllCopyTargets", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
     const gameState = createGameState({
       waiting_for: {
@@ -294,8 +294,7 @@ describe("TargetingOverlay", () => {
     fireEvent.click(btn);
 
     expect(dispatch).toHaveBeenCalledWith({
-      type: "SelectTargets",
-      data: { targets: [{ Player: 0 }] },
+      type: "KeepAllCopyTargets",
     });
   });
 

@@ -224,8 +224,9 @@ export function createAIController(config: AIControllerConfig): AIController {
     // Each seat has its own difficulty — a controller driving three AI players
     // can simultaneously run Easy, Medium, and VeryHard policies.
     const difficulty = difficultyByPlayerId.get(playerId) ?? "Medium";
+    const waitingForType = gameState?.waiting_for?.type;
     const actionPromise: Promise<GameAction | null> = Promise.resolve(
-      adapter?.getAiAction(difficulty, playerId) ?? null,
+      adapter?.getAiAction(difficulty, playerId, waitingForType) ?? null,
     );
     // Suppress unhandled-rejection warnings if stop() cancels the timeout
     // before it fires and nothing else awaits this promise.
@@ -234,7 +235,6 @@ export function createAIController(config: AIControllerConfig): AIController {
     // Mulligan is a binary keep/mulligan decision with no strategic complexity to
     // humanize — skip the artificial delay so the decision resolves as soon as the
     // engine returns (computation is near-instant after our optimizations).
-    const waitingForType = gameState?.waiting_for?.type;
     const isMulligan =
       waitingForType === "MulliganDecision" || waitingForType === "MulliganBottomCards";
     const delay = isMulligan ? 0 : AI_BASE_DELAY_MS + Math.random() * AI_DELAY_VARIANCE_MS;
@@ -272,7 +272,7 @@ export function createAIController(config: AIControllerConfig): AIController {
             throw err;
           }
           try {
-            action = await adapter!.getAiAction(difficulty, playerId);
+            action = await adapter!.getAiAction(difficulty, playerId, waitingForType);
           } catch (retryErr) {
             if (isEnginePanic(retryErr)) {
               await routePanic("ai-getAction-retry-panic", retryErr.panic);
