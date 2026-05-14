@@ -601,20 +601,42 @@ fn handle_debug_create_card(
         if !state.players.iter().any(|p| p.id == owner) {
             return JsValue::from_str("Engine error: Debug: invalid owner player id");
         }
+        // CR 400.7: For battlefield destination, stage the object in Hand
+        // first, then route through the real ETB pipeline so replacements,
+        // triggers, and SBAs all fire. Direct creation in Battlefield (the
+        // old path) bypassed all of these and left Auras stranded with
+        // `attached_to: None` plus a `entered_battlefield_turn` stamp that
+        // survived later zone moves.
+        let staging_zone = if zone == engine::types::zones::Zone::Battlefield {
+            engine::types::zones::Zone::Hand
+        } else {
+            zone
+        };
         let card_id = engine::types::identifiers::CardId(state.next_object_id);
-        let obj_id =
-            engine::game::zones::create_object(state, card_id, owner, face.name.clone(), zone);
+        let obj_id = engine::game::zones::create_object(
+            state,
+            card_id,
+            owner,
+            face.name.clone(),
+            staging_zone,
+        );
         let obj = state.objects.get_mut(&obj_id).expect("just created");
         engine::game::printed_cards::apply_card_face_to_object(obj, &face);
         state.layers_dirty = true;
+
+        let result = if zone == engine::types::zones::Zone::Battlefield {
+            engine::game::route_debug_create_to_battlefield(state, obj_id)
+        } else {
+            engine::types::game_state::ActionResult {
+                events: vec![],
+                waiting_for: state.waiting_for.clone(),
+                log_entries: vec![],
+            }
+        };
+
         engine::game::public_state::bump_state_revision(state);
         engine::game::public_state::mark_public_state_all_dirty(state);
         engine::game::public_state::finalize_public_state(state);
-        let result = engine::types::game_state::ActionResult {
-            events: vec![],
-            waiting_for: state.waiting_for.clone(),
-            log_entries: vec![],
-        };
         to_js(&result)
     }) {
         Ok(val) => val,
@@ -763,6 +785,15 @@ pub fn get_stack_pressure() -> JsValue {
 // mutations. Riding the same snapshot that carries `state.stack` makes the
 // grouping atomically consistent with the stack it describes.
 // See `engine::game::derived_views`.
+
+/// Returns the engine-typed catalog of debug-spawnable token presets,
+/// loaded from `crates/engine/data/known-tokens.toml`. Read by the debug UI
+/// to populate the Create Token dropdown — frontend never derives this list.
+#[wasm_bindgen]
+pub fn list_token_presets_js() -> JsValue {
+    let presets = engine::game::token_presets::known_token_presets();
+    to_js(presets)
+}
 
 /// Export the current game state as a JSON string.
 /// Used by the engine worker to transfer state to AI workers for root parallelism.
