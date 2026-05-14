@@ -20019,7 +20019,11 @@ mod tests {
                 AbilityCondition::QuantityCheck {
                     lhs:
                         QuantityExpr::Ref {
-                            qty: QuantityRef::SpellsCastThisGame,
+                            qty:
+                                QuantityRef::SpellsCastThisGame {
+                                    scope: CountScope::Controller,
+                                    filter: None,
+                                },
                         },
                     comparator: Comparator::EQ,
                     rhs: QuantityExpr::Fixed { value: 0 },

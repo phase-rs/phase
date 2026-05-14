@@ -1925,7 +1925,10 @@ fn parse_first_spell_this_game_condition(input: &str) -> OracleResult<'_, Static
         rest,
         StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisGame,
+                qty: QuantityRef::SpellsCastThisGame {
+                    scope: CountScope::Controller,
+                    filter: None,
+                },
             },
             comparator: Comparator::EQ,
             rhs: QuantityExpr::Fixed { value: 0 },

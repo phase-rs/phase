@@ -19,8 +19,8 @@ use super::{parse_effect_chain, scan_contains_phrase, ParseContext};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CastVariantPaid, Comparator, ControllerRef,
-    Duration, Effect, FilterProp, ObjectScope, QuantityExpr, QuantityRef, StaticCondition,
-    TargetFilter, TypeFilter, TypedFilter,
+    CountScope, Duration, Effect, FilterProp, ObjectScope, QuantityExpr, QuantityRef,
+    StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -1952,17 +1952,46 @@ pub(super) fn try_nom_condition_as_ability_condition(
         });
     }
 
-    if let Ok((rest, _)) =
+    if let Ok((after_prefix, _)) =
         tag::<_, _, OracleError<'_>>("this spell was cast from ").parse(lower.as_str())
     {
-        let zone = match rest.trim() {
-            "your hand" | "hand" => Some(Zone::Hand),
-            "your graveyard" | "a graveyard" => Some(Zone::Graveyard),
-            "exile" => Some(Zone::Exile),
-            _ => None,
-        };
-        if let Some(zone) = zone {
-            return Some(AbilityCondition::CastFromZone { zone });
+        // CR 601.2a: Match the printed source zone, then either accept the
+        // bare condition (empty / period remainder) or chain a recognised
+        // " and …" tail via `AbilityCondition::And`.
+        let zone_match: Result<(&str, Zone), nom::Err<OracleError<'_>>> = alt((
+            value(Zone::Hand, tag::<_, _, OracleError<'_>>("your hand")),
+            value(Zone::Hand, tag("hand")),
+            value(Zone::Graveyard, tag("your graveyard")),
+            value(Zone::Graveyard, tag("a graveyard")),
+            value(Zone::Exile, tag("exile")),
+        ))
+        .parse(after_prefix);
+        if let Ok((after_zone, zone)) = zone_match {
+            let trimmed = after_zone.trim_start();
+            if trimmed.is_empty() {
+                return Some(AbilityCondition::CastFromZone { zone });
+            }
+            // CR 117.1 + CR 201.2 + CR 608.2c: "and [second condition]" suffix
+            // for compound intervening-ifs like Approach of the Second Sun's
+            // "this spell was cast from your hand and you've cast another
+            // spell named {LITERAL} this game". Both halves must parse for
+            // the compound to bind — partial recognition falls through to the
+            // bare-CastFromZone path is intentionally rejected here, since
+            // running with only half the gate is unsafe.
+            if let Some(second_text) = trimmed.strip_prefix("and ") {
+                if let Some(second) =
+                    parse_youve_cast_another_named_this_game_condition(second_text)
+                {
+                    return Some(AbilityCondition::And {
+                        conditions: vec![AbilityCondition::CastFromZone { zone }, second],
+                    });
+                }
+            }
+            // Fallback: zone alone is still a valid condition if the suffix
+            // is unrecognised but starts with a period / punctuation.
+            if trimmed.starts_with(['.', ',']) {
+                return Some(AbilityCondition::CastFromZone { zone });
+            }
         }
     }
 
@@ -2475,6 +2504,47 @@ fn parse_supertype_word(input: &str) -> nom::IResult<&str, Supertype, OracleErro
 /// the parent target — but extending this function keeps the parser
 /// permissive for the LKI-semantic patterns and keeps the two combinators in
 /// lockstep on tense + verb coverage.
+/// CR 117.1 + CR 201.2: Parse "you've cast another spell named {LITERAL} this
+/// game" / "you cast another spell named {LITERAL} this game" — the
+/// game-scope cousin of the `this turn` family. Approach of the Second Sun
+/// is the canonical user; the printed name is baked into a
+/// `FilterProp::Named { name }` and counted against
+/// `QuantityRef::SpellsCastThisGame { filter }`.
+///
+/// Matching is greedy on the name up to the trailing " this game" anchor.
+/// The remainder (if any) is ignored — callers wrap this in a larger
+/// condition (e.g. `AbilityCondition::And`) so the surrounding context can
+/// own whatever follows.
+fn parse_youve_cast_another_named_this_game_condition(
+    lower: &str,
+) -> Option<AbilityCondition> {
+    let (rest, _): (&str, &str) = alt((
+        tag::<_, _, OracleError<'_>>("you've cast another spell named "),
+        tag("you cast another spell named "),
+    ))
+    .parse(lower)
+    .ok()?;
+    let anchor = " this game";
+    let pos = rest.find(anchor)?;
+    let name = rest[..pos].trim();
+    if name.is_empty() {
+        return None;
+    }
+    let filter = TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Named {
+        name: name.to_string(),
+    }]));
+    Some(AbilityCondition::QuantityCheck {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::SpellsCastThisGame {
+                scope: CountScope::Controller,
+                filter: Some(filter),
+            },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 1 },
+    })
+}
+
 fn parse_a_type_was_verbed_this_way(lower: &str) -> Option<(TypeFilter, bool)> {
     let (rest, _) = alt((
         tag::<_, _, OracleError<'_>>("an "),

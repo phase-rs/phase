@@ -1474,15 +1474,38 @@ fn resolve_ref(
         }
         // CR 117.1: Total spells cast last turn (by any player).
         QuantityRef::SpellsCastLastTurn => state.spells_cast_last_turn.map_or(0, i32::from),
-        // CR 117.1: Number of spells the controller has cast this game.
-        // Reads `state.spells_cast_this_game` indexed by the ability's
-        // controller, matching the same source used by
-        // `ParsedCondition::FirstSpellThisGame` for cast-time restrictions.
-        QuantityRef::SpellsCastThisGame => state
-            .spells_cast_this_game
-            .get(&controller)
-            .copied()
-            .map_or(0, |n| i32::try_from(n).unwrap_or(i32::MAX)),
+        // CR 117.1 + CR 601.2: Number of spells cast this game by the scoped
+        // players, optionally filtered by spell characteristics.
+        //
+        // `filter: None` reads the fast O(1) `state.spells_cast_this_game`
+        // count — preserves the pre-lift Establishing Shot semantics.
+        // `filter: Some(_)` scans `state.spells_cast_this_game_by_player`
+        // records, mirroring `SpellsCastThisTurn`'s filtered scan.
+        QuantityRef::SpellsCastThisGame { scope, ref filter } => match filter {
+            None => usize_to_i32_saturating(
+                scoped_players(state, scope, ctx, controller)
+                    .filter_map(|p| state.spells_cast_this_game.get(&p.id))
+                    .map(|n| *n as usize)
+                    .sum(),
+            ),
+            Some(filter) => usize_to_i32_saturating(
+                scoped_players(state, scope, ctx, controller)
+                    .filter_map(|p| state.spells_cast_this_game_by_player.get(&p.id))
+                    .map(|list| {
+                        list.iter()
+                            .filter(|record| {
+                                spell_record_matches_filter(
+                                    record,
+                                    filter,
+                                    controller,
+                                    &state.all_creature_types,
+                                )
+                            })
+                            .count()
+                    })
+                    .sum(),
+            ),
+        },
         // CR 122.1 + CR 122.6: Count counters put this turn by the scoped
         // actor onto objects matching event-time recipient characteristics.
         QuantityRef::CounterAddedThisTurn {
@@ -4976,6 +4999,7 @@ mod tests {
             PlayerId(0),
             vec![
                 SpellCastRecord {
+                    name: String::new(),
                     core_types: vec![CoreType::Creature],
                     supertypes: vec![Supertype::Legendary],
                     subtypes: vec!["Bird".to_string()],
@@ -4986,6 +5010,7 @@ mod tests {
                     from_zone: Zone::Hand,
                 },
                 SpellCastRecord {
+                    name: String::new(),
                     core_types: vec![CoreType::Artifact],
                     supertypes: vec![],
                     subtypes: vec![],

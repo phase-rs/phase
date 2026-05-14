@@ -161,23 +161,33 @@ pub fn record_spell_cast_from_zone(
     state.spells_cast_this_turn = state.spells_cast_this_turn.saturating_add(1);
     *state.spells_cast_this_game.entry(player).or_insert(0) += 1;
     // CR 117.1: Record spell characteristics for general-purpose filtered counting.
+    let record = SpellCastRecord {
+        name: obj.name.clone(),
+        core_types: obj.card_types.core_types.clone(),
+        supertypes: obj.card_types.supertypes.clone(),
+        subtypes: obj.card_types.subtypes.clone(),
+        keywords: obj.keywords.clone(),
+        colors: obj.color.clone(),
+        mana_value: obj.mana_cost.mana_value(),
+        // CR 107.3 + CR 601.2b: Capture X-in-cost at record time so later
+        // trigger-filter evaluation (e.g. "your first spell with {X} in its
+        // mana cost each turn") does not need to re-examine the spell object.
+        has_x_in_cost: crate::game::casting_costs::cost_has_x(&obj.mana_cost),
+        from_zone,
+    };
     state
         .spells_cast_this_turn_by_player
         .entry(player)
         .or_default()
-        .push(SpellCastRecord {
-            core_types: obj.card_types.core_types.clone(),
-            supertypes: obj.card_types.supertypes.clone(),
-            subtypes: obj.card_types.subtypes.clone(),
-            keywords: obj.keywords.clone(),
-            colors: obj.color.clone(),
-            mana_value: obj.mana_cost.mana_value(),
-            // CR 107.3 + CR 601.2b: Capture X-in-cost at record time so later
-            // trigger-filter evaluation (e.g. "your first spell with {X} in its
-            // mana cost each turn") does not need to re-examine the spell object.
-            has_x_in_cost: crate::game::casting_costs::cost_has_x(&obj.mana_cost),
-            from_zone,
-        });
+        .push(record.clone());
+    // CR 117.1: Game-scope history mirror — not cleared between turns so
+    // "named {LITERAL} this game" conditions (Approach of the Second Sun)
+    // can see all prior casts.
+    state
+        .spells_cast_this_game_by_player
+        .entry(player)
+        .or_default()
+        .push(record);
 }
 
 /// CR 508.1m: Any abilities that trigger on attackers being declared trigger.
@@ -1756,6 +1766,7 @@ mod tests {
         state.spells_cast_this_turn_by_player.insert(
             PlayerId(0),
             vec![crate::types::game_state::SpellCastRecord {
+                name: String::new(),
                 core_types: vec![CoreType::Instant],
                 supertypes: Vec::new(),
                 subtypes: Vec::new(),
@@ -1788,6 +1799,7 @@ mod tests {
             PlayerId(0),
             vec![
                 crate::types::game_state::SpellCastRecord {
+                    name: String::new(),
                     core_types: vec![CoreType::Instant],
                     supertypes: Vec::new(),
                     subtypes: Vec::new(),
@@ -1798,6 +1810,7 @@ mod tests {
                     from_zone: Zone::Hand,
                 },
                 crate::types::game_state::SpellCastRecord {
+                    name: String::new(),
                     core_types: vec![CoreType::Sorcery],
                     supertypes: Vec::new(),
                     subtypes: Vec::new(),
@@ -1808,6 +1821,7 @@ mod tests {
                     from_zone: Zone::Hand,
                 },
                 crate::types::game_state::SpellCastRecord {
+                    name: String::new(),
                     core_types: vec![CoreType::Instant],
                     supertypes: Vec::new(),
                     subtypes: Vec::new(),

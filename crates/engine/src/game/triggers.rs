@@ -3606,6 +3606,7 @@ pub mod tests {
         });
 
         let prior_record = SpellCastRecord {
+            name: String::new(),
             core_types: vec![CoreType::Sorcery],
             supertypes: Vec::new(),
             subtypes: Vec::new(),
@@ -3616,6 +3617,7 @@ pub mod tests {
             from_zone: Zone::Hand,
         };
         let current_record = SpellCastRecord {
+            name: String::new(),
             core_types: vec![CoreType::Instant],
             supertypes: Vec::new(),
             subtypes: Vec::new(),
@@ -5767,6 +5769,7 @@ pub mod tests {
             PlayerId(0),
             vec![
                 SpellCastRecord {
+                    name: String::new(),
                     core_types: vec![CoreType::Instant],
                     supertypes: vec![],
                     subtypes: vec![],
@@ -5777,6 +5780,7 @@ pub mod tests {
                     from_zone: Zone::Hand,
                 },
                 SpellCastRecord {
+                    name: String::new(),
                     core_types: vec![CoreType::Creature],
                     supertypes: vec![],
                     subtypes: vec!["Bird".to_string()],
@@ -8248,6 +8252,7 @@ pub mod tests {
         state.spells_cast_this_turn_by_player.insert(
             PlayerId(0),
             vec![SpellCastRecord {
+                name: String::new(),
                 core_types: vec![CoreType::Sorcery],
                 supertypes: vec![],
                 subtypes: vec![],
@@ -8267,6 +8272,7 @@ pub mod tests {
         state.spells_cast_this_turn_by_player.insert(
             PlayerId(0),
             vec![SpellCastRecord {
+                name: String::new(),
                 core_types: vec![CoreType::Instant],
                 supertypes: vec![],
                 subtypes: vec![],
@@ -8287,6 +8293,7 @@ pub mod tests {
             PlayerId(0),
             vec![
                 SpellCastRecord {
+                    name: String::new(),
                     core_types: vec![CoreType::Sorcery],
                     supertypes: vec![],
                     subtypes: vec![],
@@ -8297,6 +8304,7 @@ pub mod tests {
                     from_zone: Zone::Hand,
                 },
                 SpellCastRecord {
+                    name: String::new(),
                     core_types: vec![CoreType::Sorcery],
                     supertypes: vec![],
                     subtypes: vec![],
@@ -8318,6 +8326,7 @@ pub mod tests {
             PlayerId(0),
             vec![
                 SpellCastRecord {
+                    name: String::new(),
                     core_types: vec![CoreType::Sorcery],
                     supertypes: vec![],
                     subtypes: vec![],
@@ -8328,6 +8337,7 @@ pub mod tests {
                     from_zone: Zone::Hand,
                 },
                 SpellCastRecord {
+                    name: String::new(),
                     core_types: vec![CoreType::Instant],
                     supertypes: vec![],
                     subtypes: vec![],
@@ -8338,6 +8348,7 @@ pub mod tests {
                     from_zone: Zone::Hand,
                 },
                 SpellCastRecord {
+                    name: String::new(),
                     core_types: vec![CoreType::Sorcery],
                     supertypes: vec![],
                     subtypes: vec![],
@@ -8359,6 +8370,7 @@ pub mod tests {
     fn nth_spell_you_trigger_matches_source_controller_spell_only() {
         fn spell_record() -> SpellCastRecord {
             SpellCastRecord {
+                name: String::new(),
                 core_types: vec![CoreType::Instant],
                 supertypes: vec![],
                 subtypes: vec![],
