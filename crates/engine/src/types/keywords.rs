@@ -1441,6 +1441,19 @@ impl FromStr for Keyword {
             return Ok(Keyword::HexproofFrom(parse_hexproof_filter(quality)));
         }
 
+        // CR 702.41a: "affinity for [type]" — Oracle text form without a colon
+        // (e.g., "affinity for creatures" as granted by Witherbloom). The
+        // colon-separated form ("Affinity:Creature") is handled above in the
+        // parameterized branch via the MTGJSON "Affinity for X" → param "for X"
+        // bridge in `parse_affinity_type`. Without this arm, the granted-keyword
+        // path falls through to `Keyword::Unknown`, which `apply_affinity_reduction`
+        // never matches — so granted Affinity becomes a silent no-op.
+        if let Some(type_part) = name_lower.strip_prefix("affinity for ") {
+            if let Some(tf) = parse_affinity_type(type_part) {
+                return Ok(Keyword::Affinity(tf));
+            }
+        }
+
         // Simple (unit) keywords -- case-insensitive, space-normalized match
         // Stripping spaces lets PascalCase ("FirstStrike") and Oracle text ("first strike") both match.
         let name_nospace = name_lower.replace(' ', "");

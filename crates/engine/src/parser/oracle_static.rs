@@ -4435,6 +4435,10 @@ fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option<StaticDefi
             let type_prefix_tp = nom_tag_tp(&prefix_tp, "each ").unwrap_or(prefix_tp);
             parse_type_phrase(type_prefix_tp.original.trim()).0
         };
+        // CR-correct affected scope: `apply_spell_keyword_subject_constraints`
+        // recurses into `TargetFilter::Or` so compound type prefixes ("instant
+        // and sorcery spells you cast have affinity for creatures") preserve
+        // each branch instead of collapsing to all spells.
         let affected = apply_spell_keyword_subject_constraints(base_filter, zone_filter, mv_filter);
 
         let mut def = StaticDefinition::new(StaticMode::CastWithKeyword { keyword })
@@ -16082,6 +16086,72 @@ mod tests {
                 );
             }
             other => panic!("Expected Some(Typed filter), got {other:?}"),
+        }
+    }
+
+    // Witherbloom, the Balancer regression: "Instant and sorcery spells you cast
+    // have affinity for creatures." Two parser issues had to be fixed:
+    //  (1) `Keyword::from_str("affinity for creatures")` previously returned
+    //      `Keyword::Unknown` — so `apply_affinity_reduction` silently skipped
+    //      the granted keyword and no cost reduction was applied at cast time.
+    //  (2) `parse_type_phrase("Instant and sorcery")` returns `TargetFilter::Or`,
+    //      which the old `match TargetFilter::Typed(tf) => tf, _ => card()`
+    //      arm discarded — leaving the static affecting every spell card the
+    //      player casts (CR 113.3a: affected filter must scope recipients).
+    #[test]
+    fn static_instant_and_sorcery_spells_have_affinity_for_creatures() {
+        let def =
+            parse_static_line("Instant and sorcery spells you cast have affinity for creatures.")
+                .unwrap();
+        match &def.mode {
+            StaticMode::CastWithKeyword {
+                keyword: Keyword::Affinity(tf),
+            } => {
+                assert_eq!(
+                    tf.type_filters,
+                    vec![TypeFilter::Creature],
+                    "granted Affinity must carry the Creature type filter, not be Unknown"
+                );
+            }
+            other => panic!(
+                "expected CastWithKeyword(Affinity(Creature)), got {other:?}; \
+                 if this panics with Unknown(\"affinity for creatures\") the keyword \
+                 parser regressed"
+            ),
+        }
+        match &def.affected {
+            Some(TargetFilter::Or { filters }) => {
+                assert_eq!(
+                    filters.len(),
+                    2,
+                    "expected two-branch Or for instant/sorcery"
+                );
+                let has_instant = filters.iter().any(|f| {
+                    matches!(
+                        f,
+                        TargetFilter::Typed(tf)
+                            if tf.type_filters == vec![TypeFilter::Instant]
+                                && tf.controller == Some(ControllerRef::You)
+                    )
+                });
+                let has_sorcery = filters.iter().any(|f| {
+                    matches!(
+                        f,
+                        TargetFilter::Typed(tf)
+                            if tf.type_filters == vec![TypeFilter::Sorcery]
+                                && tf.controller == Some(ControllerRef::You)
+                    )
+                });
+                assert!(
+                    has_instant && has_sorcery,
+                    "expected Or to contain both Instant(You) and Sorcery(You) branches, \
+                     got {filters:?}"
+                );
+            }
+            other => panic!(
+                "expected Or(Instant, Sorcery), got {other:?}; if Typed(Card) the \
+                 compound-type-phrase fallback regressed"
+            ),
         }
     }
 

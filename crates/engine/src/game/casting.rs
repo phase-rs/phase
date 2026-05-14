@@ -1313,12 +1313,43 @@ pub fn effective_spell_cost(
         .map(|p| p.mana_cost)
 }
 
+/// Returns the engine-effective mana cost for `object_id` **as if** all
+/// situational restrictions (timing, "can't cast" statics, color identity,
+/// per-turn limits, mana affordability) were already satisfied. Always applies
+/// commander tax and every cost-modification static (Affinity, ReduceCost,
+/// RaiseCost, pending one-shot reductions, etc.) so the display layer can show
+/// the actual cost the player would pay if and when they could cast.
+///
+/// Returns `None` only for structural rejections — object missing, not in a
+/// player-castable zone, or a land (which is played, not cast). All other
+/// restrictions are deliberately suppressed.
+///
+/// This is the engine-authoritative answer for "what does this spell cost?"
+/// and is the only source of truth the UI may consult for cost display.
+pub fn display_spell_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Option<crate::types::mana::ManaCost> {
+    prepare_spell_cast_for_display(state, player, object_id)
+        .ok()
+        .map(|p| p.mana_cost)
+}
+
 fn prepare_spell_cast(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
 ) -> Result<PreparedSpellCast, EngineError> {
-    prepare_spell_cast_with_variant_override(state, player, object_id, None)
+    prepare_spell_cast_with_variant_override_inner(state, player, object_id, None, false)
+}
+
+fn prepare_spell_cast_for_display(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Result<PreparedSpellCast, EngineError> {
+    prepare_spell_cast_with_variant_override_inner(state, player, object_id, None, true)
 }
 
 /// CR 702.190a: Variant-overriding entry point for cast paths that need a
@@ -1329,6 +1360,27 @@ fn prepare_spell_cast_with_variant_override(
     player: PlayerId,
     object_id: ObjectId,
     variant_override: Option<CastingVariant>,
+) -> Result<PreparedSpellCast, EngineError> {
+    prepare_spell_cast_with_variant_override_inner(
+        state,
+        player,
+        object_id,
+        variant_override,
+        false,
+    )
+}
+
+/// Inner implementation. `for_display = true` suppresses situational checks
+/// (timing, "can't cast" prohibitions, color identity, per-turn cast limits)
+/// while preserving the full cost-computation pipeline. Structural rejections
+/// (zone, ownership, land-vs-spell) still apply because they affect what kind
+/// of object this is, not whether the player can pay right now.
+fn prepare_spell_cast_with_variant_override_inner(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    variant_override: Option<CastingVariant>,
+    for_display: bool,
 ) -> Result<PreparedSpellCast, EngineError> {
     let obj = state
         .objects
@@ -1402,7 +1454,7 @@ fn prepare_spell_cast_with_variant_override(
     // CR 604.3 + CR 101.2: "Can't" beats "can" — check CantCastFrom statics.
     // Grafdigger's Cage: "Players can't cast spells from graveyards or libraries."
     // This overrides graveyard/library casting permissions (Escape, Lurrus, etc.).
-    if is_blocked_from_casting_from_zone(state, obj) {
+    if !for_display && is_blocked_from_casting_from_zone(state, obj) {
         return Err(EngineError::ActionNotAllowed(
             "A static ability prevents casting from this zone".to_string(),
         ));
@@ -1410,7 +1462,7 @@ fn prepare_spell_cast_with_variant_override(
 
     // CR 101.2: Continuous casting prohibition — "can't" overrides "can".
     // E.g., Teferi, Time Raveler: "Your opponents can't cast spells during your turn."
-    if is_blocked_by_cant_cast_during(state, player) {
+    if !for_display && is_blocked_by_cant_cast_during(state, player) {
         return Err(EngineError::ActionNotAllowed(
             "A static ability prevents casting during this phase/turn".to_string(),
         ));
@@ -1418,7 +1470,7 @@ fn prepare_spell_cast_with_variant_override(
 
     // CR 101.2: Temporary blanket prohibition — "can't cast spells this turn."
     // E.g., Silence: "Your opponents can't cast spells this turn."
-    if is_blocked_by_cant_cast_spells(state, player) {
+    if !for_display && is_blocked_by_cant_cast_spells(state, player) {
         return Err(EngineError::ActionNotAllowed(
             "A temporary effect prevents you from casting spells this turn".to_string(),
         ));
@@ -1426,13 +1478,13 @@ fn prepare_spell_cast_with_variant_override(
 
     // CR 101.2: Blanket casting prohibition — "you can't cast [type] spells."
     // E.g., Steel Golem: "You can't cast creature spells."
-    if is_blocked_by_cant_be_cast(state, player, obj) {
+    if !for_display && is_blocked_by_cant_be_cast(state, player, obj) {
         return Err(EngineError::ActionNotAllowed(
             "A static ability prevents you from casting this spell".to_string(),
         ));
     }
 
-    if is_blocked_by_cast_only_from_zones(state, obj, player) {
+    if !for_display && is_blocked_by_cast_only_from_zones(state, obj, player) {
         return Err(EngineError::ActionNotAllowed(
             "A temporary effect prevents casting from this zone".to_string(),
         ));
@@ -1450,7 +1502,7 @@ fn prepare_spell_cast_with_variant_override(
 
     // CR 101.2 + CR 604.1: Per-turn casting limit — "can't cast more than N spells each turn."
     // E.g., Rule of Law, High Noon, Deafening Silence.
-    if is_blocked_by_per_turn_cast_limit(state, player, obj) {
+    if !for_display && is_blocked_by_per_turn_cast_limit(state, player, obj) {
         return Err(EngineError::ActionNotAllowed(
             "A static ability limits the number of spells you can cast this turn".to_string(),
         ));
@@ -1793,41 +1845,53 @@ fn prepare_spell_cast_with_variant_override(
     // CR 304.1: Instants can be cast any time a player has priority.
     // CR 301.1 / CR 306.1: Artifacts and planeswalkers are cast at sorcery speed.
     let mut cast_timing_permission = None;
-    if let Err(base_timing_error) = restrictions::check_spell_timing(
-        state,
-        player,
-        obj,
-        ability_def.as_ref(),
-        has_granted_flash,
-        casting_variant,
-    ) {
-        // CR 702.8a: Flash permits instant-speed casting.
-        let Some(flash_cost) = flash_cost else {
-            return Err(base_timing_error);
-        };
-        restrictions::check_spell_timing(
+    if !for_display {
+        if let Err(base_timing_error) = restrictions::check_spell_timing(
             state,
             player,
             obj,
             ability_def.as_ref(),
-            true,
+            has_granted_flash,
             casting_variant,
-        )?;
-        mana_cost = restrictions::add_mana_cost(&mana_cost, &flash_cost);
-        if cast_outside_sorcery_timing {
+        ) {
+            // CR 702.8a: Flash permits instant-speed casting.
+            let Some(flash_cost) = flash_cost else {
+                return Err(base_timing_error);
+            };
+            restrictions::check_spell_timing(
+                state,
+                player,
+                obj,
+                ability_def.as_ref(),
+                true,
+                casting_variant,
+            )?;
+            mana_cost = restrictions::add_mana_cost(&mana_cost, &flash_cost);
+            if cast_outside_sorcery_timing {
+                cast_timing_permission = Some(CastTimingPermission::AsThoughHadFlash);
+            }
+        } else if cast_outside_sorcery_timing && has_granted_flash {
             cast_timing_permission = Some(CastTimingPermission::AsThoughHadFlash);
         }
-    } else if cast_outside_sorcery_timing && has_granted_flash {
-        cast_timing_permission = Some(CastTimingPermission::AsThoughHadFlash);
-    }
-    restrictions::check_casting_restrictions(state, player, object_id, &obj.casting_restrictions)?;
+        restrictions::check_casting_restrictions(
+            state,
+            player,
+            object_id,
+            &obj.casting_restrictions,
+        )?;
 
-    if state.format_config.command_zone
-        && !super::commander::can_cast_in_color_identity(state, &obj.color, &obj.mana_cost, player)
-    {
-        return Err(EngineError::ActionNotAllowed(
-            "Card is outside commander's color identity".to_string(),
-        ));
+        if state.format_config.command_zone
+            && !super::commander::can_cast_in_color_identity(
+                state,
+                &obj.color,
+                &obj.mana_cost,
+                player,
+            )
+        {
+            return Err(EngineError::ActionNotAllowed(
+                "Card is outside commander's color identity".to_string(),
+            ));
+        }
     }
 
     // CR 408.3 + CR 903.8: Commanders cast from the command zone incur a tax.
@@ -9496,6 +9560,494 @@ mod tests {
         assert!(
             !ability.context.additional_cost_paid,
             "alternative costs are not additional costs"
+        );
+    }
+
+    // Snuff Out class regression: a spell with `kind: Spell { Destroy { target } }`
+    // and an `AlternativeCost::PayLife` casting option must, after the user pays
+    // the alternative cost, resolve normally and actually destroy the chosen target.
+    // The pre-fix bug: life was deducted and a Spell entry sat on the stack, but
+    // the target was never destroyed on resolution.
+    #[test]
+    fn snuff_out_alt_cost_paid_resolves_destroy_on_chosen_target() {
+        let mut state = setup_game_at_main_phase();
+        state.players[0].life = 20;
+
+        let spell_id = create_instant_in_hand(&mut state, PlayerId(0));
+        {
+            let spell = state.objects.get_mut(&spell_id).unwrap();
+            spell.name = "Snuff Out".to_string();
+            spell.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 3,
+            };
+            let abilities = Arc::make_mut(&mut spell.abilities);
+            abilities.clear();
+            abilities.push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Destroy {
+                    target: TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        controller: None,
+                        properties: vec![FilterProp::NotColor {
+                            color: ManaColor::Black,
+                        }],
+                    }),
+                    cant_regenerate: true,
+                },
+            ));
+            spell.casting_options.push(
+                crate::types::ability::SpellCastingOption::alternative_cost(AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 4 },
+                })
+                .condition(
+                    crate::types::ability::ParsedCondition::YouControlSubtypeCountAtLeast {
+                        subtype: "swamp".to_string(),
+                        count: 1,
+                    },
+                ),
+            );
+        }
+
+        let swamp_id = create_object(
+            &mut state,
+            CardId(21),
+            PlayerId(0),
+            "Swamp".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let swamp = state.objects.get_mut(&swamp_id).unwrap();
+            swamp.card_types.core_types.push(CoreType::Land);
+            swamp.card_types.subtypes.push("Swamp".to_string());
+        }
+
+        let target_id = create_object(
+            &mut state,
+            CardId(22),
+            PlayerId(1),
+            "Nonblack Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&target_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let waiting = handle_cast_spell(
+            &mut state,
+            PlayerId(0),
+            spell_id,
+            CardId(10),
+            &mut Vec::new(),
+        )
+        .expect("Snuff Out should reach the alternative-cost choice");
+        state.waiting_for = waiting;
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::OptionalCostChoice {
+                cost: AdditionalCost::Choice(AbilityCost::PayLife { .. }, _),
+                ..
+            }
+        ));
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::DecideOptionalCost { pay: true },
+        )
+        .expect("paying 4 life should commit Snuff Out to the stack");
+
+        assert_eq!(state.players[0].life, 16);
+        assert_eq!(state.stack.len(), 1);
+
+        let StackEntryKind::Spell {
+            ability: Some(ability),
+            ..
+        } = &state.stack[0].kind
+        else {
+            panic!("expected spell on stack");
+        };
+        assert_eq!(
+            ability.targets.len(),
+            1,
+            "Snuff Out's resolved ability must carry one target after alt-cost prompt"
+        );
+        assert_eq!(
+            ability.targets[0],
+            crate::types::ability::TargetRef::Object(target_id),
+            "Snuff Out's target should be the only legal nonblack creature"
+        );
+
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        let target_zone = state.objects.get(&target_id).map(|o| o.zone);
+        assert_eq!(
+            target_zone,
+            Some(Zone::Graveyard),
+            "Snuff Out should have destroyed the target creature on resolution"
+        );
+        assert!(events.iter().any(
+            |e| matches!(e, GameEvent::CreatureDestroyed { object_id } if *object_id == target_id)
+        ));
+    }
+
+    // End-to-end variant of the previous test: load Snuff Out from the actual
+    // card export so any parser/export drift in `abilities`, `casting_options`,
+    // or `condition` shape would surface here.
+    #[test]
+    fn snuff_out_from_card_database_alt_cost_destroys_target() {
+        use std::path::PathBuf;
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("client")
+            .join("public")
+            .join("card-data.json");
+        if !path.exists() {
+            eprintln!(
+                "skipping: {} not found (run ./scripts/gen-card-data.sh)",
+                path.display()
+            );
+            return;
+        }
+        // The full export contains a deserialization quirk on an unrelated card
+        // in some builds. Extract Snuff Out's record directly via jq-style lookup
+        // so this regression test is robust to that.
+        let raw = std::fs::read_to_string(&path).expect("card-data.json readable");
+        let map: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&raw).expect("card-data.json is a JSON object");
+        let snuff_value = map
+            .get("snuff out")
+            .expect("Snuff Out should be in the export keyed by lowercase name");
+        let snuff: crate::types::card::CardFace = serde_json::from_value(snuff_value.clone())
+            .expect("Snuff Out record parses as CardFace");
+        let snuff = &snuff;
+
+        let mut state = setup_game_at_main_phase();
+        state.players[0].life = 20;
+
+        let spell_id =
+            crate::game::deck_loading::create_object_from_card_face(&mut state, snuff, PlayerId(0));
+        // Move from library to hand for casting.
+        crate::game::zones::move_to_zone(&mut state, spell_id, Zone::Hand, &mut Vec::new());
+
+        let swamp_id = create_object(
+            &mut state,
+            CardId(7777),
+            PlayerId(0),
+            "Swamp".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let swamp = state.objects.get_mut(&swamp_id).unwrap();
+            swamp.card_types.core_types.push(CoreType::Land);
+            swamp.card_types.subtypes.push("Swamp".to_string());
+        }
+
+        let target_id = create_object(
+            &mut state,
+            CardId(7778),
+            PlayerId(1),
+            "Nonblack Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&target_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let card_id = state.objects[&spell_id].card_id;
+        let waiting =
+            handle_cast_spell(&mut state, PlayerId(0), spell_id, card_id, &mut Vec::new())
+                .expect("Snuff Out should reach the alternative-cost choice");
+        state.waiting_for = waiting;
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::OptionalCostChoice {
+                    cost: AdditionalCost::Choice(AbilityCost::PayLife { .. }, _),
+                    ..
+                }
+            ),
+            "expected pay-life alternative cost prompt, got {:?}",
+            state.waiting_for
+        );
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::DecideOptionalCost { pay: true },
+        )
+        .expect("paying 4 life should commit Snuff Out to the stack");
+
+        assert_eq!(state.players[0].life, 16);
+        assert_eq!(state.stack.len(), 1);
+
+        let StackEntryKind::Spell {
+            ability: Some(ability),
+            ..
+        } = &state.stack[0].kind
+        else {
+            panic!("expected spell on stack");
+        };
+        assert_eq!(
+            ability.targets.len(),
+            1,
+            "Snuff Out's resolved ability must carry one target after alt-cost prompt; \
+             targets = {:?}",
+            ability.targets
+        );
+
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        let target_zone = state.objects.get(&target_id).map(|o| o.zone);
+        assert_eq!(
+            target_zone,
+            Some(Zone::Graveyard),
+            "Snuff Out should have destroyed the target creature on resolution"
+        );
+    }
+
+    // Witherbloom, the Balancer (cost {5}{B}{G}) has printed `Keyword::Affinity(Creature)`.
+    // When cast from the command zone, the same cost-reduction code path runs as
+    // a hand cast. Witherbloom itself in the command zone is NOT on the battlefield,
+    // so it doesn't count toward its own Affinity — that's rules-correct (CR 702.41a).
+    // Reduction must scale with creatures the caster *actually controls on battlefield*.
+    #[test]
+    fn affinity_for_creatures_on_commander_in_command_zone_reduces_generic() {
+        let mut state = setup_game_at_main_phase();
+        state.format_config.command_zone = true;
+
+        let commander_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Witherbloom, the Balancer".to_string(),
+            Zone::Command,
+        );
+        {
+            let obj = state.objects.get_mut(&commander_id).unwrap();
+            obj.is_commander = true;
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.supertypes.push(Supertype::Legendary);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Black, ManaCostShard::Green],
+                generic: 5,
+            };
+            obj.keywords.push(Keyword::Affinity(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: None,
+                properties: vec![],
+            }));
+        }
+
+        // Zero creatures on the battlefield → no reduction.
+        let cost_zero = effective_spell_cost(&state, PlayerId(0), commander_id)
+            .expect("commander cast cost should compute");
+        let ManaCost::Cost {
+            generic: g_zero, ..
+        } = cost_zero
+        else {
+            panic!("expected ManaCost::Cost");
+        };
+        assert_eq!(
+            g_zero, 5,
+            "no creatures controlled → generic stays at the printed 5"
+        );
+
+        // Three creatures the player controls on battlefield → reduce by 3 to {2}.
+        for i in 0u64..3 {
+            let id = create_object(
+                &mut state,
+                CardId(100 + i),
+                PlayerId(0),
+                format!("Bear {i}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let cost_three = effective_spell_cost(&state, PlayerId(0), commander_id)
+            .expect("commander cast cost should compute");
+        let ManaCost::Cost {
+            generic: g_three, ..
+        } = cost_three
+        else {
+            panic!("expected ManaCost::Cost");
+        };
+        assert_eq!(
+            g_three, 2,
+            "three creatures controlled → generic reduced from 5 to 2 by Affinity"
+        );
+
+        // Opponent-controlled creatures must not count toward our Affinity.
+        for i in 0u64..2 {
+            let id = create_object(
+                &mut state,
+                CardId(200 + i),
+                PlayerId(1),
+                format!("Opp Bear {i}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+        let cost_with_opp = effective_spell_cost(&state, PlayerId(0), commander_id)
+            .expect("commander cast cost should compute");
+        let ManaCost::Cost {
+            generic: g_with_opp,
+            ..
+        } = cost_with_opp
+        else {
+            panic!("expected ManaCost::Cost");
+        };
+        assert_eq!(
+            g_with_opp, 2,
+            "opponent creatures must not contribute to caster's Affinity reduction"
+        );
+    }
+
+    // Witherbloom, the Balancer's second clause: "Instant and sorcery spells you cast
+    // have affinity for creatures." This is a static ability that functions while
+    // Witherbloom is on the battlefield. When the player casts an instant or sorcery,
+    // the granted Affinity must reduce its generic cost by the number of creatures
+    // they control on the battlefield.
+    #[test]
+    fn witherbloom_grants_affinity_to_instant_and_sorcery_spells() {
+        use crate::types::ability::{TargetFilter, TypeFilter, TypedFilter};
+        use crate::types::statics::StaticMode;
+
+        let mut state = setup_game_at_main_phase();
+
+        let witherbloom_id = create_object(
+            &mut state,
+            CardId(2000),
+            PlayerId(0),
+            "Witherbloom, the Balancer".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&witherbloom_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.supertypes.push(Supertype::Legendary);
+            // Mirror the parsed static_abilities[0] from card-data.json.
+            let affected = TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Instant],
+                        controller: Some(ControllerRef::You),
+                        properties: vec![],
+                    }),
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Sorcery],
+                        controller: Some(ControllerRef::You),
+                        properties: vec![],
+                    }),
+                ],
+            };
+            let granted_kw = Keyword::Affinity(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: None,
+                properties: vec![],
+            });
+            let def = StaticDefinition {
+                mode: StaticMode::CastWithKeyword {
+                    keyword: granted_kw,
+                },
+                affected: Some(affected),
+                modifications: vec![],
+                condition: None,
+                affected_zone: None,
+                effect_zone: None,
+                active_zones: vec![],
+                characteristic_defining: false,
+                description: Some(
+                    "Instant and sorcery spells you cast have affinity for creatures.".to_string(),
+                ),
+            };
+            obj.static_definitions = vec![def].into();
+        }
+
+        // Instant in hand: cost {3}{R}. With 2 creatures on the battlefield the
+        // generic cost should reduce from 3 to 1.
+        let instant_id = create_instant_in_hand(&mut state, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&instant_id).unwrap();
+            obj.name = "Searing Spear".to_string();
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 3,
+            };
+        }
+
+        let granted = super::effective_spell_keywords(&state, PlayerId(0), instant_id);
+        assert!(
+            granted
+                .iter()
+                .any(|k| matches!(k, Keyword::Affinity(tf) if tf.type_filters == vec![TypeFilter::Creature])),
+            "Witherbloom's static must grant Affinity(Creature) to instant spells you cast; \
+             got keywords {granted:?}"
+        );
+
+        let cost_no_creatures = effective_spell_cost(&state, PlayerId(0), instant_id)
+            .expect("instant cost should compute");
+        let ManaCost::Cost { generic: g_no, .. } = cost_no_creatures else {
+            panic!("expected ManaCost::Cost");
+        };
+        assert_eq!(
+            g_no, 2,
+            "Witherbloom itself counts as 1 creature; 3 generic - 1 = 2"
+        );
+
+        // Add 2 more creatures the player controls. Total creatures on battlefield
+        // controlled by player: Witherbloom + 2 = 3 → reduce 3 generic → 0.
+        for i in 0u64..2 {
+            let id = create_object(
+                &mut state,
+                CardId(2100 + i),
+                PlayerId(0),
+                format!("Bear {i}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let cost_three = effective_spell_cost(&state, PlayerId(0), instant_id)
+            .expect("instant cost should compute");
+        let ManaCost::Cost {
+            generic: g_three, ..
+        } = cost_three
+        else {
+            panic!("expected ManaCost::Cost");
+        };
+        assert_eq!(
+            g_three, 0,
+            "3 creatures controlled (Witherbloom + 2 bears) → generic reduced from 3 to 0 \
+             by Affinity granted via Witherbloom's static"
         );
     }
 
