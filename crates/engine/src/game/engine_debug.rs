@@ -278,16 +278,21 @@ pub fn apply_debug_action(
         DebugAction::CreateToken {
             owner,
             characteristics,
+            enter_with_counters,
         } => {
             validate_player(state, owner)?;
             // CR 111.1 + CR 614.1a: Route debug token creation through the real
             // CreateToken pipeline so replacements, predefined-subtype
             // abilities (Treasure/Clue/Food/etc.), and ETB triggers all fire.
+            // CR 122.6a: `enter_with_counters` is plumbed straight to
+            // `TokenSpec` and travels the same replacement pipeline as
+            // engine-driven token creation — debug spawns can give bodies the
+            // counters they need to survive SBA without bypassing CR 614.
             let spec = crate::types::proposed_event::TokenSpec {
                 script_name: characteristics.display_name.clone(),
                 characteristics,
                 static_abilities: Vec::new(),
-                enter_with_counters: Vec::new(),
+                enter_with_counters,
                 tapped: false,
                 enters_attacking: false,
                 sacrifice_at: None,
@@ -412,4 +417,103 @@ fn validate_player(state: &GameState, player_id: PlayerId) -> Result<(), EngineE
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::actions::GameAction;
+    use crate::types::format::FormatConfig;
+    use crate::types::keywords::Keyword;
+    use crate::types::mana::ManaColor;
+    use crate::types::proposed_event::TokenCharacteristics;
+    use crate::types::CoreType;
+
+    fn sandbox_state() -> GameState {
+        let mut state = GameState::new(FormatConfig::standard().with_sandbox(), 2, 42);
+        state.debug_mode = true;
+        state
+    }
+
+    fn zero_zero_creature() -> TokenCharacteristics {
+        TokenCharacteristics {
+            display_name: "Test Token".to_string(),
+            power: Some(0),
+            toughness: Some(0),
+            core_types: vec![CoreType::Creature],
+            subtypes: Vec::new(),
+            supertypes: Vec::new(),
+            colors: vec![ManaColor::Green],
+            keywords: Vec::<Keyword>::new(),
+        }
+    }
+
+    /// CR 122.6a + CR 614.1: A debug-created 0/0 creature token with
+    /// `+1/+1` counters in `enter_with_counters` enters as a 2/2 because
+    /// the counters apply during the same ETB replacement window that
+    /// engine-driven token creation uses. CR 704.5f does not kill it.
+    #[test]
+    fn debug_create_token_enters_with_counters_survives_sba() {
+        let mut state = sandbox_state();
+        let action = GameAction::Debug(DebugAction::CreateToken {
+            owner: PlayerId(0),
+            characteristics: zero_zero_creature(),
+            enter_with_counters: vec![(CounterType::Plus1Plus1, 2)],
+        });
+        let result = crate::game::engine::apply(&mut state, PlayerId(0), action)
+            .expect("debug CreateToken should succeed");
+
+        let token_id = result
+            .events
+            .iter()
+            .find_map(|e| match e {
+                GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .expect("TokenCreated event should fire");
+
+        let obj = state
+            .objects
+            .get(&token_id)
+            .expect("token should still exist on battlefield after SBA");
+        assert_eq!(obj.zone, Zone::Battlefield);
+        assert_eq!(
+            obj.counters.get(&CounterType::Plus1Plus1).copied(),
+            Some(2),
+            "token should carry the 2 +1/+1 counters supplied at create-time",
+        );
+    }
+
+    /// CR 704.5f negative control: a debug-created 0/0 creature token
+    /// with no counters dies to state-based actions on the same `apply`,
+    /// proving the survival in the positive test is due to the counters
+    /// and not some unrelated default. Locks in current SBA semantics so
+    /// an accidental auto-bump elsewhere can't silently change behavior.
+    #[test]
+    fn debug_create_token_zero_zero_no_counters_dies_to_sba() {
+        let mut state = sandbox_state();
+        let action = GameAction::Debug(DebugAction::CreateToken {
+            owner: PlayerId(0),
+            characteristics: zero_zero_creature(),
+            enter_with_counters: Vec::new(),
+        });
+        let result = crate::game::engine::apply(&mut state, PlayerId(0), action)
+            .expect("debug CreateToken should succeed");
+
+        let token_id = result
+            .events
+            .iter()
+            .find_map(|e| match e {
+                GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .expect("TokenCreated event should fire");
+
+        // CR 704.5d: Tokens that leave the battlefield cease to exist, so
+        // the object should not be present in `state.objects` after SBA.
+        assert!(
+            !state.objects.contains_key(&token_id),
+            "0/0 token with no counters should be removed by SBA + CR 704.5d",
+        );
+    }
 }

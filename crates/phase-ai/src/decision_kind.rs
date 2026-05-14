@@ -111,6 +111,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::OpponentMayChoice { .. }
         | WaitingFor::TributeChoice { .. }
         | WaitingFor::UnlessPayment { .. }
+        | WaitingFor::UnlessPaymentChooseCost { .. }
         | WaitingFor::WardDiscardChoice { .. }
         | WaitingFor::WardSacrificeChoice { .. }
         | WaitingFor::UnlessBounceChoice { .. }

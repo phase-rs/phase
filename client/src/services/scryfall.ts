@@ -357,6 +357,13 @@ export interface TokenSearchFilters {
   power?: number | null;
   toughness?: number | null;
   colors?: string[];
+  /// Token creature/artifact/etc. subtypes (e.g. ["Goblin", "Warrior"]).
+  /// Threaded into the Scryfall query as `t:<subtype>` clauses so that two
+  /// distinct tokens that share a P/T + color shape but differ in type
+  /// resolve to distinct art. Scryfall's `t:` matches the full type line,
+  /// so `t:goblin t:warrior` narrows; the ladder below relaxes it
+  /// progressively when narrow queries miss.
+  subtypes?: string[];
 }
 
 export async function fetchTokenImageUrl(
@@ -368,14 +375,32 @@ export async function fetchTokenImageUrl(
   if (localUrl) return localUrl;
 
   const colorClause = buildTokenColorClause(filters?.colors);
+  const subtypes = filters?.subtypes ?? [];
 
-  // Try with exact P/T first, then fall back without P/T if no results.
-  const queries = [
-    buildTokenQuery(tokenName, filters?.power, filters?.toughness, colorClause),
-    ...(filters?.power != null || filters?.toughness != null
-      ? [buildTokenQuery(tokenName, null, null, colorClause)]
-      : []),
-  ];
+  // Progressive fallback ladder:
+  //   1. Most specific: name + P/T + colors + every subtype.
+  //   2. Drop trailing subtypes one at a time (keeps the leading subtype
+  //      longest — for MTG creature tokens the first subtype is the race
+  //      (e.g. "Spirit" in "Spirit Soldier"), and Scryfall token printings
+  //      most reliably index the race rather than the class).
+  //   3. Drop subtypes entirely.
+  //   4. Drop P/T (existing fallback shape).
+  // Each step relaxes exactly one axis. Stop at the first non-empty hit.
+  const queries: string[] = [];
+  for (let n = subtypes.length; n >= 0; n--) {
+    queries.push(
+      buildTokenQuery(
+        tokenName,
+        filters?.power,
+        filters?.toughness,
+        colorClause,
+        subtypes.slice(0, n),
+      ),
+    );
+  }
+  if (filters?.power != null || filters?.toughness != null) {
+    queries.push(buildTokenQuery(tokenName, null, null, colorClause, []));
+  }
 
   for (const query of queries) {
     const url = `https://api.scryfall.com/cards/search?q=${encodeURIComponent(query)}&order=released&dir=desc`;
@@ -407,11 +432,18 @@ function buildTokenQuery(
   power: number | null | undefined,
   toughness: number | null | undefined,
   colorClause: string,
+  subtypes: string[],
 ): string {
   let query = `t:token !"${name}"`;
   if (power != null) query += ` pow=${power}`;
   if (toughness != null) query += ` tou=${toughness}`;
   query += colorClause;
+  for (const s of subtypes) {
+    // Scryfall's `t:` is case-insensitive and matches the full type line.
+    // Quote to defend against subtypes with spaces (e.g. multi-word
+    // creature types from supplemental sets).
+    query += ` t:"${s.toLowerCase()}"`;
+  }
   return query;
 }
 

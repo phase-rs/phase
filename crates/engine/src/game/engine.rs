@@ -1947,6 +1947,23 @@ fn apply_action(
                 &mut events,
             );
         }
+        // CR 118.12a: Player chose **which** sub-cost of a disjunctive
+        // unless-cost to pay (or declined to pay any). On a `Some(idx)`
+        // choice, the handler swaps the multi-cost prompt for a single-cost
+        // `WaitingFor::UnlessPayment` carrying the chosen branch. On `None`
+        // it falls through to the effect-happens path the same way a `pay:
+        // false` answer to `PayUnlessCost` would.
+        (
+            waiting_for @ WaitingFor::UnlessPaymentChooseCost { .. },
+            GameAction::ChooseUnlessCostBranch { choice },
+        ) => {
+            return engine_payment_choices::handle_unless_payment_choose_cost(
+                state,
+                waiting_for.clone(),
+                choice,
+                &mut events,
+            );
+        }
         // CR 508.1d + CR 508.1h + CR 509.1c + CR 509.1d: Player decided whether to
         // pay the locked-in combat tax. Resumes the paused attack/block declaration
         // with the matching sanitization per the accept/decline branch.

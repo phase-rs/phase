@@ -13808,6 +13808,36 @@ fn extract_resolution_unless_pay_modifier(text: &str) -> (String, Option<UnlessP
     {
         return (text.to_string(), None);
     }
+
+    // CR 118.12a: "[Effect] unless they X [or Y]" — the targeted player is
+    // the payer (`TargetFilter::Player`), the alternative payment is one
+    // (or one of several) non-mana action(s). Tergrid's Lantern is the
+    // canonical case: "Target player loses 3 life unless they sacrifice a
+    // nonland permanent of their choice or discard a card." Routes through
+    // the trigger-side `parse_unless_they_alt_cost_chain` building block
+    // (single authority for non-mana unless-cost shapes — see
+    // `crate::parser::oracle_trigger`).
+    if let Some((before_unless, _, after_unless_lower)) =
+        nom_primitives::scan_preceded(&lower, |i| tag::<_, _, OracleError<'_>>("unless ").parse(i))
+    {
+        if let Some(cost) =
+            crate::parser::oracle_trigger::parse_unless_they_alt_cost_chain(after_unless_lower)
+        {
+            // Strip the entire " unless ..." tail from the cleaned effect
+            // text. `before_unless` is the lowercase prefix slice ending
+            // just before " unless "; trim trailing whitespace there to
+            // produce the cleaned effect.
+            let cleaned = text[..before_unless.trim_end().len()].trim().to_string();
+            return (
+                cleaned,
+                Some(UnlessPayModifier {
+                    cost,
+                    payer: TargetFilter::Player,
+                }),
+            );
+        }
+    }
+
     let Some((before, payer, cost_text)) =
         nom_primitives::scan_preceded(&lower, parse_resolution_unless_payer)
     else {

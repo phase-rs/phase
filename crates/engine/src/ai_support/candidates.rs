@@ -1434,6 +1434,30 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 ),
             ]
         }
+        // CR 118.12a: Disjunctive unless-cost — paying player chooses **which**
+        // sub-cost (by index) or declines all. One `ChooseUnlessCostBranch`
+        // candidate per sub-cost plus one `UnlessCostBranch::Decline`.
+        WaitingFor::UnlessPaymentChooseCost { player, costs, .. } => {
+            use crate::types::actions::UnlessCostBranch;
+            let mut out = Vec::with_capacity(costs.len() + 1);
+            for idx in 0..costs.len() {
+                out.push(candidate(
+                    GameAction::ChooseUnlessCostBranch {
+                        choice: UnlessCostBranch::Pay { index: idx },
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                ));
+            }
+            out.push(candidate(
+                GameAction::ChooseUnlessCostBranch {
+                    choice: UnlessCostBranch::Decline,
+                },
+                TacticalClass::Selection,
+                Some(*player),
+            ));
+            out
+        }
         // CR 508.1d + CR 509.1c: Combat tax — active player (attacks) or defending
         // player (blocks) chooses to pay the locked-in aggregate cost or decline
         // (dropping the taxed creatures from the declaration).
