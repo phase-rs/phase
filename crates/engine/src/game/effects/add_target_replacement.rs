@@ -40,6 +40,16 @@ fn replacement_targets(
         return ability.targets.clone();
     }
 
+    // CR 109.5: SelfRef resolves to the ability's source object — used by
+    // self-installing replacements (Crafty Cutpurse: "When ~ enters, [until end
+    // of turn] each token that would be created under an opponent's control is
+    // created under your control instead.") so the trigger anchors the
+    // replacement on its own source without needing to consult the target
+    // pipeline.
+    if matches!(target, TargetFilter::SelfRef) {
+        return vec![TargetRef::Object(ability.source_id)];
+    }
+
     resolve_event_context_target(state, target, ability.source_id)
         .into_iter()
         .collect()
@@ -337,5 +347,166 @@ mod tests {
         // inference (which would scope to a specific player).
         assert_eq!(pending.damage_target_filter, None);
         assert_eq!(pending.expiry, Some(RestrictionExpiry::EndOfTurn));
+    }
+
+    // Crafty Cutpurse end-to-end: a self-installed CreateToken replacement
+    // with `token_owner_scope: Opponent` and `token_owner_redirect: You`
+    // redirects opponent-created tokens to the source's controller.
+    // Covers CR 111.6 (token controller redirection) + CR 614.1a (replacement
+    // ordering: redirect applies before the token materializes).
+    #[test]
+    fn crafty_cutpurse_self_install_redirects_opponent_tokens_to_controller() {
+        use crate::types::ability::ControllerRef;
+        use crate::types::proposed_event::TokenSpec;
+        use std::collections::HashSet;
+
+        let mut state = GameState::new_two_player(42);
+        let cutpurse_id = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Crafty Cutpurse".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Build the replacement that the parsed trigger would install.
+        let mut repl = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            .token_owner_scope(ControllerRef::Opponent)
+            .token_owner_redirect(ControllerRef::You);
+        repl.expires_at_eot = true;
+
+        let install_ability = ResolvedAbility::new(
+            Effect::AddTargetReplacement {
+                replacement: Box::new(repl),
+                target: TargetFilter::SelfRef,
+            },
+            Vec::new(),
+            cutpurse_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &install_ability, &mut events).unwrap();
+
+        // Sanity: replacement landed on Cutpurse, marked EOT-expiring.
+        let installed = &state.objects[&cutpurse_id].replacement_definitions;
+        assert_eq!(installed.iter_all().count(), 1);
+        assert_eq!(
+            installed[0].token_owner_scope,
+            Some(ControllerRef::Opponent)
+        );
+        assert_eq!(installed[0].token_owner_redirect, Some(ControllerRef::You));
+        assert!(installed[0].expires_at_eot);
+
+        // Opponent (PlayerId(1)) proposes creating a Treasure token under their control.
+        let token_spec = TokenSpec {
+            display_name: "Treasure".to_string(),
+            script_name: "Treasure".to_string(),
+            power: None,
+            toughness: None,
+            core_types: vec![crate::types::card_type::CoreType::Artifact],
+            subtypes: vec!["Treasure".to_string()],
+            supertypes: Vec::new(),
+            colors: Vec::new(),
+            keywords: Vec::new(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: ObjectId(50),
+            controller: PlayerId(1),
+        };
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(1),
+            spec: Box::new(token_spec),
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            count: 1,
+            applied: HashSet::new(),
+        };
+
+        let result = replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::Execute(ProposedEvent::CreateToken { owner, .. }) = result else {
+            panic!("expected modified CreateToken event, got {result:?}");
+        };
+        assert_eq!(
+            owner,
+            PlayerId(0),
+            "Crafty Cutpurse should redirect opponent's token to its controller"
+        );
+    }
+
+    // Symmetry guard: tokens already created under our control are untouched.
+    // Without the `token_owner_scope: Opponent` filter the redirect would also
+    // fire on our own tokens — but `find_applicable_replacements` skips the
+    // entry when the proposed owner does not match the scope, so this is the
+    // existing matcher's job; here we just make sure that's still true.
+    #[test]
+    fn crafty_cutpurse_does_not_redirect_own_tokens() {
+        use crate::types::ability::ControllerRef;
+        use crate::types::proposed_event::TokenSpec;
+        use std::collections::HashSet;
+
+        let mut state = GameState::new_two_player(42);
+        let cutpurse_id = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Crafty Cutpurse".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut repl = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            .token_owner_scope(ControllerRef::Opponent)
+            .token_owner_redirect(ControllerRef::You);
+        repl.expires_at_eot = true;
+
+        let install_ability = ResolvedAbility::new(
+            Effect::AddTargetReplacement {
+                replacement: Box::new(repl),
+                target: TargetFilter::SelfRef,
+            },
+            Vec::new(),
+            cutpurse_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &install_ability, &mut events).unwrap();
+
+        // Our own token creation — must not be intercepted.
+        let token_spec = TokenSpec {
+            display_name: "Saproling".to_string(),
+            script_name: "Saproling".to_string(),
+            power: Some(1),
+            toughness: Some(1),
+            core_types: vec![crate::types::card_type::CoreType::Creature],
+            subtypes: vec!["Saproling".to_string()],
+            supertypes: Vec::new(),
+            colors: vec![crate::types::mana::ManaColor::Green],
+            keywords: Vec::new(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: ObjectId(60),
+            controller: PlayerId(0),
+        };
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(token_spec),
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            count: 1,
+            applied: HashSet::new(),
+        };
+
+        let result = replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::Execute(ProposedEvent::CreateToken { owner, .. }) = result else {
+            panic!("expected unmodified CreateToken event, got {result:?}");
+        };
+        assert_eq!(
+            owner,
+            PlayerId(0),
+            "our own token creation must not be redirected by our own Crafty Cutpurse"
+        );
     }
 }

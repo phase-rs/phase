@@ -988,18 +988,24 @@ fn create_token_applier(
     events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
     use crate::types::ability::QuantityModification;
-    let (modification, additional_spec, ensure_specs) = state
+    let (modification, additional_spec, ensure_specs, owner_redirect, source_controller) = state
         .objects
         .get(&rid.source)
-        .and_then(|obj| obj.replacement_definitions.get(rid.index))
-        .map(|def| {
+        .and_then(|obj| {
+            obj.replacement_definitions
+                .get(rid.index)
+                .map(|def| (def, obj.controller))
+        })
+        .map(|(def, controller)| {
             (
                 def.quantity_modification.clone(),
                 def.additional_token_spec.clone(),
                 def.ensure_token_specs.clone(),
+                def.token_owner_redirect.clone(),
+                controller,
             )
         })
-        .unwrap_or((None, None, None));
+        .unwrap_or((None, None, None, None, PlayerId(0)));
 
     if let ProposedEvent::CreateToken {
         owner,
@@ -1009,6 +1015,22 @@ fn create_token_applier(
         applied,
     } = event
     {
+        // CR 111.6 + CR 614.1a: Apply controller redirect (Crafty Cutpurse).
+        // The redirect's `ControllerRef` is resolved relative to the source's
+        // controller — `You` redirects to that controller; `Opponent` would
+        // redirect away (not currently a Magic pattern but representable).
+        let owner = match owner_redirect {
+            Some(crate::types::ability::ControllerRef::You) => source_controller,
+            Some(crate::types::ability::ControllerRef::Opponent) => state
+                .players
+                .iter()
+                .map(|p| p.id)
+                .find(|pid| *pid != source_controller)
+                .unwrap_or(owner),
+            // CR 109.4: Other ControllerRef scopes have no resolution at
+            // token-creation time — fail open (preserve original owner).
+            Some(_) | None => owner,
+        };
         // CR 614.1a: Modify token count per replacement effect.
         let new_count = match modification {
             Some(QuantityModification::Double) => count.saturating_mul(2),
