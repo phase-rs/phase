@@ -9,10 +9,12 @@ interface Props {
 export function BracketEstimateChip({ tier }: Props) {
   if (tier === null) return null;
   const num = BRACKET_TIER_NUMERIC[tier];
+  const label = `Estimated bracket: B${num} ${BRACKET_LABEL[num as CommanderBracket]}`;
   return (
     <span
       className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${BRACKET_TIER_CHIP_CLASS[tier]}`}
-      title={`Estimated bracket: B${num} ${BRACKET_LABEL[num as CommanderBracket]}`}
+      aria-label={label}
+      title={label}
     >
       Estimated: B{num}
     </span>

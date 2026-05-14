@@ -18,7 +18,7 @@ vi.mock("../../services/deckCompatibility", () => ({
 }));
 
 vi.mock("../../hooks/useBracketEstimate", () => ({
-  useBracketEstimate: () => ({ estimate: null, loading: false }),
+  useBracketEstimate: () => ({ estimate: null, loading: false, unsupported: false }),
 }));
 
 vi.mock("../../adapter/wasm-adapter", () => ({

@@ -156,18 +156,21 @@ export function DeckBuilder({
   const isCommander = formatConfig?.command_zone ?? false;
   const maxCopies = formatConfig?.singleton ? 1 : 4;
 
-  const { estimate } = useBracketEstimate({
+  const { estimate, unsupported: bracketUnsupported } = useBracketEstimate({
     deck,
     commanders,
     format,
     adapter: getSharedAdapter(),
   });
 
-  const auditEmptyReason: "not-commander" | "no-commander" | undefined = !isCommander
-    ? "not-commander"
-    : commanders.length === 0
-      ? "no-commander"
-      : undefined;
+  const auditEmptyReason: "not-commander" | "no-commander" | "unsupported" | undefined =
+    !isCommander
+      ? "not-commander"
+      : commanders.length === 0
+        ? "no-commander"
+        : bracketUnsupported
+          ? "unsupported"
+          : undefined;
 
   const handleScrollToCard = useCallback((cardName: string) => {
     const node = document.querySelector<HTMLElement>(

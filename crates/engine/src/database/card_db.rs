@@ -226,56 +226,29 @@ impl CardDatabase {
     /// names in the loaded `bracket_lists`. Returns all-false `BracketSignals`
     /// when the name is unknown to both.
     ///
-    /// Multi-face commanders (e.g. partner pairs stored as `"A // B"`) are
-    /// handled in two steps:
-    /// 1. `lookup_key` resolves DFC names to their front-face key; a direct
-    ///    hit covers the transform/MDFC case.
-    /// 2. If the canonical key still misses and the name contains `" // "`,
-    ///    aggregate signals across both faces with logical-OR. For export-map
-    ///    databases this reads from `bracket_signals_by_name`; for bracket-list-
-    ///    only databases (oracle-gen / tests) this reads from `bracket_lists`.
+    /// Multi-face combined names (`"A // B"` — partner pairs, MDFCs, split,
+    /// etc.) are aggregated face-by-face with logical-OR *before* the
+    /// single-face fast path. `lookup_key` collapses combined names to their
+    /// front face, so without this pre-split a back-face signal would be
+    /// silently dropped whenever the front face is in the export map.
     pub fn bracket_signals_for(&self, name: &str) -> BracketSignals {
-        let key = self.lookup_key(name);
-        if let Some(sig) = self.bracket_signals_by_name.get(&key) {
-            return *sig;
-        }
-        // Multi-face commander partner-pair: "A // B" where each face is its
-        // own entry in the export map (lookup_key only resolves to the front
-        // face for DFCs that share an oracle_id — partner pairs do not).
         if let Some((a, b)) = name.split_once(" // ") {
-            let a_key = a.trim().to_lowercase();
-            let b_key = b.trim().to_lowercase();
-            let a_in_export = self.bracket_signals_by_name.contains_key(&a_key);
-            let b_in_export = self.bracket_signals_by_name.contains_key(&b_key);
-            if a_in_export || b_in_export {
-                // At least one face is in the export map — aggregate from there.
-                let sa = self
-                    .bracket_signals_by_name
-                    .get(&a_key)
-                    .copied()
-                    .unwrap_or_default();
-                let sb = self
-                    .bracket_signals_by_name
-                    .get(&b_key)
-                    .copied()
-                    .unwrap_or_default();
-                return BracketSignals {
-                    game_changer: sa.game_changer || sb.game_changer,
-                    mass_land_denial: sa.mass_land_denial || sb.mass_land_denial,
-                    extra_turn: sa.extra_turn || sb.extra_turn,
-                    efficient_tutor: sa.efficient_tutor || sb.efficient_tutor,
-                };
-            }
-            // Neither face is in the export map — fall back to bracket_lists,
-            // querying each face name separately and OR-ing the results.
-            let sa = self.bracket_lists.signals_for(a.trim());
-            let sb = self.bracket_lists.signals_for(b.trim());
+            let sa = self.signals_for_single_face(a.trim());
+            let sb = self.signals_for_single_face(b.trim());
             return BracketSignals {
                 game_changer: sa.game_changer || sb.game_changer,
                 mass_land_denial: sa.mass_land_denial || sb.mass_land_denial,
                 extra_turn: sa.extra_turn || sb.extra_turn,
                 efficient_tutor: sa.efficient_tutor || sb.efficient_tutor,
             };
+        }
+        self.signals_for_single_face(name)
+    }
+
+    fn signals_for_single_face(&self, name: &str) -> BracketSignals {
+        let key = self.lookup_key(name);
+        if let Some(sig) = self.bracket_signals_by_name.get(&key) {
+            return *sig;
         }
         self.bracket_lists.signals_for(name)
     }
@@ -634,6 +607,45 @@ mod tests {
         assert!(
             sig.game_changer,
             "partner-pair name must resolve to either face's signals"
+        );
+    }
+
+    #[test]
+    fn bracket_signals_for_partner_pair_picks_up_back_face_only_signal() {
+        // Regression: lookup_key("A // B") collapses to the front face's key,
+        // so a back-face-only signal must be picked up by the pre-split
+        // aggregation, not the single-face fast path.
+        let json = r#"{
+            "halana, kessig ranger": {
+                "name": "Halana, Kessig Ranger",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [], "keywords": [],
+                "bracket_signals": {
+                    "game_changer": false, "mass_land_denial": false,
+                    "extra_turn": false, "efficient_tutor": false
+                }
+            },
+            "alena, trapper founder": {
+                "name": "Alena, Trapper Founder",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [], "keywords": [],
+                "bracket_signals": {
+                    "game_changer": true, "mass_land_denial": false,
+                    "extra_turn": false, "efficient_tutor": false
+                }
+            }
+        }"#;
+        let db = CardDatabase::from_json_str(json).unwrap();
+        let sig = db.bracket_signals_for("Halana, Kessig Ranger // Alena, Trapper Founder");
+        assert!(
+            sig.game_changer,
+            "back-face partner signal must survive lookup_key's front-face collapse"
         );
     }
 

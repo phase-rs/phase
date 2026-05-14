@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
+import { AdapterError, AdapterErrorCode } from "../adapter/types";
 import type { BracketEstimate, EngineAdapter, GameFormat } from "../adapter/types";
 import { isCommanderFamilyFormat } from "../types/bracket";
 import type { ParsedDeck } from "../services/deckParser";
@@ -49,6 +50,12 @@ interface Options {
 interface Result {
   estimate: BracketEstimate | null;
   loading: boolean;
+  /**
+   * True when the active adapter (Tauri, WebSocket, P2P, server-draft) threw
+   * `BRACKET_ESTIMATION_UNSUPPORTED`. Lets callers distinguish "this build
+   * doesn't support local bracket estimation" from "deck has no commander".
+   */
+  unsupported: boolean;
 }
 
 /**
@@ -70,6 +77,7 @@ export function useBracketEstimate({
 }: Options): Result {
   const [estimate, setEstimate] = useState<BracketEstimate | null>(null);
   const [loading, setLoading] = useState(false);
+  const [unsupported, setUnsupported] = useState(false);
   /** Last successfully *stored* key — used to short-circuit identical re-renders. */
   const storedKeyRef = useRef<string | null>(null);
   /** Latest *scheduled* key — written synchronously, used as the stale-result guard. */
@@ -89,6 +97,7 @@ export function useBracketEstimate({
     if (!eligible || !deckKey) {
       setEstimate(null);
       setLoading(false);
+      setUnsupported(false);
       storedKeyRef.current = null;
       pendingKeyRef.current = null;
       return;
@@ -97,6 +106,7 @@ export function useBracketEstimate({
 
     pendingKeyRef.current = deckKey;
     setLoading(true);
+    setUnsupported(false);
     const scheduledKey = deckKey;
     const timer = setTimeout(async () => {
       try {
@@ -113,10 +123,14 @@ export function useBracketEstimate({
         }
         storedKeyRef.current = scheduledKey;
         setEstimate(result);
-      } catch {
-        if (pendingKeyRef.current === scheduledKey) {
-          setEstimate(null);
-        }
+        setUnsupported(false);
+      } catch (err) {
+        if (pendingKeyRef.current !== scheduledKey) return;
+        setEstimate(null);
+        setUnsupported(
+          err instanceof AdapterError &&
+            err.code === AdapterErrorCode.BRACKET_ESTIMATION_UNSUPPORTED,
+        );
       } finally {
         if (pendingKeyRef.current === scheduledKey) {
           setLoading(false);
@@ -130,5 +144,5 @@ export function useBracketEstimate({
     // cause re-runs on every object-identity churn with no observable change.
   }, [eligible, deckKey, adapter]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  return { estimate, loading };
+  return { estimate, loading, unsupported };
 }

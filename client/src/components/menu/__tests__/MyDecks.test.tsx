@@ -13,7 +13,7 @@ vi.mock("../../../hooks/useCardImage", () => ({
 }));
 
 vi.mock("../../../hooks/useBracketEstimate", () => ({
-  useBracketEstimate: () => ({ estimate: null, loading: false }),
+  useBracketEstimate: () => ({ estimate: null, loading: false, unsupported: false }),
 }));
 
 vi.mock("../../../adapter/wasm-adapter", () => ({

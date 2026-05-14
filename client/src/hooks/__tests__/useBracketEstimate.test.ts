@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderHook, act, waitFor } from "@testing-library/react";
 import { useBracketEstimate, clearBracketEstimateCache } from "../useBracketEstimate";
+import { AdapterError, AdapterErrorCode } from "../../adapter/types";
 import type { BracketEstimate } from "../../adapter/types";
 import type { ParsedDeck } from "../../services/deckParser";
 
@@ -167,6 +168,46 @@ describe("useBracketEstimate", () => {
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(result.current.estimate).toBeNull();
     expect(adapter.estimateBracket).not.toHaveBeenCalled();
+  });
+
+  it("flags `unsupported` when the adapter throws BRACKET_ESTIMATION_UNSUPPORTED", async () => {
+    const adapter = {
+      estimateBracket: vi.fn().mockRejectedValue(
+        new AdapterError(
+          AdapterErrorCode.BRACKET_ESTIMATION_UNSUPPORTED,
+          "Not available in this build",
+          false,
+        ),
+      ),
+    };
+    // Use a unique deck so the module cache doesn't satisfy this from a
+    // sibling test's resolved promise.
+    const uniqueDeck: ParsedDeck = {
+      main: [{ name: `Unsupported-${Date.now()}`, count: 1 }],
+      sideboard: [],
+    };
+    const { result } = renderHook(() =>
+      useBracketEstimate({ deck: uniqueDeck, commanders: ["Atraxa"], format: "Commander", adapter }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.unsupported).toBe(true);
+    expect(result.current.estimate).toBeNull();
+  });
+
+  it("does not flag `unsupported` for generic adapter failures", async () => {
+    const adapter = {
+      estimateBracket: vi.fn().mockRejectedValue(new Error("boom")),
+    };
+    const uniqueDeck: ParsedDeck = {
+      main: [{ name: `Generic-${Date.now()}`, count: 1 }],
+      sideboard: [],
+    };
+    const { result } = renderHook(() =>
+      useBracketEstimate({ deck: uniqueDeck, commanders: ["Atraxa"], format: "Commander", adapter }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.unsupported).toBe(false);
+    expect(result.current.estimate).toBeNull();
   });
 
   it("shares results across hook instances via module-level cache", async () => {
