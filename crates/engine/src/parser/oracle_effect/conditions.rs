@@ -1978,7 +1978,9 @@ pub(super) fn try_nom_condition_as_ability_condition(
             // the compound to bind — partial recognition falls through to the
             // bare-CastFromZone path is intentionally rejected here, since
             // running with only half the gate is unsafe.
-            if let Some(second_text) = trimmed.strip_prefix("and ") {
+            if let Ok((second_text, _)) =
+                tag::<_, _, OracleError<'_>>("and ").parse(trimmed)
+            {
                 if let Some(second) =
                     parse_youve_cast_another_named_this_game_condition(second_text)
                 {
@@ -2511,13 +2513,17 @@ fn parse_supertype_word(input: &str) -> nom::IResult<&str, Supertype, OracleErro
 /// `FilterProp::Named { name }` and counted against
 /// `QuantityRef::SpellsCastThisGame { filter }`.
 ///
+/// The comparator is `>= 2`, mirroring `parse_another_spell_cast_this_turn`'s
+/// `minimum: 2` convention: at resolution time the currently-resolving spell
+/// is already recorded in the cast history, so "another" means total count
+/// must be at least 2 (this spell plus at least one prior printing of the
+/// same name).
+///
 /// Matching is greedy on the name up to the trailing " this game" anchor.
 /// The remainder (if any) is ignored — callers wrap this in a larger
 /// condition (e.g. `AbilityCondition::And`) so the surrounding context can
 /// own whatever follows.
-fn parse_youve_cast_another_named_this_game_condition(
-    lower: &str,
-) -> Option<AbilityCondition> {
+fn parse_youve_cast_another_named_this_game_condition(lower: &str) -> Option<AbilityCondition> {
     let (rest, _): (&str, &str) = alt((
         tag::<_, _, OracleError<'_>>("you've cast another spell named "),
         tag("you cast another spell named "),
@@ -2541,7 +2547,7 @@ fn parse_youve_cast_another_named_this_game_condition(
             },
         },
         comparator: Comparator::GE,
-        rhs: QuantityExpr::Fixed { value: 1 },
+        rhs: QuantityExpr::Fixed { value: 2 },
     })
 }
 

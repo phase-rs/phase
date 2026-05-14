@@ -14241,6 +14241,101 @@ mod tests {
         assert_eq!(normalize_verb_token("searches"), "search");
     }
 
+    /// CR 104.2a + CR 117.1 + CR 201.2 + CR 603.4 + CR 608.2c:
+    /// Approach prints "If this spell was cast from your hand and you've cast
+    /// another spell named ~ this game, you win the game.  Otherwise, put ~
+    /// into its owner's library seventh from the top and you gain 7 life."
+    /// The parser must:
+    ///   1. Recognise the compound `And { CastFromZone(Hand),
+    ///      QuantityCheck(SpellsCastThisGame{filter=Named} >= 2) }` so the
+    ///      win effect fires only on the second cast (CR 117.1 — at
+    ///      resolution time the currently-resolving spell is already in
+    ///      `spells_cast_this_game_by_player`, so "another" maps to >= 2).
+    ///   2. Route the otherwise branch (PutAtLibraryPosition then GainLife
+    ///      7) onto `else_ability`, keeping the "and you gain 7 life"
+    ///      inside the Otherwise body rather than chaining it onto the win
+    ///      effect.
+    #[test]
+    fn approach_of_the_second_sun_parses_compound_condition_and_otherwise_branch() {
+        let def = parse_effect_chain(
+            "If this spell was cast from your hand and you've cast another spell named ~ this game, you win the game.\nOtherwise, put ~ into its owner's library seventh from the top and you gain 7 life.",
+            AbilityKind::Spell,
+        );
+
+        assert!(
+            matches!(*def.effect, Effect::WinTheGame),
+            "top-level effect must be WinTheGame, got: {:?}",
+            def.effect
+        );
+
+        let condition = def
+            .condition
+            .as_ref()
+            .expect("WinTheGame must be gated by the printed compound condition");
+        let AbilityCondition::And { conditions } = condition else {
+            panic!("expected And condition, got: {condition:?}");
+        };
+        assert_eq!(conditions.len(), 2);
+        assert!(
+            matches!(
+                &conditions[0],
+                AbilityCondition::CastFromZone { zone: Zone::Hand }
+            ),
+            "first conjunct must be CastFromZone(Hand), got: {:?}",
+            conditions[0]
+        );
+        match &conditions[1] {
+            AbilityCondition::QuantityCheck {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::SpellsCastThisGame {
+                                scope: CountScope::Controller,
+                                filter: Some(TargetFilter::Typed(tf)),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 2 },
+            } if tf
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::Named { .. })) => {}
+            other => panic!(
+                "second conjunct must be SpellsCastThisGame filtered by Named >= 2, got: {other:?}"
+            ),
+        }
+
+        let else_ab = def
+            .else_ability
+            .as_ref()
+            .expect("Otherwise must attach as else_ability");
+        assert!(
+            matches!(*else_ab.effect, Effect::PutAtLibraryPosition { .. }),
+            "else_ability head must be PutAtLibraryPosition, got: {:?}",
+            else_ab.effect
+        );
+        let gain = else_ab
+            .sub_ability
+            .as_ref()
+            .expect("Otherwise body must continue with `and you gain 7 life`");
+        assert!(
+            matches!(
+                *gain.effect,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 7 },
+                    ..
+                }
+            ),
+            "Otherwise body must end with GainLife(7), got: {:?}",
+            gain.effect
+        );
+        assert!(
+            def.sub_ability.is_none(),
+            "WinTheGame must not carry a sub_ability (the gain-life clause belongs to the Otherwise branch), got: {:?}",
+            def.sub_ability
+        );
+    }
+
     /// CR 608.2c: "If <cond>, you may instead <reveal-N-from-among>" must produce
     /// a conditional Dig alternative where the `else_ability` is the base Dig
     /// (with its patched filter) and the outer Dig carries the alternative's

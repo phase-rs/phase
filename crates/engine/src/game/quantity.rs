@@ -5045,6 +5045,62 @@ mod tests {
     }
 
     #[test]
+    fn resolve_quantity_spells_cast_this_game_filtered_by_name() {
+        // CR 117.1 + CR 201.2: Approach of the Second Sun's game-scope name
+        // filter resolves against `state.spells_cast_this_game_by_player`.
+        // The condition checks "another spell named ~ this game" via >= 2.
+        let mut state = GameState::new_two_player(42);
+        state.spells_cast_this_game_by_player.insert(
+            PlayerId(0),
+            vec![
+                SpellCastRecord {
+                    name: "Approach of the Second Sun".to_string(),
+                    core_types: vec![CoreType::Sorcery],
+                    ..SpellCastRecord::default()
+                },
+                SpellCastRecord {
+                    name: "Lightning Bolt".to_string(),
+                    core_types: vec![CoreType::Instant],
+                    ..SpellCastRecord::default()
+                },
+            ],
+        );
+
+        let filter = TargetFilter::Typed(TypedFilter::default().properties(vec![
+            FilterProp::Named {
+                name: "approach of the second sun".to_string(),
+            },
+        ]));
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::SpellsCastThisGame {
+                scope: CountScope::Controller,
+                filter: Some(filter),
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)),
+            1,
+            "name filter must match only the prior Approach cast, not Lightning Bolt"
+        );
+
+        // Cast a second copy: >= 2 should now hold ("another" semantic).
+        state
+            .spells_cast_this_game_by_player
+            .get_mut(&PlayerId(0))
+            .unwrap()
+            .push(SpellCastRecord {
+                name: "Approach of the Second Sun".to_string(),
+                core_types: vec![CoreType::Sorcery],
+                ..SpellCastRecord::default()
+            });
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)),
+            2,
+            "second Approach cast must satisfy `another spell named ~ this game` (count >= 2)"
+        );
+    }
+
+    #[test]
     fn half_rounded_up_even() {
         let state = GameState::new_two_player(42);
         let expr = QuantityExpr::DivideRounded {
