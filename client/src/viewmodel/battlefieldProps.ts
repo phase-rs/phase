@@ -35,9 +35,12 @@ export function partitionByType(objects: GameObject[]): BattlefieldPartition {
   const other: ObjectId[] = [];
 
   for (const obj of objects) {
-    // Attached permanents render as a tucked peek behind their host (see
-    // the attachments.map in PermanentCard) — they must not also occupy a
-    // partition row, which would double-render the same card.
+    // Attached permanents render through their host's surface, not the main
+    // battlefield rows: Object-host attachments peek behind the host card
+    // (see attachments.map in PermanentCard); Player-host attachments
+    // (Curse cycle, Faith's Fetters-class) render alongside the player's
+    // HUD plate (see PlayerAttachedAuras). Either way, double-rendering them
+    // here would put two copies on screen.
     if (obj.attached_to !== null) continue;
     const coreTypes = obj.card_types.core_types;
 

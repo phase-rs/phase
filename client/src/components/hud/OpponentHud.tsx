@@ -17,6 +17,7 @@ import { ScoreBadge } from "../draft/ScoreBadge.tsx";
 import { CityBlessingBadge, CounterBadge, DungeonBadge, InitiativeBadge, MonarchBadge, StatusBadge } from "./HudBadges.tsx";
 import { AvatarHoverPreview } from "./AvatarHoverPreview.tsx";
 import { HudPlate } from "./HudPlate.tsx";
+import { PlayerAttachedAuras } from "./PlayerAttachedAuras.tsx";
 import { IncomingAttackersPopover } from "./IncomingAttackersPopover.tsx";
 import { KickConfirmDialog } from "./KickConfirmDialog.tsx";
 import { UnderAttackOverlay } from "./UnderAttackOverlay.tsx";
@@ -181,7 +182,7 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
       <div
         data-player-hud={String(opponentId)}
         data-phased-out={isOpponentPhasedOut ? "true" : undefined}
-        className={`relative flex items-center py-1 ${
+        className={`relative flex items-center gap-1.5 py-1 ${
           isOpponentPhasedOut ? "opacity-40 grayscale" : ""
         }`}
       >
@@ -192,6 +193,7 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
           seatColor={opponentSeatColor}
           underAttack={isOpponentUnderAttack}
           avatarUrl={opponentAvatarUrl}
+          playerId={opponentId}
           onClick={isValidTarget ? () => handlePlayerTarget(opponentId) : undefined}
           trailing={matchScore || opponentDesignations.hasAny || opponentPoisonCounters > 0 || opponentRadCounters > 0 || opponentSpeed > 0 || opponentCompanion || isOnline || isOpponentPhasedOut ? (
             <>
@@ -218,6 +220,7 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
             <ManaPoolSummary playerId={opponentId} />
           </div>
         </HudPlate>
+        <PlayerAttachedAuras playerId={opponentId} />
       </div>
     );
   }

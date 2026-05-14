@@ -4,6 +4,14 @@ export type ObjectId = number;
 export type CardId = number;
 export type PlayerId = number;
 
+// ── Attachment Target ────────────────────────────────────────────────────
+// Mirrors `engine::game::game_object::AttachTarget`. Auras may attach to a
+// permanent (`Object`) or to a player (`Player`, e.g. Curse cycle); Equipment
+// is `Object`-only by CR 301.5. Serde tag/content format matches the engine.
+export type AttachTarget =
+  | { type: "Object"; data: ObjectId }
+  | { type: "Player"; data: PlayerId };
+
 // ── Dungeon ─────────────────────────────────────────────────────────────
 
 export type DungeonId =
@@ -467,7 +475,11 @@ export interface GameObject {
   transformed: boolean;
   damage_marked: number;
   dealt_deathtouch_damage: boolean;
-  attached_to: ObjectId | null;
+  /** Mirrors engine `Option<AttachTarget>`: null when unattached, otherwise
+   *  a tagged-union pointing at either an Object host (Equipment/most Auras)
+   *  or a Player host (Curse cycle, Faith's Fetters-class). FE consumers must
+   *  inspect `.type` before reading `.data`; do not treat as a bare ObjectId. */
+  attached_to: AttachTarget | null;
   attachments: ObjectId[];
   paired_with?: ObjectId | null;
   counters: Partial<Record<CounterType, number>>;
@@ -967,7 +979,15 @@ export interface ActionResult {
 
 export type DebugAction =
   | { type: "MoveToZone"; data: { object_id: ObjectId; to_zone: Zone; simulate?: boolean } }
-  | { type: "CreateCard"; data: { card_name: string; owner: PlayerId; zone: Zone } }
+  | {
+      type: "CreateCard";
+      data: {
+        card_name: string;
+        owner: PlayerId;
+        zone: Zone;
+        attach_to?: AttachTarget;
+      };
+    }
   | { type: "RemoveObject"; data: { object_id: ObjectId } }
   | { type: "DrawCards"; data: { player_id: PlayerId; count: number } }
   | { type: "Mill"; data: { player_id: PlayerId; count: number } }
@@ -978,7 +998,7 @@ export type DebugAction =
   | { type: "SetController"; data: { object_id: ObjectId; controller: PlayerId } }
   | { type: "SetSummoningSickness"; data: { object_id: ObjectId; sick: boolean } }
   | { type: "SetFaceState"; data: { object_id: ObjectId; face_down?: boolean; transformed?: boolean; flipped?: boolean } }
-  | { type: "Attach"; data: { object_id: ObjectId; target_id: ObjectId } }
+  | { type: "Attach"; data: { object_id: ObjectId; target: AttachTarget } }
   | { type: "Detach"; data: { object_id: ObjectId } }
   | { type: "GrantKeyword"; data: { object_id: ObjectId; keyword: Keyword } }
   | { type: "RemoveKeyword"; data: { object_id: ObjectId; keyword: Keyword } }
@@ -1208,6 +1228,16 @@ export interface DerivedViews {
    * `engine::game::derived_views::DerivedViews::stack_display_groups`.
    */
   stack_display_groups?: StackDisplayGroup[];
+  /**
+   * Engine-authored "Auras attached to player X" projection. Players have no
+   * `attachments` back-link on the GameObject side because they aren't
+   * GameObjects — this map is the FE's only legitimate channel for "which
+   * Auras enchant this player." Keyed by PlayerId-as-string per Rust's
+   * BTreeMap<PlayerId, _> serde encoding. Empty/omitted when no Auras
+   * enchant any player. Mirrors
+   * `engine::game::derived_views::DerivedViews::auras_attached_to_player`.
+   */
+  auras_attached_to_player?: Record<string, ObjectId[]>;
 }
 
 export interface GameState {

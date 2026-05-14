@@ -154,14 +154,14 @@ describe("toCardProps", () => {
 
   it("maps attachments and keywords", () => {
     const obj = makeGameObject({
-      attached_to: 5,
+      attached_to: { type: "Object", data: 5 },
       attachments: [10, 11],
       keywords: ["Flying", "Trample"],
       color: ["White", "Blue"],
     });
     const props = toCardProps(obj);
 
-    expect(props.attachedTo).toBe(5);
+    expect(props.attachedTo).toEqual({ type: "Object", data: 5 });
     expect(props.attachmentIds).toEqual([10, 11]);
     expect(props.keywords).toEqual(["Flying", "Trample"]);
     expect(props.colorIdentity).toEqual(["White", "Blue"]);

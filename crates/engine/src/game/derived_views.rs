@@ -14,10 +14,12 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use crate::game::game_object::AttachTarget;
 use crate::game::stack::{stack_display_groups, StackDisplayGroup};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
+use crate::types::zones::Zone;
 
 /// A single commander-damage badge the HUD renders: which victim received
 /// `damage` from `commander` (the ObjectId is stable across zone changes
@@ -50,6 +52,18 @@ pub struct DerivedViews {
     /// Authoritative grouping lives in `game::stack::stack_display_groups`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stack_display_groups: Vec<StackDisplayGroup>,
+
+    /// CR 303.4 + CR 702.5: Auras attached to each player (Curse cycle,
+    /// Faith's Fetters-class). Players have no `attachments` back-link
+    /// because they aren't `GameObject`s — this projection is the engine's
+    /// answer to "which Auras enchant player X" so the HUD can render them
+    /// tucked next to each player's avatar without scanning the battlefield
+    /// itself. Mirrors the Object-host case (`GameObject::attachments`)
+    /// shape-for-shape: the value list contains battlefield ObjectIds whose
+    /// `attached_to` resolves to the keyed PlayerId. Empty entries omitted
+    /// — a player with no enchanting Auras simply has no key.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub auras_attached_to_player: BTreeMap<PlayerId, Vec<ObjectId>>,
 }
 
 /// Serialize-only wrapper: the WASM getter passes `&GameState` by reference
@@ -102,6 +116,29 @@ pub fn derive_views(state: &GameState) -> DerivedViews {
     // (no spells/abilities in flight).
     if !state.stack.is_empty() {
         views.stack_display_groups = stack_display_groups(state);
+    }
+
+    // CR 303.4 + CR 702.5: Walk the battlefield once and bucket Player-host
+    // attachments by their host PlayerId. Object-host attachments are skipped
+    // here — those are surfaced through `GameObject::attachments` on the host
+    // itself and consumed by `PermanentCard`'s recursive render. The walk is
+    // O(battlefield size); the BTreeMap stays empty (and `skip_serializing_if`
+    // omits the field) when no Auras are enchanting any player, which is the
+    // dominant case.
+    for &obj_id in &state.battlefield {
+        let Some(obj) = state.objects.get(&obj_id) else {
+            continue;
+        };
+        if obj.zone != Zone::Battlefield {
+            continue;
+        }
+        if let Some(AttachTarget::Player(host)) = obj.attached_to {
+            views
+                .auras_attached_to_player
+                .entry(host)
+                .or_default()
+                .push(obj_id);
+        }
     }
 
     if state.format_config.commander_damage_threshold.is_none() {
@@ -363,5 +400,80 @@ mod tests {
             .get(&PlayerId(1))
             .expect("P1 entry survives round-trip");
         assert_eq!(from_p1[0].damage, 14);
+    }
+
+    /// CR 303.4 + CR 702.5: A Player-attached Aura on the battlefield must
+    /// surface in `auras_attached_to_player` keyed by the host player. The
+    /// frontend has no other channel for this — the FE doesn't (and per
+    /// CLAUDE.md, must not) scan the battlefield itself for player-host
+    /// attachments. Object-host attachments must NOT appear here; those
+    /// route through `GameObject::attachments` on the host.
+    #[test]
+    fn derive_views_surfaces_auras_attached_to_player() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let curse = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Curse of Opulence".into(),
+            Zone::Battlefield,
+        );
+        // Only Auras may have a Player host (mirrors `attach_to_player`'s
+        // CR 303.4 gate). Mark the subtype so a future tightening that
+        // double-checks at the derive layer wouldn't yank this entry.
+        state
+            .objects
+            .get_mut(&curse)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Aura".to_string());
+        state.objects.get_mut(&curse).unwrap().attached_to =
+            Some(AttachTarget::Player(PlayerId(1)));
+        // `create_object` already added `curse` to `state.battlefield`
+        // through `add_to_zone(Zone::Battlefield)` — no manual push needed
+        // (a duplicate push would surface as duplicate entries in the
+        // derived view's per-player Vec, which the assertion catches).
+
+        // Object-host control: a hypothetical Aura attached to a creature
+        // must NOT leak into the player map.
+        let creature = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "A Creature".into(),
+            Zone::Battlefield,
+        );
+        let aura_on_creature = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Some Aura".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&aura_on_creature)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Aura".to_string());
+        state
+            .objects
+            .get_mut(&aura_on_creature)
+            .unwrap()
+            .attached_to = Some(AttachTarget::Object(creature));
+        // No manual battlefield pushes — `create_object` did it for both.
+
+        let views = derive_views(&state);
+        let p1_auras = views
+            .auras_attached_to_player
+            .get(&PlayerId(1))
+            .expect("P1 should appear as an Aura host");
+        assert_eq!(p1_auras, &vec![curse], "Curse must be the only entry");
+        assert!(
+            !views.auras_attached_to_player.contains_key(&PlayerId(0)),
+            "P0 has no Aura host — must not get an empty entry",
+        );
     }
 }

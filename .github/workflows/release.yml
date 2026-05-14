@@ -105,7 +105,7 @@ jobs:
 
       - uses: taiki-e/install-action@v2
         with:
-          tool: wasm-bindgen-cli@0.2.114
+          tool: wasm-bindgen-cli@0.2.121
 
       - name: Cache binaryen
         id: binaryen-cache
@@ -481,7 +481,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         if: steps.macos-signing.outputs.skip != 'true'
         with:
-          tool: wasm-bindgen-cli@0.2.114
+          tool: wasm-bindgen-cli@0.2.121
 
       - name: Install binaryen (Linux)
         if: matrix.os == 'linux'

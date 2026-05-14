@@ -11,6 +11,7 @@ use super::phase::Phase;
 use super::player::PlayerId;
 use super::zones::Zone;
 use crate::game::combat::AttackTarget;
+use crate::game::game_object::AttachTarget;
 
 /// CR 701.57a + CR 702.85a: Player decision for any "you may cast that card
 /// without paying its mana cost" mid-resolution choice (Discover, Cascade).
@@ -563,10 +564,17 @@ pub enum DebugAction {
     },
     /// Create a new card object by name. Resolved against CardDatabase at the
     /// WASM layer; the engine returns InvalidAction if this reaches apply().
+    ///
+    /// `attach_to` is consulted only when `zone == Battlefield` and the card is
+    /// an Aura/Equipment-style attachment. When set, the object's `attached_to`
+    /// is populated before the ETB pipeline runs, so the SBA pass (CR 704.5n)
+    /// sees a legal host instead of an orphan. Ignored for non-Battlefield zones.
     CreateCard {
         card_name: String,
         owner: PlayerId,
         zone: Zone,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attach_to: Option<AttachTarget>,
     },
     /// Remove an object from the game entirely.
     RemoveObject { object_id: ObjectId },
@@ -608,10 +616,13 @@ pub enum DebugAction {
         transformed: Option<bool>,
         flipped: Option<bool>,
     },
-    /// Attach an object (equipment/aura) to a target permanent.
+    /// Attach an object (equipment/aura) to a target permanent or player.
+    /// CR 301.5 / CR 303.4f: Equipment hosts must be `Object`; player-attachable
+    /// Auras (Curse cycle, Faith's Fetters-class) use `Player`. The handler
+    /// dispatches to `attach_to` vs `attach_to_player` accordingly.
     Attach {
         object_id: ObjectId,
-        target_id: ObjectId,
+        target: AttachTarget,
     },
     /// Detach an object from whatever it's attached to.
     Detach { object_id: ObjectId },
@@ -694,12 +705,23 @@ impl DebugAction {
                 card_name,
                 owner,
                 zone,
-            } => format!(
-                "CreateCard ({} for {} in {:?})",
-                card_name,
-                player_label(*owner),
-                zone
-            ),
+                attach_to,
+            } => {
+                let attach_suffix = match attach_to {
+                    Some(AttachTarget::Object(id)) => format!(" attached to {}", obj(*id)),
+                    Some(AttachTarget::Player(pid)) => {
+                        format!(" attached to {}", player_label(*pid))
+                    }
+                    None => String::new(),
+                };
+                format!(
+                    "CreateCard ({} for {} in {:?}{})",
+                    card_name,
+                    player_label(*owner),
+                    zone,
+                    attach_suffix,
+                )
+            }
             DebugAction::RemoveObject { object_id } => {
                 format!("RemoveObject ({})", obj(*object_id))
             }
@@ -762,10 +784,13 @@ impl DebugAction {
                 transformed,
                 flipped
             ),
-            DebugAction::Attach {
-                object_id,
-                target_id,
-            } => format!("Attach ({} → {})", obj(*object_id), obj(*target_id)),
+            DebugAction::Attach { object_id, target } => {
+                let target_label = match target {
+                    AttachTarget::Object(id) => obj(*id),
+                    AttachTarget::Player(pid) => player_label(*pid),
+                };
+                format!("Attach ({} → {})", obj(*object_id), target_label)
+            }
             DebugAction::Detach { object_id } => format!("Detach ({})", obj(*object_id)),
             DebugAction::GrantKeyword { object_id, keyword } => {
                 format!("GrantKeyword ({} gains {:?})", obj(*object_id), keyword)
