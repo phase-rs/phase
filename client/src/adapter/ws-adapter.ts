@@ -1,4 +1,5 @@
 import type {
+  BracketEstimate,
   EngineAdapter,
   GameAction,
   GameEvent,
@@ -319,6 +320,19 @@ export class WebSocketAdapter implements EngineAdapter {
     throw new AdapterError(
       AdapterErrorCode.WASM_ERROR,
       "Undo not supported in multiplayer",
+      false,
+    );
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  estimateBracket(_deck: {
+    commander: string[];
+    main_deck: string[];
+    sideboard?: string[];
+  }): Promise<BracketEstimate | null> {
+    throw new AdapterError(
+      "bracket-estimation/unsupported",
+      "Bracket estimation is a local feature; not available in WebSocket sessions.",
       false,
     );
   }

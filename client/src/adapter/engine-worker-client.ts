@@ -249,6 +249,14 @@ export class EngineWorkerClient {
     return this.request<string | null>({ type: "takeLastPanic" });
   }
 
+  async estimateBracketForDeck(deck: {
+    commander: string[];
+    main_deck: string[];
+    sideboard: string[];
+  }): Promise<unknown> {
+    return this.request<unknown>({ type: "estimateBracketForDeck", deck });
+  }
+
   dispose(): void {
     for (const [, entry] of this.pending) {
       entry.reject(new Error("Worker disposed"));

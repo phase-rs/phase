@@ -1,5 +1,6 @@
 import type {
   BatchResolveResult,
+  BracketEstimate,
   EngineAdapter,
   FormatConfig,
   GameAction,
@@ -406,6 +407,24 @@ export class WasmAdapter implements EngineAdapter {
     }
   }
 
+  async estimateBracket(deck: {
+    commander: string[];
+    main_deck: string[];
+    sideboard?: string[];
+  }): Promise<BracketEstimate | null> {
+    this.assertInitialized();
+    const deckWithSideboard = {
+      commander: deck.commander,
+      main_deck: deck.main_deck,
+      sideboard: deck.sideboard ?? [],
+    };
+    if (this.engine) {
+      const result = await this.engine.estimateBracketForDeck(deckWithSideboard);
+      return (result ?? null) as BracketEstimate | null;
+    }
+    return this.fallback!.estimateBracketForDeck(deckWithSideboard);
+  }
+
   dispose(): void {
     // Clear the singleton reference so getSharedAdapter() creates a fresh
     // instance if called after dispose (e.g., error recovery code paths).
@@ -501,6 +520,11 @@ interface MainThreadFallback {
     playerCount?: number,
     firstPlayer?: number,
   ): Promise<SubmitResult>;
+  estimateBracketForDeck(deck: {
+    commander: string[];
+    main_deck: string[];
+    sideboard: string[];
+  }): Promise<BracketEstimate | null>;
 }
 
 async function createMainThreadFallback(): Promise<MainThreadFallback> {
@@ -613,6 +637,16 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
           throw new Error(`Deck validation failed: ${reasons.join("; ")}`);
         }
         return { events: r.events ?? [], log_entries: r.log_entries ?? [] };
+      }),
+
+    estimateBracketForDeck: (deck: {
+      commander: string[];
+      main_deck: string[];
+      sideboard: string[];
+    }) =>
+      enqueue(() => {
+        const r = wasm.estimate_bracket_for_deck(deck);
+        return (r ?? null) as BracketEstimate | null;
       }),
   };
 }

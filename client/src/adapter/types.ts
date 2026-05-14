@@ -1475,6 +1475,20 @@ export interface EngineAdapter {
   ): Promise<BatchResolveResult>;
   restoreState(state: GameState): void | Promise<void>;
   dispose(): void;
+
+  /**
+   * Estimates a Commander deck's bracket from card contents. Returns null
+   * when the deck has no commander, is empty, or the adapter doesn't
+   * support local deck analysis (multiplayer adapters throw via
+   * `AdapterError` instead of silently returning null).
+   *
+   * Pure — no game state, no side effects. Safe to call on every deck edit.
+   */
+  estimateBracket(deck: {
+    commander: string[];
+    main_deck: string[];
+    sideboard?: string[];
+  }): Promise<BracketEstimate | null>;
 }
 
 // ── Bracket Estimate ───────────────────────────────────────────────────
