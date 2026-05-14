@@ -311,6 +311,13 @@ impl AbilityCost {
             AbilityCost::Composite { costs } => {
                 costs.iter().all(|c| c.is_payable(state, player, source))
             }
+            // CR 118.12a: Disjunctive — payable if **any** sub-cost is
+            // payable. The interactive choice is surfaced at resolution via
+            // `WaitingFor::UnlessPaymentChooseCost`; the activation-time
+            // gate only needs at least one branch to be reachable.
+            AbilityCost::OneOf { costs } => {
+                costs.iter().any(|c| c.is_payable(state, player, source))
+            }
             // CR 601.2b: Waterbend composes a mana cost with a tap-creature option.
             // Affordability is checked via the standard auto-tap pre-check.
             AbilityCost::Waterbend { cost } => {

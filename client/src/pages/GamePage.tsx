@@ -1245,6 +1245,12 @@ function GamePageContent({
           canActForWaitingState && (
             <UnlessPaymentModal />
           )}
+
+        {/* CR 118.12a: Disjunctive unless-cost choice (Tergrid's Lantern). */}
+        {waitingFor?.type === "UnlessPaymentChooseCost" &&
+          canActForWaitingState && (
+            <UnlessPaymentChooseCostModal />
+          )}
       </DialogHost>
 
       {waitingFor?.type === "CompanionReveal" &&
@@ -2223,22 +2229,36 @@ function formatManaCost(cost: { type: string; shards?: string[]; generic?: numbe
   return parts.join("") || "0";
 }
 
-function formatUnlessCost(cost: { type: string; cost?: { type: string; shards?: string[]; generic?: number }; amount?: number }): string {
+function formatUnlessCost(cost: { type: string; cost?: { type: string; shards?: string[]; generic?: number }; amount?: number; count?: number }): string {
   switch (cost.type) {
+    // Legacy `UnlessCost` JSON (pre-2026-05-09 fold) — preserved for
+    // saved-game compat.
     case "Fixed":
       return cost.cost ? formatManaCost(cost.cost) : "0";
-    case "PayLife":
-      return `${cost.amount ?? 0} life`;
     case "DiscardCard":
       return "discard a card";
+    // Unified `AbilityCost` JSON (post-fold). Used by all newly produced
+    // unless-payments, including the per-branch entries of `OneOf`.
+    case "Mana":
+      return cost.cost ? formatManaCost(cost.cost) : "0";
+    case "Discard":
+      return "discard a card";
+    case "PayLife": {
+      const amount = typeof cost.amount === "number"
+        ? cost.amount
+        : (cost as { amount?: { type: string; value?: number } }).amount?.value ?? 0;
+      return `${amount} life`;
+    }
     case "Sacrifice": {
-      const n = (cost as { count?: number }).count ?? 1;
+      const n = cost.count ?? 1;
       return n > 1 ? `sacrifice ${n} permanents` : "sacrifice a permanent";
     }
     case "ReturnToHand": {
-      const n = (cost as { count?: number }).count ?? 1;
+      const n = cost.count ?? 1;
       return n > 1 ? `return ${n} permanents to hand` : "return a permanent to hand";
     }
+    case "PayEnergy":
+      return `${cost.amount ?? 0} energy`;
     default:
       return "a cost";
   }
@@ -2264,6 +2284,55 @@ function UnlessPaymentModal() {
       onChoose={(id) =>
         dispatch({ type: "PayUnlessCost", data: { pay: id === "pay" } })
       }
+    />
+  );
+}
+
+// CR 118.12a: Disjunctive unless-cost choice \u2014 the player picks **which**
+// sub-cost branch to pay (or declines all branches). Mirrors
+// `UnlessPaymentModal` but enumerates one option per sub-cost plus a
+// decline. Drives Tergrid's Lantern's "sacrifice ... or discard ..."
+// punisher pattern.
+function UnlessPaymentChooseCostModal() {
+  const dispatch = useGameDispatch();
+  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+
+  if (waitingFor?.type !== "UnlessPaymentChooseCost") return null;
+
+  const costs = waitingFor.data.costs as Array<{
+    type: string;
+    cost?: { type: string; shards?: string[]; generic?: number };
+    amount?: number;
+    count?: number;
+  }>;
+  const description = waitingFor.data.effect_description ?? "Choose a cost";
+  const title = description.charAt(0).toUpperCase() + description.slice(1);
+
+  const branchOptions = costs.map((cost, idx) => ({
+    id: String(idx),
+    label: formatUnlessCost(cost),
+  }));
+
+  return (
+    <ChoiceModal
+      title={`${title} Unless You Pay One`}
+      options={[
+        ...branchOptions,
+        { id: "decline", label: "Take the Effect" },
+      ]}
+      onChoose={(id) => {
+        // CR 118.12a: Typed `UnlessCostBranch` discriminant — `Decline`
+        // falls through to the effect, `Pay { index }` selects the
+        // sub-cost. Mirrors the Rust enum exactly.
+        const choice =
+          id === "decline"
+            ? ({ type: "Decline" } as const)
+            : ({ type: "Pay", data: { index: Number.parseInt(id, 10) } } as const);
+        dispatch({
+          type: "ChooseUnlessCostBranch",
+          data: { choice },
+        });
+      }}
     />
   );
 }

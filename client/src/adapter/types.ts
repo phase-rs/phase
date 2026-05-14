@@ -316,6 +316,14 @@ export type UnlessCost =
   | { type: "Sacrifice"; count: number; filter: TargetFilter }
   | { type: "ReturnToHand"; count: number; filter: TargetFilter };
 
+// CR 118.12a: Player decision at an `UnlessPaymentChooseCost` prompt. Mirrors
+// the Rust `UnlessCostBranch` enum (`crates/engine/src/types/actions.rs`).
+// `Decline` falls through to the effect happening; `Pay { index }` selects
+// the sub-cost by its position in `UnlessPaymentChooseCost.costs`.
+export type UnlessCostBranch =
+  | { type: "Decline" }
+  | { type: "Pay"; data: { index: number } };
+
 // ── Card Types ───────────────────────────────────────────────────────────
 
 export interface CardType {
@@ -815,6 +823,10 @@ export type WaitingFor =
   | { type: "PairChoice"; data: { player: PlayerId; source_id: ObjectId; choices: ObjectId[] } }
   | { type: "OpponentMayChoice"; data: { player: PlayerId; source_id: ObjectId; description?: string; remaining: PlayerId[] } }
   | { type: "UnlessPayment"; data: { player: PlayerId; cost: UnlessCost; pending_effect: unknown; trigger_event?: unknown; effect_description?: string } }
+  // CR 118.12a: Disjunctive unless-cost — player picks **which** sub-cost
+  // to pay (or declines all). Drives Tergrid's Lantern and the broader
+  // "unless they X or Y" punisher class.
+  | { type: "UnlessPaymentChooseCost"; data: { player: PlayerId; costs: UnlessCost[]; pending_effect: unknown; trigger_event?: unknown; effect_description?: string } }
   | { type: "WardDiscardChoice"; data: { player: PlayerId; cards: ObjectId[]; pending_effect: unknown } }
   | { type: "WardSacrificeChoice"; data: { player: PlayerId; permanents: ObjectId[]; pending_effect: unknown; remaining: number } }
   | { type: "UnlessBounceChoice"; data: { player: PlayerId; permanents: ObjectId[]; pending_effect: unknown; remaining: number } }
@@ -972,7 +984,14 @@ export type DebugAction =
   | { type: "AddMana"; data: { player_id: PlayerId; mana: ManaType[] } }
   | { type: "SetPhase"; data: { phase: Phase; active_player: PlayerId } }
   | { type: "RunStateBasedActions" }
-  | { type: "CreateToken"; data: { owner: PlayerId; characteristics: TokenCharacteristics } };
+  | {
+      type: "CreateToken";
+      data: {
+        owner: PlayerId;
+        characteristics: TokenCharacteristics;
+        enter_with_counters?: [CounterType, number][];
+      };
+    };
 
 export type GameAction =
   | { type: "PassPriority" }
@@ -1027,6 +1046,10 @@ export type GameAction =
   | { type: "DecideOptionalEffect"; data: { accept: boolean } }
   | { type: "DecideOptionalEffectAndRemember"; data: { choice: AutoMayChoice } }
   | { type: "PayUnlessCost"; data: { pay: boolean } }
+  // CR 118.12a: Choose a branch of a disjunctive unless-cost. The
+  // discriminant is `Decline` (effect happens) or `Pay { index }` (the
+  // selected sub-cost re-enters the standard unless-payment flow).
+  | { type: "ChooseUnlessCostBranch"; data: { choice: UnlessCostBranch } }
   | { type: "ChooseRingBearer"; data: { target: ObjectId } }
   | { type: "ChooseLegend"; data: { keep: ObjectId } }
   | { type: "ChooseBattleProtector"; data: { protector: PlayerId } }

@@ -147,6 +147,7 @@ function imageRequestKey(
   filterPower: number | null,
   filterToughness: number | null,
   filterColors: string,
+  filterSubtypes: string,
   oracleId: string,
   faceName: string,
 ): string {
@@ -158,6 +159,7 @@ function imageRequestKey(
     filterPower ?? "",
     filterToughness ?? "",
     filterColors,
+    filterSubtypes,
   ].join("|");
 }
 
@@ -179,6 +181,7 @@ async function acquireCachedImageSrc(
   filterPower: number | null,
   filterToughness: number | null,
   filterColors: string,
+  filterSubtypes: string,
   oracleId: string,
   faceName: string,
 ): Promise<string | null> {
@@ -203,6 +206,7 @@ async function acquireCachedImageSrc(
         power: filterPower,
         toughness: filterToughness,
         colors: filterColors ? filterColors.split(",") : undefined,
+        subtypes: filterSubtypes ? filterSubtypes.split(",") : undefined,
       });
     } else if (oracleId) {
       remoteSrc = await fetchCardImageByOracleId(oracleId, faceName, size);
@@ -237,6 +241,7 @@ export function useCardImage(
   const sourcePrinting = options?.sourcePrinting;
   const filterPower = tokenFilters?.power ?? null;
   const filterToughness = tokenFilters?.toughness ?? null;
+  const filterSubtypes = tokenFilters?.subtypes?.join(",") ?? "";
   const filterColors = tokenFilters?.colors?.join(",") ?? "";
 
   const artOverrides = usePreferencesStore((s) => s.artOverrides);
@@ -290,6 +295,7 @@ export function useCardImage(
     filterPower,
     filterToughness,
     filterColors,
+    filterSubtypes,
     oracleId,
     faceName,
   );
@@ -323,6 +329,7 @@ export function useCardImage(
           filterPower,
           filterToughness,
           filterColors,
+          filterSubtypes,
           oracleId,
           faceName,
         );
@@ -349,6 +356,7 @@ export function useCardImage(
     faceName,
     filterColors,
     filterPower,
+    filterSubtypes,
     filterToughness,
     isToken,
     oracleId,

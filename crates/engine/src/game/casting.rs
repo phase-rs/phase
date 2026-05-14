@@ -5178,6 +5178,15 @@ pub fn pay_ability_cost(
         | AbilityCost::Reveal { .. }
         | AbilityCost::Behold { .. }
         | AbilityCost::NinjutsuFamily { .. } => {}
+        // CR 118.12a: `OneOf` (disjunctive unless-cost) is intercepted at
+        // `surface_unless_payment` and never reaches an auto-payment site.
+        AbilityCost::OneOf { .. } => {
+            return Err(EngineError::ActionNotAllowed(
+                "OneOf cost is only valid as an unless-cost and must be \
+                 resolved interactively via UnlessPaymentChooseCost"
+                    .into(),
+            ));
+        }
     }
     Ok(())
 }

@@ -54,6 +54,19 @@ pub enum MulliganChoice {
     },
 }
 
+/// CR 118.12a: Player decision at an `UnlessPaymentChooseCost` prompt — the
+/// disjunctive ("unless they X or Y") unless-cost choice. `Decline` falls
+/// through to the effect happening (mirrors `PayUnlessCost { pay: false }`);
+/// `Pay { index }` selects the sub-cost by its position in
+/// `WaitingFor::UnlessPaymentChooseCost::costs` and routes back into the
+/// standard single-cost `handle_unless_payment` path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum UnlessCostBranch {
+    Decline,
+    Pay { index: usize },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, strum::IntoStaticStr)]
 #[serde(tag = "type", content = "data")]
 pub enum GameAction {
@@ -301,6 +314,14 @@ pub enum GameAction {
     /// CR 118.12: Pay or decline an "unless pays" cost (e.g., Mana Leak, No More Lies).
     PayUnlessCost {
         pay: bool,
+    },
+    /// CR 118.12a: Choose **which** sub-cost branch to pay from a disjunctive
+    /// unless-cost ("unless they X or Y"). The `UnlessCostBranch` discriminant
+    /// is `Decline` (fall through to the effect) or `Pay { index }` (re-enter
+    /// the standard single-cost payment path with the chosen sub-cost).
+    /// Drives Tergrid's Lantern's "sacrifice ... or discard ..." disjunction.
+    ChooseUnlessCostBranch {
+        choice: UnlessCostBranch,
     },
     /// CR 508.1d + CR 508.1h + CR 509.1c + CR 509.1d: Pay or decline the aggregate
     /// combat tax (Ghostly Prison, Propaganda, Sphere of Safety, Windborn Muse).
@@ -610,9 +631,21 @@ pub enum DebugAction {
     /// `characteristics` is the same body shape used by `TokenSpec` and
     /// `TokenPreset`; the WASM handler fills in runtime fields (script_name,
     /// source_id, controller, tapped, etc.) at create-time.
+    ///
+    /// `enter_with_counters` is plumbed straight through to
+    /// `TokenSpec::enter_with_counters` and travels the same replacement
+    /// pipeline as engine-driven token creation, so debug spawns of bodies
+    /// that need counters to survive (0/0 creature tokens, Hangarback /
+    /// Hydra shapes) can produce viable objects without the FE inferring
+    /// rules state. See `ProposedEvent::CreateToken` and
+    /// `TokenSpec::enter_with_counters` — same semantics, real pipeline.
+    /// CR 122.6a (counters placed at ETB), CR 614.1 (replacement window),
+    /// CR 704.5f (0-toughness SBA — why this field exists).
     CreateToken {
         owner: PlayerId,
         characteristics: super::proposed_event::TokenCharacteristics,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        enter_with_counters: Vec<(CounterType, u32)>,
     },
 }
 
@@ -742,11 +775,22 @@ impl DebugAction {
             DebugAction::CreateToken {
                 owner,
                 characteristics,
+                enter_with_counters,
             } => {
+                let counters = if enter_with_counters.is_empty() {
+                    String::new()
+                } else {
+                    let parts: Vec<String> = enter_with_counters
+                        .iter()
+                        .map(|(ct, n)| format!("{n} {}", ct.as_str()))
+                        .collect();
+                    format!(" with {}", parts.join(", "))
+                };
                 format!(
-                    "CreateToken ({} for {})",
+                    "CreateToken ({} for {}{})",
                     characteristics.display_name,
-                    player_label(*owner)
+                    player_label(*owner),
+                    counters
                 )
             }
         }
@@ -847,6 +891,7 @@ impl GameAction {
             | GameAction::DecideOptionalEffect { .. }
             | GameAction::DecideOptionalEffectAndRemember { .. }
             | GameAction::PayUnlessCost { .. }
+            | GameAction::ChooseUnlessCostBranch { .. }
             | GameAction::PayCombatTax { .. }
             | GameAction::ChooseDungeon { .. }
             | GameAction::ChooseDungeonRoom { .. }

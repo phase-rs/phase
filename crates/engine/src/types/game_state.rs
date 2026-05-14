@@ -1650,6 +1650,31 @@ pub enum WaitingFor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effect_description: Option<String>,
     },
+    /// CR 118.12a: Player must choose **which** sub-cost to pay from a
+    /// disjunctive ("unless they X or Y") unless-cost. Once a sub-cost is
+    /// chosen, the resolver re-enters `handle_unless_payment` with that
+    /// single cost as if the OR had never been there. Declining surfaces
+    /// the cost-payment-failure path (the original effect happens).
+    ///
+    /// Drives Tergrid's Lantern ("unless they sacrifice a nonland permanent
+    /// of their choice or discard a card") and the broader punisher-disjunction
+    /// class.
+    UnlessPaymentChooseCost {
+        player: PlayerId,
+        /// The sub-costs the paying player may choose between.
+        /// Stored as the unified `AbilityCost` taxonomy; forward-compatible
+        /// deserialization accepts the legacy `UnlessCost` JSON shape per-item.
+        costs: Vec<AbilityCost>,
+        /// The pending effect (with `unless_pay` already stripped) to apply if
+        /// the player declines to pay any branch.
+        pending_effect: Box<ResolvedAbility>,
+        /// Trigger event context to restore.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger_event: Option<GameEvent>,
+        /// Human-readable description for the frontend.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effect_description: Option<String>,
+    },
     /// CR 702.21a: Player must choose a card to discard as ward cost payment.
     WardDiscardChoice {
         player: PlayerId,
@@ -2273,6 +2298,7 @@ impl WaitingFor {
             | WaitingFor::OpponentMayChoice { player, .. }
             | WaitingFor::TributeChoice { player, .. }
             | WaitingFor::UnlessPayment { player, .. }
+            | WaitingFor::UnlessPaymentChooseCost { player, .. }
             | WaitingFor::DiscoverChoice { player, .. }
             | WaitingFor::CascadeChoice { player, .. }
             | WaitingFor::TopOrBottomChoice { player, .. }

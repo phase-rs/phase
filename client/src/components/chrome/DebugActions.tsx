@@ -97,7 +97,7 @@ export function DebugActions() {
           );
         })}
       </div>
-      <div className="max-h-80 overflow-y-auto">
+      <div>
         {activeTab === "player" && <DebugPlayerActions onDispatch={handleDispatch} />}
         {activeTab === "object" && <DebugObjectActions onDispatch={handleDispatch} />}
         {activeTab === "flow" && <DebugFlowActions onDispatch={handleDispatch} />}

@@ -712,7 +712,92 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         }
     }
 
+    // CR 608.2k + CR 603.7c: For event-source-bearing trigger modes, the "that
+    // card / that creature / that permanent" anaphor in the effect body
+    // refers to the *triggering object* carried by the event (the just-
+    // discarded card, sacrificed permanent, drawn card, etc.) — not a chosen
+    // target. The shared `parse_target` family returns `ParentTarget` for
+    // these phrases because trigger context is not threaded through the
+    // effect-parser entry points; this post-lowering pass rewrites the
+    // top-level effect target from `ParentTarget` to `TriggeringSource` so
+    // `extract_source_from_event` (game/targeting.rs:539) resolves it to the
+    // correct event object id at runtime.
+    //
+    // Drives Tergrid, God of Fright's reanimation class:
+    //   "Whenever an opponent sacrifices a nontoken permanent or discards a
+    //    permanent card, you may put that card from a graveyard onto the
+    //    battlefield under your control."
+    //
+    // Gated on:
+    //   1. `def.mode` is an event-source-bearing mode (see
+    //      `mode_carries_event_source_object`), AND
+    //   2. the ability has no explicit targeting (`valid_target.is_none()`
+    //      AND `optional_targeting == false`) — otherwise `ParentTarget`
+    //      legitimately inherits the player's chosen target.
+    if let Some(execute) = def.execute.as_deref_mut() {
+        if mode_carries_event_source_object(&def.mode)
+            && def.valid_target.is_none()
+            && !execute.optional_targeting
+        {
+            lift_parent_target_to_triggering_source_in_ability(execute);
+        }
+    }
+
     def
+}
+
+/// CR 603.7c: Trigger modes whose firing event carries a specific source
+/// object id retrievable via `extract_source_from_event`. The "that card /
+/// that creature / that permanent" anaphor in these triggers' effect bodies
+/// refers to *that* object.
+///
+/// Kept narrow on purpose — covers the high-confidence cases where lifting
+/// `ParentTarget` → `TriggeringSource` is unambiguous. Additional modes can
+/// be added as their patterns appear in real cards.
+fn mode_carries_event_source_object(mode: &TriggerMode) -> bool {
+    matches!(
+        mode,
+        TriggerMode::Discarded
+            | TriggerMode::DiscardedAll
+            | TriggerMode::Sacrificed
+            | TriggerMode::SacrificedOnce
+            | TriggerMode::Destroyed
+            | TriggerMode::Cycled
+            | TriggerMode::CycledOrDiscarded
+            | TriggerMode::Milled
+            | TriggerMode::MilledOnce
+    )
+}
+
+/// Top-level target rewrite: `ParentTarget` → `TriggeringSource` on the
+/// effects whose primary `target` field is the just-acted-on object.
+///
+/// Scoped to the `Effect` variants that carry a top-level `target:
+/// TargetFilter` and whose runtime semantics make sense against the event
+/// object (e.g. `ChangeZone` operating on the just-discarded card). Other
+/// effect variants are left untouched.
+fn lift_parent_target_to_triggering_source(effect: &mut Effect) {
+    if let Effect::ChangeZone { target, .. } = effect {
+        if matches!(target, TargetFilter::ParentTarget) {
+            *target = TargetFilter::TriggeringSource;
+        }
+    }
+}
+
+/// CR 608.2k + CR 603.7c: Recurse `lift_parent_target_to_triggering_source`
+/// through an ability's effect AND every chained `sub_ability`. Required
+/// for the punisher-trigger class: a chained Tergrid-shape ability like
+/// "...exile that card, then create a token" carries the "that card"
+/// anaphor on the *first* sub-ability's effect, not the top-level effect.
+/// Without the descent, the second link would silently bind to the trigger
+/// source object instead of the just-acted-on event object.
+fn lift_parent_target_to_triggering_source_in_ability(ability: &mut AbilityDefinition) {
+    lift_parent_target_to_triggering_source(ability.effect.as_mut());
+    let mut next = ability.sub_ability.as_deref_mut();
+    while let Some(child) = next {
+        lift_parent_target_to_triggering_source(child.effect.as_mut());
+        next = child.sub_ability.as_deref_mut();
+    }
 }
 
 /// Thin wrapper: parse trigger line through IR production + lowering.
@@ -1134,6 +1219,270 @@ fn parse_unless_alt_cost(after_unless: &str) -> Option<AbilityCost> {
     }
 
     None
+}
+
+/// CR 118.12 + CR 118.12a: Parse a chain of "they"-pronoun alternative
+/// payment verbs joined by " or " into either a single `AbilityCost` (one
+/// branch) or `AbilityCost::OneOf { costs }` (two or more branches). Used by
+/// the resolution-time "[Effect] unless they X or Y" pattern (Tergrid's
+/// Lantern: "Target player loses 3 life unless they sacrifice a nonland
+/// permanent of their choice or discard a card.").
+///
+/// The "of their choice" qualifier on `parse_unless_they_sacrifice_filter`
+/// is structurally redundant — the runtime sacrifice-cost prompt
+/// (`WaitingFor::WardSacrificeChoice`) already lets the paying player pick
+/// the permanent — but the Oracle text often includes it for clarity and
+/// must be absorbed to avoid leaving unparsed tail text on the cost.
+///
+/// `after_unless` is the lowercase tail immediately after the literal
+/// `"unless "` prefix has been consumed; the sole caller
+/// (`extract_resolution_unless_pay_modifier`) strips the entire unless
+/// clause from the surrounding effect text using its own pre-computed
+/// `before_unless` offset, so this combinator only needs to return the
+/// parsed cost. Returns `None` if no "they X" branch is recognized.
+pub(crate) fn parse_unless_they_alt_cost_chain(after_unless: &str) -> Option<AbilityCost> {
+    let (first_cost, after_first) = parse_unless_they_single_alt_cost(after_unless)?;
+
+    // CR 118.12a: Greedily consume " or {alt_cost}" continuations to build
+    // a disjunctive `OneOf`. English elides the second-clause subject
+    // pronoun ("unless they sacrifice X or discard Y" — the "they" before
+    // "discard" is implicit). `parse_unless_they_continuation` accepts
+    // either form, dispatching by verb.
+    let mut costs = vec![first_cost];
+    let mut remainder = after_first;
+    while let Ok((after_or, _)) = tag::<_, _, OracleError<'_>>(" or ").parse(remainder) {
+        let Some((next_cost, after_next)) = parse_unless_they_continuation(after_or) else {
+            break;
+        };
+        costs.push(next_cost);
+        remainder = after_next;
+    }
+
+    if costs.len() == 1 {
+        costs.pop()
+    } else {
+        Some(AbilityCost::OneOf { costs })
+    }
+}
+
+/// CR 118.12: Parse a single "they {verb} ..." alternative payment branch.
+/// Mirrors the verb set of `parse_unless_alt_cost` but with the "they"
+/// pronoun (the target player) instead of "you" (the resolving ability's
+/// controller). Returns the cost and the unconsumed tail.
+fn parse_unless_they_single_alt_cost(input: &str) -> Option<(AbilityCost, &str)> {
+    // The first branch requires an explicit "they " pronoun — that pronoun
+    // is what anchors the unless-clause to the target player. The "they "
+    // is consumed; then dispatch on the verb. Continuation branches reuse
+    // the same verb dispatch via `parse_unless_they_branch_by_verb` but
+    // omit the "they " requirement (English elision).
+    let (rest, _) = tag::<_, _, OracleError<'_>>("they ").parse(input).ok()?;
+    parse_unless_they_branch_by_verb(rest)
+}
+
+/// CR 118.12a: Parse the second-or-later branch of a "unless they X or Y"
+/// chain. English elides the repeated subject pronoun, so this combinator
+/// dispatches on the bare verb (without the "they " prefix). The first
+/// branch still requires "they " — see `parse_unless_they_single_alt_cost`.
+fn parse_unless_they_continuation(input: &str) -> Option<(AbilityCost, &str)> {
+    // Be tolerant of an explicitly re-stated "they " prefix; some Oracle
+    // texts do repeat it.
+    let rest = tag::<_, _, OracleError<'_>>("they ")
+        .parse(input)
+        .map(|(r, _)| r)
+        .unwrap_or(input);
+    parse_unless_they_branch_by_verb(rest)
+}
+
+/// CR 118.12: Verb dispatch shared by the first branch and continuation
+/// branches of a "unless they X [or Y]" chain. Operates on the slice
+/// immediately after the (consumed) "they " pronoun.
+fn parse_unless_they_branch_by_verb(input: &str) -> Option<(AbilityCost, &str)> {
+    // CR 701.21: "sacrifice a [filter] [of their choice]"
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("sacrifice ").parse(input) {
+        let (cost, after) = parse_unless_they_sacrifice_filter(rest)?;
+        return Some((cost, after));
+    }
+    // CR 701.9: "discard a card[ at random]"
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("discard ").parse(input) {
+        let (cost, after) = parse_unless_they_discard_cost(rest)?;
+        return Some((cost, after));
+    }
+    // CR 119.4: "pay N life"
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("pay ").parse(input) {
+        let (cost, after) = parse_unless_they_pay_life(rest)?;
+        return Some((cost, after));
+    }
+    None
+}
+
+/// CR 701.21 + CR 118.12: Parse the tail of "they sacrifice ..." preserving
+/// the unconsumed remainder. Mirrors `parse_unless_sacrifice_filter` but
+/// stops at " or " / sentence boundary instead of consuming to EOL, so a
+/// chained second branch ("or discard a card") can be parsed by the
+/// outer combinator.
+fn parse_unless_they_sacrifice_filter(input: &str) -> Option<(AbilityCost, &str)> {
+    // Locate the branch boundary: " or " (chained branch) or "." / EOL
+    // (clause terminator). Without this bounded slice, the inner
+    // `parse_target` would consume the entire remainder and the chain
+    // combinator would never see " or ".
+    let boundary = unless_branch_boundary(input);
+    let branch_text = input[..boundary].trim();
+    let after = &input[boundary..];
+
+    // Strip the redundant "of their choice" trailing qualifier — the
+    // runtime sacrifice-cost prompt already lets the paying player choose.
+    let branch_text = branch_text
+        .strip_suffix(" of their choice") // allow-noncombinator: structural cleanup on a pre-tokenized chunk bounded by unless_branch_boundary; not parsing dispatch.
+        .unwrap_or(branch_text)
+        .trim();
+    if branch_text.is_empty() {
+        return None;
+    }
+
+    // Strip leading article so `parse_target("target <phrase>")` reaches
+    // the type-phrase arm.
+    let stripped = alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))
+        .parse(branch_text)
+        .map(|(rest, _)| rest)
+        .unwrap_or(branch_text);
+    let target_phrase = format!("target {stripped}");
+    let (filter, remainder) = super::oracle_target::parse_target(&target_phrase);
+    if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
+        return None;
+    }
+    // CR 109.4 + CR 115.1 + CR 118.12a: "they sacrifice" pins the sacrificed
+    // permanent to the *payer* — the targeted player on the enclosing
+    // activated/triggered ability. `ControllerRef::TargetPlayer` reads the
+    // first `TargetRef::Player` from `ability.targets` at resolution time,
+    // which is exactly the payer the unless-cost surfaces to. Mirrors the
+    // "you sacrifice" branch's controller treatment in
+    // `parse_unless_sacrifice_filter` (which carries `ControllerRef::You`
+    // via the actor dispatch upstream); for the "they" form the actor *is*
+    // the target player and we stamp it explicitly here.
+    let filter = add_controller(filter, ControllerRef::TargetPlayer);
+    Some((
+        AbilityCost::Sacrifice {
+            target: filter,
+            count: 1,
+        },
+        after,
+    ))
+}
+
+/// CR 701.9 + CR 118.12: Parse the tail of "they discard ..." preserving
+/// the unconsumed remainder. Mirrors `parse_unless_discard_cost` but stops
+/// at the branch boundary.
+fn parse_unless_they_discard_cost(input: &str) -> Option<(AbilityCost, &str)> {
+    let boundary = unless_branch_boundary(input);
+    let branch_text = input[..boundary].trim();
+    let after = &input[boundary..];
+    if branch_text.is_empty() {
+        return None;
+    }
+    // Strip article
+    let stripped = alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))
+        .parse(branch_text)
+        .map(|(rest, _)| rest)
+        .unwrap_or(branch_text);
+    // Plain "card" / "card at random"
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("card").parse(stripped) {
+        let rest = rest.trim();
+        if rest.is_empty()
+            || tag::<_, _, OracleError<'_>>("at random")
+                .parse(rest)
+                .is_ok()
+        {
+            return Some((
+                AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    filter: None,
+                    random: false,
+                    self_ref: false,
+                },
+                after,
+            ));
+        }
+    }
+    // Typed filter ("nonland card", "creature card", etc.)
+    if let Some(filter) = super::oracle_effect::imperative::parse_discard_card_filter(stripped) {
+        return Some((
+            AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: Some(filter),
+                random: false,
+                self_ref: false,
+            },
+            after,
+        ));
+    }
+    None
+}
+
+/// CR 119.4 + CR 118.12: Parse the tail of "they pay N life" preserving
+/// the unconsumed remainder.
+fn parse_unless_they_pay_life(input: &str) -> Option<(AbilityCost, &str)> {
+    let (amount, after_num) = parse_number(input)?;
+    let trimmed = after_num.trim_start();
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("life").parse(trimmed) {
+        return Some((
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed {
+                    value: amount as i32,
+                },
+            },
+            rest,
+        ));
+    }
+    None
+}
+
+/// Locate the byte offset where the current unless-clause branch ends.
+/// The branch terminates at the first " or " (chained second branch) or
+/// at sentence-ending punctuation. The returned offset is the start of
+/// either " or " (for chained branches) or the period/end-of-input.
+///
+/// The chain combinator accepts both "they {verb}" and bare "{verb}"
+/// continuations (English elision), so the boundary check accepts either
+/// shape on the post-" or " slice. A trailing " or X" where X is not a
+/// recognized continuation verb (e.g. a noun disjunction inside a filter —
+/// "a creature or artifact") falls through to the sentence terminator.
+fn unless_branch_boundary(input: &str) -> usize {
+    // Walk every " or " occurrence — the *first* one that is followed by a
+    // recognized continuation is the branch boundary. Earlier " or "
+    // matches inside a filter phrase ("a creature or artifact") are
+    // skipped.
+    // Combinator: recognize a continuation verb prefix, optionally with a
+    // preceding "they ". The chain combinator accepts both shapes; the
+    // boundary scan must mirror that contract so its split point lines up.
+    fn parse_continuation_verb_head(input: &str) -> OracleResult<'_, ()> {
+        let (rest, _) = opt(tag::<_, _, OracleError<'_>>("they ")).parse(input)?;
+        let (rest, _) = alt((
+            value((), tag::<_, _, OracleError<'_>>("sacrifice ")),
+            value((), tag("discard ")),
+            value((), tag("pay ")),
+        ))
+        .parse(rest)?;
+        Ok((rest, ()))
+    }
+
+    let mut search_start = 0;
+    while let Ok((_, (before, after))) =
+        nom_primitives::split_once_on(&input[search_start..], " or ")
+    {
+        if parse_continuation_verb_head(after).is_ok() {
+            return search_start + before.len();
+        }
+        search_start += before.len() + 4; // advance past this " or "
+    }
+    // Sentence terminator. Use nom `take_until` to honor the same word-
+    // boundary discipline as the rest of the combinator chain — the
+    // returned prefix length is the boundary.
+    if let Ok((_, before_dot)) =
+        nom::bytes::complete::take_until::<_, _, OracleError<'_>>(".").parse(input)
+    {
+        return before_dot.len();
+    }
+    input.len()
 }
 
 /// Parse the tail of "you sacrifice ..." into an `AbilityCost::Sacrifice`.
@@ -2438,6 +2787,13 @@ fn normalize_compound_pronouns(text: &str) -> String {
 /// - "Whenever ~ deals combat damage to a player or dies" → ["Whenever ~ deals combat damage to a player", "Whenever ~ dies"]
 fn split_or_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<String>> {
     // Known event verb prefixes that signal a compound event "or".
+    //
+    // CR 603.1 + CR 701.21 + CR 701.9: Player-subject active-voice verbs
+    // ("sacrifices", "discards") cover punisher triggers like Tergrid, God of
+    // Fright ("Whenever an opponent sacrifices a nontoken permanent or
+    // discards a permanent card, ..."). Each branch then routes to the
+    // existing `try_parse_sacrifice_trigger` / `try_parse_discard_trigger`
+    // handlers via the per-half re-parse loop.
     fn is_event_verb_start(text: &str) -> bool {
         alt((
             value((), tag::<_, _, OracleError<'_>>("dies")),
@@ -2452,6 +2808,10 @@ fn split_or_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<Stri
             value((), tag("block ")),
             value((), tag("is sacrificed")),
             value((), tag("are sacrificed")),
+            value((), tag("sacrifices ")),
+            value((), tag("sacrifice ")),
+            value((), tag("discards ")),
+            value((), tag("discard ")),
             value((), tag("is exiled")),
             value((), tag("are exiled")),
             value((), tag("leaves")),
@@ -2540,6 +2900,14 @@ fn extract_subject_text(text: &str) -> &str {
             tag("block "),
             tag("is sacrificed"),
             tag("are sacrificed"),
+            // CR 701.21 + CR 701.9: Active-voice player-subject verbs paired
+            // with `is_event_verb_start` (above) so player-actor compound
+            // triggers ("an opponent sacrifices ... or discards ...") split
+            // into independently parsed halves.
+            tag("sacrifices "),
+            tag("sacrifice "),
+            tag("discards "),
+            tag("discard "),
             tag("is exiled"),
             tag("are exiled"),
             tag("leaves"),
@@ -15048,5 +15416,86 @@ mod snapshot_tests {
             "Test Card",
         );
         insta::assert_json_snapshot!(def);
+    }
+
+    /// CR 608.2k + CR 603.7c + CR 701.9: Tergrid, God of Fright's discard
+    /// branch. The compound trigger splitter produces a `Discarded` trigger
+    /// (controller-scoped to `Opponent`), and the top-level
+    /// `ChangeZone { target: ParentTarget }` produced by the effect parser
+    /// is lifted to `TriggeringSource` by `lower_trigger_ir` so the runtime
+    /// resolves "that card" against the just-discarded object.
+    #[test]
+    fn trigger_discarded_lifts_that_card_to_triggering_source() {
+        let def = parse_trigger_line(
+            "Whenever an opponent discards a permanent card, you may put that card from a graveyard onto the battlefield under your control.",
+            "Tergrid, God of Fright",
+        );
+        assert_eq!(def.mode, TriggerMode::Discarded);
+        let execute = def.execute.as_deref().expect("trigger has execute");
+        match execute.effect.as_ref() {
+            Effect::ChangeZone {
+                origin,
+                destination,
+                target,
+                under_your_control,
+                ..
+            } => {
+                assert_eq!(*origin, Some(Zone::Graveyard));
+                assert_eq!(*destination, Zone::Battlefield);
+                assert!(matches!(target, TargetFilter::TriggeringSource));
+                assert!(*under_your_control);
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2k + CR 603.7c: The `ParentTarget` → `TriggeringSource` lift
+    /// must descend through chained `sub_ability`s, not just the top-level
+    /// effect. A Tergrid-shape trigger like "...exile that card, then
+    /// create a token" carries the "that card" anaphor on the FIRST
+    /// sub-ability's effect. Without sub_ability descent, the second link
+    /// would silently bind to the trigger source instead of the
+    /// just-discarded object.
+    ///
+    /// Synthetic Oracle string: no shipping card today has this exact
+    /// shape, but the building block must work for the whole punisher-class.
+    #[test]
+    fn trigger_discarded_lift_descends_through_sub_ability() {
+        let def = parse_trigger_line(
+            "Whenever an opponent discards a permanent card, exile that card, then exile that card from a graveyard.",
+            "Test Punisher",
+        );
+        assert_eq!(def.mode, TriggerMode::Discarded);
+        let execute = def.execute.as_deref().expect("trigger has execute");
+
+        // Walk the chain: collect every ChangeZone's target filter encountered
+        // through the top-level effect and any sub_ability descent. Every
+        // `ParentTarget` should have been lifted to `TriggeringSource`.
+        let mut targets = Vec::new();
+        if let Effect::ChangeZone { target, .. } = execute.effect.as_ref() {
+            targets.push(target.clone());
+        }
+        let mut next = execute.sub_ability.as_deref();
+        while let Some(child) = next {
+            if let Effect::ChangeZone { target, .. } = child.effect.as_ref() {
+                targets.push(target.clone());
+            }
+            next = child.sub_ability.as_deref();
+        }
+
+        assert!(
+            !targets.is_empty(),
+            "expected at least one ChangeZone in the chain (top + sub_ability), got none"
+        );
+        for (i, t) in targets.iter().enumerate() {
+            assert!(
+                !matches!(t, TargetFilter::ParentTarget),
+                "chain link {i} still has ParentTarget — sub_ability lift did not descend: {t:?}",
+            );
+            assert!(
+                matches!(t, TargetFilter::TriggeringSource),
+                "chain link {i} should be TriggeringSource, got {t:?}",
+            );
+        }
     }
 }
