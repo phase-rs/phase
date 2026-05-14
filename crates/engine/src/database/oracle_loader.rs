@@ -91,6 +91,7 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
         rulings_index: HashMap::new(),
         errors,
         bracket_lists: Default::default(),
+        bracket_signals_by_name: HashMap::new(),
     })
 }
 

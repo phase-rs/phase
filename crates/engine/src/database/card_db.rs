@@ -36,6 +36,10 @@ pub struct CardDatabase {
     /// at runtime (engine binaries pass through `data/bracket_lists.json`;
     /// WASM/server consumers receive an already-built database).
     pub(crate) bracket_lists: BracketLists,
+    /// Stamped during `from_export_entries` from each `CardExportEntry`'s
+    /// `bracket_signals` field. Keyed by lowercased card name. Read by
+    /// `bracket_signals_for` at runtime.
+    pub(crate) bracket_signals_by_name: HashMap<String, BracketSignals>,
 }
 
 impl CardDatabase {
@@ -67,6 +71,8 @@ impl CardDatabase {
         let mut legalities = HashMap::new();
         let mut printings_index: HashMap<String, Vec<String>> = HashMap::new();
         let mut rulings_index: HashMap<String, Vec<Ruling>> = HashMap::new();
+        let mut bracket_signals_by_name: HashMap<String, BracketSignals> =
+            HashMap::with_capacity(entries.len());
 
         for (_name, entry) in entries {
             let key = entry.face.name.to_lowercase();
@@ -80,6 +86,7 @@ impl CardDatabase {
                 }
             }
             face_index.insert(key.clone(), entry.face);
+            bracket_signals_by_name.insert(key.clone(), entry.bracket_signals);
 
             if !entry.printings.is_empty() {
                 printings_index.insert(key.clone(), entry.printings);
@@ -107,6 +114,7 @@ impl CardDatabase {
             rulings_index,
             errors: Vec::new(),
             bracket_lists: BracketLists::default(),
+            bracket_signals_by_name,
         }
     }
 
@@ -212,9 +220,16 @@ impl CardDatabase {
         self
     }
 
-    /// Case-insensitive bracket-signal lookup. Returns an all-false
-    /// `BracketSignals` when the database has no lists loaded.
+    /// Case-insensitive bracket-signal lookup. At runtime (post-export),
+    /// reads the per-card map stamped by `from_export_entries`. At export
+    /// time (when `oracle-gen` builds the DB), falls back to looking up
+    /// names in the loaded `bracket_lists`. Returns all-false `BracketSignals`
+    /// when the name is unknown to both.
     pub fn bracket_signals_for(&self, name: &str) -> BracketSignals {
+        let key = name.to_lowercase();
+        if let Some(sig) = self.bracket_signals_by_name.get(&key) {
+            return *sig;
+        }
         self.bracket_lists.signals_for(name)
     }
 
@@ -317,6 +332,10 @@ struct CardExportEntry {
     /// Official WotC rulings; populated on the front face only for multi-face cards.
     #[serde(default)]
     rulings: Vec<Ruling>,
+    /// Bracket-axis signals stamped by the export pipeline (Task 4). Cards
+    /// exported before Task 4 will deserialize to all-false `BracketSignals::default()`.
+    #[serde(default)]
+    bracket_signals: BracketSignals,
 }
 
 /// Convert MTGJSON layout string to runtime `LayoutKind`.
@@ -523,5 +542,28 @@ mod tests {
         let db = CardDatabase::default().with_bracket_lists(lists);
         let sig = db.bracket_signals_for("Demonic Tutor");
         assert!(sig.efficient_tutor);
+    }
+
+    #[test]
+    fn from_json_loads_bracket_signals_into_face_lookup() {
+        let json = r#"{
+            "demonic tutor": {
+                "name": "Demonic Tutor",
+                "mana_cost": { "type": "Cost", "shards": [], "generic": 1 },
+                "card_type": { "supertypes": [], "core_types": ["Sorcery"], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": "Search your library...",
+                "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+                "keywords": [],
+                "bracket_signals": {
+                    "game_changer": true, "mass_land_denial": false,
+                    "extra_turn": false, "efficient_tutor": true
+                }
+            }
+        }"#;
+        let db = CardDatabase::from_json_str(json).unwrap();
+        let sig = db.bracket_signals_for("demonic tutor");
+        assert!(sig.efficient_tutor);
+        assert!(sig.game_changer);
     }
 }
