@@ -35,7 +35,7 @@ pub struct CardDatabase {
     /// Hand-curated bracket-axis name lists. Populated by `with_bracket_lists`
     /// at runtime (engine binaries pass through `data/bracket_lists.json`;
     /// WASM/server consumers receive an already-built database).
-    pub bracket_lists: BracketLists,
+    pub(crate) bracket_lists: BracketLists,
 }
 
 impl CardDatabase {
@@ -214,11 +214,6 @@ impl CardDatabase {
 
     /// Case-insensitive bracket-signal lookup. Returns an all-false
     /// `BracketSignals` when the database has no lists loaded.
-    ///
-    /// **Note:** Task 5 will replace this body with a dual-source lookup
-    /// that prefers per-card stamped signals from the card-data export and
-    /// falls back to live `bracket_lists`. For now (Task 3), it delegates
-    /// straight to the lists.
     pub fn bracket_signals_for(&self, name: &str) -> BracketSignals {
         self.bracket_lists.signals_for(name)
     }
