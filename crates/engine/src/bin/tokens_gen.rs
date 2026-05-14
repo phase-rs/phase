@@ -377,6 +377,7 @@ fn classify_category(types: &[CoreType], subtypes: &[String]) -> Result<TokenCat
             .filter_map(|s| match s.as_str() {
                 "Treasure" => Some(PredefinedTokenKind::Treasure),
                 "Food" => Some(PredefinedTokenKind::Food),
+                "Gold" => Some(PredefinedTokenKind::Gold),
                 "Clue" => Some(PredefinedTokenKind::Clue),
                 "Blood" => Some(PredefinedTokenKind::Blood),
                 "Powerstone" => Some(PredefinedTokenKind::Powerstone),

@@ -27,11 +27,11 @@ use crate::types::proposed_event::TokenCharacteristics;
 pub enum PredefinedTokenKind {
     Treasure,
     Food,
+    Gold,
     Clue,
     Blood,
     Powerstone,
     Map,
-    Gold,
 }
 
 impl PredefinedTokenKind {
@@ -41,6 +41,7 @@ impl PredefinedTokenKind {
         match self {
             Self::Treasure => "Treasure",
             Self::Food => "Food",
+            Self::Gold => "Gold",
             Self::Clue => "Clue",
             Self::Blood => "Blood",
             Self::Powerstone => "Powerstone",
