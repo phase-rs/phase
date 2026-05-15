@@ -213,10 +213,9 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         | (WaitingFor::CombatTaxPayment { .. }, GameAction::PayCombatTax { .. })
         | (WaitingFor::AdventureCastChoice { .. }, GameAction::ChooseAdventureFace { .. })
         | (WaitingFor::ModalFaceChoice { .. }, GameAction::ChooseModalFace { .. })
-        | (WaitingFor::WarpCostChoice { .. }, GameAction::ChooseWarpCost { .. })
-        | (WaitingFor::EvokeCostChoice { .. }, GameAction::ChooseEvokeCost { .. })
-        | (WaitingFor::OverloadCostChoice { .. }, GameAction::ChooseOverloadCost { .. })
-        | (WaitingFor::BestowCostChoice { .. }, GameAction::ChooseBestowCost { .. }) => false,
+        | (WaitingFor::AlternativeCastChoice { .. }, GameAction::ChooseAlternativeCast { .. }) => {
+            false
+        }
         // CR 107.1c + CR 107.14: Submitted amount must fall within [min, max].
         (WaitingFor::PayAmountChoice { min, max, .. }, GameAction::SubmitPayAmount { amount }) => {
             *amount < *min || *amount > *max
@@ -623,16 +622,38 @@ pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
         .filter(|action| !action.is_mana_ability())
         .collect();
 
-    // Build spell costs map from CastSpell actions.
+    // Build spell costs map. The frontend display layer needs the
+    // engine-effective cost (after Affinity / ReduceCost / commander tax / etc.)
+    // for every spell the player owns in a castable zone — not just spells the
+    // player can pay for right now. Otherwise the UI falls back to the printed
+    // mana cost (e.g., Witherbloom, the Balancer would always show {5}{B}{G}
+    // instead of the Affinity-reduced cost the engine actually charges).
+    //
+    // `display_spell_cost` is the single engine-authoritative source for cost
+    // display — it suppresses situational restrictions (timing, mana, can't-cast
+    // statics) but applies every cost-modifying static the cast pipeline would.
     let mut spell_costs = HashMap::new();
     if let WaitingFor::Priority { player } = &state.waiting_for {
-        for action in &actions {
-            if let GameAction::CastSpell { object_id, .. } = action {
-                if let Some(cost) =
-                    crate::game::casting::effective_spell_cost(state, *player, *object_id)
-                {
-                    spell_costs.insert(*object_id, cost);
-                }
+        // Zone pre-filter is performance-only: skips the battlefield/stack/library
+        // walk that has no chance of yielding a castable spell. Eligibility
+        // (controller, foreign-cast permissions, zone) is decided centrally by
+        // `display_spell_cost`. Do NOT filter by `obj.controller` here — Etali /
+        // Dire Fleet Daredevil / Light-Paws-style `CastFromZone` permissions let
+        // the active player cast cards owned/controlled by an opponent, and a
+        // controller pre-filter would silently hide those cost displays.
+        for obj in state.objects.values() {
+            if !matches!(
+                obj.zone,
+                crate::types::zones::Zone::Hand
+                    | crate::types::zones::Zone::Command
+                    | crate::types::zones::Zone::Exile
+                    | crate::types::zones::Zone::Graveyard
+                    | crate::types::zones::Zone::Library
+            ) {
+                continue;
+            }
+            if let Some(cost) = crate::game::casting::display_spell_cost(state, *player, obj.id) {
+                spell_costs.insert(obj.id, cost);
             }
         }
     }
@@ -1505,6 +1526,226 @@ mod tests {
         assert!(
             super::has_meaningful_priority_action(&state, &actions),
             "The reusable helper must not apply the own-stack shortcut"
+        );
+    }
+
+    // Witherbloom, the Balancer regression: the commander sits in the command zone
+    // with `Keyword::Affinity(Creature)`. Even when the player has no mana available
+    // (so no `CastSpell` action is offered), `legal_actions_full` must still expose
+    // the engine-effective cost so the UI can display the Affinity-reduced cost
+    // instead of falling back to the printed mana cost.
+    #[test]
+    fn spell_costs_include_commander_affinity_reduction_without_castability() {
+        use crate::types::ability::{TypeFilter, TypedFilter};
+        use crate::types::card_type::Supertype;
+        use crate::types::keywords::Keyword;
+        use crate::types::mana::ManaCostShard;
+
+        let mut state = setup_priority();
+        state.format_config.command_zone = true;
+
+        let commander_id = create_object(
+            &mut state,
+            CardId(1000),
+            PlayerId(0),
+            "Witherbloom, the Balancer".to_string(),
+            Zone::Command,
+        );
+        {
+            let obj = state.objects.get_mut(&commander_id).unwrap();
+            obj.is_commander = true;
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.supertypes.push(Supertype::Legendary);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Black, ManaCostShard::Green],
+                generic: 5,
+            };
+            obj.keywords.push(Keyword::Affinity(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: None,
+                properties: vec![],
+            }));
+        }
+
+        for i in 0u64..3 {
+            let id = create_object(
+                &mut state,
+                CardId(1100 + i),
+                PlayerId(0),
+                format!("Bear {i}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let (actions, spell_costs, _grouped) = legal_actions_full(&state);
+
+        let has_cast_action = actions.iter().any(|a| {
+            matches!(
+                a,
+                GameAction::CastSpell { object_id, .. } if *object_id == commander_id
+            )
+        });
+        assert!(
+            !has_cast_action,
+            "precondition: with no mana available, CastSpell must be absent from legal_actions"
+        );
+
+        let displayed = spell_costs
+            .get(&commander_id)
+            .expect("spell_costs must include the commander even when not currently castable");
+        let ManaCost::Cost { generic, shards } = displayed else {
+            panic!("expected ManaCost::Cost, got {displayed:?}");
+        };
+        assert_eq!(
+            *generic, 2,
+            "Affinity for creatures with 3 creatures on board reduces generic from 5 to 2"
+        );
+        assert_eq!(
+            shards,
+            &vec![ManaCostShard::Black, ManaCostShard::Green],
+            "colored shards remain untouched by Affinity"
+        );
+    }
+
+    // Witherbloom's static grants Affinity(Creature) to instant and sorcery spells
+    // the controller casts. The display layer must surface that reduction on the
+    // cards in hand — including when the player can't currently cast them (e.g.,
+    // a sorcery during an opponent's turn, or insufficient mana). Without this
+    // coverage, the user "never sees the cost reduced" while Witherbloom is out.
+    #[test]
+    fn spell_costs_apply_granted_affinity_from_battlefield_static() {
+        use crate::types::ability::{
+            AbilityKind, Effect, ManaContribution, ManaProduction, TargetFilter, TypeFilter,
+            TypedFilter,
+        };
+        use crate::types::card_type::Supertype;
+        use crate::types::keywords::Keyword;
+        use crate::types::mana::ManaCostShard;
+        use crate::types::statics::StaticMode;
+        use crate::types::StaticDefinition;
+
+        let mut state = setup_priority();
+
+        // Witherbloom on the battlefield with the granting static.
+        let witherbloom_id = create_object(
+            &mut state,
+            CardId(3000),
+            PlayerId(0),
+            "Witherbloom, the Balancer".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&witherbloom_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.supertypes.push(Supertype::Legendary);
+            let affected = TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Instant],
+                        controller: Some(crate::types::ability::ControllerRef::You),
+                        properties: vec![],
+                    }),
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Sorcery],
+                        controller: Some(crate::types::ability::ControllerRef::You),
+                        properties: vec![],
+                    }),
+                ],
+            };
+            let granted = Keyword::Affinity(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: None,
+                properties: vec![],
+            });
+            let def = StaticDefinition {
+                mode: StaticMode::CastWithKeyword { keyword: granted },
+                affected: Some(affected),
+                modifications: vec![],
+                condition: None,
+                affected_zone: None,
+                effect_zone: None,
+                active_zones: vec![],
+                characteristic_defining: false,
+                description: Some(
+                    "Instant and sorcery spells you cast have affinity for creatures.".to_string(),
+                ),
+            };
+            obj.static_definitions = vec![def].into();
+        }
+
+        // Sorcery in hand with generic cost > 0, and no mana available — so without
+        // the display-path fix, no CastSpell action would be produced.
+        let sorcery_id = create_object(
+            &mut state,
+            CardId(3001),
+            PlayerId(0),
+            "Test Sorcery".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&sorcery_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 3,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::Red],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            ));
+        }
+
+        // 2 additional creatures controlled by the player. Total creatures on
+        // battlefield: Witherbloom + 2 = 3.
+        for i in 0u64..2 {
+            let id = create_object(
+                &mut state,
+                CardId(3100 + i),
+                PlayerId(0),
+                format!("Bear {i}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let (_actions, spell_costs, _grouped) = legal_actions_full(&state);
+
+        let displayed = spell_costs
+            .get(&sorcery_id)
+            .expect("spell_costs must surface the granted-Affinity-reduced sorcery cost");
+        let ManaCost::Cost { generic, shards } = displayed else {
+            panic!("expected ManaCost::Cost, got {displayed:?}");
+        };
+        assert_eq!(
+            *generic, 0,
+            "3 creatures (Witherbloom + 2 bears) × Affinity({{1}}) reduces 3 generic to 0"
+        );
+        assert_eq!(
+            shards,
+            &vec![ManaCostShard::Red],
+            "colored shards remain untouched by Affinity"
         );
     }
 }

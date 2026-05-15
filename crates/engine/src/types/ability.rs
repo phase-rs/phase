@@ -8639,6 +8639,15 @@ pub struct ReplacementDefinition {
     /// "under your control" → Some(You). None = any owner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_owner_scope: Option<ControllerRef>,
+    /// CR 111.2 + CR 614.1a: Redirects the controller of a created token to a
+    /// specific scope relative to the replacement source. Used by Crafty
+    /// Cutpurse ("each token that would be created under an opponent's control
+    /// this turn is created under your control instead") — pair with
+    /// `token_owner_scope: Some(Opponent)` so only the opponent-controlled
+    /// branch fires, and `Some(You)` here to redirect ownership to the source
+    /// controller. None = no redirect (existing replacements unaffected).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_owner_redirect: Option<ControllerRef>,
     /// CR 614.1a: Restricts which player this replacement applies to.
     /// "an opponent would gain life" → Some(Opponent). None = applies to controller only.
     /// Parallel to `token_owner_scope` pattern.
@@ -8732,6 +8741,7 @@ impl ReplacementDefinition {
             shield_kind: ShieldKind::None,
             quantity_modification: None,
             token_owner_scope: None,
+            token_owner_redirect: None,
             valid_player: None,
             is_consumed: false,
             expiry: None,
@@ -8833,6 +8843,15 @@ impl ReplacementDefinition {
 
     pub fn token_owner_scope(mut self, scope: ControllerRef) -> Self {
         self.token_owner_scope = Some(scope);
+        self
+    }
+
+    /// CR 111.2 + CR 614.1a: Set the controller-redirect target for the
+    /// proposed `CreateToken` event. Pair with `token_owner_scope` so the
+    /// match-side (which tokens this replacement fires on) and the redirect
+    /// side (where their controller ends up) compose cleanly.
+    pub fn token_owner_redirect(mut self, redirect: ControllerRef) -> Self {
+        self.token_owner_redirect = Some(redirect);
         self
     }
 

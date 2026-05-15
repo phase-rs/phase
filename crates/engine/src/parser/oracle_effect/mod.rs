@@ -964,6 +964,73 @@ fn try_parse_conditional_damage_prevention_with_followup(text: &str) -> Option<P
     })
 }
 
+/// CR 111.2 + CR 614.1a: "each token that would be created under <X> control
+/// this turn is created under <Y> control instead." Builds a self-installed
+/// CreateToken replacement with an opponent-token scope and a controller
+/// redirect, marked to expire at end of turn. Crafty Cutpurse is the
+/// canonical card; this also covers any future card with the same shape.
+/// CR 111.2: "The token enters the battlefield under that player's control"
+/// — the default this replacement overrides.
+fn try_parse_token_controller_redirect(lower: &str) -> Option<Effect> {
+    // Match "each token that would be created under " (or "any token ...") then
+    // a controller phrase, then "control this turn is created under " then a
+    // controller phrase, then "control instead".
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("each token that would be created under "),
+        tag("any token that would be created under "),
+    ))
+    .parse(lower)
+    .ok()?;
+    let (rest, from_ctrl) = alt((
+        // CR 109.4: "an opponent's" — bound to Opponent scope relative to the
+        // installing source. "your opponents'" is the plural form.
+        value(
+            crate::types::ability::ControllerRef::Opponent,
+            tag::<_, _, OracleError<'_>>("an opponent's"),
+        ),
+        value(
+            crate::types::ability::ControllerRef::Opponent,
+            tag::<_, _, OracleError<'_>>("your opponents'"),
+        ),
+        value(
+            crate::types::ability::ControllerRef::You,
+            tag::<_, _, OracleError<'_>>("your"),
+        ),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" control this turn is created under ")
+        .parse(rest)
+        .ok()?;
+    // Only `your` is supported as the redirect target. No printed card today
+    // redirects to an opponent ("...created under an opponent's control
+    // instead"), and the runtime in `replacement.rs` does not implement that
+    // semantics (multiplayer "first non-source player" would be incorrect).
+    // Restricting the parser keeps the parser/runtime contract symmetric — if
+    // such a card ever prints, runtime support must land in the same change.
+    let (rest, to_ctrl) = value(
+        crate::types::ability::ControllerRef::You,
+        tag::<_, _, OracleError<'_>>("your"),
+    )
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" control instead")
+        .parse(rest)
+        .ok()?;
+    parse_optional_period_and_end(rest)?;
+
+    let mut replacement = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+        .token_owner_scope(from_ctrl)
+        .token_owner_redirect(to_ctrl);
+    // CR 514.2: "this turn" binds the replacement's lifetime to end of turn.
+    replacement.expiry = Some(RestrictionExpiry::EndOfTurn);
+
+    Some(Effect::AddTargetReplacement {
+        replacement: Box::new(replacement),
+        target: TargetFilter::SelfRef,
+    })
+}
+
 fn try_parse_next_time_source_damage_replacement(lower: &str) -> Option<Effect> {
     let (rest, _) = tag::<_, _, OracleError<'_>>("the next time ")
         .parse(lower)
@@ -2409,6 +2476,10 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // replacement to the global pending_damage_replacements with no per-target
     // binding.
     if let Some(effect) = try_parse_global_damage_modification_replacement(text) {
+        return parsed_clause(effect);
+    }
+    // CR 111.2 + CR 614.1a: Crafty-Cutpurse-class token controller redirect.
+    if let Some(effect) = try_parse_token_controller_redirect(&lower) {
         return parsed_clause(effect);
     }
 
@@ -30291,5 +30362,33 @@ mod snapshot_tests {
             }
         );
         assert_eq!(static_abilities[0].affected, Some(TargetFilter::Controller));
+    }
+
+    // Crafty Cutpurse parser regression. Pre-fix the trigger effect parsed as
+    // `Effect::Unimplemented { name: "each", ... }` because no specialized
+    // parser recognized the controller-redirect phrasing — so even though the
+    // engine's replacement pipeline can express the redirect, the trigger
+    // never installed it. This test pins the parser shape end-to-end.
+    #[test]
+    fn crafty_cutpurse_oracle_text_parses_to_token_controller_redirect() {
+        let e = parse_effect(
+            "each token that would be created under an opponent's control this turn is created under your control instead",
+        );
+        let Effect::AddTargetReplacement {
+            replacement,
+            target,
+        } = e
+        else {
+            panic!("expected AddTargetReplacement, got {e:?}");
+        };
+        assert_eq!(target, TargetFilter::SelfRef);
+        assert_eq!(replacement.event, ReplacementEvent::CreateToken);
+        assert_eq!(replacement.token_owner_scope, Some(ControllerRef::Opponent));
+        assert_eq!(replacement.token_owner_redirect, Some(ControllerRef::You));
+        assert_eq!(
+            replacement.expiry,
+            Some(RestrictionExpiry::EndOfTurn),
+            "Crafty Cutpurse's redirect is bounded to 'this turn' — must expire at EOT"
+        );
     }
 }

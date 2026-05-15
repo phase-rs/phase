@@ -988,27 +988,58 @@ fn create_token_applier(
     events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
     use crate::types::ability::QuantityModification;
-    let (modification, additional_spec, ensure_specs) = state
+    let (modification, additional_spec, ensure_specs, owner_redirect, source_controller) = state
         .objects
         .get(&rid.source)
-        .and_then(|obj| obj.replacement_definitions.get(rid.index))
-        .map(|def| {
+        .and_then(|obj| {
+            obj.replacement_definitions
+                .get(rid.index)
+                .map(|def| (def, obj.controller))
+        })
+        .map(|(def, controller)| {
             (
                 def.quantity_modification.clone(),
                 def.additional_token_spec.clone(),
                 def.ensure_token_specs.clone(),
+                def.token_owner_redirect.clone(),
+                controller,
             )
         })
-        .unwrap_or((None, None, None));
+        .unwrap_or((None, None, None, None, PlayerId(0)));
 
     if let ProposedEvent::CreateToken {
         owner,
-        spec,
+        mut spec,
         enter_tapped,
         count,
         applied,
     } = event
     {
+        // CR 111.2 + CR 614.1a: Apply controller redirect (Crafty Cutpurse).
+        // CR 111.2: "The token enters the battlefield under that player's
+        // control" — the default the replacement is overriding.
+        // The redirect's `ControllerRef` is resolved relative to the source's
+        // controller — `You` redirects to that controller; `Opponent` would
+        // redirect away (not currently a Magic pattern but representable).
+        let original_owner = owner;
+        let owner = match owner_redirect {
+            Some(crate::types::ability::ControllerRef::You) => source_controller,
+            // No other ControllerRef scope is a Magic token-redirect pattern today,
+            // and `try_parse_token_controller_redirect` enforces `You` as the only
+            // legal target. Programmatic constructions that set a non-`You` scope
+            // fall through to the original owner rather than to incorrect
+            // multiplayer semantics (e.g., "first non-source player" for Opponent).
+            Some(_) | None => owner,
+        };
+        // CR 111.2: When the redirect actually rewires ownership, the apply
+        // path's `spec.controller`-keyed lookups (combat::enter_attacking
+        // defending-player resolution, etc.) must see the new controller —
+        // otherwise an "enters attacking" token (Goblin Rabblemaster class)
+        // would resolve its defender against the original effect's controller
+        // and end up attacking the player who now controls it.
+        if owner != original_owner {
+            spec.controller = owner;
+        }
         // CR 614.1a: Modify token count per replacement effect.
         let new_count = match modification {
             Some(QuantityModification::Double) => count.saturating_mul(2),

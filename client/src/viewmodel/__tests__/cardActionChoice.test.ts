@@ -125,6 +125,26 @@ describe("isManaObjectAction", () => {
       ),
     ).toBe(false);
   });
+
+  // Sprout Swarm regression: tapping a creature for convoke pays mana, so it
+  // must classify as a mana action. Otherwise GameBoard never adds the
+  // creature to `manaTappableObjectIds` during `WaitingFor::ManaPayment`,
+  // and the click handler in PermanentCard has no path to dispatch the tap.
+  it("treats TapForConvoke as a mana action so convoke creatures get the mana-tap ring", () => {
+    const creature = makeGameObject({ card_types: { supertypes: [], core_types: ["Creature"], subtypes: ["Saproling"] } });
+    expect(
+      isManaObjectAction(
+        { type: "TapForConvoke", data: { object_id: 1, mana_type: "Green" } },
+        creature,
+      ),
+    ).toBe(true);
+    expect(
+      isManaObjectAction(
+        { type: "TapForConvoke", data: { object_id: 1, mana_type: "Colorless" } },
+        creature,
+      ),
+    ).toBe(true);
+  });
 });
 
 describe("abilityChoiceLabel", () => {

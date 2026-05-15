@@ -1246,13 +1246,29 @@ impl FromStr for Keyword {
     type Err = Infallible;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // Split on first colon for parameterized keywords
+        // Split on first colon for parameterized keywords (MTGJSON canonical form,
+        // e.g., "Affinity:for artifacts"). For grant-keyword Oracle text that omits
+        // the colon (e.g., "affinity for creatures"), we normalize the space-separated
+        // form by splitting on the first colon when present, otherwise leaving the whole
+        // string as the name (space-containing multi-word keywords like "first strike" are
+        // handled by the name_nospace match below).
         let (name, param) = match s.find(':') {
             Some(idx) => (&s[..idx], Some(s[idx + 1..].to_string())),
             None => (s, None),
         };
-
         let name_lower = name.to_ascii_lowercase();
+        // CR 702.41a: "affinity for [type]" — grant-keyword form without a colon.
+        // Normalize to the colon form so it routes through the same `parse_affinity_type`
+        // path. Without this, granted Affinity becomes Keyword::Unknown — a silent no-op.
+        if param.is_none() {
+            if let Some((kw, rest)) = name_lower.split_once(' ') {
+                if kw == "affinity" {
+                    if let Some(tf) = parse_affinity_type(rest) {
+                        return Ok(Keyword::Affinity(tf));
+                    }
+                }
+            }
+        }
 
         // If there's a param, try parameterized keywords first
         if let Some(ref p) = param {

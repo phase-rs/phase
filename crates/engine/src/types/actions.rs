@@ -55,16 +55,25 @@ pub enum MulliganChoice {
     },
 }
 
-/// CR 702.96a: Player decision at a `WaitingFor::OverloadCostChoice` prompt —
-/// pay the normal mana cost or the Overload cost. Typed enum (not `bool`) so
-/// new branches can be added without breaking exhaustive match.
+/// CR 118.9: Player decision at a `WaitingFor::AlternativeCastChoice` prompt —
+/// pay the spell's printed mana cost or the keyword-granted alternative cost.
+/// Typed enum (not `bool`, per the no-bool-flags rule) so the action serializes
+/// self-describingly and survives future expansion (e.g., a third "Decline"
+/// path) without breaking exhaustive matches. The specific keyword whose
+/// alternative cost is in play lives on the `WaitingFor::AlternativeCastChoice`
+/// state, not on this action — the decision is structurally identical across
+/// keywords; only post-payment semantics diverge (per CR 702.74a Evoke,
+/// CR 702.96a Overload, CR 702.103a Bestow, and the custom Warp keyword).
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
-pub enum OverloadChoice {
-    /// Pay the spell's printed mana cost; targets resolve normally.
+pub enum AlternativeCastDecision {
+    /// Pay the spell's printed mana cost. Resolution proceeds normally.
     Normal,
-    /// CR 702.96b-c: Pay the overload cost; every "target" becomes "each".
-    Overload,
+    /// Pay the keyword-granted alternative cost. Resolution applies the
+    /// keyword's post-payment effects (Overload's target→each text change per
+    /// CR 702.96b-c, Evoke's ETB-sacrifice trigger per CR 702.74b, Bestow's
+    /// Aura transformation per CR 702.103b, Warp's exile-at-end-step rider).
+    Alternative,
 }
 
 /// CR 118.12a: Player decision at an `UnlessPaymentChooseCost` prompt — the
@@ -228,32 +237,20 @@ pub enum GameAction {
     ChooseModalFace {
         back_face: bool,
     },
-    /// Choose normal cast (false) or Warp cast (true) from hand.
-    ChooseWarpCost {
-        use_warp: bool,
-    },
-    /// CR 702.74a: Choose normal cast (false) or Evoke cast (true) from hand.
-    /// Evoke cast tags the resolving permanent so the synthesized intervening-if
-    /// ETB sacrifice trigger fires.
-    ChooseEvokeCost {
-        use_evoke: bool,
-    },
-    /// CR 702.96a: Choose between paying the normal mana cost or the Overload
-    /// cost from hand. Overload cast substitutes the overload mana cost and
-    /// transforms every "target" in the spell's text to "each" (CR 702.96b-c).
-    ChooseOverloadCost {
-        choice: OverloadChoice,
+    /// CR 118.9: Resolve a `WaitingFor::AlternativeCastChoice` by selecting
+    /// the printed cost or the keyword-granted alternative cost. The specific
+    /// keyword (Warp, Evoke per CR 702.74a, Overload per CR 702.96a, Bestow
+    /// per CR 702.103a) lives on the waiting state — the action is uniform
+    /// because the player's *decision* (which cost) is uniform; only the
+    /// keyword's post-payment semantics diverge and are dispatched in the
+    /// engine handler.
+    ChooseAlternativeCast {
+        choice: AlternativeCastDecision,
     },
     /// CR 707.10c: Resolve a `WaitingFor::CopyRetarget` by leaving every
     /// remaining slot's target unchanged. Single action so the UI can offer
     /// "Keep Current Targets" without N round-trips through `ChooseTarget`.
     KeepAllCopyTargets,
-    /// CR 702.103a: Choose normal cast (false) or Bestow cast (true) from hand.
-    /// Bestow cast substitutes the bestow mana cost and turns the spell into an
-    /// Aura with `enchant creature` (CR 702.103b).
-    ChooseBestowCost {
-        use_bestow: bool,
-    },
     /// CR 110.4: Choose which permanent type slot to consume for a multi-type
     /// graveyard cast/play via OncePerTurnPerPermanentType (Muldrotha).
     ChoosePermanentTypeSlot {
@@ -924,11 +921,8 @@ impl GameAction {
             | GameAction::DecideOptionalCost { .. }
             | GameAction::ChooseAdventureFace { .. }
             | GameAction::ChooseModalFace { .. }
-            | GameAction::ChooseWarpCost { .. }
-            | GameAction::ChooseEvokeCost { .. }
-            | GameAction::ChooseOverloadCost { .. }
+            | GameAction::ChooseAlternativeCast { .. }
             | GameAction::KeepAllCopyTargets
-            | GameAction::ChooseBestowCost { .. }
             | GameAction::ChoosePermanentTypeSlot { .. }
             | GameAction::DecideOptionalEffect { .. }
             | GameAction::DecideOptionalEffectAndRemember { .. }

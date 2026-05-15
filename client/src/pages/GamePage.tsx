@@ -44,7 +44,7 @@ import { UnhandledWaitingForModal } from "../components/modal/UnhandledWaitingFo
 import { AdventureCastModal } from "../components/modal/AdventureCastModal.tsx";
 import { CascadeChoiceModal } from "../components/modal/CascadeChoiceModal.tsx";
 import { ModalFaceModal } from "../components/modal/ModalFaceModal.tsx";
-import { WarpCostModal } from "../components/modal/WarpCostModal.tsx";
+import { AlternativeCostModal } from "../components/modal/AlternativeCostModal.tsx";
 import { MiracleRevealModal } from "../components/modal/MiracleRevealModal.tsx";
 import { CardChoiceModal } from "../components/modal/CardChoiceModal.tsx";
 import { ChoiceModal } from "../components/modal/ChoiceModal.tsx";
@@ -56,9 +56,6 @@ import { BattleProtectorModal } from "../components/modal/BattleProtectorModal.t
 import { TributeModal } from "../components/modal/TributeModal.tsx";
 import { CombatTaxModal } from "../components/modal/CombatTaxModal.tsx";
 import { CLICK_THROUGH_WAITING_FOR_TYPES, DialogHost } from "../components/modal/DialogHost.tsx";
-import { EvokeCostModal } from "../components/modal/EvokeCostModal.tsx";
-import { BestowCostModal } from "../components/modal/BestowCostModal.tsx";
-import { OverloadCostModal } from "../components/modal/OverloadCostModal.tsx";
 import { PermanentTypeSlotModal } from "../components/modal/PermanentTypeSlotModal.tsx";
 import { StackDisplay } from "../components/stack/StackDisplay.tsx";
 import { TargetingOverlay } from "../components/targeting/TargetingOverlay.tsx";
@@ -1202,16 +1199,13 @@ function GamePageContent({
         <BattleProtectorModal />
         <TributeModal />
         <CombatTaxModal />
-        <EvokeCostModal />
-        <BestowCostModal />
-        <OverloadCostModal />
+        <AlternativeCostModal />
         <PermanentTypeSlotModal />
         <ModeChoiceModal />
         <ChooseOneOfBranchModal />
         <AdventureCastModal />
         <CascadeChoiceModal />
         <ModalFaceModal />
-        <WarpCostModal />
         <MiracleRevealModal />
 
         {/* Scry/Dig/Surveil card choice modal */}

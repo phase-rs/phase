@@ -485,6 +485,7 @@ mod tests {
             shield_kind: Default::default(),
             quantity_modification: None,
             token_owner_scope: None,
+            token_owner_redirect: None,
             valid_player: None,
             is_consumed: false,
             expiry: None,

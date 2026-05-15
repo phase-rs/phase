@@ -120,6 +120,19 @@ pub(crate) fn emit_targeting_events(
     }
 }
 
+/// Controls which checks are applied during spell preparation.
+///
+/// `Actual` is the full rules-correct path used when a player declares a cast.
+/// `Display` suppresses situational restrictions (timing, prohibitions, per-turn
+/// cast limits, color identity) while preserving the full cost-computation pipeline
+/// so the UI can show the effective mana cost the engine would charge without
+/// gating on whether the player can legally cast right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CastingMode {
+    Actual,
+    Display,
+}
+
 #[derive(Debug, Clone)]
 struct PreparedSpellCast {
     object_id: ObjectId,
@@ -1313,12 +1326,55 @@ pub fn effective_spell_cost(
         .map(|p| p.mana_cost)
 }
 
+/// Returns the engine-effective mana cost for `object_id` **as if** all
+/// situational restrictions (timing, "can't cast" statics, color identity,
+/// per-turn limits, mana affordability) were already satisfied. Always applies
+/// commander tax and every cost-modification static (Affinity, ReduceCost,
+/// RaiseCost, pending one-shot reductions, etc.) so the display layer can show
+/// the actual cost the player would pay if and when they could cast.
+///
+/// Returns `None` only for structural rejections — object missing, not in a
+/// player-castable zone, or a land (which is played, not cast). All other
+/// restrictions are deliberately suppressed.
+///
+/// This is the engine-authoritative answer for "what does this spell cost?"
+/// and is the only source of truth the UI may consult for cost display.
+pub fn display_spell_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Option<crate::types::mana::ManaCost> {
+    prepare_spell_cast_for_display(state, player, object_id)
+        .ok()
+        .map(|p| p.mana_cost)
+}
+
 fn prepare_spell_cast(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
 ) -> Result<PreparedSpellCast, EngineError> {
-    prepare_spell_cast_with_variant_override(state, player, object_id, None)
+    prepare_spell_cast_with_variant_override_inner(
+        state,
+        player,
+        object_id,
+        None,
+        CastingMode::Actual,
+    )
+}
+
+fn prepare_spell_cast_for_display(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Result<PreparedSpellCast, EngineError> {
+    prepare_spell_cast_with_variant_override_inner(
+        state,
+        player,
+        object_id,
+        None,
+        CastingMode::Display,
+    )
 }
 
 /// CR 702.190a: Variant-overriding entry point for cast paths that need a
@@ -1329,6 +1385,22 @@ fn prepare_spell_cast_with_variant_override(
     player: PlayerId,
     object_id: ObjectId,
     variant_override: Option<CastingVariant>,
+) -> Result<PreparedSpellCast, EngineError> {
+    prepare_spell_cast_with_variant_override_inner(
+        state,
+        player,
+        object_id,
+        variant_override,
+        CastingMode::Actual,
+    )
+}
+
+fn prepare_spell_cast_with_variant_override_inner(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    variant_override: Option<CastingVariant>,
+    mode: CastingMode,
 ) -> Result<PreparedSpellCast, EngineError> {
     let obj = state
         .objects
@@ -1402,7 +1474,7 @@ fn prepare_spell_cast_with_variant_override(
     // CR 604.3 + CR 101.2: "Can't" beats "can" — check CantCastFrom statics.
     // Grafdigger's Cage: "Players can't cast spells from graveyards or libraries."
     // This overrides graveyard/library casting permissions (Escape, Lurrus, etc.).
-    if is_blocked_from_casting_from_zone(state, obj) {
+    if mode == CastingMode::Actual && is_blocked_from_casting_from_zone(state, obj) {
         return Err(EngineError::ActionNotAllowed(
             "A static ability prevents casting from this zone".to_string(),
         ));
@@ -1410,7 +1482,7 @@ fn prepare_spell_cast_with_variant_override(
 
     // CR 101.2: Continuous casting prohibition — "can't" overrides "can".
     // E.g., Teferi, Time Raveler: "Your opponents can't cast spells during your turn."
-    if is_blocked_by_cant_cast_during(state, player) {
+    if mode == CastingMode::Actual && is_blocked_by_cant_cast_during(state, player) {
         return Err(EngineError::ActionNotAllowed(
             "A static ability prevents casting during this phase/turn".to_string(),
         ));
@@ -1418,7 +1490,7 @@ fn prepare_spell_cast_with_variant_override(
 
     // CR 101.2: Temporary blanket prohibition — "can't cast spells this turn."
     // E.g., Silence: "Your opponents can't cast spells this turn."
-    if is_blocked_by_cant_cast_spells(state, player) {
+    if mode == CastingMode::Actual && is_blocked_by_cant_cast_spells(state, player) {
         return Err(EngineError::ActionNotAllowed(
             "A temporary effect prevents you from casting spells this turn".to_string(),
         ));
@@ -1426,13 +1498,13 @@ fn prepare_spell_cast_with_variant_override(
 
     // CR 101.2: Blanket casting prohibition — "you can't cast [type] spells."
     // E.g., Steel Golem: "You can't cast creature spells."
-    if is_blocked_by_cant_be_cast(state, player, obj) {
+    if mode == CastingMode::Actual && is_blocked_by_cant_be_cast(state, player, obj) {
         return Err(EngineError::ActionNotAllowed(
             "A static ability prevents you from casting this spell".to_string(),
         ));
     }
 
-    if is_blocked_by_cast_only_from_zones(state, obj, player) {
+    if mode == CastingMode::Actual && is_blocked_by_cast_only_from_zones(state, obj, player) {
         return Err(EngineError::ActionNotAllowed(
             "A temporary effect prevents casting from this zone".to_string(),
         ));
@@ -1450,7 +1522,7 @@ fn prepare_spell_cast_with_variant_override(
 
     // CR 101.2 + CR 604.1: Per-turn casting limit — "can't cast more than N spells each turn."
     // E.g., Rule of Law, High Noon, Deafening Silence.
-    if is_blocked_by_per_turn_cast_limit(state, player, obj) {
+    if mode == CastingMode::Actual && is_blocked_by_per_turn_cast_limit(state, player, obj) {
         return Err(EngineError::ActionNotAllowed(
             "A static ability limits the number of spells you can cast this turn".to_string(),
         ));
@@ -1793,41 +1865,53 @@ fn prepare_spell_cast_with_variant_override(
     // CR 304.1: Instants can be cast any time a player has priority.
     // CR 301.1 / CR 306.1: Artifacts and planeswalkers are cast at sorcery speed.
     let mut cast_timing_permission = None;
-    if let Err(base_timing_error) = restrictions::check_spell_timing(
-        state,
-        player,
-        obj,
-        ability_def.as_ref(),
-        has_granted_flash,
-        casting_variant,
-    ) {
-        // CR 702.8a: Flash permits instant-speed casting.
-        let Some(flash_cost) = flash_cost else {
-            return Err(base_timing_error);
-        };
-        restrictions::check_spell_timing(
+    if mode == CastingMode::Actual {
+        if let Err(base_timing_error) = restrictions::check_spell_timing(
             state,
             player,
             obj,
             ability_def.as_ref(),
-            true,
+            has_granted_flash,
             casting_variant,
-        )?;
-        mana_cost = restrictions::add_mana_cost(&mana_cost, &flash_cost);
-        if cast_outside_sorcery_timing {
+        ) {
+            // CR 702.8a: Flash permits instant-speed casting.
+            let Some(flash_cost) = flash_cost else {
+                return Err(base_timing_error);
+            };
+            restrictions::check_spell_timing(
+                state,
+                player,
+                obj,
+                ability_def.as_ref(),
+                true,
+                casting_variant,
+            )?;
+            mana_cost = restrictions::add_mana_cost(&mana_cost, &flash_cost);
+            if cast_outside_sorcery_timing {
+                cast_timing_permission = Some(CastTimingPermission::AsThoughHadFlash);
+            }
+        } else if cast_outside_sorcery_timing && has_granted_flash {
             cast_timing_permission = Some(CastTimingPermission::AsThoughHadFlash);
         }
-    } else if cast_outside_sorcery_timing && has_granted_flash {
-        cast_timing_permission = Some(CastTimingPermission::AsThoughHadFlash);
-    }
-    restrictions::check_casting_restrictions(state, player, object_id, &obj.casting_restrictions)?;
+        restrictions::check_casting_restrictions(
+            state,
+            player,
+            object_id,
+            &obj.casting_restrictions,
+        )?;
 
-    if state.format_config.command_zone
-        && !super::commander::can_cast_in_color_identity(state, &obj.color, &obj.mana_cost, player)
-    {
-        return Err(EngineError::ActionNotAllowed(
-            "Card is outside commander's color identity".to_string(),
-        ));
+        if state.format_config.command_zone
+            && !super::commander::can_cast_in_color_identity(
+                state,
+                &obj.color,
+                &obj.mana_cost,
+                player,
+            )
+        {
+            return Err(EngineError::ActionNotAllowed(
+                "Card is outside commander's color identity".to_string(),
+            ));
+        }
     }
 
     // CR 408.3 + CR 903.8: Commanders cast from the command zone incur a tax.
@@ -2713,19 +2797,27 @@ pub fn handle_adventure_choice(
 
 /// Handle Warp cost choice and proceed with casting.
 /// Warp is a custom keyword: cast for warp cost from hand, exile at next end step,
-/// then may cast from exile later. When `use_warp` is false, the player chose to
-/// cast normally — temporarily remove the Warp keyword so prepare_spell_cast
-/// picks CastingVariant::Normal, then restore it and continue through the
-/// standard casting pipeline.
+/// then may cast from exile later. On `AlternativeCastDecision::Normal`, the player
+/// chose to cast normally — temporarily remove the Warp keyword so
+/// `prepare_spell_cast` picks `CastingVariant::Normal`, then restore it and
+/// continue through the standard casting pipeline.
 pub fn handle_warp_cost_choice(
     state: &mut GameState,
     player: PlayerId,
     object_id: ObjectId,
     _card_id: CardId,
-    use_warp: bool,
+    decision: crate::types::actions::AlternativeCastDecision,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    if !use_warp {
+    use crate::types::actions::AlternativeCastDecision;
+    // Exhaustive match so adding a third decision variant (e.g., `Decline`)
+    // is a compile error here rather than silently routing through one of
+    // the two existing branches.
+    let normal_path = match decision {
+        AlternativeCastDecision::Normal => true,
+        AlternativeCastDecision::Alternative => false,
+    };
+    if normal_path {
         // Temporarily remove Warp keyword so prepare_spell_cast picks Normal.
         // Restore immediately after preparation to preserve the keyword for
         // future casting (e.g., if the spell is countered and returns to hand).
@@ -2755,26 +2847,26 @@ pub fn handle_warp_cost_choice(
         return result;
     }
 
-    // use_warp == true: prepare_spell_cast naturally picks CastingVariant::Warp
+    // Alternative (Warp): prepare_spell_cast naturally picks CastingVariant::Warp
     continue_cast_from_prepared(state, player, object_id, events)
 }
 
 /// CR 702.96a: Handle Overload cost choice and proceed with casting. For
-/// `OverloadChoice::Overload`, the cast is prepared with
+/// `AlternativeCastDecision::Alternative`, the cast is prepared with
 /// `CastingVariant::Overload` — the overload mana cost substitutes for the
 /// printed cost and the spell's ability tree is transformed (target → each,
-/// CR 702.96b-c). For `OverloadChoice::Normal`, the cast proceeds normally.
+/// CR 702.96b-c). For `Normal`, the cast proceeds normally.
 pub fn handle_overload_cost_choice(
     state: &mut GameState,
     player: PlayerId,
     object_id: ObjectId,
     _card_id: CardId,
-    choice: crate::types::actions::OverloadChoice,
+    decision: crate::types::actions::AlternativeCastDecision,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    use crate::types::actions::OverloadChoice;
-    match choice {
-        OverloadChoice::Overload => {
+    use crate::types::actions::AlternativeCastDecision;
+    match decision {
+        AlternativeCastDecision::Alternative => {
             let prepared = prepare_spell_cast_with_variant_override(
                 state,
                 player,
@@ -2783,7 +2875,9 @@ pub fn handle_overload_cost_choice(
             )?;
             continue_with_prepared(state, player, prepared, events)
         }
-        OverloadChoice::Normal => continue_cast_from_prepared(state, player, object_id, events),
+        AlternativeCastDecision::Normal => {
+            continue_cast_from_prepared(state, player, object_id, events)
+        }
     }
 }
 
@@ -2886,11 +2980,12 @@ pub fn revert_bestow_form(state: &mut GameState, object_id: ObjectId) {
     }
 }
 
-/// CR 702.103a: Handle Bestow cost choice and proceed with casting. When
-/// `use_bestow` is true, applies the bestow type-changing effect to the hand
-/// object (CR 702.103b) and prepares the cast with `CastingVariant::Bestow`
-/// (which substitutes the bestow mana cost for the printed mana cost). When
-/// false, the cast proceeds normally — the printed Creature spell.
+/// CR 702.103a: Handle Bestow cost choice and proceed with casting. On
+/// `AlternativeCastDecision::Alternative`, applies the bestow type-changing
+/// effect to the hand object (CR 702.103b) and prepares the cast with
+/// `CastingVariant::Bestow` (which substitutes the bestow mana cost for the
+/// printed mana cost). On `Normal`, the cast proceeds as the printed Creature
+/// spell.
 ///
 /// Mirrors `handle_evoke_cost_choice` for the cost-selection branch and
 /// `handle_adventure_choice` for the object-mutation-before-prepare branch.
@@ -2899,10 +2994,18 @@ pub fn handle_bestow_cost_choice(
     player: PlayerId,
     object_id: ObjectId,
     _card_id: CardId,
-    use_bestow: bool,
+    decision: crate::types::actions::AlternativeCastDecision,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    if use_bestow {
+    use crate::types::actions::AlternativeCastDecision;
+    // Exhaustive match so adding a third decision variant (e.g., `Decline`)
+    // is a compile error here rather than silently routing through one of
+    // the two existing branches.
+    let alt_path = match decision {
+        AlternativeCastDecision::Alternative => true,
+        AlternativeCastDecision::Normal => false,
+    };
+    if alt_path {
         // CR 702.103b: Apply the type-changing bestow effect to the hand object
         // BEFORE preparing the cast, so timing/cost checks (Aura is a permanent
         // spell, sorcery-speed) and the targeting branch in
@@ -2934,19 +3037,28 @@ pub fn handle_bestow_cost_choice(
     continue_cast_from_prepared(state, player, object_id, events)
 }
 
-/// CR 702.74a: Handle Evoke cost choice and proceed with casting. When
-/// `use_evoke` is true, the cast is prepared with `CastingVariant::Evoke`
-/// (which substitutes the evoke mana cost for the printed mana cost). When
-/// false, the cast proceeds normally (no variant override → `Normal`).
+/// CR 702.74a: Handle Evoke cost choice and proceed with casting. On
+/// `AlternativeCastDecision::Alternative`, the cast is prepared with
+/// `CastingVariant::Evoke` (which substitutes the evoke mana cost for the
+/// printed mana cost). On `Normal`, the cast proceeds normally (no variant
+/// override → `Normal`).
 pub fn handle_evoke_cost_choice(
     state: &mut GameState,
     player: PlayerId,
     object_id: ObjectId,
     _card_id: CardId,
-    use_evoke: bool,
+    decision: crate::types::actions::AlternativeCastDecision,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    if use_evoke {
+    use crate::types::actions::AlternativeCastDecision;
+    // Exhaustive match so adding a third decision variant (e.g., `Decline`)
+    // is a compile error here rather than silently routing through one of
+    // the two existing branches.
+    let alt_path = match decision {
+        AlternativeCastDecision::Alternative => true,
+        AlternativeCastDecision::Normal => false,
+    };
+    if alt_path {
         let prepared = prepare_spell_cast_with_variant_override(
             state,
             player,
@@ -3399,12 +3511,13 @@ pub fn handle_cast_spell(
                 let warp_affordable =
                     can_pay_cost_after_auto_tap(state, player, object_id, &warp_cost);
                 if normal_affordable && warp_affordable {
-                    return Ok(WaitingFor::WarpCostChoice {
+                    return Ok(WaitingFor::AlternativeCastChoice {
                         player,
                         object_id,
                         card_id,
+                        keyword: crate::types::game_state::AlternativeCastKeyword::Warp,
                         normal_cost: obj.mana_cost.clone(),
-                        warp_cost: warp_cost.clone(),
+                        alternative_cost: warp_cost.clone(),
                     });
                 }
                 // If only normal is affordable, skip warp — prepare_spell_cast will
@@ -3413,7 +3526,12 @@ pub fn handle_cast_spell(
                 if normal_affordable && !warp_affordable {
                     // Force normal cast by proceeding through handle_warp_cost_choice
                     return handle_warp_cost_choice(
-                        state, player, object_id, card_id, false, events,
+                        state,
+                        player,
+                        object_id,
+                        card_id,
+                        crate::types::actions::AlternativeCastDecision::Normal,
+                        events,
                     );
                 }
                 // If only warp or neither, let prepare_spell_cast handle it normally
@@ -3438,18 +3556,24 @@ pub fn handle_cast_spell(
                 let evoke_affordable =
                     can_pay_cost_after_auto_tap(state, player, object_id, &evoke_cost);
                 if normal_affordable && evoke_affordable {
-                    return Ok(WaitingFor::EvokeCostChoice {
+                    return Ok(WaitingFor::AlternativeCastChoice {
                         player,
                         object_id,
                         card_id,
+                        keyword: crate::types::game_state::AlternativeCastKeyword::Evoke,
                         normal_cost: obj.mana_cost.clone(),
-                        evoke_cost,
+                        alternative_cost: evoke_cost,
                     });
                 }
                 if !normal_affordable && evoke_affordable {
                     // Only evoke is payable — proceed via the evoke path.
                     return handle_evoke_cost_choice(
-                        state, player, object_id, card_id, true, events,
+                        state,
+                        player,
+                        object_id,
+                        card_id,
+                        crate::types::actions::AlternativeCastDecision::Alternative,
+                        events,
                     );
                 }
                 // Otherwise (normal-only or neither): fall through to normal cast.
@@ -3473,12 +3597,13 @@ pub fn handle_cast_spell(
                 let overload_affordable =
                     can_pay_cost_after_auto_tap(state, player, object_id, &overload_cost);
                 if normal_affordable && overload_affordable {
-                    return Ok(WaitingFor::OverloadCostChoice {
+                    return Ok(WaitingFor::AlternativeCastChoice {
                         player,
                         object_id,
                         card_id,
+                        keyword: crate::types::game_state::AlternativeCastKeyword::Overload,
                         normal_cost: obj.mana_cost.clone(),
-                        overload_cost,
+                        alternative_cost: overload_cost,
                     });
                 }
                 if !normal_affordable && overload_affordable {
@@ -3488,7 +3613,7 @@ pub fn handle_cast_spell(
                         player,
                         object_id,
                         card_id,
-                        crate::types::actions::OverloadChoice::Overload,
+                        crate::types::actions::AlternativeCastDecision::Alternative,
                         events,
                     );
                 }
@@ -3528,18 +3653,24 @@ pub fn handle_cast_spell(
                 let bestow_affordable =
                     can_pay_cost_after_auto_tap(state, player, object_id, &bestow_cost);
                 if has_legal_creature_target && normal_affordable && bestow_affordable {
-                    return Ok(WaitingFor::BestowCostChoice {
+                    return Ok(WaitingFor::AlternativeCastChoice {
                         player,
                         object_id,
                         card_id,
+                        keyword: crate::types::game_state::AlternativeCastKeyword::Bestow,
                         normal_cost: obj.mana_cost.clone(),
-                        bestow_cost,
+                        alternative_cost: bestow_cost,
                     });
                 }
                 if has_legal_creature_target && !normal_affordable && bestow_affordable {
                     // Only bestow is payable — proceed via the bestow path.
                     return handle_bestow_cost_choice(
-                        state, player, object_id, card_id, true, events,
+                        state,
+                        player,
+                        object_id,
+                        card_id,
+                        crate::types::actions::AlternativeCastDecision::Alternative,
+                        events,
                     );
                 }
                 // Otherwise (normal-only / no legal target / neither affordable):
@@ -9496,6 +9627,494 @@ mod tests {
         assert!(
             !ability.context.additional_cost_paid,
             "alternative costs are not additional costs"
+        );
+    }
+
+    // Snuff Out class regression: a spell with `kind: Spell { Destroy { target } }`
+    // and an `AlternativeCost::PayLife` casting option must, after the user pays
+    // the alternative cost, resolve normally and actually destroy the chosen target.
+    // The pre-fix bug: life was deducted and a Spell entry sat on the stack, but
+    // the target was never destroyed on resolution.
+    #[test]
+    fn snuff_out_alt_cost_paid_resolves_destroy_on_chosen_target() {
+        let mut state = setup_game_at_main_phase();
+        state.players[0].life = 20;
+
+        let spell_id = create_instant_in_hand(&mut state, PlayerId(0));
+        {
+            let spell = state.objects.get_mut(&spell_id).unwrap();
+            spell.name = "Snuff Out".to_string();
+            spell.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 3,
+            };
+            let abilities = Arc::make_mut(&mut spell.abilities);
+            abilities.clear();
+            abilities.push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Destroy {
+                    target: TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        controller: None,
+                        properties: vec![FilterProp::NotColor {
+                            color: ManaColor::Black,
+                        }],
+                    }),
+                    cant_regenerate: true,
+                },
+            ));
+            spell.casting_options.push(
+                crate::types::ability::SpellCastingOption::alternative_cost(AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 4 },
+                })
+                .condition(
+                    crate::types::ability::ParsedCondition::YouControlSubtypeCountAtLeast {
+                        subtype: "swamp".to_string(),
+                        count: 1,
+                    },
+                ),
+            );
+        }
+
+        let swamp_id = create_object(
+            &mut state,
+            CardId(21),
+            PlayerId(0),
+            "Swamp".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let swamp = state.objects.get_mut(&swamp_id).unwrap();
+            swamp.card_types.core_types.push(CoreType::Land);
+            swamp.card_types.subtypes.push("Swamp".to_string());
+        }
+
+        let target_id = create_object(
+            &mut state,
+            CardId(22),
+            PlayerId(1),
+            "Nonblack Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&target_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let waiting = handle_cast_spell(
+            &mut state,
+            PlayerId(0),
+            spell_id,
+            CardId(10),
+            &mut Vec::new(),
+        )
+        .expect("Snuff Out should reach the alternative-cost choice");
+        state.waiting_for = waiting;
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::OptionalCostChoice {
+                cost: AdditionalCost::Choice(AbilityCost::PayLife { .. }, _),
+                ..
+            }
+        ));
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::DecideOptionalCost { pay: true },
+        )
+        .expect("paying 4 life should commit Snuff Out to the stack");
+
+        assert_eq!(state.players[0].life, 16);
+        assert_eq!(state.stack.len(), 1);
+
+        let StackEntryKind::Spell {
+            ability: Some(ability),
+            ..
+        } = &state.stack[0].kind
+        else {
+            panic!("expected spell on stack");
+        };
+        assert_eq!(
+            ability.targets.len(),
+            1,
+            "Snuff Out's resolved ability must carry one target after alt-cost prompt"
+        );
+        assert_eq!(
+            ability.targets[0],
+            crate::types::ability::TargetRef::Object(target_id),
+            "Snuff Out's target should be the only legal nonblack creature"
+        );
+
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        let target_zone = state.objects.get(&target_id).map(|o| o.zone);
+        assert_eq!(
+            target_zone,
+            Some(Zone::Graveyard),
+            "Snuff Out should have destroyed the target creature on resolution"
+        );
+        assert!(events.iter().any(
+            |e| matches!(e, GameEvent::CreatureDestroyed { object_id } if *object_id == target_id)
+        ));
+    }
+
+    // End-to-end variant of the previous test: load Snuff Out from the actual
+    // card export so any parser/export drift in `abilities`, `casting_options`,
+    // or `condition` shape would surface here.
+    #[test]
+    fn snuff_out_from_card_database_alt_cost_destroys_target() {
+        use std::path::PathBuf;
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("client")
+            .join("public")
+            .join("card-data.json");
+        if !path.exists() {
+            eprintln!(
+                "skipping: {} not found (run ./scripts/gen-card-data.sh)",
+                path.display()
+            );
+            return;
+        }
+        // The full export contains a deserialization quirk on an unrelated card
+        // in some builds. Extract Snuff Out's record directly via jq-style lookup
+        // so this regression test is robust to that.
+        let raw = std::fs::read_to_string(&path).expect("card-data.json readable");
+        let map: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&raw).expect("card-data.json is a JSON object");
+        let snuff_value = map
+            .get("snuff out")
+            .expect("Snuff Out should be in the export keyed by lowercase name");
+        let snuff: crate::types::card::CardFace = serde_json::from_value(snuff_value.clone())
+            .expect("Snuff Out record parses as CardFace");
+        let snuff = &snuff;
+
+        let mut state = setup_game_at_main_phase();
+        state.players[0].life = 20;
+
+        let spell_id =
+            crate::game::deck_loading::create_object_from_card_face(&mut state, snuff, PlayerId(0));
+        // Move from library to hand for casting.
+        crate::game::zones::move_to_zone(&mut state, spell_id, Zone::Hand, &mut Vec::new());
+
+        let swamp_id = create_object(
+            &mut state,
+            CardId(7777),
+            PlayerId(0),
+            "Swamp".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let swamp = state.objects.get_mut(&swamp_id).unwrap();
+            swamp.card_types.core_types.push(CoreType::Land);
+            swamp.card_types.subtypes.push("Swamp".to_string());
+        }
+
+        let target_id = create_object(
+            &mut state,
+            CardId(7778),
+            PlayerId(1),
+            "Nonblack Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&target_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let card_id = state.objects[&spell_id].card_id;
+        let waiting =
+            handle_cast_spell(&mut state, PlayerId(0), spell_id, card_id, &mut Vec::new())
+                .expect("Snuff Out should reach the alternative-cost choice");
+        state.waiting_for = waiting;
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::OptionalCostChoice {
+                    cost: AdditionalCost::Choice(AbilityCost::PayLife { .. }, _),
+                    ..
+                }
+            ),
+            "expected pay-life alternative cost prompt, got {:?}",
+            state.waiting_for
+        );
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::DecideOptionalCost { pay: true },
+        )
+        .expect("paying 4 life should commit Snuff Out to the stack");
+
+        assert_eq!(state.players[0].life, 16);
+        assert_eq!(state.stack.len(), 1);
+
+        let StackEntryKind::Spell {
+            ability: Some(ability),
+            ..
+        } = &state.stack[0].kind
+        else {
+            panic!("expected spell on stack");
+        };
+        assert_eq!(
+            ability.targets.len(),
+            1,
+            "Snuff Out's resolved ability must carry one target after alt-cost prompt; \
+             targets = {:?}",
+            ability.targets
+        );
+
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        let target_zone = state.objects.get(&target_id).map(|o| o.zone);
+        assert_eq!(
+            target_zone,
+            Some(Zone::Graveyard),
+            "Snuff Out should have destroyed the target creature on resolution"
+        );
+    }
+
+    // Witherbloom, the Balancer (cost {5}{B}{G}) has printed `Keyword::Affinity(Creature)`.
+    // When cast from the command zone, the same cost-reduction code path runs as
+    // a hand cast. Witherbloom itself in the command zone is NOT on the battlefield,
+    // so it doesn't count toward its own Affinity — that's rules-correct (CR 702.41a).
+    // Reduction must scale with creatures the caster *actually controls on battlefield*.
+    #[test]
+    fn affinity_for_creatures_on_commander_in_command_zone_reduces_generic() {
+        let mut state = setup_game_at_main_phase();
+        state.format_config.command_zone = true;
+
+        let commander_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Witherbloom, the Balancer".to_string(),
+            Zone::Command,
+        );
+        {
+            let obj = state.objects.get_mut(&commander_id).unwrap();
+            obj.is_commander = true;
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.supertypes.push(Supertype::Legendary);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Black, ManaCostShard::Green],
+                generic: 5,
+            };
+            obj.keywords.push(Keyword::Affinity(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: None,
+                properties: vec![],
+            }));
+        }
+
+        // Zero creatures on the battlefield → no reduction.
+        let cost_zero = effective_spell_cost(&state, PlayerId(0), commander_id)
+            .expect("commander cast cost should compute");
+        let ManaCost::Cost {
+            generic: g_zero, ..
+        } = cost_zero
+        else {
+            panic!("expected ManaCost::Cost");
+        };
+        assert_eq!(
+            g_zero, 5,
+            "no creatures controlled → generic stays at the printed 5"
+        );
+
+        // Three creatures the player controls on battlefield → reduce by 3 to {2}.
+        for i in 0u64..3 {
+            let id = create_object(
+                &mut state,
+                CardId(100 + i),
+                PlayerId(0),
+                format!("Bear {i}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let cost_three = effective_spell_cost(&state, PlayerId(0), commander_id)
+            .expect("commander cast cost should compute");
+        let ManaCost::Cost {
+            generic: g_three, ..
+        } = cost_three
+        else {
+            panic!("expected ManaCost::Cost");
+        };
+        assert_eq!(
+            g_three, 2,
+            "three creatures controlled → generic reduced from 5 to 2 by Affinity"
+        );
+
+        // Opponent-controlled creatures must not count toward our Affinity.
+        for i in 0u64..2 {
+            let id = create_object(
+                &mut state,
+                CardId(200 + i),
+                PlayerId(1),
+                format!("Opp Bear {i}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+        let cost_with_opp = effective_spell_cost(&state, PlayerId(0), commander_id)
+            .expect("commander cast cost should compute");
+        let ManaCost::Cost {
+            generic: g_with_opp,
+            ..
+        } = cost_with_opp
+        else {
+            panic!("expected ManaCost::Cost");
+        };
+        assert_eq!(
+            g_with_opp, 2,
+            "opponent creatures must not contribute to caster's Affinity reduction"
+        );
+    }
+
+    // Witherbloom, the Balancer's second clause: "Instant and sorcery spells you cast
+    // have affinity for creatures." This is a static ability that functions while
+    // Witherbloom is on the battlefield. When the player casts an instant or sorcery,
+    // the granted Affinity must reduce its generic cost by the number of creatures
+    // they control on the battlefield.
+    #[test]
+    fn witherbloom_grants_affinity_to_instant_and_sorcery_spells() {
+        use crate::types::ability::{TargetFilter, TypeFilter, TypedFilter};
+        use crate::types::statics::StaticMode;
+
+        let mut state = setup_game_at_main_phase();
+
+        let witherbloom_id = create_object(
+            &mut state,
+            CardId(2000),
+            PlayerId(0),
+            "Witherbloom, the Balancer".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&witherbloom_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.supertypes.push(Supertype::Legendary);
+            // Mirror the parsed static_abilities[0] from card-data.json.
+            let affected = TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Instant],
+                        controller: Some(ControllerRef::You),
+                        properties: vec![],
+                    }),
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Sorcery],
+                        controller: Some(ControllerRef::You),
+                        properties: vec![],
+                    }),
+                ],
+            };
+            let granted_kw = Keyword::Affinity(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: None,
+                properties: vec![],
+            });
+            let def = StaticDefinition {
+                mode: StaticMode::CastWithKeyword {
+                    keyword: granted_kw,
+                },
+                affected: Some(affected),
+                modifications: vec![],
+                condition: None,
+                affected_zone: None,
+                effect_zone: None,
+                active_zones: vec![],
+                characteristic_defining: false,
+                description: Some(
+                    "Instant and sorcery spells you cast have affinity for creatures.".to_string(),
+                ),
+            };
+            obj.static_definitions = vec![def].into();
+        }
+
+        // Instant in hand: cost {3}{R}. With 2 creatures on the battlefield the
+        // generic cost should reduce from 3 to 1.
+        let instant_id = create_instant_in_hand(&mut state, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&instant_id).unwrap();
+            obj.name = "Searing Spear".to_string();
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 3,
+            };
+        }
+
+        let granted = super::effective_spell_keywords(&state, PlayerId(0), instant_id);
+        assert!(
+            granted
+                .iter()
+                .any(|k| matches!(k, Keyword::Affinity(tf) if tf.type_filters == vec![TypeFilter::Creature])),
+            "Witherbloom's static must grant Affinity(Creature) to instant spells you cast; \
+             got keywords {granted:?}"
+        );
+
+        let cost_no_creatures = effective_spell_cost(&state, PlayerId(0), instant_id)
+            .expect("instant cost should compute");
+        let ManaCost::Cost { generic: g_no, .. } = cost_no_creatures else {
+            panic!("expected ManaCost::Cost");
+        };
+        assert_eq!(
+            g_no, 2,
+            "Witherbloom itself counts as 1 creature; 3 generic - 1 = 2"
+        );
+
+        // Add 2 more creatures the player controls. Total creatures on battlefield
+        // controlled by player: Witherbloom + 2 = 3 → reduce 3 generic → 0.
+        for i in 0u64..2 {
+            let id = create_object(
+                &mut state,
+                CardId(2100 + i),
+                PlayerId(0),
+                format!("Bear {i}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let cost_three = effective_spell_cost(&state, PlayerId(0), instant_id)
+            .expect("instant cost should compute");
+        let ManaCost::Cost {
+            generic: g_three, ..
+        } = cost_three
+        else {
+            panic!("expected ManaCost::Cost");
+        };
+        assert_eq!(
+            g_three, 0,
+            "3 creatures controlled (Witherbloom + 2 bears) → generic reduced from 3 to 0 \
+             by Affinity granted via Witherbloom's static"
         );
     }
 
@@ -17092,12 +17711,14 @@ mod tests {
     }
 
     /// CR 702.96a-c: Overload end-to-end — `handle_cast_spell` on a hand card
-    /// with `Keyword::Overload(cost)` offers `WaitingFor::OverloadCostChoice`
-    /// when both costs are affordable, and selecting overload prepares the
-    /// spell with `CastingVariant::Overload`, substitutes the overload cost,
-    /// and transforms the ability's `Destroy { target }` into `DestroyAll`.
+    /// with `Keyword::Overload(cost)` offers `WaitingFor::AlternativeCastChoice`
+    /// (with `keyword = Overload`) when both costs are affordable, and
+    /// selecting overload prepares the spell with `CastingVariant::Overload`,
+    /// substitutes the overload cost, and transforms the ability's
+    /// `Destroy { target }` into `DestroyAll`.
     mod overload_cast_flow {
         use super::*;
+        use crate::types::game_state::AlternativeCastKeyword;
         use crate::types::keywords::Keyword;
         use crate::types::mana::ManaCost;
 
@@ -17140,8 +17761,14 @@ mod tests {
             let wf =
                 handle_cast_spell(&mut state, PlayerId(0), obj, CardId(42), &mut events).unwrap();
             assert!(
-                matches!(wf, WaitingFor::OverloadCostChoice { .. }),
-                "expected OverloadCostChoice offer, got {:?}",
+                matches!(
+                    wf,
+                    WaitingFor::AlternativeCastChoice {
+                        keyword: AlternativeCastKeyword::Overload,
+                        ..
+                    }
+                ),
+                "expected AlternativeCastChoice(Overload) offer, got {:?}",
                 wf
             );
         }
@@ -18421,8 +19048,9 @@ mod tests {
     }
 
     /// CR 702.103a: `handle_cast_spell` on a hand bestow card with both costs
-    /// affordable AND a legal creature target presents `BestowCostChoice` so
-    /// the player can pick between creature cast and bestow cast.
+    /// affordable AND a legal creature target presents
+    /// `AlternativeCastChoice { keyword: Bestow, .. }` so the player can pick
+    /// between creature cast and bestow cast.
     #[test]
     fn bestow_cost_choice_is_offered_when_both_costs_affordable_and_target_exists() {
         let mut state = setup_game_at_main_phase();
@@ -18453,8 +19081,14 @@ mod tests {
             handle_cast_spell(&mut state, PlayerId(0), bestow_id, CardId(704), &mut events)
                 .expect("cast should succeed and route to bestow choice");
         assert!(
-            matches!(waiting, WaitingFor::BestowCostChoice { .. }),
-            "Bestow + affordable + legal target ⇒ present BestowCostChoice; got {:?}",
+            matches!(
+                waiting,
+                WaitingFor::AlternativeCastChoice {
+                    keyword: crate::types::game_state::AlternativeCastKeyword::Bestow,
+                    ..
+                }
+            ),
+            "Bestow + affordable + legal target ⇒ present AlternativeCastChoice(Bestow); got {:?}",
             waiting
         );
     }
@@ -18488,7 +19122,13 @@ mod tests {
             handle_cast_spell(&mut state, PlayerId(0), bestow_id, CardId(706), &mut events)
                 .expect("normal creature cast should succeed");
         assert!(
-            !matches!(waiting, WaitingFor::BestowCostChoice { .. }),
+            !matches!(
+                waiting,
+                WaitingFor::AlternativeCastChoice {
+                    keyword: crate::types::game_state::AlternativeCastKeyword::Bestow,
+                    ..
+                }
+            ),
             "no legal target ⇒ bestow choice must NOT be offered; got {:?}",
             waiting
         );
@@ -18662,8 +19302,8 @@ mod tests {
     }
 
     /// CR 702.103b regression: drives the full cast pipeline end-to-end —
-    /// `handle_cast_spell` → `BestowCostChoice` → `handle_bestow_cost_choice`
-    /// (`use_bestow: true`) — and asserts the spell on the stack still has the
+    /// `handle_cast_spell` → `AlternativeCastChoice(Bestow)` →
+    /// `handle_bestow_cost_choice` (Alternative) — and asserts the spell on the stack still has the
     /// bestow form. This is the path the real (non-test) cast flow takes, and
     /// it goes through `move_to_zone(Hand, Stack)` whose `apply_zone_exit_cleanup`
     /// must NOT strip the bestow form. The earlier
@@ -18699,8 +19339,14 @@ mod tests {
         let mut events = Vec::new();
         let waiting =
             handle_cast_spell(&mut state, PlayerId(0), bestow_id, CardId(901), &mut events)
-                .expect("cast should route to BestowCostChoice");
-        assert!(matches!(waiting, WaitingFor::BestowCostChoice { .. }));
+                .expect("cast should route to AlternativeCastChoice(Bestow)");
+        assert!(matches!(
+            waiting,
+            WaitingFor::AlternativeCastChoice {
+                keyword: crate::types::game_state::AlternativeCastKeyword::Bestow,
+                ..
+            }
+        ));
 
         let mut events = Vec::new();
         handle_bestow_cost_choice(
@@ -18708,7 +19354,7 @@ mod tests {
             PlayerId(0),
             bestow_id,
             CardId(901),
-            true,
+            crate::types::actions::AlternativeCastDecision::Alternative,
             &mut events,
         )
         .expect("bestow choice should drive cast to completion");
@@ -18829,17 +19475,18 @@ mod tests {
         use crate::ai_support::candidate_actions_broad;
 
         let mut state = setup_game_at_main_phase();
-        // Stub: directly drop into the BestowCostChoice waiting state so we
+        // Stub: directly drop into the AlternativeCastChoice waiting state so we
         // exercise the candidate enumeration, not the routing.
-        state.waiting_for = WaitingFor::BestowCostChoice {
+        state.waiting_for = WaitingFor::AlternativeCastChoice {
             player: PlayerId(0),
             object_id: ObjectId(1),
             card_id: CardId(1),
+            keyword: crate::types::game_state::AlternativeCastKeyword::Bestow,
             normal_cost: ManaCost::Cost {
                 shards: vec![ManaCostShard::Green],
                 generic: 1,
             },
-            bestow_cost: ManaCost::Cost {
+            alternative_cost: ManaCost::Cost {
                 shards: vec![ManaCostShard::Green],
                 generic: 3,
             },
@@ -18848,10 +19495,11 @@ mod tests {
         let mut saw_yes = false;
         let mut saw_no = false;
         for c in &cands {
-            match c.action {
-                GameAction::ChooseBestowCost { use_bestow: true } => saw_yes = true,
-                GameAction::ChooseBestowCost { use_bestow: false } => saw_no = true,
-                _ => {}
+            if let GameAction::ChooseAlternativeCast { choice } = c.action {
+                match choice {
+                    crate::types::actions::AlternativeCastDecision::Alternative => saw_yes = true,
+                    crate::types::actions::AlternativeCastDecision::Normal => saw_no = true,
+                }
             }
         }
         assert!(saw_yes, "AI must surface the 'cast bestowed' option");

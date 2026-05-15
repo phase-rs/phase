@@ -1108,6 +1108,29 @@ impl VoteActor {
     }
 }
 
+/// CR 118.9: Identifies which keyword ability granted an alternative casting
+/// cost so the `WaitingFor::AlternativeCastChoice` dispatcher can route to the
+/// keyword-specific post-payment handler. The four keywords share a single
+/// player decision shape (printed cost vs. alternative cost) but diverge in
+/// post-payment semantics — this enum keeps the prompt unified while
+/// preserving CR fidelity at resolution.
+///
+/// Adding a new alternative-cost keyword (e.g., Madness CR 702.35a, Spectacle
+/// CR 702.137a) is a compile error at every dispatch site until handled.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
+#[serde(tag = "type")]
+pub enum AlternativeCastKeyword {
+    /// Custom Warp keyword — exile-at-end-step rider; no CR section.
+    Warp,
+    /// CR 702.74a: ETB + sacrifice trigger fires when the resolving permanent
+    /// was cast for its evoke cost (CR 702.74b).
+    Evoke,
+    /// CR 702.96a: Spell's text changes "target" to "each" (CR 702.96b-c).
+    Overload,
+    /// CR 702.103a: Spell becomes an Aura with enchant creature (CR 702.103b).
+    Bestow,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum WaitingFor {
@@ -1529,55 +1552,36 @@ pub enum WaitingFor {
         object_id: ObjectId,
         card_id: CardId,
     },
-    /// Player chooses between normal cast and Warp cast from hand.
-    /// Warp is a custom keyword: cast for warp cost, exile at next end step,
-    /// then may cast from exile later. Only presented when both costs are affordable.
-    WarpCostChoice {
+    /// CR 118.9: Player chooses between paying the spell's printed mana cost
+    /// and paying a keyword-granted alternative mana cost. Only presented when
+    /// both costs are affordable (and, for Bestow, a legal Aura target exists
+    /// per CR 702.103a + CR 303.4a). The `keyword` axis disambiguates the
+    /// post-payment semantics; the prompt shape is uniform per CR 118.9 ("you
+    /// may pay [cost] rather than this spell's mana cost").
+    ///
+    /// - `Warp` — custom keyword: cast for warp cost, exile at next end step,
+    ///   may be recast from exile later (no CR section; rider lives on the
+    ///   keyword).
+    /// - `Evoke` (CR 702.74a) — creature ETBs and sacrifices itself when cast
+    ///   for the evoke cost (CR 702.74b).
+    /// - `Overload` (CR 702.96a) — substitutes the overload cost and rewrites
+    ///   every "target" in the spell's text to "each" (CR 702.96b-c).
+    /// - `Bestow` (CR 702.103a) — substitutes the bestow cost and turns the
+    ///   spell into an Aura with enchant creature (CR 702.103b).
+    AlternativeCastChoice {
         player: PlayerId,
         object_id: ObjectId,
         card_id: CardId,
-        /// The card's normal mana cost (for display in the choice modal).
+        /// Which keyword granted the alternative cost — drives post-payment
+        /// dispatch and the modal copy. Exhaustively matched everywhere so a
+        /// future keyword addition (e.g., Madness, Spectacle) is a compile
+        /// error at every site.
+        keyword: AlternativeCastKeyword,
+        /// The card's printed mana cost (for display in the choice modal).
         normal_cost: ManaCost,
-        /// The Warp keyword's alternative mana cost (for display in the choice modal).
-        warp_cost: ManaCost,
-    },
-    /// CR 702.74a: Player chooses between normal cast and Evoke cast from hand.
-    /// Evoke creature ETBs and sacrifices itself if cast for evoke cost. Only
-    /// presented when both costs are affordable.
-    EvokeCostChoice {
-        player: PlayerId,
-        object_id: ObjectId,
-        card_id: CardId,
-        /// The card's normal mana cost (for display in the choice modal).
-        normal_cost: ManaCost,
-        /// The Evoke keyword's alternative mana cost (for display in the choice modal).
-        evoke_cost: ManaCost,
-    },
-    /// CR 702.96a: Player chooses between normal cast and Overload cast from hand.
-    /// Overload substitutes the overload mana cost and transforms every "target"
-    /// in the spell's text to "each" (CR 702.96b). Only presented when both costs
-    /// are affordable.
-    OverloadCostChoice {
-        player: PlayerId,
-        object_id: ObjectId,
-        card_id: CardId,
-        /// The card's normal mana cost (for display in the choice modal).
-        normal_cost: ManaCost,
-        /// The Overload keyword's alternative mana cost (for display in the choice modal).
-        overload_cost: ManaCost,
-    },
-    /// CR 702.103a: Player chooses between normal cast and Bestow cast from hand.
-    /// Bestow substitutes the bestow mana cost and turns the spell into an Aura
-    /// with `enchant creature` (CR 702.103b). Only presented when both costs are
-    /// affordable AND there is at least one legal creature to enchant.
-    BestowCostChoice {
-        player: PlayerId,
-        object_id: ObjectId,
-        card_id: CardId,
-        /// The card's normal mana cost (for display in the choice modal).
-        normal_cost: ManaCost,
-        /// The Bestow keyword's alternative mana cost (for display in the choice modal).
-        bestow_cost: ManaCost,
+        /// The keyword-granted alternative mana cost (for display in the
+        /// choice modal).
+        alternative_cost: ManaCost,
     },
     /// CR 110.4: Player chooses which permanent type slot to consume when
     /// casting/playing a multi-type card from the graveyard via a
@@ -2347,10 +2351,7 @@ impl WaitingFor {
             | WaitingFor::MultiTargetSelection { player, .. }
             | WaitingFor::AdventureCastChoice { player, .. }
             | WaitingFor::ModalFaceChoice { player, .. }
-            | WaitingFor::WarpCostChoice { player, .. }
-            | WaitingFor::EvokeCostChoice { player, .. }
-            | WaitingFor::OverloadCostChoice { player, .. }
-            | WaitingFor::BestowCostChoice { player, .. }
+            | WaitingFor::AlternativeCastChoice { player, .. }
             | WaitingFor::ChoosePermanentTypeSlot { player, .. }
             | WaitingFor::ChooseRingBearer { player, .. }
             | WaitingFor::ChooseDungeon { player, .. }

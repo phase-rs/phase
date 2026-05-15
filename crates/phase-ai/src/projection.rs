@@ -339,7 +339,7 @@ fn resolve_choice(
         | WaitingFor::PhyrexianPayment { .. }
         | WaitingFor::CombatTaxPayment { .. }
         | WaitingFor::HarmonizeTapChoice { .. }
-        | WaitingFor::WarpCostChoice { .. }
+        | WaitingFor::AlternativeCastChoice { .. }
         | WaitingFor::UnlessPayment { .. } => {
             // First legal payment. If none exist for a mandatory cost, bail.
             actions

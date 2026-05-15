@@ -19,6 +19,11 @@ export function collectObjectActions(
 
 export function isManaObjectAction(action: GameAction, object: GameObject | undefined): boolean {
   if (action.type === "TapLandForMana") return true;
+  // CR 702.51a (convoke) + CR 701.67 (waterbend): tapping a creature/artifact
+  // pays the spell's mana cost. The engine emits this only during
+  // `WaitingFor::ManaPayment { convoke_mode: Some(_) }`, so it routes through
+  // the same mana-tap ring as land taps — without this branch, convoke
+  // creatures get no clickable affordance and the player cannot tap them.
   if (action.type === "TapForConvoke") return true;
   if (action.type !== "ActivateAbility") return false;
   return object?.abilities?.[action.data.ability_index]?.effect?.type === "Mana";

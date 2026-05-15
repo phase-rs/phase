@@ -1,7 +1,7 @@
 use rand::Rng;
 
 use engine::ai_support::build_decision_context;
-use engine::types::actions::{GameAction, MulliganChoice, OverloadChoice};
+use engine::types::actions::{AlternativeCastDecision, GameAction, MulliganChoice};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
@@ -452,23 +452,19 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             Some(GameAction::ChooseTopOrBottom { top: true })
         }
 
-        // Adventure/MDFC/Warp/Evoke/Overload cost choice: pick creature/normal face.
+        // Adventure/MDFC/alt-cost choice: default to the "normal" face/cost.
         WaitingFor::AdventureCastChoice { .. } => {
             Some(GameAction::ChooseAdventureFace { creature: true })
         }
         WaitingFor::ModalFaceChoice { .. } => {
             Some(GameAction::ChooseModalFace { back_face: false })
         }
-        WaitingFor::WarpCostChoice { .. } => Some(GameAction::ChooseWarpCost { use_warp: false }),
-        WaitingFor::EvokeCostChoice { .. } => {
-            Some(GameAction::ChooseEvokeCost { use_evoke: false })
-        }
-        WaitingFor::OverloadCostChoice { .. } => Some(GameAction::ChooseOverloadCost {
-            choice: OverloadChoice::Normal,
+        // CR 118.9: Default to the printed mana cost (Normal). Each keyword
+        // resolves through its own post-payment handler in the engine; the
+        // search-time default is uniform.
+        WaitingFor::AlternativeCastChoice { .. } => Some(GameAction::ChooseAlternativeCast {
+            choice: AlternativeCastDecision::Normal,
         }),
-        WaitingFor::BestowCostChoice { .. } => {
-            Some(GameAction::ChooseBestowCost { use_bestow: false })
-        }
         WaitingFor::ChoosePermanentTypeSlot {
             available_slots, ..
         } => available_slots

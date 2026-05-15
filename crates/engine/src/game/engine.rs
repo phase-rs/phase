@@ -1377,74 +1377,59 @@ fn apply_action(
             // intercept won't re-fire.
             handle_play_land(state, *object_id, *card_id, &mut events)?
         }
-        // Player chooses normal cast or Warp cast from hand.
+        // CR 118.9: Player chooses between the printed mana cost and the
+        // keyword-granted alternative cost. The `keyword` axis on the waiting
+        // state drives dispatch to the per-keyword post-payment handler
+        // (CR 702.74a Evoke, CR 702.96a Overload, CR 702.103a Bestow, custom
+        // Warp). Each keyword retains its own resolver because post-payment
+        // semantics genuinely diverge — the unification is purely at the
+        // player-decision layer.
         (
-            WaitingFor::WarpCostChoice {
+            WaitingFor::AlternativeCastChoice {
                 player,
                 object_id,
                 card_id,
+                keyword,
                 ..
             },
-            GameAction::ChooseWarpCost { use_warp },
-        ) => casting::handle_warp_cost_choice(
-            state,
-            *player,
-            *object_id,
-            *card_id,
-            use_warp,
-            &mut events,
-        )?,
-        // CR 702.74a: Player chooses normal cast or Evoke cast from hand.
-        (
-            WaitingFor::EvokeCostChoice {
-                player,
-                object_id,
-                card_id,
-                ..
-            },
-            GameAction::ChooseEvokeCost { use_evoke },
-        ) => casting::handle_evoke_cost_choice(
-            state,
-            *player,
-            *object_id,
-            *card_id,
-            use_evoke,
-            &mut events,
-        )?,
-        // CR 702.96a: Player chooses normal cast or Overload cast from hand.
-        (
-            WaitingFor::OverloadCostChoice {
-                player,
-                object_id,
-                card_id,
-                ..
-            },
-            GameAction::ChooseOverloadCost { choice },
-        ) => casting::handle_overload_cost_choice(
-            state,
-            *player,
-            *object_id,
-            *card_id,
-            choice,
-            &mut events,
-        )?,
-        // CR 702.103a: Player chooses normal cast or Bestow cast from hand.
-        (
-            WaitingFor::BestowCostChoice {
-                player,
-                object_id,
-                card_id,
-                ..
-            },
-            GameAction::ChooseBestowCost { use_bestow },
-        ) => casting::handle_bestow_cost_choice(
-            state,
-            *player,
-            *object_id,
-            *card_id,
-            use_bestow,
-            &mut events,
-        )?,
+            GameAction::ChooseAlternativeCast { choice },
+        ) => {
+            use crate::types::game_state::AlternativeCastKeyword;
+            match keyword {
+                AlternativeCastKeyword::Warp => casting::handle_warp_cost_choice(
+                    state,
+                    *player,
+                    *object_id,
+                    *card_id,
+                    choice,
+                    &mut events,
+                )?,
+                AlternativeCastKeyword::Evoke => casting::handle_evoke_cost_choice(
+                    state,
+                    *player,
+                    *object_id,
+                    *card_id,
+                    choice,
+                    &mut events,
+                )?,
+                AlternativeCastKeyword::Overload => casting::handle_overload_cost_choice(
+                    state,
+                    *player,
+                    *object_id,
+                    *card_id,
+                    choice,
+                    &mut events,
+                )?,
+                AlternativeCastKeyword::Bestow => casting::handle_bestow_cost_choice(
+                    state,
+                    *player,
+                    *object_id,
+                    *card_id,
+                    choice,
+                    &mut events,
+                )?,
+            }
+        }
         // CR 110.4: Player chose which permanent type slot to consume for a
         // multi-type graveyard cast via OncePerTurnPerPermanentType (Muldrotha).
         (
