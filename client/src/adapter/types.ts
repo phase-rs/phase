@@ -894,13 +894,18 @@ export type WaitingFor =
       tallies: number[];
       controller: PlayerId;
       source_id: ObjectId;
-      // When set, the named player is the ACTOR; `player` above is the
-      // SUBJECT being labeled. Battlebond friend-or-foe cards
-      // (ControllerLabels scope; no explicit CR section) pin this to the
-      // spell controller so the labeling submissions cycle through subjects
-      // while the actor is fixed. When null, classic vote: `player` is
-      // both subject and actor.
-      delegate_chooser?: PlayerId | null;
+      // The "who acts" descriptor for this step. `player` above is the
+      // SUBJECT being voted-for/labeled.
+      //   * `{ type: "SubjectActs" }` — classic Council's-dilemma; the
+      //     subject votes for themselves.
+      //   * `{ type: "Delegated", data: PlayerId }` — Battlebond friend-
+      //     or-foe; a fixed player (the spell controller) casts every
+      //     vote while `player` cycles through subjects.
+      // Resolve via `data.actor.type === "Delegated" ? data.actor.data
+      // : data.player` to get the authorized submitter.
+      actor:
+        | { type: "SubjectActs" }
+        | { type: "Delegated"; data: PlayerId };
     } }
   | { type: "ChooseDungeon"; data: { player: PlayerId; options: DungeonId[] } }
   | { type: "ChooseDungeonRoom"; data: { player: PlayerId; dungeon: DungeonId; options: number[]; option_names: string[] } }

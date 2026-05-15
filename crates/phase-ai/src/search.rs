@@ -533,17 +533,22 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         // the AI is the spell controller making one label per player. The
         // heuristic is trivial: self → friend (the beneficial label, choice
         // index 0), every other player → foe (the harmful label, choice
-        // index 1). Falls back to "first option" for classic votes when
-        // `delegate_chooser` is None.
+        // index 1). Classic votes (where `actor == player`) fall back to
+        // "first option" since the AI is voting for itself.
         WaitingFor::VoteChoice {
             options,
             player,
-            delegate_chooser,
+            actor,
             controller,
             ..
         } => {
-            let choice_text = match delegate_chooser {
-                Some(actor) if *actor == *controller => {
+            // The friend-or-foe heuristic only fires when the controller is
+            // labeling other players (the delegated shape) — matching
+            // `VoteActor::Delegated(actor)` where `actor == controller` is
+            // robust to any future delegated-vote shape where the actor is
+            // some non-controller player.
+            let choice_text = match actor {
+                engine::types::game_state::VoteActor::Delegated(actor) if *actor == *controller => {
                     let target_label = if player == controller {
                         "friend"
                     } else {
@@ -2255,7 +2260,7 @@ mod tests {
 
     /// Build a 2-player `VoteChoice` representing one step of a
     /// `ControllerLabels` vote where the named subject is being labeled.
-    /// `delegate_chooser` is always the spell controller.
+    /// `actor` is always the spell controller.
     fn vote_choice_for_subject(
         state: &GameState,
         controller: PlayerId,
@@ -2273,7 +2278,7 @@ mod tests {
             per_choice_effect: Vec::new(),
             controller,
             source_id: ObjectId(1),
-            delegate_chooser: Some(controller),
+            actor: engine::types::game_state::VoteActor::Delegated(controller),
         }
     }
 
@@ -2308,9 +2313,9 @@ mod tests {
         );
     }
 
-    /// A classic vote (no `delegate_chooser`) keeps the pre-existing
-    /// "first option" fallback — the friend-or-foe heuristic must not leak
-    /// into Council's-dilemma votes.
+    /// A classic vote (`actor == player`) keeps the pre-existing "first
+    /// option" fallback — the friend-or-foe heuristic must not leak into
+    /// Council's-dilemma votes.
     #[test]
     fn classic_vote_falls_back_to_first_option() {
         let mut state = make_state();
@@ -2326,7 +2331,7 @@ mod tests {
             per_choice_effect: Vec::new(),
             controller,
             source_id: ObjectId(1),
-            delegate_chooser: None,
+            actor: engine::types::game_state::VoteActor::SubjectActs,
         };
         let action = fallback_action(&state).expect("fallback returns an action");
         assert!(

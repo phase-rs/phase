@@ -13,11 +13,13 @@ type VoteChoice = Extract<WaitingFor, { type: "VoteChoice" }>;
  * choice list (lowercase, from `data.options`) using the original-case
  * `data.option_labels` for display.
  *
- * When `data.delegate_chooser` is set (Battlebond friend-or-foe cards;
- * no explicit CR section), the spell controller is the ACTOR and
- * `data.player` is the SUBJECT being labeled. The header re-renders to
- * "Label <subject>:" on each step as the engine cycles `data.player`
- * through each player.
+ * `data.actor` describes who submits the choice; `data.player` is the SUBJECT
+ * being voted-for/labeled.
+ *   - `{ type: "SubjectActs" }`: classic Council's-dilemma (the subject votes
+ *     for themselves).
+ *   - `{ type: "Delegated", data: <controller> }`: Battlebond friend-or-foe
+ *     (no explicit CR section) — the controller labels each player one-by-one.
+ * Labeling mode is `data.actor.type === "Delegated"`.
  *
  * Display layer only — `remaining_votes`, the running tally, and the queued
  * voter list all come straight from the engine's `WaitingFor::VoteChoice`.
@@ -25,8 +27,11 @@ type VoteChoice = Extract<WaitingFor, { type: "VoteChoice" }>;
 export function VoteChoiceModal({ data }: { data: VoteChoice["data"] }) {
   const dispatch = useGameDispatch();
   const [selected, setSelected] = useState<string | null>(null);
-  // Frontend renders engine-provided state; the engine does not yet expose a
-  // human player name field, so fall back to the 1-indexed seat ordinal.
+  // Frontend renders engine-provided state. The Player struct does not yet
+  // carry a display name (would require lobby/persistence plumbing across
+  // engine + server), so we fall back to the 1-indexed seat ordinal here.
+  // Tracked as a follow-up; the engine-side `Player.name` field is the
+  // correct long-term home for this label.
   const subjectName = `Player ${data.player + 1}`;
 
   const handleConfirm = useCallback(() => {
@@ -36,8 +41,7 @@ export function VoteChoiceModal({ data }: { data: VoteChoice["data"] }) {
     }
   }, [dispatch, selected]);
 
-  const isLabelingMode =
-    data.delegate_chooser != null && data.delegate_chooser !== data.player;
+  const isLabelingMode = data.actor.type === "Delegated";
   const title = isLabelingMode ? "Label Player" : "Vote";
   const subtitle = isLabelingMode
     ? `Choose a label for ${subjectName}`

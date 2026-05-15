@@ -1048,6 +1048,42 @@ pub struct MulliganBottomEntry {
     pub count: u8,
 }
 
+/// CR 101.4 + CR 608.2 (Battlebond friend-or-foe keyword action — no explicit
+/// CR section): The "who acts" semantic for a `WaitingFor::VoteChoice` step.
+///
+/// * `SubjectActs` — the player named by `player` casts the vote for
+///   themselves. Classic Council's-dilemma (CR 701.38) is exclusively this
+///   case: each voter acts on their own behalf and APNAP iteration changes
+///   both subject and actor together.
+/// * `Delegated(actor)` — a fixed `actor` casts every vote on behalf of the
+///   cycling subjects. The Battlebond friend-or-foe spell controller pins
+///   themselves here so `player` cycles through every player in APNAP order
+///   while authorization stays with the controller.
+///
+/// Stored on `WaitingFor::VoteChoice` instead of `Option<PlayerId>` so the
+/// "is this delegated?" discriminator is a named sum type with a meaningful
+/// pair of variant names, not a boolean-flavored optional. Callers route
+/// through [`VoteActor::resolve`] to get the authorized submitter without
+/// branching at every call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum VoteActor {
+    SubjectActs,
+    Delegated(PlayerId),
+}
+
+impl VoteActor {
+    /// Resolve to the player authorized to submit the current
+    /// `GameAction::ChooseOption`, given the subject being voted-for or
+    /// labeled on this step.
+    pub fn resolve(&self, subject: PlayerId) -> PlayerId {
+        match self {
+            VoteActor::SubjectActs => subject,
+            VoteActor::Delegated(actor) => *actor,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum WaitingFor {
@@ -1988,15 +2024,12 @@ pub enum WaitingFor {
         /// `WaitingFor` variants (e.g., NamedChoice).
         source_id: ObjectId,
         /// CR 101.4 + CR 608.2 (Battlebond keyword action, no explicit CR
-        /// section): When `Some`, the named player is the ACTOR who submits
-        /// `ChooseOption`; `player` is the SUBJECT being labeled by that
-        /// action. Set by `VoterScope::ControllerLabels` (friend-or-foe
-        /// cards) so the spell controller alone makes every choice while
-        /// the labeled-player slot cycles through each player in APNAP
-        /// order. When `None`, today's default: `player` is both the
-        /// subject and the actor (classic Council's-dilemma vote).
-        #[serde(default)]
-        delegate_chooser: Option<PlayerId>,
+        /// section): The "who acts" descriptor for the current step. See
+        /// [`VoteActor`] for the two cases (`SubjectActs` for classic
+        /// Council's-dilemma, `Delegated(controller)` for friend-or-foe).
+        /// Use [`VoteActor::resolve`] with `player` to get the player
+        /// authorized to submit the next `ChooseOption`.
+        actor: VoteActor,
     },
     /// CR 702.139a: Before the game begins, reveal companion from outside the game.
     CompanionReveal {
@@ -2347,14 +2380,11 @@ impl WaitingFor {
             | WaitingFor::MadnessCastOffer { player, .. }
             | WaitingFor::CommanderZoneChoice { player, .. } => Some(*player),
             // CR 608.2c: For `ControllerLabels` votes (Battlebond friend-or-foe
-            // cards), the ACTOR is `delegate_chooser` (the spell controller),
-            // not `player` (the subject being labeled). The acting-player API
-            // returns whoever is authorized to submit the next action.
-            WaitingFor::VoteChoice {
-                player,
-                delegate_chooser,
-                ..
-            } => Some(delegate_chooser.unwrap_or(*player)),
+            // cards), the ACTOR is the spell controller, not `player` (the
+            // subject being labeled). `VoteActor::resolve` returns the
+            // authorized submitter without the call site needing to know
+            // which voting shape this is.
+            WaitingFor::VoteChoice { player, actor, .. } => Some(actor.resolve(*player)),
             WaitingFor::GameOver { .. } => None,
         }
     }

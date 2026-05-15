@@ -31,14 +31,16 @@ export function getPlayerId(): PlayerId {
 
 function waitingPlayer(waitingFor: ReturnType<typeof useGameStore.getState>["waitingFor"]): PlayerId | null {
   if (!waitingFor || waitingFor.type === "GameOver") return null;
-  // `VoteChoice.delegate_chooser`, when set, names the ACTOR who submits
-  // the next `ChooseOption`. Battlebond's friend-or-foe cards (no explicit
-  // CR section) pin this to the spell controller so the labeling cycle's
-  // `player` field (the subject being labeled) does not gate submission.
-  // Returning the delegate makes `useCanActForWaitingState` resolve to the
-  // correct seat.
+  // `VoteChoice.actor` names who submits the next `ChooseOption`. Classic
+  // Council's-dilemma votes carry `{ type: "SubjectActs" }` so the current
+  // subject (`player`) acts for themselves. Battlebond friend-or-foe (no
+  // explicit CR section) carries `{ type: "Delegated", data: <controller> }`
+  // so the spell controller is the authorized submitter while `player`
+  // cycles through subjects. Resolving here makes
+  // `useCanActForWaitingState` route the action to the correct seat.
   if (waitingFor.type === "VoteChoice") {
-    return waitingFor.data.delegate_chooser ?? waitingFor.data.player;
+    const { actor, player } = waitingFor.data;
+    return actor.type === "Delegated" ? actor.data : player;
   }
   return "player" in waitingFor.data ? waitingFor.data.player : null;
 }
