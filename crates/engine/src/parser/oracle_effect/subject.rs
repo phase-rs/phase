@@ -2091,25 +2091,20 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     // CR 104.3b + CR 104.3c: "can't lose the game" / "can't win the game".
     // Compound "can't lose the game or win the game" (and the symmetric "win or
     // lose") must be checked before the bare forms — Everybody Lives! prints the
-    // compound shape, and the bare "can't lose the game" tag would otherwise
-    // short-circuit before the win-leg is recognized.
+    // compound shape with the negation elided over the conjunction ("can't
+    // (lose the game or win the game)"), so the second leg is a bare verb
+    // phrase without its own "can't" prefix. The bare "can't lose the game" tag
+    // would otherwise short-circuit before the win-leg is recognized.
     {
-        let cant_lose = || {
-            alt((
-                tag::<_, _, OracleError<'_>>("can't lose the game"),
-                tag("cannot lose the game"),
-            ))
-        };
-        let cant_win = || {
-            alt((
-                tag::<_, _, OracleError<'_>>("can't win the game"),
-                tag("cannot win the game"),
-            ))
-        };
-        // Compound: "[lose] or [win]" OR "[win] or [lose]" (any cant/cannot combo)
+        let negation = || alt((tag::<_, _, OracleError<'_>>("can't "), tag("cannot ")));
+        let lose_the_game = || tag::<_, _, OracleError<'_>>("lose the game");
+        let win_the_game = || tag::<_, _, OracleError<'_>>("win the game");
+        // Compound: "{neg} lose the game or win the game" or the symmetric
+        // "{neg} win the game or lose the game". The negation applies once
+        // and distributes over both verbs (English ellipsis).
         if all_consuming(alt((
-            (cant_lose(), tag(" or "), cant_win()),
-            (cant_win(), tag(" or "), cant_lose()),
+            (negation(), lose_the_game(), tag(" or "), win_the_game()),
+            (negation(), win_the_game(), tag(" or "), lose_the_game()),
         )))
         .parse(lower)
         .is_ok()
@@ -2119,10 +2114,16 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
                 StaticMode::CantWinTheGame,
             ]);
         }
-        if all_consuming(cant_lose()).parse(lower).is_ok() {
+        if all_consuming((negation(), lose_the_game()))
+            .parse(lower)
+            .is_ok()
+        {
             return Some(vec![StaticMode::CantLoseTheGame]);
         }
-        if all_consuming(cant_win()).parse(lower).is_ok() {
+        if all_consuming((negation(), win_the_game()))
+            .parse(lower)
+            .is_ok()
+        {
             return Some(vec![StaticMode::CantWinTheGame]);
         }
     }
