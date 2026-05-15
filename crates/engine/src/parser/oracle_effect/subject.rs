@@ -2088,13 +2088,18 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     {
         return Some(vec![StaticMode::CantLoseLife]);
     }
-    // CR 104.3b + CR 104.3c: "can't lose the game" / "can't win the game".
-    // Compound "can't lose the game or win the game" (and the symmetric "win or
-    // lose") must be checked before the bare forms — Everybody Lives! prints the
-    // compound shape with the negation elided over the conjunction ("can't
-    // (lose the game or win the game)"), so the second leg is a bare verb
-    // phrase without its own "can't" prefix. The bare "can't lose the game" tag
-    // would otherwise short-circuit before the win-leg is recognized.
+    // CR 104.2b + CR 104.3e + CR 104.3f: "can't lose the game" / "can't win
+    // the game" prohibitions. CR 104.2b ("An effect may state that a player
+    // wins the game") and CR 104.3e ("An effect may state that a player loses
+    // the game") are the rules these restrictions override; CR 104.3f handles
+    // the simultaneous-win-and-lose case that Everybody Lives! creates by
+    // blocking both outcomes at once. Compound "can't lose the game or win
+    // the game" (and the symmetric "win or lose") must be checked before the
+    // bare forms — Everybody Lives! prints the compound shape with the
+    // negation elided over the conjunction ("can't (lose the game or win the
+    // game)"), so the second leg is a bare verb phrase without its own
+    // "can't" prefix. The bare "can't lose the game" tag would otherwise
+    // short-circuit before the win-leg is recognized.
     {
         let negation = || alt((tag::<_, _, OracleError<'_>>("can't "), tag("cannot ")));
         let lose_the_game = || tag::<_, _, OracleError<'_>>("lose the game");
@@ -2989,10 +2994,11 @@ mod tests {
         );
     }
 
-    // CR 104.2b + CR 104.3b: Compound "can't lose the game or win the game"
-    // (Everybody Lives! prints this shape) emits BOTH `CantLoseTheGame` and
-    // `CantWinTheGame`. The compound check fires before the bare-"can't lose
-    // the game" arm so we never short-circuit and drop the win-leg.
+    // CR 104.2b + CR 104.3e + CR 104.3f: Compound "can't lose the game or
+    // win the game" (Everybody Lives! prints this shape) emits BOTH
+    // `CantLoseTheGame` and `CantWinTheGame`. The compound check fires
+    // before the bare-"can't lose the game" arm so we never short-circuit
+    // and drop the win-leg.
     #[test]
     fn parse_restriction_modes_cant_lose_or_win_the_game_compound() {
         assert_eq!(
