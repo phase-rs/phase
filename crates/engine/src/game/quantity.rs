@@ -1474,15 +1474,38 @@ fn resolve_ref(
         }
         // CR 117.1: Total spells cast last turn (by any player).
         QuantityRef::SpellsCastLastTurn => state.spells_cast_last_turn.map_or(0, i32::from),
-        // CR 117.1: Number of spells the controller has cast this game.
-        // Reads `state.spells_cast_this_game` indexed by the ability's
-        // controller, matching the same source used by
-        // `ParsedCondition::FirstSpellThisGame` for cast-time restrictions.
-        QuantityRef::SpellsCastThisGame => state
-            .spells_cast_this_game
-            .get(&controller)
-            .copied()
-            .map_or(0, |n| i32::try_from(n).unwrap_or(i32::MAX)),
+        // CR 117.1 + CR 601.2: Number of spells cast this game by the scoped
+        // players, optionally filtered by spell characteristics.
+        //
+        // `filter: None` reads the fast O(1) `state.spells_cast_this_game`
+        // count — preserves the pre-lift Establishing Shot semantics.
+        // `filter: Some(_)` scans `state.spells_cast_this_game_by_player`
+        // records, mirroring `SpellsCastThisTurn`'s filtered scan.
+        QuantityRef::SpellsCastThisGame { scope, ref filter } => match filter {
+            None => usize_to_i32_saturating(
+                scoped_players(state, scope, ctx, controller)
+                    .filter_map(|p| state.spells_cast_this_game.get(&p.id))
+                    .map(|n| *n as usize)
+                    .sum(),
+            ),
+            Some(filter) => usize_to_i32_saturating(
+                scoped_players(state, scope, ctx, controller)
+                    .filter_map(|p| state.spells_cast_this_game_by_player.get(&p.id))
+                    .map(|list| {
+                        list.iter()
+                            .filter(|record| {
+                                spell_record_matches_filter(
+                                    record,
+                                    filter,
+                                    controller,
+                                    &state.all_creature_types,
+                                )
+                            })
+                            .count()
+                    })
+                    .sum(),
+            ),
+        },
         // CR 122.1 + CR 122.6: Count counters put this turn by the scoped
         // actor onto objects matching event-time recipient characteristics.
         QuantityRef::CounterAddedThisTurn {
@@ -4974,8 +4997,9 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.spells_cast_this_turn_by_player.insert(
             PlayerId(0),
-            vec![
+            crate::im::Vector::from(vec![
                 SpellCastRecord {
+                    name: String::new(),
                     core_types: vec![CoreType::Creature],
                     supertypes: vec![Supertype::Legendary],
                     subtypes: vec!["Bird".to_string()],
@@ -4986,6 +5010,7 @@ mod tests {
                     from_zone: Zone::Hand,
                 },
                 SpellCastRecord {
+                    name: String::new(),
                     core_types: vec![CoreType::Artifact],
                     supertypes: vec![],
                     subtypes: vec![],
@@ -4995,7 +5020,7 @@ mod tests {
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
                 },
-            ],
+            ]),
         );
 
         let expr = QuantityExpr::Ref {
@@ -5017,6 +5042,61 @@ mod tests {
         };
 
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 1);
+    }
+
+    #[test]
+    fn resolve_quantity_spells_cast_this_game_filtered_by_name() {
+        // CR 117.1 + CR 201.2: Approach of the Second Sun's game-scope name
+        // filter resolves against `state.spells_cast_this_game_by_player`.
+        // The condition checks "another spell named ~ this game" via >= 2.
+        let mut state = GameState::new_two_player(42);
+        state.spells_cast_this_game_by_player.insert(
+            PlayerId(0),
+            crate::im::Vector::from(vec![
+                SpellCastRecord {
+                    name: "Approach of the Second Sun".to_string(),
+                    core_types: vec![CoreType::Sorcery],
+                    ..SpellCastRecord::default()
+                },
+                SpellCastRecord {
+                    name: "Lightning Bolt".to_string(),
+                    core_types: vec![CoreType::Instant],
+                    ..SpellCastRecord::default()
+                },
+            ]),
+        );
+
+        let filter =
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Named {
+                name: "approach of the second sun".to_string(),
+            }]));
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::SpellsCastThisGame {
+                scope: CountScope::Controller,
+                filter: Some(filter),
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)),
+            1,
+            "name filter must match only the prior Approach cast, not Lightning Bolt"
+        );
+
+        // Cast a second copy: >= 2 should now hold ("another" semantic).
+        state
+            .spells_cast_this_game_by_player
+            .get_mut(&PlayerId(0))
+            .unwrap()
+            .push_back(SpellCastRecord {
+                name: "Approach of the Second Sun".to_string(),
+                core_types: vec![CoreType::Sorcery],
+                ..SpellCastRecord::default()
+            });
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)),
+            2,
+            "second Approach cast must satisfy `another spell named ~ this game` (count >= 2)"
+        );
     }
 
     #[test]

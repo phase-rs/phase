@@ -175,6 +175,14 @@ pub struct ManaSpentSourceSnapshot {
 /// Snapshot of a spell's characteristics at cast time for per-turn history queries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpellCastRecord {
+    /// CR 201.2: Card name captured at cast time so name-filtered history
+    /// queries (e.g. Approach of the Second Sun's "another spell named
+    /// {LITERAL} this game") can resolve against `FilterProp::Named { name }`
+    /// without rehydrating the cast object.
+    /// `#[serde(default)]` keeps the field optional for serialized snapshots
+    /// predating this addition — those records won't match name filters.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
     pub core_types: Vec<CoreType>,
     pub supertypes: Vec<Supertype>,
     pub subtypes: Vec<String>,
@@ -207,6 +215,22 @@ pub struct SpellCastRecord {
 /// that pre-date the non-Option migration.
 fn default_spell_cast_record_from_zone() -> Zone {
     Zone::Hand
+}
+
+impl Default for SpellCastRecord {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            core_types: Vec::new(),
+            supertypes: Vec::new(),
+            subtypes: Vec::new(),
+            keywords: Vec::new(),
+            colors: Vec::new(),
+            mana_value: 0,
+            has_x_in_cost: false,
+            from_zone: Zone::Hand,
+        }
+    }
 }
 
 /// Backwards-compatible deserializer for `SpellCastRecord.from_zone`. Accepts
@@ -3212,11 +3236,18 @@ pub struct GameState {
     pub pending_miracle_offers: Vec<MiracleOffer>,
     #[serde(default)]
     pub spells_cast_this_game: HashMap<PlayerId, u32>,
+    /// Per-player spell cast history this game.
+    /// CR 117.1: Mirrors `spells_cast_this_turn_by_player` but is not cleared
+    /// between turns, so name-filtered "this game" queries (Approach of the
+    /// Second Sun's "another spell named {LITERAL} this game") can scan the
+    /// full game-scope history.
+    #[serde(default)]
+    pub spells_cast_this_game_by_player: HashMap<PlayerId, im::Vector<SpellCastRecord>>,
     /// Per-player spell cast history this turn.
     /// Each entry records the spell's relevant characteristics at cast time,
     /// enabling data-driven filtered counting at resolution.
     #[serde(default)]
-    pub spells_cast_this_turn_by_player: HashMap<PlayerId, Vec<SpellCastRecord>>,
+    pub spells_cast_this_turn_by_player: HashMap<PlayerId, im::Vector<SpellCastRecord>>,
     #[serde(default)]
     pub players_who_searched_library_this_turn: HashSet<PlayerId>,
     /// CR 603.4: Typed player-action events performed this turn. This is the
@@ -3779,6 +3810,7 @@ impl GameState {
             cards_drawn_this_turn: HashMap::new(),
             pending_miracle_offers: Vec::new(),
             spells_cast_this_game: HashMap::new(),
+            spells_cast_this_game_by_player: HashMap::new(),
             spells_cast_this_turn_by_player: HashMap::new(),
             players_who_searched_library_this_turn: HashSet::new(),
             player_actions_this_turn: Vec::new(),
@@ -4040,6 +4072,7 @@ impl PartialEq for GameState {
             && self.cards_drawn_this_turn == other.cards_drawn_this_turn
             && self.pending_miracle_offers == other.pending_miracle_offers
             && self.spells_cast_this_game == other.spells_cast_this_game
+            && self.spells_cast_this_game_by_player == other.spells_cast_this_game_by_player
             && self.spells_cast_this_turn_by_player == other.spells_cast_this_turn_by_player
             && self.players_who_searched_library_this_turn
                 == other.players_who_searched_library_this_turn
@@ -4988,6 +5021,7 @@ mod tests {
     #[test]
     fn spell_cast_record_explicit_from_zone_round_trips() {
         let original = SpellCastRecord {
+            name: String::new(),
             core_types: vec![CoreType::Sorcery],
             supertypes: vec![],
             subtypes: vec![],

@@ -1182,6 +1182,7 @@ pub fn spell_object_matches_filter_from_state(
 
 fn spell_cast_record_from_object(spell_obj: &GameObject) -> SpellCastRecord {
     SpellCastRecord {
+        name: spell_obj.name.clone(),
         core_types: spell_obj.card_types.core_types.clone(),
         supertypes: spell_obj.card_types.supertypes.clone(),
         subtypes: spell_obj.card_types.subtypes.clone(),
@@ -1473,6 +1474,11 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         FilterProp::Token => false,
         FilterProp::NonToken => true,
         FilterProp::InZone { zone: required } => record.from_zone == *required,
+        // CR 201.2: Exact name match against the cast-time snapshot — case-
+        // insensitive per the same convention used by the live-object path.
+        // Approach of the Second Sun's "you've cast another spell named
+        // {LITERAL} this game" relies on this against the game-scope history.
+        FilterProp::Named { name } => record.name.eq_ignore_ascii_case(name),
         // All remaining props require on-battlefield or stack state unavailable from a snapshot.
         FilterProp::Attacking
         | FilterProp::AttackingController
@@ -1522,7 +1528,10 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::FaceDown
         | FilterProp::TargetsOnly { .. }
         | FilterProp::Targets { .. }
-        | FilterProp::Named { .. }
+        // CR 201.2: Source-/target-relative name predicates require
+        // resolution context the spell-history scan doesn't currently plumb
+        // — fail closed until a card forces that plumbing.
+        // `FilterProp::Named { name }` is handled above against the snapshot.
         | FilterProp::SameName
         | FilterProp::SameNameAsParentTarget
         | FilterProp::NameMatchesAnyPermanent { .. }
@@ -3192,6 +3201,7 @@ mod tests {
     #[test]
     fn spell_record_matches_qualified_filter() {
         let record = SpellCastRecord {
+            name: String::new(),
             core_types: vec![CoreType::Creature],
             supertypes: vec![Supertype::Legendary],
             subtypes: vec!["Bird".to_string()],
@@ -3231,6 +3241,7 @@ mod tests {
     #[test]
     fn spell_record_has_x_in_cost_filter() {
         let x_record = SpellCastRecord {
+            name: String::new(),
             core_types: vec![CoreType::Creature],
             supertypes: vec![],
             subtypes: vec![],
@@ -3261,6 +3272,7 @@ mod tests {
     #[test]
     fn spell_record_matches_cast_origin_zone_filter() {
         let hand_record = SpellCastRecord {
+            name: String::new(),
             core_types: vec![CoreType::Creature],
             supertypes: vec![],
             subtypes: vec![],
@@ -6024,6 +6036,7 @@ mod tests {
                            subtypes: Vec<String>|
          -> SpellCastRecord {
             SpellCastRecord {
+                name: String::new(),
                 core_types,
                 supertypes,
                 subtypes,
@@ -6420,6 +6433,7 @@ mod tests {
     fn changeling_spell_record_matches_subtype_filter() {
         let all_creature_types = vec!["Dragon".to_string(), "Goblin".to_string()];
         let record = SpellCastRecord {
+            name: String::new(),
             core_types: vec![CoreType::Creature],
             supertypes: vec![],
             subtypes: vec!["Illusion".to_string()],

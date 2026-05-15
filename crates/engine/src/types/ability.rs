@@ -576,6 +576,10 @@ pub enum CountScope {
     Opponents,
 }
 
+fn default_count_scope_controller() -> CountScope {
+    CountScope::Controller
+}
+
 /// Which zone to count cards in (for `QuantityRef::ZoneCardCount`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ZoneRef {
@@ -2696,13 +2700,25 @@ pub enum QuantityRef {
     /// CR 117.1: Number of spells cast last turn (by any player).
     /// Used for werewolf transform conditions.
     SpellsCastLastTurn,
-    /// CR 117.1: Number of spells the controller has cast this game.
-    /// Resolved against `state.spells_cast_this_game` for the controller of
-    /// the ability. Used by "this is the first spell you've cast this game"
-    /// patterns (Establishing Shot class) — composes with `QuantityCheck`
-    /// over `Comparator::EQ` and `Fixed(0)` so the override fires only when
-    /// no prior spell has been cast.
-    SpellsCastThisGame,
+    /// CR 117.1 + CR 601.2: Number of spells cast this game by players in
+    /// `scope`, optionally filtered by spell characteristics (mirrors
+    /// `SpellsCastThisTurn`).
+    ///
+    /// `filter: None` reads the fast O(1) per-player count from
+    /// `state.spells_cast_this_game`. `filter: Some(_)` scans
+    /// `state.spells_cast_this_game_by_player` records and matches each one
+    /// against the filter at query time, so callers can ask "spells named
+    /// {LITERAL} this game" via `FilterProp::Named { name }` (Approach of
+    /// the Second Sun's win gate).
+    ///
+    /// Established usage: `{ scope: Controller, filter: None }` reproduces the
+    /// pre-lift bare-leaf reading used by Establishing Shot class.
+    SpellsCastThisGame {
+        #[serde(default = "default_count_scope_controller")]
+        scope: CountScope,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<TargetFilter>,
+    },
     /// CR 122.1 + CR 122.6: Count counters put this turn by `actor` on objects
     /// matching `target`. `counters` narrows the counter kind; `CounterMatch::Any`
     /// counts every counter type. This parameterizes the legacy boolean
