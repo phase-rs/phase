@@ -2068,34 +2068,63 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     {
         return Some(vec![StaticMode::CantBeTargeted]);
     }
-    // CR 119.7: "can't gain life" — lifegain prevention
-    if lower == "can't gain life" || lower == "cannot gain life" {
+    // CR 119.7: "can't gain life" — a player can't make their life total increase.
+    if all_consuming(alt((
+        tag::<_, _, OracleError<'_>>("can't gain life"),
+        tag("cannot gain life"),
+    )))
+    .parse(lower)
+    .is_ok()
+    {
         return Some(vec![StaticMode::CantGainLife]);
     }
-    // CR 119.8: "can't lose life" — life-loss prevention
-    if lower == "can't lose life" || lower == "cannot lose life" {
+    // CR 119.8: "can't lose life" — life-loss events are prevented.
+    if all_consuming(alt((
+        tag::<_, _, OracleError<'_>>("can't lose life"),
+        tag("cannot lose life"),
+    )))
+    .parse(lower)
+    .is_ok()
+    {
         return Some(vec![StaticMode::CantLoseLife]);
     }
-    // CR 104.3b + CR 104.3c + CR 704.5: "can't lose the game" / "can't win the game".
+    // CR 104.3b + CR 104.3c: "can't lose the game" / "can't win the game".
     // Compound "can't lose the game or win the game" (and the symmetric "win or
     // lose") must be checked before the bare forms — Everybody Lives! prints the
     // compound shape, and the bare "can't lose the game" tag would otherwise
     // short-circuit before the win-leg is recognized.
-    if lower == "can't lose the game or win the game"
-        || lower == "cannot lose the game or win the game"
-        || lower == "can't win the game or lose the game"
-        || lower == "cannot win the game or lose the game"
     {
-        return Some(vec![
-            StaticMode::CantLoseTheGame,
-            StaticMode::CantWinTheGame,
-        ]);
-    }
-    if lower == "can't lose the game" || lower == "cannot lose the game" {
-        return Some(vec![StaticMode::CantLoseTheGame]);
-    }
-    if lower == "can't win the game" || lower == "cannot win the game" {
-        return Some(vec![StaticMode::CantWinTheGame]);
+        let cant_lose = || {
+            alt((
+                tag::<_, _, OracleError<'_>>("can't lose the game"),
+                tag("cannot lose the game"),
+            ))
+        };
+        let cant_win = || {
+            alt((
+                tag::<_, _, OracleError<'_>>("can't win the game"),
+                tag("cannot win the game"),
+            ))
+        };
+        // Compound: "[lose] or [win]" OR "[win] or [lose]" (any cant/cannot combo)
+        if all_consuming(alt((
+            (cant_lose(), tag(" or "), cant_win()),
+            (cant_win(), tag(" or "), cant_lose()),
+        )))
+        .parse(lower)
+        .is_ok()
+        {
+            return Some(vec![
+                StaticMode::CantLoseTheGame,
+                StaticMode::CantWinTheGame,
+            ]);
+        }
+        if all_consuming(cant_lose()).parse(lower).is_ok() {
+            return Some(vec![StaticMode::CantLoseTheGame]);
+        }
+        if all_consuming(cant_win()).parse(lower).is_ok() {
+            return Some(vec![StaticMode::CantWinTheGame]);
+        }
     }
     // CR 302.6: "doesn't untap during [controller's] untap step"
     if alt((
