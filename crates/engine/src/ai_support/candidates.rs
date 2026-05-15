@@ -1332,26 +1332,21 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
-        WaitingFor::WarpCostChoice { player, .. } => vec![
+        // CR 118.9: Alternative-cast prompt — surface both cost paths
+        // uniformly across all keywords. The keyword discriminator lives on the
+        // waiting state; the action shape is identical.
+        WaitingFor::AlternativeCastChoice { player, .. } => vec![
             candidate(
-                GameAction::ChooseWarpCost { use_warp: true },
+                GameAction::ChooseAlternativeCast {
+                    choice: crate::types::actions::AlternativeCastDecision::Alternative,
+                },
                 TacticalClass::Selection,
                 Some(*player),
             ),
             candidate(
-                GameAction::ChooseWarpCost { use_warp: false },
-                TacticalClass::Selection,
-                Some(*player),
-            ),
-        ],
-        WaitingFor::EvokeCostChoice { player, .. } => vec![
-            candidate(
-                GameAction::ChooseEvokeCost { use_evoke: true },
-                TacticalClass::Selection,
-                Some(*player),
-            ),
-            candidate(
-                GameAction::ChooseEvokeCost { use_evoke: false },
+                GameAction::ChooseAlternativeCast {
+                    choice: crate::types::actions::AlternativeCastDecision::Normal,
+                },
                 TacticalClass::Selection,
                 Some(*player),
             ),
@@ -1370,34 +1365,6 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
-        WaitingFor::OverloadCostChoice { player, .. } => vec![
-            candidate(
-                GameAction::ChooseOverloadCost {
-                    choice: crate::types::actions::OverloadChoice::Overload,
-                },
-                TacticalClass::Selection,
-                Some(*player),
-            ),
-            candidate(
-                GameAction::ChooseOverloadCost {
-                    choice: crate::types::actions::OverloadChoice::Normal,
-                },
-                TacticalClass::Selection,
-                Some(*player),
-            ),
-        ],
-        WaitingFor::BestowCostChoice { player, .. } => vec![
-            candidate(
-                GameAction::ChooseBestowCost { use_bestow: true },
-                TacticalClass::Selection,
-                Some(*player),
-            ),
-            candidate(
-                GameAction::ChooseBestowCost { use_bestow: false },
-                TacticalClass::Selection,
-                Some(*player),
-            ),
-        ],
         WaitingFor::OptionalEffectChoice { .. }
         | WaitingFor::OpponentMayChoice { .. }
         | WaitingFor::TributeChoice { .. } => {

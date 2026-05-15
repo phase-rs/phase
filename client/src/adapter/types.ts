@@ -809,10 +809,7 @@ export type WaitingFor =
   | { type: "DefilerPayment"; data: { player: PlayerId; life_cost: number; mana_reduction: ManaCost; pending_cast: PendingCast } }
   | { type: "AdventureCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId } }
   | { type: "ModalFaceChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId } }
-  | { type: "WarpCostChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; normal_cost: ManaCost; warp_cost: ManaCost } }
-  | { type: "EvokeCostChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; normal_cost: ManaCost; evoke_cost: ManaCost } }
-  | { type: "OverloadCostChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; normal_cost: ManaCost; overload_cost: ManaCost } }
-  | { type: "BestowCostChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; normal_cost: ManaCost; bestow_cost: ManaCost } }
+  | { type: "AlternativeCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; keyword: { type: "Warp" } | { type: "Evoke" } | { type: "Overload" } | { type: "Bestow" }; normal_cost: ManaCost; alternative_cost: ManaCost } }
   | { type: "ChoosePermanentTypeSlot"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; source: ObjectId; available_slots: CoreType[] } }
   | { type: "MultiTargetSelection"; data: { player: PlayerId; legal_targets: ObjectId[]; min_targets: number; max_targets: number; pending_ability: unknown } }
   | { type: "MiracleReveal"; data: { player: PlayerId; object_id: ObjectId; cost: ManaCost } }
@@ -1063,11 +1060,8 @@ export type GameAction =
   | { type: "DecideOptionalCost"; data: { pay: boolean } }
   | { type: "ChooseAdventureFace"; data: { creature: boolean } }
   | { type: "ChooseModalFace"; data: { back_face: boolean } }
-  | { type: "ChooseWarpCost"; data: { use_warp: boolean } }
-  | { type: "ChooseEvokeCost"; data: { use_evoke: boolean } }
-  | { type: "ChooseOverloadCost"; data: { choice: { type: "Normal" } | { type: "Overload" } } }
+  | { type: "ChooseAlternativeCast"; data: { choice: { type: "Normal" } | { type: "Alternative" } } }
   | { type: "KeepAllCopyTargets" }
-  | { type: "ChooseBestowCost"; data: { use_bestow: boolean } }
   | { type: "ChoosePermanentTypeSlot"; data: { slot: CoreType } }
   | { type: "CastSpellForFree"; data: { object_id: ObjectId; card_id: CardId; source_id: ObjectId } }
   | { type: "CastSpellAsMiracle"; data: { object_id: ObjectId; card_id: CardId } }

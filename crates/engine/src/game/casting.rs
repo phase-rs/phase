@@ -2777,19 +2777,27 @@ pub fn handle_adventure_choice(
 
 /// Handle Warp cost choice and proceed with casting.
 /// Warp is a custom keyword: cast for warp cost from hand, exile at next end step,
-/// then may cast from exile later. When `use_warp` is false, the player chose to
-/// cast normally — temporarily remove the Warp keyword so prepare_spell_cast
-/// picks CastingVariant::Normal, then restore it and continue through the
-/// standard casting pipeline.
+/// then may cast from exile later. On `AlternativeCastDecision::Normal`, the player
+/// chose to cast normally — temporarily remove the Warp keyword so
+/// `prepare_spell_cast` picks `CastingVariant::Normal`, then restore it and
+/// continue through the standard casting pipeline.
 pub fn handle_warp_cost_choice(
     state: &mut GameState,
     player: PlayerId,
     object_id: ObjectId,
     _card_id: CardId,
-    use_warp: bool,
+    decision: crate::types::actions::AlternativeCastDecision,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    if !use_warp {
+    use crate::types::actions::AlternativeCastDecision;
+    // Exhaustive match so adding a third decision variant (e.g., `Decline`)
+    // is a compile error here rather than silently routing through one of
+    // the two existing branches.
+    let normal_path = match decision {
+        AlternativeCastDecision::Normal => true,
+        AlternativeCastDecision::Alternative => false,
+    };
+    if normal_path {
         // Temporarily remove Warp keyword so prepare_spell_cast picks Normal.
         // Restore immediately after preparation to preserve the keyword for
         // future casting (e.g., if the spell is countered and returns to hand).
@@ -2819,26 +2827,26 @@ pub fn handle_warp_cost_choice(
         return result;
     }
 
-    // use_warp == true: prepare_spell_cast naturally picks CastingVariant::Warp
+    // Alternative (Warp): prepare_spell_cast naturally picks CastingVariant::Warp
     continue_cast_from_prepared(state, player, object_id, events)
 }
 
 /// CR 702.96a: Handle Overload cost choice and proceed with casting. For
-/// `OverloadChoice::Overload`, the cast is prepared with
+/// `AlternativeCastDecision::Alternative`, the cast is prepared with
 /// `CastingVariant::Overload` — the overload mana cost substitutes for the
 /// printed cost and the spell's ability tree is transformed (target → each,
-/// CR 702.96b-c). For `OverloadChoice::Normal`, the cast proceeds normally.
+/// CR 702.96b-c). For `Normal`, the cast proceeds normally.
 pub fn handle_overload_cost_choice(
     state: &mut GameState,
     player: PlayerId,
     object_id: ObjectId,
     _card_id: CardId,
-    choice: crate::types::actions::OverloadChoice,
+    decision: crate::types::actions::AlternativeCastDecision,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    use crate::types::actions::OverloadChoice;
-    match choice {
-        OverloadChoice::Overload => {
+    use crate::types::actions::AlternativeCastDecision;
+    match decision {
+        AlternativeCastDecision::Alternative => {
             let prepared = prepare_spell_cast_with_variant_override(
                 state,
                 player,
@@ -2847,7 +2855,9 @@ pub fn handle_overload_cost_choice(
             )?;
             continue_with_prepared(state, player, prepared, events)
         }
-        OverloadChoice::Normal => continue_cast_from_prepared(state, player, object_id, events),
+        AlternativeCastDecision::Normal => {
+            continue_cast_from_prepared(state, player, object_id, events)
+        }
     }
 }
 
@@ -2950,11 +2960,12 @@ pub fn revert_bestow_form(state: &mut GameState, object_id: ObjectId) {
     }
 }
 
-/// CR 702.103a: Handle Bestow cost choice and proceed with casting. When
-/// `use_bestow` is true, applies the bestow type-changing effect to the hand
-/// object (CR 702.103b) and prepares the cast with `CastingVariant::Bestow`
-/// (which substitutes the bestow mana cost for the printed mana cost). When
-/// false, the cast proceeds normally — the printed Creature spell.
+/// CR 702.103a: Handle Bestow cost choice and proceed with casting. On
+/// `AlternativeCastDecision::Alternative`, applies the bestow type-changing
+/// effect to the hand object (CR 702.103b) and prepares the cast with
+/// `CastingVariant::Bestow` (which substitutes the bestow mana cost for the
+/// printed mana cost). On `Normal`, the cast proceeds as the printed Creature
+/// spell.
 ///
 /// Mirrors `handle_evoke_cost_choice` for the cost-selection branch and
 /// `handle_adventure_choice` for the object-mutation-before-prepare branch.
@@ -2963,10 +2974,18 @@ pub fn handle_bestow_cost_choice(
     player: PlayerId,
     object_id: ObjectId,
     _card_id: CardId,
-    use_bestow: bool,
+    decision: crate::types::actions::AlternativeCastDecision,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    if use_bestow {
+    use crate::types::actions::AlternativeCastDecision;
+    // Exhaustive match so adding a third decision variant (e.g., `Decline`)
+    // is a compile error here rather than silently routing through one of
+    // the two existing branches.
+    let alt_path = match decision {
+        AlternativeCastDecision::Alternative => true,
+        AlternativeCastDecision::Normal => false,
+    };
+    if alt_path {
         // CR 702.103b: Apply the type-changing bestow effect to the hand object
         // BEFORE preparing the cast, so timing/cost checks (Aura is a permanent
         // spell, sorcery-speed) and the targeting branch in
@@ -2998,19 +3017,28 @@ pub fn handle_bestow_cost_choice(
     continue_cast_from_prepared(state, player, object_id, events)
 }
 
-/// CR 702.74a: Handle Evoke cost choice and proceed with casting. When
-/// `use_evoke` is true, the cast is prepared with `CastingVariant::Evoke`
-/// (which substitutes the evoke mana cost for the printed mana cost). When
-/// false, the cast proceeds normally (no variant override → `Normal`).
+/// CR 702.74a: Handle Evoke cost choice and proceed with casting. On
+/// `AlternativeCastDecision::Alternative`, the cast is prepared with
+/// `CastingVariant::Evoke` (which substitutes the evoke mana cost for the
+/// printed mana cost). On `Normal`, the cast proceeds normally (no variant
+/// override → `Normal`).
 pub fn handle_evoke_cost_choice(
     state: &mut GameState,
     player: PlayerId,
     object_id: ObjectId,
     _card_id: CardId,
-    use_evoke: bool,
+    decision: crate::types::actions::AlternativeCastDecision,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    if use_evoke {
+    use crate::types::actions::AlternativeCastDecision;
+    // Exhaustive match so adding a third decision variant (e.g., `Decline`)
+    // is a compile error here rather than silently routing through one of
+    // the two existing branches.
+    let alt_path = match decision {
+        AlternativeCastDecision::Alternative => true,
+        AlternativeCastDecision::Normal => false,
+    };
+    if alt_path {
         let prepared = prepare_spell_cast_with_variant_override(
             state,
             player,
@@ -3463,12 +3491,13 @@ pub fn handle_cast_spell(
                 let warp_affordable =
                     can_pay_cost_after_auto_tap(state, player, object_id, &warp_cost);
                 if normal_affordable && warp_affordable {
-                    return Ok(WaitingFor::WarpCostChoice {
+                    return Ok(WaitingFor::AlternativeCastChoice {
                         player,
                         object_id,
                         card_id,
+                        keyword: crate::types::game_state::AlternativeCastKeyword::Warp,
                         normal_cost: obj.mana_cost.clone(),
-                        warp_cost: warp_cost.clone(),
+                        alternative_cost: warp_cost.clone(),
                     });
                 }
                 // If only normal is affordable, skip warp — prepare_spell_cast will
@@ -3477,7 +3506,12 @@ pub fn handle_cast_spell(
                 if normal_affordable && !warp_affordable {
                     // Force normal cast by proceeding through handle_warp_cost_choice
                     return handle_warp_cost_choice(
-                        state, player, object_id, card_id, false, events,
+                        state,
+                        player,
+                        object_id,
+                        card_id,
+                        crate::types::actions::AlternativeCastDecision::Normal,
+                        events,
                     );
                 }
                 // If only warp or neither, let prepare_spell_cast handle it normally
@@ -3502,18 +3536,24 @@ pub fn handle_cast_spell(
                 let evoke_affordable =
                     can_pay_cost_after_auto_tap(state, player, object_id, &evoke_cost);
                 if normal_affordable && evoke_affordable {
-                    return Ok(WaitingFor::EvokeCostChoice {
+                    return Ok(WaitingFor::AlternativeCastChoice {
                         player,
                         object_id,
                         card_id,
+                        keyword: crate::types::game_state::AlternativeCastKeyword::Evoke,
                         normal_cost: obj.mana_cost.clone(),
-                        evoke_cost,
+                        alternative_cost: evoke_cost,
                     });
                 }
                 if !normal_affordable && evoke_affordable {
                     // Only evoke is payable — proceed via the evoke path.
                     return handle_evoke_cost_choice(
-                        state, player, object_id, card_id, true, events,
+                        state,
+                        player,
+                        object_id,
+                        card_id,
+                        crate::types::actions::AlternativeCastDecision::Alternative,
+                        events,
                     );
                 }
                 // Otherwise (normal-only or neither): fall through to normal cast.
@@ -3537,12 +3577,13 @@ pub fn handle_cast_spell(
                 let overload_affordable =
                     can_pay_cost_after_auto_tap(state, player, object_id, &overload_cost);
                 if normal_affordable && overload_affordable {
-                    return Ok(WaitingFor::OverloadCostChoice {
+                    return Ok(WaitingFor::AlternativeCastChoice {
                         player,
                         object_id,
                         card_id,
+                        keyword: crate::types::game_state::AlternativeCastKeyword::Overload,
                         normal_cost: obj.mana_cost.clone(),
-                        overload_cost,
+                        alternative_cost: overload_cost,
                     });
                 }
                 if !normal_affordable && overload_affordable {
@@ -3552,7 +3593,7 @@ pub fn handle_cast_spell(
                         player,
                         object_id,
                         card_id,
-                        crate::types::actions::OverloadChoice::Overload,
+                        crate::types::actions::AlternativeCastDecision::Alternative,
                         events,
                     );
                 }
@@ -3592,18 +3633,24 @@ pub fn handle_cast_spell(
                 let bestow_affordable =
                     can_pay_cost_after_auto_tap(state, player, object_id, &bestow_cost);
                 if has_legal_creature_target && normal_affordable && bestow_affordable {
-                    return Ok(WaitingFor::BestowCostChoice {
+                    return Ok(WaitingFor::AlternativeCastChoice {
                         player,
                         object_id,
                         card_id,
+                        keyword: crate::types::game_state::AlternativeCastKeyword::Bestow,
                         normal_cost: obj.mana_cost.clone(),
-                        bestow_cost,
+                        alternative_cost: bestow_cost,
                     });
                 }
                 if has_legal_creature_target && !normal_affordable && bestow_affordable {
                     // Only bestow is payable — proceed via the bestow path.
                     return handle_bestow_cost_choice(
-                        state, player, object_id, card_id, true, events,
+                        state,
+                        player,
+                        object_id,
+                        card_id,
+                        crate::types::actions::AlternativeCastDecision::Alternative,
+                        events,
                     );
                 }
                 // Otherwise (normal-only / no legal target / neither affordable):
@@ -17644,12 +17691,14 @@ mod tests {
     }
 
     /// CR 702.96a-c: Overload end-to-end — `handle_cast_spell` on a hand card
-    /// with `Keyword::Overload(cost)` offers `WaitingFor::OverloadCostChoice`
-    /// when both costs are affordable, and selecting overload prepares the
-    /// spell with `CastingVariant::Overload`, substitutes the overload cost,
-    /// and transforms the ability's `Destroy { target }` into `DestroyAll`.
+    /// with `Keyword::Overload(cost)` offers `WaitingFor::AlternativeCastChoice`
+    /// (with `keyword = Overload`) when both costs are affordable, and
+    /// selecting overload prepares the spell with `CastingVariant::Overload`,
+    /// substitutes the overload cost, and transforms the ability's
+    /// `Destroy { target }` into `DestroyAll`.
     mod overload_cast_flow {
         use super::*;
+        use crate::types::game_state::AlternativeCastKeyword;
         use crate::types::keywords::Keyword;
         use crate::types::mana::ManaCost;
 
@@ -17692,8 +17741,14 @@ mod tests {
             let wf =
                 handle_cast_spell(&mut state, PlayerId(0), obj, CardId(42), &mut events).unwrap();
             assert!(
-                matches!(wf, WaitingFor::OverloadCostChoice { .. }),
-                "expected OverloadCostChoice offer, got {:?}",
+                matches!(
+                    wf,
+                    WaitingFor::AlternativeCastChoice {
+                        keyword: AlternativeCastKeyword::Overload,
+                        ..
+                    }
+                ),
+                "expected AlternativeCastChoice(Overload) offer, got {:?}",
                 wf
             );
         }
@@ -18973,8 +19028,9 @@ mod tests {
     }
 
     /// CR 702.103a: `handle_cast_spell` on a hand bestow card with both costs
-    /// affordable AND a legal creature target presents `BestowCostChoice` so
-    /// the player can pick between creature cast and bestow cast.
+    /// affordable AND a legal creature target presents
+    /// `AlternativeCastChoice { keyword: Bestow, .. }` so the player can pick
+    /// between creature cast and bestow cast.
     #[test]
     fn bestow_cost_choice_is_offered_when_both_costs_affordable_and_target_exists() {
         let mut state = setup_game_at_main_phase();
@@ -19005,8 +19061,14 @@ mod tests {
             handle_cast_spell(&mut state, PlayerId(0), bestow_id, CardId(704), &mut events)
                 .expect("cast should succeed and route to bestow choice");
         assert!(
-            matches!(waiting, WaitingFor::BestowCostChoice { .. }),
-            "Bestow + affordable + legal target ⇒ present BestowCostChoice; got {:?}",
+            matches!(
+                waiting,
+                WaitingFor::AlternativeCastChoice {
+                    keyword: crate::types::game_state::AlternativeCastKeyword::Bestow,
+                    ..
+                }
+            ),
+            "Bestow + affordable + legal target ⇒ present AlternativeCastChoice(Bestow); got {:?}",
             waiting
         );
     }
@@ -19040,7 +19102,13 @@ mod tests {
             handle_cast_spell(&mut state, PlayerId(0), bestow_id, CardId(706), &mut events)
                 .expect("normal creature cast should succeed");
         assert!(
-            !matches!(waiting, WaitingFor::BestowCostChoice { .. }),
+            !matches!(
+                waiting,
+                WaitingFor::AlternativeCastChoice {
+                    keyword: crate::types::game_state::AlternativeCastKeyword::Bestow,
+                    ..
+                }
+            ),
             "no legal target ⇒ bestow choice must NOT be offered; got {:?}",
             waiting
         );
@@ -19214,8 +19282,8 @@ mod tests {
     }
 
     /// CR 702.103b regression: drives the full cast pipeline end-to-end —
-    /// `handle_cast_spell` → `BestowCostChoice` → `handle_bestow_cost_choice`
-    /// (`use_bestow: true`) — and asserts the spell on the stack still has the
+    /// `handle_cast_spell` → `AlternativeCastChoice(Bestow)` →
+    /// `handle_bestow_cost_choice` (Alternative) — and asserts the spell on the stack still has the
     /// bestow form. This is the path the real (non-test) cast flow takes, and
     /// it goes through `move_to_zone(Hand, Stack)` whose `apply_zone_exit_cleanup`
     /// must NOT strip the bestow form. The earlier
@@ -19251,8 +19319,14 @@ mod tests {
         let mut events = Vec::new();
         let waiting =
             handle_cast_spell(&mut state, PlayerId(0), bestow_id, CardId(901), &mut events)
-                .expect("cast should route to BestowCostChoice");
-        assert!(matches!(waiting, WaitingFor::BestowCostChoice { .. }));
+                .expect("cast should route to AlternativeCastChoice(Bestow)");
+        assert!(matches!(
+            waiting,
+            WaitingFor::AlternativeCastChoice {
+                keyword: crate::types::game_state::AlternativeCastKeyword::Bestow,
+                ..
+            }
+        ));
 
         let mut events = Vec::new();
         handle_bestow_cost_choice(
@@ -19260,7 +19334,7 @@ mod tests {
             PlayerId(0),
             bestow_id,
             CardId(901),
-            true,
+            crate::types::actions::AlternativeCastDecision::Alternative,
             &mut events,
         )
         .expect("bestow choice should drive cast to completion");
@@ -19381,17 +19455,18 @@ mod tests {
         use crate::ai_support::candidate_actions_broad;
 
         let mut state = setup_game_at_main_phase();
-        // Stub: directly drop into the BestowCostChoice waiting state so we
+        // Stub: directly drop into the AlternativeCastChoice waiting state so we
         // exercise the candidate enumeration, not the routing.
-        state.waiting_for = WaitingFor::BestowCostChoice {
+        state.waiting_for = WaitingFor::AlternativeCastChoice {
             player: PlayerId(0),
             object_id: ObjectId(1),
             card_id: CardId(1),
+            keyword: crate::types::game_state::AlternativeCastKeyword::Bestow,
             normal_cost: ManaCost::Cost {
                 shards: vec![ManaCostShard::Green],
                 generic: 1,
             },
-            bestow_cost: ManaCost::Cost {
+            alternative_cost: ManaCost::Cost {
                 shards: vec![ManaCostShard::Green],
                 generic: 3,
             },
@@ -19400,10 +19475,11 @@ mod tests {
         let mut saw_yes = false;
         let mut saw_no = false;
         for c in &cands {
-            match c.action {
-                GameAction::ChooseBestowCost { use_bestow: true } => saw_yes = true,
-                GameAction::ChooseBestowCost { use_bestow: false } => saw_no = true,
-                _ => {}
+            if let GameAction::ChooseAlternativeCast { choice } = c.action {
+                match choice {
+                    crate::types::actions::AlternativeCastDecision::Alternative => saw_yes = true,
+                    crate::types::actions::AlternativeCastDecision::Normal => saw_no = true,
+                }
             }
         }
         assert!(saw_yes, "AI must surface the 'cast bestowed' option");

@@ -1194,10 +1194,20 @@ impl GameRunner {
             WaitingFor::DefilerPayment { .. } => "DefilerPayment",
             WaitingFor::AdventureCastChoice { .. } => "AdventureCastChoice",
             WaitingFor::ModalFaceChoice { .. } => "ModalFaceChoice",
-            WaitingFor::WarpCostChoice { .. } => "WarpCostChoice",
-            WaitingFor::EvokeCostChoice { .. } => "EvokeCostChoice",
-            WaitingFor::OverloadCostChoice { .. } => "OverloadCostChoice",
-            WaitingFor::BestowCostChoice { .. } => "BestowCostChoice",
+            WaitingFor::AlternativeCastChoice { keyword, .. } => match keyword {
+                crate::types::game_state::AlternativeCastKeyword::Warp => {
+                    "AlternativeCastChoice(Warp)"
+                }
+                crate::types::game_state::AlternativeCastKeyword::Evoke => {
+                    "AlternativeCastChoice(Evoke)"
+                }
+                crate::types::game_state::AlternativeCastKeyword::Overload => {
+                    "AlternativeCastChoice(Overload)"
+                }
+                crate::types::game_state::AlternativeCastKeyword::Bestow => {
+                    "AlternativeCastChoice(Bestow)"
+                }
+            },
             WaitingFor::ChoosePermanentTypeSlot { .. } => "ChoosePermanentTypeSlot",
             WaitingFor::MultiTargetSelection { .. } => "MultiTargetSelection",
             WaitingFor::AbilityModeChoice { .. } => "AbilityModeChoice",
