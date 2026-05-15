@@ -120,6 +120,19 @@ pub(crate) fn emit_targeting_events(
     }
 }
 
+/// Controls which checks are applied during spell preparation.
+///
+/// `Actual` is the full rules-correct path used when a player declares a cast.
+/// `Display` suppresses situational restrictions (timing, prohibitions, per-turn
+/// cast limits, color identity) while preserving the full cost-computation pipeline
+/// so the UI can show the effective mana cost the engine would charge without
+/// gating on whether the player can legally cast right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CastingMode {
+    Actual,
+    Display,
+}
+
 #[derive(Debug, Clone)]
 struct PreparedSpellCast {
     object_id: ObjectId,
@@ -1341,7 +1354,13 @@ fn prepare_spell_cast(
     player: PlayerId,
     object_id: ObjectId,
 ) -> Result<PreparedSpellCast, EngineError> {
-    prepare_spell_cast_with_variant_override_inner(state, player, object_id, None, false)
+    prepare_spell_cast_with_variant_override_inner(
+        state,
+        player,
+        object_id,
+        None,
+        CastingMode::Actual,
+    )
 }
 
 fn prepare_spell_cast_for_display(
@@ -1349,7 +1368,13 @@ fn prepare_spell_cast_for_display(
     player: PlayerId,
     object_id: ObjectId,
 ) -> Result<PreparedSpellCast, EngineError> {
-    prepare_spell_cast_with_variant_override_inner(state, player, object_id, None, true)
+    prepare_spell_cast_with_variant_override_inner(
+        state,
+        player,
+        object_id,
+        None,
+        CastingMode::Display,
+    )
 }
 
 /// CR 702.190a: Variant-overriding entry point for cast paths that need a
@@ -1366,21 +1391,16 @@ fn prepare_spell_cast_with_variant_override(
         player,
         object_id,
         variant_override,
-        false,
+        CastingMode::Actual,
     )
 }
 
-/// Inner implementation. `for_display = true` suppresses situational checks
-/// (timing, "can't cast" prohibitions, color identity, per-turn cast limits)
-/// while preserving the full cost-computation pipeline. Structural rejections
-/// (zone, ownership, land-vs-spell) still apply because they affect what kind
-/// of object this is, not whether the player can pay right now.
 fn prepare_spell_cast_with_variant_override_inner(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
     variant_override: Option<CastingVariant>,
-    for_display: bool,
+    mode: CastingMode,
 ) -> Result<PreparedSpellCast, EngineError> {
     let obj = state
         .objects
@@ -1454,7 +1474,7 @@ fn prepare_spell_cast_with_variant_override_inner(
     // CR 604.3 + CR 101.2: "Can't" beats "can" — check CantCastFrom statics.
     // Grafdigger's Cage: "Players can't cast spells from graveyards or libraries."
     // This overrides graveyard/library casting permissions (Escape, Lurrus, etc.).
-    if !for_display && is_blocked_from_casting_from_zone(state, obj) {
+    if mode == CastingMode::Actual && is_blocked_from_casting_from_zone(state, obj) {
         return Err(EngineError::ActionNotAllowed(
             "A static ability prevents casting from this zone".to_string(),
         ));
@@ -1462,7 +1482,7 @@ fn prepare_spell_cast_with_variant_override_inner(
 
     // CR 101.2: Continuous casting prohibition — "can't" overrides "can".
     // E.g., Teferi, Time Raveler: "Your opponents can't cast spells during your turn."
-    if !for_display && is_blocked_by_cant_cast_during(state, player) {
+    if mode == CastingMode::Actual && is_blocked_by_cant_cast_during(state, player) {
         return Err(EngineError::ActionNotAllowed(
             "A static ability prevents casting during this phase/turn".to_string(),
         ));
@@ -1470,7 +1490,7 @@ fn prepare_spell_cast_with_variant_override_inner(
 
     // CR 101.2: Temporary blanket prohibition — "can't cast spells this turn."
     // E.g., Silence: "Your opponents can't cast spells this turn."
-    if !for_display && is_blocked_by_cant_cast_spells(state, player) {
+    if mode == CastingMode::Actual && is_blocked_by_cant_cast_spells(state, player) {
         return Err(EngineError::ActionNotAllowed(
             "A temporary effect prevents you from casting spells this turn".to_string(),
         ));
@@ -1478,13 +1498,13 @@ fn prepare_spell_cast_with_variant_override_inner(
 
     // CR 101.2: Blanket casting prohibition — "you can't cast [type] spells."
     // E.g., Steel Golem: "You can't cast creature spells."
-    if !for_display && is_blocked_by_cant_be_cast(state, player, obj) {
+    if mode == CastingMode::Actual && is_blocked_by_cant_be_cast(state, player, obj) {
         return Err(EngineError::ActionNotAllowed(
             "A static ability prevents you from casting this spell".to_string(),
         ));
     }
 
-    if !for_display && is_blocked_by_cast_only_from_zones(state, obj, player) {
+    if mode == CastingMode::Actual && is_blocked_by_cast_only_from_zones(state, obj, player) {
         return Err(EngineError::ActionNotAllowed(
             "A temporary effect prevents casting from this zone".to_string(),
         ));
@@ -1502,7 +1522,7 @@ fn prepare_spell_cast_with_variant_override_inner(
 
     // CR 101.2 + CR 604.1: Per-turn casting limit — "can't cast more than N spells each turn."
     // E.g., Rule of Law, High Noon, Deafening Silence.
-    if !for_display && is_blocked_by_per_turn_cast_limit(state, player, obj) {
+    if mode == CastingMode::Actual && is_blocked_by_per_turn_cast_limit(state, player, obj) {
         return Err(EngineError::ActionNotAllowed(
             "A static ability limits the number of spells you can cast this turn".to_string(),
         ));
@@ -1845,7 +1865,7 @@ fn prepare_spell_cast_with_variant_override_inner(
     // CR 304.1: Instants can be cast any time a player has priority.
     // CR 301.1 / CR 306.1: Artifacts and planeswalkers are cast at sorcery speed.
     let mut cast_timing_permission = None;
-    if !for_display {
+    if mode == CastingMode::Actual {
         if let Err(base_timing_error) = restrictions::check_spell_timing(
             state,
             player,

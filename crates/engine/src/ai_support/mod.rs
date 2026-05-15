@@ -15,7 +15,6 @@ use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
-use crate::types::zones::Zone;
 
 pub use candidates::{
     candidate_actions, candidate_actions_broad, candidate_actions_exact, ActionMetadata,
@@ -639,13 +638,10 @@ pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
             if obj.controller != *player {
                 continue;
             }
-            let castable_zone = obj.zone == Zone::Hand
-                || (state.format_config.command_zone
-                    && obj.zone == Zone::Command
-                    && obj.is_commander);
-            if !castable_zone {
-                continue;
-            }
+            // `display_spell_cost` is the single engine-authoritative source: it applies
+            // every cost-modifying static (Affinity, ReduceCost, commander tax, etc.) while
+            // suppressing situational restrictions (timing, prohibitions). It returns `None`
+            // for objects not in a castable zone, handling zone eligibility centrally.
             if let Some(cost) = crate::game::casting::display_spell_cost(state, *player, obj.id) {
                 spell_costs.insert(obj.id, cost);
             }

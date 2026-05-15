@@ -28,6 +28,11 @@ describe("encodeWireMessage / decodeWireMessage", () => {
       senderPlayerId: 0,
       action: { type: "PassPriority" },
     },
+    {
+      type: "action",
+      senderPlayerId: 0,
+      action: { type: "TapForConvoke", data: { object_id: 42, mana_type: "Green" } },
+    },
   ];
 
   it.each(variants)("round-trips %j", async (msg) => {
