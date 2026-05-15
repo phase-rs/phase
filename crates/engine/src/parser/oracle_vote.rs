@@ -20,8 +20,9 @@
 //!   free to fall back to the standard chain parser.
 
 use crate::parser::oracle_nom::error::OracleError;
+use crate::parser::oracle_nom::primitives::scan_split_at_phrase;
 use nom::branch::alt;
-use nom::bytes::complete::{tag, tag_no_case};
+use nom::bytes::complete::{tag, tag_no_case, take_while1};
 use nom::combinator::value;
 use nom::Parser;
 
@@ -292,41 +293,34 @@ fn parse_each_class_clause<'a>(
 /// where `<choice>` is a member of the parent vote's `choices` list. Strips
 /// trailing period.
 ///
-/// Discriminator on the candidate split point: the `"each "` must be at a
-/// word boundary (start-of-input or preceded by space/period/comma) AND the
-/// token immediately following must be a known class label followed by a
-/// space. This prevents false positives on intra-body phrases like
+/// Implementation: a single nom combinator (`tag_no_case("each ")` →
+/// `take_while1` for the class word → verify membership and trailing space)
+/// is tried at every word boundary in `input` via `scan_split_at_phrase`.
+/// The dynamic `choices` vocabulary is handled by `take_while1` + an inline
+/// membership check rather than `alt()`, because `alt()` requires a static
+/// tuple of branches.
+///
+/// This prevents false positives on intra-body phrases like
 /// `"on each creature they control"` (Regna's Sanction friend body) where
 /// `"each"` is the distributive quantifier inside an imperative, not the
-/// start of a sibling class clause.
+/// start of a sibling class clause: `take_while1` reads "creature", which
+/// fails the class-label membership check.
 fn read_effect_until_each_class<'a>(input: &'a str, choices: &[String]) -> (&'a str, &'a str) {
-    let lower = input.to_lowercase();
-    let cut = lower
-        .match_indices("each ")
-        .find(|(idx, _)| {
-            let boundary = *idx == 0
-                || matches!(
-                    lower.as_bytes().get(*idx - 1),
-                    Some(b' ') | Some(b'.') | Some(b',')
-                );
-            if !boundary {
-                return false;
-            }
-            let after_each = &lower[*idx + "each ".len()..];
-            // Inner predicate for the structural `match_indices` scan above
-            // (Pattern 5 in oracle_nom/PATTERNS.md). The candidate split has
-            // already been word-boundary verified; this only checks that the
-            // token after `"each "` is a known class label.
-            choices.iter().any(|c| {
-                // allow-noncombinator: post-scan word-boundary class-label check.
-                let rest = after_each.strip_prefix(c.as_str());
-                rest.is_some_and(|r| r.starts_with(' '))
-            })
-        })
-        .map(|(idx, _)| idx)
-        .unwrap_or(input.len());
-    let head = &input[..cut];
-    let tail = &input[cut..];
+    let is_word_char = |c: char| c.is_alphanumeric() || c == '\'' || c == '-';
+    let try_each_class_marker = |i: &'a str| -> nom::IResult<&'a str, (), OracleError<'a>> {
+        let (after_each, _) = tag_no_case::<_, _, OracleError<'a>>("each ").parse(i)?;
+        let (after_word, word) =
+            take_while1::<_, _, OracleError<'a>>(is_word_char).parse(after_each)?;
+        let (_, _) = tag::<_, _, OracleError<'a>>(" ").parse(after_word)?;
+        if !choices.iter().any(|c| c.eq_ignore_ascii_case(word)) {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                i,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+        Ok((after_word, ()))
+    };
+    let (head, tail) = scan_split_at_phrase(input, try_each_class_marker).unwrap_or((input, ""));
     let head_trimmed = head.trim_end();
     // allow-noncombinator: structural period strip on pre-extracted sentence clause
     let head_no_period = head_trimmed.strip_suffix('.').unwrap_or(head_trimmed);
@@ -363,25 +357,16 @@ fn parse_who_chose_player_clause<'a>(
 
 /// Read a maximal prefix up to (but not including) the next "For each "
 /// clause or end of input. Strips a trailing period from the consumed slice.
+///
+/// `scan_split_at_phrase` + `tag_no_case` is the idiomatic combinator pair
+/// for "split at the next word-boundary occurrence of <phrase>": it tries
+/// the combinator at every word boundary and returns the split point on
+/// the first match.
 fn read_effect_until_next_clause(input: &str) -> (&str, &str) {
-    let lower = input.to_lowercase();
-    // Find the next "for each " case-insensitively. structural: not dispatch
-    // — this is a local sentence-boundary scanner, not a parser dispatch
-    // decision. We use lowercase for the search but slice the original input
-    // so casing is preserved in the returned effect text.
-    let cut = lower
-        .match_indices("for each ")
-        .find(|(idx, _)| {
-            *idx == 0
-                || matches!(
-                    lower.as_bytes().get(*idx - 1),
-                    Some(b' ') | Some(b'.') | Some(b',')
-                )
-        })
-        .map(|(idx, _)| idx)
-        .unwrap_or(input.len());
-    let head = &input[..cut];
-    let tail = &input[cut..];
+    let (head, tail) = scan_split_at_phrase(input, |i| {
+        tag_no_case::<_, _, OracleError<'_>>("for each ").parse(i)
+    })
+    .unwrap_or((input, ""));
     let head_trimmed = head.trim_end();
     // allow-noncombinator: structural period strip on pre-extracted sentence clause
     let head_no_period = head_trimmed.strip_suffix('.').unwrap_or(head_trimmed);
