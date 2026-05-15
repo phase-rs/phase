@@ -8639,7 +8639,7 @@ pub struct ReplacementDefinition {
     /// "under your control" → Some(You). None = any owner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_owner_scope: Option<ControllerRef>,
-    /// CR 111.6 + CR 614.1a: Redirects the controller of a created token to a
+    /// CR 111.2 + CR 614.1a: Redirects the controller of a created token to a
     /// specific scope relative to the replacement source. Used by Crafty
     /// Cutpurse ("each token that would be created under an opponent's control
     /// this turn is created under your control instead") — pair with
@@ -8846,7 +8846,7 @@ impl ReplacementDefinition {
         self
     }
 
-    /// CR 111.6 + CR 614.1a: Set the controller-redirect target for the
+    /// CR 111.2 + CR 614.1a: Set the controller-redirect target for the
     /// proposed `CreateToken` event. Pair with `token_owner_scope` so the
     /// match-side (which tokens this replacement fires on) and the redirect
     /// side (where their controller ends up) compose cleanly.

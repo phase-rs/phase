@@ -40,12 +40,13 @@ fn replacement_targets(
         return ability.targets.clone();
     }
 
-    // CR 109.5: SelfRef resolves to the ability's source object — used by
-    // self-installing replacements (Crafty Cutpurse: "When ~ enters, [until end
-    // of turn] each token that would be created under an opponent's control is
-    // created under your control instead.") so the trigger anchors the
-    // replacement on its own source without needing to consult the target
-    // pipeline.
+    // CR 201.5: SelfRef resolves to the ability's source object — text that
+    // refers to the object it's on by name (or "~") means that particular
+    // object. Used by self-installing replacements (Crafty Cutpurse: "When ~
+    // enters, [until end of turn] each token that would be created under an
+    // opponent's control is created under your control instead.") so the
+    // trigger anchors the replacement on its own source without needing to
+    // consult the target pipeline.
     if matches!(target, TargetFilter::SelfRef) {
         return vec![TargetRef::Object(ability.source_id)];
     }
@@ -352,7 +353,8 @@ mod tests {
     // Crafty Cutpurse end-to-end: a self-installed CreateToken replacement
     // with `token_owner_scope: Opponent` and `token_owner_redirect: You`
     // redirects opponent-created tokens to the source's controller.
-    // Covers CR 111.6 (token controller redirection) + CR 614.1a (replacement
+    // Covers CR 111.2 (token controller redirection — "the token enters the
+    // battlefield under that player's control") + CR 614.1a (replacement
     // ordering: redirect applies before the token materializes).
     #[test]
     fn crafty_cutpurse_self_install_redirects_opponent_tokens_to_controller() {
@@ -425,13 +427,108 @@ mod tests {
         };
 
         let result = replace_event(&mut state, proposed, &mut events);
-        let ReplacementResult::Execute(ProposedEvent::CreateToken { owner, .. }) = result else {
+        let ReplacementResult::Execute(ProposedEvent::CreateToken {
+            owner, ref spec, ..
+        }) = result
+        else {
             panic!("expected modified CreateToken event, got {result:?}");
         };
         assert_eq!(
             owner,
             PlayerId(0),
             "Crafty Cutpurse should redirect opponent's token to its controller"
+        );
+        // CR 111.2: `spec.controller` is consumed by the apply path
+        // (combat::enter_attacking defending-player resolution, ETB-counter
+        // accounting) and must move with the redirected owner — otherwise an
+        // enters-attacking Goblin Rabblemaster token would compute its
+        // defender against the original effect controller (the opponent) and
+        // end up attacking its new controller.
+        assert_eq!(
+            spec.controller,
+            PlayerId(0),
+            "spec.controller must follow the redirected owner under CR 111.2"
+        );
+    }
+
+    // Crafty Cutpurse + Goblin Rabblemaster class: an opponent creates a token
+    // *that's tapped and attacking*. The redirect rewires owner to Cutpurse's
+    // controller; `spec.controller` must follow so the apply path's
+    // `enter_attacking` lookup picks a defending player from the redirected
+    // controller's opponents — not from the original effect's controller.
+    #[test]
+    fn crafty_cutpurse_redirects_spec_controller_for_enters_attacking_token() {
+        use crate::types::ability::ControllerRef;
+        use crate::types::proposed_event::TokenSpec;
+        use std::collections::HashSet;
+
+        let mut state = GameState::new_two_player(42);
+        let cutpurse_id = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "Crafty Cutpurse".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut repl = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            .token_owner_scope(ControllerRef::Opponent)
+            .token_owner_redirect(ControllerRef::You);
+        repl.expires_at_eot = true;
+
+        let install_ability = ResolvedAbility::new(
+            Effect::AddTargetReplacement {
+                replacement: Box::new(repl),
+                target: TargetFilter::SelfRef,
+            },
+            Vec::new(),
+            cutpurse_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &install_ability, &mut events).unwrap();
+
+        // Opponent's Rabblemaster-style "create a 1/1 Goblin that's tapped
+        // and attacking" — `enters_attacking: true`, `spec.controller: P1`.
+        let token_spec = TokenSpec {
+            display_name: "Goblin".to_string(),
+            script_name: "Goblin".to_string(),
+            power: Some(1),
+            toughness: Some(1),
+            core_types: vec![crate::types::card_type::CoreType::Creature],
+            subtypes: vec!["Goblin".to_string()],
+            supertypes: Vec::new(),
+            colors: vec![crate::types::mana::ManaColor::Red],
+            keywords: Vec::new(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+            tapped: true,
+            enters_attacking: true,
+            sacrifice_at: None,
+            source_id: ObjectId(70),
+            controller: PlayerId(1),
+        };
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(1),
+            spec: Box::new(token_spec),
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            count: 1,
+            applied: HashSet::new(),
+        };
+
+        let result = replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::Execute(ProposedEvent::CreateToken {
+            owner, ref spec, ..
+        }) = result
+        else {
+            panic!("expected modified CreateToken event, got {result:?}");
+        };
+        assert_eq!(owner, PlayerId(0));
+        assert_eq!(
+            spec.controller,
+            PlayerId(0),
+            "redirected enters-attacking token must carry the new controller \
+             so enter_attacking picks the correct defender"
         );
     }
 

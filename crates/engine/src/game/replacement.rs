@@ -1009,16 +1009,19 @@ fn create_token_applier(
 
     if let ProposedEvent::CreateToken {
         owner,
-        spec,
+        mut spec,
         enter_tapped,
         count,
         applied,
     } = event
     {
-        // CR 111.6 + CR 614.1a: Apply controller redirect (Crafty Cutpurse).
+        // CR 111.2 + CR 614.1a: Apply controller redirect (Crafty Cutpurse).
+        // CR 111.2: "The token enters the battlefield under that player's
+        // control" — the default the replacement is overriding.
         // The redirect's `ControllerRef` is resolved relative to the source's
         // controller — `You` redirects to that controller; `Opponent` would
         // redirect away (not currently a Magic pattern but representable).
+        let original_owner = owner;
         let owner = match owner_redirect {
             Some(crate::types::ability::ControllerRef::You) => source_controller,
             Some(crate::types::ability::ControllerRef::Opponent) => state
@@ -1031,6 +1034,15 @@ fn create_token_applier(
             // token-creation time — fail open (preserve original owner).
             Some(_) | None => owner,
         };
+        // CR 111.2: When the redirect actually rewires ownership, the apply
+        // path's `spec.controller`-keyed lookups (combat::enter_attacking
+        // defending-player resolution, etc.) must see the new controller —
+        // otherwise an "enters attacking" token (Goblin Rabblemaster class)
+        // would resolve its defender against the original effect's controller
+        // and end up attacking the player who now controls it.
+        if owner != original_owner {
+            spec.controller = owner;
+        }
         // CR 614.1a: Modify token count per replacement effect.
         let new_count = match modification {
             Some(QuantityModification::Double) => count.saturating_mul(2),

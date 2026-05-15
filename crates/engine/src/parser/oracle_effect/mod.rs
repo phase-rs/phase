@@ -964,11 +964,13 @@ fn try_parse_conditional_damage_prevention_with_followup(text: &str) -> Option<P
     })
 }
 
-/// CR 111.6 + CR 614.1a: "each token that would be created under <X> control
+/// CR 111.2 + CR 614.1a: "each token that would be created under <X> control
 /// this turn is created under <Y> control instead." Builds a self-installed
 /// CreateToken replacement with an opponent-token scope and a controller
 /// redirect, marked to expire at end of turn. Crafty Cutpurse is the
 /// canonical card; this also covers any future card with the same shape.
+/// CR 111.2: "The token enters the battlefield under that player's control"
+/// — the default this replacement overrides.
 fn try_parse_token_controller_redirect(lower: &str) -> Option<Effect> {
     // Match "each token that would be created under " (or "any token ...") then
     // a controller phrase, then "control this turn is created under " then a
@@ -1000,11 +1002,9 @@ fn try_parse_token_controller_redirect(lower: &str) -> Option<Effect> {
     let (rest, _) = tag::<_, _, OracleError<'_>>(" control this turn is created under ")
         .parse(rest)
         .ok()?;
+    // Longer prefixes first: bare "your" would otherwise shadow
+    // "your opponents'" and leave " opponents'" stranded before the next tag.
     let (rest, to_ctrl) = alt((
-        value(
-            crate::types::ability::ControllerRef::You,
-            tag::<_, _, OracleError<'_>>("your"),
-        ),
         value(
             crate::types::ability::ControllerRef::Opponent,
             tag::<_, _, OracleError<'_>>("an opponent's"),
@@ -1012,6 +1012,10 @@ fn try_parse_token_controller_redirect(lower: &str) -> Option<Effect> {
         value(
             crate::types::ability::ControllerRef::Opponent,
             tag::<_, _, OracleError<'_>>("your opponents'"),
+        ),
+        value(
+            crate::types::ability::ControllerRef::You,
+            tag::<_, _, OracleError<'_>>("your"),
         ),
     ))
     .parse(rest)
@@ -2479,7 +2483,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     if let Some(effect) = try_parse_global_damage_modification_replacement(text) {
         return parsed_clause(effect);
     }
-    // CR 111.6 + CR 614.1a: Crafty-Cutpurse-class token controller redirect.
+    // CR 111.2 + CR 614.1a: Crafty-Cutpurse-class token controller redirect.
     if let Some(effect) = try_parse_token_controller_redirect(&lower) {
         return parsed_clause(effect);
     }
