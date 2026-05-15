@@ -6084,16 +6084,20 @@ impl TargetFilter {
     /// - `TargetFilter::ScopedPlayer` (the direct player reference)
     /// - `TargetFilter::Typed { ..., controller: Some(ControllerRef::ScopedPlayer), ... }`
     ///   (object selection scoped to the chosen player's permanents)
+    /// - `Or`/`And`/`Not` filters that contain any of the above
+    ///   (composed targets — every leg participates so a single
+    ///   ScopedPlayer-dependent leg flips the whole filter to "requires
+    ///   bound").
     pub fn requires_bound_scoped_player(&self) -> bool {
-        if matches!(self, TargetFilter::ScopedPlayer) {
-            return true;
-        }
-        if let TargetFilter::Typed(tf) = self {
-            if matches!(tf.controller, Some(ControllerRef::ScopedPlayer)) {
-                return true;
+        match self {
+            TargetFilter::ScopedPlayer => true,
+            TargetFilter::Typed(tf) => matches!(tf.controller, Some(ControllerRef::ScopedPlayer)),
+            TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+                filters.iter().any(Self::requires_bound_scoped_player)
             }
+            TargetFilter::Not { filter } => filter.requires_bound_scoped_player(),
+            _ => false,
         }
-        false
     }
 
     /// Extract the `InZone` zone from this filter's properties, if any.

@@ -79,22 +79,27 @@ pub fn apnap_order(state: &GameState) -> Vec<PlayerId> {
     apnap_order_from(state, None, state.active_player)
 }
 
-/// CR 101.4 + CR 800.4 + CR 800.4g: APNAP ordering with an optional turn-order
+/// CR 101.4 + CR 800.4 + CR 800.4f: APNAP ordering with an optional turn-order
 /// override.
 ///
 /// When `starting_with` is `None`, behaves identically to `apnap_order` —
 /// living players are returned starting from the active player and walking
 /// forward in seat order, per CR 101.4 (APNAP).
 ///
-/// When `starting_with` is `Some(ControllerRef::You)` (and by current rules,
-/// any other `ControllerRef` that resolves to the ability's controller), the
-/// sequence instead begins at `controller`. This is required by Join Forces
-/// ("Starting with you, each player may pay any amount of mana") and other
-/// effects that override the default APNAP turn-order start (CR 800.4):
-/// players act in turn order, but starting from a designated player rather
-/// than the active player.
+/// When `starting_with` is `Some(ControllerRef::You)` the sequence instead
+/// begins at `controller`. This is required by Join Forces ("Starting with
+/// you, each player may pay any amount of mana") and other effects that
+/// override the default APNAP turn-order start (CR 800.4): players act in
+/// turn order, but starting from a designated player rather than the active
+/// player. Other `ControllerRef` variants are not currently produced as
+/// turn-order overrides on `player_scope` iteration and fall back to the
+/// APNAP anchor — the match below lists each explicitly so adding a new
+/// variant intentionally forces the author to declare whether it shifts
+/// the start or not.
 ///
-/// CR 800.4g: Eliminated players are filtered out regardless of branch.
+/// CR 800.4f: For Join Forces in particular, eliminated players cannot pay
+/// the cost; for the broader API, eliminated players never act, so they are
+/// filtered out regardless of branch.
 pub fn apnap_order_from(
     state: &GameState,
     starting_with: Option<ControllerRef>,
@@ -106,12 +111,19 @@ pub fn apnap_order_from(
         return Vec::new();
     }
 
-    // CR 101.4 + CR 800.4: Resolve the start anchor. Only `Some(You)` shifts
-    // the start; other `ControllerRef` variants are not currently produced as
-    // turn-order overrides on player_scope iteration and fall back to APNAP.
+    // CR 101.4 + CR 800.4: Resolve the start anchor. Each `ControllerRef`
+    // variant is listed explicitly so introducing a new variant produces a
+    // compile error here rather than a silent fall-back to APNAP.
     let start_player = match starting_with {
         Some(ControllerRef::You) => controller,
-        _ => state.active_player,
+        None
+        | Some(
+            ControllerRef::Opponent
+            | ControllerRef::ScopedPlayer
+            | ControllerRef::TargetPlayer
+            | ControllerRef::ParentTargetController
+            | ControllerRef::DefendingPlayer,
+        ) => state.active_player,
     };
 
     let start_idx = seat_order
@@ -123,8 +135,8 @@ pub fn apnap_order_from(
     for offset in 0..len {
         let idx = (start_idx + offset) % len;
         let candidate = seat_order[idx];
-        // CR 800.4g: A player who has left the game does not make choices;
-        // skip eliminated players from the iteration.
+        // CR 800.4f: A player who has left the game does not pay costs or
+        // make choices on objects' behalf; skip eliminated players.
         if is_alive(state, candidate) {
             result.push(candidate);
         }
@@ -388,7 +400,7 @@ mod tests {
 
     #[test]
     fn apnap_order_from_skips_eliminated_with_override() {
-        // CR 800.4g: Eliminated players are filtered out of the starting-with
+        // CR 800.4f: Eliminated players are filtered out of the starting-with
         // iteration just like the default APNAP path.
         let mut state = make_state(4, FormatConfig::commander());
         state.active_player = PlayerId(3);

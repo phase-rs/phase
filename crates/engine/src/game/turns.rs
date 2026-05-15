@@ -1458,6 +1458,12 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 // from an end-step trigger (e.g., Rocco, Street Chef) is
                 // created AFTER this prune runs, so it correctly survives.
                 super::layers::prune_end_step_casting_permissions(state, state.active_player);
+                // CR 513.1 + CR 611.2a: Mirror the casting-permission prune
+                // for transient continuous effects with the same duration —
+                // any future parser arm emitting `UntilNextEndStepOf` onto a
+                // pump / control-change effect expires here rather than
+                // outliving its scheduled step.
+                super::layers::prune_until_next_end_step_effects(state, state.active_player);
                 // CR 513.1: End step — active player receives priority.
                 // CR 513.1a: "At the beginning of [your] end step" triggers fire here.
                 process_phase_triggers(state);

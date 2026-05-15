@@ -319,7 +319,9 @@ pub(crate) fn parse_trigger_lines_at_index_ir(
     // disjunct introduces its OWN subject. Operates on the full normalized
     // text because `split_trigger` (called above) cannot recover the
     // disjunction once the first `, or ` is consumed as the effect boundary.
-    // CR 603.2 + CR 700.4: each clause is an independent triggered ability.
+    // CR 603.2: each clause is an independent triggered ability. (Dies clauses
+    // additionally interpret via CR 700.4 "dies = put into graveyard from the
+    // battlefield" — but that's resolved at the per-clause parse, not here.)
     if let Some(halves) = split_or_clause_compound(&lower, &normalized) {
         let mut results = Vec::with_capacity(halves.len());
         for (i, clause) in halves.into_iter().enumerate() {
@@ -2976,11 +2978,11 @@ fn capitalize_first(s: &str) -> String {
     }
 }
 
-/// CR 603.2 + CR 700.4: Detect a subject-introducer prefix at the start of
-/// `remainder`. Used by `split_or_clause_compound` to validate that the text
-/// after an "or" boundary begins a new trigger clause (with its own subject)
-/// rather than continuing an inline filter disjunction such as "a creature
-/// or artifact dies" (the second alternative is a bare type word, not a
+/// CR 603.2: Detect a subject-introducer prefix at the start of `remainder`.
+/// Used by `split_or_clause_compound` to validate that the text after an
+/// "or" boundary begins a new trigger clause (with its own subject) rather
+/// than continuing an inline filter disjunction such as "a creature or
+/// artifact dies" (the second alternative is a bare type word, not a
 /// subject).
 ///
 /// Each `alt()` arm mirrors a subject-introducer recognized by
@@ -3044,7 +3046,7 @@ fn before_contains_event_verb(text: &str) -> bool {
     scan_split_at_phrase(text, parse_any_event_verb).is_some()
 }
 
-/// CR 603.2 + CR 700.4: Split a multi-clause disjunctive trigger of the form
+/// CR 603.2: Split a multi-clause disjunctive trigger of the form
 /// "Whenever <subj1> <event1> or <subj2> <event2>[, or <subj3> <event3>], <effect>"
 /// into N independent trigger lines, each sharing the same effect. Both the
 /// bare " or " (Dreadhound, Scrap Trawler) and the comma-or ", or " (Syr
@@ -5740,6 +5742,11 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     // post-verb tail through `parse_type_phrase` so the zone suffix and
     // any qualifier ride through the existing zone-suffix combinator
     // (CR 400.1 + CR 400.7).
+    //
+    // Subject scope: Oracle text on third-person "plays a land" triggers
+    // never uses "you" (the second-person form is "Whenever you play a
+    // land", verb without -s — handled by a separate branch). Only the
+    // "opponent" specifier participates here.
     if let Ok((_, (who, _))) = nom_primitives::split_once_on(lower, " plays a land") {
         let mut def = make_base();
         def.mode = TriggerMode::LandPlayed;
@@ -5749,8 +5756,6 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             def.valid_target = Some(TargetFilter::Typed(
                 TypedFilter::default().controller(ControllerRef::Opponent),
             ));
-        } else if scan_contains(who, " you") || who == "whenever you" || who == "when you" {
-            def.valid_target = Some(TargetFilter::Controller);
         }
         // For "whenever a player" — no controller restriction (any player).
 
@@ -15789,21 +15794,24 @@ mod tests {
             "dies clause should use single-zone origin, not origin_zones"
         );
 
-        // Clause 2: put into GY from anywhere except battlefield (creature card)
+        // Clause 2: put into GY from anywhere except battlefield (creature card).
+        // CR 603.10a: `origin_zones` is matched as a disjunction, so the test
+        // pins the SET of non-battlefield zones, not their listed order.
         assert_eq!(defs[1].mode, TriggerMode::ChangesZone);
         assert_eq!(defs[1].origin, None);
         assert_eq!(defs[1].destination, Some(Zone::Graveyard));
-        assert_eq!(
-            defs[1].origin_zones,
-            vec![
-                Zone::Library,
-                Zone::Hand,
-                Zone::Graveyard,
-                Zone::Exile,
-                Zone::Stack,
-                Zone::Command,
-            ]
-        );
+        let actual: std::collections::HashSet<_> = defs[1].origin_zones.iter().copied().collect();
+        let expected: std::collections::HashSet<_> = [
+            Zone::Library,
+            Zone::Hand,
+            Zone::Graveyard,
+            Zone::Exile,
+            Zone::Stack,
+            Zone::Command,
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(actual, expected);
 
         // Clause 3: leaves your graveyard (Graveyard → any)
         assert_eq!(defs[2].mode, TriggerMode::ChangesZone);
@@ -15891,9 +15899,10 @@ mod tests {
         }
     }
 
-    /// CR 603.2 + CR 122.6: "a creature or artifact dies" is a single clause
-    /// with an inline type-list (no comma before "or"). The splitter must NOT
-    /// fire on this pattern — it should stay a single trigger.
+    /// CR 603.2 + CR 603.6c: "a creature or artifact dies" is a single clause
+    /// with an inline type-list disjunction on the LHS subject, not a multi-
+    /// clause trigger. The splitter must NOT fire on this pattern — it should
+    /// stay a single trigger whose `valid_card` matches creature-or-artifact.
     #[test]
     fn trigger_split_rejects_inline_filter_disjunction() {
         let defs = parse_trigger_lines_at_index(
@@ -15965,17 +15974,20 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::ChangesZone);
         assert_eq!(def.origin, None);
         assert_eq!(def.destination, Some(Zone::Graveyard));
-        assert_eq!(
-            def.origin_zones,
-            vec![
-                Zone::Library,
-                Zone::Hand,
-                Zone::Graveyard,
-                Zone::Exile,
-                Zone::Stack,
-                Zone::Command,
-            ]
-        );
+        // CR 603.10a: matcher treats `origin_zones` as a disjunction — pin the
+        // set of non-battlefield zones, not list order.
+        let actual: std::collections::HashSet<_> = def.origin_zones.iter().copied().collect();
+        let expected: std::collections::HashSet<_> = [
+            Zone::Library,
+            Zone::Hand,
+            Zone::Graveyard,
+            Zone::Exile,
+            Zone::Stack,
+            Zone::Command,
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(actual, expected);
     }
 }
 

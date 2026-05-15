@@ -13614,7 +13614,7 @@ fn apply_where_x_expression(value: PtValue, where_x_expression: Option<&str>) ->
     }
 }
 
-fn parse_where_x_quantity_expression(where_x_expression: &str) -> Option<QuantityExpr> {
+pub(super) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Option<QuantityExpr> {
     let expression = where_x_expression.trim().trim_end_matches('.');
     let expression_lower = expression.to_ascii_lowercase();
     // CR 107.3i + CR 117.1: Within a single resolution, X has one value used
@@ -30205,11 +30205,17 @@ mod tests {
     }
 
     /// Alliance of Arms — same preamble, token body. `player_scope = All` on
-    /// both halves so each player creates X 1/1 Soldier tokens.
+    /// both halves so each player creates X 1/1 Soldier tokens. Uses the
+    /// printed Oracle text ("the total amount of mana paid this way") so the
+    /// Token-effect's where-X path collapses to `QuantityRef::Variable("X")`
+    /// via the shared Join Forces normalization in
+    /// `parse_where_x_quantity_expression`. Without that wiring the Token
+    /// count would degrade to a raw verbatim variable name and resolve to 0
+    /// at runtime, leaving Alliance of Arms unusable.
     #[test]
     fn parse_alliance_of_arms_emits_token_per_player() {
         let def = parse_effect_chain(
-            "Starting with you, each player may pay any amount of mana. Each player creates X 1/1 white Soldier creature tokens, where X is the total amount of mana that player paid.",
+            "Starting with you, each player may pay any amount of mana. Each player creates X 1/1 white Soldier creature tokens, where X is the total amount of mana paid this way.",
             AbilityKind::Spell,
         );
 
@@ -30226,6 +30232,28 @@ mod tests {
         );
         assert_eq!(def.player_scope, Some(PlayerFilter::All));
         assert_eq!(def.starting_with, Some(ControllerRef::You));
+
+        // CR 107.3i: the Token sub_ability's `count` must collapse to
+        // `Variable("X")` so the upstream PayCost loop's accumulated total
+        // flows through. Anything else (raw verbatim name, parse_cda_quantity
+        // result, etc.) leaves the count resolving to 0 at runtime.
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("expected Token sub_ability");
+        match &*sub.effect {
+            Effect::Token { count, .. } => assert!(
+                matches!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { name },
+                    } if name == "X"
+                ),
+                "Token count must be Variable(\"X\"), got {count:?}"
+            ),
+            other => panic!("Sub effect must be Token, got {other:?}"),
+        }
+        assert_eq!(sub.player_scope, Some(PlayerFilter::All));
     }
 
     /// Mana-Charged Dragon caveat: the `+X/+0` Pump body is a single-target

@@ -57,6 +57,28 @@ pub fn prune_end_of_combat_effects(state: &mut GameState) {
     }
 }
 
+/// CR 513.1 + CR 611.2a: Remove transient continuous effects whose
+/// `Duration::UntilNextEndStepOf { Controller }` expires at the start of
+/// `active_player`'s end step. Called from `turns.rs::auto_advance` at the
+/// End phase alongside `prune_end_step_casting_permissions` so any future
+/// parser arm that emits this duration on a `TimedContinuousEffect` (pump,
+/// control change, etc.) is pruned by its scheduled step rather than
+/// outliving it.
+pub fn prune_until_next_end_step_effects(state: &mut GameState, active_player: PlayerId) {
+    let before = state.transient_continuous_effects.len();
+    state.transient_continuous_effects.retain(|e| {
+        !(matches!(
+            e.duration,
+            Duration::UntilNextEndStepOf {
+                player: PlayerScope::Controller
+            }
+        ) && e.controller == active_player)
+    });
+    if state.transient_continuous_effects.len() != before {
+        state.layers_dirty = true;
+    }
+}
+
 /// CR 514.2 + CR 611.2a: Remove `PlayFromExile` casting permissions whose
 /// `Duration::UntilEndOfTurn` expires at cleanup. Called from the cleanup step
 /// alongside `prune_end_of_turn_effects`.
