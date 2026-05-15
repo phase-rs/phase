@@ -21,7 +21,7 @@
 
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
-use nom::bytes::complete::tag;
+use nom::bytes::complete::{tag, tag_no_case};
 use nom::combinator::value;
 use nom::Parser;
 
@@ -41,10 +41,13 @@ use super::oracle_ir::context::ParseContext;
 /// with you, " prefix is consumed here (kept inside this module so chain-level
 /// stripping in `parse_effect_chain_ir` doesn't interfere).
 pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityDefinition> {
-    let lower = text.to_lowercase();
-    // Phase 1: optional "starting with you," prefix.
-    let (i, starting_with) =
-        parse_starting_with(&lower).unwrap_or((lower.as_str(), ControllerRef::You));
+    // Case-insensitive nom tags (`tag_no_case`) match directly against the
+    // original-case input, so the entire vote-detection pipeline operates on
+    // `text` without an upfront `to_lowercase()` allocation. On the failure
+    // path (every non-vote spell line that reaches this probe) the first
+    // `tag_no_case` in `parse_each_player_votes_clause` short-circuits on the
+    // first byte mismatch and no allocation is ever performed.
+    let (i, starting_with) = parse_starting_with(text).unwrap_or((text, ControllerRef::You));
     // Phase 2: opener clause. Two shapes covered:
     //   * "each player votes for <a> or <b>."         → VoterScope::AllPlayers
     //   * "each player may vote for <a> or <b>."      → VoterScope::AllPlayers
@@ -124,7 +127,10 @@ pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityD
 fn parse_starting_with(input: &str) -> Option<(&str, ControllerRef)> {
     let res: nom::IResult<&str, (), OracleError<'_>> = value(
         (),
-        alt((tag("starting with you, "), tag("starting with you "))),
+        alt((
+            tag_no_case("starting with you, "),
+            tag_no_case("starting with you "),
+        )),
     )
     .parse(input);
     match res {
@@ -157,14 +163,26 @@ fn parse_starting_with(input: &str) -> Option<(&str, ControllerRef)> {
 /// chain splitter does not bisect the opener.
 fn parse_each_player_votes_clause(input: &str) -> Option<(&str, Vec<String>, VoterScope)> {
     let res: nom::IResult<&str, VoterScope, OracleError<'_>> = alt((
-        value(VoterScope::AllPlayers, tag("each player votes for ")),
-        value(VoterScope::AllPlayers, tag("each player may vote for ")),
-        value(VoterScope::EachOpponent, tag("each opponent chooses ")),
-        value(VoterScope::EachOpponent, tag("each opponent may choose ")),
-        value(VoterScope::AllPlayers, tag("each player chooses ")),
+        value(
+            VoterScope::AllPlayers,
+            tag_no_case("each player votes for "),
+        ),
+        value(
+            VoterScope::AllPlayers,
+            tag_no_case("each player may vote for "),
+        ),
+        value(
+            VoterScope::EachOpponent,
+            tag_no_case("each opponent chooses "),
+        ),
+        value(
+            VoterScope::EachOpponent,
+            tag_no_case("each opponent may choose "),
+        ),
+        value(VoterScope::AllPlayers, tag_no_case("each player chooses ")),
         value(
             VoterScope::ControllerLabels,
-            tag("for each player, choose "),
+            tag_no_case("for each player, choose "),
         ),
     ))
     .parse(input);
@@ -194,19 +212,17 @@ fn parse_for_each_vote_clause<'a>(
     input: &'a str,
     choices: &[String],
 ) -> Option<(&'a str, (String, &'a str, bool))> {
-    let lower = input.to_lowercase();
-    let res: nom::IResult<&str, (), OracleError<'_>> =
-        value((), tag("for each ")).parse(lower.as_str());
-    let (lower_rest, ()) = res.ok()?;
-    // Slice the original input at the same offset.
-    let consumed = input.len() - lower_rest.len();
-    let original_rest = &input[consumed..];
+    // Case-insensitive opener; operates directly on original-case input so
+    // downstream slices preserve casing without offset arithmetic.
+    let res: nom::IResult<&'a str, (), OracleError<'a>> =
+        value((), tag_no_case("for each ")).parse(input);
+    let (rest_after_for, ()) = res.ok()?;
 
     // Try the "<player-noun> who chose <choice>, " shape first — its prefix
     // is alphabetic-leading just like the simple "<choice> vote, " shape, so
     // a successful match here unambiguously routes to the VotedFor wiring.
     if let Some((after_clause, choice_lower)) =
-        parse_who_chose_player_clause(original_rest, choices)
+        parse_who_chose_player_clause(rest_after_for, choices)
     {
         let (effect_text, rest) = read_effect_until_next_clause(after_clause);
         return Some((rest, (choice_lower, effect_text, true)));
@@ -215,7 +231,7 @@ fn parse_for_each_vote_clause<'a>(
     // Fallback: classic "<choice> vote, <effect>" shape.
     // Read the choice token (case-insensitive); choices are whitespace-free
     // single words in canonical Council's-dilemma cards.
-    let (choice, after_choice) = read_word(original_rest)?;
+    let (choice, after_choice) = read_word(rest_after_for)?;
     let choice_lower = choice.to_lowercase();
     if !choices.iter().any(|c| c == &choice_lower) {
         return None;
@@ -253,15 +269,12 @@ fn parse_each_class_clause<'a>(
     input: &'a str,
     choices: &[String],
 ) -> Option<(&'a str, (String, &'a str, bool))> {
-    let lower = input.to_lowercase();
-    // Consume "each " (case-insensitive) at the start of the clause.
-    let res: nom::IResult<&str, (), OracleError<'_>> =
-        value((), tag("each ")).parse(lower.as_str());
-    let (lower_rest, ()) = res.ok()?;
-    let consumed = input.len() - lower_rest.len();
-    let original_rest = &input[consumed..];
+    // Case-insensitive opener; operates directly on original-case input.
+    let res: nom::IResult<&'a str, (), OracleError<'a>> =
+        value((), tag_no_case("each ")).parse(input);
+    let (after_each, ()) = res.ok()?;
     // Read the choice token and confirm it's a valid class.
-    let (choice, after_choice) = read_word(original_rest)?;
+    let (choice, after_choice) = read_word(after_each)?;
     let choice_lower = choice.to_lowercase();
     if !choices.iter().any(|c| c == &choice_lower) {
         return None;
@@ -331,10 +344,10 @@ fn parse_who_chose_player_clause<'a>(
     input: &'a str,
     choices: &[String],
 ) -> Option<(&'a str, String)> {
-    let res: nom::IResult<&str, (), OracleError<'_>> =
-        value((), alt((tag("player"), tag("opponent")))).parse(input);
+    let res: nom::IResult<&'a str, (), OracleError<'a>> =
+        value((), alt((tag_no_case("player"), tag_no_case("opponent")))).parse(input);
     let (after_noun, ()) = res.ok()?;
-    let (after_who, _): (&str, &str) = tag::<_, _, OracleError<'_>>(" who chose ")
+    let (after_who, _): (&str, &str) = tag_no_case::<_, _, OracleError<'_>>(" who chose ")
         .parse(after_noun)
         .ok()?;
     let (choice_word, after_choice) = read_word(after_who)?;
