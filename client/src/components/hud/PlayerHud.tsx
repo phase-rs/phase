@@ -10,8 +10,8 @@ import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { PhaseIndicatorLeft, PhaseIndicatorRight } from "../controls/PhaseStopBar.tsx";
 import { CityBlessingBadge, CounterBadge, DungeonBadge, InitiativeBadge, MonarchBadge, StatusBadge } from "./HudBadges.tsx";
+import { EnchantmentsBadge } from "./EnchantmentsBadge.tsx";
 import { HudPlate } from "./HudPlate.tsx";
-import { PlayerAttachedAuras } from "./PlayerAttachedAuras.tsx";
 
 export function PlayerHud() {
   const playerId = usePerspectivePlayerId();
@@ -64,7 +64,6 @@ export function PlayerHud() {
       }`}
     >
       <PhaseIndicatorLeft />
-      <PlayerAttachedAuras playerId={playerId} />
       <HudPlate
         label={getPlayerDisplayName(playerId, playerId)}
         tone={hudTone}
@@ -76,6 +75,7 @@ export function PlayerHud() {
         onClick={isValidTarget ? handleTargetClick : undefined}
         trailing={
           <>
+            <EnchantmentsBadge playerId={playerId} />
             {showMatchScore && matchScore ? <ScoreBadge score={matchScore} player={0} /> : null}
             {designations.isMonarch ? <MonarchBadge /> : null}
             {designations.hasInitiative ? <InitiativeBadge /> : null}

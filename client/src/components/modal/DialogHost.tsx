@@ -64,11 +64,14 @@ export function DialogHost({ children }: { children: ReactNode }) {
   // cards while they spectate.
   const canActForWaitingState = useCanActForWaitingState();
   // UI-driven dialogs (e.g. the planeswalker / multi-ability picker fired
-  // from PermanentCard while the player has Priority) also need the host to
+  // from PermanentCard while the player has Priority, or the enchantments
+  // dialog fired from EnchantmentsBadge in HudPlate) also need the host to
   // anchor `fixed inset-0` descendants to the viewport. Subscribing here
   // keeps the contract uniform: any modal rendered inside DialogHost is
   // centered regardless of which signal triggered it.
-  const hasUiDialog = useUiStore((s) => s.pendingAbilityChoice != null);
+  const hasUiDialog = useUiStore(
+    (s) => s.pendingAbilityChoice != null || s.enchantmentsDialogPlayer != null,
+  );
   const [peeked, setPeeked] = useState(false);
   const shouldReduceMotion = useReducedMotion();
 

@@ -1,5 +1,5 @@
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 
 import { useOptionalDialogPeek } from "./dialogPeekContext.ts";
 
@@ -8,7 +8,7 @@ interface DialogShellProps {
   eyebrowClassName?: string;
   title: ReactNode;
   subtitle?: ReactNode;
-  size?: "sm" | "md";
+  size?: "sm" | "md" | "lg";
   scrollable?: boolean;
   children: ReactNode;
   footer?: ReactNode;
@@ -18,6 +18,7 @@ interface DialogShellProps {
 const SIZE_CLASS: Record<NonNullable<DialogShellProps["size"]>, string> = {
   sm: "max-w-sm",
   md: "max-w-md",
+  lg: "max-w-3xl",
 };
 
 export function DialogShell({
@@ -32,6 +33,18 @@ export function DialogShell({
   onClose,
 }: DialogShellProps) {
   const peek = useOptionalDialogPeek();
+
+  // Esc-to-close: standard modal contract. Only attach when the dialog is
+  // dismissable (consumers like ChoiceOverlay that omit `onClose` have a
+  // different dismissal model and shouldn't intercept Escape).
+  useEffect(() => {
+    if (!onClose) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
 
   const cardClass = [
     "relative z-10 w-full overflow-hidden rounded-[16px] lg:rounded-[24px] border border-white/10 bg-[#0b1020]/96 shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-md",
@@ -76,6 +89,7 @@ export function DialogShell({
               title={title}
               subtitle={subtitle}
             />
+            {onClose ? <CloseButton onClose={onClose} /> : null}
             {children}
             {footer ? (
               <div className="border-t border-white/5 px-3 py-3 lg:px-5 lg:py-4">
@@ -171,3 +185,36 @@ export function PeekTab({ onClick }: { onClick: () => void }) {
 
 /** Backwards-compatible alias for ChoiceOverlay's existing import site. */
 export const PeekButton = PeekTab;
+
+/**
+ * X close affordance in the dialog's top-right corner. Sits inside the card
+ * (so it scrolls with content if the dialog is scrollable) at z-20 to ride
+ * above the gradient overlay but below the peek tab. Renders only when the
+ * caller provides `onClose` — non-dismissable dialogs (ChoiceOverlay) don't
+ * get one.
+ */
+function CloseButton({ onClose }: { onClose: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClose}
+      aria-label="Close"
+      title="Close (Esc)"
+      className="absolute right-2 top-2 z-20 flex h-8 w-8 items-center justify-center rounded-full text-slate-400 transition hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 lg:right-3 lg:top-3"
+    >
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        viewBox="0 0 20 20"
+        fill="currentColor"
+        className="h-4 w-4"
+        aria-hidden
+      >
+        <path
+          fillRule="evenodd"
+          d="M4.28 4.22a.75.75 0 0 1 1.06 0L10 8.94l4.66-4.72a.75.75 0 1 1 1.06 1.06L11.06 10l4.66 4.72a.75.75 0 1 1-1.06 1.06L10 11.06l-4.66 4.72a.75.75 0 0 1-1.06-1.06L8.94 10 4.28 5.28a.75.75 0 0 1 0-1.06Z"
+          clipRule="evenodd"
+        />
+      </svg>
+    </button>
+  );
+}
