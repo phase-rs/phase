@@ -285,6 +285,7 @@ mod tests {
             condition: None,
             context: SpellContext::default(),
             player_scope: None,
+            starting_with: None,
             chosen_x: None,
             cost_paid_object: None,
             effect_context_object: None,

@@ -1697,10 +1697,18 @@ pub fn resolve_ability_chain(
     if let Some(ref scope) = ability.player_scope {
         let scoped_events_before = events.len();
         let controller = ability.controller;
-        let matching_players: Vec<PlayerId> = crate::game::players::apnap_order(state)
-            .into_iter()
-            .filter(|pid| matches_player_scope(state, *pid, scope, controller, ability.source_id))
-            .collect();
+        // CR 101.4 + CR 800.4: When the ability carries a `starting_with`
+        // override (Join Forces "Starting with you, ..."), the per-player
+        // iteration starts at the ability's controller rather than the active
+        // player. Falls back to standard APNAP when no override is set.
+        let matching_players: Vec<PlayerId> = crate::game::players::apnap_order_from(
+            state,
+            ability.starting_with.clone(),
+            controller,
+        )
+        .into_iter()
+        .filter(|pid| matches_player_scope(state, *pid, scope, controller, ability.source_id))
+        .collect();
         let (scoped_template, after_scope) = split_player_scope_chain(ability);
 
         let initial_waiting_for = state.waiting_for.clone();

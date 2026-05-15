@@ -92,6 +92,7 @@ mod tests {
             target_choice_timing: crate::types::ability::TargetChoiceTiming::Stack,
             description: None,
             player_scope: None,
+            starting_with: None,
             chosen_x: None,
             cost_paid_object: None,
             effect_context_object: None,

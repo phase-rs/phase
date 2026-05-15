@@ -64,6 +64,12 @@ pub fn build_resolved_from_def_with_targets(
     resolved.forward_result = def.forward_result;
     resolved.unless_pay = def.unless_pay.clone();
     resolved.player_scope = def.player_scope;
+    // CR 101.4 + CR 800.4: Propagate the turn-order override for `player_scope`
+    // iteration. The iteration driver in `effects/mod.rs` reads this and calls
+    // `players::apnap_order_from(state, starting_with, controller)` so Join
+    // Forces ("Starting with you, each player may pay any amount of mana")
+    // prompts the controller first regardless of whose turn it is.
+    resolved.starting_with = def.starting_with.clone();
     // CR 115.1 + CR 701.9b: Carry the parser-stamped target selection mode
     // through to the resolved ability so target-selection sites can short-circuit
     // `WaitingFor::TargetSelection` for `Random` abilities.
@@ -116,6 +122,9 @@ pub(crate) fn apply_instead_swap(
     // CR 608.2 + CR 608.2c: Effect-shape fields belong to the swapped effect,
     // not the parent.
     overridden.player_scope = sub.player_scope;
+    // CR 101.4 + CR 800.4: The turn-order override is an effect-shape attribute
+    // (which iteration order the scoped effect uses), so it follows the swap.
+    overridden.starting_with = sub.starting_with.clone();
     overridden.optional = sub.optional;
     overridden.optional_for = sub.optional_for;
     overridden.optional_targeting = sub.optional_targeting;
