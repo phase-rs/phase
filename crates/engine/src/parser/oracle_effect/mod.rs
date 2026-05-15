@@ -8347,11 +8347,14 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
         .is_ok()
     {
         Some(ChoiceType::LandType)
-    } else if tag::<_, _, E>("an opponent").parse(rest).is_ok() {
-        // CR 800.4a: Choose an opponent from among players in the game.
-        Some(ChoiceType::Opponent)
-    } else if tag::<_, _, E>("a player").parse(rest).is_ok() {
-        Some(ChoiceType::Player)
+    } else if let Some(pt) = try_parse_player_or_opponent_choice(rest) {
+        // CR 800.4a + CR 102.1: "Choose [a / an / a second / a third /
+        // a fourth / another] [player|opponent]" — the cardinal/article is
+        // informational at parse time; distinctness from prior choices is
+        // enforced at resolution time by
+        // `state.chosen_players_this_resolution` per the Gluntch the Bestower
+        // 2022-06-10 ruling: "All three players must be different players."
+        Some(pt)
     } else if tag::<_, _, E>("two colors").parse(rest).is_ok() {
         Some(ChoiceType::TwoColors)
     } else if tag::<_, _, E>("a word").parse(rest).is_ok() {
@@ -8363,6 +8366,38 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
         // must come AFTER all specific patterns above.
         try_parse_labeled_choice(rest).map(|options| ChoiceType::Labeled { options })
     }
+}
+
+/// CR 800.4a + CR 102.1: Recognize "a [cardinal] [player|opponent]" after the
+/// leading "choose " has already been stripped. The cardinal is one of
+/// `a / an / another / a second / a third / a fourth`; per the Gluntch the
+/// Bestower 2022-06-10 ruling the cardinal carries no parse-time semantics
+/// (distinctness is enforced at resolution time by
+/// `state.chosen_players_this_resolution`), so all forms collapse to the same
+/// `ChoiceType::Player` or `ChoiceType::Opponent`.
+fn try_parse_player_or_opponent_choice(rest: &str) -> Option<ChoiceType> {
+    type E<'a> = OracleError<'a>;
+    // Strip the cardinal/article. Order matters: longer phrases first so
+    // "a second " is preferred over "a ".
+    let rest = alt((
+        value((), tag::<_, _, E>("a second ")),
+        value((), tag::<_, _, E>("a third ")),
+        value((), tag::<_, _, E>("a fourth ")),
+        value((), tag::<_, _, E>("another ")),
+        value((), tag::<_, _, E>("a ")),
+        value((), tag::<_, _, E>("an ")),
+    ))
+    .parse(rest)
+    .map(|(r, _)| r)
+    .unwrap_or(rest);
+
+    if tag::<_, _, E>("opponent").parse(rest).is_ok() {
+        return Some(ChoiceType::Opponent);
+    }
+    if tag::<_, _, E>("player").parse(rest).is_ok() {
+        return Some(ChoiceType::Player);
+    }
+    None
 }
 
 /// Try to parse a labeled choice ("X or Y", "X, Y, or Z", "W, X, Y, or Z", ...) into
@@ -9282,6 +9317,18 @@ pub(crate) fn parse_effect_chain_ir(
     // sentence before the body clause. The count is stashed here and applied
     // to the immediately-following clause so the body executes N times.
     let mut pending_repeat_for: Option<QuantityExpr> = None;
+    // CR 608.2c + CR 102.1: Chain-level player-anaphor scope. When a clause in
+    // the chain produces `Effect::Choose { Player | Opponent }`, subsequent
+    // clauses ("they put +1/+1 counters", "they draw a card") must resolve
+    // bare "they"/"their"/"they control" against the chosen player rather
+    // than the caster. Carries `ControllerRef::ScopedPlayer` so the existing
+    // `relative_player_scope` mechanism routes pronouns to `TargetFilter::ScopedPlayer`
+    // (which reads `ability.scoped_player`, bound at runtime by
+    // `engine_resolution_choices` when the NamedChoice resolves). Sticky
+    // through the rest of the chain — the engine's
+    // `set_scoped_player_until_next_player_choose` ensures the *next* Choose
+    // Player node rebinds at runtime when reached.
+    let mut chain_scoped_player_active: bool = false;
 
     for (chunk_idx, chunk) in chunks.iter().enumerate() {
         let normalized_text = strip_leading_sequence_connector(&chunk.text).trim();
@@ -9998,9 +10045,21 @@ pub(crate) fn parse_effect_chain_ir(
             // CR 109.4 + CR 115.1 + CR 506.2: propagate relative-player scope
             // from the trigger condition so "that player controls" inside any
             // chunk resolves to TargetPlayer rather than defaulting to You.
+            // CR 608.2c + CR 102.1: When an earlier clause in this chain
+            // produced `Effect::Choose { Player | Opponent }`, subsequent
+            // clauses' player anaphors ("they"/"that player"/"they control")
+            // must resolve to `ScopedPlayer`. The chain-level flag is sticky
+            // until the chain ends (the runtime stops propagation at the
+            // next Choose Player node via
+            // `set_scoped_player_until_next_player_choose`).
             relative_player_scope: ctx
                 .relative_player_scope
                 .clone()
+                .or(if chain_scoped_player_active {
+                    Some(ControllerRef::ScopedPlayer)
+                } else {
+                    None
+                })
                 .or_else(|| player_scope.map(|_| ControllerRef::ScopedPlayer)),
             ..Default::default()
         };
@@ -10625,6 +10684,24 @@ pub(crate) fn parse_effect_chain_ir(
         } else {
             None
         };
+
+        // CR 608.2c + CR 102.1: Sticky chain-level player-anaphor scope. When
+        // this clause is `Effect::Choose { Player | Opponent }`, subsequent
+        // clauses' bare "they"/"that player"/"they control" must resolve to
+        // `TargetFilter::ScopedPlayer`. The chunk's `relative_player_scope`
+        // already received `ScopedPlayer` when *this* clause was parsed (from
+        // a prior chain entry's flag); we set the flag NOW so the NEXT chunk
+        // inherits it. Matches the Gluntch shape: "Choose a player. They put
+        // counters on a creature they control."
+        if matches!(
+            &clause.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::Player | ChoiceType::Opponent,
+                ..
+            }
+        ) {
+            chain_scoped_player_active = true;
+        }
 
         clauses.push(ClauseIr {
             parsed: clause,
@@ -27263,6 +27340,146 @@ mod tests {
             super::try_parse_named_choice("choose a creature card name"),
             Some(ChoiceType::CardName)
         );
+    }
+
+    /// CR 800.4a + CR 102.1 + Gluntch 2022-06-10: cardinal/article prefixes
+    /// ("a", "an", "another", "a second", "a third", "a fourth") in front of
+    /// "player"/"opponent" must all collapse to the same ChoiceType. The
+    /// 2022-06-10 ruling enforces distinctness at resolution time, not parse
+    /// time — so the parser does not need to distinguish these.
+    #[test]
+    fn named_choice_accepts_player_with_cardinal_prefix() {
+        assert_eq!(
+            super::try_parse_named_choice("choose a player"),
+            Some(ChoiceType::Player)
+        );
+        assert_eq!(
+            super::try_parse_named_choice("choose a second player"),
+            Some(ChoiceType::Player)
+        );
+        assert_eq!(
+            super::try_parse_named_choice("choose a third player"),
+            Some(ChoiceType::Player)
+        );
+        assert_eq!(
+            super::try_parse_named_choice("choose a fourth player"),
+            Some(ChoiceType::Player)
+        );
+        assert_eq!(
+            super::try_parse_named_choice("choose another player"),
+            Some(ChoiceType::Player)
+        );
+    }
+
+    #[test]
+    fn named_choice_accepts_opponent_with_cardinal_prefix() {
+        assert_eq!(
+            super::try_parse_named_choice("choose an opponent"),
+            Some(ChoiceType::Opponent)
+        );
+        assert_eq!(
+            super::try_parse_named_choice("choose a second opponent"),
+            Some(ChoiceType::Opponent)
+        );
+        assert_eq!(
+            super::try_parse_named_choice("choose another opponent"),
+            Some(ChoiceType::Opponent)
+        );
+    }
+
+    /// CR 608.2c + CR 102.1 + Gluntch 2022-06-10: "Choose a [cardinal] player
+    /// to <verb>" must parse the full Gluntch trigger body, populating
+    /// the per-choice draw / token sub-abilities and binding their target
+    /// filters to `ScopedPlayer`.
+    #[test]
+    fn parse_gluntch_trigger_body_full_chain() {
+        let def = parse_effect_chain(
+            "Choose a player. They put two +1/+1 counters on a creature they control. \
+             Choose a second player to draw a card. Then choose a third player to create two Treasure tokens.",
+            AbilityKind::Spell,
+        );
+
+        // Top-level effect is the first Choose Player.
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::Choose {
+                    choice_type: ChoiceType::Player,
+                    ..
+                }
+            ),
+            "top-level effect must be Effect::Choose {{ Player }}, got {:?}",
+            def.effect
+        );
+
+        // Walk the sub_ability chain.
+        let put_counter = def
+            .sub_ability
+            .as_ref()
+            .expect("sentence 1 must have a put-counter sub_ability");
+        match &*put_counter.effect {
+            Effect::PutCounter { target, .. } => {
+                // The counter target must require ScopedPlayer for "they
+                // control" to bind to the chosen player.
+                assert!(
+                    target.requires_bound_scoped_player(),
+                    "PutCounter target must scope to ScopedPlayer, got {target:?}"
+                );
+            }
+            other => panic!("expected PutCounter, got {other:?}"),
+        }
+
+        let choose_second = put_counter
+            .sub_ability
+            .as_ref()
+            .expect("chain must continue with the second Choose Player");
+        assert!(matches!(
+            *choose_second.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::Player,
+                ..
+            }
+        ));
+
+        let draw = choose_second
+            .sub_ability
+            .as_ref()
+            .expect("'choose a second player to draw a card' must chain a Draw");
+        match &*draw.effect {
+            Effect::Draw { target, .. } => {
+                assert!(
+                    target.requires_bound_scoped_player(),
+                    "Draw target must be ScopedPlayer, got {target:?}"
+                );
+            }
+            other => panic!("expected Draw, got {other:?}"),
+        }
+
+        let choose_third = draw
+            .sub_ability
+            .as_ref()
+            .expect("chain must continue with the third Choose Player");
+        assert!(matches!(
+            *choose_third.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::Player,
+                ..
+            }
+        ));
+
+        let token = choose_third
+            .sub_ability
+            .as_ref()
+            .expect("'choose a third player to create two Treasure tokens' must chain a Token");
+        match &*token.effect {
+            Effect::Token { owner, .. } => {
+                assert!(
+                    owner.requires_bound_scoped_player(),
+                    "Token owner must be ScopedPlayer, got {owner:?}"
+                );
+            }
+            other => panic!("expected Token, got {other:?}"),
+        }
     }
 
     #[test]

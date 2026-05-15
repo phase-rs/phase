@@ -6062,6 +6062,30 @@ impl TargetFilter {
         )
     }
 
+    /// CR 609.3 + CR 102.1: Returns `true` when correct resolution of this
+    /// filter requires `ability.scoped_player` to be `Some(_)`. When the
+    /// resolver hits this filter with `scoped_player == None`, the effect
+    /// must be skipped per "do as much as possible" — falling back to the
+    /// source's controller would assign the effect to the wrong player (the
+    /// caster instead of the chosen player who was never chosen because no
+    /// legal choice existed; see Gluntch the Bestower in a two-player game).
+    ///
+    /// Recognized shapes:
+    /// - `TargetFilter::ScopedPlayer` (the direct player reference)
+    /// - `TargetFilter::Typed { ..., controller: Some(ControllerRef::ScopedPlayer), ... }`
+    ///   (object selection scoped to the chosen player's permanents)
+    pub fn requires_bound_scoped_player(&self) -> bool {
+        if matches!(self, TargetFilter::ScopedPlayer) {
+            return true;
+        }
+        if let TargetFilter::Typed(tf) = self {
+            if matches!(tf.controller, Some(ControllerRef::ScopedPlayer)) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Extract the `InZone` zone from this filter's properties, if any.
     ///
     /// Recursively checks `Typed`, `Or`, `And`, and `Not` variants.
@@ -9377,6 +9401,43 @@ impl ResolvedAbility {
         }
     }
 
+    /// CR 608.2c + CR 102.1: Propagate `scoped_player` through the `sub_ability`
+    /// chain only up to (but not including) the next sub-ability whose effect is
+    /// itself `Effect::Choose { ChoiceType::Player | ChoiceType::Opponent, .. }` —
+    /// that node represents a fresh "Choose a player" instruction and will
+    /// rebind via its own `NamedChoice` continuation when it resolves.
+    /// `else_ability` is propagated identically (no Choose-boundary
+    /// inspection — an "Otherwise" branch is a sibling instruction, not the
+    /// next chained instruction).
+    ///
+    /// Used by `engine_resolution_choices` for the Gluntch class so that the
+    /// FIRST chosen player's bindings ("they put counters", "they draw")
+    /// route correctly until the SECOND `choose a player` reaches the stack
+    /// and binds a new player.
+    pub fn set_scoped_player_until_next_player_choose(&mut self, player: PlayerId) {
+        self.scoped_player = Some(player);
+        if let Some(sub) = self.sub_ability.as_mut() {
+            if matches!(
+                sub.effect,
+                Effect::Choose {
+                    choice_type: ChoiceType::Player | ChoiceType::Opponent,
+                    ..
+                }
+            ) {
+                // Stop propagation: the next Choose-Player node will rebind
+                // via its own NamedChoice continuation when it resolves.
+                if let Some(else_branch) = self.else_ability.as_mut() {
+                    else_branch.set_scoped_player_until_next_player_choose(player);
+                }
+                return;
+            }
+            sub.set_scoped_player_until_next_player_choose(player);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_scoped_player_until_next_player_choose(player);
+        }
+    }
+
     pub fn set_original_controller_recursive(&mut self, player: PlayerId) {
         self.original_controller = Some(player);
         if let Some(sub) = self.sub_ability.as_mut() {
@@ -10580,6 +10641,162 @@ mod tests {
             assert_eq!(
                 def.cost_categories(),
                 vec![CostCategory::SacrificesPermanent]
+            );
+        }
+    }
+
+    mod set_scoped_player_until_next_player_choose {
+        use super::*;
+        use crate::types::identifiers::ObjectId;
+
+        fn make_chain(effect: Effect, sub: Option<ResolvedAbility>) -> ResolvedAbility {
+            let mut ability = ResolvedAbility::new(effect, vec![], ObjectId(1), PlayerId(0));
+            if let Some(sub) = sub {
+                ability.sub_ability = Some(Box::new(sub));
+            }
+            ability
+        }
+
+        #[test]
+        fn propagates_to_non_choose_sub_ability() {
+            // chain: Draw -> PutCounter; bind should reach both nodes.
+            let sub = make_chain(
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Any,
+                },
+                None,
+            );
+            let mut chain = make_chain(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::ScopedPlayer,
+                },
+                Some(sub),
+            );
+            chain.set_scoped_player_until_next_player_choose(PlayerId(2));
+
+            assert_eq!(chain.scoped_player, Some(PlayerId(2)));
+            assert_eq!(
+                chain.sub_ability.as_ref().unwrap().scoped_player,
+                Some(PlayerId(2))
+            );
+        }
+
+        #[test]
+        fn stops_at_next_choose_player() {
+            // chain: Draw -> Choose(Player) -> PutCounter
+            // bind should reach Draw only; Choose(Player) and its sub stay None.
+            let inner_sub = make_chain(
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Any,
+                },
+                None,
+            );
+            let choose_node = make_chain(
+                Effect::Choose {
+                    choice_type: ChoiceType::Player,
+                    persist: false,
+                },
+                Some(inner_sub),
+            );
+            let mut chain = make_chain(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::ScopedPlayer,
+                },
+                Some(choose_node),
+            );
+            chain.set_scoped_player_until_next_player_choose(PlayerId(2));
+
+            assert_eq!(chain.scoped_player, Some(PlayerId(2)));
+            let choose = chain.sub_ability.as_ref().unwrap();
+            assert_eq!(
+                choose.scoped_player, None,
+                "next Choose-Player node MUST NOT be rebound — it picks a fresh player at runtime"
+            );
+            let beyond = choose.sub_ability.as_ref().unwrap();
+            assert_eq!(
+                beyond.scoped_player, None,
+                "nodes beyond the next Choose-Player node are bound by that node's own NamedChoice continuation"
+            );
+        }
+
+        #[test]
+        fn stops_at_next_choose_opponent() {
+            // Same guard for Choose(Opponent).
+            let choose_node = make_chain(
+                Effect::Choose {
+                    choice_type: ChoiceType::Opponent,
+                    persist: false,
+                },
+                None,
+            );
+            let mut chain = make_chain(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::ScopedPlayer,
+                },
+                Some(choose_node),
+            );
+            chain.set_scoped_player_until_next_player_choose(PlayerId(2));
+
+            assert_eq!(chain.scoped_player, Some(PlayerId(2)));
+            assert_eq!(chain.sub_ability.as_ref().unwrap().scoped_player, None);
+        }
+
+        #[test]
+        fn does_not_stop_at_non_player_choose() {
+            // Choose(CreatureType) does not gate — only Player/Opponent do.
+            let sub = make_chain(
+                Effect::Choose {
+                    choice_type: ChoiceType::CreatureType,
+                    persist: true,
+                },
+                None,
+            );
+            let mut chain = make_chain(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::ScopedPlayer,
+                },
+                Some(sub),
+            );
+            chain.set_scoped_player_until_next_player_choose(PlayerId(2));
+
+            assert_eq!(chain.scoped_player, Some(PlayerId(2)));
+            assert_eq!(
+                chain.sub_ability.as_ref().unwrap().scoped_player,
+                Some(PlayerId(2))
+            );
+        }
+
+        #[test]
+        fn propagates_through_else_ability() {
+            let else_branch = make_chain(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::ScopedPlayer,
+                },
+                None,
+            );
+            let mut chain = make_chain(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::ScopedPlayer,
+                },
+                None,
+            );
+            chain.else_ability = Some(Box::new(else_branch));
+            chain.set_scoped_player_until_next_player_choose(PlayerId(2));
+
+            assert_eq!(chain.scoped_player, Some(PlayerId(2)));
+            assert_eq!(
+                chain.else_ability.as_ref().unwrap().scoped_player,
+                Some(PlayerId(2))
             );
         }
     }

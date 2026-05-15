@@ -1931,6 +1931,14 @@ pub(super) fn parse_choose_ast(
         }
     }
 
+    // CR 608.2c + CR 102.1: "Choose a [player|opponent] to <verb>" — infinitive
+    // form where the body that runs after the choice is in the same sentence.
+    // Try this BEFORE the bare NamedChoice path so the infinitive body is
+    // captured as a chained sub_ability rather than dropped.
+    if let Some(ast) = try_parse_choose_player_then(text, lower) {
+        return Some(ast);
+    }
+
     if let Some(choice_type) = super::try_parse_named_choice(lower) {
         return Some(ChooseImperativeAst::NamedChoice { choice_type });
     }
@@ -1956,6 +1964,77 @@ pub(super) fn parse_choose_ast(
     }
 
     None
+}
+
+/// CR 608.2c + CR 102.1: Recognize "Choose a [cardinal] [player|opponent] to
+/// <verb>" — the infinitive form where the body follows the choice in the
+/// same sentence (Gluntch the Bestower: "Choose a second player to draw a
+/// card."). Synthesizes "they <verb>" and parses it with
+/// `relative_player_scope = Some(ScopedPlayer)` so the body's subject
+/// anaphors route to `TargetFilter::ScopedPlayer`. At runtime,
+/// `engine_resolution_choices` binds `ability.scoped_player` to the chosen
+/// player when the `NamedChoice` resolves.
+///
+/// The cardinal/article (`a / an / another / a second / a third / a fourth`)
+/// is consumed by `try_parse_player_or_opponent_choice`; the body that
+/// remains after " to " is parsed verbatim. Returns `None` when the choose
+/// phrase has no infinitive tail (the caller falls back to the bare
+/// `NamedChoice` arm).
+fn try_parse_choose_player_then(text: &str, lower: &str) -> Option<ChooseImperativeAst> {
+    type E<'a> = OracleError<'a>;
+    // Strip "choose ".
+    let (_, rest_lower) =
+        nom_on_lower(text, lower, |input| value((), tag("choose ")).parse(input))?;
+    let rest_lower_str = &lower[lower.len() - rest_lower.len()..];
+
+    // Strip the cardinal/article — same ordered alt as
+    // `try_parse_player_or_opponent_choice` (longer first).
+    let (after_cardinal, _) = alt((
+        value((), tag::<_, _, E>("a second ")),
+        value((), tag::<_, _, E>("a third ")),
+        value((), tag::<_, _, E>("a fourth ")),
+        value((), tag::<_, _, E>("another ")),
+        value((), tag::<_, _, E>("a ")),
+        value((), tag::<_, _, E>("an ")),
+    ))
+    .parse(rest_lower_str)
+    .unwrap_or((rest_lower_str, ()));
+
+    // Match "player " or "opponent " (note: trailing space required so we
+    // distinguish "player to <verb>" from "player." / "player,").
+    let (after_subject, choice_type) = alt((
+        value(ChoiceType::Player, tag::<_, _, E>("player ")),
+        value(ChoiceType::Opponent, tag::<_, _, E>("opponent ")),
+    ))
+    .parse(after_cardinal)
+    .ok()?;
+
+    // Consume "to " (the infinitive marker).
+    let (body_lower, _) = tag::<_, _, E>("to ").parse(after_subject).ok()?;
+    if body_lower.is_empty() {
+        return None;
+    }
+
+    // Map the body remainder back to the original-case slice. The body is a
+    // suffix of `text`, so its length-offset is preserved.
+    let body_orig = &text[text.len() - body_lower.len()..];
+
+    // Synthesize a sentence with subject "they" so the existing pronoun
+    // resolution path (`resolve_they_pronoun`) routes the subject through
+    // `relative_player_scope = ScopedPlayer` and emits
+    // `TargetFilter::ScopedPlayer`. Parse the chain with that scope set.
+    let synthesized = format!("they {body_orig}");
+    let mut body_ctx = ParseContext {
+        relative_player_scope: Some(ControllerRef::ScopedPlayer),
+        ..Default::default()
+    };
+    let body_def =
+        super::parse_effect_chain_with_context(&synthesized, AbilityKind::Spell, &mut body_ctx);
+
+    Some(ChooseImperativeAst::ChoosePlayerThen {
+        choice_type,
+        body: Box::new(body_def),
+    })
 }
 
 /// CR 115.1c + CR 601.2c + CR 608.2c: Detect "target X and target Y" wording
@@ -2262,6 +2341,15 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
         // `lower_choose_ast` are restricted to single-effect contexts and do
         // not exercise this variant.
         ChooseImperativeAst::TwoTargets { target_a, .. } => Effect::TargetOnly { target: target_a },
+        // CR 608.2c + CR 102.1: "Choose a player to <verb>" — the bare-Effect
+        // lowering surfaces only the Choose; the infinitive body sub_ability
+        // is attached by `lower_imperative_family_ast`. Direct callers of
+        // `lower_choose_ast` are restricted to single-effect contexts and do
+        // not exercise this variant.
+        ChooseImperativeAst::ChoosePlayerThen { choice_type, .. } => Effect::Choose {
+            choice_type,
+            persist: false,
+        },
     }
 }
 
@@ -5368,6 +5456,24 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 AbilityKind::Spell,
                 Effect::TargetOnly { target: target_b },
             )));
+            clause
+        }
+        // CR 608.2c + CR 102.1: "Choose a [player|opponent] to <verb>" — the
+        // infinitive body becomes a chained sub_ability after the Choose.
+        // The body was parsed with `relative_player_scope = ScopedPlayer`
+        // (see `parse_choose_ast`), so its subject anaphors route to
+        // `TargetFilter::ScopedPlayer`. At runtime,
+        // `engine_resolution_choices` binds `ability.scoped_player` to the
+        // chosen player when the `NamedChoice` resolves; the body then runs
+        // with the correct scoped player.
+        ImperativeFamilyAst::Structured(ImperativeAst::Choose(
+            ChooseImperativeAst::ChoosePlayerThen { choice_type, body },
+        )) => {
+            let mut clause = parsed_clause(Effect::Choose {
+                choice_type,
+                persist: false,
+            });
+            clause.sub_ability = Some(body);
             clause
         }
         // CR 701.23a + CR 107.1: Dual/N-way search ("a X card and a Y card") lowers

@@ -317,6 +317,22 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    // CR 609.3 + CR 102.1: When the token-owner filter requires
+    // `ability.scoped_player` (e.g., "they create two Treasure tokens" after
+    // "choose a player") but no player was chosen — because the choice was
+    // skipped for lack of legal options (Gluntch in a two-player game) — do
+    // nothing. Falling back to `ability.controller` would create the tokens
+    // for the caster, which is the wrong player.
+    if let Effect::Token { owner, .. } = &ability.effect {
+        if ability.scoped_player.is_none() && owner.requires_bound_scoped_player() {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+            });
+            return Ok(());
+        }
+    }
+
     let (
         script_name,
         fallback_power,

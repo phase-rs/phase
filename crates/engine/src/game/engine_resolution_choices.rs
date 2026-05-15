@@ -1371,6 +1371,27 @@ pub(super) fn handle_resolution_choice(
             }
 
             state.last_named_choice = ChoiceValue::from_choice(&choice_type, &choice);
+
+            // CR 608.2c + CR 102.1: When the choice resolves to a player, bind
+            // that player to the continuation chain's `scoped_player` so
+            // subsequent untargeted "they"/"that player" subjects in the same
+            // resolution route to the chosen player, and append to the
+            // per-resolution ledger so the next Choose Player/Opponent filters
+            // this player out (Gluntch the Bestower 2022-06-10 ruling: "All
+            // three players must be different players"). Propagation stops at
+            // the next Choose-Player node in the chain — that node will rebind
+            // via its own NamedChoice continuation.
+            if matches!(choice_type, ChoiceType::Player | ChoiceType::Opponent) {
+                if let Some(ChoiceValue::Player(chosen_pid)) = state.last_named_choice {
+                    state.chosen_players_this_resolution.push_back(chosen_pid);
+                    if let Some(ref mut pending) = state.pending_continuation {
+                        pending
+                            .chain
+                            .set_scoped_player_until_next_player_choose(chosen_pid);
+                    }
+                }
+            }
+
             set_priority(state, player);
             if let Some(pending) = state.pending_cast.take() {
                 if let Some(ability_index) = pending.activation_ability_index {
