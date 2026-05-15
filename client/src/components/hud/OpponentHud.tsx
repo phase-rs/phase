@@ -16,8 +16,8 @@ import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { ScoreBadge } from "../draft/ScoreBadge.tsx";
 import { CityBlessingBadge, CounterBadge, DungeonBadge, InitiativeBadge, MonarchBadge, StatusBadge } from "./HudBadges.tsx";
 import { AvatarHoverPreview } from "./AvatarHoverPreview.tsx";
+import { EnchantmentsBadge } from "./EnchantmentsBadge.tsx";
 import { HudPlate } from "./HudPlate.tsx";
-import { PlayerAttachedAuras } from "./PlayerAttachedAuras.tsx";
 import { IncomingAttackersPopover } from "./IncomingAttackersPopover.tsx";
 import { KickConfirmDialog } from "./KickConfirmDialog.tsx";
 import { UnderAttackOverlay } from "./UnderAttackOverlay.tsx";
@@ -195,8 +195,9 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
           avatarUrl={opponentAvatarUrl}
           playerId={opponentId}
           onClick={isValidTarget ? () => handlePlayerTarget(opponentId) : undefined}
-          trailing={matchScore || opponentDesignations.hasAny || opponentPoisonCounters > 0 || opponentRadCounters > 0 || opponentSpeed > 0 || opponentCompanion || isOnline || isOpponentPhasedOut ? (
+          trailing={
             <>
+              <EnchantmentsBadge playerId={opponentId} />
               {matchScore ? <ScoreBadge score={matchScore} player={1} /> : null}
               {opponentDesignations.isMonarch ? <MonarchBadge /> : null}
               {opponentDesignations.hasInitiative ? <InitiativeBadge /> : null}
@@ -213,14 +214,13 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
               {opponentCompanion ? <StatusBadge label="Companion" /> : null}
               {isOnline ? <ConnectionDotInline disconnected={isDisconnected} /> : null}
             </>
-          ) : undefined}
+          }
         >
           <div className="flex min-w-0 items-center gap-2">
             <LifeTotal playerId={opponentId} size="lg" hideLabel />
             <ManaPoolSummary playerId={opponentId} />
           </div>
         </HudPlate>
-        <PlayerAttachedAuras playerId={opponentId} />
       </div>
     );
   }

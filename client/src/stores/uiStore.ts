@@ -36,6 +36,14 @@ interface UiStoreState {
   turnBannerNumber: number | null;
   focusedOpponent: number | null;
   pendingAbilityChoice: { objectId: ObjectId; actions: GameAction[] } | null;
+  /** When non-null, the AttachmentsDialog is open showing every Aura
+   *  enchanting this player. Lives in uiStore (not local React state inside
+   *  the badge) so the dialog can be rendered as a child of `<DialogHost>`
+   *  — that's the only place where `fixed inset-0` dialog descendants
+   *  reliably anchor to the viewport. Rendering from inside HudPlate would
+   *  inherit Tailwind's `transform` containing block and shrink the
+   *  dialog. See DialogHost.tsx:113-122 for the contract. */
+  enchantmentsDialogPlayer: number | null;
   mobileHandOpen: boolean;
   debugPanelOpen: boolean;
   debugInteractionMode: boolean;
@@ -76,6 +84,7 @@ interface UiStoreActions {
   flashTurnBanner: (text: string, turnNumber: number) => void;
   setFocusedOpponent: (id: number | null) => void;
   setPendingAbilityChoice: (choice: { objectId: ObjectId; actions: GameAction[] } | null) => void;
+  setEnchantmentsDialogPlayer: (id: number | null) => void;
   setMobileHandOpen: (open: boolean) => void;
   toggleDebugPanel: () => void;
   toggleDebugInteractionMode: () => void;
@@ -111,6 +120,7 @@ export const useUiStore = create<UiStore>()((set) => ({
   turnBannerNumber: null,
   focusedOpponent: null,
   pendingAbilityChoice: null,
+  enchantmentsDialogPlayer: null,
   mobileHandOpen: false,
   debugPanelOpen: false,
   debugInteractionMode: false,
@@ -253,6 +263,7 @@ export const useUiStore = create<UiStore>()((set) => ({
   },
   setFocusedOpponent: (id) => set({ focusedOpponent: id }),
   setPendingAbilityChoice: (choice) => set({ pendingAbilityChoice: choice }),
+  setEnchantmentsDialogPlayer: (id) => set({ enchantmentsDialogPlayer: id }),
   setMobileHandOpen: (open) => set({ mobileHandOpen: open }),
   toggleDebugPanel: () => set((state) => ({ debugPanelOpen: !state.debugPanelOpen })),
   toggleDebugInteractionMode: () => set((state) => ({
