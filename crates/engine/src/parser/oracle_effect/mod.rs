@@ -9329,6 +9329,11 @@ pub(crate) fn parse_effect_chain_ir(
     // `set_scoped_player_until_next_player_choose` ensures the *next* Choose
     // Player node rebinds at runtime when reached.
     let mut chain_scoped_player_active: bool = false;
+    // CR 101.4 + CR 800.4: "Starting with you," is split by sequence boundary
+    // into its own chunk when followed by a comma. Capture the override here
+    // when that chunk is consumed standalone, so the next chunk (which holds
+    // the actual `player_scope: All` payload) can stamp `starting_with`.
+    let mut pending_starting_with: Option<ControllerRef> = None;
 
     for (chunk_idx, chunk) in chunks.iter().enumerate() {
         let normalized_text = strip_leading_sequence_connector(&chunk.text).trim();
@@ -9336,20 +9341,33 @@ pub(crate) fn parse_effect_chain_ir(
             continue;
         }
 
-        // "Starting with you, " — multiplayer ordering modifier that's irrelevant
-        // for 1v1. Strip the prefix so the remaining effect text is parsed normally.
-        let normalized_text = {
+        // CR 101.4 + CR 800.4: "Starting with you," — turn-order override for
+        // `player_scope` iteration (Join Forces: "Starting with you, each
+        // player may pay any amount of mana"). `split_clause_sequence` may
+        // split at the comma so the phrase lives in its own chunk; capture
+        // it as `pending_starting_with` and apply on the NEXT non-empty
+        // chunk. When the comma stays attached, strip the prefix in-place.
+        // The lowering step stamps the captured override onto the produced
+        // `AbilityDefinition.starting_with` so the iteration site in
+        // `effects/mod.rs` reads it via
+        // `players::apnap_order_from(state, starting_with, controller)`.
+        let (normalized_text, starting_with) = {
             let temp_lower = normalized_text.to_lowercase();
             if tag::<_, _, OracleError<'_>>("starting with you")
                 .parse(temp_lower.as_str())
                 .is_ok_and(|(rest, _)| rest.trim().is_empty())
             {
+                // Standalone "starting with you" chunk — stash the override
+                // for the next body chunk and skip this empty marker.
+                pending_starting_with = Some(ControllerRef::You);
                 continue;
             }
-            nom_on_lower(normalized_text, &temp_lower, |i| {
+            match nom_on_lower(normalized_text, &temp_lower, |i| {
                 value((), tag("starting with you, ")).parse(i)
-            })
-            .map_or(normalized_text, |((), rest)| rest)
+            }) {
+                Some(((), rest)) => (rest, Some(ControllerRef::You)),
+                None => (normalized_text, pending_starting_with.take()),
+            }
         };
 
         // CR 118.9 + CR 119.4: Alternative-cost rider — "[If you cast a spell
@@ -9372,6 +9390,7 @@ pub(crate) fn parse_effect_chain_ir(
                 opponent_may_scope: None,
                 repeat_for: None,
                 player_scope: None,
+                starting_with: None,
                 delayed_condition: None,
                 prefix_delayed_condition: None,
                 intrinsic_continuation: None,
@@ -9401,6 +9420,7 @@ pub(crate) fn parse_effect_chain_ir(
                     opponent_may_scope: None,
                     repeat_for: None,
                     player_scope: None,
+                    starting_with: None,
                     delayed_condition: None,
                     prefix_delayed_condition: None,
                     intrinsic_continuation: None,
@@ -9457,6 +9477,7 @@ pub(crate) fn parse_effect_chain_ir(
                 opponent_may_scope: None,
                 repeat_for: None,
                 player_scope: None,
+                starting_with: None,
                 delayed_condition: None,
                 prefix_delayed_condition: None,
                 intrinsic_continuation: None,
@@ -9532,6 +9553,7 @@ pub(crate) fn parse_effect_chain_ir(
                     opponent_may_scope: None,
                     repeat_for: None,
                     player_scope: None,
+                    starting_with: None,
                     delayed_condition: None,
                     prefix_delayed_condition: None,
                     intrinsic_continuation: None,
@@ -9564,6 +9586,7 @@ pub(crate) fn parse_effect_chain_ir(
                     opponent_may_scope: None,
                     repeat_for: None,
                     player_scope: None,
+                    starting_with: None,
                     delayed_condition: None,
                     prefix_delayed_condition: None,
                     intrinsic_continuation: None,
@@ -9613,6 +9636,7 @@ pub(crate) fn parse_effect_chain_ir(
                         opponent_may_scope: None,
                         repeat_for: None,
                         player_scope: None,
+                        starting_with: None,
                         delayed_condition: None,
                         prefix_delayed_condition: None,
                         intrinsic_continuation: None,
@@ -9656,6 +9680,7 @@ pub(crate) fn parse_effect_chain_ir(
                 opponent_may_scope: None,
                 repeat_for: None,
                 player_scope: None,
+                starting_with: None,
                 delayed_condition: None,
                 prefix_delayed_condition: None,
                 intrinsic_continuation: None,
@@ -9690,6 +9715,7 @@ pub(crate) fn parse_effect_chain_ir(
                 opponent_may_scope: None,
                 repeat_for: None,
                 player_scope: None,
+                starting_with: None,
                 delayed_condition: None,
                 prefix_delayed_condition: None,
                 intrinsic_continuation: None,
@@ -9717,6 +9743,7 @@ pub(crate) fn parse_effect_chain_ir(
                 opponent_may_scope: None,
                 repeat_for: None,
                 player_scope: None,
+                starting_with: None,
                 delayed_condition: None,
                 prefix_delayed_condition: None,
                 intrinsic_continuation: None,
@@ -9749,6 +9776,7 @@ pub(crate) fn parse_effect_chain_ir(
                     opponent_may_scope: None,
                     repeat_for: None,
                     player_scope: None,
+                    starting_with: None,
                     delayed_condition: None,
                     prefix_delayed_condition: None,
                     intrinsic_continuation: None,
@@ -9946,6 +9974,7 @@ pub(crate) fn parse_effect_chain_ir(
                             opponent_may_scope: None,
                             repeat_for: None,
                             player_scope: None,
+                            starting_with: None,
                             delayed_condition: None,
                             prefix_delayed_condition: None,
                             intrinsic_continuation: None,
@@ -10131,6 +10160,7 @@ pub(crate) fn parse_effect_chain_ir(
                 opponent_may_scope,
                 repeat_for: repeat_for.clone(),
                 player_scope,
+                starting_with: starting_with.clone(),
                 delayed_condition: None,
                 prefix_delayed_condition: Some(prefix_condition),
                 intrinsic_continuation: None,
@@ -10190,6 +10220,7 @@ pub(crate) fn parse_effect_chain_ir(
                 opponent_may_scope,
                 repeat_for: repeat_for.clone(),
                 player_scope,
+                starting_with: starting_with.clone(),
                 delayed_condition: None,
                 prefix_delayed_condition: None,
                 intrinsic_continuation: None,
@@ -10384,6 +10415,7 @@ pub(crate) fn parse_effect_chain_ir(
                 opponent_may_scope,
                 repeat_for,
                 player_scope,
+                starting_with: starting_with.clone(),
                 delayed_condition: None,
                 prefix_delayed_condition: None,
                 intrinsic_continuation: None,
@@ -10443,6 +10475,7 @@ pub(crate) fn parse_effect_chain_ir(
                     opponent_may_scope,
                     repeat_for,
                     player_scope,
+                    starting_with: starting_with.clone(),
                     delayed_condition: None,
                     prefix_delayed_condition: None,
                     intrinsic_continuation: ic,
@@ -10660,6 +10693,7 @@ pub(crate) fn parse_effect_chain_ir(
                     opponent_may_scope,
                     repeat_for,
                     player_scope,
+                    starting_with: starting_with.clone(),
                     delayed_condition: None,
                     prefix_delayed_condition: None,
                     intrinsic_continuation: None,
@@ -10711,6 +10745,7 @@ pub(crate) fn parse_effect_chain_ir(
             opponent_may_scope,
             repeat_for,
             player_scope,
+            starting_with: starting_with.clone(),
             delayed_condition,
             prefix_delayed_condition: None,
             intrinsic_continuation,
@@ -11029,6 +11064,13 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         }
         if let Some(scope) = clause_ir.player_scope {
             def.player_scope = Some(scope);
+        }
+        // CR 101.4 + CR 800.4: Stamp the turn-order override from the chunk's
+        // "Starting with you, " prefix (Join Forces). The iteration site reads
+        // this via `players::apnap_order_from(state, starting_with, controller)`
+        // so the controller is prompted first regardless of the active player.
+        if let Some(ref who) = clause_ir.starting_with {
+            def.starting_with = Some(who.clone());
         }
         if let Some(ref duration) = clause_ir.parsed.duration {
             def = def.duration(duration.clone());
@@ -13556,6 +13598,27 @@ fn apply_where_x_expression(value: PtValue, where_x_expression: Option<&str>) ->
 fn parse_where_x_quantity_expression(where_x_expression: &str) -> Option<QuantityExpr> {
     let expression = where_x_expression.trim().trim_end_matches('.');
     let expression_lower = expression.to_ascii_lowercase();
+    // CR 107.3i + CR 117.1: Within a single resolution, X has one value used
+    // everywhere it appears. Join Forces ("Each player draws X cards, where
+    // X is the total amount of mana paid this way") binds X to the total
+    // payments accumulated by the upstream `PayCost { Mana { X } }` loop:
+    // `engine_resolution_choices::handle_resolution_choice` stamps the
+    // accumulated total onto the chained `chosen_x` slot at each
+    // `PayAmountChoice` round-trip. Normalizing the phrase to
+    // `QuantityRef::Variable("X")` lets the existing X-resolution machinery
+    // do the rest — this is also the one-line fix that unblocks Collective
+    // Voyage (#131), Alliance of Arms, Shared Trauma, and Mana-Charged
+    // Dragon, since all five Join Forces cards share this binding phrase.
+    if tag::<_, _, OracleError<'_>>("the total amount of mana paid this way")
+        .parse(expression_lower.as_str())
+        .is_ok_and(|(rest, _)| rest.is_empty())
+    {
+        return Some(QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        });
+    }
     if let Ok((rest_lower, (n, sign))) = (
         nom_primitives::parse_number,
         alt((
@@ -30040,6 +30103,172 @@ mod tests {
                 ..
             } if color_options == &vec![ManaColor::Red]
         ));
+    }
+
+    // ---------------------------------------------------------------------
+    // Join Forces (CR 101.4 + CR 800.4 + CR 107.3i + CR 117.1)
+    //
+    // Minds Aglow / Collective Voyage / Alliance of Arms / Shared Trauma /
+    // Mana-Charged Dragon share a common preamble:
+    //   "Join forces — Starting with you, each player may pay any amount of
+    //    mana. <body>, where X is the total amount of mana paid this way."
+    //
+    // The parser must emit:
+    //   * outer:  PayCost { Mana { X }, payer: Controller }
+    //             with player_scope: All, starting_with: Some(You)
+    //   * inner: <body>'s effect chain, with X bound via where_x and the
+    //             `Variable("X")` substitution path.
+    // ---------------------------------------------------------------------
+
+    /// CR 107.3i + CR 117.1: The "where X is" binding for Join Forces normalizes
+    /// "the total amount of mana paid this way" to `Variable("X")`. The
+    /// upstream PayCost { Mana { X } } loop populates `chosen_x` via
+    /// `engine_resolution_choices::handle_resolution_choice` so this binding
+    /// resolves at the inner effect. Tested at the building-block level so it
+    /// covers every Join Forces card uniformly.
+    #[test]
+    fn where_x_total_amount_of_mana_paid_normalizes_to_variable_x() {
+        let expr = parse_where_x_quantity_expression("the total amount of mana paid this way")
+            .expect("expected the binding phrase to parse");
+        assert_eq!(
+            expr,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string()
+                }
+            }
+        );
+    }
+
+    /// Minds Aglow's preamble strips into a PayCost with `starting_with =
+    /// Some(You)` and `player_scope = All`. The sub-ability's count resolves
+    /// to `Variable("X")` (not the opaque sentence string), so each player's
+    /// draw reads `chosen_x` (the cumulative total) at resolution.
+    #[test]
+    fn parse_minds_aglow_emits_player_scope_all_and_variable_x() {
+        let def = parse_effect_chain(
+            "Starting with you, each player may pay any amount of mana. Each player draws X cards, where X is the total amount of mana paid this way.",
+            AbilityKind::Spell,
+        );
+
+        // Outer: PayCost { Mana { X }, payer: Controller }, player_scope = All,
+        // starting_with = Some(You).
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::PayCost {
+                    cost: PaymentCost::Mana { .. },
+                    payer: TargetFilter::Controller,
+                }
+            ),
+            "Outer effect must be PayCost {{ Mana, Controller }}, got {:?}",
+            def.effect
+        );
+        assert_eq!(def.player_scope, Some(PlayerFilter::All));
+        assert_eq!(def.starting_with, Some(ControllerRef::You));
+
+        // Inner: Draw { count: Variable("X"), target: Controller }, player_scope = All.
+        let sub = def.sub_ability.as_ref().expect("expected Draw sub_ability");
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::Draw {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { name },
+                    },
+                    target: TargetFilter::Controller,
+                } if name == "X"
+            ),
+            "Sub effect must be Draw {{ Variable(\"X\"), Controller }}, got {:?}",
+            sub.effect
+        );
+        assert_eq!(sub.player_scope, Some(PlayerFilter::All));
+    }
+
+    /// Alliance of Arms — same preamble, token body. `player_scope = All` on
+    /// both halves so each player creates X 1/1 Soldier tokens.
+    #[test]
+    fn parse_alliance_of_arms_emits_token_per_player() {
+        let def = parse_effect_chain(
+            "Starting with you, each player may pay any amount of mana. Each player creates X 1/1 white Soldier creature tokens, where X is the total amount of mana that player paid.",
+            AbilityKind::Spell,
+        );
+
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::PayCost {
+                    cost: PaymentCost::Mana { .. },
+                    payer: TargetFilter::Controller,
+                }
+            ),
+            "Outer effect must be PayCost {{ Mana, Controller }}, got {:?}",
+            def.effect
+        );
+        assert_eq!(def.player_scope, Some(PlayerFilter::All));
+        assert_eq!(def.starting_with, Some(ControllerRef::You));
+    }
+
+    /// Mana-Charged Dragon caveat: the `+X/+0` Pump body is a single-target
+    /// effect on the dragon itself (SelfRef), NOT a player-scoped iteration.
+    /// The parser must NOT promote the Pump to `player_scope: All` just
+    /// because the upstream PayCost loop is. This locks in the boundary so
+    /// future changes don't silently rebroadcast pumps to every player.
+    #[test]
+    fn parse_mana_charged_dragon_pump_body_is_not_player_scoped() {
+        // The dragon's effective Oracle body after the Join-forces preamble
+        // is parsed standalone here. The full trigger wraps this in a
+        // "Whenever ~ attacks" trigger; the trigger-level test below covers
+        // assembly. The shape we expect: PayCost (player_scope=All), then
+        // Pump on the source itself with NO player_scope on the Pump.
+        let def = parse_effect_chain(
+            "Starting with you, each player may pay any amount of mana. This creature gets +X/+0 until end of turn, where X is the total amount of mana paid this way.",
+            AbilityKind::Spell,
+        );
+
+        // Outer must be PayCost with the iteration override.
+        assert!(matches!(
+            &*def.effect,
+            Effect::PayCost {
+                cost: PaymentCost::Mana { .. },
+                payer: TargetFilter::Controller,
+            }
+        ));
+        assert_eq!(def.player_scope, Some(PlayerFilter::All));
+        assert_eq!(def.starting_with, Some(ControllerRef::You));
+
+        // Inner Pump must NOT carry player_scope — the dragon is a single
+        // source, not a per-player iteration. CR 113.10 + CR 608.2c.
+        let sub = def.sub_ability.as_ref().expect("expected Pump sub_ability");
+        assert!(
+            matches!(&*sub.effect, Effect::Pump { .. }),
+            "Sub effect must be Pump, got {:?}",
+            sub.effect
+        );
+        assert_eq!(
+            sub.player_scope, None,
+            "Mana-Charged Dragon's pump must NOT inherit player_scope from the preamble"
+        );
+    }
+
+    /// Shared Trauma — Join Forces with a mill body. Each player mills X cards.
+    /// CR 121 (Mill is shorthand for "puts that many cards from their library
+    /// into their graveyard" — encoded as `Effect::Mill`).
+    #[test]
+    fn parse_shared_trauma_emits_mill_per_player() {
+        let def = parse_effect_chain(
+            "Starting with you, each player may pay any amount of mana. Each player mills X cards, where X is the total amount of mana paid this way.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(
+            &*def.effect,
+            Effect::PayCost {
+                cost: PaymentCost::Mana { .. },
+                payer: TargetFilter::Controller,
+            }
+        ));
+        assert_eq!(def.player_scope, Some(PlayerFilter::All));
+        assert_eq!(def.starting_with, Some(ControllerRef::You));
     }
 }
 

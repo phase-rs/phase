@@ -89,6 +89,12 @@ pub(crate) struct ClauseIr {
     pub(crate) repeat_for: Option<QuantityExpr>,
     /// Player scope iteration ("each opponent", "each player").
     pub(crate) player_scope: Option<PlayerFilter>,
+    /// CR 101.4 + CR 800.4: Turn-order override for `player_scope` iteration.
+    /// `None` (default) = use APNAP starting from the active player.
+    /// `Some(ControllerRef::You)` = start with the controller (Join Forces
+    /// "Starting with you, each player may pay any amount of mana").
+    /// Stamped onto the produced `AbilityDefinition` during lowering.
+    pub(crate) starting_with: Option<ControllerRef>,
     /// CR 603.7: Temporal suffix delayed trigger condition.
     pub(crate) delayed_condition: Option<DelayedTriggerCondition>,
     /// CR 603.7a: Temporal prefix delayed trigger condition.
@@ -150,6 +156,7 @@ mod tests {
             opponent_may_scope: None,
             repeat_for: None,
             player_scope: None,
+            starting_with: None,
             delayed_condition: None,
             prefix_delayed_condition: None,
             intrinsic_continuation: None,
@@ -183,6 +190,7 @@ mod tests {
                 opponent_may_scope: None,
                 repeat_for: None,
                 player_scope: None,
+                starting_with: None,
                 delayed_condition: None,
                 prefix_delayed_condition: None,
                 intrinsic_continuation: None,

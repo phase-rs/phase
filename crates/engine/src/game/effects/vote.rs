@@ -255,6 +255,11 @@ pub fn resolve_tally(
             unless_pay: None,
             distribution: None,
             player_scope: per_choice_player_scope,
+            // CR 101.4 + CR 800.4: Inherit the parent ability's turn-order
+            // override so per-vote-choice fan-out preserves it across the
+            // synthesized chain (vote sub-effects are children of the
+            // resolving ability and must share its iteration semantics).
+            starting_with: per_choice_effect[idx].starting_with.clone(),
             chosen_x: None,
             cost_paid_object: None,
             effect_context_object: None,
@@ -310,6 +315,10 @@ fn resolved_from_def(
         unless_pay: None,
         distribution: None,
         player_scope: None,
+        // CR 101.4 + CR 800.4: Carry through the parent def's turn-order
+        // override so vote sub-effects resolve with consistent iteration
+        // semantics. None for non-Join-Forces vote chains.
+        starting_with: def.starting_with.clone(),
         chosen_x: None,
         cost_paid_object: None,
         effect_context_object: None,
@@ -447,6 +456,7 @@ mod tests {
             unless_pay: None,
             distribution: None,
             player_scope: None,
+            starting_with: None,
             chosen_x: None,
             cost_paid_object: None,
             effect_context_object: None,
@@ -532,6 +542,7 @@ mod tests {
             unless_pay: None,
             distribution: None,
             player_scope: None,
+            starting_with: None,
             chosen_x: None,
             cost_paid_object: None,
             effect_context_object: None,
@@ -818,6 +829,7 @@ mod tests {
             unless_pay: None,
             distribution: None,
             player_scope: None,
+            starting_with: None,
             chosen_x: None,
             cost_paid_object: None,
             effect_context_object: None,
@@ -960,6 +972,7 @@ mod tests {
             unless_pay: None,
             distribution: None,
             player_scope: None,
+            starting_with: None,
             chosen_x: None,
             cost_paid_object: None,
             effect_context_object: None,
