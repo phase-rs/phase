@@ -264,45 +264,11 @@ fn player_has_cant_lose(state: &GameState, player_id: PlayerId) -> bool {
     if from_permanent {
         return true;
     }
-    transient_grants_static_mode_to_player(state, player_id, &StaticMode::CantLoseTheGame)
-}
-
-/// CR 611.1 + CR 611.3: Scan `state.transient_continuous_effects` for an effect
-/// bound to `player_id` (via `TargetFilter::SpecificPlayer { id }`) whose
-/// modifications grant the given static `mode`. Honors duration-conditional
-/// (`ForAsLongAs`) and explicit `condition` gates the same way
-/// `player_has_protection_from_everything` does.
-fn transient_grants_static_mode_to_player(
-    state: &GameState,
-    player_id: PlayerId,
-    mode: &StaticMode,
-) -> bool {
-    use crate::types::ability::{ContinuousModification, Duration};
-    for tce in &state.transient_continuous_effects {
-        let TargetFilter::SpecificPlayer { id: affected_id } = tce.affected else {
-            continue;
-        };
-        if affected_id != player_id {
-            continue;
-        }
-        if let Duration::ForAsLongAs { ref condition } = tce.duration {
-            if !layers::evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
-        }
-        if let Some(ref condition) = tce.condition {
-            if !layers::evaluate_condition(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
-        }
-        let grants_mode = tce.modifications.iter().any(|m| {
-            matches!(m, ContinuousModification::AddStaticMode { mode: m_mode } if m_mode == mode)
-        });
-        if grants_mode {
-            return true;
-        }
-    }
-    false
+    super::static_abilities::transient_grants_static_mode_to_player(
+        state,
+        player_id,
+        &StaticMode::CantLoseTheGame,
+    )
 }
 
 /// Check if a static ability from `source_controller` with the given `affected` filter
