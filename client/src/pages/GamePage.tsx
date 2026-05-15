@@ -82,6 +82,7 @@ import { ConnectionToast } from "../components/multiplayer/ConnectionToast.tsx";
 import { EmoteOverlay } from "../components/multiplayer/EmoteOverlay.tsx";
 import { LobbyProgress } from "../components/multiplayer/LobbyProgress.tsx";
 import { DisconnectChoiceDialog } from "../components/hud/DisconnectChoiceDialog.tsx";
+import { PlayerEnchantmentsDialog } from "../components/hud/PlayerEnchantmentsDialog.tsx";
 import { PausedBanner } from "../components/chrome/PausedBanner.tsx";
 import type { P2PAdapterEvent } from "../adapter/p2p-adapter.ts";
 import { WebSocketAdapter } from "../adapter/ws-adapter.ts";
@@ -1218,6 +1219,12 @@ function GamePageContent({
 
         {/* Ability choice picker (planeswalkers, multi-ability permanents) */}
         <AbilityChoiceModal />
+
+        {/* Player-attached Aura viewer (Curse cycle, Faith's Fetters, etc.).
+            Mounted here — not from inside HudPlate where the badge lives —
+            so the dialog's `fixed inset-0` shell anchors to the viewport
+            instead of HudPlate's transform-CB bounding box. */}
+        <PlayerEnchantmentsDialog />
 
         {/* Optional additional cost choice (kicker, blight, "or pay") */}
         {waitingFor?.type === "OptionalCostChoice" &&
