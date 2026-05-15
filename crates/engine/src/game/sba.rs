@@ -240,10 +240,18 @@ fn controls_ascend_permanent(state: &GameState, player: PlayerId) -> bool {
 }
 
 /// CR 104.3b + CR 810.8a: Check if a player has active CantLoseTheGame protection
-/// from any permanent on the battlefield. If so, SBAs that would cause that player
-/// to lose the game are skipped.
+/// from any permanent on the battlefield OR from a spell-applied transient
+/// continuous effect (Everybody Lives!: "Players can't lose the game this turn.")
+/// bound to this specific player. If so, SBAs that would cause that player to
+/// lose the game are skipped.
+///
+/// Mirrors `player_has_protection_from_everything` in `static_abilities.rs`:
+/// for transient effects scoped to players, we scan `transient_continuous_effects`
+/// for entries pinned to this player via `SpecificPlayer { id }` whose
+/// modifications grant `StaticMode::CantLoseTheGame`. The battlefield scan
+/// handles the permanent-source path (Platinum Angel and friends).
 fn player_has_cant_lose(state: &GameState, player_id: PlayerId) -> bool {
-    state.battlefield.iter().any(|&id| {
+    let from_permanent = state.battlefield.iter().any(|&id| {
         let obj = match state.objects.get(&id) {
             Some(o) => o,
             None => return false,
@@ -252,7 +260,15 @@ fn player_has_cant_lose(state: &GameState, player_id: PlayerId) -> bool {
             def.mode == StaticMode::CantLoseTheGame
                 && static_affects_player(obj.controller, &def.affected, player_id)
         })
-    })
+    });
+    if from_permanent {
+        return true;
+    }
+    super::static_abilities::transient_grants_static_mode_to_player(
+        state,
+        player_id,
+        &StaticMode::CantLoseTheGame,
+    )
 }
 
 /// Check if a static ability from `source_controller` with the given `affected` filter
@@ -2197,6 +2213,43 @@ mod tests {
             state.players[1].is_eliminated,
             "Opponent of CantLoseTheGame controller should still be eliminated"
         );
+    }
+
+    /// CR 104.3 + CR 704.5b + CR 611.1: Spell-applied transient continuous
+    /// effects (Everybody Lives!: "Players can't lose the game ... this turn.")
+    /// bound to a specific player via `SpecificPlayer { id }` must also block
+    /// draw-from-empty elimination, mirroring the permanent-source path. This
+    /// covers the bug where attempting to draw on an empty library caused a
+    /// player to lose despite Everybody Lives! resolving on the same turn.
+    #[test]
+    fn sba_cant_lose_tce_prevents_draw_from_empty() {
+        use crate::types::ability::{ContinuousModification, Duration};
+        let mut state = setup();
+        state.players[0].drew_from_empty_library = true;
+
+        // Install a TCE that grants CantLoseTheGame to player 0 — matches the
+        // shape `register_transient_effect` creates when resolving the
+        // GenericEffect emitted for "Players can't lose the game this turn".
+        state.add_transient_continuous_effect(
+            crate::types::identifiers::ObjectId(999),
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificPlayer { id: PlayerId(0) },
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantLoseTheGame,
+            }],
+            None,
+        );
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !state.players[0].is_eliminated,
+            "Player covered by spell-applied CantLoseTheGame TCE must not be \
+             eliminated by draw-from-empty SBA"
+        );
+        assert!(!state.eliminated_players.contains(&PlayerId(0)));
     }
 
     // --- CR 702.131b: Ascend / city's blessing grant SBA ---

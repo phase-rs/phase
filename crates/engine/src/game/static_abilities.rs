@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::functioning_abilities::{battlefield_active_statics, game_functioning_statics};
 use crate::game::layers::{evaluate_condition, evaluate_condition_with_recipient};
-use crate::types::ability::{TargetFilter, TypedFilter};
+use crate::types::ability::{ContinuousModification, Duration, TargetFilter, TypedFilter};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -514,6 +514,48 @@ pub fn check_static_ability(
     false
 }
 
+/// CR 611.1 + CR 611.3: Scan `state.transient_continuous_effects` for an effect
+/// bound to `player_id` (via `TargetFilter::SpecificPlayer { id }`) whose
+/// modifications include `AddStaticMode { mode }` matching the given `mode`.
+/// Honors `ForAsLongAs` duration conditions and explicit `condition` gates.
+///
+/// This is the canonical query for player-scoped spell-applied restrictions
+/// (e.g., Everybody Lives! fans out to per-player `SpecificPlayer` TCEs in
+/// `effect.rs`). Callers (player_has_cant_win, player_has_cant_gain_life,
+/// player_has_cant_lose_life) use this alongside `check_static_ability` so
+/// both permanent-sourced and spell-sourced protection are covered.
+pub(crate) fn transient_grants_static_mode_to_player(
+    state: &GameState,
+    player_id: PlayerId,
+    mode: &StaticMode,
+) -> bool {
+    for tce in &state.transient_continuous_effects {
+        let TargetFilter::SpecificPlayer { id: affected_id } = tce.affected else {
+            continue;
+        };
+        if affected_id != player_id {
+            continue;
+        }
+        if let Duration::ForAsLongAs { ref condition } = tce.duration {
+            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
+                continue;
+            }
+        }
+        if let Some(ref condition) = tce.condition {
+            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
+                continue;
+            }
+        }
+        let grants_mode = tce.modifications.iter().any(|m| {
+            matches!(m, ContinuousModification::AddStaticMode { mode: m_mode } if m_mode == mode)
+        });
+        if grants_mode {
+            return true;
+        }
+    }
+    false
+}
+
 /// CR 609.4b: Check if a player has the "spend mana as any color" static active.
 /// Scans battlefield and command zone for `StaticMode::SpendManaAsAnyColor`
 /// whose affected filter matches the given player.
@@ -534,6 +576,9 @@ pub fn player_can_spend_as_any_color(state: &GameState, player_id: PlayerId) -> 
 /// the game") targeting this player must be no-ops. Per CR 104.2a, the
 /// last-player-standing path is not subject to this check and is enforced
 /// directly in `elimination::check_game_over`.
+///
+/// Checks both battlefield permanents and spell-applied transient effects
+/// (e.g., a sorcery that grants all players CantWinTheGame this turn).
 pub fn player_has_cant_win(state: &GameState, player_id: PlayerId) -> bool {
     check_static_ability(
         state,
@@ -542,7 +587,7 @@ pub fn player_has_cant_win(state: &GameState, player_id: PlayerId) -> bool {
             player_id: Some(player_id),
             ..Default::default()
         },
-    )
+    ) || transient_grants_static_mode_to_player(state, player_id, &StaticMode::CantWinTheGame)
 }
 
 /// CR 119.7: Check if a player has active `CantGainLife` protection.
@@ -551,6 +596,8 @@ pub fn player_has_cant_win(state: &GameState, player_id: PlayerId) -> bool {
 /// (CR 119.7: "a replacement effect that would replace a life gain event
 /// affecting that player won't do anything"). Callers must short-circuit BEFORE
 /// invoking the replacement pipeline.
+///
+/// Checks both battlefield permanents and spell-applied transient effects.
 pub fn player_has_cant_gain_life(state: &GameState, player_id: PlayerId) -> bool {
     check_static_ability(
         state,
@@ -559,13 +606,15 @@ pub fn player_has_cant_gain_life(state: &GameState, player_id: PlayerId) -> bool
             player_id: Some(player_id),
             ..Default::default()
         },
-    )
+    ) || transient_grants_static_mode_to_player(state, player_id, &StaticMode::CantGainLife)
 }
 
 /// CR 119.8: Check if a player has active `CantLoseLife` protection.
 ///
 /// When `true`, effects that would cause the player to lose life (including
 /// damage-to-life-loss conversion per CR 120.3) have no effect.
+///
+/// Checks both battlefield permanents and spell-applied transient effects.
 pub fn player_has_cant_lose_life(state: &GameState, player_id: PlayerId) -> bool {
     check_static_ability(
         state,
@@ -574,7 +623,7 @@ pub fn player_has_cant_lose_life(state: &GameState, player_id: PlayerId) -> bool
             player_id: Some(player_id),
             ..Default::default()
         },
-    )
+    ) || transient_grants_static_mode_to_player(state, player_id, &StaticMode::CantLoseLife)
 }
 
 /// CR 118.3 + CR 119.4b + CR 601.2h + CR 602.2b: Check whether a static

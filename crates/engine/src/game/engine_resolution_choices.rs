@@ -407,6 +407,7 @@ pub(super) fn handle_resolution_choice(
                 per_choice_effect,
                 controller,
                 source_id,
+                actor,
             },
             GameAction::ChooseOption { choice },
         ) => {
@@ -434,7 +435,8 @@ pub(super) fn handle_resolution_choice(
             });
 
             if remaining_votes > 1 {
-                // CR 701.38d: Same player still has votes to cast.
+                // CR 701.38d: Same player still has votes to cast — `player`
+                // and `actor` are both unchanged.
                 state.waiting_for = WaitingFor::VoteChoice {
                     player,
                     remaining_votes: remaining_votes - 1,
@@ -446,10 +448,14 @@ pub(super) fn handle_resolution_choice(
                     per_choice_effect,
                     controller,
                     source_id,
+                    actor,
                 };
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             } else if let Some(((next_player, next_votes), rest)) = remaining_voters.split_first() {
                 // CR 101.4: Advance to the next voter in turn order.
+                // `actor` carries forward unchanged: `SubjectActs` re-resolves
+                // to whichever player is the next subject on each step, while
+                // `Delegated(p)` keeps `p` pinned across subjects.
                 state.waiting_for = WaitingFor::VoteChoice {
                     player: *next_player,
                     remaining_votes: *next_votes,
@@ -461,6 +467,7 @@ pub(super) fn handle_resolution_choice(
                     per_choice_effect,
                     controller,
                     source_id,
+                    actor,
                 };
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             } else {

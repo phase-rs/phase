@@ -529,10 +529,40 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::ParadigmCastOffer { .. } => Some(GameAction::PassParadigmOffer),
 
         // Vote: pick the first option.
-        WaitingFor::VoteChoice { options, .. } => {
-            options.first().map(|opt| GameAction::ChooseOption {
-                choice: opt.clone(),
-            })
+        // CR 608.2c: For `ControllerLabels` votes (Battlebond friend-or-foe),
+        // the AI is the spell controller making one label per player. The
+        // heuristic is trivial: self → friend (the beneficial label, choice
+        // index 0), every other player → foe (the harmful label, choice
+        // index 1). Classic votes (where `actor == player`) fall back to
+        // "first option" since the AI is voting for itself.
+        WaitingFor::VoteChoice {
+            options,
+            player,
+            actor,
+            controller,
+            ..
+        } => {
+            // The friend-or-foe heuristic only fires when the controller is
+            // labeling other players (the delegated shape) — matching
+            // `VoteActor::Delegated(actor)` where `actor == controller` is
+            // robust to any future delegated-vote shape where the actor is
+            // some non-controller player.
+            let choice_text = match actor {
+                engine::types::game_state::VoteActor::Delegated(actor) if *actor == *controller => {
+                    let target_label = if player == controller {
+                        "friend"
+                    } else {
+                        "foe"
+                    };
+                    options
+                        .iter()
+                        .find(|o| o.as_str() == target_label)
+                        .or_else(|| options.first())
+                        .cloned()
+                }
+                _ => options.first().cloned(),
+            };
+            choice_text.map(|choice| GameAction::ChooseOption { choice })
         }
 
         // Legend choice: pick the first candidate.
@@ -2224,6 +2254,90 @@ mod tests {
             }
             other => panic!("expected SelectCards, got {other:?}"),
         }
+    }
+
+    // --- ControllerLabels (Battlebond friend-or-foe) AI heuristic ---
+
+    /// Build a 2-player `VoteChoice` representing one step of a
+    /// `ControllerLabels` vote where the named subject is being labeled.
+    /// `actor` is always the spell controller.
+    fn vote_choice_for_subject(
+        state: &GameState,
+        controller: PlayerId,
+        subject: PlayerId,
+    ) -> WaitingFor {
+        let _ = state;
+        WaitingFor::VoteChoice {
+            player: subject,
+            remaining_votes: 1,
+            options: vec!["friend".to_string(), "foe".to_string()],
+            option_labels: vec!["Friend".to_string(), "Foe".to_string()],
+            remaining_voters: Vec::new(),
+            tallies: vec![0, 0],
+            ballots: engine::im::Vector::new(),
+            per_choice_effect: Vec::new(),
+            controller,
+            source_id: ObjectId(1),
+            actor: engine::types::game_state::VoteActor::Delegated(controller),
+        }
+    }
+
+    /// When the AI controller is labeling themselves, the heuristic picks
+    /// `friend` — the beneficial label. The fallback action route exercises
+    /// the same code path the runtime walks when no scored candidate beats
+    /// the deterministic default.
+    #[test]
+    fn controller_labels_ai_labels_self_friend() {
+        let mut state = make_state();
+        let controller = PlayerId(0);
+        state.waiting_for = vote_choice_for_subject(&state, controller, controller);
+        let action = fallback_action(&state).expect("fallback returns an action");
+        assert!(
+            matches!(action, GameAction::ChooseOption { ref choice } if choice == "friend"),
+            "AI labeling self must pick friend, got {action:?}"
+        );
+    }
+
+    /// When the AI controller is labeling an opponent, the heuristic picks
+    /// `foe` — the harmful label.
+    #[test]
+    fn controller_labels_ai_labels_opponent_foe() {
+        let mut state = make_state();
+        let controller = PlayerId(0);
+        let opp = PlayerId(1);
+        state.waiting_for = vote_choice_for_subject(&state, controller, opp);
+        let action = fallback_action(&state).expect("fallback returns an action");
+        assert!(
+            matches!(action, GameAction::ChooseOption { ref choice } if choice == "foe"),
+            "AI labeling opponent must pick foe, got {action:?}"
+        );
+    }
+
+    /// A classic vote (`actor == player`) keeps the pre-existing "first
+    /// option" fallback — the friend-or-foe heuristic must not leak into
+    /// Council's-dilemma votes.
+    #[test]
+    fn classic_vote_falls_back_to_first_option() {
+        let mut state = make_state();
+        let controller = PlayerId(0);
+        state.waiting_for = WaitingFor::VoteChoice {
+            player: controller,
+            remaining_votes: 1,
+            options: vec!["evidence".to_string(), "bribery".to_string()],
+            option_labels: vec!["Evidence".to_string(), "Bribery".to_string()],
+            remaining_voters: Vec::new(),
+            tallies: vec![0, 0],
+            ballots: engine::im::Vector::new(),
+            per_choice_effect: Vec::new(),
+            controller,
+            source_id: ObjectId(1),
+            actor: engine::types::game_state::VoteActor::SubjectActs,
+        };
+        let action = fallback_action(&state).expect("fallback returns an action");
+        assert!(
+            matches!(action, GameAction::ChooseOption { ref choice } if choice == "evidence"),
+            "classic vote must pick first option, got {action:?}"
+        );
     }
 
     /// Regression guard: AI priority decision against 1000-token opponent

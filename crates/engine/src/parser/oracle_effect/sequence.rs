@@ -435,6 +435,29 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                     // "that player <verb>" (which is a separate clause).
                     let compound_subject_each = before_lower.trim_end() == "you"
                         && remainder_trimmed_starts_with_compound_subject_each(remainder_trimmed);
+                    // CR 608.2c: "Otherwise, X and Y" — the body following an
+                    // "otherwise" prefix is a single Otherwise branch even when
+                    // it contains an internal " and ". Without this guard the
+                    // splitter peels "Y" off as a sibling clause that then
+                    // attaches as a sub_ability of the conditional's PARENT
+                    // effect instead of the else_ability body — the exemplar
+                    // is Approach of the Second Sun's "Otherwise, put ~ into
+                    // its owner's library seventh from the top and you gain
+                    // 7 life" where "you gain 7 life" must stay inside the
+                    // otherwise branch.
+                    //
+                    // Match only the printed Oracle-text shapes ("otherwise,
+                    // " and "otherwise "), mirroring the otherwise-prefix
+                    // table in `starts_prefix_clause`. This rejects accidental
+                    // prefix overlap from any future text whose first word
+                    // shares those letters but is not the conditional fallback
+                    // keyword.
+                    let inside_otherwise_body = alt((
+                        tag::<_, _, OracleError<'_>>("otherwise, "),
+                        tag("otherwise "),
+                    ))
+                    .parse(before_lower.trim_start())
+                    .is_ok();
                     let suppress = nom_primitives::scan_contains(&before_lower, "from among")
                         || is_inside_temporal_prefix(&before_lower)
                         || targeted_compound_continuation
@@ -442,7 +465,8 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         || search_with_that_name
                         || inside_except_clause
                         || choice_partition_remainder
-                        || compound_subject_each;
+                        || compound_subject_each
+                        || inside_otherwise_body;
                     if !suppress && starts_bare_and_clause(remainder_trimmed) {
                         push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
                         current.clear();
@@ -858,6 +882,15 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         value((), tag("it loses ")),
         value((), tag("this creature gets ")),
         value((), tag("~ gets ")),
+        // CR 104.3 + CR 119.7 + CR 119.8: Bare-plural-player subject + restriction
+        // predicate. Everybody Lives! prints "Players can't lose life this turn
+        // and players can't lose the game or win the game this turn." — the
+        // conjunction must split so each half parses as its own
+        // subject + predicate clause. Safe to split: "players can't" /
+        // "players cannot" can only begin a subject-predicate clause, never a
+        // noun-phrase continuation.
+        value((), tag("players can't ")),
+        value((), tag("players cannot ")),
     )))
     .parse(s)
     .is_ok();

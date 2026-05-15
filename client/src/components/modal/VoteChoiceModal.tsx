@@ -13,12 +13,26 @@ type VoteChoice = Extract<WaitingFor, { type: "VoteChoice" }>;
  * choice list (lowercase, from `data.options`) using the original-case
  * `data.option_labels` for display.
  *
+ * `data.actor` describes who submits the choice; `data.player` is the SUBJECT
+ * being voted-for/labeled.
+ *   - `{ type: "SubjectActs" }`: classic Council's-dilemma (the subject votes
+ *     for themselves).
+ *   - `{ type: "Delegated", data: <controller> }`: Battlebond friend-or-foe
+ *     (no explicit CR section) — the controller labels each player one-by-one.
+ * Labeling mode is `data.actor.type === "Delegated"`.
+ *
  * Display layer only — `remaining_votes`, the running tally, and the queued
  * voter list all come straight from the engine's `WaitingFor::VoteChoice`.
  */
 export function VoteChoiceModal({ data }: { data: VoteChoice["data"] }) {
   const dispatch = useGameDispatch();
   const [selected, setSelected] = useState<string | null>(null);
+  // Frontend renders engine-provided state. The Player struct does not yet
+  // carry a display name (would require lobby/persistence plumbing across
+  // engine + server), so we fall back to the 1-indexed seat ordinal here.
+  // Tracked as a follow-up; the engine-side `Player.name` field is the
+  // correct long-term home for this label.
+  const subjectName = `Player ${data.player + 1}`;
 
   const handleConfirm = useCallback(() => {
     if (selected !== null) {
@@ -27,14 +41,17 @@ export function VoteChoiceModal({ data }: { data: VoteChoice["data"] }) {
     }
   }, [dispatch, selected]);
 
-  const subtitle =
-    data.remaining_votes > 1
+  const isLabelingMode = data.actor.type === "Delegated";
+  const title = isLabelingMode ? "Label Player" : "Vote";
+  const subtitle = isLabelingMode
+    ? `Choose a label for ${subjectName}`
+    : data.remaining_votes > 1
       ? `Cast a vote (${data.remaining_votes} remaining)`
       : "Cast your vote";
 
   return (
     <ChoiceOverlay
-      title="Vote"
+      title={title}
       subtitle={subtitle}
       widthClassName="w-fit max-w-full"
       maxWidthClassName="max-w-3xl"

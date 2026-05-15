@@ -161,23 +161,33 @@ pub fn record_spell_cast_from_zone(
     state.spells_cast_this_turn = state.spells_cast_this_turn.saturating_add(1);
     *state.spells_cast_this_game.entry(player).or_insert(0) += 1;
     // CR 117.1: Record spell characteristics for general-purpose filtered counting.
+    let record = SpellCastRecord {
+        name: obj.name.clone(),
+        core_types: obj.card_types.core_types.clone(),
+        supertypes: obj.card_types.supertypes.clone(),
+        subtypes: obj.card_types.subtypes.clone(),
+        keywords: obj.keywords.clone(),
+        colors: obj.color.clone(),
+        mana_value: obj.mana_cost.mana_value(),
+        // CR 107.3 + CR 601.2b: Capture X-in-cost at record time so later
+        // trigger-filter evaluation (e.g. "your first spell with {X} in its
+        // mana cost each turn") does not need to re-examine the spell object.
+        has_x_in_cost: crate::game::casting_costs::cost_has_x(&obj.mana_cost),
+        from_zone,
+    };
     state
         .spells_cast_this_turn_by_player
         .entry(player)
         .or_default()
-        .push(SpellCastRecord {
-            core_types: obj.card_types.core_types.clone(),
-            supertypes: obj.card_types.supertypes.clone(),
-            subtypes: obj.card_types.subtypes.clone(),
-            keywords: obj.keywords.clone(),
-            colors: obj.color.clone(),
-            mana_value: obj.mana_cost.mana_value(),
-            // CR 107.3 + CR 601.2b: Capture X-in-cost at record time so later
-            // trigger-filter evaluation (e.g. "your first spell with {X} in its
-            // mana cost each turn") does not need to re-examine the spell object.
-            has_x_in_cost: crate::game::casting_costs::cost_has_x(&obj.mana_cost),
-            from_zone,
-        });
+        .push_back(record.clone());
+    // CR 117.1: Game-scope history mirror — not cleared between turns so
+    // "named {LITERAL} this game" conditions (Approach of the Second Sun)
+    // can see all prior casts.
+    state
+        .spells_cast_this_game_by_player
+        .entry(player)
+        .or_default()
+        .push_back(record);
 }
 
 /// CR 508.1m: Any abilities that trigger on attackers being declared trigger.
@@ -1755,7 +1765,8 @@ mod tests {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
         state.spells_cast_this_turn_by_player.insert(
             PlayerId(0),
-            vec![crate::types::game_state::SpellCastRecord {
+            crate::im::Vector::from(vec![crate::types::game_state::SpellCastRecord {
+                name: String::new(),
                 core_types: vec![CoreType::Instant],
                 supertypes: Vec::new(),
                 subtypes: Vec::new(),
@@ -1764,7 +1775,7 @@ mod tests {
                 mana_value: 1,
                 has_x_in_cost: false,
                 from_zone: Zone::Hand,
-            }],
+            }]),
         );
 
         assert!(parse_and_evaluate_condition(
@@ -1786,8 +1797,9 @@ mod tests {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
         state.spells_cast_this_turn_by_player.insert(
             PlayerId(0),
-            vec![
+            crate::im::Vector::from(vec![
                 crate::types::game_state::SpellCastRecord {
+                    name: String::new(),
                     core_types: vec![CoreType::Instant],
                     supertypes: Vec::new(),
                     subtypes: Vec::new(),
@@ -1798,6 +1810,7 @@ mod tests {
                     from_zone: Zone::Hand,
                 },
                 crate::types::game_state::SpellCastRecord {
+                    name: String::new(),
                     core_types: vec![CoreType::Sorcery],
                     supertypes: Vec::new(),
                     subtypes: Vec::new(),
@@ -1808,6 +1821,7 @@ mod tests {
                     from_zone: Zone::Hand,
                 },
                 crate::types::game_state::SpellCastRecord {
+                    name: String::new(),
                     core_types: vec![CoreType::Instant],
                     supertypes: Vec::new(),
                     subtypes: Vec::new(),
@@ -1817,7 +1831,7 @@ mod tests {
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
                 },
-            ],
+            ]),
         );
 
         assert!(parse_and_evaluate_condition(
@@ -2168,6 +2182,97 @@ mod tests {
         assert!(
             target_dependent_flash_permission_satisfied(&state, caster, ObjectId(10), &ability),
             "printed Flash keyword must short-circuit the target-dependent flash check"
+        );
+    }
+
+    /// CR 117.1 + CR 201.2 + CR 601.2: Cast-pipeline integration for Approach
+    /// of the Second Sun's "another spell named ~ this game" gate. Exercises
+    /// the full path: `record_spell_cast_from_zone` → `SpellCastRecord.name`
+    /// populated on the game-scope history → name-filtered
+    /// `QuantityRef::SpellsCastThisGame` resolves correctly.
+    ///
+    /// The earlier `resolve_quantity_spells_cast_this_game_filtered_by_name`
+    /// test hand-populates `spells_cast_this_game_by_player`, bypassing the
+    /// pipeline hook. This test fails if any future cast path forks the
+    /// recording flow (alt-cost, free cast, escape, etc.) and forgets to
+    /// invoke `record_spell_cast_from_zone`, or if the `name` field stops
+    /// being captured from the cast object — both regressions Approach of
+    /// the Second Sun would silently inherit otherwise.
+    #[test]
+    fn approach_of_the_second_sun_round_trips_through_record_spell_cast() {
+        use crate::game::game_object::GameObject;
+        use crate::game::quantity::resolve_quantity;
+        use crate::types::ability::{
+            CountScope, FilterProp, QuantityExpr, QuantityRef, TargetFilter, TypedFilter,
+        };
+
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let caster = PlayerId(0);
+
+        // Build an Approach `GameObject` shaped the way the cast pipeline
+        // would hand it to `record_spell_cast_from_zone`.
+        let approach = GameObject::new(
+            ObjectId(10),
+            CardId(10),
+            caster,
+            "Approach of the Second Sun".to_string(),
+            Zone::Stack,
+        );
+
+        // Mirror the parser's emitted filter exactly: lowercased name match
+        // against `SpellCastRecord.name` via `eq_ignore_ascii_case`.
+        let approach_filter =
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Named {
+                name: "approach of the second sun".to_string(),
+            }]));
+        let approach_count = QuantityExpr::Ref {
+            qty: QuantityRef::SpellsCastThisGame {
+                scope: CountScope::Controller,
+                filter: Some(approach_filter),
+            },
+        };
+
+        // Pre-cast: no Approaches recorded → count is 0, gate fails.
+        assert_eq!(
+            resolve_quantity(&state, &approach_count, caster, ObjectId(10)),
+            0,
+            "no casts recorded yet"
+        );
+
+        // First cast: pipeline records the spell.
+        record_spell_cast(&mut state, caster, &approach);
+        let history = state
+            .spells_cast_this_game_by_player
+            .get(&caster)
+            .expect("first cast must populate the game-scope history");
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history[0].name, "Approach of the Second Sun",
+            "record_spell_cast must capture `obj.name` so name filters can match it"
+        );
+        assert_eq!(
+            resolve_quantity(&state, &approach_count, caster, ObjectId(10)),
+            1,
+            "first Approach must register against the named-filter count"
+        );
+
+        // Second cast: same name, same player. The "another" gate (>= 2)
+        // is now satisfied.
+        record_spell_cast(&mut state, caster, &approach);
+        assert_eq!(
+            resolve_quantity(&state, &approach_count, caster, ObjectId(10)),
+            2,
+            "second Approach must bring the count to 2 — `another spell named ~ this game` becomes true"
+        );
+
+        // Cross-player scope safety: a different player's casts of the same
+        // name must NOT count toward the caster's controller-scoped gate.
+        let opponent = PlayerId(1);
+        record_spell_cast(&mut state, opponent, &approach);
+        assert_eq!(
+            resolve_quantity(&state, &approach_count, caster, ObjectId(10)),
+            2,
+            "controller-scoped count must ignore an opponent's named-Approach casts"
         );
     }
 }

@@ -20,8 +20,9 @@
 //!   free to fall back to the standard chain parser.
 
 use crate::parser::oracle_nom::error::OracleError;
+use crate::parser::oracle_nom::primitives::scan_split_at_phrase;
 use nom::branch::alt;
-use nom::bytes::complete::tag;
+use nom::bytes::complete::{tag, tag_no_case, take_while1};
 use nom::combinator::value;
 use nom::Parser;
 
@@ -41,10 +42,13 @@ use super::oracle_ir::context::ParseContext;
 /// with you, " prefix is consumed here (kept inside this module so chain-level
 /// stripping in `parse_effect_chain_ir` doesn't interfere).
 pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityDefinition> {
-    let lower = text.to_lowercase();
-    // Phase 1: optional "starting with you," prefix.
-    let (i, starting_with) =
-        parse_starting_with(&lower).unwrap_or((lower.as_str(), ControllerRef::You));
+    // Case-insensitive nom tags (`tag_no_case`) match directly against the
+    // original-case input, so the entire vote-detection pipeline operates on
+    // `text` without an upfront `to_lowercase()` allocation. On the failure
+    // path (every non-vote spell line that reaches this probe) the first
+    // `tag_no_case` in `parse_each_player_votes_clause` short-circuits on the
+    // first byte mismatch and no allocation is ever performed.
+    let (i, starting_with) = parse_starting_with(text).unwrap_or((text, ControllerRef::You));
     // Phase 2: opener clause. Two shapes covered:
     //   * "each player votes for <a> or <b>."         → VoterScope::AllPlayers
     //   * "each player may vote for <a> or <b>."      → VoterScope::AllPlayers
@@ -58,16 +62,24 @@ pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityD
     if choices.len() < 2 {
         return None;
     }
-    // Phase 3: per-choice clauses. Two shapes covered:
+    // Phase 3: per-choice clauses. Three shapes covered, dispatched by scope:
     //   * "For each <choice> vote, <effect>."                     (Tivit / classic)
     //   * "For each player who chose <choice>, <effect>."          (Master of Ceremonies)
-    // Walk the text exactly once and key the parsed sub-effects by their
-    // canonical `choices` index so the output array always matches
-    // declaration order.
+    //   * "Each <choice> <effect>."                                (Battlebond friend-or-foe)
+    // For `ControllerLabels`, every per-class effect implicitly distributes
+    // across labeled players and the body refers to "they" / "their" — these
+    // are the labeled players, not the spell controller. Wire each parsed
+    // sub-effect with `PlayerFilter::VotedFor { choice_index }` so the runtime
+    // re-binds the sub-effect controller to each labeled player.
+    let is_controller_labels = matches!(voter_scope, VoterScope::ControllerLabels);
     let mut slots: Vec<Option<Box<AbilityDefinition>>> = (0..choices.len()).map(|_| None).collect();
     let mut walk = i.trim_start();
     while !walk.is_empty() {
-        let (rest, (choice, effect_text, who_chose)) = parse_for_each_vote_clause(walk, &choices)?;
+        let (rest, (choice, effect_text, who_chose)) = if is_controller_labels {
+            parse_each_class_clause(walk, &choices)?
+        } else {
+            parse_for_each_vote_clause(walk, &choices)?
+        };
         let idx = choices.iter().position(|c| c == &choice)?;
         if slots[idx].is_some() {
             // Same choice referenced twice — shape we don't yet model.
@@ -75,12 +87,16 @@ pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityD
         }
         let mut parsed =
             parse_effect_chain_with_context(effect_text, kind, &mut ParseContext::default());
-        if who_chose {
-            // CR 608.2c + CR 701.38: "for each player who chose <choice>,
-            // <effect>" routes the per-vote sub-effect to the controller plus
-            // each voter who picked that option. The runtime player-scope
-            // expansion (controller + matching voters) is encoded by
-            // `PlayerFilter::VotedFor`.
+        if who_chose || is_controller_labels {
+            // CR 701.38 + CR 101.4: Wire the per-vote sub-effect to fan out
+            // across the players who received this choice index.
+            // - "for each player who chose <choice>, <effect>" (Master of
+            //   Ceremonies-style) routes to controller + voters who picked
+            //   the option.
+            // - "Each <choice> <effect>" under ControllerLabels (Battlebond
+            //   friend-or-foe; no explicit CR section) routes to every
+            //   labeled player, re-binding the sub-effect controller to
+            //   each labeled player so "they" / "their" refers correctly.
             //
             // u8 fits trivially: vote-choice cardinality is bounded by Magic
             // card design (no card has ever exceeded ~5 choices).
@@ -112,7 +128,10 @@ pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityD
 fn parse_starting_with(input: &str) -> Option<(&str, ControllerRef)> {
     let res: nom::IResult<&str, (), OracleError<'_>> = value(
         (),
-        alt((tag("starting with you, "), tag("starting with you "))),
+        alt((
+            tag_no_case("starting with you, "),
+            tag_no_case("starting with you "),
+        )),
     )
     .parse(input);
     match res {
@@ -121,7 +140,7 @@ fn parse_starting_with(input: &str) -> Option<(&str, ControllerRef)> {
     }
 }
 
-/// Parse the opener that precedes the vote choice list. Five shapes:
+/// Parse the opener that precedes the vote choice list. Six shapes:
 ///
 /// | Pattern                                      | `VoterScope`            |
 /// |----------------------------------------------|-------------------------|
@@ -130,19 +149,42 @@ fn parse_starting_with(input: &str) -> Option<(&str, ControllerRef)> {
 /// | `"each player chooses "`                     | `AllPlayers`            |
 /// | `"each opponent chooses "`                   | `EachOpponent`          |
 /// | `"each opponent may choose "`                | `EachOpponent`          |
+/// | `"for each player, choose "`                 | `ControllerLabels`      |
 ///
 /// Returns the unconsumed remainder, the lowercase choice list, and the
 /// resolved voter scope.
 ///
 /// Generalized to N>=2 choices via repeated " or " / ", " separators —
 /// covers cards like Capital Punishment that vote on three options.
+///
+/// The `ControllerLabels` opener is Battlebond's friend-or-foe pattern
+/// (no explicit CR section; resolution follows CR 101.4 APNAP + CR 608.2
+/// general spell resolution). The leading `"for each player, "` is
+/// consumed here (mirroring the `"starting with you, "` handling) so the
+/// chain splitter does not bisect the opener.
 fn parse_each_player_votes_clause(input: &str) -> Option<(&str, Vec<String>, VoterScope)> {
     let res: nom::IResult<&str, VoterScope, OracleError<'_>> = alt((
-        value(VoterScope::AllPlayers, tag("each player votes for ")),
-        value(VoterScope::AllPlayers, tag("each player may vote for ")),
-        value(VoterScope::EachOpponent, tag("each opponent chooses ")),
-        value(VoterScope::EachOpponent, tag("each opponent may choose ")),
-        value(VoterScope::AllPlayers, tag("each player chooses ")),
+        value(
+            VoterScope::AllPlayers,
+            tag_no_case("each player votes for "),
+        ),
+        value(
+            VoterScope::AllPlayers,
+            tag_no_case("each player may vote for "),
+        ),
+        value(
+            VoterScope::EachOpponent,
+            tag_no_case("each opponent chooses "),
+        ),
+        value(
+            VoterScope::EachOpponent,
+            tag_no_case("each opponent may choose "),
+        ),
+        value(VoterScope::AllPlayers, tag_no_case("each player chooses ")),
+        value(
+            VoterScope::ControllerLabels,
+            tag_no_case("for each player, choose "),
+        ),
     ))
     .parse(input);
     let (rest, voter_scope) = res.ok()?;
@@ -171,19 +213,17 @@ fn parse_for_each_vote_clause<'a>(
     input: &'a str,
     choices: &[String],
 ) -> Option<(&'a str, (String, &'a str, bool))> {
-    let lower = input.to_lowercase();
-    let res: nom::IResult<&str, (), OracleError<'_>> =
-        value((), tag("for each ")).parse(lower.as_str());
-    let (lower_rest, ()) = res.ok()?;
-    // Slice the original input at the same offset.
-    let consumed = input.len() - lower_rest.len();
-    let original_rest = &input[consumed..];
+    // Case-insensitive opener; operates directly on original-case input so
+    // downstream slices preserve casing without offset arithmetic.
+    let res: nom::IResult<&'a str, (), OracleError<'a>> =
+        value((), tag_no_case("for each ")).parse(input);
+    let (rest_after_for, ()) = res.ok()?;
 
     // Try the "<player-noun> who chose <choice>, " shape first — its prefix
     // is alphabetic-leading just like the simple "<choice> vote, " shape, so
     // a successful match here unambiguously routes to the VotedFor wiring.
     if let Some((after_clause, choice_lower)) =
-        parse_who_chose_player_clause(original_rest, choices)
+        parse_who_chose_player_clause(rest_after_for, choices)
     {
         let (effect_text, rest) = read_effect_until_next_clause(after_clause);
         return Some((rest, (choice_lower, effect_text, true)));
@@ -192,7 +232,7 @@ fn parse_for_each_vote_clause<'a>(
     // Fallback: classic "<choice> vote, <effect>" shape.
     // Read the choice token (case-insensitive); choices are whitespace-free
     // single words in canonical Council's-dilemma cards.
-    let (choice, after_choice) = read_word(original_rest)?;
+    let (choice, after_choice) = read_word(rest_after_for)?;
     let choice_lower = choice.to_lowercase();
     if !choices.iter().any(|c| c == &choice_lower) {
         return None;
@@ -209,6 +249,84 @@ fn parse_for_each_vote_clause<'a>(
     Some((rest, (choice_lower, effect_text, false)))
 }
 
+/// Parse a single "Each <choice> <effect>." clause used by Battlebond's
+/// friend-or-foe cards (no explicit CR section): Pir's Whim, Khorvath's
+/// Fury, Regna's Sanction, Virtus's Maneuver, Zndrsplt's Judgment. The
+/// `<choice>` token must be a member of the parent vote's `choices` list
+/// (canonically `["friend", "foe"]`).
+///
+/// Shape: `"Each <choice> <effect>."` — case-insensitive on `"Each"`.
+///
+/// Returns the unconsumed remainder, the matched choice (lowercase), the
+/// inner effect text, and `who_chose=true` (the per-class fan-out always
+/// routes via `PlayerFilter::VotedFor`).
+///
+/// Distinct from `parse_for_each_vote_clause`: that helper recognizes
+/// `"For each <choice> vote, <effect>"` and `"For each player who chose
+/// <choice>, <effect>"`. The bare-`"Each <choice>"` shape only fires
+/// under `VoterScope::ControllerLabels`; otherwise it would false-match
+/// general "Each creature..." imperatives.
+fn parse_each_class_clause<'a>(
+    input: &'a str,
+    choices: &[String],
+) -> Option<(&'a str, (String, &'a str, bool))> {
+    // Case-insensitive opener; operates directly on original-case input.
+    let res: nom::IResult<&'a str, (), OracleError<'a>> =
+        value((), tag_no_case("each ")).parse(input);
+    let (after_each, ()) = res.ok()?;
+    // Read the choice token and confirm it's a valid class.
+    let (choice, after_choice) = read_word(after_each)?;
+    let choice_lower = choice.to_lowercase();
+    if !choices.iter().any(|c| c == &choice_lower) {
+        return None;
+    }
+    // Consume the single space between the class label and the verb. The
+    // body extends until the next `"Each "` (start of the sibling class
+    // clause) or end of input. Strip the trailing period.
+    let (after_space, _): (&str, &str) =
+        tag::<_, _, OracleError<'_>>(" ").parse(after_choice).ok()?;
+    let (effect_text, rest) = read_effect_until_each_class(after_space, choices);
+    Some((rest, (choice_lower, effect_text, true)))
+}
+
+/// Read maximally up to the next `"Each <choice>"` clause or end of input,
+/// where `<choice>` is a member of the parent vote's `choices` list. Strips
+/// trailing period.
+///
+/// Implementation: a single nom combinator (`tag_no_case("each ")` →
+/// `take_while1` for the class word → verify membership and trailing space)
+/// is tried at every word boundary in `input` via `scan_split_at_phrase`.
+/// The dynamic `choices` vocabulary is handled by `take_while1` + an inline
+/// membership check rather than `alt()`, because `alt()` requires a static
+/// tuple of branches.
+///
+/// This prevents false positives on intra-body phrases like
+/// `"on each creature they control"` (Regna's Sanction friend body) where
+/// `"each"` is the distributive quantifier inside an imperative, not the
+/// start of a sibling class clause: `take_while1` reads "creature", which
+/// fails the class-label membership check.
+fn read_effect_until_each_class<'a>(input: &'a str, choices: &[String]) -> (&'a str, &'a str) {
+    let is_word_char = |c: char| c.is_alphanumeric() || c == '\'' || c == '-';
+    let try_each_class_marker = |i: &'a str| -> nom::IResult<&'a str, (), OracleError<'a>> {
+        let (after_each, _) = tag_no_case::<_, _, OracleError<'a>>("each ").parse(i)?;
+        let (after_word, word) =
+            take_while1::<_, _, OracleError<'a>>(is_word_char).parse(after_each)?;
+        let (_, _) = tag::<_, _, OracleError<'a>>(" ").parse(after_word)?;
+        if !choices.iter().any(|c| c.eq_ignore_ascii_case(word)) {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                i,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+        Ok((after_word, ()))
+    };
+    let (head, tail) = scan_split_at_phrase(input, try_each_class_marker).unwrap_or((input, ""));
+    let head_trimmed = head.trim_end();
+    // allow-noncombinator: structural period strip on pre-extracted sentence clause
+    let head_no_period = head_trimmed.strip_suffix('.').unwrap_or(head_trimmed);
+    (head_no_period.trim(), tail.trim_start())
+}
+
 /// Parse the "who chose" sub-shape of a `for each ...` clause:
 ///
 ///   `"<player-noun> who chose <choice>, "`
@@ -220,10 +338,10 @@ fn parse_who_chose_player_clause<'a>(
     input: &'a str,
     choices: &[String],
 ) -> Option<(&'a str, String)> {
-    let res: nom::IResult<&str, (), OracleError<'_>> =
-        value((), alt((tag("player"), tag("opponent")))).parse(input);
+    let res: nom::IResult<&'a str, (), OracleError<'a>> =
+        value((), alt((tag_no_case("player"), tag_no_case("opponent")))).parse(input);
     let (after_noun, ()) = res.ok()?;
-    let (after_who, _): (&str, &str) = tag::<_, _, OracleError<'_>>(" who chose ")
+    let (after_who, _): (&str, &str) = tag_no_case::<_, _, OracleError<'_>>(" who chose ")
         .parse(after_noun)
         .ok()?;
     let (choice_word, after_choice) = read_word(after_who)?;
@@ -239,25 +357,16 @@ fn parse_who_chose_player_clause<'a>(
 
 /// Read a maximal prefix up to (but not including) the next "For each "
 /// clause or end of input. Strips a trailing period from the consumed slice.
+///
+/// `scan_split_at_phrase` + `tag_no_case` is the idiomatic combinator pair
+/// for "split at the next word-boundary occurrence of <phrase>": it tries
+/// the combinator at every word boundary and returns the split point on
+/// the first match.
 fn read_effect_until_next_clause(input: &str) -> (&str, &str) {
-    let lower = input.to_lowercase();
-    // Find the next "for each " case-insensitively. structural: not dispatch
-    // — this is a local sentence-boundary scanner, not a parser dispatch
-    // decision. We use lowercase for the search but slice the original input
-    // so casing is preserved in the returned effect text.
-    let cut = lower
-        .match_indices("for each ")
-        .find(|(idx, _)| {
-            *idx == 0
-                || matches!(
-                    lower.as_bytes().get(*idx - 1),
-                    Some(b' ') | Some(b'.') | Some(b',')
-                )
-        })
-        .map(|(idx, _)| idx)
-        .unwrap_or(input.len());
-    let head = &input[..cut];
-    let tail = &input[cut..];
+    let (head, tail) = scan_split_at_phrase(input, |i| {
+        tag_no_case::<_, _, OracleError<'_>>("for each ").parse(i)
+    })
+    .unwrap_or((input, ""));
     let head_trimmed = head.trim_end();
     // allow-noncombinator: structural period strip on pre-extracted sentence clause
     let head_no_period = head_trimmed.strip_suffix('.').unwrap_or(head_trimmed);
@@ -673,5 +782,112 @@ mod tests {
             }
             other => panic!("expected Token for second half, got {:?}", other),
         }
+    }
+
+    // --- Battlebond friend-or-foe (Pir's Whim class) ---
+
+    /// Pir's Whim is the canonical friend-or-foe spell (no explicit CR
+    /// section; CR 101.4 APNAP + CR 608.2 resolution apply). The opener
+    /// `"For each player, choose friend or foe."` emits a Vote with
+    /// `voter_scope = ControllerLabels`; the two `"Each <choice> <effect>."`
+    /// clauses emit per-choice sub-effects with `player_scope = VotedFor`.
+    #[test]
+    fn parses_pirs_whim_friend_or_foe_block() {
+        let text = "For each player, choose friend or foe. \
+                    Each friend searches their library for a land card, puts it onto \
+                    the battlefield tapped, then shuffles. \
+                    Each foe sacrifices an artifact or enchantment of their choice.";
+        let def = parse_vote_block(text, AbilityKind::Spell).expect("vote block parses");
+        match *def.effect {
+            Effect::Vote {
+                ref choices,
+                ref per_choice_effect,
+                voter_scope,
+                ..
+            } => {
+                assert_eq!(choices, &vec!["friend".to_string(), "foe".to_string()]);
+                assert_eq!(voter_scope, VoterScope::ControllerLabels);
+                assert_eq!(per_choice_effect.len(), 2);
+                assert_eq!(
+                    per_choice_effect[0].player_scope,
+                    Some(PlayerFilter::VotedFor { choice_index: 0 })
+                );
+                assert_eq!(
+                    per_choice_effect[1].player_scope,
+                    Some(PlayerFilter::VotedFor { choice_index: 1 })
+                );
+                // friend body parses to SearchLibrary chain
+                assert!(
+                    matches!(*per_choice_effect[0].effect, Effect::SearchLibrary { .. }),
+                    "expected friend body to be SearchLibrary, got {:?}",
+                    per_choice_effect[0].effect
+                );
+                // foe body parses to Sacrifice
+                assert!(
+                    matches!(*per_choice_effect[1].effect, Effect::Sacrifice { .. }),
+                    "expected foe body to be Sacrifice, got {:?}",
+                    per_choice_effect[1].effect
+                );
+            }
+            other => panic!("expected Vote, got {:?}", other),
+        }
+    }
+
+    /// The CR-ordering invariant — `choices[0]` must be `"friend"` so
+    /// per-class fan-out runs friends before foes (Pir's Whim 2018-06-08
+    /// ruling: "Friends perform their specified actions before foes."). All
+    /// five Battlebond cards print the friend clause first.
+    #[test]
+    fn pirs_whim_emits_friend_before_foe_in_choices() {
+        let text = "For each player, choose friend or foe. \
+                    Each friend draws a card. Each foe loses 1 life.";
+        let def = parse_vote_block(text, AbilityKind::Spell).expect("vote block parses");
+        match *def.effect {
+            Effect::Vote { ref choices, .. } => {
+                assert_eq!(choices[0], "friend");
+                assert_eq!(choices[1], "foe");
+            }
+            other => panic!("expected Vote, got {:?}", other),
+        }
+    }
+
+    /// The bare `Each <choice>` per-class shape must not false-match
+    /// intra-body `each` (e.g., "puts a +1/+1 counter on each creature they
+    /// control" — Regna's Sanction friend body). The split discriminator
+    /// requires the token after `each ` to be a known class label.
+    #[test]
+    fn regnas_sanction_friend_body_keeps_distributive_each_intact() {
+        let text = "For each player, choose friend or foe. \
+                    Each friend puts a +1/+1 counter on each creature they control. \
+                    Each foe taps a creature.";
+        let def = parse_vote_block(text, AbilityKind::Spell).expect("vote block parses");
+        match *def.effect {
+            Effect::Vote {
+                ref choices,
+                ref per_choice_effect,
+                ..
+            } => {
+                assert_eq!(choices, &vec!["friend".to_string(), "foe".to_string()]);
+                // Friend body should NOT be split at "each creature" — the full
+                // body parses as PutCounterAll (distributive over creatures).
+                assert!(
+                    matches!(*per_choice_effect[0].effect, Effect::PutCounterAll { .. }),
+                    "friend body must keep distributive 'each creature' intact, \
+                     got {:?}",
+                    per_choice_effect[0].effect
+                );
+            }
+            other => panic!("expected Vote, got {:?}", other),
+        }
+    }
+
+    /// Rejects single-class openers — every friend-or-foe card prints two
+    /// classes. A single-choice opener like `"For each player, choose
+    /// friend."` is malformed and must fail (matches the existing
+    /// single-choice rejection for classic votes).
+    #[test]
+    fn rejects_single_class_friend_or_foe_opener() {
+        let text = "For each player, choose friend. Each friend draws a card.";
+        assert!(parse_vote_block(text, AbilityKind::Spell).is_none());
     }
 }

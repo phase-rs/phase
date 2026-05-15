@@ -2263,7 +2263,23 @@ pub(crate) fn parse_oracle_ir(
             };
             ctx.subject = None;
             ctx.actor = None;
-            let mut def = parse_effect_chain_with_context(parse_line, AbilityKind::Spell, &mut ctx);
+            // CR 701.38 (Council's-dilemma vote) + CR 101.4 (APNAP for
+            // Battlebond friend-or-foe — no dedicated CR section). Both
+            // shapes produce a single Vote effect with per-choice sub-effects. The
+            // dispatcher in `parse_vote_block` recognises the entire opener +
+            // per-class clauses and returns a synthesised AbilityDefinition;
+            // when it matches we use that directly rather than chunk-splitting
+            // the text through `parse_effect_chain_with_context`, which would
+            // mis-parse `"For each player, choose friend or foe."` as an
+            // Unimplemented chunk and leave the per-class clauses to chain as
+            // ordinary sequential effects.
+            let mut def = if let Some(vote_def) =
+                crate::parser::oracle_vote::parse_vote_block(parse_line, AbilityKind::Spell)
+            {
+                vote_def
+            } else {
+                parse_effect_chain_with_context(parse_line, AbilityKind::Spell, &mut ctx)
+            };
             def.min_x_value = spell_min_x_value;
             def.description = Some(description);
             // CR 608.2c: Compose ability word condition with chain-extracted condition.
@@ -9171,6 +9187,70 @@ mod tests {
             matches!(*sub2.effect, Effect::DealDamage { .. }),
             "third clause should be DealDamage, got {:?}",
             sub2.effect
+        );
+    }
+
+    // CR 104.2b + CR 104.3b + CR 119.7 + CR 119.8 + CR 611.2b:
+    // Everybody Lives! prints three sentences, the third of which is a
+    // conjunction joining two player-subject restriction clauses
+    // ("Players can't lose life this turn AND players can't lose the game
+    // or win the game this turn."). All three statics — CantLoseLife,
+    // CantLoseTheGame, CantWinTheGame — must land in the chain with
+    // UntilEndOfTurn duration so the engine installs them as transient
+    // continuous effects. Before this fix, the third sentence routed to
+    // Effect::Unimplemented and the game-loss prevention did not fire,
+    // allowing a player to win by causing an opponent to draw from an
+    // empty library on the same turn Everybody Lives! resolved.
+    #[test]
+    fn everybody_lives_emits_cant_lose_life_lose_game_win_game_statics() {
+        use crate::types::statics::StaticMode;
+        let r = parse(
+            "All creatures gain hexproof and indestructible until end of turn. \
+             Players gain hexproof until end of turn. \
+             Players can't lose life this turn and players can't lose the game \
+             or win the game this turn.",
+            "Everybody Lives!",
+            &[],
+            &["Instant"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1, "single chained spell ability");
+
+        // Walk the chain and collect every static mode emitted by every
+        // GenericEffect node. The exact node assignment is an implementation
+        // detail of the chain assembler; the contract is that the chain emits
+        // CantLoseLife + CantLoseTheGame + CantWinTheGame (and no Unimplemented
+        // chunk).
+        let mut modes: Vec<StaticMode> = Vec::new();
+        let mut node = Some(&r.abilities[0]);
+        while let Some(def) = node {
+            assert!(
+                !matches!(*def.effect, Effect::Unimplemented { .. }),
+                "no Unimplemented chunk should remain, got {:?}",
+                def.effect
+            );
+            if let Effect::GenericEffect {
+                ref static_abilities,
+                ..
+            } = *def.effect
+            {
+                for s in static_abilities {
+                    modes.push(s.mode.clone());
+                }
+            }
+            node = def.sub_ability.as_deref();
+        }
+        assert!(
+            modes.contains(&StaticMode::CantLoseLife),
+            "chain must emit CantLoseLife, got {modes:?}"
+        );
+        assert!(
+            modes.contains(&StaticMode::CantLoseTheGame),
+            "chain must emit CantLoseTheGame, got {modes:?}"
+        );
+        assert!(
+            modes.contains(&StaticMode::CantWinTheGame),
+            "chain must emit CantWinTheGame, got {modes:?}"
         );
     }
 

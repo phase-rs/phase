@@ -864,20 +864,32 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
         // identical action set (CR 701.38d allows repeats), so emitting one
         // candidate per option is correct: the engine re-enters VoteChoice for
         // each subsequent vote.
+        // For `ControllerLabels` (Battlebond friend-or-foe; no explicit CR
+        // section), the ACTOR is the spell controller, not the labeled
+        // `player`. AI candidate enumeration must tag each `ChooseOption`
+        // with the player who is authorized to submit it; otherwise the
+        // action gets routed to the wrong AI seat in multiplayer. The
+        // `actor` field is always set to the authorized submitter.
         WaitingFor::VoteChoice {
-            player, options, ..
-        } => options
-            .iter()
-            .map(|opt| {
-                candidate(
-                    GameAction::ChooseOption {
-                        choice: opt.clone(),
-                    },
-                    TacticalClass::Selection,
-                    Some(*player),
-                )
-            })
-            .collect(),
+            options,
+            actor,
+            player,
+            ..
+        } => {
+            let actor = actor.resolve(*player);
+            options
+                .iter()
+                .map(|opt| {
+                    candidate(
+                        GameAction::ChooseOption {
+                            choice: opt.clone(),
+                        },
+                        TacticalClass::Selection,
+                        Some(actor),
+                    )
+                })
+                .collect()
+        }
         WaitingFor::ModeChoice {
             player,
             modal,

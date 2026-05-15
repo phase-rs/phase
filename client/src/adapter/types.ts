@@ -894,6 +894,18 @@ export type WaitingFor =
       tallies: number[];
       controller: PlayerId;
       source_id: ObjectId;
+      // The "who acts" descriptor for this step. `player` above is the
+      // SUBJECT being voted-for/labeled.
+      //   * `{ type: "SubjectActs" }` — classic Council's-dilemma; the
+      //     subject votes for themselves.
+      //   * `{ type: "Delegated", data: PlayerId }` — Battlebond friend-
+      //     or-foe; a fixed player (the spell controller) casts every
+      //     vote while `player` cycles through subjects.
+      // Resolve via `data.actor.type === "Delegated" ? data.actor.data
+      // : data.player` to get the authorized submitter.
+      actor:
+        | { type: "SubjectActs" }
+        | { type: "Delegated"; data: PlayerId };
     } }
   | { type: "ChooseDungeon"; data: { player: PlayerId; options: DungeonId[] } }
   | { type: "ChooseDungeonRoom"; data: { player: PlayerId; dungeon: DungeonId; options: number[]; option_names: string[] } }
