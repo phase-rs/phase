@@ -1597,6 +1597,13 @@ pub fn resolve_ability_chain(
         // alongside `last_zone_changed_ids` so cross-resolution leakage is
         // impossible.
         state.last_vote_ballots = crate::im::Vector::new();
+        // CR 608.2c + CR 102.1: Per-resolution chosen-player ledger; populated
+        // by `engine_resolution_choices` when a `NamedChoice` resolves a player
+        // and read by `choose::compute_options` to filter already-chosen
+        // players. Cleared per top-level chain so cross-resolution leakage is
+        // impossible (Gluntch's "Choose a second/third player" only excludes
+        // players chosen within the same trigger resolution).
+        state.chosen_players_this_resolution = crate::im::Vector::new();
         state.last_effect_amount = None;
         state.last_effect_counts_by_player.clear();
         state.exiled_from_hand_this_resolution = 0;
@@ -2999,7 +3006,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission,
+        AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, ChoiceType,
         ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration, FilterProp,
         GainLifePlayer, ManaSpendPermission, PermissionGrantee, PlayerFilter, PlayerScope, PtValue,
         QuantityExpr, QuantityRef, SpellContext, StaticDefinition, TargetFilter, TargetRef,
@@ -7801,6 +7808,423 @@ mod tests {
             "Stale cost_payment_failed_flag should be cleared by handle_optional_effect_choice. \
              Hand should have 2 cards (discard 1 + draw 2), got {}.",
             hand_after,
+        );
+    }
+
+    // ----- Gluntch, the Bestower (#409) -----------------------------------
+    //
+    // "At the beginning of your end step, choose a player. They put two +1/+1
+    //  counters on a creature they control. Choose a second player to draw a
+    //  card. Then choose a third player to create two Treasure tokens."
+    //
+    // Modeled as a ResolvedAbility chain:
+    //
+    //   Choose Player                         (sentence 1)
+    //     └─ PutCounter (Creature, ScopedPlayer-controlled)  (sentence 2)
+    //         └─ Choose Player                                (sentence 3)
+    //             └─ Draw (target: ScopedPlayer)              (sentence 3 tail)
+    //                 └─ Choose Player                        (sentence 4)
+    //                     └─ Token (owner: ScopedPlayer)      (sentence 4 tail)
+    //
+    // Per the 2022-06-10 ruling, all three players must be different.
+
+    fn gluntch_source(state: &mut GameState) -> ObjectId {
+        create_object(
+            state,
+            CardId(1),
+            PlayerId(0),
+            "Gluntch, the Bestower".to_string(),
+            Zone::Battlefield,
+        )
+    }
+
+    /// Build a Gluntch-shaped chain that exercises scoped_player binding.
+    ///
+    /// The real Gluntch text is:
+    ///
+    ///   Choose a player.
+    ///   They put two +1/+1 counters on a creature they control.
+    ///   Choose a second player to draw a card.
+    ///   Then choose a third player to create two Treasure tokens.
+    ///
+    /// PutCounter on a non-targeting "a creature they control" filter requires
+    /// the *chosen player* to additionally choose which creature to receive
+    /// the counters (per the 2022-06-10 ruling). Modeling that interactive
+    /// per-target choice is out of scope for this PR — it requires a separate
+    /// target-choice machinery upstream of `resolve_add`. To exercise the
+    /// part of the architecture this PR delivers (scoped_player binding,
+    /// per-resolution ledger, CR 609.3 skip), we substitute Draw for the
+    /// PutCounter sentence — Draw on `TargetFilter::ScopedPlayer` resolves
+    /// directly from `ability.scoped_player` and is the canonical
+    /// "chosen player does X" check.
+    ///
+    /// Chain shape:
+    ///   Choose Player          (sentence 1)
+    ///     └─ Draw (ScopedPlayer)               <- exercises P1's bound scope
+    ///         └─ Choose Player                  (sentence 3)
+    ///             └─ Draw (ScopedPlayer)        <- exercises P2's bound scope
+    ///                 └─ Choose Player          (sentence 4)
+    ///                     └─ Token (ScopedPlayer)  <- exercises P0's bound scope
+    fn build_gluntch_chain(source_id: ObjectId, controller: PlayerId) -> ResolvedAbility {
+        // Sentence 4 tail: create two Treasure tokens (owner: ScopedPlayer).
+        let token = ResolvedAbility::new(
+            Effect::Token {
+                name: "Treasure".to_string(),
+                power: PtValue::Fixed(0),
+                toughness: PtValue::Fixed(0),
+                types: vec!["Artifact".to_string()],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 2 },
+                owner: TargetFilter::ScopedPlayer,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+            vec![],
+            source_id,
+            controller,
+        );
+
+        // Sentence 4: choose a third player (with token sub).
+        let choose_third = ResolvedAbility::new(
+            Effect::Choose {
+                choice_type: ChoiceType::Player,
+                persist: false,
+            },
+            vec![],
+            source_id,
+            controller,
+        )
+        .sub_ability(token);
+
+        // Sentence 3 tail: draw a card (target: ScopedPlayer).
+        let draw_second = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ScopedPlayer,
+            },
+            vec![],
+            source_id,
+            controller,
+        )
+        .sub_ability(choose_third);
+
+        // Sentence 3: choose a second player (with draw sub, leading to choose_third).
+        let choose_second = ResolvedAbility::new(
+            Effect::Choose {
+                choice_type: ChoiceType::Player,
+                persist: false,
+            },
+            vec![],
+            source_id,
+            controller,
+        )
+        .sub_ability(draw_second);
+
+        // Sentence 2 stand-in: Draw a card (target: ScopedPlayer). This stands
+        // in for the printed "they put two +1/+1 counters on a creature they
+        // control" — the test exercises scoped_player binding, not the
+        // chosen-player target-choice machinery the counter sub-effect would
+        // also require.
+        let draw_first = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ScopedPlayer,
+            },
+            vec![],
+            source_id,
+            controller,
+        )
+        .sub_ability(choose_second);
+
+        // Sentence 1: choose a player.
+        ResolvedAbility::new(
+            Effect::Choose {
+                choice_type: ChoiceType::Player,
+                persist: false,
+            },
+            vec![],
+            source_id,
+            controller,
+        )
+        .sub_ability(draw_first)
+    }
+
+    /// Submit a ChooseOption response via the apply pipeline so authorization,
+    /// resolution-choice dispatch, and continuation drains all run end-to-end.
+    fn submit_choose_option(state: &mut GameState, choice: &str) {
+        use crate::game::engine::apply;
+        use crate::types::GameAction;
+
+        let acting_player = match &state.waiting_for {
+            crate::types::game_state::WaitingFor::NamedChoice { player, .. } => *player,
+            other => panic!("expected NamedChoice, got {other:?}"),
+        };
+        apply(
+            state,
+            acting_player,
+            GameAction::ChooseOption {
+                choice: choice.to_string(),
+            },
+        )
+        .expect("ChooseOption submits");
+    }
+
+    fn new_three_player_state(seed: u64) -> GameState {
+        GameState::new(FormatConfig::standard(), 3, seed)
+    }
+
+    #[test]
+    fn gluntch_three_player_chain_binds_each_chosen_player_to_correct_subeffect() {
+        // CR 608.2c + CR 102.1: Drive the full Gluntch-shape chain through
+        // three NamedChoice transitions and verify each sub-effect lands on
+        // the PER-CHOICE chosen player, not the caster (Gluntch's controller).
+        let mut state = new_three_player_state(42);
+
+        // Load library cards for P1 and P2 (chosen players for sentences 1
+        // and 3 — both perform a Draw on ScopedPlayer in this test).
+        for (pid, idx) in [(1u8, 100u64), (2, 101)] {
+            create_object(
+                &mut state,
+                CardId(idx),
+                PlayerId(pid),
+                format!("Library card for P{pid}"),
+                Zone::Library,
+            );
+        }
+
+        let source = gluntch_source(&mut state);
+        let chain = build_gluntch_chain(source, PlayerId(0));
+
+        // Resolve the chain top-level. The first Choose Player transitions
+        // to NamedChoice and stashes the continuation.
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &chain, &mut events, 0).unwrap();
+
+        // ----- First NamedChoice: pick P1. -----
+        let p0_hand_before = state.players[0].hand.len();
+        let p1_hand_before = state.players[1].hand.len();
+        submit_choose_option(&mut state, "1");
+        assert_eq!(
+            state.players[1].hand.len(),
+            p1_hand_before + 1,
+            "first sub-effect (Draw on ScopedPlayer) must land on P1, not the caster"
+        );
+        assert_eq!(
+            state.players[0].hand.len(),
+            p0_hand_before,
+            "caster (P0) must NOT draw — the chosen player did"
+        );
+        assert!(
+            state.chosen_players_this_resolution.contains(&PlayerId(1)),
+            "ledger must record P1 after the first NamedChoice resolves"
+        );
+
+        // ----- Second NamedChoice: P1 excluded; pick P2. -----
+        match &state.waiting_for {
+            crate::types::game_state::WaitingFor::NamedChoice { options, .. } => {
+                assert!(
+                    !options.contains(&"1".to_string()),
+                    "P1 must be excluded from the second Choose Player"
+                );
+                assert!(options.contains(&"0".to_string()));
+                assert!(options.contains(&"2".to_string()));
+            }
+            other => panic!("expected NamedChoice for second pick, got {other:?}"),
+        }
+        let p2_hand_before = state.players[2].hand.len();
+        submit_choose_option(&mut state, "2");
+        assert_eq!(
+            state.players[2].hand.len(),
+            p2_hand_before + 1,
+            "second sub-effect (Draw on ScopedPlayer) must land on P2"
+        );
+
+        // ----- Third NamedChoice: P1 and P2 excluded; pick P0. -----
+        match &state.waiting_for {
+            crate::types::game_state::WaitingFor::NamedChoice { options, .. } => {
+                assert!(!options.contains(&"1".to_string()));
+                assert!(!options.contains(&"2".to_string()));
+                assert!(options.contains(&"0".to_string()));
+            }
+            other => panic!("expected NamedChoice for third pick, got {other:?}"),
+        }
+        let p0_artifacts_before = state
+            .objects
+            .iter()
+            .filter(|(_, obj)| {
+                obj.controller == PlayerId(0)
+                    && obj.card_types.core_types.contains(&CoreType::Artifact)
+            })
+            .count();
+        submit_choose_option(&mut state, "0");
+        let p0_artifacts_after = state
+            .objects
+            .iter()
+            .filter(|(_, obj)| {
+                obj.controller == PlayerId(0)
+                    && obj.card_types.core_types.contains(&CoreType::Artifact)
+            })
+            .count();
+        assert_eq!(
+            p0_artifacts_after,
+            p0_artifacts_before + 2,
+            "P0 must own exactly 2 new Treasure tokens"
+        );
+    }
+
+    #[test]
+    fn gluntch_two_player_game_skips_third_choose_per_cr_609_3() {
+        // CR 609.3: In a 2-player game, after P1 and P0 have been chosen the
+        // third Choose Player must skip (no NamedChoice transition) and no
+        // Treasure tokens are created.
+        let mut state = GameState::new_two_player(42);
+        // Library cards for both players (each will draw when their
+        // ScopedPlayer Draw resolves).
+        for (pid, idx) in [(0u8, 100u64), (1, 101)] {
+            create_object(
+                &mut state,
+                CardId(idx),
+                PlayerId(pid),
+                format!("Library card for P{pid}"),
+                Zone::Library,
+            );
+        }
+
+        let source = gluntch_source(&mut state);
+        let chain = build_gluntch_chain(source, PlayerId(0));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &chain, &mut events, 0).unwrap();
+
+        // First choice: P1.
+        let p1_hand_before = state.players[1].hand.len();
+        submit_choose_option(&mut state, "1");
+        assert_eq!(
+            state.players[1].hand.len(),
+            p1_hand_before + 1,
+            "first Draw on ScopedPlayer must land on P1"
+        );
+
+        // Second choice: only P0 left.
+        match &state.waiting_for {
+            crate::types::game_state::WaitingFor::NamedChoice { options, .. } => {
+                assert_eq!(options, &vec!["0".to_string()]);
+            }
+            other => panic!("expected NamedChoice for second pick, got {other:?}"),
+        }
+        let p0_hand_before = state.players[0].hand.len();
+        submit_choose_option(&mut state, "0");
+        assert_eq!(
+            state.players[0].hand.len(),
+            p0_hand_before + 1,
+            "second Draw on ScopedPlayer must land on P0"
+        );
+
+        // Third Choose Player has no legal options and must skip — no
+        // NamedChoice transition, no Treasure created.
+        assert!(
+            !matches!(
+                state.waiting_for,
+                crate::types::game_state::WaitingFor::NamedChoice { .. }
+            ),
+            "third Choose Player must skip, but waiting_for={:?}",
+            state.waiting_for
+        );
+        let p0_artifacts = state
+            .objects
+            .iter()
+            .filter(|(_, obj)| {
+                obj.controller == PlayerId(0)
+                    && obj.card_types.core_types.contains(&CoreType::Artifact)
+            })
+            .count();
+        assert_eq!(
+            p0_artifacts, 0,
+            "no Treasure tokens should exist after the skipped third Choose"
+        );
+    }
+
+    #[test]
+    fn gluntch_three_choices_must_be_different_players() {
+        // CR 608.2c + 2022-06-10 ruling: Each successive Choose Player must
+        // exclude all previously-chosen players.
+        let mut state = new_three_player_state(7);
+        for (pid, idx) in [(0u8, 100u64), (1, 101)] {
+            create_object(
+                &mut state,
+                CardId(idx),
+                PlayerId(pid),
+                format!("Library card for P{pid}"),
+                Zone::Library,
+            );
+        }
+
+        let source = gluntch_source(&mut state);
+        let chain = build_gluntch_chain(source, PlayerId(0));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &chain, &mut events, 0).unwrap();
+
+        // First choice: P0 (caster picks themselves — legal).
+        match &state.waiting_for {
+            crate::types::game_state::WaitingFor::NamedChoice { options, .. } => {
+                assert_eq!(options.len(), 3);
+            }
+            other => panic!("expected NamedChoice, got {other:?}"),
+        }
+        submit_choose_option(&mut state, "0");
+
+        // Second: P0 excluded.
+        match &state.waiting_for {
+            crate::types::game_state::WaitingFor::NamedChoice { options, .. } => {
+                assert!(!options.contains(&"0".to_string()));
+                assert_eq!(options.len(), 2);
+            }
+            other => panic!("expected NamedChoice, got {other:?}"),
+        }
+        submit_choose_option(&mut state, "1");
+
+        // Third: P0 and P1 excluded.
+        match &state.waiting_for {
+            crate::types::game_state::WaitingFor::NamedChoice { options, .. } => {
+                assert_eq!(options, &vec!["2".to_string()]);
+            }
+            other => panic!("expected NamedChoice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gluntch_chosen_player_zero_is_self() {
+        // CR 102.1 + 2022-06-10 ruling: "any one of them can be you" — the
+        // caster is a legal pick for the first Choose Player. The Draw must
+        // land on the caster (P0) since P0 chose themselves.
+        let mut state = new_three_player_state(99);
+        create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Library card for P0".to_string(),
+            Zone::Library,
+        );
+
+        let source = gluntch_source(&mut state);
+        let chain = build_gluntch_chain(source, PlayerId(0));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &chain, &mut events, 0).unwrap();
+
+        let p0_hand_before = state.players[0].hand.len();
+        submit_choose_option(&mut state, "0");
+
+        assert_eq!(
+            state.players[0].hand.len(),
+            p0_hand_before + 1,
+            "the chosen player (P0 / caster) draws — 'any one of them can be you'"
         );
     }
 }

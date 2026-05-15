@@ -263,6 +263,23 @@ pub fn resolve_add(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    // CR 609.3 + CR 102.1: When the PutCounter target filter requires
+    // `ability.scoped_player` (e.g., "they put two +1/+1 counters on a
+    // creature they control" after "choose a player") but no player was
+    // chosen — because the choice was skipped for lack of legal options
+    // (Gluntch in a two-player game) — do nothing. Falling back to source
+    // controller via `scoped_player_or_controller` in filter.rs would put
+    // counters on the caster's creatures instead.
+    if let Effect::PutCounter { target, .. } | Effect::AddCounter { target, .. } = &ability.effect {
+        if ability.scoped_player.is_none() && target.requires_bound_scoped_player() {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+            });
+            return Ok(());
+        }
+    }
+
     let (counter_type, counter_num) = match &ability.effect {
         Effect::AddCounter {
             counter_type,

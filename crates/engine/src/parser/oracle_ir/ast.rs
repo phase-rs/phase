@@ -797,6 +797,19 @@ pub(crate) enum ChooseImperativeAst {
         target_a: TargetFilter,
         target_b: TargetFilter,
     },
+    /// CR 608.2c + CR 102.1: "Choose a [player|opponent] to <verb>" — the
+    /// infinitive body is the sub-ability that runs after the player is
+    /// chosen. Lowers to `Effect::Choose { choice_type, persist: false }`
+    /// with `sub_ability = Some(body)`, where `body` was parsed with
+    /// `relative_player_scope = Some(ScopedPlayer)` so its subject anaphors
+    /// route to `TargetFilter::ScopedPlayer` (read at runtime from
+    /// `ability.scoped_player`, bound by `engine_resolution_choices` when
+    /// the `NamedChoice` resolves). Used by the Gluntch the Bestower class:
+    /// "Choose a second player to draw a card."
+    ChoosePlayerThen {
+        choice_type: crate::types::ability::ChoiceType,
+        body: Box<AbilityDefinition>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

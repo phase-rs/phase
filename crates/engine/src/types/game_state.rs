@@ -3442,6 +3442,17 @@ pub struct GameState {
     #[serde(default)]
     pub last_vote_ballots: im::Vector<(PlayerId, u8)>,
 
+    /// CR 608.2c + CR 102.1: Per-resolution ledger of PlayerIds already
+    /// resolved by `Effect::Choose { ChoiceType::Player | ChoiceType::Opponent }`
+    /// in the current top-level ability resolution. Append-only; cleared at
+    /// `depth == 0` of `resolve_ability_chain` (mirrors `last_zone_changed_ids`).
+    /// Read by `choose::compute_options` to skip already-chosen players for
+    /// "choose a second/third/another player" patterns (Gluntch the Bestower
+    /// 2022-06-10 ruling) and to leave no legal choice in two-player games
+    /// (CR 609.3 "do as much as possible" — the second Choose Player skips).
+    #[serde(default)]
+    pub chosen_players_this_resolution: im::Vector<PlayerId>,
+
     /// CR 608.2c + CR 109.5: Player actions performed during the current
     /// top-level ability resolution. Distinct from turn-level trackers like
     /// `players_who_searched_library_this_turn`: this set accumulates only
@@ -3855,6 +3866,7 @@ impl GameState {
             last_revealed_ids: Vec::new(),
             last_zone_changed_ids: Vec::new(),
             last_vote_ballots: im::Vector::new(),
+            chosen_players_this_resolution: im::Vector::new(),
             player_actions_this_way: HashSet::new(),
             last_effect_amount: None,
             last_effect_count: None,
@@ -4112,6 +4124,7 @@ impl PartialEq for GameState {
             && self.last_revealed_ids == other.last_revealed_ids
             && self.last_zone_changed_ids == other.last_zone_changed_ids
             && self.last_vote_ballots == other.last_vote_ballots
+            && self.chosen_players_this_resolution == other.chosen_players_this_resolution
             && self.player_actions_this_way == other.player_actions_this_way
             && self.last_effect_count == other.last_effect_count
             && self.last_effect_counts_by_player == other.last_effect_counts_by_player
