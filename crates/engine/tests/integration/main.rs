@@ -30,6 +30,7 @@ mod riot_control_regression;
 mod ripples_of_undeath_regression;
 mod rules;
 mod swans_prevention_followup;
+mod syr_konrad_disjunction;
 mod tempt_with_discovery;
 mod timely_ward_regression;
 mod treasured_find_regression;

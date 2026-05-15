@@ -313,6 +313,26 @@ pub(crate) fn parse_trigger_lines_at_index_ir(
         return results;
     }
 
+    // Pattern 3: "whenever <subj1> <event1>, or <subj2> <event2>[, or ...], <effect>"
+    // — multi-subject disjunctive trigger (Syr Konrad-class). Each clause is a
+    // standalone trigger that shares the effect body. Unlike pattern 2, each
+    // disjunct introduces its OWN subject. Operates on the full normalized
+    // text because `split_trigger` (called above) cannot recover the
+    // disjunction once the first `, or ` is consumed as the effect boundary.
+    // CR 603.2 + CR 700.4: each clause is an independent triggered ability.
+    if let Some(halves) = split_or_clause_compound(&lower, &normalized) {
+        let mut results = Vec::with_capacity(halves.len());
+        for (i, clause) in halves.into_iter().enumerate() {
+            results.push(parse_trigger_line_with_index_ir(
+                &clause,
+                card_name,
+                base_trigger_index.map(|b| b + i),
+                ctx,
+            ));
+        }
+        return results;
+    }
+
     // No compound — single trigger.
     vec![parse_trigger_line_with_index_ir(
         text,
@@ -2932,6 +2952,187 @@ fn capitalize_first(s: &str) -> String {
     }
 }
 
+/// CR 603.2 + CR 700.4: Detect a subject-introducer prefix at the start of
+/// `remainder`. Used by `split_or_clause_compound` to validate that the text
+/// after an "or" boundary begins a new trigger clause (with its own subject)
+/// rather than continuing an inline filter disjunction such as "a creature
+/// or artifact dies" (the second alternative is a bare type word, not a
+/// subject).
+///
+/// Each `alt()` arm mirrors a subject-introducer recognized by
+/// `parse_single_subject`. We only need to recognize the prefix — the per-half
+/// re-parse pass invokes the full subject parser. New subject-introducers
+/// added to `parse_single_subject` should be mirrored here so the splitter
+/// remains in lockstep.
+fn starts_with_new_subject(remainder: &str) -> bool {
+    alt((
+        value((), tag::<_, _, OracleError<'_>>("~ ")),
+        value((), tag("~,")),
+        value((), tag("this ")),
+        value((), tag("that ")),
+        value((), tag("another ")),
+        value((), tag("an opponent")),
+        value((), tag("each opponent")),
+        value((), tag("a player")),
+        value((), tag("an ")),
+        value((), tag("a ")),
+        value((), tag("each ")),
+        value((), tag("one or more ")),
+    ))
+    .parse(remainder)
+    .is_ok()
+}
+
+/// CR 603.2: Detect whether `text` contains a recognized trigger event verb at
+/// a word boundary. Used by `split_or_clause_compound` to verify the prefix
+/// before an "or" boundary is a complete subject+verb clause (Dreadhound: the
+/// "dies" before " or " marks the first clause as complete). Without this
+/// check, single-subject disjunctions like "Whenever a Knight or a Soldier
+/// enters" would be wrongly split (the LHS "a Knight" has no verb yet — the
+/// shared verb "enters" comes after the disjunction).
+///
+/// The set of event verbs mirrors `is_event_verb_start` in
+/// `split_or_event_compound` for consistency. New trigger event verbs added
+/// to the trigger event dispatch (`try_parse_event`) should be reflected here
+/// so the splitter recognises them.
+fn before_contains_event_verb(text: &str) -> bool {
+    fn parse_any_event_verb(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+        alt((
+            value((), tag::<_, _, OracleError<'_>>("dies")),
+            value((), tag("die ")),
+            value((), tag("deals ")),
+            value((), tag("deal ")),
+            value((), tag("enters")),
+            value((), tag("enter ")),
+            value((), tag("attacks")),
+            value((), tag("attack ")),
+            value((), tag("blocks")),
+            value((), tag("block ")),
+            value((), tag("is sacrificed")),
+            value((), tag("are sacrificed")),
+            value((), tag("is exiled")),
+            value((), tag("are exiled")),
+            value((), tag("leaves")),
+            value((), tag("is put into")),
+        ))
+        .parse(input)
+    }
+    scan_split_at_phrase(text, parse_any_event_verb).is_some()
+}
+
+/// CR 603.2 + CR 700.4: Split a multi-clause disjunctive trigger of the form
+/// "Whenever <subj1> <event1> or <subj2> <event2>[, or <subj3> <event3>], <effect>"
+/// into N independent trigger lines, each sharing the same effect. Both the
+/// bare " or " (Dreadhound, Scrap Trawler) and the comma-or ", or " (Syr
+/// Konrad) clause-separators are supported.
+///
+/// Sibling to `split_and_when_compound` and `split_or_event_compound`. Unlike
+/// `split_or_event_compound` (which handles "Whenever <subj> <event1> or <event2>"
+/// — events sharing a single subject), this combinator handles clauses where
+/// each disjunct introduces its own subject.
+///
+/// Operates on the FULL normalized text (not just the condition) because the
+/// upstream `split_trigger` boundary search treats the first `, or ` in Syr
+/// Konrad-class text as the effect boundary (the second clause does not start
+/// with a type word, so `continues_player_action_list` returns false). That
+/// over-split would leave the second and third clauses orphaned inside the
+/// "effect" text. Scanning the full text directly recovers the disjunctive
+/// structure before per-clause parsing.
+///
+/// Disambiguation:
+/// - To accept an "or" position as a clause boundary, the text BEFORE the "or"
+///   must contain a recognized event verb (`before_contains_event_verb`) AND
+///   the text AFTER the "or" must start with a subject-introducer
+///   (`starts_with_new_subject`).
+/// - Inline filter disjunctions ("Whenever a creature or artifact dies"):
+///   "artifact" is not a subject-introducer → rejected.
+/// - Single-subject disjunctions ("Whenever a Knight or a Soldier enters"):
+///   "a Knight" contains no event verb yet → rejected (the shared verb
+///   "enters" comes after the disjunction).
+/// - "One or more" batched triggers (CR 603.2c — single trigger per batch):
+///   the quantifier "one or more" precedes a noun, never an event verb on its
+///   LHS, so the verb-before-or check excludes them.
+///
+/// Returns `Some(vec![line1, line2, ...])` if at least one valid clause boundary
+/// is found, else `None`.
+fn split_or_clause_compound(lower: &str, text: &str) -> Option<Vec<String>> {
+    // Must begin with a trigger keyword ("when"/"whenever"). "At the beginning
+    // of" phase triggers are not subject-introducing in the same way and use
+    // distinct splitters upstream.
+    let (after_keyword, keyword_label) = if let Ok((rest, ())) =
+        value((), tag::<_, _, OracleError<'_>>("whenever ")).parse(lower)
+    {
+        (rest, "Whenever")
+    } else if let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>("when ")).parse(lower) {
+        (rest, "When")
+    } else {
+        return None;
+    };
+    let keyword_byte_len = lower.len() - after_keyword.len();
+
+    // Walk every " or " position (with optional preceding comma) — at each,
+    // verify both halves carry the multi-clause signature. The boundary's
+    // length depends on which form we matched; track it per-boundary so the
+    // clause-body slicing aligns later.
+    use super::oracle_nom::primitives::split_once_on;
+    let mut boundaries: Vec<(usize, usize)> = Vec::new(); // (start_pos, separator_len)
+    let mut search_start = keyword_byte_len;
+    while let Ok((_, (before, after))) = split_once_on(&lower[search_start..], " or ") {
+        let or_pos = search_start + before.len();
+        // CR 603.2: clause boundary requires (event-verb-on-LHS) AND
+        // (subject-introducer-on-RHS). The LHS scan covers everything from
+        // the trigger keyword up to this " or " — picking up the verb that
+        // closes the FIRST clause.
+        let lhs = &lower[keyword_byte_len..or_pos];
+        if before_contains_event_verb(lhs) && starts_with_new_subject(after) {
+            // Prefer the comma-or form when the byte directly before this
+            // " or " is a comma. The " or " separator match started AFTER
+            // the comma; the literal text is ", or ". Pull the boundary back
+            // by one byte so the before-half doesn't carry a trailing ",".
+            if or_pos > 0 && lower.as_bytes()[or_pos - 1] == b',' {
+                boundaries.push((or_pos - 1, ", or ".len()));
+            } else {
+                boundaries.push((or_pos, " or ".len()));
+            }
+        }
+        search_start = or_pos + " or ".len();
+    }
+    if boundaries.is_empty() {
+        return None;
+    }
+
+    // After the last clause boundary, the next `, ` is the effect boundary
+    // (the comma between the last subject+event clause and the shared effect
+    // body). Use the same boundary detector the rest of the pipeline uses so
+    // heuristics stay aligned.
+    let (last_or_pos, last_sep_len) = *boundaries.last().expect("non-empty above");
+    let after_last_or = &lower[last_or_pos + last_sep_len..];
+    let effect_rel = find_effect_boundary(after_last_or)?;
+    let effect_abs = last_or_pos + last_sep_len + effect_rel;
+
+    // Build N condition spans, each from "<keyword> " + clause body, sharing
+    // the same effect tail.
+    let effect_text = text[effect_abs + 2..].trim();
+    let mut clause_starts: Vec<usize> = vec![keyword_byte_len];
+    for &(pos, sep_len) in &boundaries {
+        clause_starts.push(pos + sep_len);
+    }
+    let mut clause_ends: Vec<usize> = boundaries.iter().map(|(pos, _)| *pos).collect();
+    clause_ends.push(effect_abs);
+
+    let mut results = Vec::with_capacity(clause_starts.len());
+    for (start, end) in clause_starts.into_iter().zip(clause_ends) {
+        let body = text[start..end].trim();
+        let clause = if effect_text.is_empty() {
+            format!("{keyword_label} {body}")
+        } else {
+            format!("{keyword_label} {body}, {effect_text}")
+        };
+        results.push(clause);
+    }
+    Some(results)
+}
+
 fn split_trigger(tp: TextPair<'_>) -> (String, String) {
     if let Some(comma_pos) = find_effect_boundary(tp.lower) {
         let condition = tp.original[..comma_pos].trim().to_string();
@@ -3720,6 +3921,56 @@ fn try_parse_event(
         def.mode = TriggerMode::Blocks;
         def.valid_card = Some(subject.clone());
         return Some((TriggerMode::Blocks, def));
+    }
+
+    // CR 603.10a + CR 109.5: "leaves your graveyard" / "leaves a graveyard" —
+    // single-subject sibling of the batched `try_parse_one_or_more_leave_graveyard`.
+    // The graveyard possessive narrows `valid_card.controller`, identical to
+    // the put-into-graveyard path. Must be tried BEFORE the generic
+    // "leaves the battlefield" / bare "leaves" arm below because bare "leaves"
+    // would otherwise match this text and emit a battlefield-LTB trigger.
+    //
+    // "leaves the graveyard" is intentionally NOT recognized: no real card uses
+    // the bare/un-possessive form for the singular leaves-graveyard event, and
+    // accepting it could shadow inflected uses like "leaves the battlefield".
+    fn parse_leaves_graveyard_possessive(input: &str) -> OracleResult<'_, Option<ControllerRef>> {
+        alt((
+            value(Some(ControllerRef::You), tag("leaves your graveyard")),
+            value(
+                Some(ControllerRef::Opponent),
+                tag("leaves an opponent's graveyard"),
+            ),
+            value(None, tag("leaves a graveyard")),
+        ))
+        .parse(input)
+    }
+    if let Ok((_, possessive)) = parse_leaves_graveyard_possessive.parse(rest) {
+        let mut def = make_base();
+        def.mode = TriggerMode::ChangesZone;
+        def.origin = Some(Zone::Graveyard);
+        // Destination is unrestricted — the card may leave the graveyard to any
+        // other zone (exile, hand, battlefield, library) and the trigger still
+        // fires.
+        def.destination = None;
+        // CR 109.5: Narrow the valid_card's controller to the graveyard owner
+        // when the possessive is present.
+        let valid_card = match possessive.clone() {
+            Some(ctrl) => add_controller(subject.clone(), ctrl),
+            None => subject.clone(),
+        };
+        def.valid_card = Some(valid_card);
+        def.valid_target =
+            possessive.map(|ctrl| TargetFilter::Typed(TypedFilter::default().controller(ctrl)));
+        // CR 603.10a: leaves-graveyard is a look-back trigger; the matcher
+        // examines the card's pre-event zone (graveyard). The trigger source
+        // (Syr Konrad) is on the battlefield, so `trigger_zones` stays empty.
+        // Self-referential leaves-graveyard ("when ~ leaves your graveyard")
+        // would need extended trigger_zones to fire from the post-event zone,
+        // mirroring the LTB self-reference rule.
+        if filter_references_self(subject) {
+            def.trigger_zones = vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile];
+        }
+        return Some((TriggerMode::ChangesZone, def));
     }
 
     // "leaves the battlefield" / "leaves"
@@ -6117,20 +6368,24 @@ fn try_parse_put_into_graveyard(
 
     let (after_gy, possessive) = parse_graveyard_possessive.parse(after_verb).ok()?;
 
-    // Parse optional "from [zone]" clause
+    // Parse optional "from [zone]" clause. CR 603.6c: "from anywhere" leaves
+    // `origin = None`; "from anywhere other than the battlefield" (Syr Konrad
+    // clause 2) materializes `origin_zones` instead so the matcher rejects
+    // battlefield-source events. Both are routed through
+    // `apply_graveyard_origin_shape`.
     let after_gy = after_gy.trim_start();
-    let origin = if let Ok((after_from, ())) =
+    let shape = if let Ok((after_from, ())) =
         value((), tag::<_, _, OracleError<'_>>("from ")).parse(after_gy)
     {
         let after_from = after_from.trim_start();
         parse_graveyard_origin_zone
             .parse(after_from)
             .ok()
-            .map(|(_, z)| z)
-            .unwrap_or(None)
+            .map(|(_, s)| s)
+            .unwrap_or(GraveyardOriginShape::Anywhere)
     } else {
         // No "from" clause -- no origin restriction (any zone to graveyard)
-        None
+        GraveyardOriginShape::Anywhere
     };
 
     let valid_card = match possessive.clone() {
@@ -6143,7 +6398,7 @@ fn try_parse_put_into_graveyard(
     let mut def = make_base();
     def.mode = TriggerMode::ChangesZone;
     def.destination = Some(Zone::Graveyard);
-    def.origin = origin;
+    apply_graveyard_origin_shape(&mut def, shape);
     def.valid_card = valid_card;
     def.valid_target = valid_target;
     Some((TriggerMode::ChangesZone, def))
@@ -6172,28 +6427,118 @@ fn parse_graveyard_possessive(input: &str) -> OracleResult<'_, Option<Controller
     .parse(input)
 }
 
+/// CR 603.6c + CR 109.5: Parser-internal classification of the source-zone
+/// phrase in a "put into <graveyard> from <X>" clause. Three categories:
+///
+/// - `Single(Zone)` — a single named origin (e.g. "from the battlefield",
+///   "from your library").
+/// - `Anywhere` — no origin restriction (CR 603.6c: "from anywhere" — never
+///   treated as a leaves-the-battlefield ability).
+/// - `AnywhereExceptBattlefield` — Syr Konrad-class disjunctive source: every
+///   public/private zone except the battlefield. Materialized at call sites
+///   into `TriggerDefinition.origin_zones` so the matcher (CR 603.10a)
+///   accepts the union without coalescing distinct sources.
+///
+/// Parser-internal only — call sites are responsible for translating each
+/// shape into the right combination of `origin` / `origin_zones`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GraveyardOriginShape {
+    Single(Zone),
+    Anywhere,
+    AnywhereExceptBattlefield,
+}
+
 /// CR 603.6c + CR 109.5: Parse the origin zone for a put-into-graveyard trigger.
-/// Returns `Some(Zone)` for a constrained origin, or `None` for "anywhere".
-/// Shared by `try_parse_put_into_graveyard` and the batched variant.
-fn parse_graveyard_origin_zone(input: &str) -> OracleResult<'_, Option<Zone>> {
+/// Returns a `GraveyardOriginShape` distinguishing the three Oracle-text
+/// patterns so call sites can route each into the correct trigger field
+/// (`origin` for single-zone, `origin_zones` for the disjunctive Syr Konrad
+/// exception). Shared by `try_parse_put_into_graveyard` and the batched
+/// `one-or-more` variant.
+///
+/// Order matters: the longer "anywhere other than the battlefield" must be
+/// tried before bare "anywhere" so the bare prefix does not short-circuit
+/// the exception variant.
+fn parse_graveyard_origin_zone(input: &str) -> OracleResult<'_, GraveyardOriginShape> {
     alt((
-        value(Some(Zone::Battlefield), tag("the battlefield")),
+        // CR 603.6c: "from anywhere other than the battlefield" — Syr Konrad
+        // class. Source is any non-battlefield zone. Must come BEFORE bare
+        // "anywhere" so the prefix does not match first.
+        value(
+            GraveyardOriginShape::AnywhereExceptBattlefield,
+            tag("anywhere other than the battlefield"),
+        ),
+        value(
+            GraveyardOriginShape::Single(Zone::Battlefield),
+            tag("the battlefield"),
+        ),
         // CR 603.6c: "from anywhere" — no origin restriction; the trigger
         // is explicitly NOT treated as a leaves-the-battlefield ability.
-        value(None, tag("anywhere")),
+        value(GraveyardOriginShape::Anywhere, tag("anywhere")),
         // Library origins: every possessive form maps to Zone::Library.
         // CR 109.5: "their library" is an anaphor back to the graveyard's owner;
         // "a player's library" / "any library" leave the owner unconstrained
         // (the valid_card filter from the graveyard possessive already handles
         // owner narrowing when present).
-        value(Some(Zone::Library), tag("your library")),
-        value(Some(Zone::Library), tag("their library")),
-        value(Some(Zone::Library), tag("an opponent's library")),
-        value(Some(Zone::Library), tag("a player's library")),
-        value(Some(Zone::Library), tag("any library")),
-        value(Some(Zone::Hand), tag("your hand")),
+        value(
+            GraveyardOriginShape::Single(Zone::Library),
+            tag("your library"),
+        ),
+        value(
+            GraveyardOriginShape::Single(Zone::Library),
+            tag("their library"),
+        ),
+        value(
+            GraveyardOriginShape::Single(Zone::Library),
+            tag("an opponent's library"),
+        ),
+        value(
+            GraveyardOriginShape::Single(Zone::Library),
+            tag("a player's library"),
+        ),
+        value(
+            GraveyardOriginShape::Single(Zone::Library),
+            tag("any library"),
+        ),
+        // CR 400.1: bare "a library" — Bloodchief Ascension / Dreadhound class.
+        // Owner narrowing is handled by the graveyard possessive's controller
+        // filter (or left unscoped when "a graveyard" is the destination).
+        value(
+            GraveyardOriginShape::Single(Zone::Library),
+            tag("a library"),
+        ),
+        value(GraveyardOriginShape::Single(Zone::Hand), tag("your hand")),
     ))
     .parse(input)
+}
+
+/// CR 400.1: All non-battlefield zones, in the canonical ordering used by
+/// `origin_zones` for "from anywhere other than the battlefield" triggers.
+/// The matcher (CR 603.10a) treats `origin_zones` as a disjunction, so order
+/// is not semantically meaningful — kept in a single list constant so test
+/// expectations and the parser stay aligned.
+fn non_battlefield_zones() -> Vec<Zone> {
+    vec![
+        Zone::Library,
+        Zone::Hand,
+        Zone::Graveyard,
+        Zone::Exile,
+        Zone::Stack,
+        Zone::Command,
+    ]
+}
+
+/// Apply a parsed `GraveyardOriginShape` to a mutable `TriggerDefinition`.
+/// Centralises the (single-zone → `origin`) / (anywhere-except-battlefield →
+/// `origin_zones`) split so both call sites stay in lockstep.
+fn apply_graveyard_origin_shape(def: &mut TriggerDefinition, shape: GraveyardOriginShape) {
+    match shape {
+        GraveyardOriginShape::Single(z) => def.origin = Some(z),
+        GraveyardOriginShape::Anywhere => def.origin = None,
+        GraveyardOriginShape::AnywhereExceptBattlefield => {
+            def.origin = None;
+            def.origin_zones = non_battlefield_zones();
+        }
+    }
 }
 
 /// Parse "[subject] is/are put into [possessive] hand from [zone]" — dredge-style
@@ -6358,19 +6703,23 @@ fn try_parse_one_or_more_put_into_graveyard(
             continue;
         };
 
-        // Parse optional "from [zone]" clause using nom
+        // Parse optional "from [zone]" clause using the shared shape combinator.
+        // CR 603.6c: "from anywhere" leaves origin unrestricted; "from anywhere
+        // other than the battlefield" populates `origin_zones` with every
+        // non-battlefield zone. Routing is centralised in
+        // `apply_graveyard_origin_shape`.
         let after_gy = after_gy.trim_start();
-        let origin = if let Ok((after_from, ())) =
+        let shape = if let Ok((after_from, ())) =
             value((), tag::<_, _, OracleError<'_>>("from ")).parse(after_gy)
         {
             let after_from = after_from.trim_start();
             parse_graveyard_origin_zone
                 .parse(after_from)
                 .ok()
-                .map(|(_, z)| z)
-                .unwrap_or(None)
+                .map(|(_, s)| s)
+                .unwrap_or(GraveyardOriginShape::Anywhere)
         } else {
-            None
+            GraveyardOriginShape::Anywhere
         };
 
         // Parse the subject type filter: "creature cards", "land cards", "cards"
@@ -6403,7 +6752,7 @@ fn try_parse_one_or_more_put_into_graveyard(
         let mut def = make_base();
         def.mode = TriggerMode::ChangesZoneAll;
         def.destination = Some(Zone::Graveyard);
-        def.origin = origin;
+        apply_graveyard_origin_shape(&mut def, shape);
         def.valid_card = valid_card;
         def.valid_target = valid_target;
         def.batched = true;
@@ -15334,6 +15683,228 @@ mod tests {
             tf.properties.contains(&FilterProp::OtherThanTriggerObject),
             "expected OtherThanTriggerObject in aggregate filter, got {:?}",
             tf.properties
+        );
+    }
+
+    // ---- Issue #411: disjunctive graveyard triggers (Syr Konrad class) ----
+
+    /// CR 603.2 + CR 700.4 + CR 603.10a: Syr Konrad's three-clause disjunctive
+    /// trigger must split into three independent ChangesZone triggers — dies
+    /// (battlefield → graveyard), put-into-graveyard-from-anywhere-except-
+    /// battlefield (origin_zones = all non-battlefield), and leaves-your-
+    /// graveyard (graveyard → any). All three share the same DamageEachPlayer
+    /// effect body.
+    #[test]
+    fn trigger_split_syr_konrad_three_clauses() {
+        let defs = parse_trigger_lines_at_index(
+            "Whenever another creature dies, or a creature card is put into a graveyard from anywhere other than the battlefield, or a creature card leaves your graveyard, ~ deals 1 damage to each opponent.",
+            "Syr Konrad, the Grim",
+            None,
+            &mut ParseContext::default(),
+        );
+        assert_eq!(
+            defs.len(),
+            3,
+            "expected 3 triggers, got {}: {:?}",
+            defs.len(),
+            defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+        );
+
+        // Clause 1: dies (Battlefield → Graveyard, another creature)
+        assert_eq!(defs[0].mode, TriggerMode::ChangesZone);
+        assert_eq!(defs[0].origin, Some(Zone::Battlefield));
+        assert_eq!(defs[0].destination, Some(Zone::Graveyard));
+        assert!(
+            defs[0].origin_zones.is_empty(),
+            "dies clause should use single-zone origin, not origin_zones"
+        );
+
+        // Clause 2: put into GY from anywhere except battlefield (creature card)
+        assert_eq!(defs[1].mode, TriggerMode::ChangesZone);
+        assert_eq!(defs[1].origin, None);
+        assert_eq!(defs[1].destination, Some(Zone::Graveyard));
+        assert_eq!(
+            defs[1].origin_zones,
+            vec![
+                Zone::Library,
+                Zone::Hand,
+                Zone::Graveyard,
+                Zone::Exile,
+                Zone::Stack,
+                Zone::Command,
+            ]
+        );
+
+        // Clause 3: leaves your graveyard (Graveyard → any)
+        assert_eq!(defs[2].mode, TriggerMode::ChangesZone);
+        assert_eq!(defs[2].origin, Some(Zone::Graveyard));
+        assert_eq!(defs[2].destination, None);
+
+        // All three carry the same DamageEachPlayer effect body.
+        for (i, d) in defs.iter().enumerate() {
+            let exec = d
+                .execute
+                .as_deref()
+                .unwrap_or_else(|| panic!("clause {i} missing execute body"));
+            assert!(
+                matches!(exec.effect.as_ref(), Effect::DamageEachPlayer { .. }),
+                "clause {i} effect should be DamageEachPlayer, got {:?}",
+                exec.effect
+            );
+        }
+    }
+
+    /// CR 603.2 + CR 700.4: Dreadhound — two-clause disjunction sharing a
+    /// LoseLife effect body. Dies (battlefield → graveyard) and library →
+    /// graveyard. Uses the MTGJSON-canonical Oracle text (no comma before
+    /// "or") to exercise the bare-` or ` boundary path.
+    #[test]
+    fn trigger_split_dreadhound_two_clauses() {
+        let defs = parse_trigger_lines_at_index(
+            "Whenever a creature dies or a creature card is put into a graveyard from a library, each opponent loses 1 life.",
+            "Dreadhound",
+            None,
+            &mut ParseContext::default(),
+        );
+        assert_eq!(defs.len(), 2, "expected 2 triggers, got {}", defs.len());
+        assert_eq!(defs[0].mode, TriggerMode::ChangesZone);
+        assert_eq!(defs[0].origin, Some(Zone::Battlefield));
+        assert_eq!(defs[0].destination, Some(Zone::Graveyard));
+
+        assert_eq!(defs[1].mode, TriggerMode::ChangesZone);
+        assert_eq!(defs[1].origin, Some(Zone::Library));
+        assert_eq!(defs[1].destination, Some(Zone::Graveyard));
+    }
+
+    /// CR 603.2: Scrap Trawler — self-referential dies + another-artifact
+    /// put-into-graveyard. The splitter must respect the SelfRef vs.
+    /// Another-Artifact distinction on each clause's `valid_card`. Uses
+    /// MTGJSON-canonical Oracle text (no comma before "or").
+    #[test]
+    fn trigger_split_scrap_trawler_self_and_other() {
+        let defs = parse_trigger_lines_at_index(
+            "Whenever ~ dies or another artifact you control is put into a graveyard from the battlefield, return to your hand target artifact card in your graveyard with lesser mana value.",
+            "Scrap Trawler",
+            None,
+            &mut ParseContext::default(),
+        );
+        assert_eq!(defs.len(), 2, "expected 2 triggers, got {}", defs.len());
+        // Clause 1: ~ dies — valid_card is SelfRef.
+        assert!(
+            matches!(defs[0].valid_card, Some(TargetFilter::SelfRef)),
+            "first clause should reference self, got {:?}",
+            defs[0].valid_card
+        );
+        assert_eq!(defs[0].origin, Some(Zone::Battlefield));
+        assert_eq!(defs[0].destination, Some(Zone::Graveyard));
+
+        // Clause 2: another artifact you control — Typed Artifact + Another + Controller=You.
+        assert_eq!(defs[1].origin, Some(Zone::Battlefield));
+        assert_eq!(defs[1].destination, Some(Zone::Graveyard));
+        if let Some(TargetFilter::Typed(tf)) = &defs[1].valid_card {
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Artifact),
+                "second clause should filter on Artifact, got {:?}",
+                tf.type_filters
+            );
+            assert!(
+                tf.properties.contains(&FilterProp::Another),
+                "second clause should carry Another, got {:?}",
+                tf.properties
+            );
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+        } else {
+            panic!(
+                "second clause valid_card should be Typed, got {:?}",
+                defs[1].valid_card
+            );
+        }
+    }
+
+    /// CR 603.2 + CR 122.6: "a creature or artifact dies" is a single clause
+    /// with an inline type-list (no comma before "or"). The splitter must NOT
+    /// fire on this pattern — it should stay a single trigger.
+    #[test]
+    fn trigger_split_rejects_inline_filter_disjunction() {
+        let defs = parse_trigger_lines_at_index(
+            "Whenever a creature or artifact dies, draw a card.",
+            "Test Card",
+            None,
+            &mut ParseContext::default(),
+        );
+        assert_eq!(
+            defs.len(),
+            1,
+            "inline filter disjunction must stay a single trigger, got {}",
+            defs.len()
+        );
+    }
+
+    /// CR 603.2c: "Whenever one or more creatures die" fires once per batch.
+    /// The splitter must not interpret the bare "or" inside the quantifier as
+    /// a clause boundary.
+    #[test]
+    fn trigger_split_preserves_one_or_more_batching() {
+        let defs = parse_trigger_lines_at_index(
+            "Whenever one or more creatures die, draw a card.",
+            "Test Card",
+            None,
+            &mut ParseContext::default(),
+        );
+        assert_eq!(
+            defs.len(),
+            1,
+            "one-or-more batched trigger must stay single, got {}",
+            defs.len()
+        );
+        assert!(defs[0].batched, "batched flag should be set");
+    }
+
+    /// CR 603.10a + CR 109.5: A creature card leaving the controller's
+    /// graveyard fires a single ChangesZone trigger with origin=Graveyard and
+    /// no destination restriction. The bare-"leaves" arm (LeavesBattlefield)
+    /// must NOT swallow this — the more-specific arm comes first.
+    #[test]
+    fn trigger_leaves_your_graveyard_single_clause() {
+        let def = parse_trigger_line(
+            "Whenever a creature card leaves your graveyard, draw a card.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.origin, Some(Zone::Graveyard));
+        assert_eq!(def.destination, None);
+        // valid_card should carry the controller narrowing from "your graveyard".
+        if let Some(TargetFilter::Typed(tf)) = &def.valid_card {
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+        } else {
+            panic!("expected Typed valid_card, got {:?}", def.valid_card);
+        }
+    }
+
+    /// CR 603.6c: "from anywhere other than the battlefield" expands into the
+    /// disjunctive `origin_zones` field (all non-battlefield zones). The
+    /// single-zone `origin` field must be left as `None` so the matcher
+    /// (`match_changes_zone`) routes through the origin_zones disjunction.
+    #[test]
+    fn trigger_put_into_graveyard_from_anywhere_except_battlefield() {
+        let def = parse_trigger_line(
+            "Whenever a creature card is put into a graveyard from anywhere other than the battlefield, draw a card.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.origin, None);
+        assert_eq!(def.destination, Some(Zone::Graveyard));
+        assert_eq!(
+            def.origin_zones,
+            vec![
+                Zone::Library,
+                Zone::Hand,
+                Zone::Graveyard,
+                Zone::Exile,
+                Zone::Stack,
+                Zone::Command,
+            ]
         );
     }
 }
