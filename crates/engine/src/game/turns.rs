@@ -1451,6 +1451,13 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 // Continue to PostCombatMain
             }
             Phase::End => {
+                // CR 513.1 + CR 611.2a/b: Expire `PlayFromExile { duration:
+                // UntilNextEndStepOf { Controller } }` grants for the active
+                // player BEFORE end-step triggers fire. CR 513.2 prevents
+                // the end step from "backing up" — a new same-turn grant
+                // from an end-step trigger (e.g., Rocco, Street Chef) is
+                // created AFTER this prune runs, so it correctly survives.
+                super::layers::prune_end_step_casting_permissions(state, state.active_player);
                 // CR 513.1: End step — active player receives priority.
                 // CR 513.1a: "At the beginning of [your] end step" triggers fire here.
                 process_phase_triggers(state);

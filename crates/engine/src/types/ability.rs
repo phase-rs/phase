@@ -1134,6 +1134,16 @@ pub enum Duration {
     UntilNextUntapStepOf {
         player: PlayerScope,
     },
+    /// CR 513.1 + CR 611.2a: Effect expires at the beginning of `player`'s
+    /// next end step. `PlayerScope::Controller` corresponds to the
+    /// "until your next end step" reading used by Rocco, Street Chef and
+    /// similar floating play-permission patterns. Categorical boundary:
+    /// distinct from `UntilNextUntapStepOf` (CR 502 untap step) and
+    /// `UntilEndOfTurn` (CR 514.2 cleanup) — these are separate
+    /// turn-structure steps that resolve independently.
+    UntilNextEndStepOf {
+        player: PlayerScope,
+    },
     /// CR 611.2b: "for as long as [condition]" — effect persists while condition holds.
     ForAsLongAs {
         condition: StaticCondition,
@@ -10234,6 +10244,9 @@ mod tests {
                 player: PlayerScope::Controller,
             },
             Duration::UntilNextUntapStepOf {
+                player: PlayerScope::Controller,
+            },
+            Duration::UntilNextEndStepOf {
                 player: PlayerScope::Controller,
             },
             Duration::UntilHostLeavesPlay,

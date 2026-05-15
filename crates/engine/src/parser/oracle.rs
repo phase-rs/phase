@@ -12091,4 +12091,117 @@ mod pipeline_snapshot_tests {
             "static mode must be CantUntap"
         );
     }
+
+    // ----------------------------------------------------------------
+    // Rocco, Street Chef (issue #412): end-step exile-and-grant +
+    // disjunctive play-or-cast payoff triggers.
+    // ----------------------------------------------------------------
+
+    /// CR 513.1 + CR 611.2a + CR 108.3 + CR 400.7: Rocco's first trigger
+    /// parses to a Phase-mode end-step trigger whose chained sub-ability is
+    /// `GrantCastingPermission { permission: PlayFromExile { duration:
+    /// UntilNextEndStepOf { Controller }, ... }, target: TrackedSet(0),
+    /// grantee: ObjectOwner }`. CR 305.1 + CR 601.2: the second trigger is
+    /// disjunctive on "plays a land from exile" / "casts a spell from
+    /// exile" and emits two TriggerDefinitions — one `LandPlayed`, one
+    /// `SpellCast` — both with `valid_card.InZone(Exile)` so the
+    /// payoff (counter + Food token) fires only on plays-from-exile.
+    #[test]
+    fn pipeline_rocco_street_chef_emits_three_triggers() {
+        use crate::types::ability::{
+            CastingPermission, Duration, Effect, FilterProp, PermissionGrantee, PlayerScope,
+            TargetFilter, TypedFilter,
+        };
+        let result = pipeline_parse(
+            "At the beginning of your end step, each player exiles the top card of their library. Until your next end step, each player may play the card they exiled this way.\nWhenever a player plays a land from exile or casts a spell from exile, you put a +1/+1 counter on target creature and create a Food token.",
+            "Rocco, Street Chef",
+            &["Legendary", "Creature"],
+            &["Elf", "Druid"],
+        );
+
+        assert_eq!(
+            result.triggers.len(),
+            3,
+            "expected 3 triggers (1 end-step + 2 disjunctive payoff), got {:?}",
+            result.triggers.iter().map(|t| &t.mode).collect::<Vec<_>>(),
+        );
+
+        // Trigger 0: end-step Phase trigger with sub_ability GrantCastingPermission.
+        let t0 = &result.triggers[0];
+        assert_eq!(t0.mode, TriggerMode::Phase);
+        assert_eq!(t0.phase, Some(crate::types::phase::Phase::End));
+        let execute = t0.execute.as_deref().expect("trigger has execute");
+        let sub = execute.sub_ability.as_deref().expect("sub_ability present");
+        match sub.effect.as_ref() {
+            Effect::GrantCastingPermission {
+                permission,
+                target,
+                grantee,
+            } => {
+                match permission {
+                    CastingPermission::PlayFromExile {
+                        duration: Duration::UntilNextEndStepOf {
+                            player: PlayerScope::Controller,
+                        },
+                        ..
+                    } => {}
+                    _ => panic!(
+                        "expected PlayFromExile {{ UntilNextEndStepOf {{ Controller }} }}, got {:?}",
+                        permission,
+                    ),
+                }
+                assert!(
+                    matches!(
+                        target,
+                        TargetFilter::TrackedSet {
+                            id: crate::types::identifiers::TrackedSetId(0)
+                        }
+                    ),
+                    "target must be TrackedSet(0), got {:?}",
+                    target,
+                );
+                assert_eq!(*grantee, PermissionGrantee::ObjectOwner);
+            }
+            other => panic!("expected GrantCastingPermission, got {:?}", other),
+        }
+
+        // Triggers 1 and 2: disjunctive payoff. Order may vary; collect modes.
+        let modes: std::collections::HashSet<_> = result.triggers[1..]
+            .iter()
+            .map(|t| t.mode.clone())
+            .collect();
+        assert!(
+            modes.contains(&TriggerMode::LandPlayed),
+            "expected one LandPlayed trigger, got {:?}",
+            modes,
+        );
+        assert!(
+            modes.contains(&TriggerMode::SpellCast),
+            "expected one SpellCast trigger, got {:?}",
+            modes,
+        );
+
+        // Each payoff trigger has valid_card with InZone(Exile).
+        for trigger in &result.triggers[1..] {
+            let valid_card = trigger
+                .valid_card
+                .as_ref()
+                .expect("payoff trigger has valid_card filter");
+            match valid_card {
+                TargetFilter::Typed(TypedFilter { properties, .. }) => {
+                    assert!(
+                        properties.iter().any(|p| matches!(
+                            p,
+                            FilterProp::InZone {
+                                zone: crate::types::zones::Zone::Exile
+                            }
+                        )),
+                        "payoff trigger's valid_card must carry InZone(Exile), got {:?}",
+                        properties,
+                    );
+                }
+                other => panic!("expected Typed filter, got {:?}", other),
+            }
+        }
+    }
 }
