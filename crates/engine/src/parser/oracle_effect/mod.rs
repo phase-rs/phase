@@ -1882,15 +1882,21 @@ fn try_parse_choose_one_of_inline(
     // parse independently as supported effects. Restriction predicates are
     // surface-level "subject can't <verb-list>" grammar and have no chooser
     // semantic — defer to the subject+predicate path so
-    // `parse_restriction_modes` can recognize the compound. Word-boundary
-    // matching via the project's `scan_contains` combinator handles both the
-    // start-of-string case ("can't ...") and the mid-string case
-    // ("<subject> can't ...") in a single pass.
-    if nom_primitives::scan_contains(before_lower, "can't ")
-        || nom_primitives::scan_contains(before_lower, "cannot ")
-        || nom_primitives::scan_contains(before_lower, "doesn't ")
-        || nom_primitives::scan_contains(before_lower, "don't ")
-    {
+    // `parse_restriction_modes` can recognize the compound. A single
+    // word-boundary scan with an `alt()` of the four negation forms covers
+    // both the start-of-string case ("can't ...") and the mid-string case
+    // ("<subject> can't ...") in one pass.
+    let has_restriction = nom_primitives::scan_at_word_boundaries(before_lower, |i| {
+        alt((
+            tag::<_, _, OracleError<'_>>("can't "),
+            tag("cannot "),
+            tag("doesn't "),
+            tag("don't "),
+        ))
+        .parse(i)
+    })
+    .is_some();
+    if has_restriction {
         return None;
     }
 
