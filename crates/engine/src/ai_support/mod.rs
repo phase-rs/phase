@@ -634,14 +634,24 @@ pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
     // statics) but applies every cost-modifying static the cast pipeline would.
     let mut spell_costs = HashMap::new();
     if let WaitingFor::Priority { player } = &state.waiting_for {
+        // Zone pre-filter is performance-only: skips the battlefield/stack/library
+        // walk that has no chance of yielding a castable spell. Eligibility
+        // (controller, foreign-cast permissions, zone) is decided centrally by
+        // `display_spell_cost`. Do NOT filter by `obj.controller` here — Etali /
+        // Dire Fleet Daredevil / Light-Paws-style `CastFromZone` permissions let
+        // the active player cast cards owned/controlled by an opponent, and a
+        // controller pre-filter would silently hide those cost displays.
         for obj in state.objects.values() {
-            if obj.controller != *player {
+            if !matches!(
+                obj.zone,
+                crate::types::zones::Zone::Hand
+                    | crate::types::zones::Zone::Command
+                    | crate::types::zones::Zone::Exile
+                    | crate::types::zones::Zone::Graveyard
+                    | crate::types::zones::Zone::Library
+            ) {
                 continue;
             }
-            // `display_spell_cost` is the single engine-authoritative source: it applies
-            // every cost-modifying static (Affinity, ReduceCost, commander tax, etc.) while
-            // suppressing situational restrictions (timing, prohibitions). It returns `None`
-            // for objects not in a castable zone, handling zone eligibility centrally.
             if let Some(cost) = crate::game::casting::display_spell_cost(state, *player, obj.id) {
                 spell_costs.insert(obj.id, cost);
             }

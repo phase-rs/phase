@@ -1024,12 +1024,11 @@ fn create_token_applier(
         let original_owner = owner;
         let owner = match owner_redirect {
             Some(crate::types::ability::ControllerRef::You) => source_controller,
-            // CR 109.4: Other ControllerRef scopes have no token-creation resolution —
-            // fail open (preserve original owner). The `Opponent` scope is intentionally
-            // not handled here: "owner is an opponent of X" patterns require a specific
-            // opponent reference (not just "first non-source player") and no current card
-            // uses this form for token replacement, so we defer to the fail-open path
-            // rather than implementing incorrect multiplayer semantics.
+            // No other ControllerRef scope is a Magic token-redirect pattern today,
+            // and `try_parse_token_controller_redirect` enforces `You` as the only
+            // legal target. Programmatic constructions that set a non-`You` scope
+            // fall through to the original owner rather than to incorrect
+            // multiplayer semantics (e.g., "first non-source player" for Opponent).
             Some(_) | None => owner,
         };
         // CR 111.2: When the redirect actually rewires ownership, the apply

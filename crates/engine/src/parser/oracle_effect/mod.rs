@@ -1002,22 +1002,16 @@ fn try_parse_token_controller_redirect(lower: &str) -> Option<Effect> {
     let (rest, _) = tag::<_, _, OracleError<'_>>(" control this turn is created under ")
         .parse(rest)
         .ok()?;
-    // Longer prefixes first: bare "your" would otherwise shadow
-    // "your opponents'" and leave " opponents'" stranded before the next tag.
-    let (rest, to_ctrl) = alt((
-        value(
-            crate::types::ability::ControllerRef::Opponent,
-            tag::<_, _, OracleError<'_>>("an opponent's"),
-        ),
-        value(
-            crate::types::ability::ControllerRef::Opponent,
-            tag::<_, _, OracleError<'_>>("your opponents'"),
-        ),
-        value(
-            crate::types::ability::ControllerRef::You,
-            tag::<_, _, OracleError<'_>>("your"),
-        ),
-    ))
+    // Only `your` is supported as the redirect target. No printed card today
+    // redirects to an opponent ("...created under an opponent's control
+    // instead"), and the runtime in `replacement.rs` does not implement that
+    // semantics (multiplayer "first non-source player" would be incorrect).
+    // Restricting the parser keeps the parser/runtime contract symmetric — if
+    // such a card ever prints, runtime support must land in the same change.
+    let (rest, to_ctrl) = value(
+        crate::types::ability::ControllerRef::You,
+        tag::<_, _, OracleError<'_>>("your"),
+    )
     .parse(rest)
     .ok()?;
     let (rest, _) = tag::<_, _, OracleError<'_>>(" control instead")
