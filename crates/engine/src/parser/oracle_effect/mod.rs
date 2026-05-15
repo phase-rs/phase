@@ -4003,6 +4003,17 @@ fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClau
         tag("for each of those cards, its owner may cast it"),
         tag("its owner may play it"),
         tag("its owner may cast it"),
+        // CR 611.2a + CR 108.3 + CR 400.7i + CR 400.7j: Rocco-class
+        // "each player may play the card they exiled this way" —
+        // multi-player owner-binding grant. The "they exiled this way"
+        // anaphor refers to the per-iteration tracked set published by
+        // the parent player_scope iteration in `resolve_ability_chain`;
+        // the resolver binds `granted_to` to each card's owner via
+        // `PermissionGrantee::ObjectOwner`.
+        tag("each player may play the card they exiled this way"),
+        tag("each player may cast the card they exiled this way"),
+        tag("each player may play the cards they exiled this way"),
+        tag("each player may cast the cards they exiled this way"),
     ))
     .parse(lower)
     .is_ok()
@@ -11956,6 +11967,14 @@ fn strip_leading_duration(text: &str) -> Option<(Duration, &str)> {
                     player: PlayerScope::Controller,
                 },
                 tag("until your next turn, "),
+            ),
+            // CR 513.1 + CR 611.2a: Rocco, Street Chef and the floating
+            // play-permission class — "Until your next end step, ...".
+            value(
+                Duration::UntilNextEndStepOf {
+                    player: PlayerScope::Controller,
+                },
+                tag("until your next end step, "),
             ),
         ))
         .parse(i)

@@ -684,6 +684,9 @@ fn fmt_duration(d: &Duration) -> String {
         Duration::UntilNextUntapStepOf { player } => {
             format!("until next untap step ({})", fmt_player_scope(*player))
         }
+        Duration::UntilNextEndStepOf { player } => {
+            format!("until next end step ({})", fmt_player_scope(*player))
+        }
         Duration::ForAsLongAs { .. } => "for as long as condition".to_string(),
         Duration::Permanent => "permanent".to_string(),
     }

@@ -81,6 +81,13 @@ pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
                 duration: Duration::UntilNextTurnOf { .. } | Duration::Permanent,
                 ..
             } => true,
+            // CR 513.1: `UntilNextEndStepOf` is expired by
+            // `prune_end_step_casting_permissions` at the End phase entry,
+            // NOT at cleanup. Retain here.
+            CastingPermission::PlayFromExile {
+                duration: Duration::UntilNextEndStepOf { .. },
+                ..
+            } => true,
             // UntilHostLeavesPlay / ForAsLongAs / UntilNextUntapStepOf:
             // these are pruned by their own systems (zone-exit cleanup, condition
             // re-evaluation, untap step). Retain here — they are not end-of-turn.
@@ -115,6 +122,13 @@ pub fn prune_until_next_turn_casting_permissions(state: &mut GameState, active_p
                 granted_to,
                 ..
             } => *granted_to != active_player,
+            // CR 513.1 + CR 611.2a/b: `UntilNextEndStepOf { Controller }` is
+            // expired by `prune_end_step_casting_permissions` at the end
+            // step, NOT at the untap step. Retain here.
+            CastingPermission::PlayFromExile {
+                duration: Duration::UntilNextEndStepOf { .. },
+                ..
+            } => true,
             CastingPermission::PlayFromExile { .. }
             | CastingPermission::AdventureCreature
             | CastingPermission::ExileWithAltCost { .. }
@@ -123,6 +137,43 @@ pub fn prune_until_next_turn_casting_permissions(state: &mut GameState, active_p
             | CastingPermission::WarpExile { .. }
             // CR 702.170d: Plotted persists across turns; never pruned at the
             // untap step. Retention is zone-scoped (see zones::apply_zone_exit_cleanup).
+            | CastingPermission::Plotted { .. }
+            | CastingPermission::Foretold { .. } => true,
+        });
+    }
+}
+
+/// CR 513.1 + CR 611.2a/b: Remove `PlayFromExile` permissions granted to
+/// `active_player` whose `Duration::UntilNextEndStepOf { Controller }`
+/// expires at that player's next end step. Called at the start of the
+/// End phase in `turns.rs::auto_advance`.
+///
+/// CR 513.2 ordering: this prune runs BEFORE end-step triggers fire, so a
+/// new grant created by an end-step trigger (e.g., Rocco, Street Chef) is
+/// NOT wiped by the same end step's prune — the new trigger cannot back up
+/// per CR 513.2, so the new permission lands AFTER the prune completes.
+///
+/// 2023-05-12 Wizards ruling on Rocco, Street Chef: the permission outlives
+/// the granting permanent leaving the battlefield. This prune keys off the
+/// permission's `granted_to`, not the source object's presence on the
+/// battlefield.
+pub fn prune_end_step_casting_permissions(state: &mut GameState, active_player: PlayerId) {
+    for obj in state.objects.iter_mut().map(|(_, v)| v) {
+        obj.casting_permissions.retain(|p| match p {
+            CastingPermission::PlayFromExile {
+                duration:
+                    Duration::UntilNextEndStepOf {
+                        player: PlayerScope::Controller,
+                    },
+                granted_to,
+                ..
+            } => *granted_to != active_player,
+            CastingPermission::PlayFromExile { .. }
+            | CastingPermission::AdventureCreature
+            | CastingPermission::ExileWithAltCost { .. }
+            | CastingPermission::ExileWithAltAbilityCost { .. }
+            | CastingPermission::ExileWithEnergyCost
+            | CastingPermission::WarpExile { .. }
             | CastingPermission::Plotted { .. }
             | CastingPermission::Foretold { .. } => true,
         });

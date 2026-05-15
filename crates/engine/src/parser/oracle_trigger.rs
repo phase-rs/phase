@@ -2795,7 +2795,9 @@ fn split_or_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<Stri
     // existing `try_parse_sacrifice_trigger` / `try_parse_discard_trigger`
     // handlers via the per-half re-parse loop.
     fn is_event_verb_start(text: &str) -> bool {
-        alt((
+        // Nested `alt()` calls to stay within nom's tuple arity limit while
+        // still expressing the full set of event verbs as composable groups.
+        let combat_or_zone = alt((
             value((), tag::<_, _, OracleError<'_>>("dies")),
             value((), tag("die ")),
             value((), tag("deals ")),
@@ -2806,7 +2808,11 @@ fn split_or_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<Stri
             value((), tag("attack ")),
             value((), tag("blocks")),
             value((), tag("block ")),
-            value((), tag("is sacrificed")),
+            value((), tag("leaves")),
+            value((), tag("is put into")),
+        ));
+        let player_actions = alt((
+            value((), tag::<_, _, OracleError<'_>>("is sacrificed")),
             value((), tag("are sacrificed")),
             value((), tag("sacrifices ")),
             value((), tag("sacrifice ")),
@@ -2814,11 +2820,18 @@ fn split_or_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<Stri
             value((), tag("discard ")),
             value((), tag("is exiled")),
             value((), tag("are exiled")),
-            value((), tag("leaves")),
-            value((), tag("is put into")),
-        ))
-        .parse(text)
-        .is_ok()
+            // CR 305.1 + CR 601.2: Active-voice player verbs for play-land
+            // (CR 305 special action) and cast-spell (CR 601 stack-based)
+            // events — paired so "whenever a player plays a land from
+            // exile or casts a spell from exile" (Rocco, Street Chef)
+            // splits into two single-event halves that route to
+            // `LandPlayed` and `SpellCast` matchers respectively.
+            value((), tag("plays ")),
+            value((), tag("play ")),
+            value((), tag("casts ")),
+            value((), tag("cast ")),
+        ));
+        alt((combat_or_zone, player_actions)).parse(text).is_ok()
     }
 
     // Patterns already handled as dedicated compound TriggerMode variants
@@ -2887,7 +2900,9 @@ fn extract_subject_text(text: &str) -> &str {
     // scan_split_at_phrase tries the combinator at each word boundary,
     // returning (prefix, matched_start) on the first hit.
     if let Some((prefix, _)) = scan_split_at_phrase(text, |i| {
-        alt((
+        // Nested `alt()` to stay within nom's tuple arity limit while
+        // still recognising the full set of event verb starts.
+        let combat_or_zone = alt((
             tag("enters"),
             tag("enter "),
             tag("dies"),
@@ -2898,6 +2913,10 @@ fn extract_subject_text(text: &str) -> &str {
             tag("attack "),
             tag("blocks"),
             tag("block "),
+            tag("leaves"),
+            tag("is put into"),
+        ));
+        let player_actions = alt((
             tag("is sacrificed"),
             tag("are sacrificed"),
             // CR 701.21 + CR 701.9: Active-voice player-subject verbs paired
@@ -2910,10 +2929,15 @@ fn extract_subject_text(text: &str) -> &str {
             tag("discard "),
             tag("is exiled"),
             tag("are exiled"),
-            tag("leaves"),
-            tag("is put into"),
-        ))
-        .parse(i)
+            // CR 305.1 + CR 601.2: Player-subject active-voice verbs paired
+            // with `is_event_verb_start` (above) for Rocco-class compound
+            // triggers ("a player plays a land … or casts a spell …").
+            tag("plays "),
+            tag("play "),
+            tag("casts "),
+            tag("cast "),
+        ));
+        alt((combat_or_zone, player_actions)).parse(i)
     }) {
         if !prefix.is_empty() {
             return prefix.trim_end();
@@ -5454,6 +5478,52 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         }
 
         return Some((TriggerMode::SpellCast, def));
+    }
+
+    // CR 305.1 + CR 603.2 + CR 701.18a: "whenever a player plays a land
+    // [from <zone>]" — fires on the CR 305 special action. Detects both the
+    // bare form ("a player plays a land") and the from-zone form
+    // ("a player plays a land from exile" / Rocco-class). Built on the
+    // same composable structure as the "casts a spell" branch: scan for
+    // the verb, take the subject prefix as the caster filter, parse the
+    // post-verb tail through `parse_type_phrase` so the zone suffix and
+    // any qualifier ride through the existing zone-suffix combinator
+    // (CR 400.1 + CR 400.7).
+    if let Ok((_, (who, _))) = nom_primitives::split_once_on(lower, " plays a land") {
+        let mut def = make_base();
+        def.mode = TriggerMode::LandPlayed;
+
+        // Determine the caster filter from the subject phrase.
+        if scan_contains(who, "opponent") {
+            def.valid_target = Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent),
+            ));
+        } else if scan_contains(who, " you") || who == "whenever you" || who == "when you" {
+            def.valid_target = Some(TargetFilter::Controller);
+        }
+        // For "whenever a player" — no controller restriction (any player).
+
+        // Parse the tail after "plays a land" for zone qualifier / properties.
+        let after_plays = &lower[who.len() + " plays a land".len()..].trim_start();
+        let clause = nom_primitives::split_once_on(after_plays, ", ")
+            .map(|(_, (before, _))| before)
+            .unwrap_or(after_plays);
+        if !clause.is_empty() {
+            // "land" is implied; prepend it so `parse_type_phrase` recognizes
+            // the head subtype and runs its zone-suffix combinator.
+            let phrase = format!("land {clause}");
+            let (filter, _rest) = parse_type_phrase(&phrase);
+            let is_meaningful = match &filter {
+                TargetFilter::Typed(tf) => tf.has_meaningful_type_constraint(),
+                TargetFilter::Or { .. } => true,
+                _ => false,
+            };
+            if is_meaningful {
+                def.valid_card = Some(filter);
+            }
+        }
+
+        return Some((TriggerMode::LandPlayed, def));
     }
 
     if scan_contains(lower, "you draw a card") {
