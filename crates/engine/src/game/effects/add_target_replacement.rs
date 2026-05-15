@@ -375,7 +375,7 @@ mod tests {
         let mut repl = ReplacementDefinition::new(ReplacementEvent::CreateToken)
             .token_owner_scope(ControllerRef::Opponent)
             .token_owner_redirect(ControllerRef::You);
-        repl.expires_at_eot = true;
+        repl.expiry = Some(RestrictionExpiry::EndOfTurn);
 
         let install_ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {
@@ -397,19 +397,21 @@ mod tests {
             Some(ControllerRef::Opponent)
         );
         assert_eq!(installed[0].token_owner_redirect, Some(ControllerRef::You));
-        assert!(installed[0].expires_at_eot);
+        assert_eq!(installed[0].expiry, Some(RestrictionExpiry::EndOfTurn));
 
         // Opponent (PlayerId(1)) proposes creating a Treasure token under their control.
         let token_spec = TokenSpec {
-            display_name: "Treasure".to_string(),
+            characteristics: crate::types::proposed_event::TokenCharacteristics {
+                display_name: "Treasure".to_string(),
+                power: None,
+                toughness: None,
+                core_types: vec![crate::types::card_type::CoreType::Artifact],
+                subtypes: vec!["Treasure".to_string()],
+                supertypes: Vec::new(),
+                colors: Vec::new(),
+                keywords: Vec::new(),
+            },
             script_name: "Treasure".to_string(),
-            power: None,
-            toughness: None,
-            core_types: vec![crate::types::card_type::CoreType::Artifact],
-            subtypes: vec!["Treasure".to_string()],
-            supertypes: Vec::new(),
-            colors: Vec::new(),
-            keywords: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
             tapped: false,
@@ -474,7 +476,7 @@ mod tests {
         let mut repl = ReplacementDefinition::new(ReplacementEvent::CreateToken)
             .token_owner_scope(ControllerRef::Opponent)
             .token_owner_redirect(ControllerRef::You);
-        repl.expires_at_eot = true;
+        repl.expiry = Some(RestrictionExpiry::EndOfTurn);
 
         let install_ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {
@@ -491,15 +493,17 @@ mod tests {
         // Opponent's Rabblemaster-style "create a 1/1 Goblin that's tapped
         // and attacking" — `enters_attacking: true`, `spec.controller: P1`.
         let token_spec = TokenSpec {
-            display_name: "Goblin".to_string(),
+            characteristics: crate::types::proposed_event::TokenCharacteristics {
+                display_name: "Goblin".to_string(),
+                power: Some(1),
+                toughness: Some(1),
+                core_types: vec![crate::types::card_type::CoreType::Creature],
+                subtypes: vec!["Goblin".to_string()],
+                supertypes: Vec::new(),
+                colors: vec![crate::types::mana::ManaColor::Red],
+                keywords: Vec::new(),
+            },
             script_name: "Goblin".to_string(),
-            power: Some(1),
-            toughness: Some(1),
-            core_types: vec![crate::types::card_type::CoreType::Creature],
-            subtypes: vec!["Goblin".to_string()],
-            supertypes: Vec::new(),
-            colors: vec![crate::types::mana::ManaColor::Red],
-            keywords: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
             tapped: true,
@@ -555,7 +559,7 @@ mod tests {
         let mut repl = ReplacementDefinition::new(ReplacementEvent::CreateToken)
             .token_owner_scope(ControllerRef::Opponent)
             .token_owner_redirect(ControllerRef::You);
-        repl.expires_at_eot = true;
+        repl.expiry = Some(RestrictionExpiry::EndOfTurn);
 
         let install_ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {
@@ -571,15 +575,17 @@ mod tests {
 
         // Our own token creation — must not be intercepted.
         let token_spec = TokenSpec {
-            display_name: "Saproling".to_string(),
+            characteristics: crate::types::proposed_event::TokenCharacteristics {
+                display_name: "Saproling".to_string(),
+                power: Some(1),
+                toughness: Some(1),
+                core_types: vec![crate::types::card_type::CoreType::Creature],
+                subtypes: vec!["Saproling".to_string()],
+                supertypes: Vec::new(),
+                colors: vec![crate::types::mana::ManaColor::Green],
+                keywords: Vec::new(),
+            },
             script_name: "Saproling".to_string(),
-            power: Some(1),
-            toughness: Some(1),
-            core_types: vec![crate::types::card_type::CoreType::Creature],
-            subtypes: vec!["Saproling".to_string()],
-            supertypes: Vec::new(),
-            colors: vec![crate::types::mana::ManaColor::Green],
-            keywords: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
             tapped: false,

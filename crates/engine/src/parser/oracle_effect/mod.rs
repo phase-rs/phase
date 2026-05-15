@@ -1028,7 +1028,8 @@ fn try_parse_token_controller_redirect(lower: &str) -> Option<Effect> {
     let mut replacement = ReplacementDefinition::new(ReplacementEvent::CreateToken)
         .token_owner_scope(from_ctrl)
         .token_owner_redirect(to_ctrl);
-    replacement.expires_at_eot = true;
+    // CR 514.2: "this turn" binds the replacement's lifetime to end of turn.
+    replacement.expiry = Some(RestrictionExpiry::EndOfTurn);
 
     Some(Effect::AddTargetReplacement {
         replacement: Box::new(replacement),
@@ -30390,8 +30391,9 @@ mod snapshot_tests {
         assert_eq!(replacement.event, ReplacementEvent::CreateToken);
         assert_eq!(replacement.token_owner_scope, Some(ControllerRef::Opponent));
         assert_eq!(replacement.token_owner_redirect, Some(ControllerRef::You));
-        assert!(
-            replacement.expires_at_eot,
+        assert_eq!(
+            replacement.expiry,
+            Some(RestrictionExpiry::EndOfTurn),
             "Crafty Cutpurse's redirect is bounded to 'this turn' — must expire at EOT"
         );
     }
