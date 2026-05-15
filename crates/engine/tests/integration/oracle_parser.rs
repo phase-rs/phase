@@ -428,3 +428,63 @@ fn corpse_harvester_lowers_to_dual_search_into_hand() {
         "expected one ChangeZone for found set"
     );
 }
+
+/// CR 115.1 + CR 113.3 + CR 701.6a: Louisoix's Sacrifice three-way counter
+/// target list. The parsed effect must contain a target with all three legs
+/// represented (two stack-ability legs + one stack-spell-with-noncreature
+/// leg). Issue #408 regression: the legacy `scan_contains` precheck silently
+/// dropped the noncreature-spell leg.
+#[test]
+fn snapshot_louisoixs_sacrifice() {
+    let result = parse(
+        "As an additional cost to cast this spell, sacrifice a legendary creature.\nCounter target activated ability, triggered ability, or noncreature spell.",
+        "Louisoix's Sacrifice",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    // Find the Counter effect; assert its target is an Or with 3 legs.
+    let counter = result
+        .abilities
+        .iter()
+        .find(|a| matches!(&*a.effect, Effect::Counter { .. }))
+        .expect("Counter effect must be present");
+    let Effect::Counter { target, .. } = &*counter.effect else {
+        unreachable!();
+    };
+    match target {
+        TargetFilter::Or { filters } => {
+            assert_eq!(
+                filters.len(),
+                3,
+                "Louisoix's Sacrifice must counter exactly 3 leg types (activated ability, triggered ability, noncreature spell), got: {filters:?}"
+            );
+        }
+        other => panic!("Louisoix's Sacrifice target must be Or with 3 legs, got: {other:?}"),
+    }
+}
+
+/// CR 113.3b/c + CR 115.1: Squelch — single activated-ability counter. Pre-
+/// existing behavior should be preserved by the new typed combinator.
+#[test]
+fn snapshot_squelch() {
+    let result = parse(
+        "Counter target activated ability.",
+        "Squelch",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    let counter = result
+        .abilities
+        .iter()
+        .find(|a| matches!(&*a.effect, Effect::Counter { .. }))
+        .expect("Counter effect must be present");
+    let Effect::Counter { target, .. } = &*counter.effect else {
+        unreachable!();
+    };
+    assert!(
+        matches!(target, TargetFilter::StackAbility { controller: None }),
+        "Squelch target must be StackAbility, got: {target:?}"
+    );
+}

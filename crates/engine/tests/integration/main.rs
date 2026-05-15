@@ -22,6 +22,7 @@ mod integration_bending;
 mod integration_landfall;
 mod json_smoke_test;
 mod kaito_integration;
+mod louisoix_sacrifice_counter;
 mod madame_null_integration;
 mod master_of_ceremonies;
 mod mystic_forge_regression;
