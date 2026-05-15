@@ -5,7 +5,7 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::char;
 use nom::combinator::{all_consuming, opt, value};
-use nom::sequence::preceded;
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
@@ -1974,10 +1974,11 @@ pub(super) fn try_nom_condition_as_ability_condition(
             // CR 117.1 + CR 201.2 + CR 608.2c: "and [second condition]" suffix
             // for compound intervening-ifs like Approach of the Second Sun's
             // "this spell was cast from your hand and you've cast another
-            // spell named {LITERAL} this game". Both halves must parse for
-            // the compound to bind — partial recognition falls through to the
-            // bare-CastFromZone path is intentionally rejected here, since
-            // running with only half the gate is unsafe.
+            // spell named {LITERAL} this game". Both halves must parse for the
+            // compound to bind — if `and ` is consumed but the second
+            // condition does not parse, we deliberately fall through (return
+            // None) rather than binding bare CastFromZone, since running with
+            // only half the printed gate is unsafe.
             if let Ok((second_text, _)) = tag::<_, _, OracleError<'_>>("and ").parse(trimmed) {
                 if let Some(second) =
                     parse_youve_cast_another_named_this_game_condition(second_text)
@@ -2537,16 +2538,15 @@ fn parse_youve_cast_another_named_this_game_condition(lower: &str) -> Option<Abi
     ))
     .parse(lower)
     .ok()?;
-    // CR 201.2: Consume the name up to the trailing " this game" anchor via
-    // `take_until`. The anchor itself is then consumed with `tag` so callers
-    // see the remainder after " this game", which they may further inspect.
-    let (_after_anchor, name_text): (&str, &str) = (
+    // CR 201.2: Consume the name up to the trailing " this game" anchor, then
+    // drop the anchor itself. `terminated` returns the value of its first
+    // parser (the name slice) and discards the anchor's output.
+    let (_, name_text) = terminated(
         take_until::<_, _, OracleError<'_>>(" this game"),
         tag(" this game"),
     )
-        .parse(rest)
-        .ok()
-        .map(|(after, (name, _anchor))| (after, name))?;
+    .parse(rest)
+    .ok()?;
     let name = name_text.trim();
     if name.is_empty() {
         return None;
