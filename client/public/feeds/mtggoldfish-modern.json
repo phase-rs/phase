@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-05-29T00:00:00Z",
+  "updated": "2026-05-30T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -291,170 +291,6 @@
       ]
     },
     {
-      "name": "Jeskai Blink",
-      "author": "MTGGoldfish",
-      "colors": [
-        "W",
-        "R",
-        "U"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Phelia, Exuberant Shepherd"
-        },
-        {
-          "count": 4,
-          "name": "Solitude"
-        },
-        {
-          "count": 4,
-          "name": "Phlage, Titan of Fire's Fury"
-        },
-        {
-          "count": 1,
-          "name": "Fable of the Mirror-Breaker"
-        },
-        {
-          "count": 3,
-          "name": "Ragavan, Nimble Pilferer"
-        },
-        {
-          "count": 2,
-          "name": "Casey Jones, Vigilante"
-        },
-        {
-          "count": 4,
-          "name": "Quantum Riddler"
-        },
-        {
-          "count": 1,
-          "name": "Teferi, Time Raveler"
-        },
-        {
-          "count": 4,
-          "name": "Galvanic Discharge"
-        },
-        {
-          "count": 4,
-          "name": "Consign to Memory"
-        },
-        {
-          "count": 1,
-          "name": "Wrath of the Skies"
-        },
-        {
-          "count": 1,
-          "name": "Ephemerate"
-        },
-        {
-          "count": 2,
-          "name": "Prismatic Ending"
-        },
-        {
-          "count": 1,
-          "name": "Strix Serenade"
-        },
-        {
-          "count": 1,
-          "name": "Elegant Parlor"
-        },
-        {
-          "count": 1,
-          "name": "Plains"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 3,
-          "name": "Arena of Glory"
-        },
-        {
-          "count": 2,
-          "name": "Sacred Foundry"
-        },
-        {
-          "count": 1,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 1,
-          "name": "Hallowed Fountain"
-        },
-        {
-          "count": 1,
-          "name": "Thundering Falls"
-        },
-        {
-          "count": 1,
-          "name": "Meticulous Archive"
-        },
-        {
-          "count": 4,
-          "name": "Flooded Strand"
-        },
-        {
-          "count": 4,
-          "name": "Arid Mesa"
-        },
-        {
-          "count": 3,
-          "name": "Scalding Tarn"
-        },
-        {
-          "count": 1,
-          "name": "Marsh Flats"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Celestial Purge"
-        },
-        {
-          "count": 1,
-          "name": "Ashiok, Dream Render"
-        },
-        {
-          "count": 1,
-          "name": "Surgical Extraction"
-        },
-        {
-          "count": 2,
-          "name": "Obsidian Charmaw"
-        },
-        {
-          "count": 2,
-          "name": "Damping Sphere"
-        },
-        {
-          "count": 1,
-          "name": "Wear // Tear"
-        },
-        {
-          "count": 1,
-          "name": "Strix Serenade"
-        },
-        {
-          "count": 2,
-          "name": "High Noon"
-        },
-        {
-          "count": 2,
-          "name": "Wrath of the Skies"
-        },
-        {
-          "count": 2,
-          "name": "Mystical Dispute"
-        }
-      ]
-    },
-    {
       "name": "Ruby Storm",
       "author": "MTGGoldfish",
       "colors": [
@@ -603,171 +439,6 @@
         {
           "count": 2,
           "name": "Grapeshot"
-        }
-      ]
-    },
-    {
-      "name": "Goryo's Vengeance",
-      "author": "MTGGoldfish",
-      "colors": [
-        "W",
-        "U",
-        "B",
-        "G"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 1,
-          "name": "Shadowy Backstreet"
-        },
-        {
-          "count": 1,
-          "name": "Emperor of Bones"
-        },
-        {
-          "count": 4,
-          "name": "Ephemerate"
-        },
-        {
-          "count": 1,
-          "name": "Faithful Mending"
-        },
-        {
-          "count": 2,
-          "name": "Force of Negation"
-        },
-        {
-          "count": 4,
-          "name": "Solitude"
-        },
-        {
-          "count": 4,
-          "name": "Polluted Delta"
-        },
-        {
-          "count": 1,
-          "name": "Hallowed Fountain"
-        },
-        {
-          "count": 1,
-          "name": "Overgrown Tomb"
-        },
-        {
-          "count": 1,
-          "name": "Watery Grave"
-        },
-        {
-          "count": 1,
-          "name": "Meticulous Archive"
-        },
-        {
-          "count": 4,
-          "name": "Marsh Flats"
-        },
-        {
-          "count": 2,
-          "name": "Prismatic Ending"
-        },
-        {
-          "count": 2,
-          "name": "Griselbrand"
-        },
-        {
-          "count": 4,
-          "name": "Goryo's Vengeance"
-        },
-        {
-          "count": 1,
-          "name": "Godless Shrine"
-        },
-        {
-          "count": 3,
-          "name": "Thoughtseize"
-        },
-        {
-          "count": 2,
-          "name": "Flooded Strand"
-        },
-        {
-          "count": 1,
-          "name": "Undercity Sewers"
-        },
-        {
-          "count": 4,
-          "name": "Atraxa, Grand Unifier"
-        },
-        {
-          "count": 4,
-          "name": "Fallaji Archaeologist"
-        },
-        {
-          "count": 1,
-          "name": "Plains"
-        },
-        {
-          "count": 1,
-          "name": "Swamp"
-        },
-        {
-          "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 2,
-          "name": "Otherworldly Gaze"
-        },
-        {
-          "count": 1,
-          "name": "Cephalid Coliseum"
-        },
-        {
-          "count": 4,
-          "name": "Psychic Frog"
-        },
-        {
-          "count": 1,
-          "name": "Pest Control"
-        },
-        {
-          "count": 1,
-          "name": "Superior Spider-Man"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 3,
-          "name": "Consign to Memory"
-        },
-        {
-          "count": 3,
-          "name": "Mystical Dispute"
-        },
-        {
-          "count": 2,
-          "name": "Wrath of the Skies"
-        },
-        {
-          "count": 1,
-          "name": "Spell Snare"
-        },
-        {
-          "count": 1,
-          "name": "Drannith Magistrate"
-        },
-        {
-          "count": 1,
-          "name": "Supreme Verdict"
-        },
-        {
-          "count": 3,
-          "name": "Quantum Riddler"
-        },
-        {
-          "count": 1,
-          "name": "Teferi, Time Raveler"
         }
       ]
     },
@@ -926,6 +597,311 @@
         {
           "count": 1,
           "name": "Soul-Guide Lantern"
+        }
+      ]
+    },
+    {
+      "name": "Goryo's Vengeance",
+      "author": "MTGGoldfish",
+      "colors": [
+        "W",
+        "U",
+        "B",
+        "G"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Flooded Strand"
+        },
+        {
+          "count": 4,
+          "name": "Polluted Delta"
+        },
+        {
+          "count": 3,
+          "name": "Marsh Flats"
+        },
+        {
+          "count": 1,
+          "name": "Hallowed Fountain"
+        },
+        {
+          "count": 1,
+          "name": "Watery Grave"
+        },
+        {
+          "count": 1,
+          "name": "Godless Shrine"
+        },
+        {
+          "count": 1,
+          "name": "Undercity Sewers"
+        },
+        {
+          "count": 1,
+          "name": "Shadowy Backstreet"
+        },
+        {
+          "count": 1,
+          "name": "Island"
+        },
+        {
+          "count": 1,
+          "name": "Plains"
+        },
+        {
+          "count": 1,
+          "name": "Swamp"
+        },
+        {
+          "count": 4,
+          "name": "Psychic Frog"
+        },
+        {
+          "count": 4,
+          "name": "Atraxa, Grand Unifier"
+        },
+        {
+          "count": 4,
+          "name": "Solitude"
+        },
+        {
+          "count": 4,
+          "name": "Fallaji Archaeologist"
+        },
+        {
+          "count": 2,
+          "name": "Griselbrand"
+        },
+        {
+          "count": 1,
+          "name": "Superior Spider-Man"
+        },
+        {
+          "count": 4,
+          "name": "Ephemerate"
+        },
+        {
+          "count": 4,
+          "name": "Goryo's Vengeance"
+        },
+        {
+          "count": 3,
+          "name": "Thoughtseize"
+        },
+        {
+          "count": 2,
+          "name": "Force of Negation"
+        },
+        {
+          "count": 2,
+          "name": "Prismatic Ending"
+        },
+        {
+          "count": 2,
+          "name": "Faithful Mending"
+        },
+        {
+          "count": 1,
+          "name": "Pest Control"
+        },
+        {
+          "count": 1,
+          "name": "Emperor of Bones"
+        },
+        {
+          "count": 1,
+          "name": "Meticulous Archive"
+        },
+        {
+          "count": 1,
+          "name": "Overgrown Tomb"
+        },
+        {
+          "count": 1,
+          "name": "Teferi, Time Raveler"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 1,
+          "name": "Spell Snare"
+        },
+        {
+          "count": 3,
+          "name": "Quantum Riddler"
+        },
+        {
+          "count": 2,
+          "name": "Surgical Extraction"
+        },
+        {
+          "count": 3,
+          "name": "Consign to Memory"
+        },
+        {
+          "count": 3,
+          "name": "Mystical Dispute"
+        },
+        {
+          "count": 3,
+          "name": "Wrath of the Skies"
+        }
+      ]
+    },
+    {
+      "name": "Jeskai Blink",
+      "author": "MTGGoldfish",
+      "colors": [
+        "R",
+        "W",
+        "U"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Arid Mesa"
+        },
+        {
+          "count": 4,
+          "name": "Flooded Strand"
+        },
+        {
+          "count": 3,
+          "name": "Scalding Tarn"
+        },
+        {
+          "count": 3,
+          "name": "Arena of Glory"
+        },
+        {
+          "count": 1,
+          "name": "Sacred Foundry"
+        },
+        {
+          "count": 1,
+          "name": "Hallowed Fountain"
+        },
+        {
+          "count": 1,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 1,
+          "name": "Thundering Falls"
+        },
+        {
+          "count": 1,
+          "name": "Meticulous Archive"
+        },
+        {
+          "count": 1,
+          "name": "Elegant Parlor"
+        },
+        {
+          "count": 2,
+          "name": "Plains"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 4,
+          "name": "Ragavan, Nimble Pilferer"
+        },
+        {
+          "count": 4,
+          "name": "Solitude"
+        },
+        {
+          "count": 4,
+          "name": "Phlage, Titan of Fire's Fury"
+        },
+        {
+          "count": 4,
+          "name": "Quantum Riddler"
+        },
+        {
+          "count": 3,
+          "name": "Phelia, Exuberant Shepherd"
+        },
+        {
+          "count": 3,
+          "name": "Fable of the Mirror-Breaker"
+        },
+        {
+          "count": 1,
+          "name": "Prismatic Ending"
+        },
+        {
+          "count": 2,
+          "name": "Wrath of the Skies"
+        },
+        {
+          "count": 4,
+          "name": "Consign to Memory"
+        },
+        {
+          "count": 2,
+          "name": "Ephemerate"
+        },
+        {
+          "count": 1,
+          "name": "March of Otherworldly Light"
+        },
+        {
+          "count": 4,
+          "name": "Galvanic Discharge"
+        },
+        {
+          "count": 1,
+          "name": "Strix Serenade"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Wear // Tear"
+        },
+        {
+          "count": 1,
+          "name": "Surgical Extraction"
+        },
+        {
+          "count": 1,
+          "name": "Teferi, Time Raveler"
+        },
+        {
+          "count": 1,
+          "name": "Strix Serenade"
+        },
+        {
+          "count": 3,
+          "name": "Mystical Dispute"
+        },
+        {
+          "count": 2,
+          "name": "High Noon"
+        },
+        {
+          "count": 3,
+          "name": "Obsidian Charmaw"
+        },
+        {
+          "count": 1,
+          "name": "Wrath of the Skies"
+        },
+        {
+          "count": 1,
+          "name": "Elesh Norn, Mother of Machines"
         }
       ]
     },
@@ -1355,10 +1331,11 @@
       ]
     },
     {
-      "name": "Eldrazi Tron",
+      "name": "Izzet Prowess",
       "author": "MTGGoldfish",
       "colors": [
-        "G"
+        "R",
+        "U"
       ],
       "tags": [
         "metagame"
@@ -1366,141 +1343,113 @@
       "main": [
         {
           "count": 4,
-          "name": "Devourer of Destiny"
+          "name": "Lightning Bolt"
         },
         {
           "count": 4,
-          "name": "Karn, the Great Creator"
+          "name": "Slickshot Show-Off"
         },
         {
           "count": 4,
-          "name": "Urza's Power Plant"
+          "name": "Dragon's Rage Channeler"
         },
         {
           "count": 4,
-          "name": "Kozilek's Command"
-        },
-        {
-          "count": 4,
-          "name": "Urza's Mine"
-        },
-        {
-          "count": 4,
-          "name": "Urza's Tower"
-        },
-        {
-          "count": 4,
-          "name": "Thought-Knot Seer"
-        },
-        {
-          "count": 4,
-          "name": "Ugin, Eye of the Storms"
-        },
-        {
-          "count": 4,
-          "name": "Sowing Mycospawn"
-        },
-        {
-          "count": 1,
-          "name": "Ulamog, the Ceaseless Hunger"
-        },
-        {
-          "count": 1,
-          "name": "Wastes"
-        },
-        {
-          "count": 1,
-          "name": "Forest"
-        },
-        {
-          "count": 1,
-          "name": "All Is Dust"
-        },
-        {
-          "count": 4,
-          "name": "Eldrazi Temple"
+          "name": "Lava Dart"
         },
         {
           "count": 2,
-          "name": "Expedition Map"
-        },
-        {
-          "count": 4,
-          "name": "Talisman of Resilience"
-        },
-        {
-          "count": 1,
-          "name": "Karn's Sylex"
-        },
-        {
-          "count": 4,
-          "name": "Ugin's Labyrinth"
+          "name": "Spell Pierce"
         },
         {
           "count": 2,
-          "name": "Talisman of Impulse"
+          "name": "Mutagenic Growth"
         },
         {
-          "count": 1,
-          "name": "Urza's Saga"
+          "count": 2,
+          "name": "Violent Urge"
+        },
+        {
+          "count": 4,
+          "name": "Monastery Swiftspear"
+        },
+        {
+          "count": 4,
+          "name": "Mishra's Bauble"
+        },
+        {
+          "count": 4,
+          "name": "Cori-Steel Cutter"
+        },
+        {
+          "count": 4,
+          "name": "Preordain"
+        },
+        {
+          "count": 4,
+          "name": "Expressive Iteration"
         },
         {
           "count": 3,
-          "name": "Dismember"
+          "name": "Mountain"
+        },
+        {
+          "count": 3,
+          "name": "Arid Mesa"
+        },
+        {
+          "count": 3,
+          "name": "Wooded Foothills"
+        },
+        {
+          "count": 3,
+          "name": "Bloodstained Mire"
+        },
+        {
+          "count": 3,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 1,
+          "name": "Thundering Falls"
+        },
+        {
+          "count": 2,
+          "name": "Fiery Islet"
         }
       ],
       "sideboard": [
         {
-          "count": 1,
-          "name": "Tormod's Crypt"
-        },
-        {
-          "count": 1,
-          "name": "Soulless Jailer"
-        },
-        {
-          "count": 1,
-          "name": "Cityscape Leveler"
+          "count": 4,
+          "name": "Unholy Heat"
         },
         {
           "count": 2,
-          "name": "Disruptor Flute"
+          "name": "Surgical Extraction"
+        },
+        {
+          "count": 3,
+          "name": "Consign to Memory"
         },
         {
           "count": 1,
-          "name": "Liquimetal Coating"
+          "name": "Mystical Dispute"
         },
         {
           "count": 1,
-          "name": "Extinguisher Battleship"
-        },
-        {
-          "count": 1,
-          "name": "Ensnaring Bridge"
-        },
-        {
-          "count": 1,
-          "name": "Skysovereign, Consul Flagship"
-        },
-        {
-          "count": 1,
-          "name": "Trinisphere"
+          "name": "Abhorrent Oculus"
         },
         {
           "count": 2,
-          "name": "Torpor Orb"
+          "name": "Meltdown"
         },
         {
           "count": 1,
-          "name": "Ratchet Bomb"
+          "name": "Abrade"
         },
         {
           "count": 1,
-          "name": "Vexing Bauble"
-        },
-        {
-          "count": 1,
-          "name": "Ratchet Bomb"
+          "name": "Into the Flood Maw"
         }
       ]
     }
