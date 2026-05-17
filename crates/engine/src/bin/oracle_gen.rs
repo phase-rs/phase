@@ -476,7 +476,11 @@ fn main() {
                 }
             }
 
-            for (face_idx, face_ref) in layout_faces(&layout).into_iter().enumerate() {
+            for (face_idx, (face_ref, source)) in layout_faces(&layout)
+                .into_iter()
+                .zip(faces.iter())
+                .enumerate()
+            {
                 let key = face_ref.name.to_lowercase();
                 let legalities = legalities_by_face.remove(&key).unwrap_or_default();
                 let face = face_ref.clone();
