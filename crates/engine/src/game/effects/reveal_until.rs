@@ -6,7 +6,7 @@ use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -23,7 +23,7 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (player_filter, filter, kept_destination, rest_destination, enter_tapped) =
+    let (player_filter, filter, kept_destination, rest_destination, enter_tapped, kept_optional_to) =
         match &ability.effect {
             Effect::RevealUntil {
                 player,
@@ -31,12 +31,14 @@ pub fn resolve(
                 kept_destination,
                 rest_destination,
                 enter_tapped,
+                kept_optional_to,
             } => (
                 player,
                 filter,
                 *kept_destination,
                 *rest_destination,
                 *enter_tapped,
+                *kept_optional_to,
             ),
             _ => return Err(EffectError::MissingParam("RevealUntil".to_string())),
         };
@@ -96,6 +98,28 @@ pub fn resolve(
     // Store revealed IDs for downstream reference.
     state.last_revealed_ids = all_revealed;
 
+    // CR 701.20a + CR 608.2c: "You may put that card onto the battlefield" — when
+    // the kept destination is a controller choice and a hit was found, pause for
+    // `WaitingFor::RevealUntilKeptChoice`. The choice handler routes the hit card,
+    // moves the misses, and drains `pending_continuation`. `EffectResolved` is
+    // emitted here (before the pause) mirroring `discover::resolve`.
+    if let (Some(accept_zone), Some(hit)) = (kept_optional_to, hit_card) {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::RevealUntil,
+            source_id: ability.source_id,
+        });
+        state.waiting_for = WaitingFor::RevealUntilKeptChoice {
+            player: revealing_player,
+            hit_card: hit,
+            accept_zone,
+            decline_zone: kept_destination,
+            enter_tapped,
+            revealed_misses,
+            rest_destination,
+        };
+        return Ok(());
+    }
+
     // Move the matching card to its destination.
     if let Some(hit) = hit_card {
         match kept_destination {
@@ -117,22 +141,7 @@ pub fn resolve(
     }
 
     // Move remaining revealed cards to rest_destination.
-    match rest_destination {
-        Zone::Library => {
-            // "on the bottom of your library in a random order"
-            shuffle_to_bottom(state, &revealed_misses, events);
-        }
-        Zone::Graveyard => {
-            for &card_id in &revealed_misses {
-                zones::move_to_zone(state, card_id, Zone::Graveyard, events);
-            }
-        }
-        other => {
-            for &card_id in &revealed_misses {
-                zones::move_to_zone(state, card_id, other, events);
-            }
-        }
-    }
+    move_rest(state, &revealed_misses, rest_destination, events);
 
     // Clear reveal markers — cards have moved zones.
     for &card_id in &revealed_misses {
@@ -180,6 +189,34 @@ fn resolve_revealing_player(
     }
 }
 
+/// CR 701.20a: Move the non-matching ("rest") pile to `rest_destination`. Single
+/// authority for rest-pile placement — used by both the synchronous resolver path
+/// and the `RevealUntilKeptChoice` handler (which, on decline, may add the hit
+/// card to `cards` so it joins the random-order shuffle).
+pub(crate) fn move_rest(
+    state: &mut GameState,
+    cards: &[ObjectId],
+    rest_destination: Zone,
+    events: &mut Vec<GameEvent>,
+) {
+    match rest_destination {
+        Zone::Library => {
+            // "on the bottom of your library in a random order"
+            shuffle_to_bottom(state, cards, events);
+        }
+        Zone::Graveyard => {
+            for &card_id in cards {
+                zones::move_to_zone(state, card_id, Zone::Graveyard, events);
+            }
+        }
+        other => {
+            for &card_id in cards {
+                zones::move_to_zone(state, card_id, other, events);
+            }
+        }
+    }
+}
+
 /// Put cards on the bottom of the player's library in random order.
 fn shuffle_to_bottom(state: &mut GameState, cards: &[ObjectId], events: &mut Vec<GameEvent>) {
     let mut shuffled = cards.to_vec();
@@ -212,6 +249,7 @@ mod tests {
                 kept_destination,
                 rest_destination,
                 enter_tapped: false,
+                kept_optional_to: None,
             },
             vec![],
             ObjectId(100),
@@ -234,6 +272,7 @@ mod tests {
                 kept_destination,
                 rest_destination,
                 enter_tapped: false,
+                kept_optional_to: None,
             },
             targets,
             ObjectId(100),
@@ -458,6 +497,126 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::EffectResolved { .. })));
+    }
+
+    /// CR 701.20a + CR 608.2c: "You may put that card onto the battlefield" —
+    /// `kept_optional_to: Some(_)` pauses on `WaitingFor::RevealUntilKeptChoice`
+    /// after a hit is found. The choice handler routes the hit card: accept →
+    /// `accept_zone`; decline → `decline_zone` (the repurposed `kept_destination`).
+    #[test]
+    fn reveal_until_optional_kept_pauses_and_routes_choice() {
+        use crate::game::engine_resolution_choices::handle_resolution_choice;
+        use crate::types::actions::GameAction;
+
+        fn setup() -> (GameState, ObjectId, ObjectId) {
+            let mut state = GameState::new_two_player(42);
+            let land = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Forest".to_string(),
+                Zone::Library,
+            );
+            state
+                .objects
+                .get_mut(&land)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Land);
+            let creature = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Bear".to_string(),
+                Zone::Library,
+            );
+            state
+                .objects
+                .get_mut(&creature)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            (state, land, creature)
+        }
+
+        fn optional_ability() -> ResolvedAbility {
+            ResolvedAbility::new(
+                Effect::RevealUntil {
+                    player: TargetFilter::Controller,
+                    filter: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+                    kept_destination: Zone::Hand,
+                    rest_destination: Zone::Library,
+                    enter_tapped: false,
+                    kept_optional_to: Some(Zone::Battlefield),
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            )
+        }
+
+        // Accept → hit card onto the battlefield.
+        {
+            let (mut state, land, creature) = setup();
+            let ability = optional_ability();
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).unwrap();
+
+            match state.waiting_for.clone() {
+                WaitingFor::RevealUntilKeptChoice { hit_card, .. } => {
+                    assert_eq!(hit_card, creature, "hit card should be the creature");
+                }
+                other => panic!("Expected RevealUntilKeptChoice, got {other:?}"),
+            }
+
+            let wf = state.waiting_for.clone();
+            handle_resolution_choice(
+                &mut state,
+                wf,
+                GameAction::DecideOptionalEffect { accept: true },
+                &mut events,
+            )
+            .unwrap();
+            assert!(
+                state.battlefield.contains(&creature),
+                "accepted hit card should be on the battlefield"
+            );
+            assert!(
+                state.players[0].library.contains(&land),
+                "miss should be on the bottom of the library"
+            );
+        }
+
+        // Decline → hit card to the decline zone (kept_destination = Hand).
+        {
+            let (mut state, land, creature) = setup();
+            let ability = optional_ability();
+            let mut events = Vec::new();
+            resolve(&mut state, &ability, &mut events).unwrap();
+
+            let wf = state.waiting_for.clone();
+            handle_resolution_choice(
+                &mut state,
+                wf,
+                GameAction::DecideOptionalEffect { accept: false },
+                &mut events,
+            )
+            .unwrap();
+            assert!(
+                state.players[0].hand.contains(&creature),
+                "declined hit card should be in hand (decline zone)"
+            );
+            assert!(
+                state.players[0].library.contains(&land),
+                "miss should be on the bottom of the library"
+            );
+            assert!(
+                !state.battlefield.contains(&creature),
+                "declined hit card must not be on the battlefield"
+            );
+        }
     }
 
     /// CR 109.5 + CR 701.20a: When `player = ParentTargetController`, the library

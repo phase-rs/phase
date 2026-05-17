@@ -5,8 +5,9 @@ use crate::game::filter;
 use crate::game::speed::has_max_speed;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityKind, ControllerRef, CostPaidObjectSnapshot, Effect,
-    EffectError, EffectKind, FilterProp, PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility,
-    SharedQuality, SharedQualityRelation, TargetFilter, TargetRef,
+    EffectError, EffectKind, FilterProp, PlayerFilter, QuantityExpr, QuantityRef,
+    RepeatContinuation, ResolvedAbility, SharedQuality, SharedQualityRelation, SubAbilityLink,
+    TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -297,6 +298,38 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     if !waits_for_resolution_choice(&state.waiting_for) {
         choose_one_of::resume_pending(state, events);
     }
+    // CR 608.2c + CR 107.1c: After the iteration's choice and any chained
+    // continuation have fully drained (state is back at priority), resume a
+    // paused "repeat this process" loop — re-set the `ControllerChoice` repeat
+    // prompt.
+    if matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && state.pending_continuation.is_none()
+        && state.pending_repeat_iteration.is_none()
+    {
+        drain_pending_repeat_until(state);
+    }
+}
+
+/// CR 608.2c + CR 107.1c: Resume a "repeat this process" loop that paused when
+/// an iteration's process entered an interactive `WaitingFor` state. Called by
+/// `drain_pending_continuation` once the iteration's choice (and any chained
+/// continuation) has fully drained.
+fn drain_pending_repeat_until(state: &mut GameState) {
+    let Some(pending) = state.pending_repeat_until.take() else {
+        return;
+    };
+    let crate::types::game_state::PendingRepeatUntil { ability } = pending;
+    match &ability.repeat_until {
+        // CR 107.1c: the iteration's choice has resolved — prompt the
+        // controller whether to repeat the process.
+        Some(RepeatContinuation::ControllerChoice) => {
+            state.waiting_for = WaitingFor::RepeatDecision {
+                player: ability.controller,
+                ability,
+            };
+        }
+        None => {}
+    }
 }
 
 /// CR 609.3 + CR 109.5: Resume a paused `repeat_for` loop. Each iteration
@@ -530,6 +563,8 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::OpponentMayChoice { .. }
             | WaitingFor::TributeChoice { .. }
             | WaitingFor::DiscoverChoice { .. }
+            | WaitingFor::RevealUntilKeptChoice { .. }
+            | WaitingFor::RepeatDecision { .. }
             | WaitingFor::CascadeChoice { .. }
             | WaitingFor::TopOrBottomChoice { .. }
             | WaitingFor::ProliferateChoice { .. }
@@ -577,10 +612,15 @@ pub(super) fn resolve_optional_effect_decision(
         }
         AutoMayChoice::Decline => {
             let decline_branch = ability.else_ability.as_ref().or_else(|| {
-                ability
-                    .sub_ability
-                    .as_ref()
-                    .filter(|sub| should_resolve_subability_on_optional_decline(sub))
+                ability.sub_ability.as_ref().filter(|sub| {
+                    // CR 608.2c: A separate-sentence sibling ("You may shuffle."
+                    // "Draw a card.") is the next printed instruction — it
+                    // resolves regardless of the optional decision. A
+                    // within-clause continuation only resolves if it is a
+                    // conditioned decline branch (IfYouDo / Otherwise / composite).
+                    sub.sub_link == SubAbilityLink::SequentialSibling
+                        || should_resolve_subability_on_optional_decline(sub)
+                })
             });
             if let Some(branch) = decline_branch {
                 let mut resolved = branch.as_ref().clone();
@@ -1213,6 +1253,13 @@ fn affected_objects_from_events(effect: &Effect, events: &[GameEvent]) -> Vec<Ob
                 // sub-ability resolve against exactly the milled cards.
                 Effect::Mill { destination, .. } => Some(*destination),
                 Effect::ExileTop { .. } => Some(crate::types::zones::Zone::Exile),
+                // CR 701.9a: discarded cards land in the graveyard; "for each
+                // card discarded this way" counts exactly those (CR 701.9c
+                // excludes a discard redirected by a replacement to another
+                // zone — e.g. Madness — which must not be tracked here).
+                Effect::Discard { .. } | Effect::DiscardCard { .. } => {
+                    Some(crate::types::zones::Zone::Graveyard)
+                }
                 // CR 400.7 + CR 611.2c: Mass-bounce destination defaults to
                 // Hand; downstream "those creatures" / "for each of those
                 // permanents" tracking must filter by the actual landing zone.
@@ -1236,7 +1283,7 @@ fn affected_objects_from_events(effect: &Effect, events: &[GameEvent]) -> Vec<Ob
     }
 }
 
-fn publish_tracked_set(state: &mut GameState, affected_ids: Vec<ObjectId>) {
+pub(crate) fn publish_tracked_set(state: &mut GameState, affected_ids: Vec<ObjectId>) {
     // CR 603.7 + CR 608.2c: Chain unification. If an ancestor in this
     // resolution chain already published a tracked set, extend that set with
     // the current publish so compound zone-changing effects expose every
@@ -1815,6 +1862,55 @@ pub fn resolve_ability_chain(
         }
     }
 
+    // CR 608.2c + CR 107.1c: "Repeat this process" dispatch — the non-count
+    // companion to `repeat_for`. Instead of a fixed iteration count, a
+    // predicate decides per-iteration whether to re-follow the whole
+    // resolution chain. The dispatch is ITERATIVE (not recursive): `depth`
+    // never accumulates, the `depth > 20` guard is never approached, and the
+    // `depth == 0` prelude above ran exactly once — a repeated process is one
+    // resolution (CR 608.2c), so per-resolution accumulators and the
+    // resolution counter must not re-fire per iteration.
+    debug_assert!(
+        !(ability.repeat_for.is_some() && ability.repeat_until.is_some()),
+        "repeat_for (count) and repeat_until (predicate) are mutually exclusive"
+    );
+    match ability.repeat_until.clone() {
+        None => resolve_chain_body(state, ability, events, depth),
+        Some(RepeatContinuation::ControllerChoice) => {
+            let initial_waiting_for = state.waiting_for.clone();
+            resolve_chain_body(state, ability, events, depth)?;
+            if state.waiting_for != initial_waiting_for {
+                // Inner pause: stash so the drain re-sets the repeat prompt
+                // after the iteration's player choice resolves.
+                state.pending_repeat_until = Some(crate::types::game_state::PendingRepeatUntil {
+                    ability: Box::new(ability.clone()),
+                });
+            } else {
+                // CR 107.1c: after the iteration fully resolved, prompt the
+                // controller to repeat the process or stop.
+                state.waiting_for = WaitingFor::RepeatDecision {
+                    player: ability.controller,
+                    ability: Box::new(ability.clone()),
+                };
+            }
+            Ok(())
+        }
+    }
+}
+
+/// One full pass of an ability's resolution chain — the parent effect (with its
+/// `repeat_for` count loop) and the entire `sub_ability` chain. This is one
+/// "process" for the purposes of "repeat this process" (CR 608.2c). Extracted
+/// from `resolve_ability_chain` so the `repeat_until` dispatch can drive it
+/// iteratively. The `depth == 0` prelude (state-clearing, the resolution
+/// counter, the BeginGame/Mulligan guards) runs once in `resolve_ability_chain`
+/// and is intentionally NOT repeated per iteration.
+fn resolve_chain_body(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+) -> Result<(), EffectError> {
     // CR 608.2e: "Instead" kicker — check if a sub overrides the parent.
     // When condition is met, replace the current ability's effect with the sub's
     // effect, preserving the full resolution flow (tracked sets, continuations).
@@ -4284,7 +4380,9 @@ mod tests {
         let draw = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextSourcePower,
+                    qty: QuantityRef::Power {
+                        scope: crate::types::ability::ObjectScope::CostPaidObject,
+                    },
                 },
                 target: TargetFilter::Controller,
             },
@@ -4295,7 +4393,9 @@ mod tests {
         let gain_life = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextSourcePower,
+                    qty: QuantityRef::Power {
+                        scope: crate::types::ability::ObjectScope::CostPaidObject,
+                    },
                 },
                 player: GainLifePlayer::Controller,
             },
@@ -4401,7 +4501,9 @@ mod tests {
         let lose_life = ResolvedAbility::new(
             Effect::LoseLife {
                 amount: QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextSourceManaValue,
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: crate::types::ability::ObjectScope::CostPaidObject,
+                    },
                 },
                 target: Some(TargetFilter::Controller),
             },
@@ -4439,6 +4541,159 @@ mod tests {
 
         assert_eq!(state.objects[&creature].zone, Zone::Battlefield);
         assert_eq!(state.players[0].life, 12);
+    }
+
+    /// CR 608.2c + CR 400.7j + CR 608.2k: a non-targeted `ChangeZone` with 2+
+    /// eligible objects raises `WaitingFor::EffectZoneChoice`. After the player
+    /// picks a card, the `EffectZoneChoice` handler stamps parent-referent
+    /// context onto the pending continuation so a later instruction (here a
+    /// `LoseLife` rider reading
+    /// `QuantityRef::ObjectManaValue { scope: CostPaidObject }`) sees
+    /// the *chosen* object's mana value — not the first eligible card, and not
+    /// a fallback of 0. This covers the `EffectZoneChoice` continuation stamp
+    /// site, the sibling path to `change_zone_then_lose_life_reads_moved_object_mana_value`.
+    ///
+    /// `chosen_mv` is the mana value of the card the player selects; the test
+    /// asserts the controller loses exactly that much life (starting from the
+    /// `GameState::new_two_player` default of 20). A regression in the stamp
+    /// would leave the `LoseLife` quantity unresolved (fallback 0) and life at 20.
+    fn run_effect_zone_choice_lose_life_case(choose_mv8: bool) {
+        let mut state = GameState::new_two_player(42);
+        let mv8_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Eight Mana Creature".to_string(),
+            Zone::Graveyard,
+        );
+        let mv3_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Three Mana Creature".to_string(),
+            Zone::Graveyard,
+        );
+        for (id, mv) in [(mv8_creature, 8), (mv3_creature, 3)] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = ManaCost::generic(mv);
+            obj.base_mana_cost = obj.mana_cost.clone();
+        }
+
+        let lose_life = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: crate::types::ability::ObjectScope::CostPaidObject,
+                    },
+                },
+                target: Some(TargetFilter::Controller),
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        // Empty `targets` + `optional_targeting: false` (the `new` default)
+        // forces `resolve()` down the non-targeted resolution-time zone-scan
+        // path; two eligible graveyard creatures raise `EffectZoneChoice`.
+        let reanimate = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: None,
+                    properties: vec![FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    }],
+                }),
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: true,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(lose_life);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &reanimate, &mut events, 0).unwrap();
+
+        let choice_player = match &state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                player,
+                effect_kind: EffectKind::ChangeZone,
+                zone: Zone::Graveyard,
+                cards,
+                ..
+            } => {
+                assert!(cards.contains(&mv8_creature));
+                assert!(cards.contains(&mv3_creature));
+                *player
+            }
+            other => panic!("expected EffectZoneChoice, got {other:?}"),
+        };
+        assert!(
+            state.pending_continuation.is_some(),
+            "LoseLife tail must be stashed as a pending continuation"
+        );
+
+        let chosen = if choose_mv8 {
+            mv8_creature
+        } else {
+            mv3_creature
+        };
+        let unchosen = if choose_mv8 {
+            mv3_creature
+        } else {
+            mv8_creature
+        };
+
+        crate::game::engine::apply(
+            &mut state,
+            choice_player,
+            GameAction::SelectCards {
+                cards: vec![chosen],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.objects[&chosen].zone,
+            Zone::Battlefield,
+            "chosen card should have moved to the battlefield"
+        );
+        assert_eq!(
+            state.objects[&unchosen].zone,
+            Zone::Graveyard,
+            "unchosen card should be untouched"
+        );
+        // Discriminating assertion: the continuation read the chosen card's MV.
+        // A stamp regression would leave the quantity unresolved (0) and life at 20.
+        let expected_life = if choose_mv8 { 20 - 8 } else { 20 - 3 };
+        assert_eq!(
+            state.players[0].life, expected_life,
+            "controller should lose life equal to the chosen object's mana value"
+        );
+        assert!(
+            state.pending_continuation.is_none(),
+            "continuation should be drained after the choice resolves"
+        );
+    }
+
+    #[test]
+    fn effect_zone_choice_then_lose_life_reads_chosen_object_mana_value() {
+        // Choosing the MV-8 creature -> lose 8 life (20 -> 12).
+        run_effect_zone_choice_lose_life_case(true);
+        // Choosing the MV-3 creature -> lose 3 life (20 -> 17): proves the
+        // stamp tracks the actual choice, not the first eligible card.
+        run_effect_zone_choice_lose_life_case(false);
     }
 
     fn bounce_then_draw_if_controller_matched_lki(
@@ -5681,6 +5936,114 @@ mod tests {
             state.players[0].hand.len(),
             1,
             "Expected 1 card drawn from base continuation chain"
+        );
+    }
+
+    #[test]
+    fn repeat_until_controller_choice_prompts_each_iteration() {
+        // CR 107.1c: a "you may repeat this process" loop resolves one
+        // iteration, prompts the controller via `WaitingFor::RepeatDecision`,
+        // and repeats on accept. Accept twice then decline → 3 resolutions.
+        let mut state = GameState::new_two_player(42);
+        let start_life = state.players[0].life;
+
+        let mut ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: crate::types::ability::GainLifePlayer::default(),
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.repeat_until = Some(RepeatContinuation::ControllerChoice);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // First iteration resolved; the controller is now prompted.
+        assert!(
+            matches!(state.waiting_for, WaitingFor::RepeatDecision { .. }),
+            "expected RepeatDecision prompt, got {:?}",
+            state.waiting_for,
+        );
+        assert_eq!(state.players[0].life, start_life + 1);
+
+        // Accept twice, then decline.
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            crate::types::actions::GameAction::DecideOptionalEffect { accept: true },
+        )
+        .unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::RepeatDecision { .. }
+        ));
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            crate::types::actions::GameAction::DecideOptionalEffect { accept: true },
+        )
+        .unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::RepeatDecision { .. }
+        ));
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            crate::types::actions::GameAction::DecideOptionalEffect { accept: false },
+        )
+        .unwrap();
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::RepeatDecision { .. }),
+            "declining ends the loop",
+        );
+        assert_eq!(
+            state.players[0].life,
+            start_life + 3,
+            "initial iteration + 2 accepted = 3 resolutions, each gaining 1 life",
+        );
+    }
+
+    #[test]
+    fn repeat_until_paused_resume_resets_prompt_after_inner_choice() {
+        // CR 107.1c: when a `ControllerChoice` iteration pauses on an inner
+        // player choice, `pending_repeat_until` is stashed and
+        // `drain_pending_continuation` re-sets `WaitingFor::RepeatDecision`
+        // once the choice drains.
+        let mut state = GameState::new_two_player(42);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: crate::types::ability::GainLifePlayer::default(),
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.repeat_until = Some(RepeatContinuation::ControllerChoice);
+
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.pending_repeat_until = Some(crate::types::game_state::PendingRepeatUntil {
+            ability: Box::new(ability),
+        });
+
+        let mut events = Vec::new();
+        drain_pending_continuation(&mut state, &mut events);
+
+        assert!(
+            state.pending_repeat_until.is_none(),
+            "the resume slot must be consumed by the drain",
+        );
+        assert!(
+            matches!(state.waiting_for, WaitingFor::RepeatDecision { .. }),
+            "the drain re-sets the repeat prompt, got {:?}",
+            state.waiting_for,
         );
     }
 
@@ -9083,6 +9446,95 @@ mod tests {
             state.tracked_object_sets.get(&fresh),
             Some(&vec![]),
             "empty selection produces an empty fresh set"
+        );
+    }
+
+    /// CR 608.2e + CR 701.9a: Building-block test for issue #456. A
+    /// `player_scope: Opponent` `Discard` with a `Draw { Ref(TrackedSetSize) }`
+    /// tail must accumulate every opponent's discarded card into ONE chain
+    /// tracked set across the per-opponent interactive `DiscardChoice` pauses,
+    /// so the trailing `Draw` reads the union (count == 3 for 3 opponents).
+    #[test]
+    fn discard_choice_publishes_tracked_set_across_continuation() {
+        let mut state = GameState::new(FormatConfig::commander(), 4, 42);
+
+        // P0's library: cards for the trailing Draw to draw.
+        for i in 0..6 {
+            create_object(
+                &mut state,
+                CardId(900 + i),
+                PlayerId(0),
+                format!("Lib {i}"),
+                Zone::Library,
+            );
+        }
+        // Each opponent holds 2 hand cards so its discard is interactive
+        // (hand > count → DiscardChoice).
+        for opp in 1..4u8 {
+            for c in 0..2u64 {
+                create_object(
+                    &mut state,
+                    CardId(u64::from(opp) * 100 + c),
+                    PlayerId(opp),
+                    format!("P{opp} card {c}"),
+                    Zone::Hand,
+                );
+            }
+        }
+
+        // Syphon-Mind-shaped ability: each opponent discards one card, then the
+        // controller draws one card per card discarded this way.
+        let mut ability = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            ObjectId(500),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::Opponent);
+        ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize,
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(500),
+            PlayerId(0),
+        )));
+
+        let p0_hand_before = state.players[0].hand.len();
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // Resolve each opponent's interactive discard via the real pipeline.
+        let mut select_actions = 0;
+        while let WaitingFor::DiscardChoice { player, cards, .. } = &state.waiting_for {
+            let pick = vec![cards[0]];
+            let _ = *player;
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::SelectCards { cards: pick },
+            )
+            .unwrap();
+            select_actions += 1;
+            assert!(select_actions <= 3, "must not loop past 3 opponents");
+        }
+
+        assert_eq!(select_actions, 3, "three opponents each discard once");
+        // The trailing Draw reads TrackedSetSize == 3 (one card per opponent
+        // discard, accumulated across the continuation pauses).
+        assert_eq!(
+            state.players[0].hand.len() - p0_hand_before,
+            3,
+            "controller draws one card per card discarded this way (3 total)"
         );
     }
 }

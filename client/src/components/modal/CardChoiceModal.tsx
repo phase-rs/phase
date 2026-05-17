@@ -45,6 +45,8 @@ type HarmonizeTapChoice = Extract<WaitingFor, { type: "HarmonizeTapChoice" }>;
 type PairChoice = Extract<WaitingFor, { type: "PairChoice" }>;
 type ChooseLegend = Extract<WaitingFor, { type: "ChooseLegend" }>;
 type CommanderZoneChoice = Extract<WaitingFor, { type: "CommanderZoneChoice" }>;
+type RevealUntilKeptChoice = Extract<WaitingFor, { type: "RevealUntilKeptChoice" }>;
+type RepeatDecision = Extract<WaitingFor, { type: "RepeatDecision" }>;
 type ManifestDreadChoice = Extract<WaitingFor, { type: "ManifestDreadChoice" }>;
 type CrewVehicle = Extract<WaitingFor, { type: "CrewVehicle" }>;
 type StationTarget = Extract<WaitingFor, { type: "StationTarget" }>;
@@ -259,6 +261,12 @@ export function CardChoiceModal() {
     case "CommanderZoneChoice":
       if (!canActForWaitingState) return null;
       return <CommanderZoneChoiceModal data={waitingFor.data} />;
+    case "RevealUntilKeptChoice":
+      if (!canActForWaitingState) return null;
+      return <RevealUntilKeptChoiceModal data={waitingFor.data} />;
+    case "RepeatDecision":
+      if (!canActForWaitingState) return null;
+      return <RepeatDecisionModal data={waitingFor.data} />;
     case "ConniveDiscard":
       if (!canActForWaitingState) return null;
       return <DiscardModal data={waitingFor.data} title={`Connive \u2014 Discard ${waitingFor.data.count === 1 ? "a card" : `${waitingFor.data.count} cards`}`} />;
@@ -2668,6 +2676,76 @@ function CommanderZoneChoiceModal({ data }: { data: CommanderZoneChoice["data"] 
             onClick={() => dispatch({ type: "DecideOptionalEffect", data: { accept: false } })}
           />
         </div>
+      </div>
+    </ChoiceOverlay>
+  );
+}
+
+// ── Reveal Until Kept Choice Modal (CR 701.20a) ───────────────────────────
+
+function RevealUntilKeptChoiceModal({ data }: { data: RevealUntilKeptChoice["data"] }) {
+  const dispatch = useGameDispatch();
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const hoverProps = useInspectHoverProps();
+
+  if (!objects) return null;
+
+  const obj = objects[data.hit_card];
+  const declineZone = data.decline_zone.charAt(0).toUpperCase() + data.decline_zone.slice(1);
+
+  return (
+    <ChoiceOverlay
+      title="Reveal Until"
+      subtitle={`Put ${obj?.name ?? "the revealed card"} onto the battlefield?`}
+    >
+      <div className="flex items-center gap-6">
+        <motion.div
+          className="relative rounded-lg"
+          initial={{ opacity: 0, y: 60, scale: 0.85 }}
+          animate={{ opacity: 0.85, y: 0, scale: 1 }}
+          transition={{ delay: 0.1, duration: 0.35 }}
+          {...hoverProps(data.hit_card)}
+        >
+          <CardImage
+            cardName={obj?.name ?? "Unknown"}
+            size="normal"
+            className={CHOICE_CARD_IMAGE_CLASS}
+          />
+        </motion.div>
+        <div className="flex flex-col gap-3">
+          <ConfirmButton
+            label="Onto the battlefield"
+            onClick={() => dispatch({ type: "DecideOptionalEffect", data: { accept: true } })}
+          />
+          <ConfirmButton
+            label={`Into ${declineZone}`}
+            onClick={() => dispatch({ type: "DecideOptionalEffect", data: { accept: false } })}
+          />
+        </div>
+      </div>
+    </ChoiceOverlay>
+  );
+}
+
+// ── Repeat Decision Modal ──────────────────────────────────────────────────
+
+function RepeatDecisionModal({ data: _data }: { data: RepeatDecision["data"] }) {
+  const dispatch = useGameDispatch();
+
+  return (
+    <ChoiceOverlay
+      title="Repeat This Process"
+      subtitle="Repeat the process again?"
+    >
+      <div className="flex flex-col gap-3">
+        <ConfirmButton
+          label="Repeat"
+          onClick={() => dispatch({ type: "DecideOptionalEffect", data: { accept: true } })}
+        />
+        <ConfirmButton
+          label="Stop"
+          onClick={() => dispatch({ type: "DecideOptionalEffect", data: { accept: false } })}
+        />
       </div>
     </ChoiceOverlay>
   );

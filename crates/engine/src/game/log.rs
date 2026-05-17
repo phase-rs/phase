@@ -129,6 +129,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         GameEvent::LifeChanged { .. } => LogCategory::Life,
 
         GameEvent::ManaAdded { .. }
+        | GameEvent::TappedForMana { .. }
         | GameEvent::ManaPoolEmptied { .. }
         | GameEvent::ManaRecolored { .. } => LogCategory::Mana,
 
@@ -961,6 +962,11 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(" revoked debug actions from "),
             player_seg(state, *player_id),
         ],
+        // CR 106.12a: `TappedForMana` is the per-resolution trigger event for
+        // `TapsForMana` matchers. The per-unit `ManaAdded` events already
+        // produce the user-facing "adds X mana" log lines, so this event is
+        // internal plumbing and emits no segments of its own.
+        GameEvent::TappedForMana { .. } => vec![],
     }
 }
 

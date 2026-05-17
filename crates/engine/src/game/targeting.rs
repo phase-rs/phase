@@ -370,6 +370,18 @@ pub fn resolved_targets(
             })
             .unwrap_or_default();
     }
+    // CR 608.2k: "the exiled/sacrificed/discarded <noun>" — an untargeted
+    // reference to the object referred to by this ability's cost. Resolved
+    // from the recursively-stamped `cost_paid_object`. Mirrors the local
+    // resolution `token_copy.rs` already performs for `CopyTokenOf`; this is
+    // the general chokepoint for every effect that targets a cost-paid object.
+    if matches!(target_filter, TargetFilter::CostPaidObject) {
+        return ability
+            .cost_paid_object
+            .iter()
+            .map(|snap| TargetRef::Object(snap.object_id))
+            .collect();
+    }
     let use_self = matches!(
         target_filter,
         TargetFilter::None | TargetFilter::ParentTarget
@@ -563,6 +575,9 @@ pub(crate) fn extract_source_from_event(
         // CR 106.3 + CR 605.1a: For TapsForMana triggers, "that land" / "that permanent"
         // resolves to the mana source — the land/permanent being tapped for mana.
         GameEvent::ManaAdded { source_id, .. } => Some(*source_id),
+        // CR 106.12a: `TappedForMana` is the per-resolution event a `TapsForMana`
+        // trigger fires from; `source_id` is the permanent tapped for mana.
+        GameEvent::TappedForMana { source_id, .. } => Some(*source_id),
         GameEvent::CounterAdded { object_id, .. } => Some(*object_id),
         GameEvent::CounterRemoved { object_id, .. } => Some(*object_id),
         GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
@@ -608,6 +623,9 @@ pub(crate) fn extract_player_from_event(
         // rebinds as the resolving ability's controller so the bonus mana
         // routes to the tapper even when the Aura is opponent-controlled.
         GameEvent::ManaAdded { player_id, .. } => Some(*player_id),
+        // CR 106.12a + CR 605.1b: `TappedForMana` carries the player who tapped
+        // the source for mana — the triggering player for `TapsForMana`.
+        GameEvent::TappedForMana { player_id, .. } => Some(*player_id),
         GameEvent::CardsDrawn { player_id, .. } => Some(*player_id),
         GameEvent::CardDrawn { player_id, .. } => Some(*player_id),
         GameEvent::Discarded { player_id, .. } => Some(*player_id),
@@ -661,6 +679,9 @@ pub(crate) fn extract_amount_from_event(event: &crate::types::events::GameEvent)
         GameEvent::CounterAdded { count, .. } => Some(*count as i32),
         GameEvent::CounterRemoved { count, .. } => Some(*count as i32),
         GameEvent::Discarded { .. } => Some(1),
+        // CR 706.2: the final number of a die roll is its result. Lets
+        // `EventContextAmount` resolve "where X is the result" pump effects.
+        GameEvent::DieRolled { result, .. } => Some(*result as i32),
         _ => None,
     }
 }
@@ -2555,5 +2576,17 @@ mod tests {
             vec![TargetRef::Object(c1)],
             "Should fall through to ability.targets when no other tier applies"
         );
+    }
+
+    /// CR 706.2: a die roll's result is the amount `EventContextAmount`
+    /// resolves "where X is the result" against.
+    #[test]
+    fn extract_amount_from_die_rolled_returns_result() {
+        let event = crate::types::events::GameEvent::DieRolled {
+            player_id: PlayerId(0),
+            sides: 8,
+            result: 7,
+        };
+        assert_eq!(extract_amount_from_event(&event), Some(7));
     }
 }

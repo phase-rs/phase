@@ -441,6 +441,8 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.triggers_fired_this_turn.clear();
     state.trigger_fire_counts_this_turn.clear();
     state.activated_abilities_this_turn.clear();
+    // CR 602.5b: "Activate only once each turn" crew restriction resets each turn.
+    state.crew_activated_this_turn.clear();
     // CR 514 + CR 603.4: Per-ability per-turn resolution counter resets at turn
     // boundary alongside other "this turn" trackers (mirrors the cleanup of
     // `trigger_fire_counts_this_turn`).

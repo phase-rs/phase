@@ -1,5 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 496
 expression: "&ir"
 ---
 {
@@ -40,7 +41,10 @@ expression: "&ir"
                 "amount": {
                   "type": "Ref",
                   "qty": {
-                    "type": "EventContextSourceManaValue"
+                    "type": "ObjectManaValue",
+                    "scope": {
+                      "type": "CostPaidObject"
+                    }
                   }
                 },
                 "target": {
@@ -56,7 +60,8 @@ expression: "&ir"
               "condition": null,
               "optional_targeting": false,
               "optional": false,
-              "forward_result": false
+              "forward_result": false,
+              "sub_link": "SequentialSibling"
             },
             "duration": null,
             "description": null,

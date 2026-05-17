@@ -567,6 +567,169 @@ fn bloodghast_does_not_trigger_on_opponent_land() {
 }
 
 // ---------------------------------------------------------------------------
+// Issue #459: optional + targeted landfall trigger batch
+//
+// Ob Nixilis, the Fallen: "Whenever a land you control enters, you may have
+// target player lose 3 life. If you do, put three +1/+1 counters on ~."
+//   - trigger `optional: true` (the "may"), non-empty target slot (target player)
+//   - chained `IfYouDo` sub-ability puts the counters.
+// Scute Swarm: "Whenever a land you control enters, create a 1/1 green Insect
+// creature token..." — non-optional, no targets.
+//
+// Playing one land triggers BOTH landfall abilities (same controller, batched
+// per CR 603.3b). The engine must drive the multi-stage WaitingFor sequence
+// TriggerTargetSelection -> Priority -> OptionalEffectChoice -> Priority and
+// always land on a clean empty-stack Priority. This is the engine-innocent
+// regression guard for the frontend softlock fixed alongside it.
+// ---------------------------------------------------------------------------
+
+const OB_NIXILIS_ORACLE: &str = "Whenever a land you control enters, you may have target player lose 3 life. If you do, put three +1/+1 counters on Ob Nixilis, the Fallen.";
+const SCUTE_SWARM_ORACLE: &str = "Whenever a land you control enters, create a 1/1 green Insect creature token. If you control six or more lands, create a token that's a copy of Scute Swarm instead.";
+
+/// Count battlefield Insect creature tokens controlled by P0.
+fn p0_insect_tokens(runner: &engine::game::scenario::GameRunner) -> usize {
+    runner
+        .state()
+        .objects
+        .values()
+        .filter(|o| {
+            o.is_token
+                && o.zone == Zone::Battlefield
+                && o.card_types.subtypes.iter().any(|s| s == "Insect")
+        })
+        .count()
+}
+
+/// Drive the batched landfall triggers to completion, deciding the optional
+/// effect with `accept`. Returns once a clean empty-stack Priority is reached.
+/// Panics (via the 100-iteration cap assertion) if the engine ever reaches a
+/// WaitingFor state with no progressing action — the softlock signature.
+fn resolve_landfall_batch(runner: &mut engine::game::scenario::GameRunner, accept: bool) {
+    for _ in 0..100 {
+        match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return,
+            WaitingFor::TriggerTargetSelection { target_slots, .. } => {
+                // Ob Nixilis targets a player — prefer P1 (the opponent) so the
+                // life-loss assertion against players[1] is meaningful; fall
+                // back to the first legal target for any other slot shape.
+                let legal = target_slots.first().map(|slot| &slot.legal_targets);
+                let target = legal
+                    .and_then(|targets| {
+                        targets
+                            .iter()
+                            .find(|t| **t == engine::types::ability::TargetRef::Player(P1))
+                            .or_else(|| targets.first())
+                    })
+                    .cloned();
+                runner
+                    .act(GameAction::ChooseTarget { target })
+                    .expect("Ob Nixilis target selection should succeed");
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept })
+                    .expect("optional-effect decision should succeed");
+            }
+            _ => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass priority should succeed");
+            }
+        }
+    }
+    panic!(
+        "landfall trigger batch never reached clean Priority — stuck at {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// Run the issue-#459 scenario. `ob_nixilis_first` controls battlefield add
+/// order (which drives same-controller batched trigger dispatch order).
+fn run_optional_landfall_scenario(ob_nixilis_first: bool, accept: bool) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let (ob_nixilis_id, _scute_id) = if ob_nixilis_first {
+        let ob = scenario
+            .add_creature_from_oracle(P0, "Ob Nixilis, the Fallen", 3, 3, OB_NIXILIS_ORACLE)
+            .id();
+        let scute = scenario
+            .add_creature_from_oracle(P0, "Scute Swarm", 1, 1, SCUTE_SWARM_ORACLE)
+            .id();
+        (ob, scute)
+    } else {
+        let scute = scenario
+            .add_creature_from_oracle(P0, "Scute Swarm", 1, 1, SCUTE_SWARM_ORACLE)
+            .id();
+        let ob = scenario
+            .add_creature_from_oracle(P0, "Ob Nixilis, the Fallen", 3, 3, OB_NIXILIS_ORACLE)
+            .id();
+        (ob, scute)
+    };
+
+    let forest_id = scenario.add_land_to_hand(P0, "Forest").id();
+    let mut runner = scenario.build();
+
+    let start_life_p1 = runner.state().players[1].life;
+
+    let card_id = runner.state().objects[&forest_id].card_id;
+    runner
+        .act(GameAction::PlayLand {
+            object_id: forest_id,
+            card_id,
+        })
+        .expect("should play Forest");
+
+    resolve_landfall_batch(&mut runner, accept);
+
+    // The batch resolved to a clean empty-stack Priority — the softlock guard.
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "expected clean Priority, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "stack must be empty after the landfall batch resolves"
+    );
+
+    // Scute's non-optional trigger always fires: exactly one Insect token.
+    assert_eq!(
+        p0_insect_tokens(&runner),
+        1,
+        "Scute Swarm must create exactly one Insect token"
+    );
+
+    let counters = runner.state().objects[&ob_nixilis_id]
+        .counters
+        .get(&CounterType::Plus1Plus1)
+        .copied()
+        .unwrap_or(0);
+    let life_lost = start_life_p1 - runner.state().players[1].life;
+
+    if accept {
+        // Optional accepted: target player loses 3 life, IfYouDo puts 3 counters.
+        assert_eq!(life_lost, 3, "accepted optional must drain 3 life");
+        assert_eq!(counters, 3, "IfYouDo must place three +1/+1 counters");
+    } else {
+        // Optional declined: no life loss, IfYouDo sub-ability does not fire.
+        assert_eq!(life_lost, 0, "declined optional must not drain life");
+        assert_eq!(counters, 0, "declined optional must not place counters");
+    }
+}
+
+#[test]
+fn optional_plus_targeted_landfall_trigger_batch_resolves_to_clean_priority() {
+    // Ordering R1: Ob Nixilis added first. Both accept and decline branches.
+    run_optional_landfall_scenario(true, true);
+    run_optional_landfall_scenario(true, false);
+    // Ordering R2 (the bug-report ordering): Scute added first, Ob Nixilis
+    // second — Ob Nixilis dispatched first, Scute parked in deferred_triggers.
+    run_optional_landfall_scenario(false, true);
+    run_optional_landfall_scenario(false, false);
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 

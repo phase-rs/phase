@@ -2,8 +2,8 @@ use crate::game::filter;
 use crate::game::layers::evaluate_condition;
 use crate::game::quantity::{quantity_expr_uses_recipient, resolve_quantity_with_targets};
 use crate::types::ability::{
-    ContinuousModification, Duration, Effect, EffectError, EffectKind, ResolvedAbility,
-    StaticDefinition, TargetFilter, TargetRef,
+    ContinuousModification, Duration, Effect, EffectError, EffectKind, QuantityExpr, QuantityRef,
+    ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -34,6 +34,23 @@ pub fn resolve(
             .unwrap_or(Duration::UntilEndOfTurn);
 
         for static_def in static_abilities {
+            // CR 611.2d: A continuous effect's variable (X) is determined once,
+            // on resolution. Snapshot resolution-context quantity refs (e.g.
+            // "where X is the result" of the preceding die roll) to constants
+            // before registration, so the layer system never re-resolves them
+            // against game state that no longer carries the resolution context.
+            let mut static_def = static_def.clone();
+            for modification in &mut static_def.modifications {
+                match modification {
+                    ContinuousModification::AddDynamicPower { value }
+                    | ContinuousModification::AddDynamicToughness { value }
+                    | ContinuousModification::AddDynamicKeyword { value, .. } => {
+                        *value = snapshot_resolution_context_quantity(value, events);
+                    }
+                    _ => {}
+                }
+            }
+            let static_def = &static_def;
             // CR 603.4 + CR 608.2h + CR 611.2d: An in-effect "if <condition>"
             // carried by a `StaticDefinition` (Odric, Lunarch Marshal:
             // "creatures you control gain first strike ... if a creature you
@@ -171,6 +188,28 @@ fn register_transient_effect(
             }
         }
         Some(TargetFilter::None) | None => {}
+        // CR 608.2k: A grant whose affected object is the ability's cost-paid
+        // object (Jhoira of the Ghitu's suspend grant — "If it doesn't have
+        // suspend, it gains suspend", the "it" anaphor parsed as `ParentTarget`
+        // on the suspend-grant sub_ability). The exiled card is in the exile
+        // zone, so the battlefield-scan branch below cannot reach it; resolve
+        // directly from the recursively-stamped `cost_paid_object`. A bare
+        // `ParentTarget` with no chosen targets but a stamped cost-paid object
+        // is treated as the cost-paid reference (the parent acted on it).
+        Some(TargetFilter::CostPaidObject) | Some(TargetFilter::ParentTarget)
+            if ability.targets.is_empty() && ability.cost_paid_object.is_some() =>
+        {
+            if let Some(snap) = &ability.cost_paid_object {
+                state.add_transient_continuous_effect(
+                    ability.source_id,
+                    ability.controller,
+                    duration.clone(),
+                    TargetFilter::SpecificObject { id: snap.object_id },
+                    modifications.clone(),
+                    static_def.condition.clone(),
+                );
+            }
+        }
         Some(filter) => {
             let filter = crate::game::effects::resolved_object_filter(ability, filter);
             let filter = crate::game::targeting::resolve_tracked_set_sentinel(state, filter);
@@ -236,6 +275,80 @@ fn snapshot_transient_modifications(
             _ => modification.clone(),
         })
         .collect()
+}
+
+/// CR 611.2d: A resolving spell/ability that creates a continuous effect with a
+/// variable X determines that variable's value only once, on resolution.
+///
+/// Walks a `QuantityExpr` tree and replaces every resolution-context leaf —
+/// currently only `QuantityRef::EventContextAmount`, which "where X is the
+/// result" of a preceding die roll (CR 706.2) compiles to — with a constant
+/// `Fixed`. The amount is read from the most recent amount-yielding event in
+/// this resolution's `events` slice (the `RollDie` sub-ability resolved one
+/// step earlier, so its `GameEvent::DieRolled` is present).
+///
+/// Persistent game-state refs (`ObjectCount`, `LifeTotal`, `Power`, …) are left
+/// UNTOUCHED so CDA-style "+1/+1 for each X" continuous mods keep their dynamic
+/// behavior — only resolution-context refs, which read transient context that
+/// is gone by the next layer recompute, are snapshotted.
+fn snapshot_resolution_context_quantity(expr: &QuantityExpr, events: &[GameEvent]) -> QuantityExpr {
+    match expr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        } => {
+            let amount = events
+                .iter()
+                .rev()
+                .find_map(crate::game::targeting::extract_amount_from_event);
+            // GAP-3 silent-failure guard: an `EventContextAmount` leaf with no
+            // source event in this resolution would snapshot to 0 and silently
+            // produce a +0/+0 pump. On a silent-failure-remediation branch that
+            // must trip in debug builds rather than ship a no-op.
+            debug_assert!(
+                amount.is_some(),
+                "snapshot_resolution_context_quantity: EventContextAmount leaf found no \
+                 source event in the resolution events slice",
+            );
+            QuantityExpr::Fixed {
+                value: amount.unwrap_or(0),
+            }
+        }
+        QuantityExpr::Ref { .. } | QuantityExpr::Fixed { .. } => expr.clone(),
+        QuantityExpr::DivideRounded {
+            inner,
+            divisor,
+            rounding,
+        } => QuantityExpr::DivideRounded {
+            inner: Box::new(snapshot_resolution_context_quantity(inner, events)),
+            divisor: *divisor,
+            rounding: *rounding,
+        },
+        QuantityExpr::Offset { inner, offset } => QuantityExpr::Offset {
+            inner: Box::new(snapshot_resolution_context_quantity(inner, events)),
+            offset: *offset,
+        },
+        QuantityExpr::Multiply { factor, inner } => QuantityExpr::Multiply {
+            factor: *factor,
+            inner: Box::new(snapshot_resolution_context_quantity(inner, events)),
+        },
+        QuantityExpr::Sum { exprs } => QuantityExpr::Sum {
+            exprs: exprs
+                .iter()
+                .map(|e| snapshot_resolution_context_quantity(e, events))
+                .collect(),
+        },
+        QuantityExpr::UpTo { max } => QuantityExpr::UpTo {
+            max: Box::new(snapshot_resolution_context_quantity(max, events)),
+        },
+        QuantityExpr::Power { base, exponent } => QuantityExpr::Power {
+            base: *base,
+            exponent: Box::new(snapshot_resolution_context_quantity(exponent, events)),
+        },
+        QuantityExpr::Difference { left, right } => QuantityExpr::Difference {
+            left: Box::new(snapshot_resolution_context_quantity(left, events)),
+            right: Box::new(snapshot_resolution_context_quantity(right, events)),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -871,6 +984,164 @@ mod tests {
                 .unwrap()
                 .has_keyword(&Kw::FirstStrike),
             "the first strike grant must persist for its duration after the gate creature loses the keyword"
+        );
+    }
+
+    // ── CR 611.2d: resolution-context quantity snapshot (Hammer Helper) ──
+
+    /// CR 706.2 + CR 611.2d: an `EventContextAmount` leaf is snapshotted to the
+    /// most recent amount-yielding event — the preceding `DieRolled`'s result.
+    #[test]
+    fn snapshot_replaces_event_context_amount_with_die_result() {
+        let events = vec![
+            GameEvent::DieRolled {
+                player_id: PlayerId(0),
+                sides: 6,
+                result: 4,
+            },
+            GameEvent::EffectResolved {
+                kind: EffectKind::RollDie,
+                source_id: ObjectId(1),
+            },
+        ];
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        assert_eq!(
+            snapshot_resolution_context_quantity(&expr, &events),
+            QuantityExpr::Fixed { value: 4 },
+        );
+    }
+
+    /// Persistent game-state refs must be left untouched — only resolution-
+    /// context refs are snapshotted.
+    #[test]
+    fn snapshot_leaves_persistent_refs_unchanged() {
+        let events = vec![GameEvent::DieRolled {
+            player_id: PlayerId(0),
+            sides: 6,
+            result: 4,
+        }];
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        };
+        assert_eq!(snapshot_resolution_context_quantity(&expr, &events), expr,);
+    }
+
+    /// GAP-3 silent-failure guard: an `EventContextAmount` leaf with no source
+    /// event must trip the `debug_assert!` rather than silently snapshot to 0.
+    #[test]
+    #[should_panic(expected = "EventContextAmount leaf found no source event")]
+    fn snapshot_panics_on_event_context_amount_without_source_event() {
+        let events: Vec<GameEvent> = Vec::new();
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        let _ = snapshot_resolution_context_quantity(&expr, &events);
+    }
+
+    /// CR 706.2 + CR 611.2d end-to-end: roll a die, then register a continuous
+    /// `+X/+0` pump where X is the result (the Hammer Helper shape). The pump
+    /// must snapshot to the rolled value at resolution and stay stable across
+    /// later layer recomputes — never collapse to +0/+0, and never re-resolve
+    /// against a later effect's published amount.
+    ///
+    /// The source object is itself a creature so the parsed GenericEffect's
+    /// `affected: SelfRef` binds the pump to it — 07f flags the affected-
+    /// subject misparse (the pump should target the gained-control creature)
+    /// as a separate out-of-scope defect.
+    #[test]
+    fn die_result_pump_snapshots_to_roll_and_stays_stable() {
+        let mut state = GameState::new_two_player(42);
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Helped Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+
+        // Chain: RollDie (six-sided) → GenericEffect (+X/+0, X = the result).
+        let pump = StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddDynamicPower {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+            }]);
+        let generic = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![pump],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+            },
+            vec![],
+            creature,
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::RollDie {
+                sides: 6,
+                results: vec![],
+            },
+            vec![],
+            creature,
+            PlayerId(0),
+        )
+        .sub_ability(generic);
+
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        let roll = events
+            .iter()
+            .find_map(|e| match e {
+                GameEvent::DieRolled { result, .. } => Some(*result as i32),
+                _ => None,
+            })
+            .expect("RollDie must emit a DieRolled event");
+        assert!((1..=6).contains(&roll), "d6 result out of range: {roll}");
+
+        evaluate_layers(&mut state);
+        let power_after = state.objects.get(&creature).unwrap().power;
+        assert_eq!(
+            power_after,
+            Some(2 + roll),
+            "pump must snapshot to the rolled result ({roll}); +0/+0 = silent-failure regression",
+        );
+        assert_ne!(
+            power_after,
+            Some(2),
+            "a +0/+0 pump means the snapshot missed"
+        );
+
+        // Stability: a later layer recompute must not re-resolve the pump.
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects.get(&creature).unwrap().power,
+            Some(2 + roll),
+            "snapshotted pump must stay stable across layer recomputes",
+        );
+
+        // A later effect that publishes an amount must NOT bleed into the
+        // pump: the snapshot froze it. An un-snapshotted `EventContextAmount`
+        // would fall back to `last_effect_amount` and corrupt the pump.
+        state.last_effect_amount = Some(99);
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects.get(&creature).unwrap().power,
+            Some(2 + roll),
+            "a later effect's amount must not bleed into the snapshotted pump",
         );
     }
 

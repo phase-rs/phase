@@ -35,6 +35,11 @@ pub(crate) struct EffectChainIr {
     pub(crate) chain_rounding: Option<RoundingMode>,
     /// CR 701.21a: Actor context threaded from ParseContext (per D-07).
     pub(crate) actor: Option<ControllerRef>,
+    /// CR 608.2c + CR 107.1c: chain-level "repeat this process" loop predicate.
+    /// Set when a trailing "you may repeat this process" / "if you do, repeat
+    /// this process" directive is recognized. Lowering applies it to the root
+    /// `AbilityDefinition` so the resolver re-follows the whole chain.
+    pub(crate) repeat_until: Option<crate::types::ability::RepeatContinuation>,
 }
 
 /// Special-case clause actions that modify or attach to adjacent clauses during lowering.
@@ -139,6 +144,7 @@ mod tests {
             kind: AbilityKind::Spell,
             chain_rounding: None,
             actor: None,
+            repeat_until: None,
         };
         assert!(ir.clauses.is_empty());
     }
@@ -205,6 +211,7 @@ mod tests {
             kind: AbilityKind::Spell,
             chain_rounding: None,
             actor: None,
+            repeat_until: None,
         };
         assert_eq!(ir.clauses.len(), 1);
         assert_eq!(ir.kind, AbilityKind::Spell);

@@ -838,7 +838,7 @@ export type WaitingFor =
   | { type: "ModeChoice"; data: { player: PlayerId; modal: ModalChoice; pending_cast: PendingCast } }
   | { type: "AbilityModeChoice"; data: { player: PlayerId; modal: ModalChoice; source_id: ObjectId; mode_abilities: unknown[]; is_activated: boolean; ability_index?: number; ability_cost?: unknown; unavailable_modes?: number[] } }
   | { type: "DiscardToHandSize"; data: { player: PlayerId; count: number; cards: ObjectId[] } }
-  | { type: "OptionalCostChoice"; data: { player: PlayerId; cost: AdditionalCost; pending_cast: PendingCast } }
+  | { type: "OptionalCostChoice"; data: { player: PlayerId; cost: AdditionalCost; times_kicked: number; pending_cast: PendingCast } }
   | { type: "DefilerPayment"; data: { player: PlayerId; life_cost: number; mana_reduction: ManaCost; pending_cast: PendingCast } }
   | { type: "AdventureCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId } }
   | { type: "ModalFaceChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId } }
@@ -876,6 +876,8 @@ export type WaitingFor =
   | { type: "UnlessBounceChoice"; data: { player: PlayerId; permanents: ObjectId[]; pending_effect: unknown; remaining: number } }
   | { type: "ChooseRingBearer"; data: { player: PlayerId; candidates: ObjectId[] } }
   | { type: "DiscoverChoice"; data: { player: PlayerId; hit_card: ObjectId; exiled_misses: ObjectId[] } }
+  | { type: "RevealUntilKeptChoice"; data: { player: PlayerId; hit_card: ObjectId; accept_zone: string; decline_zone: string; enter_tapped: boolean; revealed_misses: ObjectId[]; rest_destination: string } }
+  | { type: "RepeatDecision"; data: { player: PlayerId; ability: unknown } }
   | { type: "CascadeChoice"; data: { player: PlayerId; hit_card: ObjectId; exiled_misses: ObjectId[]; source_mv: number } }
   | { type: "TopOrBottomChoice"; data: { player: PlayerId; object_id: ObjectId } }
   | { type: "ParadigmCastOffer"; data: { player: PlayerId; offers: ObjectId[] } }
@@ -1299,6 +1301,14 @@ export interface GameState {
   combat: CombatState | null;
   waiting_for: WaitingFor;
   has_pending_cast: boolean;
+  /**
+   * CR 601.2f: The locked-in pending cast (cost, ability, object) while the
+   * caster is mid-cast. Present during ManaPayment / cost-choice WaitingFor
+   * states; the `cost` field is the engine-resolved total (base + Strive +
+   * RaiseCost statics + commander tax - reductions). Absent when no cast is
+   * in progress.
+   */
+  pending_cast?: PendingCast;
   lands_played_this_turn: number;
   max_lands_per_turn: number;
   priority_pass_count: number;

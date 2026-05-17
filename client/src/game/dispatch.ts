@@ -68,12 +68,18 @@ let isAnimating = false;
 const pendingQueue: PendingWork[] = [];
 
 /**
- * The local action currently being processed (set while inside processAction).
- * Used alongside pendingQueue to deduplicate rapid double-clicks: if the same
- * action is already in flight, a second dispatch is a silent no-op rather than
- * a queued duplicate that would fail against a transitioned engine state.
+ * The local action currently being processed (set while inside processAction),
+ * paired with the seat that dispatched it. Used alongside pendingQueue to
+ * deduplicate rapid double-clicks: if the same action from the same actor is
+ * already in flight, a second dispatch is a silent no-op rather than a queued
+ * duplicate that would fail against a transitioned engine state.
+ *
+ * The actor is part of the identity: a double-click is one seat firing the
+ * same action twice. Two different seats firing the same action type (e.g.
+ * the human and the AI both passing priority across an intervening priority
+ * round — issue #459) are distinct game decisions and must NOT be collapsed.
  */
-let inFlightLocalAction: GameAction | null = null;
+let inFlightLocalAction: { action: GameAction; actor: number } | null = null;
 
 /** Structural equality for GameAction — action objects are small plain JSON. */
 function actionsEqual(a: GameAction, b: GameAction): boolean {
@@ -321,7 +327,7 @@ async function processQueue(): Promise<void> {
     const next = pendingQueue.shift()!;
     try {
       if (next.kind === "local") {
-        inFlightLocalAction = next.action;
+        inFlightLocalAction = { action: next.action, actor: next.actor };
         try {
           await processAction(next.action, next.actor);
         } finally {
@@ -384,15 +390,25 @@ export async function dispatchAction(
   actor: number = getPlayerId(),
 ): Promise<void> {
   if (isAnimating) {
-    // Enqueue-time de-dup: if the exact same action is already in flight or
-    // already queued, silently resolve. Covers rapid double-clicks (e.g. a
-    // planeswalker ability fired twice before the first transitions the
-    // engine into TargetSelection).
-    if (inFlightLocalAction && actionsEqual(inFlightLocalAction, action)) {
+    // Enqueue-time de-dup: if the exact same action from the same actor is
+    // already in flight or already queued, silently resolve. Covers rapid
+    // double-clicks (e.g. a planeswalker ability fired twice before the first
+    // transitions the engine into TargetSelection). The actor is part of the
+    // identity — two seats passing priority across an intervening priority
+    // round are distinct decisions and must both be delivered (issue #459).
+    if (
+      inFlightLocalAction &&
+      inFlightLocalAction.actor === actor &&
+      actionsEqual(inFlightLocalAction.action, action)
+    ) {
       return;
     }
     for (const pending of pendingQueue) {
-      if (pending.kind === "local" && actionsEqual(pending.action, action)) {
+      if (
+        pending.kind === "local" &&
+        pending.actor === actor &&
+        actionsEqual(pending.action, action)
+      ) {
         return;
       }
     }
@@ -403,7 +419,7 @@ export async function dispatchAction(
   }
 
   isAnimating = true;
-  inFlightLocalAction = action;
+  inFlightLocalAction = { action, actor };
   try {
     await processAction(action, actor);
   } catch (e) {

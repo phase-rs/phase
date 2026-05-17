@@ -528,6 +528,25 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                     if !suppress && starts_bare_and_clause(remainder_trimmed) {
                         push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
                         current.clear();
+                    } else if !suppress {
+                        // CR 508.1d / CR 509.1c: "<subj> gains <keyword> until end
+                        // of turn and <attack|must-be-blocked> ... if able" — the
+                        // trailing conjunct is a recognized standalone combat
+                        // requirement that is NOT verb-headed by any entry in
+                        // `starts_bare_and_clause`'s list, so the bare-and logic
+                        // above never splits it. Split it here and prepend
+                        // conjunct 1's subject so each half reaches its existing
+                        // parser with the correct `affected`. The combat-requirement
+                        // gate keeps multi-keyword lists ("gains flying and haste")
+                        // — which do NOT match the recognizer — on the untouched
+                        // single-clause path.
+                        if let Some(prepend) =
+                            combat_requirement_conjunct_prepend(before_and, remainder_trimmed)
+                        {
+                            push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
+                            current.clear();
+                            current.push_str(&prepend);
+                        }
                     }
                 }
             }
@@ -991,6 +1010,58 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         }
     }
     starts_with_damage_clause(s)
+}
+
+/// CR 508.1d / CR 509.1c: For a bare-`" and "` boundary, decide whether the
+/// conjunction is "<subj> gain(s) <keyword> until end of turn **and** <combat
+/// requirement> ... if able". Returns `Some(prepend)` — the subject text to
+/// seed conjunct 2 with — only when BOTH halves match:
+///
+/// - `before_and` is a gain-keyword clause (contains the gain verb), and
+/// - `remainder_trimmed` is a recognized standalone combat requirement
+///   ("attack(s) ... if able" / "must be blocked ...").
+///
+/// The prepend keeps conjunct 2's `affected` correct: for a *targeted* subject
+/// ("target creature ...") it returns the anaphor `"it "` so the chunk loop's
+/// unconditional-anaphor rewrite collapses conjunct 2's outer target to
+/// `ParentTarget` (one shared target, not a second slot). For a non-targeted
+/// set-scoped subject ("all Revelers ...") it returns the literal subject text
+/// so `inject_subject_target` threads the typed filter onto conjunct 2.
+fn combat_requirement_conjunct_prepend(
+    before_and: &str,
+    remainder_trimmed: &str,
+) -> Option<String> {
+    let remainder_lower = remainder_trimmed.to_ascii_lowercase();
+    if !super::imperative::is_standalone_combat_requirement(&remainder_lower) {
+        return None;
+    }
+    let before_lower = before_and.to_ascii_lowercase();
+    // Conjunct 1 must be a gain-keyword clause: locate the gain verb.
+    let subject_text = take_until::<_, _, OracleError<'_>>(" gain")
+        .parse(before_lower.as_str())
+        .ok()
+        .and_then(|(after, before_verb)| {
+            // Confirm a real " gain " / " gains " verb boundary.
+            alt((tag::<_, _, OracleError<'_>>(" gains "), tag(" gain ")))
+                .parse(after)
+                .ok()?;
+            // Map the verb position back onto the original-case slice.
+            let subject = before_and[..before_verb.len()].trim();
+            (!subject.is_empty()).then_some(subject)
+        })?;
+    // Targeted subject → anaphor; non-targeted set subject → literal subject.
+    let subject_lower = subject_text.to_ascii_lowercase();
+    let targeted = alt((
+        value((), tag::<_, _, OracleError<'_>>("another target ")),
+        value((), tag("target ")),
+    ))
+    .parse(subject_lower.as_str())
+    .is_ok();
+    if targeted {
+        Some("it ".to_string())
+    } else {
+        Some(format!("{subject_text} "))
+    }
 }
 
 /// CR 121.1 / CR 119.1: Returns true when the token immediately following a
@@ -1586,6 +1657,7 @@ pub(super) fn apply_clause_continuation(
             destination,
             enter_tapped: tapped,
             rest_destination: rest_dest,
+            optional_decline,
         } => {
             let Some(previous) = defs.last_mut() else {
                 return;
@@ -1594,11 +1666,31 @@ pub(super) fn apply_clause_continuation(
                 kept_destination,
                 enter_tapped,
                 rest_destination,
+                kept_optional_to,
                 ..
             } = &mut *previous.effect
             {
-                *kept_destination = destination;
-                *enter_tapped = tapped;
+                match optional_decline {
+                    // CR 701.20a + CR 608.2c: optional kept clause ("you may put
+                    // that card onto the battlefield"). `destination` is the
+                    // accept zone, `decline` the decline zone. `enter_tapped`
+                    // applies to the accept zone (always Battlefield).
+                    Some(decline) => {
+                        *kept_optional_to = Some(destination);
+                        *kept_destination = decline;
+                        *enter_tapped = tapped;
+                    }
+                    // Mandatory kept clause. Refine `kept_destination` without
+                    // clobbering a `kept_optional_to` set by a prior chunk (the
+                    // GAP-1 fix: Songbirds' Blessing's "If you don't, put it into
+                    // your hand" sentence refines the decline zone to Hand).
+                    None => {
+                        *kept_destination = destination;
+                        if destination == Zone::Battlefield {
+                            *enter_tapped = tapped;
+                        }
+                    }
+                }
                 if let Some(rest) = rest_dest {
                     *rest_destination = rest;
                 }
@@ -2372,10 +2464,25 @@ pub(super) fn parse_followup_continuation_ast(
                     (Zone::Hand, false)
                 };
             let rest = parse_reveal_until_rest_zone(&lower);
+            // CR 701.20a + CR 608.2c: "you may put that card onto the battlefield"
+            // makes the kept destination a controller choice. The decline zone is
+            // the explicit "if you don't, put it into your hand" (→ Hand) or the
+            // bottom-of-library rest pile by default (→ Library).
+            let optional = nom_primitives::scan_contains(&lower, "you may put");
+            let optional_decline = if optional {
+                Some(if nom_primitives::scan_contains(&lower, "into your hand") {
+                    Zone::Hand
+                } else {
+                    Zone::Library
+                })
+            } else {
+                None
+            };
             Some(ContinuationAst::RevealUntilKept {
                 destination,
                 enter_tapped,
                 rest_destination: rest,
+                optional_decline,
             })
         }
         // CR 701.20a: "put the rest" / "the rest on the bottom" / "put the revealed cards"

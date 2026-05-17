@@ -169,7 +169,15 @@ pub fn apply_debug_action(
             controller,
         } => {
             validate_player(state, controller)?;
-            validate_object_mut(state, object_id)?.controller = controller;
+            let obj = validate_object_mut(state, object_id)?;
+            // CR 110.2 + CR 613.1b: A permanent's controller is a Layer-2
+            // derived property. `evaluate_layers` Step 1 resets `obj.controller`
+            // to `base_controller` on every pass, so a debug controller change
+            // must write the base — the Layer-2 input — exactly as
+            // `SetBasePowerToughness` writes base P/T and
+            // `apply_battlefield_entry_controller_override` writes both fields.
+            obj.base_controller = Some(controller);
+            obj.controller = controller;
             state.layers_dirty = true;
         }
 
@@ -497,6 +505,76 @@ mod tests {
             obj.counters.get(&CounterType::Plus1Plus1).copied(),
             Some(2),
             "token should carry the 2 +1/+1 counters supplied at create-time",
+        );
+    }
+
+    /// Issue #464 — CR 110.2 + CR 613.1b: `DebugAction::SetController` must
+    /// change a permanent's effective controller AND survive re-evaluation of
+    /// the layer system. Controller is a Layer-2 derived property:
+    /// `evaluate_layers` resets `obj.controller` to `base_controller` on every
+    /// pass. Pre-fix the handler wrote only the derived field, so the next
+    /// layer pass reverted control to the owner. The discriminating assertion
+    /// is step (b): control must PERSIST across a second `evaluate_layers`.
+    #[test]
+    fn debug_set_controller_survives_layer_reevaluation() {
+        use crate::game::layers::evaluate_layers;
+        use crate::game::zones::create_object;
+        use crate::types::identifiers::CardId;
+
+        let mut state = sandbox_state();
+        let object_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        assert_eq!(state.objects[&object_id].controller, PlayerId(0));
+
+        // A→B: PlayerId(0) → PlayerId(1).
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::Debug(DebugAction::SetController {
+                object_id,
+                controller: PlayerId(1),
+            }),
+        )
+        .expect("debug SetController should succeed");
+        assert_eq!(
+            state.objects[&object_id].controller,
+            PlayerId(1),
+            "effective controller should be the new player immediately",
+        );
+
+        // Discriminating assertion: a second layer pass must NOT revert it.
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&object_id].controller,
+            PlayerId(1),
+            "control must persist across layer re-evaluation (issue #464)",
+        );
+        assert_eq!(
+            state.objects[&object_id].base_controller,
+            Some(PlayerId(1)),
+            "base_controller is the Layer-2 input that makes the change durable",
+        );
+
+        // B→C: transfer control back off the opponent — PlayerId(1) → PlayerId(0).
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::Debug(DebugAction::SetController {
+                object_id,
+                controller: PlayerId(0),
+            }),
+        )
+        .expect("second debug SetController should succeed");
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&object_id].controller,
+            PlayerId(0),
+            "control must transfer back and persist across re-evaluation",
         );
     }
 

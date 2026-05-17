@@ -1504,6 +1504,7 @@ fn apply_action(
                 player,
                 cost,
                 pending_cast,
+                ..
             },
             GameAction::DecideOptionalCost { pay },
         ) => engine_casting::handle_optional_cost_choice(
@@ -4042,6 +4043,16 @@ pub(super) fn handle_tap_land_for_mana(
             true,
             events,
         );
+        // CR 106.12 + CR 106.12a: a basic/subtype-only land's intrinsic mana
+        // ability always includes `{T}`. Emit one `TappedForMana` per
+        // resolution so `TapsForMana` triggers fire exactly once (mirrors the
+        // ability-resolution path in `produce_mana_from_ability`).
+        events.push(GameEvent::TappedForMana {
+            player_id: player,
+            source_id: object_id,
+            produced: vec![mana_option.mana_type],
+            tap_state: crate::types::events::ManaTapState::FromTap,
+        });
         state
             .lands_tapped_for_mana
             .entry(player)
@@ -4249,18 +4260,32 @@ fn handle_crew_activation(
         ));
     }
 
-    // Extract crew power from keywords
-    let crew_power = obj
+    // Extract crew power and activation cadence from keywords
+    let (crew_power, crew_cadence) = obj
         .keywords
         .iter()
         .find_map(|kw| {
-            if let crate::types::keywords::Keyword::Crew(n) = kw {
-                Some(*n)
+            if let crate::types::keywords::Keyword::Crew {
+                power,
+                once_per_turn,
+            } = kw
+            {
+                Some((*power, *once_per_turn))
             } else {
                 None
             }
         })
         .ok_or_else(|| EngineError::InvalidAction("Vehicle has no Crew keyword".to_string()))?;
+
+    // CR 602.5b: "Activate only once each turn" — reject a second crew activation
+    // of this Vehicle in the same turn.
+    if crew_cadence == crate::types::keywords::ActivationCadence::OncePerTurn
+        && state.crew_activated_this_turn.contains(&vehicle_id)
+    {
+        return Err(EngineError::ActionNotAllowed(
+            "This Vehicle's crew ability can be activated only once each turn".to_string(),
+        ));
+    }
 
     // Find eligible creatures: untapped creatures controlled by player, excluding the Vehicle
     // TODO: CR 702.122c — filter out creatures with "can't crew Vehicles" restriction when implemented
@@ -4407,6 +4432,10 @@ fn handle_crew_announcement(
             caused_by: None,
         });
     }
+
+    // CR 602.5b: Record this crew activation so an "Activate only once each turn"
+    // Vehicle cannot be crewed a second time this turn. Cleared at turn start.
+    state.crew_activated_this_turn.insert(vehicle_id);
 
     Ok(push_keyword_action(
         state,
@@ -14941,7 +14970,10 @@ mod crew_tests {
                 .core_types
                 .push(crate::types::card_type::CoreType::Artifact);
             obj.card_types.subtypes.push("Vehicle".to_string());
-            obj.keywords.push(crate::types::keywords::Keyword::Crew(3));
+            obj.keywords.push(crate::types::keywords::Keyword::Crew {
+                power: 3,
+                once_per_turn: crate::types::keywords::ActivationCadence::Unlimited,
+            });
             obj.base_power = Some(6);
             obj.base_toughness = Some(5);
             obj.power = Some(6);
@@ -15173,7 +15205,10 @@ mod crew_tests {
             obj.card_types
                 .core_types
                 .push(crate::types::card_type::CoreType::Artifact);
-            obj.keywords.push(crate::types::keywords::Keyword::Crew(1));
+            obj.keywords.push(crate::types::keywords::Keyword::Crew {
+                power: 1,
+                once_per_turn: crate::types::keywords::ActivationCadence::Unlimited,
+            });
         }
 
         let result = apply_as_current(
@@ -15615,8 +15650,10 @@ mod keyword_action_stack_tests {
         let obj = state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(CoreType::Artifact);
         obj.card_types.subtypes.push("Vehicle".to_string());
-        obj.keywords
-            .push(crate::types::keywords::Keyword::Crew(crew_n));
+        obj.keywords.push(crate::types::keywords::Keyword::Crew {
+            power: crew_n,
+            once_per_turn: crate::types::keywords::ActivationCadence::Unlimited,
+        });
         obj.base_power = Some(6);
         obj.base_toughness = Some(5);
         obj.power = Some(6);
@@ -15761,6 +15798,107 @@ mod keyword_action_stack_tests {
         assert!(
             state.objects.get(&creature_a).unwrap().tapped,
             "CR 118.7: cost persists after counter"
+        );
+    }
+
+    fn make_vehicle_once_per_turn(state: &mut GameState, crew_n: u32) -> ObjectId {
+        let id = make_vehicle(state, crew_n);
+        let obj = state.objects.get_mut(&id).unwrap();
+        // CR 602.5b: "Activate only once each turn" crew restriction.
+        obj.keywords.clear();
+        obj.card_types.subtypes = vec!["Vehicle".to_string()];
+        obj.keywords.push(crate::types::keywords::Keyword::Crew {
+            power: crew_n,
+            once_per_turn: crate::types::keywords::ActivationCadence::OncePerTurn,
+        });
+        id
+    }
+
+    #[test]
+    fn crew_once_per_turn_vehicle_rejects_second_activation_same_turn() {
+        // CR 602.5b: Luxurious Locomotive — "Crew 1. Activate only once each
+        // turn." A second CrewVehicle activation in the same turn is rejected.
+        let mut state = setup_main_phase();
+        let vehicle_id = make_vehicle_once_per_turn(&mut state, 1);
+        let creature_a = make_creature(&mut state, "Bear", 3);
+        let creature_b = make_creature(&mut state, "Elk", 3);
+
+        // First crew: full announcement, vehicle recorded as crewed this turn.
+        apply_as_current(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id,
+                creature_ids: vec![],
+            },
+        )
+        .unwrap();
+        apply_as_current(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id,
+                creature_ids: vec![creature_a],
+            },
+        )
+        .unwrap();
+        assert!(
+            state.crew_activated_this_turn.contains(&vehicle_id),
+            "first crew records the vehicle as crewed this turn"
+        );
+
+        // Second crew activation this turn — must be rejected. `creature_b` is
+        // a fresh untapped creature, so power is not the blocker.
+        let second = apply_as_current(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id,
+                creature_ids: vec![],
+            },
+        );
+        assert!(
+            matches!(second, Err(EngineError::ActionNotAllowed(_))),
+            "second crew of an 'Activate only once each turn' Vehicle must be \
+             rejected; got {second:?}"
+        );
+        let _ = creature_b;
+    }
+
+    #[test]
+    fn crew_unlimited_vehicle_allows_second_activation_same_turn() {
+        // A normal (non-once-per-turn) Vehicle may be crewed repeatedly.
+        let mut state = setup_main_phase();
+        let vehicle_id = make_vehicle(&mut state, 1);
+        let creature_a = make_creature(&mut state, "Bear", 3);
+        let _creature_b = make_creature(&mut state, "Elk", 3);
+
+        apply_as_current(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id,
+                creature_ids: vec![],
+            },
+        )
+        .unwrap();
+        apply_as_current(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id,
+                creature_ids: vec![creature_a],
+            },
+        )
+        .unwrap();
+
+        // Second crew activation — an Unlimited Vehicle accepts it (the
+        // once-per-turn restriction does not apply).
+        let second = apply_as_current(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id,
+                creature_ids: vec![],
+            },
+        );
+        assert!(
+            second.is_ok(),
+            "an unrestricted Vehicle may be crewed again the same turn; got {second:?}"
         );
     }
 

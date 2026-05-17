@@ -287,6 +287,13 @@ pub(crate) enum ContinuationAst {
         destination: Zone,
         enter_tapped: bool,
         rest_destination: Option<Zone>,
+        /// CR 701.20a + CR 608.2c: `Some(decline_zone)` when the kept clause is
+        /// optional ("you may put that card onto the battlefield"). `destination`
+        /// is then the accept zone and `decline_zone` is where the kept card
+        /// goes if the controller declines (the explicit "if you don't, put it
+        /// into your hand" zone, or the bottom-of-library rest pile by default).
+        /// `None` → mandatory kept destination (absorbs into `kept_destination`).
+        optional_decline: Option<Zone>,
     },
     /// CR 701.20a: "puts those cards into [zone]" after RevealUntil — the entire
     /// revealed pile (the matching card AND everything revealed before it) goes

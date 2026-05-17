@@ -411,6 +411,11 @@ fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
             StaticCondition::IsMonarch,
             alt((tag("you're the monarch"), tag("you are the monarch"))),
         ),
+        // CR 725.1: "there is no monarch" — no player holds the designation.
+        value(
+            StaticCondition::NoMonarch,
+            alt((tag("there is no monarch"), tag("there's no monarch"))),
+        ),
         // CR 702.131a: Ascend / City's Blessing
         value(
             StaticCondition::HasCityBlessing,
@@ -6122,6 +6127,20 @@ mod tests {
         let (rest, c) = parse_inner_condition("you are the monarch").unwrap();
         assert_eq!(rest, "");
         assert_eq!(c, StaticCondition::IsMonarch);
+    }
+
+    #[test]
+    fn test_there_is_no_monarch() {
+        let (rest, c) = parse_inner_condition("there is no monarch").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(c, StaticCondition::NoMonarch);
+    }
+
+    #[test]
+    fn test_theres_no_monarch() {
+        let (rest, c) = parse_inner_condition("there's no monarch").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(c, StaticCondition::NoMonarch);
     }
 
     #[test]

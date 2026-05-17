@@ -546,17 +546,23 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
         }
         "its power" => {
             return Some(QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourcePower,
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject,
+                },
             })
         }
         "its toughness" => {
             return Some(QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourceToughness,
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::CostPaidObject,
+                },
             })
         }
         "its mana value" | "its converted mana cost" => {
             return Some(QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourceManaValue,
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject,
+                },
             })
         }
         _ => {}
@@ -574,12 +580,36 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
     // CR 603.7c: Decompose possessive noun phrases: "{referent}'s {property}"
     if let Some((prefix, suffix)) = lower.split_once("'s ") {
         let suffix = suffix.trim();
-        let qty = match suffix {
-            "power" => Some(QuantityRef::EventContextSourcePower),
-            "toughness" => Some(QuantityRef::EventContextSourceToughness),
-            "mana value" | "converted mana cost" => Some(QuantityRef::EventContextSourceManaValue),
-            _ => None,
-        };
+        // CR 608.2k: the trailing property word maps to the cost-paid /
+        // trigger-referenced object's characteristic. Nom `alt` over the
+        // property keywords (longest-match first for "mana value" variants).
+        let qty = alt((
+            value(
+                QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject,
+                },
+                alt((
+                    tag::<_, _, OracleError<'_>>("mana value"),
+                    tag("converted mana cost"),
+                )),
+            ),
+            value(
+                QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject,
+                },
+                tag("power"),
+            ),
+            value(
+                QuantityRef::Toughness {
+                    scope: ObjectScope::CostPaidObject,
+                },
+                tag("toughness"),
+            ),
+        ))
+        .parse(suffix)
+        .ok()
+        .filter(|(rest, _): &(&str, QuantityRef)| rest.is_empty())
+        .map(|(_, qty)| qty);
         if let Some(qty) = qty {
             let prefix = prefix.trim();
             if is_event_context_referent(prefix) {
@@ -1935,7 +1965,9 @@ mod tests {
         assert_eq!(
             parse_event_context_quantity("its power"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourcePower
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject
+                }
             })
         );
     }
@@ -1945,7 +1977,9 @@ mod tests {
         assert_eq!(
             parse_event_context_quantity("its toughness"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourceToughness
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::CostPaidObject
+                }
             })
         );
     }
@@ -1955,7 +1989,9 @@ mod tests {
         assert_eq!(
             parse_event_context_quantity("its mana value"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourceManaValue
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject
+                }
             })
         );
     }
@@ -1965,7 +2001,9 @@ mod tests {
         assert_eq!(
             parse_event_context_quantity("that spell's mana value"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourceManaValue
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject
+                }
             })
         );
     }
@@ -2036,7 +2074,9 @@ mod tests {
         assert_eq!(
             parse_event_context_quantity("that creature's toughness"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourceToughness
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::CostPaidObject
+                }
             })
         );
     }
@@ -2070,7 +2110,9 @@ mod tests {
         assert_eq!(
             parse_event_context_quantity("the destroyed creature's power"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourcePower
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject
+                }
             })
         );
     }

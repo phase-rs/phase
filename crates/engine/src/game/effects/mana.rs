@@ -77,11 +77,14 @@ pub fn resolve(
     let concrete_restrictions = resolve_restrictions(restrictions, state, ability.source_id);
 
     let recipient = match produced {
+        // CR 106.3 + CR 109.5: "add one mana of any type that land produced" —
+        // the bonus mana goes to the player who tapped the land (the
+        // `TappedForMana` event's `player_id`), not the trigger's controller.
         ManaProduction::TriggerEventManaType => state
             .current_trigger_event
             .as_ref()
             .and_then(|event| match event {
-                GameEvent::ManaAdded { player_id, .. } => Some(*player_id),
+                GameEvent::TappedForMana { player_id, .. } => Some(*player_id),
                 _ => None,
             })
             .unwrap_or(ability.controller),
@@ -468,31 +471,34 @@ fn resolve_mana_types_impl(
                 .map(|c| mana_color_to_type(&c))
                 .collect()
         }
-        // CR 603.7c + CR 106.3 + CR 106.5: Vorinclex / Dictate of Karametra —
-        // "add one mana of any type that land produced." The mana type is read
-        // from the triggering `ManaAdded` event carried in
-        // `state.current_trigger_event` at resolution time. If the current
-        // event is absent (off-stack resolution) or not a `ManaAdded` event,
-        // this produces no mana (CR 106.5 — undefined mana type).
+        // CR 603.7c + CR 106.3 + CR 106.5 + CR 106.12a: Vorinclex / Dictate of
+        // Karametra — "add one mana of any type that land produced." The set of
+        // produced types is read from the triggering `TappedForMana` event
+        // carried in `state.current_trigger_event` at resolution time. The
+        // `TapsForMana` trigger fires once per mana-ability resolution
+        // (CR 106.12a), so this branch sees the full produced set, not a single
+        // unit. If the current event is absent (off-stack resolution) or not a
+        // `TappedForMana` event, this produces no mana (CR 106.5 — undefined
+        // mana type).
         //
-        // Per-event single-type model: a `ManaAdded` event carries exactly one
-        // `ManaType`, so this branch produces exactly one mana matching that
-        // type. The engine fires one trigger per `ManaAdded` event, so a land
-        // tapping for {C}{C} produces two triggers and two singletons here —
-        // not one trigger producing `vec![Colorless, Colorless]`. This matches
-        // Vorinclex / Mana Reflex / Dictate of Karametra's "any type that land
-        // produced" semantics where there is no choice to make.
+        // For every land the engine models, a single resolution produces mana
+        // of one uniform color (basics → one type; Nykthos → all green), so
+        // emitting one unit per *distinct* color yields exactly one mana — the
+        // CR-correct "any type that land produced" with no choice to make.
         //
         // If a future card requires the player to *choose* among multiple
         // produced types in a single resolution ("any one type that land
-        // produced"), the resolver must be extended to emit a player choice
-        // rather than reading the singular event type. Add a separate
-        // `ManaProduction::TriggerEventManaTypeChoice` variant before reusing
-        // this branch — silently expanding the vec here would skip the choice.
+        // produced"), the resolver must be extended to emit a player choice.
+        // Add a separate `ManaProduction::TriggerEventManaTypeChoice` variant
+        // before reusing this branch — silently expanding the vec here would
+        // skip the choice.
         ManaProduction::TriggerEventManaType => {
             use crate::types::events::GameEvent;
             match &state.current_trigger_event {
-                Some(GameEvent::ManaAdded { mana_type, .. }) => vec![*mana_type],
+                Some(GameEvent::TappedForMana { produced, .. }) => {
+                    let distinct: std::collections::HashSet<_> = produced.iter().copied().collect();
+                    distinct.into_iter().collect()
+                }
                 _ => Vec::new(),
             }
         }

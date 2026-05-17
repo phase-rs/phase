@@ -263,7 +263,7 @@ fn collect_matching_triggers(
             if matches!(trig_def.mode, TriggerMode::TapsForMana)
                 && matches!(
                     event,
-                    GameEvent::ManaAdded {
+                    GameEvent::TappedForMana {
                         tap_state: ManaTapState::FromTapTriggersResolved,
                         ..
                     }
@@ -464,7 +464,7 @@ fn event_is_suppressed_by_static_triggers(state: &GameState, event: &GameEvent) 
 /// mid-payment, where a modal/targeted trigger could corrupt the in-flight cast.
 ///
 /// `events[events_before..]` is the batch produced by auto-tap. Every freshly
-/// produced `FromTap` `ManaAdded` event in that range is flipped to
+/// produced `FromTap` `TappedForMana` event in that range is flipped to
 /// `FromTapTriggersResolved`; the post-action scan's double-resolution guard
 /// keys off that marker to skip the triggered mana abilities resolved here.
 pub(super) fn resolve_tap_mana_triggers_inline(
@@ -480,7 +480,7 @@ pub(super) fn resolve_tap_mana_triggers_inline(
     for idx in events_before..scan_end {
         let tap_event = match events.get(idx) {
             Some(
-                ev @ GameEvent::ManaAdded {
+                ev @ GameEvent::TappedForMana {
                     tap_state: ManaTapState::FromTap,
                     ..
                 },
@@ -530,7 +530,7 @@ pub(super) fn resolve_tap_mana_triggers_inline(
     // triggers on `FromTapTriggersResolved` events; non-mana `TapsForMana`
     // triggers still match and fire there (CR 603.3).
     for ev in &mut events[events_before..scan_end] {
-        if let GameEvent::ManaAdded { tap_state, .. } = ev {
+        if let GameEvent::TappedForMana { tap_state, .. } = ev {
             if matches!(tap_state, ManaTapState::FromTap) {
                 *tap_state = ManaTapState::FromTapTriggersResolved;
             }
@@ -2711,6 +2711,8 @@ pub(crate) fn check_trigger_condition(
         }
         // CR 725.1: True when the controller is the monarch.
         TriggerCondition::IsMonarch => state.monarch == Some(controller),
+        // CR 725.1: True when no player holds the monarch designation.
+        TriggerCondition::NoMonarch => state.monarch.is_none(),
         // CR 702.131a: True when the controller has the city's blessing.
         TriggerCondition::HasCityBlessing => state.city_blessing.contains(&controller),
         // CR 110.5b: True when the trigger source is tapped. Negation ("untapped")
@@ -3100,10 +3102,10 @@ pub mod tests {
         AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
         AggregateFunction, ChosenAttribute, ChosenSubtypeKind, Comparator, ContinuousModification,
         ControllerRef, DelayedTriggerCondition, Duration, Effect, FilterProp, GainLifePlayer,
-        KickerVariant, MultiTargetSpec, PaymentCost, PlayerScope, QuantityExpr, QuantityRef,
-        ResolvedAbility, SharedQuality, SharedQualityRelation, StaticCondition, StaticDefinition,
-        TargetFilter, TargetRef, TriggerCondition, TriggerConstraint, TriggerDefinition,
-        TypeFilter, TypedFilter,
+        KickerVariant, MultiTargetSpec, PaymentCost, PlayerFilter, PlayerScope, QuantityExpr,
+        QuantityRef, ResolvedAbility, SharedQuality, SharedQualityRelation, StaticCondition,
+        StaticDefinition, TargetFilter, TargetRef, TriggerCondition, TriggerConstraint,
+        TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -4300,8 +4302,9 @@ pub mod tests {
     /// The ETB trigger (CR 603.6a) fires for the entering creature; the trigger
     /// body's X is defined by the ability text (CR 107.3) as the entering
     /// creature's power, which the parser lowers to
-    /// `QuantityRef::EventContextSourcePower`. At resolution the event's source
-    /// is the entering creature, so that variant must read THAT creature's
+    /// `QuantityRef::Power { scope: ObjectScope::CostPaidObject }`. At
+    /// resolution the event's source is the entering creature; the resolver's
+    /// slot-2 (trigger-event source) fallback must read THAT creature's
     /// power, not default to 0. Covers the class of ETB triggers that scale
     /// a self-counter by the entering object's power/toughness (~20 cards:
     /// Hamletback Goliath, Kresh the Bloodbraided, Nantuko Mentor, ...).
@@ -4331,7 +4334,9 @@ pub mod tests {
                         Effect::PutCounter {
                             counter_type: crate::types::counter::CounterType::Plus1Plus1,
                             count: QuantityExpr::Ref {
-                                qty: QuantityRef::EventContextSourcePower,
+                                qty: QuantityRef::Power {
+                                    scope: crate::types::ability::ObjectScope::CostPaidObject,
+                                },
                             },
                             target: TargetFilter::SelfRef,
                         },
@@ -4382,7 +4387,8 @@ pub mod tests {
             .unwrap_or(0);
         assert_eq!(
             p1p1, 4,
-            "EventContextSourcePower must resolve to the entering creature's power (4), \
+            "Power {{ CostPaidObject }} must resolve via the trigger-event-source \
+             fallback to the entering creature's power (4), \
              yielding 4 +1/+1 counters on the source (got {p1p1})"
         );
     }
@@ -6902,6 +6908,44 @@ pub mod tests {
     }
 
     #[test]
+    fn test_no_monarch_trigger_condition() {
+        // CR 725.1: NoMonarch is true only when no player holds the monarch.
+        let mut state = setup();
+        let source = ObjectId(10);
+        let condition = TriggerCondition::NoMonarch;
+
+        // No monarch → condition true.
+        state.monarch = None;
+        assert!(check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            None,
+        ));
+
+        // Controller is monarch → false (distinct from Not(IsMonarch)).
+        state.monarch = Some(PlayerId(0));
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            None,
+        ));
+
+        // An opponent is monarch → still false: a monarch exists.
+        state.monarch = Some(PlayerId(1));
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            None,
+        ));
+    }
+
+    #[test]
     fn test_damage_dealt_this_turn_cleared_on_turn() {
         use crate::types::game_state::DamageRecord;
 
@@ -8188,11 +8232,11 @@ pub mod tests {
             );
         }
 
-        // Simulate tapping the Forest for mana: ManaAdded with tapped_for_mana=true.
-        let events = vec![GameEvent::ManaAdded {
+        // Simulate tapping the Forest for mana: TappedForMana (CR 106.12a).
+        let events = vec![GameEvent::TappedForMana {
             player_id: PlayerId(0),
-            mana_type: crate::types::mana::ManaType::Green,
             source_id: forest,
+            produced: vec![crate::types::mana::ManaType::Green],
             tap_state: ManaTapState::FromTap,
         }];
 
@@ -8300,10 +8344,10 @@ pub mod tests {
         }
 
         // P0 taps their Forest for mana.
-        let events = vec![GameEvent::ManaAdded {
+        let events = vec![GameEvent::TappedForMana {
             player_id: PlayerId(0),
-            mana_type: crate::types::mana::ManaType::Green,
             source_id: forest,
+            produced: vec![crate::types::mana::ManaType::Green],
             tap_state: ManaTapState::FromTap,
         }];
 
@@ -8394,11 +8438,11 @@ pub mod tests {
             );
         }
 
-        // Tap the Forest for mana — emits ManaAdded{Green, tapped_for_mana=true}.
-        let events = vec![GameEvent::ManaAdded {
+        // Tap the Forest for mana — emits TappedForMana (CR 106.12a).
+        let events = vec![GameEvent::TappedForMana {
             player_id: PlayerId(0),
-            mana_type: crate::types::mana::ManaType::Green,
             source_id: forest,
+            produced: vec![crate::types::mana::ManaType::Green],
             tap_state: ManaTapState::FromTap,
         }];
 
@@ -10770,6 +10814,172 @@ pub mod tests {
             }
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Issue #461: Sowing Mycospawn's kicked cast-trigger ("When you cast this
+    // spell, if it was kicked, exile target land.") must actually exile the
+    // chosen land. The intervening-'if' AdditionalCostPaid condition (CR 603.4)
+    // is rechecked at resolution; it reads `kickers_paid` off the
+    // spell-on-stack object, which `finalize_cast_to_stack` must stamp.
+    // -----------------------------------------------------------------------
+
+    /// Sowing Mycospawn's full Oracle text (kicker + two SpellCast triggers).
+    const SOWING_MYCOSPAWN_ORACLE: &str = "Devoid (This card has no color.)\n\
+        Kicker {1}{C} (You may pay an additional {1}{C} as you cast this spell.)\n\
+        When you cast this spell, search your library for a land card, put it \
+        onto the battlefield, then shuffle.\n\
+        When you cast this spell, if it was kicked, exile target land.";
+
+    /// Build a scenario with Sowing Mycospawn in P0's hand and a single land
+    /// (P1's) on the battlefield as the exile target. Returns the runner, the
+    /// spell's `ObjectId`/`CardId`, and the target land's `ObjectId`.
+    fn sowing_mycospawn_scenario() -> (
+        crate::game::scenario::GameRunner,
+        ObjectId,
+        CardId,
+        ObjectId,
+    ) {
+        use crate::game::scenario::GameScenario;
+        use crate::types::mana::ManaCostShard;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+
+        // {4}{C} mana cost.
+        let spell_builder = scenario.add_creature_to_hand_from_oracle(
+            PlayerId(0),
+            "Sowing Mycospawn",
+            3,
+            3,
+            SOWING_MYCOSPAWN_ORACLE,
+        );
+        let spell_id = spell_builder.id();
+        let spell_card_id = scenario.state.objects[&spell_id].card_id;
+        scenario.state.objects.get_mut(&spell_id).unwrap().mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Colorless],
+            generic: 4,
+        };
+
+        // The land to be exiled — opponent-controlled so it is unambiguous.
+        // P0's library has no land cards, so the first cast-trigger's
+        // SearchLibrary fizzles without prompting.
+        let target_land = scenario.add_basic_land(PlayerId(1), ManaColor::Red);
+
+        let runner = scenario.build();
+        (runner, spell_id, spell_card_id, target_land)
+    }
+
+    /// Add enough colorless mana to pay {4}{C} plus the {1}{C} kicker.
+    fn fund_sowing_mycospawn(runner: &mut crate::game::scenario::GameRunner, kicked: bool) {
+        let count = if kicked { 7 } else { 5 };
+        let p0 = runner
+            .state_mut()
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(0))
+            .unwrap();
+        for _ in 0..count {
+            p0.mana_pool.add(ManaUnit {
+                color: ManaType::Colorless,
+                source_id: ObjectId(0),
+                snow: false,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: Vec::new(),
+                grants: vec![],
+                expiry: None,
+            });
+        }
+    }
+
+    /// Drive every casting/targeting prompt to completion, paying the kicker
+    /// per `kicked` and routing any target prompt to `target_land`. Returns
+    /// once the stack is empty and P0 holds priority.
+    fn drive_sowing_mycospawn(
+        runner: &mut crate::game::scenario::GameRunner,
+        kicked: bool,
+        target_land: ObjectId,
+    ) {
+        for _ in 0..60 {
+            match runner.state().waiting_for.clone() {
+                WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+                WaitingFor::OptionalCostChoice { .. } => {
+                    runner
+                        .act(GameAction::DecideOptionalCost { pay: kicked })
+                        .expect("kicker decision must be accepted");
+                }
+                WaitingFor::TriggerTargetSelection { .. }
+                | WaitingFor::TargetSelection { .. }
+                | WaitingFor::MultiTargetSelection { .. } => {
+                    runner
+                        .act(GameAction::ChooseTarget {
+                            target: Some(TargetRef::Object(target_land)),
+                        })
+                        .or_else(|_| {
+                            runner.act(GameAction::SelectTargets {
+                                targets: vec![TargetRef::Object(target_land)],
+                            })
+                        })
+                        .expect("target selection must be accepted");
+                }
+                _ => {
+                    if runner.act(GameAction::PassPriority).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /// CR 603.4 + CR 702.33d: Casting Sowing Mycospawn KICKED must, on the
+    /// second cast-trigger's resolution, exile the chosen target land. This
+    /// drives the real cast pipeline (`apply`) — it is a pipeline test, not a
+    /// shape test. Regression guard for issue #461.
+    #[test]
+    fn sowing_mycospawn_kicked_cast_trigger_exiles_target_land() {
+        let (mut runner, spell_id, spell_card_id, target_land) = sowing_mycospawn_scenario();
+        fund_sowing_mycospawn(&mut runner, true);
+
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell_id,
+                card_id: spell_card_id,
+                targets: vec![],
+            })
+            .expect("casting Sowing Mycospawn must be accepted");
+
+        drive_sowing_mycospawn(&mut runner, true, target_land);
+
+        assert_eq!(
+            runner.state().objects[&target_land].zone,
+            Zone::Exile,
+            "kicked Sowing Mycospawn's second cast-trigger must exile the target land"
+        );
+    }
+
+    /// CR 603.4: Casting Sowing Mycospawn UNKICKED — the second cast-trigger's
+    /// intervening-'if' AdditionalCostPaid condition is false, so the land is
+    /// never exiled. Negative control for issue #461.
+    #[test]
+    fn sowing_mycospawn_unkicked_cast_trigger_does_not_exile_land() {
+        let (mut runner, spell_id, spell_card_id, target_land) = sowing_mycospawn_scenario();
+        fund_sowing_mycospawn(&mut runner, false);
+
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell_id,
+                card_id: spell_card_id,
+                targets: vec![],
+            })
+            .expect("casting Sowing Mycospawn must be accepted");
+
+        drive_sowing_mycospawn(&mut runner, false, target_land);
+
+        assert_ne!(
+            runner.state().objects[&target_land].zone,
+            Zone::Exile,
+            "unkicked Sowing Mycospawn must not exile the land (intervening-'if' false)"
+        );
+    }
     // -----------------------------------------------------------------------
     // Issue #423: dies-triggers (Undying, Blood Artist-class) must not be lost
     // when a creature is sacrificed inside a resolution-choice handler.
@@ -10958,6 +11168,170 @@ pub mod tests {
             .map(|(_, n)| *n)
             .sum();
         assert_eq!(p1p1, 1, "Undying returns with exactly one +1/+1 counter");
+    }
+
+    /// CR 603.2c + CR 608.2e + issue #456: Syphon Mind ("Each other player
+    /// discards a card. You draw a card for each card discarded this way.")
+    /// resolving in a 4-player game while the controller has Waste Not on the
+    /// battlefield. Each of the three opponents discards one noncreature,
+    /// nonland card via an interactive `DiscardChoice`.
+    ///
+    /// Pre-fix this drew 1 (Waste Not fired once, Syphon Mind's TrackedSetSize
+    /// read 0). Post-fix the controller must draw exactly 6: 3 from Syphon
+    /// Mind's `Draw { Ref(TrackedSetSize) }` tail (all three discards
+    /// accumulate into one chain tracked set across the continuation pauses)
+    /// plus 3 from Waste Not's `Discarded` trigger firing once per opponent.
+    #[test]
+    fn syphon_mind_with_waste_not_four_player_draws_six() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::commander(), 4, 99);
+        state.phase = Phase::PreCombatMain;
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        // P0 controls a Waste Not stand-in: a battlefield permanent carrying
+        // the noncreature-nonland `Discarded` trigger ("Whenever an opponent
+        // discards a noncreature, nonland card, draw a card.") — the parsed
+        // AST is `valid_card: Typed{[Card], controller: Opponent}`,
+        // `execute: Draw{1}`.
+        let waste_not = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Waste Not".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let trigger = TriggerDefinition::new(TriggerMode::Discarded)
+                .valid_card(TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Card).controller(ControllerRef::Opponent),
+                ))
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                ))
+                .description(
+                    "Whenever an opponent discards a noncreature, nonland card, draw a card."
+                        .to_string(),
+                );
+            let obj = state.objects.get_mut(&waste_not).unwrap();
+            obj.trigger_definitions.push(trigger.clone());
+            std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger);
+        }
+
+        // Each of the three opponents holds two noncreature, nonland cards so
+        // every discard routes through an interactive `DiscardChoice`.
+        for opp in 1..4u8 {
+            for c in 0..2u64 {
+                create_object(
+                    &mut state,
+                    CardId(u64::from(opp) * 100 + c),
+                    PlayerId(opp),
+                    format!("P{opp} Spell {c}"),
+                    Zone::Hand,
+                );
+            }
+        }
+        // P0's library must hold at least 6 cards for the draws to land.
+        for i in 0..10u64 {
+            create_object(
+                &mut state,
+                CardId(900 + i),
+                PlayerId(0),
+                format!("P0 Lib {i}"),
+                Zone::Library,
+            );
+        }
+
+        // Syphon Mind on the stack — exactly the parsed AST: a `player_scope:
+        // Opponent` `Discard{1}` with a `Draw { Ref(TrackedSetSize) }` tail.
+        let syphon_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Syphon Mind".to_string(),
+            Zone::Stack,
+        );
+        state.objects.get_mut(&syphon_id).unwrap().zone = Zone::Stack;
+        let mut syphon = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            syphon_id,
+            PlayerId(0),
+        );
+        syphon.player_scope = Some(PlayerFilter::Opponent);
+        syphon.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize,
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            syphon_id,
+            PlayerId(0),
+        )));
+        state.stack.push_back(StackEntry {
+            id: syphon_id,
+            source_id: syphon_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(2),
+                ability: Some(syphon),
+                casting_variant: crate::types::game_state::CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let p0_hand_before = state.players[0].hand.len();
+
+        // Resolve Syphon Mind off the stack — pauses on opponent 1's discard.
+        resolve_stack_until_paused(&mut state);
+
+        // Drive each opponent's interactive `DiscardChoice` through the real
+        // `apply` pipeline (so the final settle runs `run_post_action_pipeline`).
+        let mut discards = 0;
+        for _ in 0..60 {
+            match &state.waiting_for {
+                WaitingFor::DiscardChoice { cards, .. } => {
+                    let pick = vec![cards[0]];
+                    crate::game::engine::apply_as_current(
+                        &mut state,
+                        GameAction::SelectCards { cards: pick },
+                    )
+                    .expect("opponent discards a card");
+                    discards += 1;
+                }
+                WaitingFor::Priority { .. } if state.stack.is_empty() => break,
+                WaitingFor::Priority { .. } => {
+                    crate::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
+                        .expect("pass priority to resolve Waste Not triggers");
+                }
+                other => panic!("unexpected waiting_for during discard: {other:?}"),
+            }
+        }
+
+        assert_eq!(discards, 3, "all three opponents discard exactly once");
+
+        // CR 603.2c: Waste Not triggered once per opponent discard → 3 draws.
+        // CR 608.2e: Syphon Mind's TrackedSetSize == 3 → 3 more draws.
+        let drawn = state.players[0].hand.len() - p0_hand_before;
+        assert_eq!(
+            drawn, 6,
+            "controller must draw exactly 6 (3 Syphon Mind for-each + 3 Waste Not), got {drawn}"
+        );
     }
 
     /// CR 702.93a + issue #423 (4b): the negative path — an Undying creature
@@ -12020,6 +12394,95 @@ mod dedup_regression_tests {
         assert!(
             check_trigger_condition(&state, &condition, controller, None, None),
             "opponent-discard must satisfy 'an opponent discarded a card this turn'"
+        );
+    }
+
+    /// Issue #451 — RUNTIME PIPELINE TEST. CR 603.4 + CR 701.21: A who-controls
+    /// sacrifice trigger ("Whenever an opponent who controls an artifact
+    /// sacrifices a permanent, ...") must parse the relative clause into an
+    /// `ObjectCount >= 1` intervening-if and gate the trigger correctly at
+    /// runtime.
+    ///
+    /// This drives the real pipeline: the parser produces the `TriggerMode`
+    /// and `TriggerDefinition.condition`, then `check_trigger_condition` (the
+    /// exact evaluator `apply` uses for intervening-ifs) is run against a real
+    /// `GameState`. The triggering player (the sacrificer) is bound from a
+    /// `PermanentSacrificed` event. NOT a shape test — the condition under test
+    /// is the parser's actual output, evaluated by the runtime evaluator.
+    #[test]
+    fn issue_451_who_controls_sacrifice_trigger_gates_at_runtime() {
+        let mut ctx = crate::parser::oracle_ir::context::ParseContext::default();
+        let (mode, def) = crate::parser::oracle_trigger::parse_trigger_condition(
+            "Whenever an opponent who controls an artifact sacrifices a permanent",
+            &mut ctx,
+        );
+        assert_eq!(
+            mode,
+            TriggerMode::Sacrificed,
+            "who-controls sacrifice line must parse to Sacrificed (not Unknown)",
+        );
+        let condition = def
+            .condition
+            .expect("the who-controls clause must be lifted into def.condition");
+
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0); // the trigger source's controller
+        let sacrificer = PlayerId(1); // the opponent who sacrifices
+
+        // Sacrifice event — the triggering player is the sacrificer (P1).
+        let sac_event = GameEvent::PermanentSacrificed {
+            object_id: ObjectId(777),
+            player_id: sacrificer,
+        };
+
+        // No one controls an artifact → the who-controls intervening-if fails.
+        assert!(
+            !check_trigger_condition(&state, &condition, controller, None, Some(&sac_event)),
+            "with no artifact in play the who-controls clause must fail the trigger",
+        );
+
+        // The CONTROLLER (P0) controls an artifact, but the triggering player
+        // is P1 → the clause (scoped to TriggeringPlayer) still fails.
+        let p0_artifact = create_object(
+            &mut state,
+            CardId(300),
+            controller,
+            "Some Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&p0_artifact)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        assert!(
+            !check_trigger_condition(&state, &condition, controller, None, Some(&sac_event)),
+            "an artifact controlled by the trigger's controller (not the \
+             sacrificer) must NOT satisfy 'who controls an artifact'",
+        );
+
+        // The SACRIFICER (P1, the triggering player) controls an artifact →
+        // the who-controls clause is satisfied and the trigger fires.
+        let p1_artifact = create_object(
+            &mut state,
+            CardId(301),
+            sacrificer,
+            "Some Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&p1_artifact)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        assert!(
+            check_trigger_condition(&state, &condition, controller, None, Some(&sac_event)),
+            "an artifact controlled by the sacrificing (triggering) player \
+             must satisfy 'who controls an artifact' and fire the trigger",
         );
     }
 

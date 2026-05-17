@@ -16,7 +16,7 @@ use super::{EffectError, ResolvedAbility};
 /// CR 107.1c + CR 107.14: Detect a "pay any amount of X" shape — the parser
 /// emits `QuantityExpr::Ref { QuantityRef::Variable { name: "X" } }` for
 /// these prompts (Galvanic Discharge, etc.). A fixed or dynamic reference
-/// (e.g., `Fixed { 2 }` or `EventContextSourcePower`) is paid unconditionally.
+/// (e.g., `Fixed { 2 }` or `Power { CostPaidObject }`) is paid unconditionally.
 fn is_pay_any_amount(amount: &QuantityExpr) -> bool {
     matches!(
         amount,
@@ -83,7 +83,8 @@ pub fn resolve(
             // IS a life-loss event, so the replacement pipeline fires and a
             // CantLoseLife lock blocks the payment (cost unpayable). The amount
             // is a `QuantityExpr` resolved here — dynamic refs like
-            // `EventContextSourcePower` resolve against the triggering event.
+            // `Power { CostPaidObject }` resolve against the cost-paid /
+            // trigger-referenced object per CR 608.2k.
             let amount = resolve_quantity_with_targets(state, amount, &payment_ability);
             let amount = u32::try_from(amount.max(0)).unwrap_or(0);
             match pay_life_as_cost(state, payer, amount, events) {

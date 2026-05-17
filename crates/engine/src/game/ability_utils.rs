@@ -58,6 +58,9 @@ pub fn build_resolved_from_def_with_targets(
     resolved.multi_target = def.multi_target.clone();
     resolved.target_choice_timing = def.target_choice_timing;
     resolved.repeat_for = def.repeat_for.clone();
+    // CR 608.2c + CR 107.1c: Carry the loop-continuation predicate through so the
+    // `repeat_until` dispatch in `resolve_ability_chain` can re-follow the chain.
+    resolved.repeat_until = def.repeat_until.clone();
     resolved.min_x_value = def.min_x_value;
     resolved.cant_be_copied = def.cant_be_copied;
     resolved.description = def.description.clone();
@@ -68,6 +71,9 @@ pub fn build_resolved_from_def_with_targets(
     // through to the resolved ability so target-selection sites can short-circuit
     // `WaitingFor::TargetSelection` for `Random` abilities.
     resolved.target_selection_mode = def.target_selection_mode;
+    // CR 608.2c: Carry the parent-link kind through so the decline classifier can
+    // distinguish a separate-sentence sibling from a within-clause continuation.
+    resolved.sub_link = def.sub_link;
     resolved
 }
 

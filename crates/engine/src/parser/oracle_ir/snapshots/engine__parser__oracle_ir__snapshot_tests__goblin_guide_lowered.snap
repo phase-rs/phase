@@ -1,5 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 473
 expression: "&lowered"
 ---
 {
@@ -63,7 +64,8 @@ expression: "&lowered"
           },
           "optional_targeting": false,
           "optional": false,
-          "forward_result": false
+          "forward_result": false,
+          "sub_link": "SequentialSibling"
         },
         "duration": null,
         "description": null,

@@ -3613,6 +3613,101 @@ mod tests {
         assert!(validate_blockers(&state, &[]).is_ok());
     }
 
+    /// CR 509.1c (GAP-7): a `MustBeBlocked` requirement granted *transiently*
+    /// via `Effect::GenericEffect` (the Deadly Allure path) must reach
+    /// `combat.rs` enforcement. Unlike `add_must_be_blocked` (which pushes onto
+    /// the BASE `static_definitions`), this drives the full
+    /// `resolve` → transient continuous effect → `evaluate_layers` →
+    /// `static_definitions` pipeline. The `AddStaticMode` modification is what
+    /// propagates the mode — `register_transient_effect` snapshots only
+    /// `modifications`, never the inert `mode` field.
+    #[test]
+    fn generic_effect_granted_must_be_blocked_reaches_enforcement() {
+        use crate::game::effects::effect::resolve;
+        use crate::game::layers::evaluate_layers;
+        use crate::types::ability::{
+            ContinuousModification, Duration, Effect, ResolvedAbility, TargetFilter,
+        };
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Lure Beast", 3, 3);
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+
+        let static_def = StaticDefinition::new(StaticMode::MustBeBlocked)
+            .affected(TargetFilter::SpecificObject { id: attacker })
+            .modifications(vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::MustBeBlocked,
+            }]);
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![static_def],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+            },
+            vec![],
+            attacker,
+            PlayerId(0),
+        )
+        .duration(Duration::UntilEndOfTurn);
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+        evaluate_layers(&mut state);
+
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+        // The transiently-granted MustBeBlocked must force a blocker assignment.
+        assert!(
+            validate_blockers(&state, &[]).is_err(),
+            "transient MustBeBlocked must reach combat enforcement"
+        );
+        assert!(validate_blockers(&state, &[(blocker, attacker)]).is_ok());
+    }
+
+    /// CR 508.1d (GAP-7): the `MustAttack` carrier fix. This drives the
+    /// *parser-produced* `GenericEffect` for "attack this combat if able"
+    /// through `resolve` → transient continuous effect → `evaluate_layers` →
+    /// `static_definitions` → `declare_attackers` enforcement. It FAILS against
+    /// pre-fix code — `try_parse_attack_if_able` emitted a `StaticDefinition`
+    /// with empty `modifications`, so `register_transient_effect` snapshotted
+    /// nothing and the `MustAttack` mode never reached `combat.rs`. The step-4
+    /// `AddStaticMode` carrier fix is what makes this pass.
+    #[test]
+    fn generic_effect_granted_must_attack_reaches_enforcement() {
+        use crate::game::effects::effect::resolve;
+        use crate::game::layers::evaluate_layers;
+        use crate::types::ability::{Duration, Effect, ResolvedAbility, TargetFilter};
+        let mut state = setup_combat_phase();
+        let attacker = create_creature(&mut state, PlayerId(0), "Berserker", 3, 3);
+
+        // The parser output for the standalone attack requirement — this is the
+        // exact `GenericEffect` `try_parse_attack_if_able` builds.
+        let mut effect = crate::parser::oracle_effect::parse_effect("attack this combat if able");
+        // Point the requirement at the attacker (the standalone parser leaves
+        // `affected` at the default — the conjunction-split / subject pipeline
+        // fills it; here we set it directly to isolate the carrier behaviour).
+        match &mut effect {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => {
+                for sd in static_abilities.iter_mut() {
+                    sd.affected = Some(TargetFilter::SpecificObject { id: attacker });
+                }
+            }
+            other => panic!("expected GenericEffect from parser, got {other:?}"),
+        }
+        let ability = ResolvedAbility::new(effect, vec![], attacker, PlayerId(0))
+            .duration(Duration::UntilEndOfTurn);
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+        evaluate_layers(&mut state);
+
+        // Declaring no attackers must be illegal: the creature is forced to attack.
+        let result = declare_attackers(&mut state, &[], &mut Vec::new());
+        assert!(
+            result.is_err(),
+            "transient MustAttack must reach declare_attackers enforcement"
+        );
+    }
+
     #[test]
     fn must_be_blocked_respects_flying_evasion() {
         // MustBeBlocked doesn't force illegal blocks: flying attacker can't be

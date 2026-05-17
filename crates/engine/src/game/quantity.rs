@@ -1163,7 +1163,7 @@ fn resolve_ref(
         QuantityRef::ExiledFromHandThisResolution => {
             u32_to_i32_saturating(state.exiled_from_hand_this_resolution)
         }
-        // CR 603.7c: Numeric value from the triggering event.
+        // CR 608.2c: Numeric value from the triggering event.
         // Falls back to the preceding effect's count or amount for sub_ability
         // continuations where current_trigger_event has no amount (e.g.,
         // "discard up to N, then draw that many"; "dealt excess damage this
@@ -1186,87 +1186,11 @@ fn resolve_ref(
         // not the sacrificed object.
         //
         // CR 400.7: Falls back to LKI cache for objects that have left their zone.
-        // CR 400.7j: Other parts of the same effect can find an object that
-        // effect moved to a public zone. CR 608.2k separately covers activated
-        // abilities with a cost-paid object referent like Greater Good's "the
-        // sacrificed creature's power".
-        QuantityRef::EventContextSourcePower => ability
-            .and_then(|a| a.effect_context_object.as_ref())
-            .and_then(|snap| snap.lki.power)
-            .or_else(|| {
-                state
-                    .current_trigger_event
-                    .as_ref()
-                    .and_then(crate::game::targeting::extract_source_from_event)
-                    .and_then(|id| {
-                        state
-                            .objects
-                            .get(&id)
-                            .and_then(|obj| obj.power)
-                            .or_else(|| state.lki_cache.get(&id).and_then(|lki| lki.power))
-                    })
-            })
-            .or_else(|| {
-                ability
-                    .and_then(|a| a.cost_paid_object.as_ref())
-                    .and_then(|snap| snap.lki.power)
-            })
-            .unwrap_or(0),
-        // CR 400.7j / CR 608.2k: Toughness of the source object. See
-        // `EventContextSourcePower` above for the trigger → effect-context →
-        // cost-paid-object ordering.
-        QuantityRef::EventContextSourceToughness => ability
-            .and_then(|a| a.effect_context_object.as_ref())
-            .and_then(|snap| snap.lki.toughness)
-            .or_else(|| {
-                state
-                    .current_trigger_event
-                    .as_ref()
-                    .and_then(crate::game::targeting::extract_source_from_event)
-                    .and_then(|id| {
-                        state
-                            .objects
-                            .get(&id)
-                            .and_then(|obj| obj.toughness)
-                            .or_else(|| state.lki_cache.get(&id).and_then(|lki| lki.toughness))
-                    })
-            })
-            .or_else(|| {
-                ability
-                    .and_then(|a| a.cost_paid_object.as_ref())
-                    .and_then(|snap| snap.lki.toughness)
-            })
-            .unwrap_or(0),
-        // CR 400.7j / CR 608.2k: Mana value of the source object. See
-        // `EventContextSourcePower` above for the trigger → effect-context →
-        // cost-paid-object ordering.
-        QuantityRef::EventContextSourceManaValue => ability
-            .and_then(|a| a.effect_context_object.as_ref())
-            .map(|snap| u32_to_i32_saturating(snap.lki.mana_value))
-            .or_else(|| {
-                state
-                    .current_trigger_event
-                    .as_ref()
-                    .and_then(crate::game::targeting::extract_source_from_event)
-                    .and_then(|id| {
-                        state
-                            .objects
-                            .get(&id)
-                            .map(|obj| u32_to_i32_saturating(obj.mana_cost.mana_value()))
-                            .or_else(|| {
-                                state
-                                    .lki_cache
-                                    .get(&id)
-                                    .map(|lki| u32_to_i32_saturating(lki.mana_value))
-                            })
-                    })
-            })
-            .or_else(|| {
-                ability
-                    .and_then(|a| a.cost_paid_object.as_ref())
-                    .map(|snap| u32_to_i32_saturating(snap.lki.mana_value))
-            })
-            .unwrap_or(0),
+        // CR 608.2k cost-paid / trigger-condition referents are now resolved
+        // via `QuantityRef::Power/Toughness/ObjectManaValue { scope:
+        // ObjectScope::CostPaidObject }` (see `resolve_object_pt` /
+        // `resolve_object_mana_value`).
+        //
         // CR 107.3a + CR 601.2b + CR 603.7c: The announced value of X for the
         // triggering spell. Reads `GameObject::cost_x_paid` — populated during
         // cost determination and persisted through the stack → battlefield
@@ -2204,21 +2128,40 @@ where
                 .unwrap_or(0)
         }
         // CR 608.2k: An ability's effect referring to a specific untargeted
-        // object previously referred to by that ability's cost still affects
-        // it. The "cost-paid object" power/toughness reads `cost_paid_object`
-        // first — the canonical referent for activated/cast sacrifice costs
-        // (Greater Good) — then falls back to `effect_context_object` for
-        // effect-driven sacrifices captured mid-resolution (Fire Lord Ozai,
-        // The Meep, Venom, Broadside Bombardiers). Exact parity with the
-        // `resolve_object_mana_value` `CostPaidObject` arm.
+        // object previously referred to by that ability's cost OR trigger
+        // condition still affects it. Resolved (first match wins) via:
+        //   1. `cost_paid_object` — canonical activated/cast sacrifice-cost
+        //      referent (Greater Good).
+        //   2. trigger-event source — the object named by this ability's
+        //      trigger condition (Hamletback Goliath, Conclave Mentor), live
+        //      object then LKI for dies/leaves-battlefield triggers.
+        //   3. `effect_context_object` — effect-driven sacrifices captured
+        //      mid-resolution (Fire Lord Ozai, The Meep, Venom, Broadside
+        //      Bombardiers).
+        // Slots 1 and 3 are PINNED in this order by the
+        // `resolve_object_mana_value` regression guard; slot 2 is inserted
+        // strictly between them (insert-only — never reorders 1 vs 3). CR
+        // 608.2k names cost and trigger referents but does not adjudicate
+        // priority between them; the engine's pinned `cost_paid_object`-first
+        // choice stands. Exact parity with the `resolve_object_mana_value`
+        // `CostPaidObject` arm.
         ObjectScope::CostPaidObject => ability
-            .and_then(|ability| {
-                ability
-                    .cost_paid_object
-                    .as_ref()
-                    .or(ability.effect_context_object.as_ref())
-            })
+            .and_then(|a| a.cost_paid_object.as_ref())
             .and_then(|snapshot| lki_extract(&snapshot.lki))
+            .or_else(|| {
+                object_id_for_scope(state, ObjectScope::EventSource, ctx, targets).and_then(|id| {
+                    state
+                        .objects
+                        .get(&id)
+                        .and_then(&obj_extract)
+                        .or_else(|| state.lki_cache.get(&id).and_then(&lki_extract))
+                })
+            })
+            .or_else(|| {
+                ability
+                    .and_then(|a| a.effect_context_object.as_ref())
+                    .and_then(|snapshot| lki_extract(&snapshot.lki))
+            })
             .unwrap_or(0),
     }
 }
@@ -2275,26 +2218,44 @@ fn resolve_object_mana_value(
                 .unwrap_or(0)
         }
         // CR 608.2k + CR 400.7j + CR 701.21a: The "cost-paid object" mana
-        // value reads `cost_paid_object` first — the canonical referent for
-        // this scope (activated/cast costs: Food Chain, Burnt Offering) — then
-        // falls back to `effect_context_object`. When a `Sacrifice` *effect*
-        // (not a cost) appears mid-resolution — Birthing Ritual: "you may
-        // sacrifice a creature. If you do, you may put a creature card with
-        // mana value X or less ..., where X is 1 plus the sacrificed
-        // creature's mana value" — the sacrificed permanent is captured into
-        // `effect_context_object` (the `EffectZoneChoice` handler snapshots the
-        // `PermanentSacrificed` event into the stashed continuation chain).
-        // Both fields name the same CR 608.2k "specific untargeted object"
-        // referent; the `EventContextSource*` arms above include
-        // `effect_context_object` as a fallback for the same CR 608.2k reason.
+        // value resolves (first match wins) via:
+        //   1. `cost_paid_object` — canonical activated/cast-cost referent
+        //      (Food Chain, Burnt Offering, Dark Confidant).
+        //   2. trigger-event source — the object named by this ability's
+        //      trigger condition, live object then LKI.
+        //   3. `effect_context_object` — when a `Sacrifice` *effect* (not a
+        //      cost) appears mid-resolution (Birthing Ritual: "you may
+        //      sacrifice a creature. If you do, ..., where X is 1 plus the
+        //      sacrificed creature's mana value"), the sacrificed permanent is
+        //      captured into `effect_context_object` by the `EffectZoneChoice`
+        //      handler.
+        // Slots 1 and 3 are PINNED in this order by the
+        // `resolve_object_mana_value_cost_paid_object_takes_priority_over_effect_context`
+        // regression guard; slot 2 is inserted strictly between them
+        // (insert-only). Exact parity with the `resolve_object_pt`
+        // `CostPaidObject` arm.
         ObjectScope::CostPaidObject => ability
-            .and_then(|ability| {
-                ability
-                    .cost_paid_object
-                    .as_ref()
-                    .or(ability.effect_context_object.as_ref())
-            })
+            .and_then(|a| a.cost_paid_object.as_ref())
             .map(|snapshot| u32_to_i32_saturating(snapshot.lki.mana_value))
+            .or_else(|| {
+                object_id_for_scope(state, ObjectScope::EventSource, ctx, targets).and_then(|id| {
+                    state
+                        .objects
+                        .get(&id)
+                        .map(|obj| u32_to_i32_saturating(obj.mana_cost.mana_value()))
+                        .or_else(|| {
+                            state
+                                .lki_cache
+                                .get(&id)
+                                .map(|lki| u32_to_i32_saturating(lki.mana_value))
+                        })
+                })
+            })
+            .or_else(|| {
+                ability
+                    .and_then(|a| a.effect_context_object.as_ref())
+                    .map(|snapshot| u32_to_i32_saturating(snapshot.lki.mana_value))
+            })
             .unwrap_or(0),
     }
 }
@@ -5883,7 +5844,9 @@ mod tests {
             excess: 0,
         });
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::EventContextSourcePower,
+            qty: QuantityRef::Power {
+                scope: ObjectScope::CostPaidObject,
+            },
         };
         assert_eq!(
             resolve_quantity(&state, &expr, PlayerId(0), ObjectId(99)),
@@ -5917,7 +5880,9 @@ mod tests {
         state.current_trigger_event =
             Some(crate::types::events::GameEvent::CreatureDestroyed { object_id: dead_id });
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::EventContextSourcePower,
+            qty: QuantityRef::Power {
+                scope: ObjectScope::CostPaidObject,
+            },
         };
         assert_eq!(
             resolve_quantity(&state, &expr, PlayerId(0), ObjectId(99)),
@@ -5928,9 +5893,10 @@ mod tests {
     /// CR 400.7j + CR 117.1 + CR 608.2k: Regression guard for Greater Good
     /// (issue #334). When an activated ability with a sacrifice cost
     /// references "the sacrificed creature's power", the parser emits
-    /// `EventContextSourcePower`. No trigger event is in scope for activated
-    /// abilities, so the resolver must fall back to the resolving ability's
-    /// `cost_paid_object` snapshot captured at cost-payment time.
+    /// `Power { scope: CostPaidObject }`. No trigger event is in scope for
+    /// activated abilities, so the resolver must fall back (slot 1) to the
+    /// resolving ability's `cost_paid_object` snapshot captured at
+    /// cost-payment time.
     #[test]
     fn resolve_event_context_source_power_cost_paid_object_fallback() {
         use crate::types::ability::{CostPaidObjectSnapshot, ResolvedAbility};
@@ -5941,7 +5907,9 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextSourcePower,
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::CostPaidObject,
+                    },
                 },
                 target: TargetFilter::Controller,
             },
@@ -5969,20 +5937,24 @@ mod tests {
         let power = resolve_quantity_with_targets(
             &state,
             &QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourcePower,
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject,
+                },
             },
             &ability,
         );
         assert_eq!(
             power, 5,
-            "EventContextSourcePower must fall back to cost-paid object's LKI power \
+            "Power {{ CostPaidObject }} must fall back to cost-paid object's LKI power \
              when no trigger event is in scope (Greater Good: sacrificed 5/5 → draw 5)"
         );
 
         let toughness = resolve_quantity_with_targets(
             &state,
             &QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourceToughness,
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::CostPaidObject,
+                },
             },
             &ability,
         );
@@ -5990,7 +5962,9 @@ mod tests {
         let cmc = resolve_quantity_with_targets(
             &state,
             &QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourceManaValue,
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject,
+                },
             },
             &ability,
         );
@@ -5998,7 +5972,7 @@ mod tests {
     }
 
     /// Regression guard: when neither a trigger event nor a cost-paid-object
-    /// snapshot is in scope, `EventContextSourcePower` must still return 0
+    /// snapshot is in scope, `Power { CostPaidObject }` must still return 0
     /// rather than panic or hit an unexpected fallback (e.g. the source
     /// object's own power).
     #[test]
@@ -6018,7 +5992,9 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextSourcePower,
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::CostPaidObject,
+                    },
                 },
                 target: TargetFilter::Controller,
             },
@@ -6029,23 +6005,26 @@ mod tests {
         let resolved = resolve_quantity_with_targets(
             &state,
             &QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourcePower,
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject,
+                },
             },
             &ability,
         );
         assert_eq!(
             resolved, 0,
-            "EventContextSourcePower with no trigger event and no cost-paid \
+            "Power {{ CostPaidObject }} with no trigger event and no cost-paid \
              snapshot must return 0 (not the source object's own power)"
         );
     }
 
-    /// CR 603.7c precedence: when both a trigger event and a cost-paid-object
-    /// snapshot are in scope (theoretical — triggered abilities don't carry
-    /// activation costs in practice), the trigger event wins. Guards the
-    /// fallback ordering contract.
+    /// CR 608.2k slot ordering: when both a cost-paid-object snapshot (slot 1)
+    /// and a trigger event (slot 2) are in scope (theoretical — triggered
+    /// abilities don't carry activation costs in practice), `cost_paid_object`
+    /// wins per the engine's pinned slot-1-first order. Guards the fallback
+    /// ordering contract.
     #[test]
-    fn resolve_event_context_source_power_trigger_event_takes_priority() {
+    fn resolve_power_cost_paid_object_takes_priority_over_trigger_event() {
         use crate::types::ability::{CostPaidObjectSnapshot, ResolvedAbility};
         use crate::types::game_state::LKISnapshot;
 
@@ -6069,7 +6048,9 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextSourcePower,
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::CostPaidObject,
+                    },
                 },
                 target: TargetFilter::Controller,
             },
@@ -6098,13 +6079,16 @@ mod tests {
         let resolved = resolve_quantity_with_targets(
             &state,
             &QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourcePower,
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject,
+                },
             },
             &ability,
         );
         assert_eq!(
-            resolved, 3,
-            "Trigger event must take priority over cost-paid-object fallback"
+            resolved, 99,
+            "CR 608.2k slot 1 (cost_paid_object) takes priority over slot 2 \
+             (trigger-event source) per the engine's pinned ordering"
         );
     }
 
@@ -6493,8 +6477,8 @@ mod tests {
     /// resolve. Two assertions discriminate the fix:
     ///
     /// 1. **Parser** — the draw quantity must parse to
-    ///    `Power { ObjectScope::CostPaidObject }`, NOT `EventContextSourcePower`.
-    ///    This assertion FAILS on pre-fix code, where the participle-possessive
+    ///    `Power { ObjectScope::CostPaidObject }`, NOT a trigger-event-context
+    ///    referent. This assertion FAILS on pre-fix code, where the participle-possessive
     ///    "the sacrificed creature's power" was mis-classified as an
     ///    event-context referent.
     /// 2. **Runtime** — driving the engine through `apply_as_current`, exactly
@@ -6535,8 +6519,8 @@ mod tests {
         let mut runner = scenario.build();
 
         // The draw quantity must have parsed through the cost-paid-object
-        // chain — NOT EventContextSourcePower. This is the discriminating
-        // assertion that fails on pre-fix code.
+        // chain — NOT a trigger-event-context referent. This is the
+        // discriminating assertion that fails on pre-fix code.
         let draw_count = {
             let gg = &runner.state().objects[&greater_good];
             let ability = gg
@@ -6557,8 +6541,8 @@ mod tests {
                 },
             },
             "Greater Good's draw quantity must route through \
-             parse_cost_paid_object_ref → Power{{CostPaidObject}}, not \
-             EventContextSourcePower (issue #338)"
+             parse_cost_paid_object_ref → Power{{CostPaidObject}}, not a \
+             trigger-event-context referent (issue #338)"
         );
 
         let hand_count = |runner: &crate::game::scenario::GameRunner| {
@@ -6617,8 +6601,8 @@ mod tests {
         }
 
         // The 4/4 was sacrificed → exactly 4 cards drawn (its power). On
-        // pre-fix code the quantity mis-classified to EventContextSourcePower;
-        // the parser assertion above is the primary discriminator, this
+        // pre-fix code the quantity mis-classified to a trigger-event-context
+        // referent; the parser assertion above is the primary discriminator, this
         // confirms the value resolves correctly end-to-end.
         let hand_after = hand_count(&runner);
         assert_eq!(

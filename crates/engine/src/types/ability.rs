@@ -6,7 +6,7 @@ use serde::ser::SerializeStructVariant;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
-use super::card_type::{CardType, CoreType, Supertype};
+use super::card_type::{CardType, CoreType, SubtypeSet, Supertype};
 use super::counter::{CounterMatch, CounterType};
 use super::events::BendingType;
 use super::game_state::{
@@ -2377,8 +2377,12 @@ pub enum ObjectScope {
     Recipient,
     /// CR 603.2: The object referenced by the current trigger event.
     EventSource,
-    /// CR 117.1 + CR 400.7j + CR 608.2k: The object paid as a cost for the
-    /// resolving spell or ability, read from `ResolvedAbility.cost_paid_object`.
+    /// CR 608.2k: The specific untargeted object previously referred to by
+    /// this ability's cost OR trigger condition. Resolved (first match wins)
+    /// via `ResolvedAbility.cost_paid_object` → trigger-event source →
+    /// `effect_context_object`. Subsumes the former `EventContextSource*`
+    /// trio (CR 117.1 + CR 400.7j cost referent and CR 603.2 trigger
+    /// referent are the two enumerated members of CR 608.2k's single clause).
     CostPaidObject,
 }
 
@@ -2521,16 +2525,20 @@ pub enum QuantityRef {
     /// CR 208.1 + CR 113.6: Current power of an object, scoped via ObjectScope
     /// (Round Π-6). Replaces the `SelfPower` / `TargetPower` sibling pair.
     /// `Source` reads the source object's power (post-layer); `Target` reads
-    /// the first object target's power.
+    /// the first object target's power. `CostPaidObject` subsumes the former
+    /// `EventContextSourcePower` (CR 608.2k: cost OR trigger-condition
+    /// referent).
     Power { scope: ObjectScope },
     /// CR 208.1 + CR 113.6: Current toughness of an object, scoped via
     /// ObjectScope (Round Π-6). Mirrors `Power`. Replaces the `SelfToughness`
-    /// variant.
+    /// variant. `CostPaidObject` subsumes the former
+    /// `EventContextSourceToughness` (CR 608.2k).
     Toughness { scope: ObjectScope },
     /// CR 202.3: Mana value of an object, scoped via ObjectScope.
     /// `Source` is the resolving ability's source; `Target` is the first object
     /// target. Used by source/target-relative mana-value filters such as
-    /// "with the same mana value as that spell".
+    /// "with the same mana value as that spell". `CostPaidObject` subsumes the
+    /// former `EventContextSourceManaValue` (CR 608.2k).
     ObjectManaValue { scope: ObjectScope },
     /// CR 105.1 + CR 105.2: Number of colors of an object, scoped via
     /// ObjectScope. Counts the object's current W/U/B/R/G color set; colorless
@@ -2557,10 +2565,10 @@ pub enum QuantityRef {
     /// as `source` to `resolve_quantity`. For an alt-cost cast (CR 118.9) this
     /// is the spell-being-cast, so "pay life equal to its mana value" reads
     /// the right value at cost-payment time. Distinct from
-    /// `EventContextSourceManaValue` (which reads the triggering source via
-    /// `current_trigger_event`); that ref returns 0 outside trigger
-    /// resolution, whereas this one is correct any time the resolver has a
-    /// `source_id` (cost payment, ability resolution, etc.).
+    /// `ObjectManaValue { scope: CostPaidObject }` (which reads the
+    /// cost-paid / trigger-referenced object per CR 608.2k); that ref returns
+    /// 0 outside cost/trigger resolution, whereas this one is correct any time
+    /// the resolver has a `source_id` (cost payment, ability resolution, etc.).
     SelfManaValue,
     /// CR 107.3e: Aggregate query (max/min/sum) over a property of battlefield objects.
     Aggregate {
@@ -2637,14 +2645,6 @@ pub enum QuantityRef {
     /// CR 603.7c: Numeric value from the triggering event.
     /// Extracts amount/count from DamageDealt, LifeChanged, CardsDrawn, CounterAdded, etc.
     EventContextAmount,
-    /// CR 603.7c: Power of the source object from the triggering event.
-    /// Falls back to LKI cache for dies/leaves-battlefield triggers.
-    EventContextSourcePower,
-    /// CR 603.7c: Toughness of the source object from the triggering event.
-    /// Falls back to LKI cache for dies/leaves-battlefield triggers.
-    EventContextSourceToughness,
-    /// CR 603.7c: Mana value of the source object from the triggering event.
-    EventContextSourceManaValue,
     /// CR 603.10a + CR 603.6e: Count of attachments of a given kind that were attached
     /// to the leaving-battlefield object at the moment it left, optionally filtered by
     /// attachment controller. Resolved via the triggering `ZoneChangeRecord`'s
@@ -3310,6 +3310,9 @@ pub enum StaticCondition {
     SourceIsBlocked,
     /// CR 725.1: True when the controller is the monarch.
     IsMonarch,
+    /// CR 725.1: True when no player holds the monarch designation. Distinct
+    /// from `Not(IsMonarch)`, which is also true when an opponent is monarch.
+    NoMonarch,
     /// CR 702.131a: True when the controller has the city's blessing (Ascend).
     HasCityBlessing,
     /// CR 309.7: True when the controller has completed at least one dungeon.
@@ -3539,7 +3542,12 @@ pub enum ParsedCondition {
     YouControlNamedPlaneswalker {
         name: String,
     },
-    YouControlCreatureWithKeyword {
+    /// CR 602.5b: "[you / an opponent] control(s) a creature with [keyword]"
+    /// activation restriction. `controller` selects whose creatures are
+    /// inspected — `ControllerRef::You` for "you control", `Opponent` for
+    /// "an opponent controls".
+    ControlsCreatureWithKeyword {
+        controller: ControllerRef,
         keyword: Keyword,
     },
     YouControlCreatureWithPowerAtLeast {
@@ -5520,13 +5528,22 @@ pub enum Effect {
         #[serde(default = "default_target_filter_controller")]
         player: TargetFilter,
         filter: TargetFilter,
-        /// Where the matching card goes (Hand or Battlefield).
+        /// Where the matching card goes (Hand or Battlefield). When
+        /// `kept_optional_to` is `Some`, this is repurposed as the *decline*
+        /// zone (where the kept card goes if the controller declines).
         kept_destination: Zone,
         /// Where non-matching revealed cards go (Library bottom or Graveyard).
         rest_destination: Zone,
         /// CR 110.5b: When true, the matching card enters the battlefield tapped.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         enter_tapped: bool,
+        /// CR 701.20a + CR 608.2c: Optional kept destination — `Some(accept_zone)`
+        /// encodes "you may put that card onto the battlefield": the controller
+        /// chooses the kept card's destination. Accept → `accept_zone`; decline →
+        /// `kept_destination` (repurposed as the decline zone). `None` → the
+        /// kept card unconditionally goes to `kept_destination` (mandatory).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kept_optional_to: Option<Zone>,
     },
     /// CR 701.57a: Discover N — exile from top until nonland with MV ≤ N,
     /// cast free or put to hand, rest to bottom in random order.
@@ -7443,6 +7460,67 @@ pub struct AbilityDefinition {
     /// Read at target-selection time to short-circuit `WaitingFor::TargetSelection`.
     #[serde(default, skip_serializing_if = "TargetSelectionMode::is_chosen")]
     pub target_selection_mode: TargetSelectionMode,
+    /// CR 608.2c + CR 107.1c: per-iteration loop-continuation predicate, the
+    /// non-count companion to `repeat_for`. When `Some`, the resolution chain
+    /// is re-followed ("repeat this process") under this predicate instead of
+    /// a fixed iteration count. Mutually exclusive with `repeat_for` in
+    /// practice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_until: Option<RepeatContinuation>,
+    /// CR 608.2c: How this ability links to its parent when present as a
+    /// `sub_ability`. `ContinuationStep` (default) = part of the parent's action;
+    /// `SequentialSibling` = independent following instruction. Set during
+    /// `lower_effect_chain_ir` from the `ClauseBoundary` PRECEDING this clause.
+    #[serde(default, skip_serializing_if = "SubAbilityLink::is_continuation")]
+    pub sub_link: SubAbilityLink,
+}
+
+/// CR 608.2c: How a `sub_ability` relates to its parent in the resolution chain.
+/// Determines whether the sub is part of the parent's action (skipped when an
+/// optional parent is declined) or an independent following instruction (always
+/// resolves). Derived at parse time from the `ClauseBoundary` separating the
+/// two clauses in the printed Oracle text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SubAbilityLink {
+    /// Within-sentence continuation (comma / "then" joined). The sub is a
+    /// resolution step of the parent's instruction — Squadron Hawk
+    /// "...put them into your hand, then shuffle." Skipped when an optional
+    /// parent is declined. This is the default: an unmarked sub is a
+    /// continuation, preserving today's runtime behavior for every existing
+    /// chain.
+    #[default]
+    ContinuationStep,
+    /// Separate-sentence sibling instruction (sentence boundary). The sub is
+    /// the NEXT printed instruction, independent of the parent — Ponder
+    /// "You may shuffle." "Draw a card." Always resolves, even when an
+    /// optional parent is declined (CR 608.2c "in the order written").
+    SequentialSibling,
+}
+
+impl SubAbilityLink {
+    /// `skip_serializing_if` predicate — the default needs no JSON byte.
+    pub fn is_continuation(link: &Self) -> bool {
+        matches!(link, Self::ContinuationStep)
+    }
+}
+
+/// CR 608.2c + CR 107.1c: how a "repeat this process" loop decides whether to
+/// run another iteration. The non-count companion to `AbilityDefinition`'s
+/// `repeat_for` (a fixed `QuantityExpr` count) — this predicate decides
+/// per-iteration whether to re-follow the resolving ability's instructions.
+///
+/// Currently a single-variant enum: only the controller-decision form ("you
+/// may repeat this process any number of times") is modeled. The game-state
+/// predicate form ("if you do, repeat this process" — Primal Surge) is a
+/// separately-tracked deferred unit; it will add a `While(...)` variant once
+/// the optional-put pause semantics it depends on are designed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum RepeatContinuation {
+    /// CR 107.1c: "you may repeat this process [any number of times]" — after
+    /// each iteration fully resolves, the controller is prompted
+    /// (`WaitingFor::RepeatDecision`) to repeat or stop.
+    ControllerChoice,
 }
 
 impl fmt::Debug for AbilityDefinition {
@@ -7499,6 +7577,8 @@ impl AbilityDefinition {
             forward_result: false,
             player_scope: None,
             target_selection_mode: TargetSelectionMode::Chosen,
+            repeat_until: None,
+            sub_link: SubAbilityLink::ContinuationStep,
         }
     }
 
@@ -8114,6 +8194,9 @@ pub enum TriggerCondition {
 
     /// CR 725.1: "if you're the monarch" is true when the controller is the monarch.
     IsMonarch,
+    /// CR 725.1: "if there is no monarch" is true when no player holds the
+    /// monarch designation. Distinct from `Not(IsMonarch)`.
+    NoMonarch,
     /// CR 103.1: "if you were/weren't the starting player" — true when the
     /// scoped player took the first turn of the game
     /// (`GameState.current_starting_player`). Used by Radiant Smite's Cycling
@@ -8332,6 +8415,12 @@ pub enum ReplacementCondition {
     /// CR 702.138c: "escapes with" — replacement applies only when the creature
     /// entered the battlefield via escape.
     CastViaEscape,
+    /// CR 702.188a: "if ~ was cast using [variant]" — replacement applies only
+    /// when the source permanent's spell was cast paying the named alternative
+    /// cost. Mirrors `TriggerCondition::CastVariantPaid` /
+    /// `AbilityCondition::CastVariantPaid`. Evaluated against
+    /// `GameObject.cast_variant_paid`. Used by Scarlet Spider (web-slinging).
+    CastVariantPaid { variant: CastVariantPaid },
     /// CR 603.4: "if you cast it from [zone]" — replacement applies only when
     /// the source object was cast from the specified zone (e.g., Myojin's
     /// "enters with an indestructible counter on it if you cast it from your
@@ -9341,6 +9430,19 @@ pub enum ContinuousModification {
     RemoveSubtype {
         subtype: String,
     },
+    /// CR 205.1a + CR 613.1d: Replace the object's entire core card-type set
+    /// (Layer 4). Models "becomes a [type] ... and loses all other card types"
+    /// — set-replacement semantics, atomic, so the parser need not enumerate
+    /// the full `CoreType` space to express "becomes exactly artifact creature".
+    SetCardTypes {
+        core_types: Vec<CoreType>,
+    },
+    /// CR 205.1a + CR 613.1d: Remove every subtype belonging to a given subtype
+    /// set (Layer 4). "loses all other creature types" emits
+    /// `RemoveAllSubtypes { set: SubtypeSet::Creature }`.
+    RemoveAllSubtypes {
+        set: SubtypeSet,
+    },
     /// Set power to a dynamically computed value (CDA, layer 7a).
     SetDynamicPower {
         value: QuantityExpr,
@@ -9663,6 +9765,17 @@ pub struct ResolvedAbility {
     /// this list as the exclusion set when computing the next choice's options.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chosen_players: Vec<PlayerId>,
+    /// CR 608.2c + CR 107.1c: per-iteration loop-continuation predicate carried
+    /// through from the originating `AbilityDefinition`. When `Some`, the
+    /// resolution chain is re-followed ("repeat this process") under this
+    /// predicate. Read by the `repeat_until` dispatch in `resolve_ability_chain`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_until: Option<RepeatContinuation>,
+    /// CR 608.2c: How this ability links to its parent when present as a
+    /// `sub_ability`. Copied through from the originating `AbilityDefinition`.
+    /// `SequentialSibling` subs resolve even when an optional parent is declined.
+    #[serde(default, skip_serializing_if = "SubAbilityLink::is_continuation")]
+    pub sub_link: SubAbilityLink,
 }
 
 impl ResolvedAbility {
@@ -9706,6 +9819,8 @@ impl ResolvedAbility {
             may_trigger_origin: None,
             target_selection_mode: TargetSelectionMode::Chosen,
             chosen_players: Vec::new(),
+            repeat_until: None,
+            sub_link: SubAbilityLink::ContinuationStep,
         }
     }
 

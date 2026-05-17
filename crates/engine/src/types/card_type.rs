@@ -135,6 +135,26 @@ impl CoreType {
     ];
 }
 
+/// CR 205.3: The classification of subtype sets. Each card type has its own
+/// correlated subtype pool — creature types, land types, artifact types, etc.
+/// Used by `ContinuousModification::RemoveAllSubtypes` to express "loses all
+/// other creature types" without enumerating individual subtypes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SubtypeSet {
+    /// CR 205.3m: Creature subtypes (creature types).
+    Creature,
+    /// CR 205.3i: Land subtypes (land types).
+    Land,
+    /// CR 205.3g: Artifact subtypes.
+    Artifact,
+    /// CR 205.3h: Enchantment subtypes.
+    Enchantment,
+    /// CR 205.3j: Planeswalker subtypes.
+    Planeswalker,
+    /// CR 205.3k: Spell subtypes (instant/sorcery).
+    Spell,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CardType {
     pub supertypes: Vec<Supertype>,

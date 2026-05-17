@@ -517,6 +517,8 @@ fn evaluate_condition_with_context(
         }),
         // CR 725.1: True when the controller is the monarch.
         StaticCondition::IsMonarch => state.monarch == Some(controller),
+        // CR 725.1: True when no player holds the monarch designation.
+        StaticCondition::NoMonarch => state.monarch.is_none(),
         // CR 702.131a: True when the controller has the city's blessing.
         StaticCondition::HasCityBlessing => state.city_blessing.contains(&controller),
         StaticCondition::OpponentPoisonAtLeast { count } => state
@@ -1374,12 +1376,17 @@ fn order_with_dependencies(
     // CR 613.7a: Effects in the same layer apply in timestamp order.
     // CR 613.3: Within layers 2-6, apply effects from CDAs first (see CR 604.3), then others in timestamp order.
     let mut sorted: Vec<&ActiveContinuousEffect> = effects.to_vec();
+    // CR 613.7: equal-timestamp same-source effects (a single static ability's
+    // modifications all share one timestamp per CR 613.7a) get a deterministic
+    // written-order tiebreak via `mod_index` — the index of the modification
+    // within the source's `modifications` Vec, i.e. Oracle written order.
     sorted.sort_by_key(|e| {
         (
             !e.characteristic_defining,
             e.timestamp,
             e.source_id.0,
             e.def_index,
+            e.mod_index,
         )
     });
 
@@ -1513,12 +1520,15 @@ fn filter_references_ability(filter: &TargetFilter) -> bool {
 /// Order effects by timestamp (deterministic fallback). CDAs sort first per CR 604.3.
 fn order_by_timestamp(effects: &[&ActiveContinuousEffect]) -> Vec<ActiveContinuousEffect> {
     let mut sorted: Vec<ActiveContinuousEffect> = effects.iter().map(|e| (*e).clone()).collect();
+    // CR 613.7: see `order_with_dependencies` — `mod_index` is the
+    // written-order tiebreak for equal-timestamp same-source effects.
     sorted.sort_by_key(|e| {
         (
             !e.characteristic_defining,
             e.timestamp,
             e.source_id.0,
             e.def_index,
+            e.mod_index,
         )
     });
     sorted
@@ -1930,6 +1940,37 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             }
             ContinuousModification::RemoveSubtype { ref subtype } => {
                 obj.card_types.subtypes.retain(|s| s != subtype);
+            }
+            // CR 205.1a + CR 613.1d: Replace the entire core card-type set.
+            ContinuousModification::SetCardTypes { ref core_types } => {
+                obj.card_types.core_types = core_types.clone();
+            }
+            // CR 205.1a + CR 613.1d: Remove every subtype belonging to the
+            // named subtype set. Membership for the `Creature` set is resolved
+            // against the runtime-populated `state.all_creature_types` — the
+            // same source `AddAllCreatureTypes` uses below.
+            ContinuousModification::RemoveAllSubtypes { set } => {
+                use crate::types::card_type::SubtypeSet;
+                match set {
+                    SubtypeSet::Creature => {
+                        obj.card_types
+                            .subtypes
+                            .retain(|s| !state.all_creature_types.iter().any(|c| c == s));
+                    }
+                    SubtypeSet::Land => {
+                        // CR 205.3i: land-type membership via the basic/non-basic
+                        // land-subtype classification.
+                        obj.card_types.subtypes.retain(|s| !is_land_subtype(s));
+                    }
+                    SubtypeSet::Artifact
+                    | SubtypeSet::Enchantment
+                    | SubtypeSet::Planeswalker
+                    | SubtypeSet::Spell => unreachable!(
+                        "RemoveAllSubtypes for {set:?} has no membership source wired; \
+                         only Creature and Land subtype removal is emitted by the parser. \
+                         Add a membership classifier before emitting this set."
+                    ),
+                }
             }
             // CR 205.4 + CR 707.9d: "in addition to its other types" — append
             // the supertype if absent. Idempotent.
@@ -3717,6 +3758,98 @@ mod tests {
         assert!(obj.trigger_definitions.is_empty());
         assert!(obj.replacement_definitions.is_empty());
         assert!(obj.static_definitions.is_empty());
+    }
+
+    #[test]
+    fn darksteel_mutation_full_layer_evaluation_e2e() {
+        // Issue #453: drive the real pipeline — parse Darksteel Mutation's
+        // Oracle text into its static ability, attach it to a creature via the
+        // engine's `attach_to` primitive (real `attached_to` link + real
+        // timestamps), then run layer evaluation.
+        use crate::game::effects::attach::attach_to;
+
+        let mut scenario = GameScenario::new();
+
+        // A base creature with a printed keyword and an activated ability.
+        let bear = {
+            let mut card = scenario.add_creature(PlayerId(0), "Grizzly Bears", 2, 2);
+            card.trample()
+                .with_ability_definition(AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: GainLifePlayer::Controller,
+                    },
+                ))
+                .with_trigger(TriggerMode::Attacks);
+            card.id()
+        };
+
+        // Darksteel Mutation as a real battlefield Aura, static parsed from
+        // Oracle text — not a hand-built modification list.
+        let mutation = scenario
+            .add_creature(PlayerId(0), "Darksteel Mutation", 0, 0)
+            .as_enchantment()
+            .from_oracle_text(
+                "Enchant creature\nEnchanted creature is an Insect artifact creature \
+                 with base power and toughness 0/1 and has indestructible, and it \
+                 loses all other abilities, card types, and creature types.",
+            )
+            .id();
+
+        let mut state = scenario.build().state().clone();
+        // Mark the Aura with the Aura subtype so it is a valid attachment.
+        state
+            .objects
+            .get_mut(&mutation)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Aura".to_string());
+
+        // Real attach pipeline: sets `attached_to` + host `attachments`.
+        attach_to(&mut state, mutation, bear);
+
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&bear).unwrap();
+        // CR 613.4b: base P/T set to 0/1.
+        assert_eq!(obj.power, Some(0), "power should be 0");
+        assert_eq!(obj.toughness, Some(1), "toughness should be 1");
+        // CR 613.1f + CR 613.7: indestructible granted, and it survives the
+        // RemoveAllAbilities wipe via the written-order (mod_index) tiebreak.
+        assert!(
+            obj.keywords.contains(&Keyword::Indestructible),
+            "should have indestructible, keywords={:?}",
+            obj.keywords
+        );
+        assert!(
+            !obj.keywords.contains(&Keyword::Trample),
+            "trample must be stripped by RemoveAllAbilities"
+        );
+        // CR 613.1f: all printed abilities removed.
+        assert!(obj.abilities.is_empty(), "abilities must be empty");
+        assert!(
+            obj.trigger_definitions.is_empty(),
+            "trigger definitions must be empty"
+        );
+        assert!(
+            obj.static_definitions.is_empty(),
+            "static definitions must be empty"
+        );
+        // CR 205.1b + CR 613.1d: exactly artifact + creature.
+        assert_eq!(
+            obj.card_types.core_types,
+            vec![CoreType::Artifact, CoreType::Creature],
+            "core types must be exactly [Artifact, Creature]"
+        );
+        // CR 205.1a/b: creature types replaced — exactly Insect.
+        assert_eq!(
+            obj.card_types.subtypes,
+            vec!["Insect".to_string()],
+            "subtypes must be exactly [Insect]"
+        );
     }
 
     #[test]

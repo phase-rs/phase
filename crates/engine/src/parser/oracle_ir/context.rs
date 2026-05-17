@@ -5,6 +5,7 @@
 
 use super::diagnostic::OracleDiagnostic;
 use crate::types::ability::{ControllerRef, QuantityRef, TargetFilter, TargetSelectionMode};
+use crate::types::zones::Zone;
 
 /// Unified parsing context — threaded through all parser branches for
 /// pronoun/reference resolution ("it", "that creature", "that many").
@@ -67,6 +68,14 @@ pub(crate) struct ParseContext {
     /// `None` at the entry of every `parse_trigger_condition` call so stale
     /// clause state cannot leak across trigger lines.
     pub pending_trigger_subject_clause: Option<TargetFilter>,
+    /// CR 608.2k: Source zone of the current ability's `AbilityCost::Exile`
+    /// component, if any. Set by `parse_activated_ability_definition` after the
+    /// cost is parsed and before the effect text is parsed, then restored after
+    /// the ability. Consumed by `parse_cost_paid_object_reference` to
+    /// disambiguate "the exiled card" — a cost-paid-object reference
+    /// (`TargetFilter::CostPaidObject`) when the ability has a non-self exile
+    /// cost, an effect-exiled tracked-set reference (`TrackedSet`) otherwise.
+    pub current_ability_exile_cost_zone: Option<Zone>,
 }
 
 impl ParseContext {

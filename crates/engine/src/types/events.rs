@@ -154,6 +154,23 @@ pub enum GameEvent {
         #[serde(default, skip_serializing_if = "ManaTapState::is_not_from_tap")]
         tap_state: ManaTapState,
     },
+    /// CR 106.12a: A mana ability whose activation cost includes the `{T}`
+    /// symbol (CR 106.12) resolved and produced mana. Emitted **exactly once
+    /// per resolution** — unlike `ManaAdded`, which is per mana unit (CR 106.4)
+    /// pool accounting. The `TapsForMana` trigger matcher keys off this event
+    /// so triggers like Vorinclex fire once per tap, not once per mana point.
+    TappedForMana {
+        player_id: PlayerId,
+        source_id: ObjectId,
+        /// The full set of mana units produced by this resolution. Consumed by
+        /// `TriggerEventManaType` (one trigger-event mana per distinct color).
+        produced: Vec<ManaType>,
+        /// CR 605.4a: Tracks whether the coupled `TapsForMana` triggered mana
+        /// abilities have already resolved — the post-action double-resolution
+        /// guard and the inline resolver's Pass-2 flip key off this.
+        #[serde(default, skip_serializing_if = "ManaTapState::is_not_from_tap")]
+        tap_state: ManaTapState,
+    },
     /// CR 500.5 + CR 703.4q: A single mana unit was emptied from a player's
     /// pool during the step-end empty event after the CR 616.1 replacement
     /// pipeline resolved. `source_id` is the unit's original producer

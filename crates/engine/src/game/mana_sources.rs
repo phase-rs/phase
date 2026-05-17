@@ -1195,9 +1195,10 @@ pub(crate) fn opponent_land_color_options(
 /// tap-untap-tap exploit (Fertile Ground, Wild Growth, Utopia Sprawl, Trace
 /// of Abundance, Verdant Haven, Market Festival, Weirding Wood, Overgrowth).
 ///
-/// Reuses `match_taps_for_mana`'s `valid_card_matches` predicate — the same
-/// single-authority match used at trigger-firing time — so the refund and
-/// firing paths cannot drift.
+/// Reuses `taps_for_mana_card_matches` — the same single-authority card-identity
+/// predicate `match_taps_for_mana` uses at trigger-firing time — so the refund
+/// and firing paths cannot drift. No `GameEvent` is synthesized: the predicate
+/// is probed directly with the land as the mana source.
 pub(crate) fn aura_taps_for_mana_sources_for_land(
     state: &GameState,
     land_id: ObjectId,
@@ -1220,17 +1221,8 @@ pub(crate) fn aura_taps_for_mana_sources_for_land(
             // canonical aura-on-land shape; `SelfRef` covers the
             // self-tapping land case (already refunded by the land's own
             // `source_id`, but kept here for completeness).
-            let synthetic_event = crate::types::events::GameEvent::ManaAdded {
-                player_id: controller,
-                mana_type: ManaType::Colorless,
-                source_id: land_id,
-                tap_state: crate::types::events::ManaTapState::FromTap,
-            };
-            if super::trigger_matchers::match_taps_for_mana(
-                &synthetic_event,
-                trigger,
-                object_id,
-                state,
+            if super::trigger_matchers::taps_for_mana_card_matches(
+                trigger, state, land_id, object_id,
             ) && object_id != land_id
                 && !sources.contains(&object_id)
             {

@@ -257,6 +257,13 @@ pub const ORDERING_MANIFEST: &[((&str, &str), OrderingClass)] = &[
         ("ContinuousModification", "colors"),
         OrderingClass::SetEquivalent,
     ),
+    // CR 205.1a + CR 613.1d: `SetCardTypes` replaces the object's entire core
+    // card-type set (Layer 4). A type set is unordered — only membership
+    // matters — so reordering is incidental. Set.
+    (
+        ("ContinuousModification", "core_types"),
+        OrderingClass::SetEquivalent,
+    ),
     (("CopiableValues", "color"), OrderingClass::SetEquivalent),
     (("CopiableValues", "keywords"), OrderingClass::SetEquivalent),
     // ----- Effect embedded lists -----

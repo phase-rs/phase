@@ -940,7 +940,9 @@ fn action_result(events: &mut Vec<GameEvent>, waiting_for: WaitingFor) -> Action
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{AbilityCondition, GainLifePlayer, QuantityExpr, ResolvedAbility};
+    use crate::types::ability::{
+        AbilityCondition, GainLifePlayer, QuantityExpr, ResolvedAbility, SubAbilityLink,
+    };
     use crate::types::game_state::{AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin};
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
@@ -1070,12 +1072,13 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let mut optional = ResolvedAbility::new(gain_life(1), vec![], ObjectId(100), PlayerId(0));
         optional.optional = true;
-        optional.sub_ability = Some(Box::new(ResolvedAbility::new(
-            gain_life(3),
-            vec![],
-            ObjectId(100),
-            PlayerId(0),
-        )));
+        let mut continuation_sub =
+            ResolvedAbility::new(gain_life(3), vec![], ObjectId(100), PlayerId(0));
+        // CR 608.2c: This sub is a within-clause continuation step of the
+        // declined action — declining the optional must skip it. Made explicit
+        // so the case under test is unambiguous to a future reader.
+        continuation_sub.sub_link = SubAbilityLink::ContinuationStep;
+        optional.sub_ability = Some(Box::new(continuation_sub));
         state.pending_optional_effect = Some(Box::new(optional));
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),

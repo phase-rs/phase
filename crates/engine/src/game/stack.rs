@@ -393,6 +393,22 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 }
             }
 
+            // CR 702.188a: Web-slinging is a casting alternative cost. Tag the
+            // permanent BEFORE the ETB replacement pipeline runs so a
+            // `ReplacementCondition::CastVariantPaid` gate (Scarlet Spider's
+            // "Sensational Save" enters-with-counters replacement) can read it.
+            // `cast_variant_paid` is also written post-resolution for other
+            // variants (Sneak/Evoke/Escape), but those have no ETB-replacement
+            // gate; web-slinging does, so its write must precede `replace_event`.
+            if let CastingVariant::WebSlinging { .. } = casting_variant {
+                if let Some(obj) = state.objects.get_mut(&entry.id) {
+                    obj.cast_variant_paid = Some((
+                        crate::types::ability::CastVariantPaid::WebSlinging,
+                        state.turn_number,
+                    ));
+                }
+            }
+
             let convoked_creatures = state
                 .objects
                 .get(&entry.id)
@@ -709,17 +725,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 }
             }
 
-            // CR 702.188a: Web-slinging is a casting alternative cost, so tag
-            // the resolved permanent through the same cast-variant channel as
-            // other alternative-cost casting variants.
-            if let CastingVariant::WebSlinging { .. } = casting_variant {
-                if let Some(obj) = state.objects.get_mut(&entry.id) {
-                    obj.cast_variant_paid = Some((
-                        crate::types::ability::CastVariantPaid::WebSlinging,
-                        state.turn_number,
-                    ));
-                }
-            }
+            // CR 702.188a: Web-slinging's `cast_variant_paid` tag is written
+            // before `replace_event` above (so the ETB-replacement gate can
+            // read it) — no post-resolution write is needed here.
 
             // CR 702.74a: Evoke-cast permanent gets the `cast_variant_paid` tag
             // so the synthesized intervening-if ETB sacrifice trigger fires.

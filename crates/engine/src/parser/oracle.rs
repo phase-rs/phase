@@ -13,7 +13,7 @@ use crate::types::ability::{
     StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition,
     TypedFilter,
 };
-use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
+use crate::types::keywords::{ActivationCadence, FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
@@ -1505,6 +1505,18 @@ pub(crate) fn parse_oracle_ir(
             }
         }
 
+        // CR 702.122 + CR 602.5b: Crew with a trailing "Activate only once each
+        // turn." cadence sentence. Must run before the generic keyword-only
+        // extraction below — that path parses "Crew N" via `parse_keyword_from_oracle`
+        // and would consume the line, dropping the cadence sentence.
+        if lower_starts_with(&lower, "crew ") {
+            if let Some(crew_kw) = parse_crew_keyword(&lower) {
+                result.extracted_keywords.push(crew_kw);
+                i += 1;
+                continue;
+            }
+        }
+
         // Priority 1b: keyword-only line — extract any keywords for the union set
         // Guard: "{Keyword} abilities you activate cost {N} less" is a static ability,
         // not a keyword line. Don't let keyword extraction consume it.
@@ -2801,6 +2813,26 @@ fn activation_zone_from_self_effect(def: &AbilityDefinition) -> Option<Zone> {
         .and_then(activation_zone_from_self_effect)
 }
 
+/// CR 608.2k: Source zone of a non-self `AbilityCost::Exile` component
+/// ("Exile a nonland card from your hand"), if present. Effect-side companion
+/// to `activation_zone_from_self_cost`: returns `None` for a self-ref exile
+/// (Scavenge), which is auto-paid and never back-referenced as a cost-paid
+/// object. Recurses into `Composite`.
+fn non_self_exile_cost_zone(cost: &AbilityCost) -> Option<Zone> {
+    match cost {
+        AbilityCost::Exile {
+            filter: Some(TargetFilter::SelfRef),
+            ..
+        } => None,
+        AbilityCost::Exile {
+            zone: Some(zone @ (Zone::Hand | Zone::Graveyard)),
+            ..
+        } => Some(*zone),
+        AbilityCost::Composite { costs } => costs.iter().find_map(non_self_exile_cost_zone),
+        _ => None,
+    }
+}
+
 fn parse_activated_ability_definition(
     cost_text: &str,
     effect_text: &str,
@@ -2812,9 +2844,17 @@ fn parse_activated_ability_definition(
     let normalized_cost_text = normalize_self_refs_for_static(cost_text, card_name);
     let cost = parse_oracle_cost(&normalized_cost_text);
 
+    // CR 608.2k: expose this ability's exile-cost source zone so the effect
+    // parser can disambiguate "the exiled card" as a cost-paid-object
+    // reference. Restored after the effect parse — no leak to sibling abilities.
+    let prev_exile_zone = ctx.current_ability_exile_cost_zone.take();
+    ctx.current_ability_exile_cost_zone = non_self_exile_cost_zone(&cost);
+
     // Retry with `~` normalization if the first pass left an Unimplemented node
     // or emitted a target-fallback warning.
     let mut def = parse_activated_with_self_ref_fallback(&effect_text, card_name, ctx);
+
+    ctx.current_ability_exile_cost_zone = prev_exile_zone;
     normalize_activated_mana_instead_delta(&mut def);
     if def.activation_zone.is_none() {
         def.activation_zone = activation_zone_from_self_cost(&cost);
@@ -3609,6 +3649,48 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
     }
 
     (remaining, constraints)
+}
+
+/// CR 602.5b: Recognize a standalone `"Activate only once each turn"` cadence
+/// sentence — the trailing restriction on cards like Luxurious Locomotive's
+/// "Crew 1. Activate only once each turn." Pure / side-effect-free.
+///
+/// Only the standalone imperative sentence is recognized here. The conjoined
+/// `"activate only if [X] and only once each turn"` tail is a different
+/// grammatical shape with its own slicing requirement, handled by
+/// `strip_once_per_turn_suffix`; the strictly-once-ever `" and only once"`
+/// form is likewise that function's concern (it maps to
+/// `ActivationRestriction::OnlyOnce`, which `ActivationCadence` does not model).
+fn recognize_once_each_turn_cadence(text: &str) -> Option<ActivationCadence> {
+    let lower = text.trim().trim_end_matches('.').to_lowercase();
+    let matched = all_consuming(tag::<_, _, OracleError<'_>>("activate only once each turn"))
+        .parse(lower.as_str())
+        .is_ok();
+    matched.then_some(ActivationCadence::OncePerTurn)
+}
+
+/// CR 702.122 + CR 602.5b: Parse a Crew keyword line, capturing an optional
+/// trailing "Activate only once each turn." cadence sentence. MTGJSON supplies
+/// `Crew:N` without the cadence, so this re-extracts the full keyword from Oracle
+/// text when the line carries the standalone restriction sentence; the merge in
+/// `synthesis.rs` then replaces the cadence-less MTGJSON keyword. Returns `None`
+/// when there is no cadence sentence, leaving the MTGJSON keyword untouched.
+/// `lower` is the reminder-stripped, lowercased line.
+fn parse_crew_keyword(lower: &str) -> Option<Keyword> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("crew ").parse(lower).ok()?;
+    let (power, after_power) = parse_number(rest)?;
+    // After the power, the only modeled tail is the cadence sentence: "Crew N.
+    // Activate only once each turn." A bare "Crew N" (no tail) yields None so the
+    // MTGJSON keyword is kept as-is.
+    let tail = after_power.trim_start_matches(|c: char| c == '.' || c.is_whitespace());
+    if recognize_once_each_turn_cadence(tail) == Some(ActivationCadence::OncePerTurn) {
+        Some(Keyword::Crew {
+            power,
+            once_per_turn: ActivationCadence::OncePerTurn,
+        })
+    } else {
+        None
+    }
 }
 
 /// Strip "and only once each turn" / "and only once" compound suffixes from a condition_text
@@ -4420,6 +4502,51 @@ mod tests {
                 other => panic!("expected Pump, got {other:?}"),
             }
         }
+    }
+
+    /// CR 706.2 + CR 706.3b: "where X is the result" binds X to the preceding
+    /// die roll. Hammer Helper's inline +X/+0 pump must parse as a dynamic
+    /// power modification referencing `EventContextAmount`, not be swallowed.
+    #[test]
+    fn hammer_helper_die_result_pump_parses_dynamic_power_no_warning() {
+        let r = parse(
+            "Gain control of target creature until end of turn. Untap that creature and roll a six-sided die. Until end of turn, it gains haste and gets +X/+0, where X is the result.",
+            "Hammer Helper",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert!(
+            r.parse_warnings
+                .iter()
+                .all(|warning| warning.to_string().split_whitespace().next()
+                    != Some("Swallow:DynamicQty")),
+            "unexpected DynamicQty warning: {:?}",
+            r.parse_warnings
+        );
+        assert_eq!(r.abilities.len(), 1);
+        // GainControl → Untap → RollDie → GenericEffect
+        let generic = r.abilities[0]
+            .sub_ability
+            .as_ref()
+            .and_then(|a| a.sub_ability.as_ref())
+            .and_then(|a| a.sub_ability.as_ref())
+            .expect("GenericEffect should be the 4th link of the chain");
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = generic.effect.as_ref()
+        else {
+            panic!("expected GenericEffect, got {:?}", generic.effect);
+        };
+        let mods = &static_abilities[0].modifications;
+        assert!(
+            mods.contains(&ContinuousModification::AddDynamicPower {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+            }),
+            "expected AddDynamicPower(EventContextAmount), got {mods:?}"
+        );
     }
 
     #[test]
@@ -5835,6 +5962,72 @@ mod tests {
                 ActivationRestriction::AsSorcery,
                 ActivationRestriction::OnlyOnceEachTurn,
             ]
+        );
+    }
+
+    #[test]
+    fn crew_with_activate_only_once_each_turn_carries_cadence() {
+        // CR 702.122 + CR 602.5b: Luxurious Locomotive — "Crew 1. Activate only
+        // once each turn." The trailing cadence sentence upgrades the keyword's
+        // `once_per_turn` field from the cadence-less MTGJSON `Crew`.
+        let r = parse_with_keyword_names(
+            "Crew 1. Activate only once each turn. (Tap any number of creatures you control with total power 1 or more: This Vehicle becomes an artifact creature until end of turn.)",
+            "Luxurious Locomotive",
+            &["Crew"],
+            &["Artifact"],
+            &["Vehicle"],
+        );
+        assert!(
+            r.extracted_keywords.contains(&Keyword::Crew {
+                power: 1,
+                once_per_turn: ActivationCadence::OncePerTurn,
+            }),
+            "expected Crew {{ power: 1, once_per_turn: OncePerTurn }}, got {:?}",
+            r.extracted_keywords
+        );
+    }
+
+    #[test]
+    fn plain_crew_line_extracts_unlimited_cadence() {
+        // A bare "Crew N" line (no cadence sentence) parses as the default
+        // `Unlimited` cadence — no once-per-turn restriction is invented.
+        let r = parse_with_keyword_names(
+            "Crew 3 (Tap any number of creatures you control with total power 3 or more: This Vehicle becomes an artifact creature until end of turn.)",
+            "Smuggler's Copter",
+            &["Crew"],
+            &["Artifact"],
+            &["Vehicle"],
+        );
+        assert!(
+            r.extracted_keywords.contains(&Keyword::Crew {
+                power: 3,
+                once_per_turn: ActivationCadence::Unlimited,
+            }),
+            "a plain Crew line keeps the default Unlimited cadence; got {:?}",
+            r.extracted_keywords
+        );
+    }
+
+    #[test]
+    fn kirol_standalone_activate_only_once_each_turn_unchanged() {
+        // Regression witness: Kirol, Attentive First-Year — a NORMAL activated
+        // ability with a standalone "Activate only once each turn." sentence.
+        // Factoring `recognize_once_each_turn_cadence` must not disturb this
+        // path; the ability still carries `OnlyOnceEachTurn`.
+        let r = parse(
+            "Tap two untapped creatures you control: Copy target triggered ability you control. You may choose new targets for the copy. Activate only once each turn.",
+            "Kirol, Attentive First-Year",
+            &[],
+            &["Creature"],
+            &["Elf", "Druid"],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        assert!(
+            r.abilities[0]
+                .activation_restrictions
+                .contains(&ActivationRestriction::OnlyOnceEachTurn),
+            "Kirol's activated ability must still carry OnlyOnceEachTurn; got {:?}",
+            r.abilities[0].activation_restrictions
         );
     }
 
@@ -7397,6 +7590,45 @@ mod tests {
         // CR 609.3: "twice" → repeat_for = Fixed(2), resolver handles repetition.
         assert_eq!(def.repeat_for, Some(QuantityExpr::Fixed { value: 2 }));
         assert!(def.sub_ability.is_none());
+    }
+
+    #[test]
+    fn repeat_this_process_you_may_sets_controller_choice() {
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::RepeatContinuation;
+        // CR 107.1c: Ad Nauseam — "You may repeat this process any number of
+        // times." sets the root ability's `repeat_until` to a controller
+        // decision, instead of being silently dropped.
+        let def = parse_effect_chain(
+            "Reveal the top card of your library and put that card into your hand. \
+             You lose life equal to its mana value. \
+             You may repeat this process any number of times.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(
+            def.repeat_until,
+            Some(RepeatContinuation::ControllerChoice),
+            "expected repeat_until = ControllerChoice, got {:?}",
+            def.repeat_until,
+        );
+    }
+
+    #[test]
+    fn repeat_this_process_if_you_do_stays_recognized_without_predicate() {
+        use crate::parser::oracle_effect::parse_effect_chain;
+        // CR 608.2c: Primal Surge — "If you do, repeat this process." is the
+        // game-state-predicate form, a deferred unit. The directive is still
+        // recognized (no Unimplemented gap) but sets no `repeat_until`.
+        let def = parse_effect_chain(
+            "Exile the top card of your library. If it's a permanent card, you \
+             may put it onto the battlefield. If you do, repeat this process.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(
+            def.repeat_until, None,
+            "the 'if you do' form is deferred — no predicate set, got {:?}",
+            def.repeat_until,
+        );
     }
 
     #[test]

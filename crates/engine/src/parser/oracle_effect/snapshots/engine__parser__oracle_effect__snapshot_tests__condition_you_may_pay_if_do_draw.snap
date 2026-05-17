@@ -1,5 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_effect/mod.rs
+assertion_line: 31927
 expression: def
 ---
 {
@@ -42,7 +43,8 @@ expression: def
     },
     "optional_targeting": false,
     "optional": false,
-    "forward_result": false
+    "forward_result": false,
+    "sub_link": "SequentialSibling"
   },
   "duration": null,
   "description": null,

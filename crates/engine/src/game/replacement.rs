@@ -2155,6 +2155,13 @@ fn evaluate_replacement_condition(
             .objects
             .get(&source_id)
             .is_some_and(|o| o.cast_from_zone == Some(Zone::Graveyard)),
+        // CR 702.188a: applies only when the source permanent's spell was cast
+        // using the named alternative cost. Mirrors
+        // `TriggerCondition::CastVariantPaid` (triggers.rs).
+        ReplacementCondition::CastVariantPaid { variant } => state
+            .objects
+            .get(&source_id)
+            .is_some_and(|o| o.cast_variant_paid == Some((*variant, state.turn_number))),
         // CR 603.4: "if you cast it from [zone]" — applies only when the source
         // permanent was cast from the gated zone. Equivalent to CastViaEscape
         // for arbitrary zones (Hand for Myojin, Exile for foretell-style, etc.).
@@ -4716,6 +4723,57 @@ mod tests {
         ));
         assert!(!evaluate_replacement_condition(
             &ReplacementCondition::SourceTappedState { tapped: false },
+            PlayerId(0),
+            ObjectId(10),
+            &state,
+            None,
+            &dummy_begin_turn_event(),
+        ));
+    }
+
+    #[test]
+    fn cast_variant_paid_condition_matches_web_slinging_tag() {
+        // CR 702.188a: Scarlet Spider's "Sensational Save" replacement applies
+        // only when the source's spell was cast using web-slinging.
+        use crate::types::ability::CastVariantPaid;
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, Vec::new());
+        let cond = ReplacementCondition::CastVariantPaid {
+            variant: CastVariantPaid::WebSlinging,
+        };
+
+        // Untagged (cast normally) → condition false, no counters.
+        assert!(!evaluate_replacement_condition(
+            &cond,
+            PlayerId(0),
+            ObjectId(10),
+            &state,
+            None,
+            &dummy_begin_turn_event(),
+        ));
+
+        // Tagged this turn with web-slinging → condition true.
+        state
+            .objects
+            .get_mut(&ObjectId(10))
+            .unwrap()
+            .cast_variant_paid = Some((CastVariantPaid::WebSlinging, state.turn_number));
+        assert!(evaluate_replacement_condition(
+            &cond,
+            PlayerId(0),
+            ObjectId(10),
+            &state,
+            None,
+            &dummy_begin_turn_event(),
+        ));
+
+        // Tagged with a different variant → condition false.
+        state
+            .objects
+            .get_mut(&ObjectId(10))
+            .unwrap()
+            .cast_variant_paid = Some((CastVariantPaid::Evoke, state.turn_number));
+        assert!(!evaluate_replacement_condition(
+            &cond,
             PlayerId(0),
             ObjectId(10),
             &state,
