@@ -6632,7 +6632,8 @@ mod tests {
             Zone::Battlefield,
         );
         {
-            let duration = Duration::UntilNextUntapStepOf {
+            let duration = Duration::UntilNextStepOf {
+                step: Phase::Untap,
                 player: PlayerScope::Controller,
             };
             let obj = state.objects.get_mut(&vorinclex).unwrap();

@@ -10,6 +10,7 @@ use engine::types::ability::{
     StaticDefinition,
 };
 use engine::types::statics::StaticMode;
+use engine::types::Phase;
 
 use crate::convert::keyword::try_convert as keyword_try_convert;
 use crate::convert::result::{ConvResult, ConversionGap};
@@ -637,10 +638,11 @@ pub fn expiration_to_duration(exp: &Expiration) -> ConvResult<Duration> {
             }
         }
         // CR 502.1: "during your next untap step" — Π-2 parameterized
-        // `UntilNextUntapStepOf { player: Controller }` ends at the affected
+        // `UntilNextStepOf { step: Untap, player: Controller }` ends at the affected
         // permanent's controller's next untap step, matching the SelfPlayer scope.
         Expiration::DuringPlayersNextUntapStep(p) if is_self_player(p) => {
-            Duration::UntilNextUntapStepOf {
+            Duration::UntilNextStepOf {
+                step: Phase::Untap,
                 player: PlayerScope::Controller,
             }
         }
@@ -673,7 +675,7 @@ pub fn expiration_to_duration(exp: &Expiration) -> ConvResult<Duration> {
 
 /// True when the `Player` reference resolves to the effect's own controller —
 /// the only `PlayerScope` (`Controller`) the `Duration::UntilNextTurnOf` /
-/// `UntilNextUntapStepOf` parameterizations bind today.
+/// `UntilNextStepOf` parameterizations bind today.
 fn is_self_player(p: &Player) -> bool {
     matches!(p, Player::You | Player::SelfPlayer | Player::ItsController)
 }

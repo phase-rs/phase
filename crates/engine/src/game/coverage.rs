@@ -691,11 +691,12 @@ fn fmt_duration(d: &Duration) -> String {
             format!("until next turn ({})", fmt_player_scope(*player))
         }
         Duration::UntilHostLeavesPlay => "while on battlefield".to_string(),
-        Duration::UntilNextUntapStepOf { player } => {
-            format!("until next untap step ({})", fmt_player_scope(*player))
-        }
-        Duration::UntilNextEndStepOf { player } => {
-            format!("until next end step ({})", fmt_player_scope(*player))
+        Duration::UntilNextStepOf { step, player } => {
+            format!(
+                "until next {} ({})",
+                fmt_phase(step),
+                fmt_player_scope(*player)
+            )
         }
         Duration::ForAsLongAs { .. } => "for as long as condition".to_string(),
         Duration::Permanent => "permanent".to_string(),

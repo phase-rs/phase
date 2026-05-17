@@ -3473,7 +3473,8 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 }]);
             Effect::GenericEffect {
                 static_abilities: vec![static_def],
-                duration: Some(Duration::UntilNextUntapStepOf {
+                duration: Some(Duration::UntilNextStepOf {
+                    step: Phase::Untap,
                     player: PlayerScope::Controller,
                 }),
                 target: Some(affected),
@@ -3493,7 +3494,8 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 }]);
             Effect::GenericEffect {
                 static_abilities: vec![static_def],
-                duration: Some(Duration::UntilNextUntapStepOf {
+                duration: Some(Duration::UntilNextStepOf {
+                    step: Phase::Untap,
                     player: PlayerScope::Controller,
                 }),
                 target: Some(affected),

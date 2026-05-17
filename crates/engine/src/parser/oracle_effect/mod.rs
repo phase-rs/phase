@@ -9974,6 +9974,7 @@ pub(crate) fn parse_effect_chain_ir(
                     opponent_may_scope: None,
                     repeat_for: None,
                     player_scope: None,
+                    starting_with: None,
                     delayed_condition: None,
                     prefix_delayed_condition: None,
                     intrinsic_continuation: None,
@@ -12755,7 +12756,8 @@ fn strip_leading_duration(text: &str) -> Option<(Duration, &str)> {
             // CR 513.1 + CR 611.2a: Rocco, Street Chef and the floating
             // play-permission class — "Until your next end step, ...".
             value(
-                Duration::UntilNextEndStepOf {
+                Duration::UntilNextStepOf {
+                    step: Phase::End,
                     player: PlayerScope::Controller,
                 },
                 tag("until your next end step, "),

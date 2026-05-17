@@ -19,6 +19,7 @@ use crate::types::game_state::{DayNight, GameState};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::layers::{ActiveContinuousEffect, Layer};
+use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
 
@@ -58,7 +59,7 @@ pub fn prune_end_of_combat_effects(state: &mut GameState) {
 }
 
 /// CR 513.1 + CR 611.2a: Remove transient continuous effects whose
-/// `Duration::UntilNextEndStepOf { Controller }` expires at the start of
+/// `Duration::UntilNextStepOf { step: Phase::End, player: Controller }` expires at the start of
 /// `active_player`'s end step. Called from `turns.rs::auto_advance` at the
 /// End phase alongside `prune_end_step_casting_permissions` so any future
 /// parser arm that emits this duration on a `TimedContinuousEffect` (pump,
@@ -69,7 +70,8 @@ pub fn prune_until_next_end_step_effects(state: &mut GameState, active_player: P
     state.transient_continuous_effects.retain(|e| {
         !(matches!(
             e.duration,
-            Duration::UntilNextEndStepOf {
+            Duration::UntilNextStepOf {
+                step: Phase::End,
                 player: PlayerScope::Controller
             }
         ) && e.controller == active_player)
@@ -103,14 +105,17 @@ pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
                 duration: Duration::UntilNextTurnOf { .. } | Duration::Permanent,
                 ..
             } => true,
-            // CR 513.1: `UntilNextEndStepOf` is expired by
+            // CR 513.1: `UntilNextStepOf { step: End }` is expired by
             // `prune_end_step_casting_permissions` at the End phase entry,
             // NOT at cleanup. Retain here.
             CastingPermission::PlayFromExile {
-                duration: Duration::UntilNextEndStepOf { .. },
+                duration:
+                    Duration::UntilNextStepOf {
+                        step: Phase::End, ..
+                    },
                 ..
             } => true,
-            // UntilHostLeavesPlay / ForAsLongAs / UntilNextUntapStepOf:
+            // UntilHostLeavesPlay / ForAsLongAs / UntilNextStepOf { step: Untap }:
             // these are pruned by their own systems (zone-exit cleanup, condition
             // re-evaluation, untap step). Retain here — they are not end-of-turn.
             CastingPermission::PlayFromExile { .. } => true,
@@ -144,11 +149,14 @@ pub fn prune_until_next_turn_casting_permissions(state: &mut GameState, active_p
                 granted_to,
                 ..
             } => *granted_to != active_player,
-            // CR 513.1 + CR 611.2a/b: `UntilNextEndStepOf { Controller }` is
+            // CR 513.1 + CR 611.2a/b: `UntilNextStepOf { step: End }` is
             // expired by `prune_end_step_casting_permissions` at the end
             // step, NOT at the untap step. Retain here.
             CastingPermission::PlayFromExile {
-                duration: Duration::UntilNextEndStepOf { .. },
+                duration:
+                    Duration::UntilNextStepOf {
+                        step: Phase::End, ..
+                    },
                 ..
             } => true,
             CastingPermission::PlayFromExile { .. }
@@ -166,7 +174,7 @@ pub fn prune_until_next_turn_casting_permissions(state: &mut GameState, active_p
 }
 
 /// CR 513.1 + CR 611.2a/b: Remove `PlayFromExile` permissions granted to
-/// `active_player` whose `Duration::UntilNextEndStepOf { Controller }`
+/// `active_player` whose `Duration::UntilNextStepOf { step: End, player: Controller }`
 /// expires at that player's next end step. Called at the start of the
 /// End phase in `turns.rs::auto_advance`.
 ///
@@ -184,7 +192,8 @@ pub fn prune_end_step_casting_permissions(state: &mut GameState, active_player: 
         obj.casting_permissions.retain(|p| match p {
             CastingPermission::PlayFromExile {
                 duration:
-                    Duration::UntilNextEndStepOf {
+                    Duration::UntilNextStepOf {
+                        step: Phase::End,
                         player: PlayerScope::Controller,
                     },
                 granted_to,
@@ -242,7 +251,8 @@ pub fn prune_controller_untap_step_effects(state: &mut GameState, active_player:
     state.transient_continuous_effects.retain(|e| {
         if !matches!(
             e.duration,
-            Duration::UntilNextUntapStepOf {
+            Duration::UntilNextStepOf {
+                step: Phase::Untap,
                 player: PlayerScope::Controller
             }
         ) {

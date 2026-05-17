@@ -10165,7 +10165,8 @@ mod tests {
                             static_def.mode == crate::types::statics::StaticMode::CantUntap
                         }) && matches!(
                             duration,
-                            Some(crate::types::ability::Duration::UntilNextUntapStepOf {
+                            Some(crate::types::ability::Duration::UntilNextStepOf {
+                                step: crate::types::phase::Phase::Untap,
                                 player: crate::types::ability::PlayerScope::Controller,
                             })
                         );
@@ -13001,7 +13002,7 @@ mod pipeline_snapshot_tests {
     /// CR 513.1 + CR 611.2a + CR 108.3 + CR 400.7: Rocco's first trigger
     /// parses to a Phase-mode end-step trigger whose chained sub-ability is
     /// `GrantCastingPermission { permission: PlayFromExile { duration:
-    /// UntilNextEndStepOf { Controller }, ... }, target: TrackedSet(0),
+    /// UntilNextStepOf { step: End, player: Controller }, ... }, target: TrackedSet(0),
     /// grantee: ObjectOwner }`. CR 305.1 + CR 601.2: the second trigger is
     /// disjunctive on "plays a land from exile" / "casts a spell from
     /// exile" and emits two TriggerDefinitions — one `LandPlayed`, one
@@ -13041,13 +13042,15 @@ mod pipeline_snapshot_tests {
             } => {
                 match permission {
                     CastingPermission::PlayFromExile {
-                        duration: Duration::UntilNextEndStepOf {
+                        duration:
+                            Duration::UntilNextStepOf {
+                                step: crate::types::phase::Phase::End,
                             player: PlayerScope::Controller,
                         },
                         ..
                     } => {}
                     _ => panic!(
-                        "expected PlayFromExile {{ UntilNextEndStepOf {{ Controller }} }}, got {:?}",
+                        "expected PlayFromExile {{ UntilNextStepOf {{ End, Controller }} }}, got {:?}",
                         permission,
                     ),
                 }

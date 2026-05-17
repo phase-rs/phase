@@ -11,6 +11,8 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{ManaColor, ManaCost, ManaPool, ManaType, PaymentContext};
+#[cfg(test)]
+use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
@@ -3664,7 +3666,8 @@ mod tests {
             "Vorinclex, Voice of Hunger".to_string(),
             Zone::Battlefield,
         );
-        let duration = Duration::UntilNextUntapStepOf {
+        let duration = Duration::UntilNextStepOf {
+            step: Phase::Untap,
             player: PlayerScope::Controller,
         };
         state

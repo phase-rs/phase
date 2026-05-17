@@ -5792,7 +5792,8 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         let clause = nom_primitives::split_once_on(after_plays, ", ")
             .map(|(_, (before, _))| before)
             .unwrap_or(after_plays);
-        if let Some(filter) = parse_type_phrase(clause) {
+        let (filter, _) = parse_type_phrase(clause);
+        if !matches!(filter, TargetFilter::Any) {
             def.valid_card = Some(filter);
         }
 
@@ -14591,6 +14592,7 @@ mod tests {
                 opponent_may_scope: None,
                 repeat_for: None,
                 player_scope: None,
+                starting_with: None,
                 delayed_condition: None,
                 prefix_delayed_condition: None,
                 intrinsic_continuation: None,

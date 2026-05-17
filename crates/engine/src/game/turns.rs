@@ -1454,7 +1454,7 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
             }
             Phase::End => {
                 // CR 513.1 + CR 611.2a/b: Expire `PlayFromExile { duration:
-                // UntilNextEndStepOf { Controller } }` grants for the active
+                // UntilNextStepOf { step: End, player: Controller } }` grants for the active
                 // player BEFORE end-step triggers fire. CR 513.2 prevents
                 // the end step from "backing up" — a new same-turn grant
                 // from an end-step trigger (e.g., Rocco, Street Chef) is
@@ -1462,7 +1462,7 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 super::layers::prune_end_step_casting_permissions(state, state.active_player);
                 // CR 513.1 + CR 611.2a: Mirror the casting-permission prune
                 // for transient continuous effects with the same duration —
-                // any future parser arm emitting `UntilNextEndStepOf` onto a
+                // any future parser arm emitting `UntilNextStepOf { step: End }` onto a
                 // pump / control-change effect expires here rather than
                 // outliving its scheduled step.
                 super::layers::prune_until_next_end_step_effects(state, state.active_player);

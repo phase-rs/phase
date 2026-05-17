@@ -1121,12 +1121,11 @@ pub enum ManaSpendRestriction {
 
 /// Duration for temporary effects.
 ///
-/// Player-axis variants (`UntilNextTurnOf`, `UntilNextUntapStepOf`) are
-/// parameterized by `PlayerScope` per the workspace "Parameterize, don't
-/// proliferate" principle. `PlayerScope::Controller` recovers the legacy
-/// "until your next turn" / "controller's next untap step" semantics; future
-/// `Target` / `Opponent` / `AllPlayers` readings unblock cards whose duration
-/// is bound to a non-controller player.
+/// Player-axis variants are parameterized by `PlayerScope` per the workspace
+/// "Parameterize, don't proliferate" principle. `PlayerScope::Controller`
+/// recovers the legacy "until your next turn" / "controller's next step"
+/// semantics; future `Target` / `Opponent` / `AllPlayers` readings unblock
+/// cards whose duration is bound to a non-controller player.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Duration {
     /// CR 514.2: Effect expires at end of turn (cleanup step).
@@ -1142,21 +1141,12 @@ pub enum Duration {
     /// CR 611.2a: Effect expires when the source object leaves the
     /// battlefield.
     UntilHostLeavesPlay,
-    /// CR 502.3 + CR 611.2a: Effect expires at the beginning of `player`'s
-    /// next untap step. `PlayerScope::Controller` corresponds to the legacy
-    /// "controller's next untap step" reading used by exert / "doesn't
-    /// untap" effects.
-    UntilNextUntapStepOf {
-        player: PlayerScope,
-    },
-    /// CR 513.1 + CR 611.2a: Effect expires at the beginning of `player`'s
-    /// next end step. `PlayerScope::Controller` corresponds to the
-    /// "until your next end step" reading used by Rocco, Street Chef and
-    /// similar floating play-permission patterns. Categorical boundary:
-    /// distinct from `UntilNextUntapStepOf` (CR 502 untap step) and
-    /// `UntilEndOfTurn` (CR 514.2 cleanup) — these are separate
-    /// turn-structure steps that resolve independently.
-    UntilNextEndStepOf {
+    /// CR 500.1 + CR 611.2a: Effect expires at the beginning of `player`'s
+    /// next named phase/step. `Phase::Untap` covers exert / "doesn't untap"
+    /// effects (CR 502.3). `Phase::End` covers "until your next end step"
+    /// floating play-permission patterns such as Rocco, Street Chef (CR 513.1).
+    UntilNextStepOf {
+        step: Phase,
         player: PlayerScope,
     },
     /// CR 611.2b: "for as long as [condition]" — effect persists while condition holds.
@@ -10732,10 +10722,12 @@ mod tests {
             Duration::UntilNextTurnOf {
                 player: PlayerScope::Controller,
             },
-            Duration::UntilNextUntapStepOf {
+            Duration::UntilNextStepOf {
+                step: Phase::Untap,
                 player: PlayerScope::Controller,
             },
-            Duration::UntilNextEndStepOf {
+            Duration::UntilNextStepOf {
+                step: Phase::End,
                 player: PlayerScope::Controller,
             },
             Duration::UntilHostLeavesPlay,

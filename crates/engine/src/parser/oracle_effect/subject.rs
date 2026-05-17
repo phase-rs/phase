@@ -14,6 +14,7 @@ use crate::types::ability::{
     RoundingMode, StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::game_state::DayNight;
+use crate::types::phase::Phase;
 use crate::types::statics::StaticMode;
 
 use super::super::oracle_nom::error::OracleResult;
@@ -1852,7 +1853,8 @@ fn build_restriction_clause(
     let has_next_untap = normalized.to_lowercase().contains("next untap step")
         || predicate.to_lowercase().contains("next untap step");
     let duration = if has_next_untap && modes.iter().any(|m| matches!(m, StaticMode::CantUntap)) {
-        Some(Duration::UntilNextUntapStepOf {
+        Some(Duration::UntilNextStepOf {
+            step: Phase::Untap,
             player: PlayerScope::Controller,
         })
     } else {
@@ -2655,7 +2657,8 @@ mod tests {
         assert_eq!(target, None);
         assert_eq!(
             duration,
-            Some(Duration::UntilNextUntapStepOf {
+            Some(Duration::UntilNextStepOf {
+                step: Phase::Untap,
                 player: PlayerScope::Controller,
             })
         );

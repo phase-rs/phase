@@ -193,6 +193,7 @@ mod tests {
     use crate::types::ability::{CastingPermission, Duration, PlayerScope, TargetFilter};
     use crate::types::game_state::GameState;
     use crate::types::identifiers::CardId;
+    use crate::types::phase::Phase;
     use crate::types::zones::Zone;
 
     /// CR 611.2a default: grantee defaults to the ability controller.
@@ -423,12 +424,12 @@ mod tests {
     }
 
     // ----------------------------------------------------------------
-    // Rocco, Street Chef (issue #412): Duration::UntilNextEndStepOf and
+    // Rocco, Street Chef (issue #412): Duration::UntilNextStepOf { step: End } and
     // its end-step prune lifecycle.
     // ----------------------------------------------------------------
 
     /// CR 513.1 + CR 611.2a: Granting `PlayFromExile { duration:
-    /// UntilNextEndStepOf { Controller } }` writes the permission with the
+    /// UntilNextStepOf { step: End, player: Controller } }` writes the permission with the
     /// new variant onto each object owned by the iterated player. This
     /// covers the parser-output → resolver path for Rocco's first trigger.
     #[test]
@@ -452,7 +453,8 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::GrantCastingPermission {
                 permission: CastingPermission::PlayFromExile {
-                    duration: Duration::UntilNextEndStepOf {
+                    duration: Duration::UntilNextStepOf {
+                        step: Phase::End,
                         player: PlayerScope::Controller,
                     },
                     granted_to: PlayerId(0),
@@ -482,7 +484,8 @@ mod tests {
                 } => {
                     assert_eq!(
                         duration,
-                        &Duration::UntilNextEndStepOf {
+                        &Duration::UntilNextStepOf {
+                            step: Phase::End,
                             player: PlayerScope::Controller,
                         },
                     );
@@ -494,7 +497,7 @@ mod tests {
     }
 
     /// CR 513.1: `prune_end_step_casting_permissions` removes only the
-    /// `UntilNextEndStepOf` permissions whose `granted_to == active_player`.
+    /// `UntilNextStepOf { step: End }` permissions whose `granted_to == active_player`.
     /// Permissions for other players survive (asymmetric multiplayer
     /// prune), and non-end-step durations (Permanent, UntilEndOfTurn,
     /// UntilNextTurnOf) all survive.
@@ -536,13 +539,15 @@ mod tests {
         };
 
         state.objects.get_mut(&card_a).unwrap().casting_permissions = vec![mk_perm(
-            Duration::UntilNextEndStepOf {
+            Duration::UntilNextStepOf {
+                step: Phase::End,
                 player: PlayerScope::Controller,
             },
             PlayerId(0),
         )];
         state.objects.get_mut(&card_b).unwrap().casting_permissions = vec![mk_perm(
-            Duration::UntilNextEndStepOf {
+            Duration::UntilNextStepOf {
+                step: Phase::End,
                 player: PlayerScope::Controller,
             },
             PlayerId(1),
@@ -558,17 +563,17 @@ mod tests {
             ),
         ];
 
-        // Active player is 0 — only their UntilNextEndStepOf permissions go.
+        // Active player is 0 — only their UntilNextStepOf { step: End } permissions go.
         prune_end_step_casting_permissions(&mut state, PlayerId(0));
 
         assert!(
             state.objects[&card_a].casting_permissions.is_empty(),
-            "P0's UntilNextEndStepOf grant should be pruned",
+            "P0's UntilNextStepOf {{ step: End }} grant should be pruned",
         );
         assert_eq!(
             state.objects[&card_b].casting_permissions.len(),
             1,
-            "P1's UntilNextEndStepOf grant survives P0's end step",
+            "P1's UntilNextStepOf {{ step: End }} grant survives P0's end step",
         );
         assert_eq!(
             state.objects[&card_c].casting_permissions.len(),
@@ -577,7 +582,7 @@ mod tests {
         );
     }
 
-    /// CR 513.2 ordering regression: a new `UntilNextEndStepOf` permission
+    /// CR 513.2 ordering regression: a new `UntilNextStepOf { step: End }` permission
     /// granted by an end-step trigger DURING this end step (after the
     /// prune has already run) MUST survive — CR 513.2 prevents the end
     /// step from "backing up" so the new trigger lands after the prune.
@@ -603,7 +608,8 @@ mod tests {
             .get_mut(&exiled_pre_prune)
             .unwrap()
             .casting_permissions = vec![CastingPermission::PlayFromExile {
-            duration: Duration::UntilNextEndStepOf {
+            duration: Duration::UntilNextStepOf {
+                step: Phase::End,
                 player: PlayerScope::Controller,
             },
             granted_to: PlayerId(0),
@@ -633,7 +639,8 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::GrantCastingPermission {
                 permission: CastingPermission::PlayFromExile {
-                    duration: Duration::UntilNextEndStepOf {
+                    duration: Duration::UntilNextStepOf {
+                        step: Phase::End,
                         player: PlayerScope::Controller,
                     },
                     granted_to: PlayerId(0),
@@ -666,7 +673,8 @@ mod tests {
             } => {
                 assert_eq!(
                     duration,
-                    &Duration::UntilNextEndStepOf {
+                    &Duration::UntilNextStepOf {
+                        step: Phase::End,
                         player: PlayerScope::Controller,
                     },
                 );
@@ -677,7 +685,7 @@ mod tests {
     }
 
     /// CR 514.2: `prune_end_of_turn_casting_permissions` at cleanup must
-    /// NOT touch `UntilNextEndStepOf` permissions — that variant is
+    /// NOT touch `UntilNextStepOf { step: End }` permissions — that variant is
     /// pruned at the next end step instead. Defensive arm in the
     /// cleanup prune match.
     #[test]
@@ -695,7 +703,8 @@ mod tests {
         );
         state.objects.get_mut(&card).unwrap().casting_permissions =
             vec![CastingPermission::PlayFromExile {
-                duration: Duration::UntilNextEndStepOf {
+                duration: Duration::UntilNextStepOf {
+                    step: Phase::End,
                     player: PlayerScope::Controller,
                 },
                 granted_to: PlayerId(0),
@@ -710,12 +719,12 @@ mod tests {
         assert_eq!(
             state.objects[&card].casting_permissions.len(),
             1,
-            "UntilNextEndStepOf must survive the cleanup prune",
+            "UntilNextStepOf {{ step: End }} must survive the cleanup prune",
         );
     }
 
     /// CR 502.3: `prune_until_next_turn_casting_permissions` at the
-    /// untap step must NOT touch `UntilNextEndStepOf` permissions either.
+    /// untap step must NOT touch `UntilNextStepOf { step: End }` permissions either.
     #[test]
     fn untap_prune_retains_until_next_end_step_permissions() {
         use crate::game::layers::prune_until_next_turn_casting_permissions;
@@ -731,7 +740,8 @@ mod tests {
         );
         state.objects.get_mut(&card).unwrap().casting_permissions =
             vec![CastingPermission::PlayFromExile {
-                duration: Duration::UntilNextEndStepOf {
+                duration: Duration::UntilNextStepOf {
+                    step: Phase::End,
                     player: PlayerScope::Controller,
                 },
                 granted_to: PlayerId(0),
@@ -746,7 +756,7 @@ mod tests {
         assert_eq!(
             state.objects[&card].casting_permissions.len(),
             1,
-            "UntilNextEndStepOf must survive the untap-step prune",
+            "UntilNextStepOf {{ step: End }} must survive the untap-step prune",
         );
     }
 }
