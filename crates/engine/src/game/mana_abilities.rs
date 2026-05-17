@@ -460,13 +460,37 @@ pub(crate) fn mana_choice_prompt(
                     .collect(),
             })
         }
-        ManaProduction::ChosenColor { .. } => {
-            if super::effects::mana::chosen_color_for_mana(state, source_id).is_some() {
-                None
-            } else {
-                Some(ManaChoicePrompt::SingleColor {
+        ManaProduction::ChosenColor {
+            fixed_alternative, ..
+        } => {
+            let chosen = super::effects::mana::chosen_color_for_mana(state, source_id);
+            match (fixed_alternative, chosen) {
+                // CR 106.1: "Add {fixed} or one mana of the chosen color" — once
+                // a color is chosen, the player still picks between the fixed
+                // color and the chosen color. Dedupe defensively: identical
+                // options collapse to a 1-element set (no prompt).
+                (Some(fixed), Some(chosen)) => {
+                    let mut options = vec![mana_color_to_type(fixed)];
+                    let chosen_type = mana_color_to_type(&chosen);
+                    if !options.contains(&chosen_type) {
+                        options.push(chosen_type);
+                    }
+                    if options.len() > 1 {
+                        Some(ManaChoicePrompt::SingleColor { options })
+                    } else {
+                        None
+                    }
+                }
+                // CR 106.1: no color chosen yet (cannot occur for Gate lands —
+                // the as-enters Choose always fires first — but the field makes
+                // it representable). The fixed color is a subset of ALL, so a
+                // full five-color prompt loses nothing.
+                (Some(_), None) | (None, None) => Some(ManaChoicePrompt::SingleColor {
                     options: ManaColor::ALL.iter().map(mana_color_to_type).collect(),
-                })
+                }),
+                // CR 106.1: pure chosen-color production with a color already
+                // chosen — no prompt (Utopia Sprawl class).
+                (None, Some(_)) => None,
             }
         }
         // CR 106.7 + CR 106.1b: Reflecting Pool class — surface the union of
@@ -4593,6 +4617,7 @@ mod tests {
                 },
             },
             contribution: ManaContribution::Base,
+            fixed_alternative: None,
         });
         Arc::make_mut(&mut state.objects.get_mut(&nykthos).unwrap().abilities)
             .push(ability.clone());
@@ -4656,6 +4681,7 @@ mod tests {
                         },
                     },
                     contribution: ManaContribution::Base,
+                    fixed_alternative: None,
                 },
                 restrictions: vec![],
                 grants: vec![],

@@ -173,7 +173,7 @@ pub(crate) fn target_filter_controller_scope(filter: &TargetFilter) -> Option<Co
     }
 }
 
-fn matches_player_scope(
+pub(crate) fn matches_player_scope(
     state: &GameState,
     player: PlayerId,
     scope: &PlayerFilter,
@@ -255,6 +255,13 @@ fn matches_player_scope(
                         });
                         triggering.is_none_or(|pid| pid != p.id)
                     }
+                    // CR 109.4: the parent-object-target anchor requires the
+                    // resolving `ResolvedAbility` (for `ability.targets`),
+                    // which this generic scope predicate does not carry. The
+                    // `ChangeSpeed` resolver routes this filter through
+                    // `speed_effects::players_for_filter` instead, which has
+                    // the ability in scope. Unreachable here.
+                    PlayerFilter::ParentObjectTargetController => false,
                 }
         })
 }
@@ -848,7 +855,7 @@ pub fn resolve_effect(
 ) -> Result<(), EffectError> {
     match &ability.effect {
         Effect::StartYourEngines { .. } => speed_effects::resolve_start(state, ability, events),
-        Effect::IncreaseSpeed { .. } => speed_effects::resolve_increase(state, ability, events),
+        Effect::ChangeSpeed { .. } => speed_effects::resolve_change_speed(state, ability, events),
         Effect::DealDamage { .. } => deal_damage::resolve(state, ability, events),
         Effect::Draw { .. } => draw::resolve(state, ability, events),
         Effect::Pump { .. } => pump::resolve(state, ability, events),
@@ -1127,7 +1134,7 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
         Effect::Surveil { count, .. } => quantity_hits_tracked(count),
         Effect::GainLife { amount, .. } => quantity_hits_tracked(amount),
         Effect::LoseLife { amount, .. } => quantity_hits_tracked(amount),
-        Effect::IncreaseSpeed { amount, .. } => quantity_hits_tracked(amount),
+        Effect::ChangeSpeed { amount, .. } => quantity_hits_tracked(amount),
         Effect::PutCounter { count, .. } => quantity_hits_tracked(count),
         Effect::PutCounterAll { count, .. } => quantity_hits_tracked(count),
         Effect::Token { count, .. } => quantity_hits_tracked(count),
@@ -3081,18 +3088,12 @@ fn evaluate_condition(
             comparator,
             rhs,
         } => {
-            let l = crate::game::quantity::resolve_quantity(
-                state,
-                lhs,
-                ability.controller,
-                ability.source_id,
-            );
-            let r = crate::game::quantity::resolve_quantity(
-                state,
-                rhs,
-                ability.controller,
-                ability.source_id,
-            );
+            // CR 608.2c: a conditional second effect — evaluate the quantity
+            // comparison at resolution time. Thread the full `ability` so
+            // target-relative scopes (e.g. `PlayerScope::Target`,
+            // `ParentObjectTargetController`) resolve against `ability.targets`.
+            let l = crate::game::quantity::resolve_quantity_with_targets(state, lhs, ability);
+            let r = crate::game::quantity::resolve_quantity_with_targets(state, rhs, ability);
             comparator.evaluate(l, r)
         }
         AbilityCondition::PreviousEffectAmount { comparator, rhs } => {

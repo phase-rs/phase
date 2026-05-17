@@ -66,6 +66,17 @@ pub fn choose_attackers_with_targets_with_profile(
             })
             .collect()
     };
+    // CR 508.1d / CR 701.15b: creatures with a live must-attack requirement
+    // (goad, "attacks each combat if able", lure statics) MUST be declared as
+    // attackers or the engine rejects the whole declaration. Partition them out
+    // and union them back unconditionally — value heuristics only apply to the
+    // free choices. `creature_must_attack` is the engine's single authority.
+    let mandatory: Vec<ObjectId> = candidates
+        .iter()
+        .copied()
+        .filter(|&id| engine::game::combat::creature_must_attack(state, id))
+        .collect();
+
     let preferred_opponent = preferred_attack_opponent(state, player, &opponents, &candidates);
     // Collect blockers for the most likely attack target rather than the whole table.
     let opponent_blockers: Vec<ObjectId> = state
@@ -179,6 +190,14 @@ pub fn choose_attackers_with_targets_with_profile(
         }
     }
 
+    // CR 508.1d / CR 701.15b: union the mandatory must-attack set. These
+    // creatures are declared regardless of the value heuristic's verdict.
+    for &id in &mandatory {
+        if !attacking_ids.contains(&id) {
+            attacking_ids.push(id);
+        }
+    }
+
     // Crackback analysis: if tapping our attackers leaves us dead on the swing-back,
     // hold back non-vigilance creatures (highest-value first) until we survive.
     if !attacking_ids.is_empty() && !matches!(objective, CombatObjective::PushLethal) {
@@ -211,11 +230,14 @@ pub fn choose_attackers_with_targets_with_profile(
                 .iter()
                 .enumerate()
                 .filter(|&(_, &id)| {
-                    state
-                        .objects
-                        .get(&id)
-                        .map(|o| !o.has_keyword(&Keyword::Vigilance))
-                        .unwrap_or(false)
+                    // CR 508.1d / CR 701.15b: a must-attack creature cannot be
+                    // pruned for crackback — declaring it is mandatory.
+                    !mandatory.contains(&id)
+                        && state
+                            .objects
+                            .get(&id)
+                            .map(|o| !o.has_keyword(&Keyword::Vigilance))
+                            .unwrap_or(false)
                 })
                 .map(|(i, &id)| (i, evaluate_creature(state, id)))
                 .collect();
@@ -1468,6 +1490,40 @@ mod tests {
         obj.keywords = keywords;
         obj.entered_battlefield_turn = Some(1);
         id
+    }
+
+    /// Issue #484 (P0) — E2E: a goaded creature the value heuristic would skip
+    /// MUST still be declared as an attacker, and the resulting declaration must
+    /// be accepted by the engine. Drives the real AI → engine pipeline.
+    #[test]
+    fn goaded_creature_is_declared_and_engine_accepts() {
+        let mut state = setup();
+        // Goaded 1/5: the value heuristic scores it as a non-attacker into a
+        // blocker, but goad (CR 701.15b) forces it to attack.
+        let goaded = add_creature(&mut state, PlayerId(0), "Omo", 1, 5, vec![]);
+        state
+            .objects
+            .get_mut(&goaded)
+            .unwrap()
+            .goaded_by
+            .insert(PlayerId(1));
+        // A vanilla creature for the heuristic to also (legitimately) decline.
+        add_creature(&mut state, PlayerId(0), "Bear", 2, 2, vec![]);
+        // Opponent blocker so the 1/5 looks unprofitable to the heuristic.
+        add_creature(&mut state, PlayerId(1), "Wall", 0, 6, vec![]);
+
+        let attacks = choose_attackers_with_targets(&state, PlayerId(0));
+        assert!(
+            attacks.iter().any(|(id, _)| *id == goaded),
+            "goaded creature must be declared as an attacker (CR 701.15b)"
+        );
+
+        // The AI's declaration must be engine-legal.
+        let result = engine::game::combat::declare_attackers(&mut state, &attacks, &mut vec![]);
+        assert!(
+            result.is_ok(),
+            "engine must accept the AI's goad-compliant declaration: {result:?}"
+        );
     }
 
     #[test]

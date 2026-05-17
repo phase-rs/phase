@@ -208,7 +208,7 @@ expression: "&ir"
             "origin": "Hand",
             "destination": "Library",
             "target": {
-              "type": "Player"
+              "type": "ParentTargetController"
             }
           },
           "cost": null,

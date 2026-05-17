@@ -556,4 +556,111 @@ mod tests {
             "opponent 2 mills 5 — count uses CASTER's hand size (5), not their own (1)"
         );
     }
+
+    /// Issue #477 — Renegade Reaper: "Mill four cards. If at least one Angel
+    /// card is milled this way, you gain 4 life." The `GainLife` sub-ability
+    /// carries `AbilityCondition::ZoneChangedThisWay { Angel }`; the life gain
+    /// must fire ONLY when an Angel was among the milled cards.
+    ///
+    /// CR 608.2c + CR 400.7: the conditional gate references the cards moved
+    /// by the preceding `Mill` this resolution (`last_zone_changed_ids`).
+    ///
+    /// This drives the real pipeline: `resolve_ability_chain` → `Mill` (emits
+    /// `ZoneChanged`, populates `last_zone_changed_ids`) → sub-ability
+    /// condition check (`evaluate_condition` for `ZoneChangedThisWay`) →
+    /// `GainLife`. It is a runtime test, not a shape test.
+    fn renegade_reaper_chain() -> ResolvedAbility {
+        use crate::types::ability::{
+            AbilityCondition, GainLifePlayer, TargetFilter as TF, TypeFilter, TypedFilter,
+        };
+        ResolvedAbility::new(
+            Effect::Mill {
+                count: QuantityExpr::Fixed { value: 4 },
+                target: TargetFilter::Controller,
+                destination: Zone::Graveyard,
+            },
+            vec![TargetRef::Player(PlayerId(0))],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability({
+            let mut gain = ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 4 },
+                    player: GainLifePlayer::Controller,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            );
+            gain.condition = Some(AbilityCondition::ZoneChangedThisWay {
+                filter: TF::Typed(TypedFilter::new(TypeFilter::Subtype("Angel".to_string()))),
+            });
+            gain
+        })
+    }
+
+    #[test]
+    fn renegade_reaper_gains_life_only_when_angel_milled() {
+        // --- Case A: an Angel IS among the milled cards → life gained. ---
+        let mut state = GameState::new_two_player(42);
+        let life_before = state.players[0].life;
+        // Top of library: 3 plain cards + 1 Angel within the milled top-4.
+        for i in 0..3 {
+            create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("Plain {i}"),
+                Zone::Library,
+            );
+        }
+        let angel = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Test Angel".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&angel)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Angel".to_string());
+
+        let ability = renegade_reaper_chain();
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(state.players[0].graveyard.len(), 4, "all 4 cards milled");
+        assert_eq!(
+            state.players[0].life,
+            life_before + 4,
+            "life must increase by 4 — an Angel was milled this way"
+        );
+
+        // --- Case B: NO Angel among the milled cards → life unchanged. ---
+        let mut state = GameState::new_two_player(42);
+        let life_before = state.players[0].life;
+        for i in 0..4 {
+            create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("Plain {i}"),
+                Zone::Library,
+            );
+        }
+        let ability = renegade_reaper_chain();
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(state.players[0].graveyard.len(), 4, "all 4 cards milled");
+        assert_eq!(
+            state.players[0].life, life_before,
+            "life must be unchanged — no Angel was milled this way"
+        );
+    }
 }

@@ -168,7 +168,7 @@ fn rewrite_cost_x_in_effect(effect: &mut crate::types::ability::Effect) {
         Effect::DealDamage { amount, .. }
         | Effect::GainLife { amount, .. }
         | Effect::LoseLife { amount, .. }
-        | Effect::IncreaseSpeed { amount, .. }
+        | Effect::ChangeSpeed { amount, .. }
         | Effect::Draw { count: amount, .. }
         | Effect::Mill { count: amount, .. }
         | Effect::PutCounter { count: amount, .. }
@@ -646,6 +646,9 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     let execute = match &ir.body {
         Some(TriggerBody::EffectChain(chain_ir)) => {
             let mut ability = lower_effect_chain_ir(chain_ir);
+            // CR 702.179c-d: fold trailing speed-floor sentences into the
+            // preceding `ChangeSpeed` effect and drop the orphan node.
+            crate::parser::oracle_effect::fold_speed_floor_sentences(&mut ability);
             if modifiers.has_up_to {
                 ability.optional_targeting = true;
             }

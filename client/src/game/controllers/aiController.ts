@@ -169,27 +169,32 @@ export function createAIController(config: AIControllerConfig): AIController {
         `AI stuck: ${MAX_CONSECUTIVE_FAILURES} consecutive failures on ${waitingFor.type}, dispatching fallback`,
         "warn",
       );
-      // Instead of freezing the game, dispatch a safe escape action.
-      // CancelCast during casting flow, empty combat submissions during combat,
-      // PassPriority otherwise.
-      // has_pending_cast is computed by the engine — no parallel list needed.
-      let fallback: GameAction;
-      if (state.has_pending_cast) {
-        fallback = { type: "CancelCast" };
-      } else if (waitingFor.type === "DeclareAttackers") {
-        fallback = { type: "DeclareAttackers", data: { attacks: [] } };
-      } else if (waitingFor.type === "DeclareBlockers") {
-        fallback = { type: "DeclareBlockers", data: { assignments: [] } };
-      } else {
-        fallback = { type: "PassPriority" };
-      }
       // Guard against re-entry: set pending so subscription callbacks during
       // the fallback dispatch don't trigger another fallback cascade.
       pending = true;
+      // Resolve a guaranteed-legal escape action. A hardcoded empty combat
+      // declaration is NOT always legal — CR 508.1d / CR 701.15b require
+      // goaded / "attacks if able" creatures to be declared. Instead, ask the
+      // engine for its legal-action list (the single authority for legality)
+      // and pick the first entry matching the current WaitingFor.
+      // CancelCast escapes a stuck casting flow; PassPriority is the final
+      // fallthrough — never dispatch `undefined`.
+      const fallbackPromise: Promise<GameAction> = state.has_pending_cast
+        ? Promise.resolve<GameAction>({ type: "CancelCast" })
+        : (() => {
+            const { adapter } = useGameStore.getState();
+            if (!adapter) return Promise.resolve<GameAction>({ type: "PassPriority" });
+            return adapter.getLegalActions().then((result) => {
+              const match = result.actions.find((a) => a.type === waitingFor.type);
+              return match ?? { type: "PassPriority" };
+            });
+          })();
       // Dispatch the fallback as the AI seat that's being unstuck — NEVER
       // as the local human. The engine guard would reject a human-seat actor
-      // while the WaitingFor belongs to the AI.
-      dispatchAction(fallback, waitingPlayerId)
+      // while the WaitingFor belongs to the AI. A rejection from
+      // getLegalActions routes into the existing .catch() below.
+      fallbackPromise
+        .then((fallback) => dispatchAction(fallback, waitingPlayerId))
         .then(() => {
           consecutiveFailures = 0;
           totalFailures = 0;

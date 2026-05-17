@@ -623,6 +623,7 @@ fn parse_number_of_cards_in_all_players_hands(input: &str) -> OracleResult<'_, Q
         QuantityRef::HandSize {
             player: PlayerScope::AllPlayers {
                 aggregate: AggregateFunction::Sum,
+                exclude: None,
             },
         },
     ))
@@ -2279,9 +2280,15 @@ fn assert_for_each_controlled_chosen_type(
     }
 }
 
-/// Parse "your speed".
+/// Parse "your speed" → the controller's speed (CR 702.179f).
 fn parse_speed_ref(input: &str) -> OracleResult<'_, QuantityRef> {
-    value(QuantityRef::Speed, tag("your speed")).parse(input)
+    value(
+        QuantityRef::Speed {
+            player: PlayerScope::Controller,
+        },
+        tag("your speed"),
+    )
+    .parse(input)
 }
 
 /// CR 122.1: Parse "[kind] counters <possessor>" → `QuantityRef::PlayerCounter`.
@@ -3077,6 +3084,7 @@ mod tests {
             QuantityRef::HandSize {
                 player: PlayerScope::AllPlayers {
                     aggregate: AggregateFunction::Sum,
+                    exclude: None,
                 },
             }
         );

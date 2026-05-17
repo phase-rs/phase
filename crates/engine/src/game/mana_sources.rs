@@ -1642,6 +1642,7 @@ mod tests {
         let chosen = pips_for_production(ManaProduction::ChosenColor {
             count: QuantityExpr::Fixed { value: 1 },
             contribution: ManaContribution::Base,
+            fixed_alternative: None,
         });
         assert_eq!(chosen, vec![ManaPip::OneOfColors(ManaColor::ALL.to_vec())]);
 

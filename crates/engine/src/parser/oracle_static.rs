@@ -10822,7 +10822,12 @@ mod tests {
             panic!("expected ReduceCost");
         };
         assert_eq!(amount, ManaCost::generic(1));
-        assert_eq!(dynamic_count, Some(QuantityRef::Speed));
+        assert_eq!(
+            dynamic_count,
+            Some(QuantityRef::Speed {
+                player: PlayerScope::Controller
+            })
+        );
     }
 
     #[test]
@@ -11673,6 +11678,7 @@ mod tests {
             qty: QuantityRef::HandSize {
                 player: PlayerScope::AllPlayers {
                     aggregate: AggregateFunction::Sum,
+                    exclude: None,
                 },
             },
         };
