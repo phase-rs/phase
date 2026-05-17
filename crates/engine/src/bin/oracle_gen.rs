@@ -50,6 +50,16 @@ fn is_clean_signals(sig: &BracketSignals) -> bool {
     sig.is_clean()
 }
 
+fn bracket_signals_for_face(
+    lists: &BracketLists,
+    face: &CardFace,
+    source: &AtomicCard,
+) -> BracketSignals {
+    let mut signals = lists.signals_for(&face.name);
+    signals.game_changer = source.is_game_changer;
+    signals
+}
+
 /// Insert a card face under its short-name key, resolving collisions when
 /// multiple MTGJSON entries map to the same lowercased face name. This happens
 /// when a new DFC has a back face whose name matches a classic standalone card
@@ -366,8 +376,9 @@ fn main() {
     // Scan per-set MTGJSON files to build a card name → rarities map.
     let rarity_map = build_rarity_map(&mtgjson_path);
 
-    // Load bracket lists for signal stamping. Path is relative to data_dir, or
-    // falls back to "data/bracket_lists.json" relative to the current directory.
+    // Load non-MTGJSON bracket lists for signal stamping. Game Changers come
+    // directly from MTGJSON `isGameChanger`; this file covers policy axes that
+    // MTGJSON does not expose.
     let bracket_lists_path = data_dir
         .as_ref()
         .map(|d| d.join("bracket_lists.json"))
@@ -375,14 +386,14 @@ fn main() {
     let bracket_lists = if bracket_lists_path.exists() {
         BracketLists::from_json_path(&bracket_lists_path).unwrap_or_else(|e| {
             eprintln!(
-                "warning: failed to load {}: {e}; bracket signals will be all-false",
+                "warning: failed to load {}: {e}; non-MTGJSON bracket signals will be all-false",
                 bracket_lists_path.display()
             );
             BracketLists::default()
         })
     } else {
         eprintln!(
-            "warning: {} not found; bracket signals will be all-false",
+            "warning: {} not found; non-MTGJSON bracket signals will be all-false",
             bracket_lists_path.display()
         );
         BracketLists::default()
@@ -488,7 +499,7 @@ fn main() {
                     .get(&face.name.to_lowercase())
                     .cloned()
                     .unwrap_or_default();
-                let bracket_signals = bracket_lists.signals_for(&face.name);
+                let bracket_signals = bracket_signals_for_face(&bracket_lists, &face, source);
                 insert_face(
                     &mut face_index,
                     mtgjson_key.as_str(),
@@ -521,7 +532,7 @@ fn main() {
                 .get(&face.name.to_lowercase())
                 .cloned()
                 .unwrap_or_default();
-            let bracket_signals = bracket_lists.signals_for(&face.name);
+            let bracket_signals = bracket_signals_for_face(&bracket_lists, &face, &faces[0]);
             insert_face(
                 &mut face_index,
                 mtgjson_key.as_str(),

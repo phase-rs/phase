@@ -354,35 +354,95 @@ function formatAbilityCost(cost: SerializedAbilityCost): string {
   return formatCost(cost);
 }
 
-/** Build title + option labels for the OptionalCostChoice modal. */
-export function additionalCostChoices(cost: AdditionalCost): { title: string; payLabel: string; skipLabel: string } {
+/**
+ * A single option in the OptionalCostChoice modal. `pay` maps to
+ * `DecideOptionalCost { pay: true }`, `decline` to `{ pay: false }`. The two
+ * `id`s are stable so `OptionalCostModal` can dispatch the right action.
+ */
+export interface AdditionalCostOption {
+  id: "pay" | "decline";
+  label: string;
+  description?: string;
+}
+
+/**
+ * Build the title + pay/decline options for the OptionalCostChoice modal.
+ *
+ * `timesKicked` is the engine-provided count of kicks already paid for this
+ * spell (`WaitingFor::OptionalCostChoice::times_kicked`). It only affects the
+ * `Kicker` branch: at `0` this is the first prompt; at `> 0` it is a
+ * repeatable multikicker re-prompt and the copy reflects the running count.
+ * The decline copy never says "skip"/"cancel" — declining the kicker
+ * *completes* the cast (CR 601.2h), it does not abort it.
+ */
+export function additionalCostChoices(
+  cost: AdditionalCost,
+  timesKicked = 0,
+): { title: string; options: AdditionalCostOption[] } {
   switch (cost.type) {
     case "Optional":
       return {
         title: `Pay additional cost: ${formatAbilityCost(cost.data)}?`,
-        payLabel: `Pay ${formatAbilityCost(cost.data)}`,
-        skipLabel: "Skip",
+        options: [
+          { id: "pay", label: `Pay ${formatAbilityCost(cost.data)}` },
+          { id: "decline", label: "Skip" },
+        ],
       };
     case "Kicker": {
       const first = cost.data.costs[0];
       const label = first ? formatAbilityCost(first) : "kicker";
+      if (timesKicked > 0) {
+        // CR 702.33c/d: repeatable multikicker re-prompt — the spell has
+        // already been kicked `timesKicked` times.
+        return {
+          title: `Multikicker — kicked ${timesKicked}×. Pay ${label} again?`,
+          options: [
+            { id: "pay", label: `Pay ${label} — kick again` },
+            {
+              id: "decline",
+              label: `Done — finish casting (kicked ${timesKicked}×)`,
+              description: "Stop kicking and pay the total cost.",
+            },
+          ],
+        };
+      }
+      // First prompt (timesKicked === 0).
+      const repeatable = cost.data.repeatable;
       return {
-        title: `Pay kicker cost: ${label}?`,
-        payLabel: `Pay ${label}`,
-        skipLabel: cost.data.repeatable ? "Done" : "Skip",
+        title: repeatable
+          ? `Multikicker — pay ${label} to kick this spell?`
+          : `Kicker — pay ${label} to kick this spell?`,
+        options: [
+          {
+            id: "pay",
+            label: `Pay ${label} — kick it`,
+            description: repeatable
+              ? "Adds a kicker. You'll be asked again so you can kick multiple times."
+              : "Adds a kicker to this spell.",
+          },
+          {
+            id: "decline",
+            label: "Cast without kicking",
+            description: "Finish casting now with 0 kickers — the spell still resolves.",
+          },
+        ],
       };
     }
     case "Required":
       return {
         title: `Pay additional cost: ${formatAbilityCost(cost.data)}`,
-        payLabel: `Pay ${formatAbilityCost(cost.data)}`,
-        skipLabel: "Cancel",
+        options: [
+          { id: "pay", label: `Pay ${formatAbilityCost(cost.data)}` },
+          { id: "decline", label: "Cancel" },
+        ],
       };
     case "Choice":
       return {
         title: "Choose additional cost",
-        payLabel: formatAbilityCost(cost.data[0]),
-        skipLabel: formatAbilityCost(cost.data[1]),
+        options: [
+          { id: "pay", label: formatAbilityCost(cost.data[0]) },
+          { id: "decline", label: formatAbilityCost(cost.data[1]) },
+        ],
       };
   }
 }

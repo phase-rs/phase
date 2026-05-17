@@ -1,5 +1,16 @@
-import type { CommanderBracketTier, GameFormat } from "../adapter/types";
+import type { GameFormat } from "../adapter/types";
 import { formatMetadata } from "../data/formatRegistry";
+import type { CommanderBracketTier } from "./bracketEstimate";
+export {
+  BRACKET_AXES,
+  BRACKET_TIER_NUMERIC,
+  type BracketAxis,
+  type BracketDeckRequest,
+  type BracketEstimate,
+  type BracketViolation,
+  type CommanderBracketTier,
+  isBracketEstimate,
+} from "./bracketEstimate";
 
 /**
  * WotC Commander bracket tiers (1 Exhibition → 5 cEDH). Used only as

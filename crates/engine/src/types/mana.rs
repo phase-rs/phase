@@ -215,6 +215,8 @@ pub enum PaymentContext<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ManaRestriction {
+    /// "Spend this mana only to cast spells."
+    OnlyForSpell,
     /// "Spend this mana only to cast creature spells" / "only to cast artifact spells".
     OnlyForSpellType(String),
     /// "Spend this mana only to cast a creature spell of the chosen type."
@@ -258,6 +260,7 @@ impl ManaRestriction {
     /// Returns `true` if this restriction permits spending mana on the given spell.
     pub fn allows_spell(&self, meta: &SpellMeta) -> bool {
         match self {
+            ManaRestriction::OnlyForSpell => true,
             ManaRestriction::OnlyForSpellType(required_type) => {
                 Self::matches_required_quality(required_type, meta.types.iter())
             }
@@ -310,7 +313,8 @@ impl ManaRestriction {
     pub fn allows_activation(&self, source_types: &[String], source_subtypes: &[String]) -> bool {
         match self {
             // Spell-only restrictions don't permit ability activation.
-            ManaRestriction::OnlyForSpellType(_)
+            ManaRestriction::OnlyForSpell
+            | ManaRestriction::OnlyForSpellType(_)
             | ManaRestriction::OnlyForCreatureType(_)
             | ManaRestriction::OnlyForSpellWithKeywordKind(_)
             | ManaRestriction::OnlyForSpellWithKeywordKindFromZone(_, _) => false,
@@ -1254,6 +1258,26 @@ mod tests {
     }
 
     #[test]
+    fn restriction_spell_only_allows_spells_not_activations_or_effects() {
+        let restriction = ManaRestriction::OnlyForSpell;
+        let spell = SpellMeta {
+            types: vec!["Instant".to_string()],
+            subtypes: vec![],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+        };
+        let source_types = vec!["Artifact".to_string()];
+        let source_subtypes = Vec::new();
+
+        assert!(restriction.allows(&PaymentContext::Spell(&spell)));
+        assert!(!restriction.allows(&PaymentContext::Activation {
+            source_types: &source_types,
+            source_subtypes: &source_subtypes,
+        }));
+        assert!(!restriction.allows(&PaymentContext::Effect));
+    }
+
+    #[test]
     fn restriction_creature_type_requires_both_type_and_subtype() {
         let restriction = ManaRestriction::OnlyForCreatureType("Elf".to_string());
         let elf_creature = SpellMeta {
@@ -1465,6 +1489,38 @@ mod tests {
         let artifact_types = vec!["Artifact".to_string()];
         let no_subtypes: Vec<String> = vec![];
         assert!(artifact_restriction.allows_activation(&artifact_types, &no_subtypes));
+    }
+
+    #[test]
+    fn restriction_artifact_spell_or_activation_uses_both_payment_contexts() {
+        let restriction = ManaRestriction::OnlyForTypeSpellsOrAbilities("Artifact".to_string());
+        let artifact_spell = SpellMeta {
+            types: vec!["Artifact".to_string()],
+            subtypes: vec![],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+        };
+        let creature_spell = SpellMeta {
+            types: vec!["Creature".to_string()],
+            subtypes: vec![],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+        };
+        let artifact_types = vec!["Artifact".to_string()];
+        let creature_types = vec!["Creature".to_string()];
+        let no_subtypes = Vec::new();
+
+        assert!(restriction.allows(&PaymentContext::Spell(&artifact_spell)));
+        assert!(!restriction.allows(&PaymentContext::Spell(&creature_spell)));
+        assert!(restriction.allows(&PaymentContext::Activation {
+            source_types: &artifact_types,
+            source_subtypes: &no_subtypes,
+        }));
+        assert!(!restriction.allows(&PaymentContext::Activation {
+            source_types: &creature_types,
+            source_subtypes: &no_subtypes,
+        }));
+        assert!(!restriction.allows(&PaymentContext::Effect));
     }
 
     // CR 105.2c + CR 106.6: The activation half uses the same compound-quality

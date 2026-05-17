@@ -13,7 +13,7 @@ use crate::types::ability::{
     StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition,
     TypedFilter,
 };
-use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
+use crate::types::keywords::{ActivationCadence, FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
@@ -257,6 +257,138 @@ fn try_parse_opening_hand_reveal_delayed_trigger(
     Some(def)
 }
 
+/// CR 103.6 / CR 103.6a: Parse an "opening hand, begin the game with ~ on the
+/// battlefield" line into a `BeginGame` `AbilityDefinition`.
+///
+/// This is the sole detector for the begin-game class — the parser IS the
+/// detector. It is built entirely from nom combinators; the preamble is matched
+/// with explicit `alt`/`tag` over its known forms (never `take_until`, which
+/// would skip arbitrary text and weaken the detector).
+///
+/// Two pieces of text the previous hardcoded branch dropped are now captured:
+///   1. CR 122.1: an optional "with [N] [type] counter(s) on it" clause →
+///      populates `Effect::ChangeZone::enter_with_counters`.
+///   2. An optional "If you do, [effect]" follow-up sentence → becomes a
+///      `sub_ability` gated by `AbilityCondition::IfYouDo`, so the dependent
+///      effect only fires when the player accepts the begin-game opt-in.
+///
+/// Mirrors `try_parse_opening_hand_reveal_delayed_trigger` end-to-end shape and
+/// is near-isomorphic to Forsaken City's `optional: true` + `IfYouDo`
+/// sub-ability layout (Forsaken City proves `parse_effect_chain` handles the
+/// "exile a card from your hand" tail).
+fn parse_begin_game_clause(line: &str, lower: &str) -> Option<AbilityDefinition> {
+    // Closure consumes the structural prefix on the lowercased view. It returns
+    // the parsed entry counters; the original-case remainder (mapped back by
+    // `nom_on_lower`) is the "If you do, [effect]" tail — empty when absent.
+    let (enter_with_counters, effect_text) = nom_on_lower(line, lower, |input| {
+        // Preamble — explicit known forms, each ending in "you may ".
+        // CR 103.6a (begin the game with that card on the battlefield);
+        // Gemstone Caverns additionally gates on not being the starting player.
+        let (input, _) = alt((
+            tag(
+                "if this card is in your opening hand and you're not the starting player, you may ",
+            ),
+            tag("if this card is in your opening hand, you may "),
+            tag("if ~ is in your opening hand, you may "),
+        ))
+        .parse(input)?;
+        let (input, _) = tag("begin the game with ").parse(input)?;
+        // Self-reference: `~` after normalization, or an object pronoun.
+        let (input, _) =
+            alt((tag("~"), tag("it"), tag("him"), tag("her"), tag("them"))).parse(input)?;
+        let (input, _) = tag(" on the battlefield").parse(input)?;
+
+        // Optional "with [N] [type] counter(s) on it" clause (CR 122.1).
+        let (input, counters) = opt(parse_begin_game_counter_clause).parse(input)?;
+
+        // First sentence terminator.
+        let (input, _) = tag(".").parse(input)?;
+
+        // Optional "If you do, " follow-up prefix. When present, the remainder
+        // is the dependent effect text; when absent, the remainder is empty.
+        let (input, _) = opt(alt((tag(" if you do, "), tag(" if you do ")))).parse(input)?;
+
+        Ok((input, counters.unwrap_or_default()))
+    })?;
+
+    let mut def = AbilityDefinition::new(
+        AbilityKind::BeginGame,
+        // CR 103.6a: the card is put onto the battlefield from the opening hand.
+        Effect::ChangeZone {
+            destination: Zone::Battlefield,
+            target: TargetFilter::SelfRef,
+            origin: Some(Zone::Hand),
+            owner_library: false,
+            enter_transformed: false,
+            under_your_control: false,
+            enter_tapped: false,
+            enters_attacking: false,
+            up_to: false,
+            // CR 122.1: entry counters parsed from "with [N] [type] counter(s) on it".
+            enter_with_counters,
+        },
+    )
+    .description(line.to_string());
+    def.optional = true;
+
+    // Optional "If you do, [effect]" dependent sub-ability. A non-empty
+    // remainder means the line carried a follow-up sentence.
+    let effect_text = effect_text.trim().trim_end_matches('.').trim();
+    if !effect_text.is_empty() {
+        // CR 701.13a: "exile a card from your hand" resolves to a player-choice
+        // exile via `parse_effect_chain` (proven by Forsaken City's identical
+        // tail). The `IfYouDo` condition gates it so it only fires when the
+        // player accepted the begin-game opt-in.
+        let sub = parse_effect_chain(effect_text, AbilityKind::Spell);
+        if has_unimplemented(&sub) {
+            return None;
+        }
+        def = def.sub_ability(sub.condition(AbilityCondition::IfYouDo));
+    }
+
+    Some(def)
+}
+
+/// Parse the "with [N] [type] counter(s) on it" sub-clause of a begin-game line.
+///
+/// CR 122.1: counters placed on the permanent as it enters. The count defaults
+/// to 1 ("a"/"an") and the type word is canonicalized through
+/// `types::counter::parse_counter_type` (single authority).
+fn parse_begin_game_counter_clause(
+    input: &str,
+) -> super::oracle_nom::error::OracleResult<
+    '_,
+    Vec<(crate::types::counter::CounterType, QuantityExpr)>,
+> {
+    use nom::bytes::complete::take_while1;
+    use nom::character::complete::{char as nom_char, digit1};
+
+    let (input, _) = tag(" with ").parse(input)?;
+    // Count: a number, or the article "a"/"an" (→ 1).
+    let (input, count) = alt((
+        nom::combinator::map_res(digit1, |d: &str| d.parse::<u32>()),
+        value(1u32, alt((tag("an "), tag("a ")))),
+    ))
+    .parse(input)?;
+    let (input, _) = opt(nom_char(' ')).parse(input)?;
+    // Counter type word (e.g. "luck"). Canonicalized by the single authority.
+    let (input, type_word) =
+        take_while1(|c: char| c.is_ascii_alphabetic() || c == '-').parse(input)?;
+    let (input, _) = alt((tag(" counters"), tag(" counter"))).parse(input)?;
+    let (input, _) = tag(" on it").parse(input)?;
+
+    let counter_type = crate::types::counter::parse_counter_type(type_word);
+    Ok((
+        input,
+        vec![(
+            counter_type,
+            QuantityExpr::Fixed {
+                value: count as i32,
+            },
+        )],
+    ))
+}
+
 fn parsed_result_recently_granted_flashback(result: &ParsedAbilities) -> bool {
     result
         .abilities
@@ -372,13 +504,43 @@ fn parse_static_line_with_graveyard_keyword_continuation(line: &str) -> Vec<Stat
 
 use crate::parser::oracle_ir::ast::ActivatedConstraintAst;
 
-/// CR 608.2c: Pre-strip "instead if [condition]" or trailing "instead" from effect text.
-/// The "instead" keyword signals a cross-line replacement pattern. The trailing
-/// "if [condition]" (when present after "instead") is parsed through the shared
-/// condition grammar and composed with any ability-word condition at the caller.
-fn strip_instead_suffix(text: &str) -> (String, Option<AbilityCondition>, bool) {
+/// CR 614.1a / CR 614.15: Pre-strip an "instead" replacement clause from effect text.
+/// The "instead" keyword signals a cross-line self-replacement pattern (CR 614.15 —
+/// "the text can be a separate ability, particularly when preceded by an ability
+/// word").
+///
+/// Three word orders are recognised:
+/// 1. "if [condition], instead [effect]" — condition FIRST (Arrow Storm, Lightning Surge)
+/// 2. "[effect] instead if [condition]" — mid-line "instead", condition AFTER
+/// 3. "[effect] instead" — trailing "instead"
+///
+/// Any extracted "if [condition]" clause is parsed through the shared condition
+/// grammar (`parse_inner_condition`) and composed with any ability-word condition
+/// at the caller.
+fn strip_instead_clause(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> (String, Option<AbilityCondition>, bool) {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
+
+    // Pattern: "if [condition], instead [effect]" — leading-conditional word order.
+    // Ordered FIRST: more specific (requires a leading "if " before a ", instead "
+    // split). The `", instead "` needle (with surrounding spaces) cannot match the
+    // "instead of" compound, so no extra compound guard is needed here.
+    if let Some((before, after)) = tp.split_around(", instead ") {
+        if let Ok((cond_text, ())) =
+            value::<_, _, OracleError<'_>, _>((), tag("if ")).parse(before.lower.trim_start())
+        {
+            if let Some(condition) = parse_inner_condition(cond_text.trim())
+                .ok()
+                .and_then(|(rest, condition)| rest.trim().is_empty().then_some(condition))
+                .and_then(|condition| ability_word_to_ability_condition(&Some(condition), ctx))
+            {
+                return (after.original.trim().to_string(), Some(condition), true);
+            }
+        }
+    }
 
     // Pattern: " instead if [condition]" — mid-line "instead" followed by condition
     if let Some((before, after)) = tp.rsplit_around(" instead if ") {
@@ -386,7 +548,7 @@ fn strip_instead_suffix(text: &str) -> (String, Option<AbilityCondition>, bool) 
         let condition = parse_inner_condition(condition_text)
             .ok()
             .and_then(|(rest, condition)| rest.trim().is_empty().then_some(condition))
-            .and_then(|condition| ability_word_to_ability_condition(&Some(condition)));
+            .and_then(|condition| ability_word_to_ability_condition(&Some(condition), ctx));
         return (before.original.trim().to_string(), condition, true);
     }
 
@@ -695,14 +857,16 @@ fn is_spell_resolution_instruction_line(
 /// - Ferocious: you control a creature with power 4 or greater
 fn ability_word_to_condition(word: &str) -> Option<crate::types::ability::StaticCondition> {
     use crate::types::ability::{
-        CardTypeSetSource, ControllerRef, CountScope, FilterProp, QuantityExpr, QuantityRef,
-        StaticCondition, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+        CardTypeSetSource, ControllerRef, CountScope, FilterProp, PlayerScope, QuantityExpr,
+        QuantityRef, StaticCondition, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
     };
 
     match word {
         "threshold" => Some(StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::GraveyardSize,
+                qty: QuantityRef::GraveyardSize {
+                    player: PlayerScope::Controller,
+                },
             },
             comparator: Comparator::GE,
             rhs: QuantityExpr::Fixed { value: 7 },
@@ -761,15 +925,27 @@ fn ability_word_to_condition(word: &str) -> Option<crate::types::ability::Static
             })
         }
         // allow-noncombinator: semantic mapping after ability-word parser has classified the word
+        // CR 702.x: Ferocious — "you control a creature with power 4 or greater".
+        // The `InZone { Battlefield }` property is emitted explicitly so this
+        // ability-word condition is structurally identical to the literal
+        // "you control a creature with power 4 or greater" clause parsed by
+        // `parse_inner_condition`, letting `merge_ability_condition` dedup the
+        // two when a card prints both (e.g. Feed the Clan's "Ferocious — …
+        // instead if you control a creature with power 4 or greater").
         "ferocious" => Some(StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
                 qty: QuantityRef::ObjectCount {
                     filter: TargetFilter::Typed(
                         TypedFilter::creature()
                             .controller(ControllerRef::You)
-                            .properties(vec![FilterProp::PowerGE {
-                                value: QuantityExpr::Fixed { value: 4 },
-                            }]),
+                            .properties(vec![
+                                FilterProp::PowerGE {
+                                    value: QuantityExpr::Fixed { value: 4 },
+                                },
+                                FilterProp::InZone {
+                                    zone: Zone::Battlefield,
+                                },
+                            ]),
                     ),
                 },
             },
@@ -782,23 +958,20 @@ fn ability_word_to_condition(word: &str) -> Option<crate::types::ability::Static
 }
 
 /// Convert an ability-word `StaticCondition` to an `AbilityCondition` for spell effects.
+/// CR 608.2c: Bridge an ability-word / "instead if" `StaticCondition` to its
+/// effect-resolution `AbilityCondition` form. Delegates to the single
+/// authoritative bridge (`static_condition_to_ability_condition`) so every
+/// `StaticCondition` variant — including compound `Or`/`And`, `WasStartingPlayer`,
+/// and `SpellCastWithVariantThisTurn` — is handled uniformly rather than via a
+/// narrow per-call duplicate.
 fn ability_word_to_ability_condition(
     cond: &Option<crate::types::ability::StaticCondition>,
+    ctx: &mut ParseContext,
 ) -> Option<crate::types::ability::AbilityCondition> {
-    use crate::types::ability::{AbilityCondition, StaticCondition};
-    match cond.as_ref()? {
-        StaticCondition::QuantityComparison {
-            lhs,
-            comparator,
-            rhs,
-        } => Some(AbilityCondition::QuantityCheck {
-            lhs: lhs.clone(),
-            comparator: *comparator,
-            rhs: rhs.clone(),
-        }),
-        StaticCondition::HasMaxSpeed => Some(AbilityCondition::HasMaxSpeed),
-        _ => None,
-    }
+    crate::parser::oracle_effect::conditions::static_condition_to_ability_condition(
+        cond.as_ref()?,
+        ctx,
+    )
 }
 
 /// Single-authority merge for composing a freshly-parsed `AbilityCondition` onto an
@@ -1042,6 +1215,22 @@ pub(crate) fn parse_oracle_ir(
         ..Default::default()
     };
 
+    // CR 303.4 + CR 702.103: When the card being parsed is an Aura or has the
+    // Bestow keyword, it can be attached to a permanent. A "that creature"
+    // anaphor inside such a card's ability body (e.g. Springheart Nantuko's
+    // landfall "create a token that's a copy of that creature") refers to the
+    // enchanted host, not a chosen target. Expose the typed host self-reference
+    // so the token-copy parser can remap a generic-parser `ParentTarget` to
+    // `TargetFilter::AttachedTo`. Left `None` for non-Aura cards so
+    // `ParentTarget` keeps its chosen-target meaning (Twinflame Strike).
+    if subtypes.iter().any(|s| s.eq_ignore_ascii_case("Aura"))
+        || mtgjson_keyword_names
+            .iter()
+            .any(|k| k.eq_ignore_ascii_case("bestow"))
+    {
+        ctx.host_self_reference = Some(crate::types::ability::TargetFilter::AttachedTo);
+    }
+
     // CR 201.4b: A card's Oracle text uses its name to refer to itself.
     // Normalize self-references to `~` once, at the single parser entry point,
     // so every downstream block parser (saga, class, leveler, modal, trigger,
@@ -1235,7 +1424,6 @@ pub(crate) fn parse_oracle_ir(
         let min_x_value = x_annotation_min_value(&line);
         // Strip "X can't be 0." casting constraint suffix — annotation only, not an ability.
         let line = strip_x_cant_be_zero_suffix(&line);
-        let line = strip_copy_retarget_suffix(&line);
         if line.is_empty() {
             if min_x_value > 0 {
                 if let Some(previous) = result.abilities.last_mut() {
@@ -1292,7 +1480,12 @@ pub(crate) fn parse_oracle_ir(
         // Must run before keyword extraction so "Spree" header + follow-on `+` lines
         // are consumed as a modal block, not swallowed as a keyword-only line.
         if let Some((block, next_i)) = parse_oracle_block(&lines, i) {
-            lower_oracle_block(block, card_name, &mut result);
+            lower_oracle_block(
+                block,
+                card_name,
+                ctx.host_self_reference.clone(),
+                &mut result,
+            );
             i = next_i;
             continue;
         }
@@ -1307,6 +1500,18 @@ pub(crate) fn parse_oracle_ir(
         if lower_starts_with(&lower, "equip") && !lower_starts_with(&lower, "equipped") {
             if let Some(ability) = try_parse_equip(&line) {
                 result.abilities.push(ability);
+                i += 1;
+                continue;
+            }
+        }
+
+        // CR 702.122 + CR 602.5b: Crew with a trailing "Activate only once each
+        // turn." cadence sentence. Must run before the generic keyword-only
+        // extraction below — that path parses "Crew N" via `parse_keyword_from_oracle`
+        // and would consume the line, dropping the cadence sentence.
+        if lower_starts_with(&lower, "crew ") {
+            if let Some(crew_kw) = parse_crew_keyword(&lower) {
+                result.extracted_keywords.push(crew_kw);
                 i += 1;
                 continue;
             }
@@ -1566,6 +1771,39 @@ pub(crate) fn parse_oracle_ir(
                 // CR 702.142b: Tag this ability as originating from Boast so
                 // effects can reference "boast abilities" as a class.
                 def.ability_tag = Some(AbilityTag::Boast);
+                extract_cost_reduction_from_chain(&mut def);
+                result.abilities.push(def);
+                i += 1;
+                continue;
+            }
+        }
+
+        // Priority 3e: Exhaust — "Exhaust — {cost}: {effect}" (CR 702.177a)
+        // Exhaust is a keyword ability that grants an activated ability with
+        // the implicit activation restriction "Activate only once."
+        if let Some(((), rest_original)) = nom_on_lower(&line, &lower, |i| {
+            value((), alt((tag("exhaust \u{2014} "), tag("exhaust -- ")))).parse(i)
+        }) {
+            let rest_lower = rest_original.to_lowercase();
+            if let Some(colon_pos) = find_activated_colon(&rest_lower) {
+                let prefix_len = line.len() - rest_original.len();
+                let cost_text = line[prefix_len..prefix_len + colon_pos].trim();
+                let effect_text = line[prefix_len + colon_pos + 1..].trim();
+                let (effect_text, constraints) = strip_activated_constraints(effect_text);
+                let cost = parse_oracle_cost(cost_text);
+                ctx.subject = None;
+                ctx.actor = None;
+                let mut def =
+                    parse_effect_chain_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
+                def.cost = Some(cost);
+                def.description = Some(line.to_string());
+                if constraints.sorcery_speed() {
+                    def.sorcery_speed = true;
+                }
+                def.activation_restrictions.extend(constraints.restrictions);
+                def.activation_restrictions
+                    .push(ActivationRestriction::OnlyOnce);
+                def.ability_tag = Some(AbilityTag::Exhaust);
                 extract_cost_reduction_from_chain(&mut def);
                 result.abilities.push(def);
                 i += 1;
@@ -1959,6 +2197,7 @@ pub(crate) fn parse_oracle_ir(
                 AbilityKind::Spell,
                 Effect::PreventDamage {
                     amount: PreventionAmount::All,
+                    amount_dynamic: None,
                     target: TargetFilter::Any,
                     scope: PreventionScope::AllDamage,
                     damage_source_filter: Some(TargetFilter::Typed(source_filter)),
@@ -1974,7 +2213,23 @@ pub(crate) fn parse_oracle_ir(
         // not a standing replacement definition. Let the effect-chain parser
         // preserve any preceding clauses ("You gain 1 life for each ...")
         // before the replacement classifier sees the prevention marker.
-        if is_spell && scan_contains(&lower, "prevent") && scan_contains(&lower, "damage") {
+        //
+        // CR 614.15: Exclude ability-word self-replacement lines whose body is
+        // "if <cond>, instead <effect> ... the damage can't be prevented."
+        // (Arrow Storm, Lightning Surge). For these, the prevention clause is a
+        // sub-effect of the conditional override, not the line's primary effect —
+        // routing the whole line through `parse_effect_chain_with_context` here
+        // would swallow the leading conditional and drop the `instead` composition.
+        // They must reach Priority 9, where `strip_instead_clause` extracts the
+        // condition and the existing block composes a `ConditionInstead` sub-ability.
+        let prevention_effect_text = strip_ability_word_with_name(&line)
+            .map(|(_, effect)| effect)
+            .unwrap_or_else(|| line.clone());
+        if is_spell
+            && scan_contains(&lower, "prevent")
+            && scan_contains(&lower, "damage")
+            && !is_instead_replacement_line(&prevention_effect_text)
+        {
             ctx.subject = None;
             ctx.actor = None;
             let def = parse_effect_chain_with_context(&line, AbilityKind::Spell, &mut ctx);
@@ -2012,24 +2267,11 @@ pub(crate) fn parse_oracle_ir(
 
         // Priority 8c: "If this card is in your opening hand, you may begin the game with it on the battlefield"
         // CR 103.6: The Leyline rule — opt-in at game start, never compelled.
-        if is_opening_hand_begin_game(&lower) {
-            let mut def = AbilityDefinition::new(
-                AbilityKind::BeginGame,
-                Effect::ChangeZone {
-                    destination: crate::types::zones::Zone::Battlefield,
-                    target: crate::types::ability::TargetFilter::SelfRef,
-                    origin: Some(crate::types::zones::Zone::Hand),
-                    owner_library: false,
-                    enter_transformed: false,
-                    under_your_control: false,
-                    enter_tapped: false,
-                    enters_attacking: false,
-                    up_to: false,
-                    enter_with_counters: vec![],
-                },
-            )
-            .description(line.to_string());
-            def.optional = true;
+        // `parse_begin_game_clause` is the sole detector — the parser IS the
+        // detector; there is no string pre-filter. It also captures the
+        // optional "with [counters] on it" clause and the optional "If you do,
+        // [effect]" dependent sub-ability.
+        if let Some(def) = parse_begin_game_clause(&line, &lower) {
             result.abilities.push(def);
             i += 1;
             continue;
@@ -2255,7 +2497,7 @@ pub(crate) fn parse_oracle_ir(
             // mid-position MV conditions (e.g., "if it has mana value 4 or less")
             // that precede "instead if [ability word condition]".
             let (effect_line_clean, instead_condition, is_instead) =
-                strip_instead_suffix(&effect_line);
+                strip_instead_clause(&effect_line, &mut ctx);
             let parse_line = if is_instead {
                 effect_line_clean.as_str()
             } else {
@@ -2292,7 +2534,10 @@ pub(crate) fn parse_oracle_ir(
             // the chain-extracted condition is merged onto it, preserving the
             // historical `[ability_word, chain]` ordering when both are distinct.
             let chain = def.condition.take();
-            def.condition = match (ability_word_to_ability_condition(&aw_condition), chain) {
+            def.condition = match (
+                ability_word_to_ability_condition(&aw_condition, &mut ctx),
+                chain,
+            ) {
                 (Some(aw), Some(chain)) => Some(merge_ability_condition(Some(aw), chain)),
                 (Some(aw), None) => Some(aw),
                 (None, chain) => chain,
@@ -2499,7 +2744,7 @@ pub(crate) fn parse_oracle_ir(
 
         // Priority 14a: Nom dispatch — try effect, trigger, static, and replacement
         // sub-parsers. If any succeeds, use the result directly.
-        let nom_effect = dispatch_line_nom(&line, card_name);
+        let nom_effect = dispatch_line_nom(&line, card_name, ctx.host_self_reference.clone());
         if !matches!(nom_effect, Effect::Unimplemented { .. }) {
             result
                 .abilities
@@ -2542,6 +2787,52 @@ fn activation_zone_from_self_cost(cost: &AbilityCost) -> Option<Zone> {
     }
 }
 
+/// Effect-side companion to `activation_zone_from_self_cost`.
+///
+/// CR 113.6m + CR 602.1: an activated ability whose *effect* moves the object
+/// it's printed on out of a particular non-battlefield zone (e.g. "Put this
+/// card from your hand onto the battlefield") functions only from that zone.
+/// The cost-based derivation cannot see this because the zone lives in the
+/// effect, not the cost. This walks the parsed effect chain for a self-
+/// `ChangeZone` whose `origin` is a non-battlefield zone and `destination` is
+/// the battlefield, returning that origin as the activation zone.
+fn activation_zone_from_self_effect(def: &AbilityDefinition) -> Option<Zone> {
+    if let Effect::ChangeZone {
+        origin: Some(origin),
+        destination: Zone::Battlefield,
+        target: TargetFilter::SelfRef,
+        ..
+    } = *def.effect
+    {
+        if origin != Zone::Battlefield {
+            return Some(origin);
+        }
+    }
+    def.sub_ability
+        .as_deref()
+        .and_then(activation_zone_from_self_effect)
+}
+
+/// CR 608.2k: Source zone of a non-self `AbilityCost::Exile` component
+/// ("Exile a nonland card from your hand"), if present. Effect-side companion
+/// to `activation_zone_from_self_cost`: returns `None` for a self-ref exile
+/// (Scavenge), which is auto-paid and never back-referenced as a cost-paid
+/// object. Recurses into `Composite`.
+fn non_self_exile_cost_zone(cost: &AbilityCost) -> Option<Zone> {
+    match cost {
+        AbilityCost::Exile {
+            filter: Some(TargetFilter::SelfRef),
+            ..
+        } => None,
+        AbilityCost::Exile {
+            zone: Some(zone @ (Zone::Hand | Zone::Graveyard)),
+            ..
+        } => Some(*zone),
+        AbilityCost::Composite { costs } => costs.iter().find_map(non_self_exile_cost_zone),
+        _ => None,
+    }
+}
+
 fn parse_activated_ability_definition(
     cost_text: &str,
     effect_text: &str,
@@ -2553,12 +2844,26 @@ fn parse_activated_ability_definition(
     let normalized_cost_text = normalize_self_refs_for_static(cost_text, card_name);
     let cost = parse_oracle_cost(&normalized_cost_text);
 
+    // CR 608.2k: expose this ability's exile-cost source zone so the effect
+    // parser can disambiguate "the exiled card" as a cost-paid-object
+    // reference. Restored after the effect parse — no leak to sibling abilities.
+    let prev_exile_zone = ctx.current_ability_exile_cost_zone.take();
+    ctx.current_ability_exile_cost_zone = non_self_exile_cost_zone(&cost);
+
     // Retry with `~` normalization if the first pass left an Unimplemented node
     // or emitted a target-fallback warning.
     let mut def = parse_activated_with_self_ref_fallback(&effect_text, card_name, ctx);
+
+    ctx.current_ability_exile_cost_zone = prev_exile_zone;
     normalize_activated_mana_instead_delta(&mut def);
     if def.activation_zone.is_none() {
         def.activation_zone = activation_zone_from_self_cost(&cost);
+    }
+    // CR 113.6m: fall back to the effect-side derivation — an ability whose
+    // effect moves the source out of a non-battlefield zone functions only
+    // from that zone. Cost-based derivation keeps priority.
+    if def.activation_zone.is_none() {
+        def.activation_zone = activation_zone_from_self_effect(&def);
     }
     def.cost = Some(cost);
     def.description = Some(description.to_string());
@@ -3346,6 +3651,48 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
     (remaining, constraints)
 }
 
+/// CR 602.5b: Recognize a standalone `"Activate only once each turn"` cadence
+/// sentence — the trailing restriction on cards like Luxurious Locomotive's
+/// "Crew 1. Activate only once each turn." Pure / side-effect-free.
+///
+/// Only the standalone imperative sentence is recognized here. The conjoined
+/// `"activate only if [X] and only once each turn"` tail is a different
+/// grammatical shape with its own slicing requirement, handled by
+/// `strip_once_per_turn_suffix`; the strictly-once-ever `" and only once"`
+/// form is likewise that function's concern (it maps to
+/// `ActivationRestriction::OnlyOnce`, which `ActivationCadence` does not model).
+fn recognize_once_each_turn_cadence(text: &str) -> Option<ActivationCadence> {
+    let lower = text.trim().trim_end_matches('.').to_lowercase();
+    let matched = all_consuming(tag::<_, _, OracleError<'_>>("activate only once each turn"))
+        .parse(lower.as_str())
+        .is_ok();
+    matched.then_some(ActivationCadence::OncePerTurn)
+}
+
+/// CR 702.122 + CR 602.5b: Parse a Crew keyword line, capturing an optional
+/// trailing "Activate only once each turn." cadence sentence. MTGJSON supplies
+/// `Crew:N` without the cadence, so this re-extracts the full keyword from Oracle
+/// text when the line carries the standalone restriction sentence; the merge in
+/// `synthesis.rs` then replaces the cadence-less MTGJSON keyword. Returns `None`
+/// when there is no cadence sentence, leaving the MTGJSON keyword untouched.
+/// `lower` is the reminder-stripped, lowercased line.
+fn parse_crew_keyword(lower: &str) -> Option<Keyword> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("crew ").parse(lower).ok()?;
+    let (power, after_power) = parse_number(rest)?;
+    // After the power, the only modeled tail is the cadence sentence: "Crew N.
+    // Activate only once each turn." A bare "Crew N" (no tail) yields None so the
+    // MTGJSON keyword is kept as-is.
+    let tail = after_power.trim_start_matches(|c: char| c == '.' || c.is_whitespace());
+    if recognize_once_each_turn_cadence(tail) == Some(ActivationCadence::OncePerTurn) {
+        Some(Keyword::Crew {
+            power,
+            once_per_turn: ActivationCadence::OncePerTurn,
+        })
+    } else {
+        None
+    }
+}
+
 /// Strip "and only once each turn" / "and only once" compound suffixes from a condition_text
 /// extracted from "activate only if [condition_text]", pushing the corresponding
 /// `OnlyOnceEachTurn`/`OnlyOnce` restriction.
@@ -3452,25 +3799,6 @@ fn x_annotation_min_value(line: &str) -> u32 {
     } else {
         0
     }
-}
-
-/// Strip the reminder-like retarget sentence from copy effects. The runtime
-/// copy resolver implements CR 707.10c via `WaitingFor::CopyRetarget`; keeping
-/// this sentence as a separate effect would duplicate that behavior.
-fn strip_copy_retarget_suffix(line: &str) -> String {
-    let lower = line.to_lowercase();
-    let trimmed = lower.trim_end_matches('.');
-    for suffix in [
-        ". you may choose new targets for the copies",
-        ". you may choose new targets for the copy",
-    ] {
-        if let Some(pos) = trimmed.rfind(suffix) {
-            let mut result = line[..pos].to_string();
-            result.push('.');
-            return result.trim_end().to_string();
-        }
-    }
-    line.to_string()
 }
 
 /// Primary nom-based dispatcher for Oracle text lines.
@@ -4176,6 +4504,51 @@ mod tests {
         }
     }
 
+    /// CR 706.2 + CR 706.3b: "where X is the result" binds X to the preceding
+    /// die roll. Hammer Helper's inline +X/+0 pump must parse as a dynamic
+    /// power modification referencing `EventContextAmount`, not be swallowed.
+    #[test]
+    fn hammer_helper_die_result_pump_parses_dynamic_power_no_warning() {
+        let r = parse(
+            "Gain control of target creature until end of turn. Untap that creature and roll a six-sided die. Until end of turn, it gains haste and gets +X/+0, where X is the result.",
+            "Hammer Helper",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert!(
+            r.parse_warnings
+                .iter()
+                .all(|warning| warning.to_string().split_whitespace().next()
+                    != Some("Swallow:DynamicQty")),
+            "unexpected DynamicQty warning: {:?}",
+            r.parse_warnings
+        );
+        assert_eq!(r.abilities.len(), 1);
+        // GainControl → Untap → RollDie → GenericEffect
+        let generic = r.abilities[0]
+            .sub_ability
+            .as_ref()
+            .and_then(|a| a.sub_ability.as_ref())
+            .and_then(|a| a.sub_ability.as_ref())
+            .expect("GenericEffect should be the 4th link of the chain");
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = generic.effect.as_ref()
+        else {
+            panic!("expected GenericEffect, got {:?}", generic.effect);
+        };
+        let mods = &static_abilities[0].modifications;
+        assert!(
+            mods.contains(&ContinuousModification::AddDynamicPower {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+            }),
+            "expected AddDynamicPower(EventContextAmount), got {mods:?}"
+        );
+    }
+
     #[test]
     fn bhaal_myrkul_half_starting_life_static_has_typed_condition_no_dynamic_qty_warning() {
         for (name, subject) in [
@@ -4717,6 +5090,96 @@ mod tests {
         assert!(matches!(filter, TargetFilter::Any));
         assert_eq!(*rest_destination, Some(Zone::Exile));
         assert!(!reveal);
+    }
+
+    /// CR 103.6a + CR 122.1 + CR 701.13a: Gemstone Caverns' begin-game line must
+    /// capture BOTH the "with a luck counter on it" entry counter AND the
+    /// "If you do, exile a card from your hand" dependent sub-ability gated by
+    /// `IfYouDo` — neither may be silently dropped.
+    #[test]
+    fn gemstone_caverns_begin_game_captures_counter_and_exile_sub_ability() {
+        let r = parse(
+            "If this card is in your opening hand and you're not the starting player, you may begin the game with Gemstone Caverns on the battlefield with a luck counter on it. If you do, exile a card from your hand.",
+            "Gemstone Caverns",
+            &[],
+            &["Land"],
+            &[],
+        );
+
+        assert_eq!(r.abilities.len(), 1);
+        let begin_game = &r.abilities[0];
+        assert_eq!(begin_game.kind, AbilityKind::BeginGame);
+        assert!(begin_game.optional);
+
+        let Effect::ChangeZone {
+            destination,
+            origin,
+            target,
+            enter_with_counters,
+            ..
+        } = &*begin_game.effect
+        else {
+            panic!("expected ChangeZone, got {:?}", begin_game.effect);
+        };
+        assert_eq!(*destination, Zone::Battlefield);
+        assert_eq!(*origin, Some(Zone::Hand));
+        assert!(matches!(target, TargetFilter::SelfRef));
+        assert_eq!(
+            enter_with_counters,
+            &vec![(
+                crate::types::counter::CounterType::Generic("luck".to_string()),
+                QuantityExpr::Fixed { value: 1 },
+            )],
+        );
+
+        let sub = begin_game
+            .sub_ability
+            .as_deref()
+            .expect("'If you do, exile a card from your hand' must create a sub-ability");
+        assert_eq!(sub.condition, Some(AbilityCondition::IfYouDo));
+        assert!(
+            !has_unimplemented(sub),
+            "exile-from-hand sub-ability must not be Unimplemented: {:?}",
+            sub.effect
+        );
+        assert!(matches!(
+            &*sub.effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Exile,
+                ..
+            }
+        ));
+    }
+
+    /// A Leyline-style begin-game line carries no counter clause and no
+    /// "If you do" follow-up — the optional clauses must be truly optional so
+    /// the branch is not over-fitted to Gemstone Caverns.
+    #[test]
+    fn leyline_begin_game_has_no_counters_or_sub_ability() {
+        let r = parse(
+            "If this card is in your opening hand, you may begin the game with it on the battlefield.\nYou have hexproof.",
+            "Leyline of Sanctity",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+
+        let begin_game = r
+            .abilities
+            .iter()
+            .find(|a| a.kind == AbilityKind::BeginGame)
+            .expect("Leyline begin-game ability must parse");
+        assert!(begin_game.optional);
+        assert!(begin_game.sub_ability.is_none());
+        let Effect::ChangeZone {
+            enter_with_counters,
+            ..
+        } = &*begin_game.effect
+        else {
+            panic!("expected ChangeZone, got {:?}", begin_game.effect);
+        };
+        assert!(enter_with_counters.is_empty());
     }
 
     /// CR 103.5b: Serum Powder's mulligan-time ability must classify as
@@ -5499,6 +5962,72 @@ mod tests {
                 ActivationRestriction::AsSorcery,
                 ActivationRestriction::OnlyOnceEachTurn,
             ]
+        );
+    }
+
+    #[test]
+    fn crew_with_activate_only_once_each_turn_carries_cadence() {
+        // CR 702.122 + CR 602.5b: Luxurious Locomotive — "Crew 1. Activate only
+        // once each turn." The trailing cadence sentence upgrades the keyword's
+        // `once_per_turn` field from the cadence-less MTGJSON `Crew`.
+        let r = parse_with_keyword_names(
+            "Crew 1. Activate only once each turn. (Tap any number of creatures you control with total power 1 or more: This Vehicle becomes an artifact creature until end of turn.)",
+            "Luxurious Locomotive",
+            &["Crew"],
+            &["Artifact"],
+            &["Vehicle"],
+        );
+        assert!(
+            r.extracted_keywords.contains(&Keyword::Crew {
+                power: 1,
+                once_per_turn: ActivationCadence::OncePerTurn,
+            }),
+            "expected Crew {{ power: 1, once_per_turn: OncePerTurn }}, got {:?}",
+            r.extracted_keywords
+        );
+    }
+
+    #[test]
+    fn plain_crew_line_extracts_unlimited_cadence() {
+        // A bare "Crew N" line (no cadence sentence) parses as the default
+        // `Unlimited` cadence — no once-per-turn restriction is invented.
+        let r = parse_with_keyword_names(
+            "Crew 3 (Tap any number of creatures you control with total power 3 or more: This Vehicle becomes an artifact creature until end of turn.)",
+            "Smuggler's Copter",
+            &["Crew"],
+            &["Artifact"],
+            &["Vehicle"],
+        );
+        assert!(
+            r.extracted_keywords.contains(&Keyword::Crew {
+                power: 3,
+                once_per_turn: ActivationCadence::Unlimited,
+            }),
+            "a plain Crew line keeps the default Unlimited cadence; got {:?}",
+            r.extracted_keywords
+        );
+    }
+
+    #[test]
+    fn kirol_standalone_activate_only_once_each_turn_unchanged() {
+        // Regression witness: Kirol, Attentive First-Year — a NORMAL activated
+        // ability with a standalone "Activate only once each turn." sentence.
+        // Factoring `recognize_once_each_turn_cadence` must not disturb this
+        // path; the ability still carries `OnlyOnceEachTurn`.
+        let r = parse(
+            "Tap two untapped creatures you control: Copy target triggered ability you control. You may choose new targets for the copy. Activate only once each turn.",
+            "Kirol, Attentive First-Year",
+            &[],
+            &["Creature"],
+            &["Elf", "Druid"],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        assert!(
+            r.abilities[0]
+                .activation_restrictions
+                .contains(&ActivationRestriction::OnlyOnceEachTurn),
+            "Kirol's activated ability must still carry OnlyOnceEachTurn; got {:?}",
+            r.abilities[0].activation_restrictions
         );
     }
 
@@ -7064,6 +7593,45 @@ mod tests {
     }
 
     #[test]
+    fn repeat_this_process_you_may_sets_controller_choice() {
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::RepeatContinuation;
+        // CR 107.1c: Ad Nauseam — "You may repeat this process any number of
+        // times." sets the root ability's `repeat_until` to a controller
+        // decision, instead of being silently dropped.
+        let def = parse_effect_chain(
+            "Reveal the top card of your library and put that card into your hand. \
+             You lose life equal to its mana value. \
+             You may repeat this process any number of times.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(
+            def.repeat_until,
+            Some(RepeatContinuation::ControllerChoice),
+            "expected repeat_until = ControllerChoice, got {:?}",
+            def.repeat_until,
+        );
+    }
+
+    #[test]
+    fn repeat_this_process_if_you_do_stays_recognized_without_predicate() {
+        use crate::parser::oracle_effect::parse_effect_chain;
+        // CR 608.2c: Primal Surge — "If you do, repeat this process." is the
+        // game-state-predicate form, a deferred unit. The directive is still
+        // recognized (no Unimplemented gap) but sets no `repeat_until`.
+        let def = parse_effect_chain(
+            "Exile the top card of your library. If it's a permanent card, you \
+             may put it onto the battlefield. If you do, repeat this process.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(
+            def.repeat_until, None,
+            "the 'if you do' form is deferred — no predicate set, got {:?}",
+            def.repeat_until,
+        );
+    }
+
+    #[test]
     fn proliferate_twice_uses_repeat_for() {
         use crate::parser::oracle_effect::parse_effect_chain;
         let def = parse_effect_chain("proliferate twice", AbilityKind::Spell);
@@ -7192,6 +7760,86 @@ mod tests {
                 "expected PreventDamage All + CombatDamage, got {:?}",
                 effect
             ),
+        }
+    }
+
+    #[test]
+    fn prevent_dynamic_amount_where_x_is_counters() {
+        use crate::types::ability::{ObjectScope, PreventionAmount, QuantityExpr, QuantityRef};
+        use crate::types::counter::CounterType;
+        // Cover of Winter class: "prevent X … where X is the number of age
+        // counters on this enchantment". The chunk machinery strips the
+        // trailing "where x is …" binding and `apply_where_x_effect_expression`
+        // re-applies it onto `Effect::PreventDamage::amount_dynamic`. Driven
+        // through the full `parse` path because the chunk-level where-X
+        // mechanism does not run inside the single-clause `parse_effect`.
+        let parsed = parse(
+            "If a creature would deal combat damage to you and/or one or more creatures \
+             you control, prevent X of that damage, where X is the number of age counters \
+             on this enchantment.",
+            "Cover of Winter",
+            &[],
+            &["Snow", "Enchantment"],
+            &[],
+        );
+        let prevent = parsed
+            .abilities
+            .iter()
+            .find(|a| matches!(&*a.effect, Effect::PreventDamage { .. }))
+            .expect("expected a PreventDamage ability");
+        match &*prevent.effect {
+            Effect::PreventDamage {
+                amount: PreventionAmount::Next(1),
+                amount_dynamic:
+                    Some(QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::CountersOn {
+                                scope: ObjectScope::Source,
+                                counter_type: Some(ct),
+                            },
+                    }),
+                ..
+            } => assert_eq!(*ct, CounterType::Generic("age".to_string())),
+            other => panic!("expected PreventDamage with dynamic age counters, got {other:?}"),
+        }
+        assert!(
+            parsed
+                .parse_warnings
+                .iter()
+                .all(|w| w.to_string().split_whitespace().next() != Some("Swallow:DynamicQty")),
+            "DynamicQty swallow warning should clear, got {:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    #[test]
+    fn prevent_all_damage_has_no_dynamic_amount() {
+        use crate::parser::oracle_effect::parse_effect;
+        use crate::types::ability::PreventionAmount;
+        let effect = parse_effect("prevent all damage that would be dealt this turn");
+        match effect {
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                ..
+            } => {}
+            other => panic!("expected PreventDamage All + no dynamic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prevent_next_3_has_no_dynamic_amount() {
+        use crate::parser::oracle_effect::parse_effect;
+        use crate::types::ability::PreventionAmount;
+        let effect =
+            parse_effect("prevent the next 3 damage that would be dealt to any target this turn");
+        match effect {
+            Effect::PreventDamage {
+                amount: PreventionAmount::Next(3),
+                amount_dynamic: None,
+                ..
+            } => {}
+            other => panic!("expected PreventDamage Next(3) + no dynamic, got {other:?}"),
         }
     }
 
@@ -7555,6 +8203,67 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // CR 113.6m — activation zone derived from a self-ChangeZone *effect*
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn put_self_from_hand_onto_battlefield_activates_from_hand() {
+        // Talon Gates of Madara — the {4}: Put this card from your hand onto
+        // the battlefield ability. The "from your hand" lives in the effect,
+        // not the cost, so activation_zone must be derived effect-side.
+        let r = parse(
+            "{4}: Put this card from your hand onto the battlefield.",
+            "Talon Gates of Madara",
+            &[],
+            &["Land"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let ability = &r.abilities[0];
+        assert_eq!(ability.kind, AbilityKind::Activated);
+        // CR 113.6m: effect moves the source out of hand → functions from hand.
+        assert_eq!(ability.activation_zone, Some(Zone::Hand));
+    }
+
+    #[test]
+    fn put_self_from_graveyard_onto_battlefield_activates_from_graveyard() {
+        // Building-block test: the derivation generalizes across origin zones,
+        // not just Talon Gates' Hand. CR 113.6m example: Reassembling Skeleton.
+        let r = parse(
+            "{2}: Put this card from your graveyard onto the battlefield.",
+            "Test Recursion Land",
+            &[],
+            &["Land"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let ability = &r.abilities[0];
+        assert_eq!(ability.kind, AbilityKind::Activated);
+        assert_eq!(ability.activation_zone, Some(Zone::Graveyard));
+    }
+
+    #[test]
+    fn battlefield_self_changezone_leaves_activation_zone_unset() {
+        // Negative control: a normal battlefield-activated ability whose effect
+        // does NOT move the source out of a non-battlefield zone must keep
+        // activation_zone == None (→ defaults to Battlefield at runtime).
+        let r = parse(
+            "{1}{U}: Return Test Bounce Creature to its owner's hand.",
+            "Test Bounce Creature",
+            &[],
+            &["Creature"],
+            &["Bird"],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let ability = &r.abilities[0];
+        assert_eq!(ability.kind, AbilityKind::Activated);
+        assert_eq!(
+            ability.activation_zone, None,
+            "a self-bounce (battlefield → hand) must not derive an activation zone"
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // Boast (CR 702.142 — keyword ability)
     // -----------------------------------------------------------------------
 
@@ -7650,6 +8359,33 @@ mod tests {
         assert!(r.abilities[0]
             .activation_restrictions
             .contains(&ActivationRestriction::OnlyOnceEachTurn),);
+    }
+
+    #[test]
+    fn exhaust_mana_cost_parses_as_activated_with_once_per_game_restriction() {
+        let r = parse(
+            "Exhaust \u{2014} {3}: Draw a card.",
+            "Adrenaline Jockey",
+            &[],
+            &["Creature"],
+            &["Human", "Pilot"],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let ability = &r.abilities[0];
+        assert_eq!(ability.kind, AbilityKind::Activated);
+        assert_eq!(ability.ability_tag, Some(AbilityTag::Exhaust));
+        assert!(matches!(
+            ability.cost,
+            Some(AbilityCost::Mana {
+                cost: ManaCost::Cost { generic: 3, .. }
+            })
+        ));
+        assert!(
+            ability
+                .activation_restrictions
+                .contains(&ActivationRestriction::OnlyOnce),
+            "Exhaust must have OnlyOnce restriction"
+        );
     }
 
     #[test]
@@ -8591,6 +9327,17 @@ mod tests {
     }
 
     #[test]
+    fn mana_spend_restriction_spell_only() {
+        let result = crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
+            "spend this mana only to cast spells",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellOnly)
+        );
+    }
+
+    #[test]
     fn mana_spend_restriction_x_cost_only() {
         use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
         use crate::types::ability::ManaSpendRestriction;
@@ -8626,6 +9373,53 @@ mod tests {
             result.map(|(r, _)| r),
             Some(ManaSpendRestriction::SpellTypeOrAbilityActivation(
                 "Colorless Eldrazi".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn mana_spend_restriction_singular_source_ability_activation() {
+        let result = crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
+            "spend this mana only to cast an artifact spell or activate an ability of an artifact source",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation(
+                "Artifact".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn mana_spend_restriction_or_to_activate_source_ability() {
+        let result = crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
+            "spend this mana only to cast an assassin spell or to activate an ability of an assassin source",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation(
+                "Assassin".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn mana_spend_restriction_bare_activation_or_is_unsupported() {
+        let result = crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
+            "spend this mana only to cast an artifact spell or activate an ability",
+        );
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn mana_spend_restriction_ally_spell_or_source_activation() {
+        let result = crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
+            "spend this mana only to cast an ally spell or activate an ability of an ally source",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation(
+                "Ally".to_string()
             ))
         );
     }
@@ -10302,6 +11096,113 @@ mod tests {
             }
             other => panic!("expected ConditionInstead quantity check, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn leading_conditional_instead_composes_self_replacement() {
+        use crate::types::ability::{AbilityCondition, QuantityRef};
+
+        // CR 614.15: "<ability word> — If <condition>, instead <effect>" — the
+        // leading-conditional word order (condition FIRST, then "instead").
+        // Arrow Storm: raid-gated self-replacement. The base 4-damage ability
+        // becomes the fallback; the alternative 5-damage chain is gated by a
+        // `ConditionInstead { AttackedThisTurn >= 1 }`.
+        let r = parse_oracle_text(
+            "Arrow Storm deals 4 damage to any target.\nRaid \u{2014} If you attacked this turn, instead Arrow Storm deals 5 damage to that permanent or player and the damage can't be prevented.",
+            "Arrow Storm",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        // The leading-conditional "instead" line must NOT leave a swallowed-clause
+        // warning — the condition and the alternative effect are both captured.
+        assert!(
+            r.parse_warnings.iter().all(|w| {
+                let kind = w.to_string();
+                // allow-noncombinator: test assertion on a diagnostic-warning kind string, not Oracle-text parsing dispatch
+                !kind.contains("Condition_If") && !kind.contains("Replacement_Instead")
+            }),
+            "leading-conditional instead should not emit swallowed-clause warnings, got: {:?}",
+            r.parse_warnings
+        );
+        assert_eq!(r.abilities.len(), 1, "should compose into ONE base ability");
+        let base = &r.abilities[0];
+        assert!(
+            matches!(
+                *base.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 4 },
+                    ..
+                }
+            ),
+            "base should deal 4, got: {:?}",
+            base.effect
+        );
+        let sub = base
+            .sub_ability
+            .as_ref()
+            .expect("expected conditional self-replacement sub-ability");
+        let Some(AbilityCondition::ConditionInstead { inner }) = sub.condition.as_ref() else {
+            panic!("expected ConditionInstead on sub, got: {:?}", sub.condition);
+        };
+        assert!(
+            matches!(
+                inner.as_ref(),
+                AbilityCondition::QuantityCheck {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::AttackedThisTurn,
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                }
+            ),
+            "expected AttackedThisTurn >= 1 inside ConditionInstead, got: {inner:?}"
+        );
+    }
+
+    #[test]
+    fn leading_conditional_instead_threshold_graveyard_count() {
+        use crate::types::ability::{AbilityCondition, QuantityRef};
+
+        // CR 614.15: Lightning Surge — threshold-gated self-replacement using the
+        // leading-conditional word order with a graveyard-count condition.
+        let r = parse_oracle_text(
+            "Lightning Surge deals 4 damage to any target.\nThreshold \u{2014} If there are seven or more cards in your graveyard, instead Lightning Surge deals 6 damage to that permanent or player and the damage can't be prevented.",
+            "Lightning Surge",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        assert!(
+            r.parse_warnings.iter().all(|w| {
+                let kind = w.to_string();
+                // allow-noncombinator: test assertion on a diagnostic-warning kind string, not Oracle-text parsing dispatch
+                !kind.contains("Condition_If") && !kind.contains("Replacement_Instead")
+            }),
+            "threshold instead should not emit swallowed-clause warnings, got: {:?}",
+            r.parse_warnings
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let sub = r.abilities[0]
+            .sub_ability
+            .as_ref()
+            .expect("expected threshold self-replacement sub-ability");
+        let Some(AbilityCondition::ConditionInstead { inner }) = sub.condition.as_ref() else {
+            panic!("expected ConditionInstead on sub, got: {:?}", sub.condition);
+        };
+        assert!(
+            matches!(
+                inner.as_ref(),
+                AbilityCondition::QuantityCheck {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::GraveyardSize { .. },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 7 },
+                }
+            ),
+            "expected GraveyardSize >= 7 inside ConditionInstead, got: {inner:?}"
+        );
     }
 
     #[test]

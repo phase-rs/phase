@@ -23,6 +23,32 @@ pub fn shuffle_library(state: &mut GameState, player: PlayerId) {
     }
 }
 
+/// CR 701.17c + CR 603.7: For a `TrackedSet` / `TrackedSetFiltered` target,
+/// resolve the zone its members currently occupy. Tracked sets are not
+/// zone-constrained — milled cards land in the graveyard, revealed cards stay
+/// in the library/hand — so an interactive `ChangeZone` selecting "from among"
+/// such a set must scan the members' actual zone, not the battlefield default.
+///
+/// The `TrackedSetId(0)` sentinel resolves to the most recent non-empty set,
+/// mirroring the binding pass in `resolve` (CR 603.7). Returns `None` when the
+/// filter is not tracked-set-backed or the set is empty/unbound.
+fn tracked_set_member_zone(state: &GameState, filter: &TargetFilter) -> Option<Zone> {
+    let id = match filter {
+        TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. } => *id,
+        _ => return None,
+    };
+    let id = if id == TrackedSetId(0) {
+        crate::game::targeting::latest_tracked_set_id(state)?
+    } else {
+        id
+    };
+    state
+        .tracked_object_sets
+        .get(&id)?
+        .iter()
+        .find_map(|obj_id| state.objects.get(obj_id).map(|obj| obj.zone))
+}
+
 /// Result of a single zone-move attempt through the replacement pipeline.
 pub(crate) enum ZoneMoveResult {
     /// Object was moved (or prevented). Continue processing.
@@ -73,9 +99,12 @@ pub(crate) fn deliver_replaced_zone_change(
         // "under your control" — set before triggers fire.
         if let Some(new_controller) = ctrl_override {
             if to == Zone::Battlefield {
-                if let Some(obj) = state.objects.get_mut(&object_id) {
-                    obj.controller = new_controller;
-                }
+                zones::apply_battlefield_entry_controller_override(
+                    state,
+                    events,
+                    object_id,
+                    new_controller,
+                );
             }
         }
         // CR 614.1c: Apply counters from replacement pipeline (e.g., saga lore counters,
@@ -318,10 +347,19 @@ pub fn resolve(
 
     let mut origin = origin;
 
-    let target_filter = match &ability.effect {
-        Effect::ChangeZone { target, .. } => target,
-        _ => &TargetFilter::Any,
+    // CR 603.7: Resolve the `TrackedSetId(0)` sentinel emitted by the parser
+    // for "from among the milled cards" / "X cards revealed this way"
+    // continuations to the most recent non-empty tracked set. Done up front so
+    // every downstream path (interactive scan, `matches_target_filter`,
+    // `tracked_set_member_zone`) sees the bound id — `matches_target_filter`
+    // looks the set up by exact id and would otherwise miss the sentinel.
+    let target_filter: TargetFilter = match &ability.effect {
+        Effect::ChangeZone { target, .. } => {
+            crate::game::targeting::resolve_tracked_set_sentinel(state, target.clone())
+        }
+        _ => TargetFilter::Any,
     };
+    let target_filter = &target_filter;
     if origin.is_none() && matches!(target_filter, TargetFilter::TriggeringSource) {
         origin = state
             .current_trigger_event
@@ -383,8 +421,17 @@ pub fn resolve(
             return Ok(());
         }
 
+        // CR 701.17c + CR 603.7: A tracked-set filter ("from among the milled
+        // cards" / "X cards revealed this way") scopes the selection to a set
+        // of objects that may live in any zone (milled cards land in the
+        // graveyard, revealed cards in the library/hand). The tracked-set
+        // membership IS the scope — there is no fixed `InZone` constraint to
+        // extract — so derive the scan zone from the members' actual zone
+        // rather than defaulting to the battlefield (which would scan the
+        // wrong zone and silently offer nothing).
         let scan_zone = origin
             .or_else(|| target_filter.extract_in_zone())
+            .or_else(|| tracked_set_member_zone(state, target_filter))
             .unwrap_or(Zone::Battlefield);
         // Filter-controller override is primary here: when a filter like
         // "creature you control" needs "you" to resolve to the *target* player
@@ -678,19 +725,9 @@ pub fn resolve_all(
     // chain: exile creature → search land → return the exiled card). The
     // delayed-trigger resolver performs the same binding at delayed-trigger
     // creation time; inline chains must bind here so `ChangeZoneAll` scans the
-    // correct set. Mirrors the sentinel handling in `grant_permission.rs`.
-    let effective_filter = match effective_filter {
-        TargetFilter::TrackedSet {
-            id: TrackedSetId(0),
-        } => state
-            .tracked_object_sets
-            .iter()
-            .filter(|(_, objects)| !objects.is_empty())
-            .max_by_key(|(id, _)| id.0)
-            .map(|(&real_id, _)| TargetFilter::TrackedSet { id: real_id })
-            .unwrap_or(effective_filter),
-        other => other,
-    };
+    // correct set.
+    let effective_filter =
+        crate::game::targeting::resolve_tracked_set_sentinel(state, effective_filter);
 
     let filter_controller =
         crate::game::effects::controller_for_relative_filter(ability, &effective_filter);
@@ -2376,6 +2413,338 @@ mod tests {
             "Academy Rector should be in exile"
         );
         assert!(!state.players[0].graveyard.contains(&obj_id));
+    }
+
+    // === Issue #448: "enters tapped" observer triggers (CR 603.6a + CR 110.5b) ===
+    //
+    // Amulet of Vigor ("Whenever a permanent you control enters tapped, untap
+    // it.") is an *observer* trigger: its `valid_card` matches any permanent the
+    // controller owns, so the entering permanent differs from the ability
+    // source. The `ZoneChangeObjectIsTapped` condition must read the entering
+    // permanent named by the `ZoneChanged` event — NOT the (untapped) Amulet.
+    //
+    // These tests drive the real pipeline: `resolve()` performs the ChangeZone
+    // effect (tapping the entering permanent and emitting a real `ZoneChanged`
+    // event), then `process_triggers` scans the battlefield for matching
+    // observer triggers and stacks them. On pre-fix `main`, the buggy
+    // `SourceIsTapped` condition reads the untapped Amulet → trigger never
+    // fires → these tests fail.
+
+    /// Build an Amulet of Vigor-style observer trigger: "Whenever a permanent
+    /// you control enters tapped, untap it." Mirrors the parsed card-data
+    /// shape (`valid_card: Typed[Permanent] controller You`,
+    /// `condition: ZoneChangeObjectIsTapped`, `execute: Untap{TriggeringSource}`).
+    fn amulet_of_vigor_trigger() -> crate::types::ability::TriggerDefinition {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, ControllerRef, TriggerCondition, TriggerDefinition,
+            TypedFilter,
+        };
+        use crate::types::triggers::TriggerMode;
+
+        let mut trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+        trigger.destination = Some(Zone::Battlefield);
+        trigger.trigger_zones = vec![Zone::Battlefield];
+        trigger.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::permanent().controller(ControllerRef::You),
+        ));
+        trigger.condition = Some(TriggerCondition::ZoneChangeObjectIsTapped);
+        trigger.execute = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Untap {
+                target: TargetFilter::TriggeringSource,
+            },
+        )));
+        trigger
+    }
+
+    /// Move a freshly created hand permanent onto the battlefield through the
+    /// real ChangeZone resolution path, with `enter_tapped` controlling the
+    /// post-ETB tapped state. Returns the emitted events (carrying the real
+    /// `ZoneChanged` event) for `process_triggers`.
+    fn enter_permanent_via_change_zone(
+        state: &mut GameState,
+        obj_id: ObjectId,
+        enter_tapped: bool,
+    ) -> Vec<GameEvent> {
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: true,
+                enter_tapped,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(state, &ability, &mut events).unwrap();
+        events
+    }
+
+    /// Issue #448: Amulet of Vigor untaps a *different* permanent that enters
+    /// tapped. Two distinct objects (Amulet ≠ Lotus Field). Pre-fix `main`
+    /// reads `obj.tapped` on the untapped Amulet → condition false → no trigger.
+    #[test]
+    fn amulet_of_vigor_untaps_permanent_entering_tapped() {
+        use crate::game::stack::resolve_top;
+        use crate::game::triggers::process_triggers;
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Amulet of Vigor on the battlefield, untapped artifact.
+        let amulet = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Amulet of Vigor".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&amulet).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.tapped = false;
+            obj.trigger_definitions.push(amulet_of_vigor_trigger());
+        }
+
+        // Lotus Field in hand — a distinct land that will enter tapped.
+        let land = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Lotus Field".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let events = enter_permanent_via_change_zone(&mut state, land, true);
+        assert!(
+            state.objects[&land].tapped,
+            "land must enter tapped (enter_tapped replacement applied)"
+        );
+
+        process_triggers(&mut state, &events);
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "Amulet of Vigor's trigger must fire when a different permanent enters tapped"
+        );
+        assert_eq!(
+            state.stack.back().unwrap().source_id,
+            amulet,
+            "the stacked trigger must be Amulet of Vigor's"
+        );
+
+        let mut resolve_events = Vec::new();
+        resolve_top(&mut state, &mut resolve_events);
+        assert!(
+            !state.objects[&land].tapped,
+            "Amulet of Vigor should have untapped the entering land"
+        );
+    }
+
+    /// Issue #448 negative control: a permanent entering *untapped* must NOT
+    /// fire Amulet of Vigor's trigger — the `ZoneChangeObjectIsTapped`
+    /// condition genuinely gates on the entering object's tapped state.
+    #[test]
+    fn amulet_of_vigor_ignores_permanent_entering_untapped() {
+        use crate::game::triggers::process_triggers;
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        let amulet = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Amulet of Vigor".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&amulet).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.tapped = false;
+            obj.trigger_definitions.push(amulet_of_vigor_trigger());
+        }
+        let land = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Untapped Land".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let events = enter_permanent_via_change_zone(&mut state, land, false);
+        assert!(!state.objects[&land].tapped, "land entered untapped");
+
+        process_triggers(&mut state, &events);
+        assert!(
+            state.stack.is_empty(),
+            "a permanent entering untapped must not fire Amulet of Vigor"
+        );
+    }
+
+    /// Issue #448 (the exact Discord report): two Amulet of Vigor in play, one
+    /// permanent enters tapped — both Amulets must trigger (CR 603.3: each
+    /// triggered ability is placed on the stack independently).
+    #[test]
+    fn two_amulets_of_vigor_both_trigger() {
+        use crate::game::triggers::process_triggers;
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        for cid in [CardId(1), CardId(2)] {
+            let amulet = create_object(
+                &mut state,
+                cid,
+                PlayerId(0),
+                "Amulet of Vigor".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&amulet).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.tapped = false;
+            obj.trigger_definitions.push(amulet_of_vigor_trigger());
+        }
+        let land = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Lotus Field".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let events = enter_permanent_via_change_zone(&mut state, land, true);
+        process_triggers(&mut state, &events);
+        assert_eq!(
+            state.stack.len(),
+            2,
+            "CR 603.3: both Amulet of Vigor copies must place a triggered ability on the stack"
+        );
+    }
+
+    /// Issue #448 sibling class: Charismatic Conqueror's `Not(ZoneChangeObjectIsTapped)`
+    /// observer trigger fires when an opponent's permanent enters *untapped*.
+    #[test]
+    fn charismatic_conqueror_triggers_on_opponent_untapped_etb() {
+        use crate::game::triggers::process_triggers;
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, ControllerRef, TriggerCondition, TriggerDefinition,
+            TypedFilter,
+        };
+        use crate::types::card_type::CoreType;
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Charismatic Conqueror under PlayerId(0).
+        let conqueror = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Charismatic Conqueror".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let mut trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+            trigger.destination = Some(Zone::Battlefield);
+            trigger.trigger_zones = vec![Zone::Battlefield];
+            // "a permanent ... under an opponent's control"
+            trigger.valid_card = Some(TargetFilter::Typed(
+                TypedFilter::permanent().controller(ControllerRef::Opponent),
+            ));
+            // "enters untapped" → Not(ZoneChangeObjectIsTapped)
+            trigger.condition = Some(TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::ZoneChangeObjectIsTapped),
+            });
+            trigger.execute = Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Untap {
+                    target: TargetFilter::TriggeringSource,
+                },
+            )));
+            let obj = state.objects.get_mut(&conqueror).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.trigger_definitions.push(trigger);
+        }
+
+        // An opponent's (PlayerId(1)) creature enters the battlefield untapped.
+        let opp_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Creature".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&opp_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: true,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![TargetRef::Object(opp_creature)],
+            ObjectId(999),
+            PlayerId(1),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert!(
+            !state.objects[&opp_creature].tapped,
+            "opponent creature entered untapped"
+        );
+
+        process_triggers(&mut state, &events);
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "Charismatic Conqueror must trigger on an opponent's permanent entering untapped"
+        );
+        assert_eq!(
+            state.stack.back().unwrap().source_id,
+            conqueror,
+            "the stacked trigger must be Charismatic Conqueror's"
+        );
     }
 
     /// CR 400.6 + CR 608.2c: `ChangeZoneAll` must set `last_effect_count` to

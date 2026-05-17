@@ -1263,10 +1263,33 @@ mod bracket_estimate_tests {
 
     #[test]
     fn estimate_bracket_inner_returns_b3_for_one_game_changer() {
-        let db = CardDatabase::default().with_bracket_lists(
-            BracketLists::from_json_str(r#"{"version":"t","game_changers":["Smothering Tithe"]}"#)
-                .unwrap(),
-        );
+        let db = CardDatabase::from_json_str(
+            r#"{
+                "smothering tithe": {
+                    "name": "Smothering Tithe",
+                    "mana_cost": { "type": "NoCost" },
+                    "card_type": { "supertypes": [], "core_types": ["Enchantment"], "subtypes": [] },
+                    "power": null,
+                    "toughness": null,
+                    "loyalty": null,
+                    "defense": null,
+                    "oracle_text": null,
+                    "abilities": [],
+                    "triggers": [],
+                    "static_abilities": [],
+                    "replacements": [],
+                    "keywords": [],
+                    "bracket_signals": {
+                        "game_changer": true,
+                        "mass_land_denial": false,
+                        "extra_turn": false,
+                        "efficient_tutor": false
+                    }
+                }
+            }"#,
+        )
+        .unwrap()
+        .with_bracket_lists(BracketLists::from_json_str(r#"{"version":"t"}"#).unwrap());
         CARD_DB.with(|c| *c.borrow_mut() = Some(db));
 
         let deck = PlayerDeckList {

@@ -261,6 +261,9 @@ pub fn resolve_tally(
             ability_index: None,
             may_trigger_origin: None,
             target_selection_mode: per_choice_effect[idx].target_selection_mode,
+            chosen_players: Vec::new(),
+            repeat_until: None,
+            sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
         };
         // CR 608.2c: depth = 1 so the chain entry doesn't clear
         // `state.last_vote_ballots`; see ledger-publication note above.
@@ -316,6 +319,10 @@ fn resolved_from_def(
         ability_index: None,
         may_trigger_origin: None,
         target_selection_mode: def.target_selection_mode,
+        chosen_players: Vec::new(),
+        repeat_until: None,
+        // CR 608.2c: Carry the parent-link kind through to the resolved ability.
+        sub_link: def.sub_link,
     }
 }
 
@@ -453,6 +460,9 @@ mod tests {
             ability_index: None,
             may_trigger_origin: None,
             target_selection_mode: crate::types::ability::TargetSelectionMode::Chosen,
+            chosen_players: Vec::new(),
+            repeat_until: None,
+            sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
         };
 
         let mut events = Vec::new();
@@ -538,6 +548,9 @@ mod tests {
             ability_index: None,
             may_trigger_origin: None,
             target_selection_mode: crate::types::ability::TargetSelectionMode::Chosen,
+            chosen_players: Vec::new(),
+            repeat_until: None,
+            sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
         }
     }
 
@@ -824,6 +837,9 @@ mod tests {
             ability_index: None,
             may_trigger_origin: None,
             target_selection_mode: crate::types::ability::TargetSelectionMode::Chosen,
+            chosen_players: Vec::new(),
+            repeat_until: None,
+            sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
         };
 
         // Resolution parks on VoteChoice with controller as first subject.
@@ -966,6 +982,9 @@ mod tests {
             ability_index: None,
             may_trigger_origin: None,
             target_selection_mode: crate::types::ability::TargetSelectionMode::Chosen,
+            chosen_players: Vec::new(),
+            repeat_until: None,
+            sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
         };
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).expect("vote initiates");

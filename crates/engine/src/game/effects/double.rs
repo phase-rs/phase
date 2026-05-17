@@ -3,7 +3,7 @@ use crate::types::ability::{
     DoubleTarget, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::counter::CounterType;
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{ManaColor, ManaType, ManaUnit};
@@ -203,7 +203,7 @@ fn resolve_double_mana(
                 player_id,
                 mana_type,
                 source_id: ability.source_id,
-                tapped_for_mana: false,
+                tap_state: ManaTapState::NotFromTap,
             });
         }
     }
@@ -303,6 +303,9 @@ mod tests {
             unless_pay: None,
             distribution: None,
             target_selection_mode: crate::types::ability::TargetSelectionMode::Chosen,
+            chosen_players: Vec::new(),
+            repeat_until: None,
+            sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
         }
     }
 

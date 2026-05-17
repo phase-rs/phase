@@ -1,8 +1,9 @@
-//! `oracle-gen data` must stamp `bracket_signals` onto every card by looking
-//! up the lowercase name in `data/bracket_lists.json`. This test verifies a
-//! known Game Changer (Smothering Tithe), a known MLD (Armageddon), a known
-//! extra-turn card (Time Warp), a known tutor (Demonic Tutor), and a clean
-//! card (Llanowar Elves).
+//! `oracle-gen data` must stamp `bracket_signals` onto every card. Game
+//! Changers come from MTGJSON `isGameChanger`; the other axes come from
+//! `data/bracket_lists.json`. This test verifies a known Game Changer
+//! (Smothering Tithe), a known MLD (Armageddon), a known extra-turn card
+//! (Time Warp), a known tutor (Demonic Tutor), and a clean card (Llanowar
+//! Elves).
 
 use std::path::PathBuf;
 use std::process::Command;

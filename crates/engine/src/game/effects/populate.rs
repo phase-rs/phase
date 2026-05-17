@@ -70,6 +70,9 @@ pub fn create_token_copy(
     let copy_ability = ResolvedAbility::new(
         Effect::CopyTokenOf {
             target: TargetFilter::Any,
+            // CR 707.2: Populate puts the copy under the populating player's
+            // control — the default `Controller`.
+            owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking: false,
             tapped: false,

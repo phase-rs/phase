@@ -209,7 +209,9 @@ fn handle_activated_mode_choice(
     events.push(GameEvent::AbilityActivated { source_id });
     // CR 702.142b: Emit additional event when a boast ability is activated.
     if let Some(index) = ability_index {
-        super::casting_targets::emit_boast_event_if_tagged(state, source_id, index, player, events);
+        super::casting_targets::emit_keyword_ability_event_if_tagged(
+            state, source_id, index, player, events,
+        );
     }
     state.priority_passes.clear();
     state.priority_pass_count = 0;
@@ -271,7 +273,13 @@ fn handle_triggered_mode_choice(
         if let Some(targets) = resolved_targets {
             let mut resolved = trigger.ability.clone();
             assign_targets_in_chain(state, &mut resolved, &targets)?;
-            engine_stack::finalize_trigger_target_selection(state, trigger, resolved, events);
+            // CR 113.2c + CR 603.2 + CR 603.3b: `finalize_trigger_target_selection`
+            // already drains the deferred-trigger queue and surfaces the next
+            // WaitingFor if a sibling trigger needs input; use that result
+            // instead of falling through to Priority below.
+            return Ok(engine_stack::finalize_trigger_target_selection(
+                state, trigger, resolved, events,
+            ));
         } else {
             let description = trigger.description.clone();
             state.pending_trigger = Some(trigger);
@@ -298,6 +306,12 @@ fn handle_triggered_mode_choice(
         triggers::push_pending_trigger_to_stack(state, trigger, events);
         state.priority_passes.clear();
         state.priority_pass_count = 0;
+        // CR 113.2c + CR 603.2 + CR 603.3b: Drain siblings deferred behind this
+        // modal trigger so each independent instance reaches the stack
+        // (issue #416).
+        if let Some(waiting_for) = triggers::drain_deferred_trigger_queue(state, events) {
+            return Ok(waiting_for);
+        }
     }
 
     Ok(WaitingFor::Priority { player })

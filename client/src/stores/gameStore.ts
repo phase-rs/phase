@@ -214,12 +214,18 @@ export const useGameStore = create<GameStore>()(
         throw new Error("Game not initialized");
       }
 
-      // Save current state for undo (only for unrevealed-information actions,
-      // and only in single-player — multiplayer sessions can't undo because
-      // rewinding this client's view would desync from the authoritative
-      // game state on the wire).
+      // Save current state for undo. Three conditions must hold:
+      // 1. Action type is in UNDOABLE_ACTIONS (no hidden-info leaks).
+      // 2. Single-player mode — multiplayer sessions can't undo because
+      //    rewinding this client's view would desync from the authoritative
+      //    game state on the wire.
+      // 3. Stack is empty. Checkpoints exist only at stack-empty boundaries
+      //    so undo always lands the player before the most recent
+      //    activation/trigger sequence, never mid-resolution.
       const shouldSaveHistory =
-        UNDOABLE_ACTIONS.has(action.type) && !isMultiplayerMode(gameMode);
+        UNDOABLE_ACTIONS.has(action.type) &&
+        !isMultiplayerMode(gameMode) &&
+        gameState.stack.length === 0;
 
       // `getPlayerId()` returns the local human's authenticated seat ID.
       // The engine rejects the action if this doesn't match the authorized

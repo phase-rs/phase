@@ -1,6 +1,5 @@
 import type {
   ActionResult,
-  BracketEstimate,
   EngineAdapter,
   GameAction,
   GameState,
@@ -10,6 +9,7 @@ import type {
   SubmitResult,
 } from "./types";
 import { AdapterError, AdapterErrorCode } from "./types";
+import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 
 /**
  * Tauri IPC-backed implementation of EngineAdapter.
@@ -139,11 +139,7 @@ export class TauriAdapter implements EngineAdapter {
     );
   }
 
-  estimateBracket(_deck: {
-    commander: string[];
-    main_deck: string[];
-    sideboard?: string[];
-  }): Promise<BracketEstimate | null> {
+  estimateBracket(_deck: BracketDeckRequest): Promise<BracketEstimate | null> {
     // Bracket estimation runs locally against the WASM card database.
     // The Tauri sidecar does not yet expose an `estimate_bracket_for_deck`
     // command. When Tauri parity is needed, add a Tauri command in

@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::types::ability::{
-    ControllerRef, DamageKindFilter, EffectKind, TargetFilter, TargetRef, TriggerDefinition,
-    TypedFilter,
+    ControllerRef, DamageKindFilter, EffectKind, OriginConstraint, TargetFilter, TargetRef,
+    TriggerDefinition, TypedFilter,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{GameState, StackEntryKind};
@@ -109,11 +109,13 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::SaddlesOrCrews => match_saddles_or_crews,
         TriggerMode::NinjutsuActivated => match_ninjutsu_activated,
         TriggerMode::BoastAbilityActivated => match_boast_ability_activated,
+        TriggerMode::ExhaustAbilityActivated => match_exhaust_ability_activated,
         TriggerMode::Firebend => match_firebend,
         TriggerMode::Airbend => match_airbend,
         TriggerMode::Earthbend => match_earthbend,
         TriggerMode::Waterbend => match_waterbend,
         TriggerMode::ElementalBend => match_elemental_bend,
+        TriggerMode::BecomesPlotted => match_becomes_plotted,
         TriggerMode::DamagePreventedOnce
         | TriggerMode::AbilityCast
         | TriggerMode::AbilityResolves
@@ -159,8 +161,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::SetInMotion
         | TriggerMode::Specializes
         | TriggerMode::Trains
-        | TriggerMode::VisitAttraction
-        | TriggerMode::BecomesPlotted => match_unimplemented,
+        | TriggerMode::VisitAttraction => match_unimplemented,
         // CR 603.8: State triggers are not event-based — they are checked separately
         // in the priority pipeline, not through the event-matching trigger system.
         TriggerMode::StateCondition => return None,
@@ -315,6 +316,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     r.insert(TriggerMode::RoomEntered, match_room_entered);
     r.insert(TriggerMode::UnlockDoor, match_unlock_door);
     r.insert(TriggerMode::FullyUnlock, match_fully_unlock);
+    r.insert(TriggerMode::BecomesPlotted, match_becomes_plotted);
     // CR 725: Initiative triggers
     r.insert(TriggerMode::TakesInitiative, match_takes_initiative);
 
@@ -388,7 +390,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::Trains,
         TriggerMode::VisitAttraction,
         // TriggerMode::BecomesCrewed — moved to real matcher below
-        TriggerMode::BecomesPlotted,
+        // TriggerMode::BecomesPlotted — moved to real matcher above
         // TriggerMode::BecomesSaddled — moved to real matcher below
     ];
 
@@ -422,6 +424,10 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     r.insert(
         TriggerMode::BoastAbilityActivated,
         match_boast_ability_activated,
+    );
+    r.insert(
+        TriggerMode::ExhaustAbilityActivated,
+        match_exhaust_ability_activated,
     );
 
     // Avatar crossover: bending trigger matchers
@@ -521,6 +527,8 @@ pub(super) fn target_filter_matches_object(
     match filter {
         TargetFilter::None => false,
         TargetFilter::Player => false,
+        // CR 118.12a: unless-payer population — never matches an object.
+        TargetFilter::AllPlayers => false,
         TargetFilter::Controller => false,
         // CR 109.5: OriginalController is a player reference, not an object.
         TargetFilter::OriginalController => false,
@@ -570,6 +578,52 @@ pub(super) fn target_filter_matches_object(
 // Core Trigger Matchers (~20 with real logic)
 // ---------------------------------------------------------------------------
 
+/// CR 603.6 + CR 603.6c: Tests whether one zone-change event satisfies a single
+/// origin/destination/valid_card clause. Shared by both the scalar
+/// `match_changes_zone` path and the disjunctive `zone_change_clauses` path.
+#[allow(clippy::too_many_arguments)]
+fn zone_change_clause_matches(
+    origin: &OriginConstraint,
+    destination: Option<&Zone>,
+    valid_card: Option<&TargetFilter>,
+    from: &Option<Zone>,
+    to: &Zone,
+    record: &crate::types::game_state::ZoneChangeRecord,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    // CR 603.6c + CR 111.1: A zone-change event's `from` is `None` when the
+    // object was created directly in `to` (token creation / emblem). Any
+    // constraint that names a specific source zone cannot match such an event;
+    // `OriginConstraint::Any` matches regardless.
+    let origin_ok = match origin {
+        OriginConstraint::Any => true,
+        OriginConstraint::Equals(z) => from == &Some(*z),
+        OriginConstraint::NotEquals(z) => matches!(from, Some(f) if f != z),
+        OriginConstraint::OneOf(zs) => matches!(from, Some(f) if zs.contains(f)),
+    };
+    if !origin_ok {
+        return false;
+    }
+    if let Some(dest) = destination {
+        if dest != to {
+            return false;
+        }
+    }
+    if let Some(filter) = valid_card {
+        let ctx = super::filter::FilterContext::from_source(state, source_id);
+        let matches = if *to == Zone::Battlefield && state.objects.contains_key(&record.object_id) {
+            super::filter::matches_target_filter(state, record.object_id, filter, &ctx)
+        } else {
+            super::filter::matches_target_filter_on_zone_change_record(state, record, filter, &ctx)
+        };
+        if !matches {
+            return false;
+        }
+    }
+    true
+}
+
 // CR 603.6: ZoneChange triggers when an object enters or leaves a zone.
 pub(super) fn match_changes_zone(
     event: &GameEvent,
@@ -584,56 +638,46 @@ pub(super) fn match_changes_zone(
         record,
     } = event
     {
-        // CR 603.10a: Check origin zone(s). Disjunctive `origin_zones` takes
-        // precedence over single-zone `origin` when non-empty — this supports
-        // "put into exile from your library and/or your graveyard" where the
-        // source zone can be one of several zones.
-        //
-        // CR 111.1 + CR 603.6a: `from = None` means the object was created
-        // directly in `to` (token creation / emblem). Any trigger that names
-        // a specific origin zone cannot match such an event; a trigger with
-        // no origin filter (e.g. Elvish Vanguard's "whenever another Elf
-        // enters") falls through these guards and matches.
-        match from {
-            Some(from_zone) => {
-                if !trigger.origin_zones.is_empty() {
-                    if !trigger.origin_zones.contains(from_zone) {
-                        return false;
-                    }
-                } else if let Some(origin) = &trigger.origin {
-                    if origin != from_zone {
-                        return false;
-                    }
-                }
-            }
-            None => {
-                if !trigger.origin_zones.is_empty() || trigger.origin.is_some() {
-                    return false;
-                }
-            }
+        // CR 603.2: A disjunctive zone-change trigger fires if the event matches
+        // ANY of its clauses. When `zone_change_clauses` is non-empty it fully
+        // supersedes the scalar `origin`/`origin_zones`/`destination`/`valid_card`
+        // path (Syr Konrad's three-way "dies / put into graveyard / leaves
+        // graveyard" disjunction).
+        if !trigger.zone_change_clauses.is_empty() {
+            return trigger.zone_change_clauses.iter().any(|clause| {
+                zone_change_clause_matches(
+                    &clause.origin,
+                    clause.destination.as_ref(),
+                    clause.valid_card.as_ref(),
+                    from,
+                    to,
+                    record,
+                    source_id,
+                    state,
+                )
+            });
         }
-        // Check destination zone using typed field
-        if let Some(destination) = &trigger.destination {
-            if destination != to {
-                return false;
-            }
-        }
-        // Check valid_card filter
-        if let Some(filter) = &trigger.valid_card {
-            let ctx = super::filter::FilterContext::from_source(state, source_id);
-            let matches =
-                if *to == Zone::Battlefield && state.objects.contains_key(&record.object_id) {
-                    super::filter::matches_target_filter(state, record.object_id, filter, &ctx)
-                } else {
-                    super::filter::matches_target_filter_on_zone_change_record(
-                        state, record, filter, &ctx,
-                    )
-                };
-            if !matches {
-                return false;
-            }
-        }
-        true
+        // Scalar single-clause path. CR 603.10a: `origin_zones` is a disjunctive
+        // source-zone set that takes precedence over single-zone `origin` when
+        // non-empty. CR 111.1: `from = None` (token creation) cannot satisfy a
+        // trigger that names any specific origin zone.
+        let origin = if !trigger.origin_zones.is_empty() {
+            OriginConstraint::OneOf(trigger.origin_zones.clone())
+        } else if let Some(origin) = trigger.origin {
+            OriginConstraint::Equals(origin)
+        } else {
+            OriginConstraint::Any
+        };
+        zone_change_clause_matches(
+            &origin,
+            trigger.destination.as_ref(),
+            trigger.valid_card.as_ref(),
+            from,
+            to,
+            record,
+            source_id,
+            state,
+        )
     } else {
         false
     }
@@ -1610,33 +1654,44 @@ pub(super) fn match_revealed(
     )
 }
 
+/// Card-identity predicate for `TapsForMana` triggers: does the permanent that
+/// was tapped for mana (`mana_source`) match the trigger's `valid_card` filter
+/// (or, absent a filter, equal the trigger source itself)?
+///
+/// Extracted as a standalone authority so the aura mana-refund probe
+/// (`mana_sources::aura_taps_for_mana_sources_for_land`) can ask the same
+/// question without synthesizing a `GameEvent`.
+pub(super) fn taps_for_mana_card_matches(
+    trigger: &TriggerDefinition,
+    state: &GameState,
+    mana_source: ObjectId,
+    source_id: ObjectId,
+) -> bool {
+    if trigger.valid_card.is_some() {
+        valid_card_matches(trigger, state, mana_source, source_id)
+    } else {
+        mana_source == source_id
+    }
+}
+
 /// TapsForMana: fires when source taps and produces mana.
+///
+/// CR 106.12a: triggers once per resolution of a mana ability whose activation
+/// cost includes `{T}` — keyed off `GameEvent::TappedForMana`, which the engine
+/// emits exactly once per such resolution (not once per mana unit).
 pub(super) fn match_taps_for_mana(
     event: &GameEvent,
     trigger: &TriggerDefinition,
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::ManaAdded {
+    if let GameEvent::TappedForMana {
         player_id,
         source_id: mana_source,
-        tapped_for_mana,
         ..
     } = event
     {
-        // Only fire for actual mana ability activations (tap costs), not for mana
-        // produced by triggered abilities, effects, convoke, or doublers.
-        // This prevents infinite loops (e.g., Badgermole Cub's trigger producing
-        // mana that re-triggers itself).
-        if !tapped_for_mana {
-            return false;
-        }
-
-        if trigger.valid_card.is_some() {
-            if !valid_card_matches(trigger, state, *mana_source, source_id) {
-                return false;
-            }
-        } else if *mana_source != source_id {
+        if !taps_for_mana_card_matches(trigger, state, *mana_source, source_id) {
             return false;
         }
 
@@ -2091,6 +2146,29 @@ pub(super) fn match_fully_unlock(
         ..
     } = event
     {
+        let card_matches = if trigger.valid_card.is_some() {
+            valid_card_matches(trigger, state, *object_id, source_id)
+        } else {
+            *object_id == source_id
+        };
+        card_matches && valid_player_matches(trigger, state, *player_id, source_id)
+    } else {
+        false
+    }
+}
+
+/// CR 702.170c-d: Match "when this card becomes plotted" while the source is in exile.
+pub(super) fn match_becomes_plotted(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::BecomesPlotted {
+        object_id,
+        player_id,
+    } = event
+    {
         *object_id == source_id && valid_player_matches(trigger, state, *player_id, source_id)
     } else {
         false
@@ -2143,6 +2221,24 @@ pub(super) fn match_boast_ability_activated(
 ) -> bool {
     if let GameEvent::BoastAbilityActivated { player_id, .. } = event {
         // Fire when the boast ability was activated by the trigger source's controller
+        state
+            .objects
+            .get(&source_id)
+            .map(|obj| obj.controller == *player_id)
+            .unwrap_or(false)
+    } else {
+        false
+    }
+}
+
+/// CR 702.177a + CR 603.2: Matches when a player activates an exhaust ability.
+pub(super) fn match_exhaust_ability_activated(
+    event: &GameEvent,
+    _trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::ExhaustAbilityActivated { player_id, .. } = event {
         state
             .objects
             .get(&source_id)
@@ -2479,7 +2575,7 @@ mod tests {
         TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
-    use crate::types::events::{GameEvent, PlayerActionKind};
+    use crate::types::events::{GameEvent, ManaTapState, PlayerActionKind};
     use crate::types::game_state::{
         CastingVariant, GameState, StackEntry, StackEntryKind, ZoneChangeRecord,
     };
@@ -2505,6 +2601,78 @@ mod tests {
     /// Helper to create a minimal TriggerDefinition with typed fields.
     fn make_trigger(mode: TriggerMode) -> TriggerDefinition {
         TriggerDefinition::new(mode)
+    }
+
+    #[test]
+    fn becomes_plotted_matches_only_source_card() {
+        let mut state = setup();
+        let plotted = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Aloe Alchemist".to_string(),
+            Zone::Exile,
+        );
+        let other = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Other Card".to_string(),
+            Zone::Exile,
+        );
+        let trigger = make_trigger(TriggerMode::BecomesPlotted);
+
+        assert!(match_becomes_plotted(
+            &GameEvent::BecomesPlotted {
+                object_id: plotted,
+                player_id: PlayerId(0),
+            },
+            &trigger,
+            plotted,
+            &state
+        ));
+        assert!(!match_becomes_plotted(
+            &GameEvent::BecomesPlotted {
+                object_id: other,
+                player_id: PlayerId(0),
+            },
+            &trigger,
+            plotted,
+            &state
+        ));
+    }
+
+    #[test]
+    fn exhaust_ability_activation_matches_controller() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Rangers' Aetherhive".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = make_trigger(TriggerMode::ExhaustAbilityActivated);
+
+        assert!(match_exhaust_ability_activated(
+            &GameEvent::ExhaustAbilityActivated {
+                player_id: PlayerId(0),
+                source_id: ObjectId(99),
+                is_mana_ability: false,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+        assert!(!match_exhaust_ability_activated(
+            &GameEvent::BoastAbilityActivated {
+                player_id: PlayerId(0),
+                source_id: ObjectId(99),
+            },
+            &trigger,
+            source,
+            &state
+        ));
     }
 
     #[test]
@@ -2703,6 +2871,61 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn fully_unlock_room_trigger_matches_observer_with_room_filter() {
+        let mut state = setup();
+        let room = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Test Room".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&room).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Room".to_string());
+        }
+        let observer = create_object(
+            &mut state,
+            CardId(21),
+            PlayerId(0),
+            "Entity Tracker".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut trigger = make_trigger(TriggerMode::FullyUnlock);
+        trigger.valid_target = Some(TargetFilter::Controller);
+        trigger.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::default().subtype("Room".to_string()),
+        ));
+        let fully_unlock_event = GameEvent::RoomDoorUnlocked {
+            player_id: PlayerId(0),
+            object_id: room,
+            door: RoomDoor::Right,
+            fully_unlocked: true,
+        };
+        assert!(match_fully_unlock(
+            &fully_unlock_event,
+            &trigger,
+            observer,
+            &state
+        ));
+
+        let opponent_unlock_event = GameEvent::RoomDoorUnlocked {
+            player_id: PlayerId(1),
+            object_id: room,
+            door: RoomDoor::Right,
+            fully_unlocked: true,
+        };
+        assert!(!match_fully_unlock(
+            &opponent_unlock_event,
+            &trigger,
+            observer,
+            &state
+        ));
+    }
+
     fn zone_changed_event(
         object_id: ObjectId,
         from: Zone,
@@ -2738,6 +2961,99 @@ mod tests {
             Vec::new(),
         );
         assert!(match_changes_zone(&event, &trigger, ObjectId(1), &state));
+    }
+
+    #[test]
+    fn match_changes_zone_disjunctive() {
+        use crate::types::ability::{OriginConstraint, ZoneChangeClause};
+
+        let state = setup();
+        let mut trigger = make_trigger(TriggerMode::ChangesZone);
+        // CR 603.6: Syr Konrad's three-clause disjunction.
+        trigger.zone_change_clauses = vec![
+            // Clause 1: another creature dies (battlefield -> graveyard).
+            ZoneChangeClause {
+                origin: OriginConstraint::Equals(Zone::Battlefield),
+                destination: Some(Zone::Graveyard),
+                valid_card: None,
+            },
+            // Clause 2: a creature card put into a graveyard from anywhere
+            // other than the battlefield.
+            ZoneChangeClause {
+                origin: OriginConstraint::NotEquals(Zone::Battlefield),
+                destination: Some(Zone::Graveyard),
+                valid_card: None,
+            },
+            // Clause 3: a creature card leaves the graveyard (any destination).
+            ZoneChangeClause {
+                origin: OriginConstraint::Equals(Zone::Graveyard),
+                destination: None,
+                valid_card: None,
+            },
+        ];
+
+        // Clause 1: dies in combat.
+        let dies = zone_changed_event(
+            ObjectId(5),
+            Zone::Battlefield,
+            Zone::Graveyard,
+            vec![CoreType::Creature],
+            Vec::new(),
+        );
+        assert!(match_changes_zone(&dies, &trigger, ObjectId(1), &state));
+
+        // Clause 2: milled from library into graveyard.
+        let milled = zone_changed_event(
+            ObjectId(6),
+            Zone::Library,
+            Zone::Graveyard,
+            vec![CoreType::Creature],
+            Vec::new(),
+        );
+        assert!(match_changes_zone(&milled, &trigger, ObjectId(1), &state));
+
+        // Clause 3: creature card leaves the graveyard for the hand.
+        let leaves_graveyard = zone_changed_event(
+            ObjectId(7),
+            Zone::Graveyard,
+            Zone::Hand,
+            vec![CoreType::Creature],
+            Vec::new(),
+        );
+        assert!(match_changes_zone(
+            &leaves_graveyard,
+            &trigger,
+            ObjectId(1),
+            &state
+        ));
+
+        // Matches no clause: a creature enters the battlefield from hand.
+        let etb = zone_changed_event(
+            ObjectId(8),
+            Zone::Hand,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            Vec::new(),
+        );
+        assert!(!match_changes_zone(&etb, &trigger, ObjectId(1), &state));
+
+        // Implicit `from = None` guard: a token created directly in the
+        // graveyard must NOT satisfy clause 2's `NotEquals(Battlefield)`.
+        let created_in_graveyard = GameEvent::ZoneChanged {
+            object_id: ObjectId(9),
+            from: None,
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord {
+                core_types: vec![CoreType::Creature],
+                ..ZoneChangeRecord::test_minimal(ObjectId(9), None, Zone::Graveyard)
+            }),
+        };
+        assert!(!match_changes_zone(
+            &created_in_graveyard,
+            &trigger,
+            ObjectId(1),
+            &state
+        ));
     }
 
     #[test]
@@ -3581,14 +3897,14 @@ mod tests {
     }
 
     #[test]
-    fn taps_for_mana_matches_mana_added() {
+    fn taps_for_mana_matches_tapped_for_mana() {
         let state = setup();
         let source = ObjectId(5);
-        let event = GameEvent::ManaAdded {
+        let event = GameEvent::TappedForMana {
             player_id: PlayerId(0),
-            mana_type: crate::types::mana::ManaType::Green,
             source_id: source,
-            tapped_for_mana: true,
+            produced: vec![crate::types::mana::ManaType::Green],
+            tap_state: ManaTapState::FromTap,
         };
         let trigger = make_trigger(TriggerMode::TapsForMana);
         assert!(match_taps_for_mana(&event, &trigger, source, &state));
@@ -3613,11 +3929,11 @@ mod tests {
         );
         state.objects.get_mut(&aura).unwrap().attached_to = Some(enchanted_land.into());
 
-        let event = GameEvent::ManaAdded {
+        let event = GameEvent::TappedForMana {
             player_id: PlayerId(0),
-            mana_type: crate::types::mana::ManaType::Green,
             source_id: enchanted_land,
-            tapped_for_mana: true,
+            produced: vec![crate::types::mana::ManaType::Green],
+            tap_state: ManaTapState::FromTap,
         };
 
         let mut trigger = make_trigger(TriggerMode::TapsForMana);
@@ -3650,11 +3966,11 @@ mod tests {
             .core_types
             .push(CoreType::Land);
 
-        let event = GameEvent::ManaAdded {
+        let event = GameEvent::TappedForMana {
             player_id: PlayerId(1),
-            mana_type: crate::types::mana::ManaType::Green,
             source_id: tapped_land,
-            tapped_for_mana: true,
+            produced: vec![crate::types::mana::ManaType::Green],
+            tap_state: ManaTapState::FromTap,
         };
 
         let mut trigger = make_trigger(TriggerMode::TapsForMana);
@@ -3667,12 +3983,14 @@ mod tests {
     fn taps_for_mana_ignores_non_mana_ability_production() {
         let state = setup();
         let source = ObjectId(5);
-        // Mana produced by a triggered ability effect, not a mana ability activation
+        // Mana produced by a triggered ability effect, not a mana ability
+        // activation, emits `ManaAdded` (per-unit pool accounting) but never
+        // `TappedForMana` — so the matcher must not fire on it.
         let event = GameEvent::ManaAdded {
             player_id: PlayerId(0),
             mana_type: crate::types::mana::ManaType::Green,
             source_id: source,
-            tapped_for_mana: false,
+            tap_state: ManaTapState::NotFromTap,
         };
         let trigger = make_trigger(TriggerMode::TapsForMana);
         assert!(!match_taps_for_mana(&event, &trigger, source, &state));

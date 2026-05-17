@@ -39,8 +39,11 @@ pub fn resolve(
     let mut created = Vec::new();
 
     for opponent in opponents {
+        // CR 702.116a: Myriad copies are created under the source creature's
+        // controller's control, so `owner` stays the default `Controller`.
         let copy_effect = Effect::CopyTokenOf {
             target: TargetFilter::SelfRef,
+            owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking: false,
             tapped: true,

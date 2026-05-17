@@ -32,9 +32,9 @@ pub struct CardDatabase {
     /// cards carry rulings; back-face lookups return the empty slice.
     pub(crate) rulings_index: HashMap<String, Vec<Ruling>>,
     pub(crate) errors: Vec<(PathBuf, String)>,
-    /// Hand-curated bracket-axis name lists. Populated by `with_bracket_lists`
-    /// at runtime (engine binaries pass through `data/bracket_lists.json`;
-    /// WASM/server consumers receive an already-built database).
+    /// Non-MTGJSON bracket-axis name lists. Populated by `with_bracket_lists`
+    /// at export time for policy axes MTGJSON does not expose. WASM/server
+    /// consumers receive those signals in the already-built database.
     pub(crate) bracket_lists: BracketLists,
     /// Stamped during `from_export_entries` from each `CardExportEntry`'s
     /// `bracket_signals` field. Keyed by lowercased card name. Read by
@@ -220,11 +220,10 @@ impl CardDatabase {
         self
     }
 
-    /// Case-insensitive bracket-signal lookup. At runtime (post-export),
-    /// reads the per-card map stamped by `from_export_entries`. At export
-    /// time (when `oracle-gen` builds the DB), falls back to looking up
-    /// names in the loaded `bracket_lists`. Returns all-false `BracketSignals`
-    /// when the name is unknown to both.
+    /// Case-insensitive bracket-signal lookup. Game Changers are card-level
+    /// MTGJSON facts stamped into `bracket_signals_by_name`; other axes may
+    /// come from either the export or `bracket_lists`. Returns all-false
+    /// `BracketSignals` when the name is unknown to both.
     ///
     /// Multi-face combined names (`"A // B"` — partner pairs, MDFCs, split,
     /// etc.) are aggregated face-by-face with logical-OR *before* the
@@ -247,10 +246,16 @@ impl CardDatabase {
 
     fn signals_for_single_face(&self, name: &str) -> BracketSignals {
         let key = self.lookup_key(name);
-        if let Some(sig) = self.bracket_signals_by_name.get(&key) {
-            return *sig;
+        let list_signals = self.bracket_lists.signals_for(name);
+        let Some(card_signals) = self.bracket_signals_by_name.get(&key) else {
+            return list_signals;
+        };
+        BracketSignals {
+            game_changer: card_signals.game_changer,
+            mass_land_denial: card_signals.mass_land_denial || list_signals.mass_land_denial,
+            extra_turn: card_signals.extra_turn || list_signals.extra_turn,
+            efficient_tutor: card_signals.efficient_tutor || list_signals.efficient_tutor,
         }
-        self.bracket_lists.signals_for(name)
     }
 
     fn lookup_key(&self, name: &str) -> String {
@@ -654,19 +659,21 @@ mod tests {
         use crate::database::bracket_lists::BracketLists;
         // No export entries — bracket_lists is the source of truth.
         let lists = BracketLists::from_json_str(
-            r#"{"version":"t","game_changers":["Halana, Kessig Ranger"]}"#,
+            r#"{"version":"t","efficient_tutors":["Halana, Kessig Ranger"]}"#,
         )
         .unwrap();
         let db = CardDatabase::default().with_bracket_lists(lists);
         let sig = db.bracket_signals_for("Halana, Kessig Ranger // Alena, Trapper Founder");
         assert!(
-            sig.game_changer,
+            sig.efficient_tutor,
             "falls back to bracket_lists for partner pair when export map is empty"
         );
     }
 
     #[test]
-    fn from_json_loads_bracket_signals_into_face_lookup() {
+    fn from_json_merges_card_signals_with_list_signals() {
+        use crate::database::bracket_lists::BracketLists;
+
         let json = r#"{
             "demonic tutor": {
                 "name": "Demonic Tutor",
@@ -678,11 +685,16 @@ mod tests {
                 "keywords": [],
                 "bracket_signals": {
                     "game_changer": true, "mass_land_denial": false,
-                    "extra_turn": false, "efficient_tutor": true
+                    "extra_turn": false, "efficient_tutor": false
                 }
             }
         }"#;
-        let db = CardDatabase::from_json_str(json).unwrap();
+        let lists =
+            BracketLists::from_json_str(r#"{"version":"t","efficient_tutors":["Demonic Tutor"]}"#)
+                .unwrap();
+        let db = CardDatabase::from_json_str(json)
+            .unwrap()
+            .with_bracket_lists(lists);
         let sig = db.bracket_signals_for("demonic tutor");
         assert!(sig.efficient_tutor);
         assert!(sig.game_changer);

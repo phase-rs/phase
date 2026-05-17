@@ -130,24 +130,38 @@ fn collect_player_targets(
             type_filters,
             controller,
             ..
-        }) if type_filters.is_empty() => state
-            .players
-            .iter()
-            .filter(|p| match controller {
-                Some(ControllerRef::You) => p.id == ability.controller,
-                Some(ControllerRef::Opponent) => p.id != ability.controller,
-                Some(ControllerRef::ScopedPlayer) => {
-                    p.id == ability.scoped_player.unwrap_or(ability.controller)
-                }
-                // CR 109.4: TargetPlayer is ambiguous here (phase_out targets are
-                // resolved from ability.targets directly); fail closed.
-                Some(ControllerRef::TargetPlayer) => false,
-                Some(ControllerRef::ParentTargetController) => false,
-                Some(ControllerRef::DefendingPlayer) => false,
-                None => true,
-            })
-            .map(|p| p.id)
-            .collect(),
+        }) if type_filters.is_empty() => {
+            state
+                .players
+                .iter()
+                .filter(|p| match controller {
+                    Some(ControllerRef::You) => p.id == ability.controller,
+                    Some(ControllerRef::Opponent) => p.id != ability.controller,
+                    Some(ControllerRef::ScopedPlayer) => {
+                        p.id == ability.scoped_player.unwrap_or(ability.controller)
+                    }
+                    // CR 109.4: TargetPlayer is ambiguous here (phase_out targets are
+                    // resolved from ability.targets directly); fail closed.
+                    Some(ControllerRef::TargetPlayer) => false,
+                    Some(ControllerRef::ParentTargetController) => false,
+                    Some(ControllerRef::DefendingPlayer) => false,
+                    // CR 608.2c + CR 109.4: Player chosen by an earlier
+                    // `Choose(Player)` in this resolution.
+                    Some(ControllerRef::ChosenPlayer { index }) => {
+                        ability.chosen_players.get(*index as usize).copied() == Some(p.id)
+                    }
+                    // CR 603.2 + CR 109.4: The triggering player. Resolved against
+                    // the current trigger event; fail closed when there is none.
+                    Some(ControllerRef::TriggeringPlayer) => {
+                        state.current_trigger_event.as_ref().and_then(|e| {
+                            crate::game::targeting::extract_player_from_event(e, state)
+                        }) == Some(p.id)
+                    }
+                    None => true,
+                })
+                .map(|p| p.id)
+                .collect()
+        }
         _ => Vec::new(),
     }
 }

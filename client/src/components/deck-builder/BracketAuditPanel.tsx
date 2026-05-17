@@ -1,8 +1,14 @@
 import { useState } from "react";
 
-import type { BracketEstimate, BracketAxis } from "../../adapter/types";
-import { BRACKET_TIER_NUMERIC } from "../../adapter/types";
-import { BRACKET_LABEL, BRACKET_TIER_CHIP_CLASS, type CommanderBracket } from "../../types/bracket";
+import {
+  BRACKET_AXES,
+  BRACKET_LABEL,
+  BRACKET_TIER_CHIP_CLASS,
+  BRACKET_TIER_NUMERIC,
+  type BracketAxis,
+  type BracketEstimate,
+  type CommanderBracket,
+} from "../../types/bracket";
 
 interface Props {
   estimate: BracketEstimate | null;
@@ -22,7 +28,6 @@ const AXIS_LABEL: Record<BracketAxis, string> = {
   extra_turns: "Extra Turns",
   efficient_tutors: "Efficient Tutors",
 };
-
 
 export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyReason }: Props) {
   const [expanded, setExpanded] = useState(false);
@@ -44,7 +49,7 @@ export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyR
   }
 
   const tierNum = BRACKET_TIER_NUMERIC[estimate.tier];
-  const tierLabel = BRACKET_LABEL[tierNum as CommanderBracket];
+  const tierLabel = BRACKET_LABEL[tierNum];
   const mismatch = manualBracket !== null && manualBracket !== tierNum;
 
   return (
@@ -80,7 +85,7 @@ export function BracketAuditPanel({ estimate, manualBracket, onCardClick, emptyR
 
       {expanded && (
         <dl className="mt-3 space-y-2 text-xs">
-          {(Object.keys(AXIS_LABEL) as BracketAxis[]).map((axis) => {
+          {BRACKET_AXES.map((axis) => {
             const count = estimate.axes[axis];
             const cards = estimate.contributing[axis];
             const cap = estimate.axis_caps_at_tier[axis];

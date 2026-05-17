@@ -201,6 +201,8 @@ pub fn convert(t: &CreatableToken) -> ConvResult<Effect> {
             let (extra_keywords, additional_modifications) = convert_copy_effects(copy_effects)?;
             Effect::CopyTokenOf {
                 target: filter::convert_permanent(perm)?,
+                // CR 109.4: default — the creating player controls the copy.
+                owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
                 tapped: false,
@@ -217,6 +219,8 @@ pub fn convert(t: &CreatableToken) -> ConvResult<Effect> {
             let (extra_keywords, additional_modifications) = convert_copy_effects(copy_effects)?;
             Effect::CopyTokenOf {
                 target: filter::convert(perms)?,
+                // CR 109.4: default — the creating player controls the copy.
+                owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
                 tapped: false,
@@ -237,6 +241,8 @@ pub fn convert(t: &CreatableToken) -> ConvResult<Effect> {
             let (extra_keywords, additional_modifications) = convert_copy_effects(copy_effects)?;
             Effect::CopyTokenOf {
                 target: TargetFilter::Any,
+                // CR 109.4: default — the creating player controls the copy.
+                owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
                 tapped: false,
@@ -254,6 +260,8 @@ pub fn convert(t: &CreatableToken) -> ConvResult<Effect> {
             let (extra_keywords, additional_modifications) = convert_copy_effects(copy_effects)?;
             Effect::CopyTokenOf {
                 target: TargetFilter::ParentTarget,
+                // CR 109.4: default — the creating player controls the copy.
+                owner: TargetFilter::Controller,
                 source_filter: Some(filter::convert(perms)?),
                 enters_attacking: false,
                 tapped: false,

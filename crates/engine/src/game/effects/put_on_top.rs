@@ -63,11 +63,17 @@ pub fn resolve(
     // not say "target"), present an EffectZoneChoice for resolution-time selection.
     // This covers Brainstorm ("put two cards from your hand on top of your library")
     // and similar cards where the player chooses during resolution.
+    let expected = resolve_quantity_with_targets(state, &count_expr, ability).max(0) as usize;
     if collected_targets.is_empty() {
+        if expected == 0 {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::PutAtLibraryPosition,
+                source_id: ability.source_id,
+            });
+            return Ok(());
+        }
         if let Some(source_zone) = target_filter.extract_in_zone() {
             if matches!(source_zone, Zone::Hand | Zone::Library) {
-                let expected =
-                    resolve_quantity_with_targets(state, &count_expr, ability).max(0) as usize;
                 let eligible: Vec<_> = match source_zone {
                     Zone::Hand => state.players[ability.controller.0 as usize]
                         .hand
@@ -117,7 +123,6 @@ pub fn resolve(
     // placement, CR 401.4 lets the owner arrange cards put into the same
     // library position. The runtime uses target/selection order for "in any
     // order" effects; linked-exile bottom cleanup randomizes separately below.
-    let expected = resolve_quantity_with_targets(state, &count_expr, ability).max(0) as usize;
     let mut randomized_targets;
     let to_place = if expected == 0 {
         if matches!(position, LibraryPosition::Bottom)
@@ -315,6 +320,96 @@ mod tests {
         let lib = &state.players[0].library;
         let after_order: Vec<_> = lib.iter().copied().collect();
         assert_eq!(after_order, vec![id2, id1, id3]);
+    }
+
+    #[test]
+    fn count_zero_places_all_selected_cards_on_top_in_target_order() {
+        let mut state = GameState::new_two_player(42);
+        let existing = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Existing".to_string(),
+            Zone::Library,
+        );
+        let first = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "First".to_string(),
+            Zone::Library,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Second".to_string(),
+            Zone::Library,
+        );
+        let third = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Third".to_string(),
+            Zone::Library,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 0 },
+                position: LibraryPosition::Top,
+            },
+            vec![
+                TargetRef::Object(third),
+                TargetRef::Object(first),
+                TargetRef::Object(second),
+            ],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = vec![];
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let after_order: Vec<_> = state.players[0].library.iter().copied().collect();
+        assert_eq!(after_order, vec![third, first, second, existing]);
+    }
+
+    #[test]
+    fn count_zero_with_no_selected_cards_is_noop() {
+        let mut state = GameState::new_two_player(42);
+        let existing = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Existing".to_string(),
+            Zone::Library,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 0 },
+                position: LibraryPosition::Top,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = vec![];
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let after_order: Vec<_> = state.players[0].library.iter().copied().collect();
+        assert_eq!(after_order, vec![existing]);
+        assert!(matches!(
+            events.as_slice(),
+            [GameEvent::EffectResolved {
+                kind: EffectKind::PutAtLibraryPosition,
+                source_id: ObjectId(100)
+            }]
+        ));
     }
 
     #[test]

@@ -150,6 +150,13 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // CR 702.3b: CanAttackWithDefender — allows creatures with defender to attack.
     // Runtime enforcement is in combat.rs::validate_attack().
     registry.insert(StaticMode::CanAttackWithDefender, handle_rule_mod);
+    // CR 602.5a: CanActivateAbilitiesAsThoughHaste — bypasses the summoning-sickness
+    // gate on a creature's {T}/{Q} activated abilities (Tyvar, Jubilant Brawler).
+    // Runtime enforcement is in restrictions.rs::summoning_sick_for_tap_ability().
+    registry.insert(
+        StaticMode::CanActivateAbilitiesAsThoughHaste,
+        handle_rule_mod,
+    );
     // CR 510.1a: AssignNoCombatDamage — creature assigns no combat damage.
     // Runtime enforcement is in combat_damage.rs::combat_damage_amount().
     registry.insert(StaticMode::AssignNoCombatDamage, handle_rule_mod);
@@ -851,6 +858,11 @@ pub(crate) fn static_filter_matches(
                         crate::types::ability::ControllerRef::TargetPlayer => false,
                         crate::types::ability::ControllerRef::ParentTargetController => false,
                         crate::types::ability::ControllerRef::DefendingPlayer => false,
+                        // CR 109.4: Chosen-player scope has no static context.
+                        crate::types::ability::ControllerRef::ChosenPlayer { .. } => false,
+                        // CR 603.2 + CR 109.4: Triggering-player scope has no
+                        // static context. Fail closed.
+                        crate::types::ability::ControllerRef::TriggeringPlayer => false,
                     };
                 }
                 return true;

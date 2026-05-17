@@ -16,6 +16,7 @@ use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter};
 use crate::types::card_type::Supertype;
 use crate::types::mana::ManaColor;
+use crate::types::zones::Zone;
 
 /// Parse a "target <type phrase>" from Oracle text.
 ///
@@ -165,7 +166,7 @@ pub fn parse_type_filter_word(input: &str) -> OracleResult<'_, TypeFilter> {
         ("permanent", TypeFilter::Permanent),
         ("cards", TypeFilter::Card),
         ("card", TypeFilter::Card),
-        // "spell"/"spells" → Card per existing parser convention (CR 108.1)
+        // CR 112.1: a spell is a card on the stack — "spell"/"spells" → Card.
         ("spells", TypeFilter::Card),
         ("spell", TypeFilter::Card),
     ];
@@ -251,6 +252,162 @@ pub fn parse_event_context_ref(input: &str) -> OracleResult<'_, TargetFilter> {
         value(TargetFilter::TriggeringPlayer, tag("the player")),
     ))
     .parse(input)
+}
+
+/// Parse a "stack-object" target phrase — the disjunction of spells and/or
+/// activated/triggered abilities currently on the stack that a counter effect
+/// (or a retarget effect) can name as a target.
+///
+/// CR 701.6a: "To counter a spell or ability means to cancel it…" — the legal
+/// target set of a counter effect is one of: spells on the stack, abilities on
+/// the stack, or both. CR 113.3b/113.3c: activated and triggered abilities are
+/// the two kinds of ability that exist as objects on the stack and can be
+/// countered. CR 115.1: the target is chosen from the legal set the effect
+/// defines, so the parser must reproduce that legal set faithfully — including
+/// any type restriction on the spell disjunct ("noncreature spell").
+///
+/// Handles the full three-way disjunction "activated ability, triggered
+/// ability, or noncreature spell" (Louisoix's Sacrifice) by composing two
+/// independent axes:
+///   1. the ability-kind phrase — "activated ability, triggered ability",
+///      "activated or triggered ability", or "activated ability"; and
+///   2. an optional ", or <type> spell" / "or <type> spell" tail describing a
+///      restricted spell disjunct (e.g. "noncreature spell").
+///
+/// Also recognizes the "spell or ability" / "spell and/or ability" /
+/// "ability or spell" form used by other counter cards →
+/// `Or{StackSpell, StackAbility}`.
+///
+/// Deliberately does NOT match a phrase that is purely a spell type
+/// restriction with no ability disjunct ("noncreature spell", "artifact or
+/// enchantment spell", plain "spell"): those are already handled by
+/// `parse_target` + `constrain_filter_to_stack`. This combinator only fires for
+/// the cases bare `parse_target` cannot — an "activated/triggered ability"
+/// disjunct. It returns a nom `Err` otherwise so callers fall back cleanly.
+pub fn parse_stack_object_target(input: &str) -> OracleResult<'_, TargetFilter> {
+    alt((
+        // "spell or ability" / "spell and/or ability" → both spells and abilities.
+        value(
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::StackSpell,
+                    TargetFilter::StackAbility { controller: None },
+                ],
+            },
+            alt((
+                tag("spell or ability"),
+                tag("spell and/or ability"),
+                tag("ability or spell"),
+            )),
+        ),
+        // Ability-kind phrase, optionally followed by an "[,] or <type> spell"
+        // tail. The two axes are composed independently rather than enumerated.
+        parse_ability_kind_with_optional_spell,
+    ))
+    .parse(input)
+}
+
+/// Parse the ability-kind disjunct of a stack-object phrase, optionally
+/// followed by a trailing spell disjunct.
+///
+/// CR 113.3b/113.3c: the only ability kinds that exist on the stack are
+/// activated and triggered abilities; both map to `StackAbility { None }`
+/// (the ability-kind axis carries no type, so the three spellings collapse to
+/// one filter). An optional ", or <type> spell" / " or <type> spell" tail adds
+/// the restricted spell disjunct, producing the `Or` for Louisoix's Sacrifice.
+fn parse_ability_kind_with_optional_spell(input: &str) -> OracleResult<'_, TargetFilter> {
+    // Axis 1: the ability-kind phrase. All spellings denote the same legal set
+    // (any activated/triggered ability on the stack) — longest-match-first so
+    // the comma-separated form is consumed whole before the shorter alternates.
+    let (rest, _) = alt((
+        tag("activated ability, triggered ability"),
+        tag("activated or triggered ability"),
+        tag("triggered or activated ability"),
+        tag("triggered ability or activated ability"),
+        tag("activated ability or triggered ability"),
+        tag("triggered ability"),
+        tag("activated ability"),
+    ))
+    .parse(input)?;
+
+    // Axis 2 (optional): a trailing spell disjunct. The connector is "[,] or "
+    // (Oracle uses a serial comma in the three-way list).
+    let (rest, spell_leg) = opt(preceded(
+        alt((tag(", or "), tag(" or "), tag(", "))),
+        parse_restricted_spell,
+    ))
+    .parse(rest)?;
+
+    let ability = TargetFilter::StackAbility { controller: None };
+    let filter = match spell_leg {
+        Some(spell) => TargetFilter::Or {
+            filters: vec![ability, spell],
+        },
+        None => ability,
+    };
+    Ok((rest, filter))
+}
+
+/// Parse a (possibly type-restricted) spell phrase into a stack-constrained
+/// `Typed` filter.
+///
+/// CR 112.1: a "spell" is a card (or copy of a card) on the stack. The leading
+/// type phrase ("noncreature", "instant or sorcery", a bare "spell") is parsed
+/// with the shared `parse_type_phrase` combinator, then the result is pinned to
+/// the stack with an `InZone { Stack }` property so the runtime resolves it
+/// against stack objects rather than the battlefield.
+fn parse_restricted_spell(input: &str) -> OracleResult<'_, TargetFilter> {
+    // `parse_type_phrase` consumes the leading type words. The phrase MUST
+    // describe a spell: either it ends in an explicit " spell" noun (e.g.
+    // "noncreature spell", "instant or sorcery spell") or `parse_type_phrase`
+    // mapped a bare "spell" → `TypeFilter::Card`. Requiring this prevents the
+    // combinator from swallowing battlefield type phrases ("creature you
+    // control") as if they were stack spells.
+    let (rest, filter) = parse_type_phrase(input)?;
+    let is_bare_spell = matches!(
+        &filter,
+        TargetFilter::Typed(TypedFilter { type_filters, .. })
+            if type_filters.as_slice() == [TypeFilter::Card]
+    );
+    let rest = match tag::<_, _, OracleError<'_>>(" spell").parse(rest) {
+        Ok((r, _)) => r,
+        Err(e) => {
+            if is_bare_spell {
+                // Phrase was just "spell" — already a spell, nothing to consume.
+                rest
+            } else {
+                // A type phrase with no "spell" noun is not a spell phrase.
+                return Err(e);
+            }
+        }
+    };
+    Ok((rest, constrain_typed_to_stack(filter)))
+}
+
+/// Add an `InZone { Stack }` property to a `Typed` filter so it resolves
+/// against stack objects. Mirrors `oracle_effect::constrain_filter_to_stack`
+/// but operates on the `oracle_nom` layer for the stack-object combinator.
+fn constrain_typed_to_stack(filter: TargetFilter) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller,
+            mut properties,
+        }) => {
+            if !properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Stack }))
+            {
+                properties.push(FilterProp::InZone { zone: Zone::Stack });
+            }
+            TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller,
+                properties,
+            })
+        }
+        other => other,
+    }
 }
 
 /// Build a `TargetFilter` from parsed components.
@@ -479,9 +636,110 @@ mod tests {
 
     #[test]
     fn test_parse_type_filter_word_spell() {
-        // "spell" maps to Card per existing parser convention (CR 108.1)
+        // CR 112.1: a spell is a card on the stack — "spell" maps to Card.
         let (rest, t) = parse_type_filter_word("spell").unwrap();
         assert!(matches!(t, TypeFilter::Card), "expected Card for spell");
         assert_eq!(rest, "");
+    }
+
+    // --- parse_stack_object_target (CR 701.6a + CR 115.1) ---
+
+    /// The noncreature-spell disjunct: a stack-pinned `Typed` filter that
+    /// excludes creature spells via `TypeFilter::Non(Creature)`.
+    fn noncreature_spell_leg() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Non(Box::new(TypeFilter::Creature))],
+            controller: None,
+            properties: vec![FilterProp::InZone { zone: Zone::Stack }],
+        })
+    }
+
+    #[test]
+    fn test_stack_object_three_way_disjunction() {
+        // Louisoix's Sacrifice — the full three-way disjunction.
+        let (rest, filter) =
+            parse_stack_object_target("activated ability, triggered ability, or noncreature spell")
+                .unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            filter,
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::StackAbility { controller: None },
+                    noncreature_spell_leg(),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn test_stack_object_noncreature_excludes_creature_spell() {
+        // The noncreature restriction must be carried as a typed `Non` leg —
+        // a creature spell is NOT a member of the legal target set.
+        let (_, filter) =
+            parse_stack_object_target("activated ability, triggered ability, or noncreature spell")
+                .unwrap();
+        let TargetFilter::Or { filters } = &filter else {
+            panic!("expected Or filter");
+        };
+        let spell_leg = &filters[1];
+        let TargetFilter::Typed(tf) = spell_leg else {
+            panic!("expected Typed spell leg");
+        };
+        assert_eq!(
+            tf.type_filters,
+            vec![TypeFilter::Non(Box::new(TypeFilter::Creature))],
+            "creature spells must be excluded by the noncreature restriction"
+        );
+        assert!(
+            tf.properties
+                .contains(&FilterProp::InZone { zone: Zone::Stack }),
+            "the spell leg must be pinned to the stack zone"
+        );
+    }
+
+    #[test]
+    fn test_stack_object_activated_or_triggered_ability() {
+        // Ability-only counter (e.g. Stifle / Disallow's ability disjunct).
+        let (rest, filter) = parse_stack_object_target("activated or triggered ability").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(filter, TargetFilter::StackAbility { controller: None });
+    }
+
+    #[test]
+    fn test_stack_object_activated_ability_only() {
+        let (rest, filter) = parse_stack_object_target("activated ability").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(filter, TargetFilter::StackAbility { controller: None });
+    }
+
+    #[test]
+    fn test_stack_object_spell_or_ability() {
+        // Disallow / Voidslime — "counter target spell, activated ability, or
+        // triggered ability" reduces (in the simple two-way form) to the
+        // "spell or ability" phrasing.
+        let (rest, filter) = parse_stack_object_target("spell or ability").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            filter,
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::StackSpell,
+                    TargetFilter::StackAbility { controller: None },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn test_stack_object_rejects_pure_spell_phrase() {
+        // A phrase that is purely a spell type restriction (no ability
+        // disjunct) must NOT be matched — `parse_target` handles those.
+        assert!(parse_stack_object_target("noncreature spell").is_err());
+        assert!(parse_stack_object_target("artifact or enchantment spell").is_err());
+        assert!(parse_stack_object_target("spell").is_err());
+        // A battlefield type phrase must likewise not be swallowed.
+        assert!(parse_stack_object_target("creature you control").is_err());
+        assert!(parse_stack_object_target("permanent").is_err());
     }
 }

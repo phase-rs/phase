@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 
 import { AdapterError, AdapterErrorCode } from "../adapter/types";
-import type { BracketEstimate, EngineAdapter, GameFormat } from "../adapter/types";
+import type { EngineAdapter, GameFormat } from "../adapter/types";
+import type { BracketEstimate } from "../types/bracket";
 import { isCommanderFamilyFormat } from "../types/bracket";
 import type { ParsedDeck } from "../services/deckParser";
 

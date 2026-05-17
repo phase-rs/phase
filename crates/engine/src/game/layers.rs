@@ -378,6 +378,14 @@ fn evaluate_condition_with_context(
             .is_some_and(|current| current >= *level),
         StaticCondition::Unrecognized { .. } => true,
         StaticCondition::DuringYourTurn => state.active_player == controller,
+        // CR 103.1: True when the scoped player took the first turn of the
+        // game (fixed at game start). The parser emits `ControllerRef::You`.
+        StaticCondition::WasStartingPlayer { .. } => state.current_starting_player == controller,
+        // CR 702.185c: True when any player cast a spell using `variant` (e.g.
+        // Warp) this turn. Not controller-scoped.
+        StaticCondition::SpellCastWithVariantThisTurn { variant } => {
+            crate::game::restrictions::spell_cast_with_variant_this_turn(state, variant)
+        }
         // CR 400.7: True when the source permanent entered the battlefield this turn.
         StaticCondition::SourceEnteredThisTurn => state
             .objects
@@ -509,6 +517,8 @@ fn evaluate_condition_with_context(
         }),
         // CR 725.1: True when the controller is the monarch.
         StaticCondition::IsMonarch => state.monarch == Some(controller),
+        // CR 725.1: True when no player holds the monarch designation.
+        StaticCondition::NoMonarch => state.monarch.is_none(),
         // CR 702.131a: True when the controller has the city's blessing.
         StaticCondition::HasCityBlessing => state.city_blessing.contains(&controller),
         StaticCondition::OpponentPoisonAtLeast { count } => state
@@ -523,6 +533,15 @@ fn evaluate_condition_with_context(
         // restriction remains active. Making the payment optional is a full
         // interactive feature tracked separately from the static-stub cleanup.
         StaticCondition::UnlessPay { .. } => false,
+        // CR 702.166a: True when an optional additional cost (Bargain) was paid for the
+        // spell being cast. `source_id` is the spell whose self-spell `ReduceCost` static
+        // is being evaluated; read the in-flight cast's `additional_cost_paid` flag.
+        StaticCondition::AdditionalCostPaid => state
+            .pending_cast
+            .as_ref()
+            .filter(|pc| pc.object_id == source_id)
+            .map(|pc| pc.ability.context.additional_cost_paid)
+            .unwrap_or(false),
         StaticCondition::None => true,
         // CR 309.7: True when the controller has completed at least one dungeon.
         StaticCondition::CompletedADungeon => state
@@ -618,8 +637,9 @@ pub fn evaluate_layers(state: &mut GameState) {
             obj.replacement_definitions = Arc::clone(&obj.base_replacement_definitions).into();
             obj.static_definitions = Arc::clone(&obj.base_static_definitions).into();
             obj.color = obj.base_color.clone();
-            // CR 613.1b: Reset controller to owner; Layer 2 re-applies control-changing effects.
-            obj.controller = obj.owner;
+            // CR 613.1b: Reset controller to the object's base controller;
+            // Layer 2 re-applies continuous control-changing effects.
+            obj.controller = obj.base_controller.unwrap_or(obj.owner);
             // CR 613.11 + CR 510.1a: Reset combat-assignment rule flags;
             // re-applied after object-characteristic layers are complete.
             obj.assigns_damage_from_toughness = false;
@@ -967,6 +987,31 @@ fn active_continuous_effects_from_static_definitions(
             if is_combat_assignment_rule_modification(modification) {
                 continue;
             }
+            // CR 113.3d + CR 604.1 + CR 611.2c: A `GrantStaticAbility` modification
+            // installs the inner static onto every recipient matching the host's
+            // `affected_filter`. The recipient is the granted-static's *source*
+            // for the purposes of resolving `ControllerRef::You` and per-recipient
+            // condition gating — the inner static functions exactly as if it
+            // were printed on the recipient (CR 604.1). We synthesize the inner
+            // modifications as additional `ActiveContinuousEffect`s here (one
+            // per recipient per inner modification) so the inner effects take
+            // effect during the same `evaluate_layers` pass — without this
+            // gather-time expansion, the layer-6 push onto `obj.static_definitions`
+            // would not appear in `effects_by_layer` (which is captured before
+            // layer 6 applies) and the inner static would be inert for a full pass.
+            if let ContinuousModification::GrantStaticAbility { definition: inner } = modification {
+                effects.extend(expand_granted_static_effects(
+                    state,
+                    source_id,
+                    timestamp,
+                    &affected_filter,
+                    inner.as_ref(),
+                ));
+                // Continue: also push the meta-effect below so layer-6 apply
+                // pushes the inner static onto the recipient's
+                // `static_definitions` for inspectability and downstream
+                // queries (e.g., parser/coverage walks).
+            }
             effects.push(ActiveContinuousEffect {
                 source_id,
                 controller,
@@ -985,6 +1030,88 @@ fn active_continuous_effects_from_static_definitions(
     }
 
     effects
+}
+
+/// CR 113.3d + CR 604.1 + CR 611.2c: Expand a `GrantStaticAbility` into one
+/// `ActiveContinuousEffect` per inner modification per recipient matching the
+/// host's `host_affected_filter`. Each recipient becomes the synthesized
+/// effect's `source_id` so `ControllerRef::You` and any other source-relative
+/// references in `inner.affected` resolve against the recipient — which is the
+/// semantic the CR requires for a granted ability ("its controller is the
+/// controller of the object that gained the ability"). The synthesized effects
+/// carry the inner static's own `condition`, `mode`, and CDA flag.
+///
+/// Single-pass limitation: if `inner.modifications` itself contains another
+/// `GrantStaticAbility`, this function does not recursively expand it within
+/// the same `evaluate_layers` pass — the inner-inner grant lands on the
+/// recipient's `static_definitions` via the apply step and only contributes on
+/// the next layer evaluation triggered by `layers_dirty`. No known Magic card
+/// exercises a quoted-within-quoted grant, so this is acceptable for now;
+/// revisit if such a card appears.
+fn expand_granted_static_effects(
+    state: &GameState,
+    host_source_id: ObjectId,
+    host_timestamp: u64,
+    host_affected_filter: &TargetFilter,
+    inner: &StaticDefinition,
+) -> Vec<ActiveContinuousEffect> {
+    if inner.mode != StaticMode::Continuous {
+        return Vec::new();
+    }
+    let inner_affected = inner.affected.clone().unwrap_or(TargetFilter::Any);
+    let ctx = crate::game::filter::FilterContext::from_source(state, host_source_id);
+    let mut out = Vec::new();
+    for &recipient_id in &state.battlefield {
+        if !crate::game::filter::matches_target_filter(
+            state,
+            recipient_id,
+            host_affected_filter,
+            &ctx,
+        ) {
+            continue;
+        }
+        let recipient_controller = match state.objects.get(&recipient_id) {
+            Some(obj) => obj.controller,
+            None => continue,
+        };
+        // CR 109.5 + CR 113.7: "You" inside the granted ability refers to the
+        // recipient's controller. Re-run any inner condition gate with the
+        // recipient as the source so that gating like "during your turn"
+        // resolves against the recipient's controller.
+        let retained_inner_condition = if let Some(condition) = &inner.condition {
+            if !source_condition_gate_passes(state, condition, recipient_controller, recipient_id) {
+                continue;
+            }
+            condition_uses_recipient_context(condition).then(|| condition.clone())
+        } else {
+            None
+        };
+        for (mod_index, modification) in inner.modifications.iter().enumerate() {
+            if is_combat_assignment_rule_modification(modification) {
+                continue;
+            }
+            out.push(ActiveContinuousEffect {
+                source_id: recipient_id,
+                controller: recipient_controller,
+                // Distinguish synthesized inner effects from the host's own
+                // static-definition entries so `apply_continuous_effect` doesn't
+                // confuse them with the host's `static_definitions[def_idx]`.
+                def_index: None,
+                transient_id: None,
+                mod_index,
+                layer: modification.layer(),
+                // Inherit the host's timestamp so ordering within a layer is
+                // stable and reproducible per CR 613.7.
+                timestamp: host_timestamp,
+                modification: modification.clone(),
+                affected_filter: inner_affected.clone(),
+                condition: retained_inner_condition.clone(),
+                mode: inner.mode.clone(),
+                characteristic_defining: inner.characteristic_defining,
+            });
+        }
+    }
+    out
 }
 
 /// Collect active transient effects, filtering out expired host-bound effects.
@@ -1249,12 +1376,17 @@ fn order_with_dependencies(
     // CR 613.7a: Effects in the same layer apply in timestamp order.
     // CR 613.3: Within layers 2-6, apply effects from CDAs first (see CR 604.3), then others in timestamp order.
     let mut sorted: Vec<&ActiveContinuousEffect> = effects.to_vec();
+    // CR 613.7: equal-timestamp same-source effects (a single static ability's
+    // modifications all share one timestamp per CR 613.7a) get a deterministic
+    // written-order tiebreak via `mod_index` — the index of the modification
+    // within the source's `modifications` Vec, i.e. Oracle written order.
     sorted.sort_by_key(|e| {
         (
             !e.characteristic_defining,
             e.timestamp,
             e.source_id.0,
             e.def_index,
+            e.mod_index,
         )
     });
 
@@ -1341,6 +1473,7 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
             | ContinuousModification::GrantTrigger { .. }
             | ContinuousModification::RemoveAllAbilities
             | ContinuousModification::AddStaticMode { .. }
+            | ContinuousModification::GrantStaticAbility { .. }
             | ContinuousModification::RetainPrintedTriggerFromSource { .. }
     );
 
@@ -1387,12 +1520,15 @@ fn filter_references_ability(filter: &TargetFilter) -> bool {
 /// Order effects by timestamp (deterministic fallback). CDAs sort first per CR 604.3.
 fn order_by_timestamp(effects: &[&ActiveContinuousEffect]) -> Vec<ActiveContinuousEffect> {
     let mut sorted: Vec<ActiveContinuousEffect> = effects.iter().map(|e| (*e).clone()).collect();
+    // CR 613.7: see `order_with_dependencies` — `mod_index` is the
+    // written-order tiebreak for equal-timestamp same-source effects.
     sorted.sort_by_key(|e| {
         (
             !e.characteristic_defining,
             e.timestamp,
             e.source_id.0,
             e.def_index,
+            e.mod_index,
         )
     });
     sorted
@@ -1805,6 +1941,37 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             ContinuousModification::RemoveSubtype { ref subtype } => {
                 obj.card_types.subtypes.retain(|s| s != subtype);
             }
+            // CR 205.1a + CR 613.1d: Replace the entire core card-type set.
+            ContinuousModification::SetCardTypes { ref core_types } => {
+                obj.card_types.core_types = core_types.clone();
+            }
+            // CR 205.1a + CR 613.1d: Remove every subtype belonging to the
+            // named subtype set. Membership for the `Creature` set is resolved
+            // against the runtime-populated `state.all_creature_types` — the
+            // same source `AddAllCreatureTypes` uses below.
+            ContinuousModification::RemoveAllSubtypes { set } => {
+                use crate::types::card_type::SubtypeSet;
+                match set {
+                    SubtypeSet::Creature => {
+                        obj.card_types
+                            .subtypes
+                            .retain(|s| !state.all_creature_types.iter().any(|c| c == s));
+                    }
+                    SubtypeSet::Land => {
+                        // CR 205.3i: land-type membership via the basic/non-basic
+                        // land-subtype classification.
+                        obj.card_types.subtypes.retain(|s| !is_land_subtype(s));
+                    }
+                    SubtypeSet::Artifact
+                    | SubtypeSet::Enchantment
+                    | SubtypeSet::Planeswalker
+                    | SubtypeSet::Spell => unreachable!(
+                        "RemoveAllSubtypes for {set:?} has no membership source wired; \
+                         only Creature and Land subtype removal is emitted by the parser. \
+                         Add a membership classifier before emitting this set."
+                    ),
+                }
+            }
             // CR 205.4 + CR 707.9d: "in addition to its other types" — append
             // the supertype if absent. Idempotent.
             ContinuousModification::AddSupertype { supertype } => {
@@ -1925,6 +2092,24 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
                     .any(|t| t == trigger.as_ref())
                 {
                     obj.trigger_definitions.push(*trigger.clone());
+                }
+            }
+            // CR 113.3d + CR 604.1 + CR 613.1f: Grant a full static ability to the
+            // recipient. The inner static's `affected`/`condition`/`modifications`
+            // are independent of the recipient (e.g. "Other commanders you control
+            // get +2/+2 and have lifelink") and are preserved verbatim, so the
+            // granted static operates against its own scope under CR 611.2c once
+            // it's installed on the recipient's `static_definitions`. Dedup by
+            // structural equality so repeated layer passes don't multiply the
+            // grant (mirrors the `GrantAbility` / `GrantTrigger` / `AddStaticMode`
+            // idempotency invariant in this match).
+            ContinuousModification::GrantStaticAbility { definition } => {
+                if !obj
+                    .static_definitions
+                    .iter_all()
+                    .any(|sd| sd == definition.as_ref())
+                {
+                    obj.static_definitions.push(*definition.clone());
                 }
             }
             ContinuousModification::AddStaticMode { mode } => {
@@ -3287,6 +3472,50 @@ mod tests {
         assert_eq!(state.objects.get(&bear).unwrap().power, Some(4));
     }
 
+    #[test]
+    fn attached_object_presence_condition_uses_source_attachment_context() {
+        let mut state = setup();
+        let creature = make_creature(&mut state, "Host Creature", 2, 2, PlayerId(0));
+        let artifact = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Host Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&artifact)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let aura = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Attached Condition Aura".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.attached_to = Some(creature.into());
+        }
+
+        let condition = StaticCondition::IsPresent {
+            filter: Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+            )),
+        };
+        assert!(evaluate_condition(&state, &condition, PlayerId(0), aura));
+
+        state.objects.get_mut(&aura).unwrap().attached_to = Some(artifact.into());
+        assert!(!evaluate_condition(&state, &condition, PlayerId(0), aura));
+    }
+
     /// CR 107.4 + CR 202.1 + CR 613.4c: Light from Within-style statics count
     /// mana symbols in each affected creature's own mana cost. Hybrid and
     /// Phyrexian symbols that contain the color count through
@@ -3529,6 +3758,98 @@ mod tests {
         assert!(obj.trigger_definitions.is_empty());
         assert!(obj.replacement_definitions.is_empty());
         assert!(obj.static_definitions.is_empty());
+    }
+
+    #[test]
+    fn darksteel_mutation_full_layer_evaluation_e2e() {
+        // Issue #453: drive the real pipeline — parse Darksteel Mutation's
+        // Oracle text into its static ability, attach it to a creature via the
+        // engine's `attach_to` primitive (real `attached_to` link + real
+        // timestamps), then run layer evaluation.
+        use crate::game::effects::attach::attach_to;
+
+        let mut scenario = GameScenario::new();
+
+        // A base creature with a printed keyword and an activated ability.
+        let bear = {
+            let mut card = scenario.add_creature(PlayerId(0), "Grizzly Bears", 2, 2);
+            card.trample()
+                .with_ability_definition(AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: GainLifePlayer::Controller,
+                    },
+                ))
+                .with_trigger(TriggerMode::Attacks);
+            card.id()
+        };
+
+        // Darksteel Mutation as a real battlefield Aura, static parsed from
+        // Oracle text — not a hand-built modification list.
+        let mutation = scenario
+            .add_creature(PlayerId(0), "Darksteel Mutation", 0, 0)
+            .as_enchantment()
+            .from_oracle_text(
+                "Enchant creature\nEnchanted creature is an Insect artifact creature \
+                 with base power and toughness 0/1 and has indestructible, and it \
+                 loses all other abilities, card types, and creature types.",
+            )
+            .id();
+
+        let mut state = scenario.build().state().clone();
+        // Mark the Aura with the Aura subtype so it is a valid attachment.
+        state
+            .objects
+            .get_mut(&mutation)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Aura".to_string());
+
+        // Real attach pipeline: sets `attached_to` + host `attachments`.
+        attach_to(&mut state, mutation, bear);
+
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&bear).unwrap();
+        // CR 613.4b: base P/T set to 0/1.
+        assert_eq!(obj.power, Some(0), "power should be 0");
+        assert_eq!(obj.toughness, Some(1), "toughness should be 1");
+        // CR 613.1f + CR 613.7: indestructible granted, and it survives the
+        // RemoveAllAbilities wipe via the written-order (mod_index) tiebreak.
+        assert!(
+            obj.keywords.contains(&Keyword::Indestructible),
+            "should have indestructible, keywords={:?}",
+            obj.keywords
+        );
+        assert!(
+            !obj.keywords.contains(&Keyword::Trample),
+            "trample must be stripped by RemoveAllAbilities"
+        );
+        // CR 613.1f: all printed abilities removed.
+        assert!(obj.abilities.is_empty(), "abilities must be empty");
+        assert!(
+            obj.trigger_definitions.is_empty(),
+            "trigger definitions must be empty"
+        );
+        assert!(
+            obj.static_definitions.is_empty(),
+            "static definitions must be empty"
+        );
+        // CR 205.1b + CR 613.1d: exactly artifact + creature.
+        assert_eq!(
+            obj.card_types.core_types,
+            vec![CoreType::Artifact, CoreType::Creature],
+            "core types must be exactly [Artifact, Creature]"
+        );
+        // CR 205.1a/b: creature types replaced — exactly Insect.
+        assert_eq!(
+            obj.card_types.subtypes,
+            vec!["Insect".to_string()],
+            "subtypes must be exactly [Insect]"
+        );
     }
 
     #[test]
@@ -7030,5 +7351,142 @@ mod tests {
             .and_then(|a| a.by_layer.get(&Layer::Copy))
             .expect("Copy layer bucket present");
         assert_eq!(copy_layer.len(), 1, "exactly one Copy-layer attribution");
+    }
+
+    /// CR 113.3d + CR 604.1 + CR 611.2c + CR 613.1f: When a host static grants
+    /// the equipped creature a quoted continuous static whose own affected
+    /// scope is independent of the recipient ("Other commanders you control
+    /// get +2/+2 and have lifelink"), the recipient must (a) hold the inner
+    /// static on its `static_definitions` after layer evaluation, and (b) the
+    /// inner static must then buff every matching object on the battlefield —
+    /// driven through the actual `evaluate_layers` pipeline, not a hand-rolled
+    /// expected state. This is the runtime end of the Dancer's Chakrams class.
+    #[test]
+    fn granted_static_ability_applies_inner_scope_to_other_objects() {
+        let mut state = setup();
+
+        // Equipped creature (the recipient of the granted static).
+        let equipped = make_creature(&mut state, "Hero Token", 1, 1, PlayerId(0));
+        // Another commander the equipped creature's controller controls.
+        // The inner static is "Other commanders you control get +2/+2 and have
+        // lifelink" — controller is the recipient's controller (PlayerId(0)),
+        // and `Another` excludes the recipient itself even though the recipient
+        // is also a commander in this scenario.
+        let other_cmdr = make_creature(&mut state, "Other Commander", 3, 3, PlayerId(0));
+        // A non-commander creature the same player controls — should NOT be buffed.
+        let non_cmdr = make_creature(&mut state, "Plain Bear", 2, 2, PlayerId(0));
+        // An opponent's commander — should NOT be buffed (controller mismatch).
+        let opp_cmdr = make_creature(&mut state, "Opp Commander", 4, 4, PlayerId(1));
+
+        // Mark the commanders.
+        for &id in &[equipped, other_cmdr, opp_cmdr] {
+            state.objects.get_mut(&id).unwrap().is_commander = true;
+        }
+
+        // Drive the production parser end-to-end so the test exercises the
+        // exact shape Dancer's Chakrams produces (Permanent-typed inner filter,
+        // ControllerRef::You + IsCommander + Another), not a hand-rolled
+        // approximation. Closes the parser ↔ runtime loop in one test.
+        let parsed = crate::parser::oracle_static::parse_quoted_ability_modifications(
+            r#""Other commanders you control get +2/+2 and have lifelink.""#,
+        );
+        let inner_static = match parsed.as_slice() {
+            [ContinuousModification::GrantStaticAbility { definition }] => (**definition).clone(),
+            other => panic!("expected single GrantStaticAbility, got {:?}", other),
+        };
+
+        // The Equipment itself, with a static affecting EquippedBy that grants
+        // the inner static. We don't model the full Dancer's Chakrams clause
+        // here — only the granted-static piece, which is what this PR adds.
+        let equipment = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Dancer's Chakrams".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&equipment).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Equipment".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.attached_to = Some(equipped.into());
+            obj.timestamp = ts;
+
+            let equipped_creature = TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EquippedBy]),
+            );
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(equipped_creature)
+                    .modifications(vec![ContinuousModification::GrantStaticAbility {
+                        definition: Box::new(inner_static.clone()),
+                    }]),
+            );
+        }
+        state
+            .objects
+            .get_mut(&equipped)
+            .unwrap()
+            .attachments
+            .push(equipment);
+
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        // (a) The recipient holds the inner static after layer evaluation.
+        let recipient = state.objects.get(&equipped).unwrap();
+        assert!(
+            recipient
+                .static_definitions
+                .iter_all()
+                .any(|sd| sd == &inner_static),
+            "Equipped creature must hold the granted inner static after layer 6"
+        );
+
+        // (b) The other commander you control is buffed +2/+2 and has lifelink.
+        let oc = state.objects.get(&other_cmdr).unwrap();
+        assert_eq!(oc.power, Some(5), "Other commander: 3 base + 2 granted");
+        assert_eq!(oc.toughness, Some(5), "Other commander: 3 base + 2 granted");
+        assert!(
+            oc.has_keyword(&Keyword::Lifelink),
+            "Other commander must have lifelink from granted static"
+        );
+
+        // (c) The recipient itself is NOT buffed by the inner static
+        // (`FilterProp::Another` excludes self).
+        assert_eq!(
+            recipient.power,
+            Some(1),
+            "Recipient is excluded by `Another` — power unchanged"
+        );
+        assert_eq!(
+            recipient.toughness,
+            Some(1),
+            "Recipient toughness unchanged"
+        );
+        assert!(
+            !recipient.has_keyword(&Keyword::Lifelink),
+            "Recipient is excluded by `Another` — no lifelink"
+        );
+
+        // (d) Non-commander you control: not buffed (filter mismatch).
+        let nc = state.objects.get(&non_cmdr).unwrap();
+        assert_eq!(nc.power, Some(2), "Non-commander unaffected");
+        assert_eq!(nc.toughness, Some(2), "Non-commander unaffected");
+        assert!(
+            !nc.has_keyword(&Keyword::Lifelink),
+            "Non-commander no lifelink"
+        );
+
+        // (e) Opponent's commander: not buffed (controller mismatch).
+        let opc = state.objects.get(&opp_cmdr).unwrap();
+        assert_eq!(opc.power, Some(4), "Opponent commander unaffected");
+        assert_eq!(opc.toughness, Some(4), "Opponent commander unaffected");
+        assert!(
+            !opc.has_keyword(&Keyword::Lifelink),
+            "Opponent commander no lifelink"
+        );
     }
 }

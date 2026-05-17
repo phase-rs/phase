@@ -5,7 +5,6 @@ pub mod filter;
 
 use std::collections::{HashMap, HashSet};
 
-use crate::game::combat;
 use crate::game::mana_abilities;
 use crate::game::mana_sources;
 use crate::types::ability::AbilityKind;
@@ -191,6 +190,8 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             partner.is_some_and(|partner| !choices.contains(&partner))
         }
         (WaitingFor::DiscoverChoice { .. }, GameAction::DiscoverChoice { .. })
+        | (WaitingFor::RevealUntilKeptChoice { .. }, GameAction::DecideOptionalEffect { .. })
+        | (WaitingFor::RepeatDecision { .. }, GameAction::DecideOptionalEffect { .. })
         | (WaitingFor::CascadeChoice { .. }, GameAction::CascadeChoice { .. })
         | (WaitingFor::MulliganDecision { .. }, GameAction::MulliganDecision { .. })
         | (WaitingFor::BetweenGamesChoosePlayDraw { .. }, GameAction::ChoosePlayDraw { .. })
@@ -762,10 +763,13 @@ pub(super) fn activatable_object_mana_actions_for_player(
             if ability.kind != AbilityKind::Activated || !mana_abilities::is_mana_ability(ability) {
                 continue;
             }
-            // CR 302.6: Only tap-cost abilities are gated by tapped state and summoning
-            // sickness. Free or mana-cost-only mana abilities are always activatable.
+            // CR 302.6 + CR 602.5a: Only tap-cost abilities are gated by tapped state and
+            // summoning sickness. Free or mana-cost-only mana abilities are always
+            // activatable. The summoning-sickness check honors the
+            // CanActivateAbilitiesAsThoughHaste static (Tyvar) via the shared predicate.
             if mana_sources::has_tap_component(&ability.cost)
-                && (obj.tapped || combat::has_summoning_sickness(obj))
+                && (obj.tapped
+                    || crate::game::restrictions::summoning_sick_for_tap_ability(state, obj))
             {
                 continue;
             }
@@ -1267,6 +1271,7 @@ mod tests {
                     pending_effect: Box::new(empty_effect(ObjectId(0))),
                     trigger_event: None,
                     effect_description: None,
+                    remaining: Vec::new(),
                 },
                 false,
             ),

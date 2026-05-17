@@ -2230,16 +2230,13 @@ fn ability_cost_to_payment_cost(
 ) -> ConvResult<engine::types::ability::PaymentCost> {
     use engine::types::ability::AbilityCost as AC;
     use engine::types::ability::PaymentCost as PC;
-    use engine::types::ability::QuantityExpr;
     Ok(match cost {
         AC::Mana { cost } => PC::Mana { cost: cost.clone() },
         AC::PayLife { amount } => PC::Life {
             amount: amount.clone(),
         },
         AC::PayEnergy { amount } => PC::Energy {
-            amount: QuantityExpr::Fixed {
-                value: *amount as i32,
-            },
+            amount: amount.clone(),
         },
         AC::PaySpeed { amount } => PC::Speed {
             amount: amount.clone(),

@@ -16,7 +16,7 @@ use super::super::oracle_nom::bridge::nom_on_lower;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity::parse_for_each_clause_expr;
-use super::super::oracle_target::{parse_target, parse_type_phrase};
+use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase};
 use super::super::oracle_util::{parse_count_expr, parse_number};
 use super::{resolve_it_pronoun, ParseContext};
 #[cfg(debug_assertions)]
@@ -154,7 +154,12 @@ fn resolve_counter_placement_target<'a>(
     );
     let on_offset = lower.len() - on_rest.len();
     let on_text = &text[on_offset..];
-    let (parsed_target, parsed_remainder) = parse_target(on_text);
+    // CR 608.2c + CR 109.4: use the ctx-threaded target parser so a controller
+    // suffix like "they control" / "that player controls" resolves against the
+    // ambient `relative_player_scope` (e.g. the chosen player from a preceding
+    // `Choose(Player)` clause — Gluntch's "They put two +1/+1 counters on a
+    // creature they control") instead of defaulting to `ControllerRef::You`.
+    let (parsed_target, parsed_remainder) = parse_target_with_ctx(on_text, ctx);
     if matches!(parsed_target, TargetFilter::SelfRef) {
         return (TargetFilter::SelfRef, parsed_remainder, None);
     }
@@ -192,7 +197,7 @@ fn resolve_counter_placement_target<'a>(
         let on_offset = lower.len() - on_rest.len();
         (&text[on_offset..], None)
     };
-    let (target, rem) = parse_target(target_text);
+    let (target, rem) = parse_target_with_ctx(target_text, ctx);
     (target, rem, multi)
 }
 

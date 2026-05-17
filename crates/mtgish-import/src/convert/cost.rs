@@ -188,15 +188,11 @@ pub fn convert(cost: &Cost) -> ConvResult<AbilityCost> {
             cost: mana::convert_x(symbols)?,
         },
 
-        // CR 107.14: Pay {E} (energy counters). Engine `PayEnergy.amount`
-        // is `u32`; X-bound payments strict-fail with a precise extension
-        // request rather than a generic malformed-idiom.
+        // CR 107.14: Pay {E} (energy counters). `PayEnergy.amount` is a
+        // `QuantityExpr`, so X-bound and dynamic counts lower directly via
+        // `quantity::convert` (mirrors `Cost::PayLife`).
         Cost::PayEnergy(n) => AbilityCost::PayEnergy {
-            amount: fixed_count_or_engine_gap(
-                n,
-                "AbilityCost::PayEnergy",
-                "amount: QuantityExpr (X-bound / dynamic count)",
-            )?,
+            amount: quantity::convert(n)?,
         },
 
         // CR 701.13: Exile a single named permanent. `Cost::ExilePermanent`

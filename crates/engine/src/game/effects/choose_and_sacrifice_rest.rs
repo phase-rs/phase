@@ -509,6 +509,93 @@ mod tests {
         assert_eq!(eligible[1].len(), 0); // P0 has no artifacts (P1's artifact excluded)
     }
 
+    /// Regression for #447: a non-active player whose battlefield contains an
+    /// artifact creature shared across the Artifact and Creature categories,
+    /// plus extra options in each, must produce a real `CategoryChoice` (no
+    /// auto-resolve) — and every `SelectCategoryPermanents` candidate the AI
+    /// enumerator yields must apply cleanly through the engine (the duplicate
+    /// guard would otherwise softlock the seat).
+    #[test]
+    fn non_active_player_shared_type_permanent_enumerates_applicable_choices() {
+        use crate::game::engine::apply;
+        use crate::types::actions::GameAction;
+
+        // 3-player game so a non-active player makes the choice.
+        let mut state = crate::types::game_state::GameState::new(
+            crate::types::format::FormatConfig::commander(),
+            3,
+            42,
+        );
+        // Player 0 (active) has nothing — resolve advances to player 1.
+        // Player 1: an artifact creature (in both categories) + an extra
+        // artifact + an extra creature, so neither category auto-resolves.
+        let _ac = add_battlefield_permanent(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Steel Hellkite",
+            vec![CoreType::Artifact, CoreType::Creature],
+        );
+        let _extra_artifact = add_battlefield_permanent(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Sol Ring",
+            vec![CoreType::Artifact],
+        );
+        let _extra_creature = add_battlefield_permanent(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Grizzly Bears",
+            vec![CoreType::Creature],
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::ChooseAndSacrificeRest {
+                categories: vec![CoreType::Artifact, CoreType::Creature],
+                chooser_scope: CategoryChooserScope::EachPlayerSelf,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let chooser = match &state.waiting_for {
+            WaitingFor::CategoryChoice {
+                player,
+                target_player,
+                eligible_per_category,
+                ..
+            } => {
+                assert_eq!(*target_player, PlayerId(1));
+                assert_eq!(eligible_per_category[0].len(), 2); // 2 artifacts
+                assert_eq!(eligible_per_category[1].len(), 2); // 2 creatures
+                *player
+            }
+            other => panic!("Expected CategoryChoice (not auto-resolved), got {other:?}"),
+        };
+
+        // Every enumerated SelectCategoryPermanents candidate must apply
+        // cleanly — none may repeat an object across categories.
+        let candidates = crate::ai_support::legal_actions(&state);
+        let category_actions: Vec<GameAction> = candidates
+            .into_iter()
+            .filter(|a| matches!(a, GameAction::SelectCategoryPermanents { .. }))
+            .collect();
+        assert!(
+            !category_actions.is_empty(),
+            "legal_actions must enumerate at least one SelectCategoryPermanents"
+        );
+        for action in category_actions {
+            let mut clone = state.clone();
+            apply(&mut clone, chooser, action.clone())
+                .unwrap_or_else(|e| panic!("candidate {action:?} failed to apply: {e:?}"));
+        }
+    }
+
     #[test]
     fn multi_type_permanent_appears_in_multiple_categories() {
         let mut state = setup_two_player();

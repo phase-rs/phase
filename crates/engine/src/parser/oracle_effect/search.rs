@@ -78,10 +78,23 @@ pub(super) fn parse_search_library_details(
     // emits a sentinel count that is capped to the matching-set size at resolution.
     let any_number_tail = scan_after_tag(lower, "any number of ");
 
-    // Extract count from "up to N" / "up to X" (must be done before filter extraction
-    // since "for up to five creature cards" needs to skip the count to find the type).
+    // Extract count from "up to N" / "up to X" / "up to that many" (must be done
+    // before filter extraction since "for up to five creature cards" needs to skip
+    // the count to find the type).
     // CR 107.3a + CR 601.2b: X resolves to the caster's announced value at cast time.
-    let up_to_match = scan_preceded(lower, "up to ", nom_quantity::parse_quantity_expr_number);
+    // CR 608.2c: "up to that many" is a back-reference to a count produced by an
+    // earlier instruction in the same resolution (e.g. Scapeshift's sacrifice) —
+    // `parse_quantity_ref` maps "that many"/"that much" to `EventContextAmount`,
+    // which resolves through `state.last_effect_count` at runtime.
+    let up_to_match = scan_preceded(lower, "up to ", |input| {
+        alt((
+            map(nom_quantity::parse_quantity_ref, |qty| QuantityExpr::Ref {
+                qty,
+            }),
+            nom_quantity::parse_quantity_expr_number,
+        ))
+        .parse(input)
+    });
 
     // Fallback: "for N cards" / "for X cards" without "up to".
     let for_match = if up_to_match.is_none() && any_number_tail.is_none() {
@@ -2000,7 +2013,9 @@ fn parse_search_filter_suffixes(
             }
         }
 
-        if let Some((prop, consumed)) = parse_mana_value_suffix(remaining) {
+        if let Some((prop, consumed)) =
+            parse_mana_value_suffix(remaining, &mut ParseContext::default())
+        {
             suffix.properties.push(prop);
             remaining = remaining[consumed..].trim_start();
             continue;
@@ -3307,6 +3322,26 @@ mod tests {
         );
         assert!(details.up_to, "up to N should set up_to=true");
         assert_eq!(details.count, QuantityExpr::Fixed { value: 3 });
+    }
+
+    // Issue #458: "search ... for up to that many land cards" — Scapeshift.
+    // CR 608.2c: "that many" back-references the count produced by the earlier
+    // sacrifice instruction in the same resolution. `parse_quantity_ref` maps
+    // it to `QuantityRef::EventContextAmount`.
+    #[test]
+    fn search_up_to_that_many_emits_event_context_back_reference() {
+        let details = parse_search_library_details(
+            "search your library for up to that many land cards, put them onto the battlefield tapped, then shuffle",
+            &mut ParseContext::default(),
+        );
+        assert!(details.up_to, "\"up to that many\" should set up_to=true");
+        assert_eq!(
+            details.count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            "\"that many\" must back-reference the prior effect's count"
+        );
     }
 
     #[test]

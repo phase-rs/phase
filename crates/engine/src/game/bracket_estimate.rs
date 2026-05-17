@@ -255,14 +255,9 @@ mod tests {
     use crate::game::deck_loading::PlayerDeckList;
 
     fn db_with_signals(entries: &[(&str, BracketSignals)]) -> CardDatabase {
-        CardDatabase::default().with_bracket_lists(BracketLists {
+        let mut db = CardDatabase::default().with_bracket_lists(BracketLists {
             version: "test-1".to_string(),
             source: String::new(),
-            game_changers: entries
-                .iter()
-                .filter(|(_, s)| s.game_changer)
-                .map(|(n, _)| n.to_lowercase())
-                .collect(),
             mass_land_denial: entries
                 .iter()
                 .filter(|(_, s)| s.mass_land_denial)
@@ -278,7 +273,12 @@ mod tests {
                 .filter(|(_, s)| s.efficient_tutor)
                 .map(|(n, _)| n.to_lowercase())
                 .collect(),
-        })
+        });
+        db.bracket_signals_by_name = entries
+            .iter()
+            .map(|(name, signals)| (name.to_lowercase(), *signals))
+            .collect();
+        db
     }
 
     fn deck(commander: Vec<&str>, main: Vec<&str>) -> PlayerDeckList {
@@ -463,14 +463,11 @@ mod tests {
         };
         let entries: Vec<(String, BracketSignals)> =
             (0..40).map(|i| (format!("Card{i}"), sig)).collect();
-        let db = CardDatabase::default().with_bracket_lists(BracketLists {
-            version: "t".into(),
-            source: String::new(),
-            game_changers: entries.iter().map(|(n, _)| n.to_lowercase()).collect(),
-            mass_land_denial: entries.iter().map(|(n, _)| n.to_lowercase()).collect(),
-            extra_turns: entries.iter().map(|(n, _)| n.to_lowercase()).collect(),
-            efficient_tutors: entries.iter().map(|(n, _)| n.to_lowercase()).collect(),
-        });
+        let entry_refs: Vec<(&str, BracketSignals)> = entries
+            .iter()
+            .map(|(name, signals)| (name.as_str(), *signals))
+            .collect();
+        let db = db_with_signals(&entry_refs);
         let main: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
         let d = deck(vec!["Cmdr"], main);
         let e = estimate_bracket(&d, &db).unwrap();

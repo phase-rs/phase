@@ -1,6 +1,9 @@
 use crate::game::combat::{AttackTarget, CombatState, DamageAssignment, DamageTarget, TrampleKind};
-use crate::game::effects::deal_damage::{apply_damage_to_target, DamageContext, DamageResult};
+use crate::game::effects::deal_damage::{
+    apply_damage_after_replacement, pre_replacement_damage_gate, DamageContext, DamageResult,
+};
 use crate::game::game_object::GameObject;
+use crate::game::replacement;
 use crate::game::sba;
 use crate::game::triggers;
 use crate::types::ability::TargetRef;
@@ -9,6 +12,7 @@ use crate::types::game_state::{CombatDamageAssignmentMode, DamageSlot, GameState
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
+use crate::types::proposed_event::ProposedEvent;
 
 /// CR 510.1a + CR 613.11: Returns the amount of combat damage a creature assigns.
 /// Normally equal to power, but if `assigns_damage_from_toughness` is set (e.g. Doran),
@@ -608,11 +612,38 @@ fn lethal_damage_needed(
         .unwrap_or(1)
 }
 
+/// CR 510.2: One source's place in a simultaneous combat-damage batch — the
+/// damage context, commander flag, and original assignment, carried alongside
+/// the source's `ProposedEvent` so Phase C can apply the post-replacement
+/// survivor and run combat-only bookkeeping.
+struct BatchEntry<'a> {
+    ctx: DamageContext,
+    source_is_commander: bool,
+    assignment: &'a DamageAssignment,
+}
+
 /// Apply all combat damage assignments simultaneously (CR 510.2).
-/// All damage goes through replace_event for replacement effect interception.
-/// Apply pre-built combat damage assignments through the shared damage pipeline.
-/// Handles protection, replacement effects, lifelink, deathtouch, infect, and events.
-/// Used by both the automatic assignment path and the interactive `AssignCombatDamage` handler.
+///
+/// Combat damage is one simultaneous event batch (CR 510.2). To keep prevention
+/// shields (e.g. Inkshield's "prevent all combat damage ... for each 1 damage
+/// prevented, create a token") rules-correct (CR 615.7 — count the amount, not
+/// the sources; CR 615.13 — the rider fires once per batch), this runs in
+/// three phases:
+///
+/// - **Phase A (Collect):** build a `ProposedEvent::Damage` per assignment
+///   through `pre_replacement_damage_gate` (0-damage / protection / prohibition
+///   gates) WITHOUT applying any damage yet.
+/// - **Phase B (Batch replace):** pass the whole proposed-event slice through
+///   `replace_combat_damage_batch`, which runs the replacement pipeline per
+///   event but aggregates each `Prevention::All` shield's prevented amount.
+/// - **Phase C (Apply + bookkeeping):** apply each surviving post-replacement
+///   event via `apply_damage_after_replacement`, then run the player-batching
+///   and commander-damage bookkeeping. Afterward, fire each prevention shield's
+///   `runtime_execute` rider exactly once against the aggregate prevented
+///   amount (CR 615.5 + CR 615.13).
+///
+/// Used by both the automatic assignment path and the interactive
+/// `AssignCombatDamage` handler.
 pub(crate) fn apply_combat_damage(
     state: &mut GameState,
     assignments: &[(ObjectId, DamageAssignment)],
@@ -621,6 +652,11 @@ pub(crate) fn apply_combat_damage(
     let mut combat_damage_to_players: Vec<(crate::types::player::PlayerId, Vec<ObjectId>)> =
         Vec::new();
 
+    // --- Phase A: Collect proposed damage events (CR 510.2) ---
+    // Gated assignments (0-damage, protection, prohibition) contribute nothing
+    // and are dropped here; the gate already emitted any required DamagePrevented.
+    let mut entries: Vec<BatchEntry> = Vec::with_capacity(assignments.len());
+    let mut proposed_events: Vec<ProposedEvent> = Vec::with_capacity(assignments.len());
     for (source_id, assignment) in assignments {
         // Read commander flag before DamageContext borrows — both are immutable reads.
         let source_is_commander = state
@@ -644,44 +680,77 @@ pub(crate) fn apply_combat_damage(
             DamageTarget::Player(id) => TargetRef::Player(*id),
         };
 
-        // Delegate to shared damage pipeline — handles protection, replacement,
-        // damage application, deathtouch, lifelink, and DamageDealt event.
-        let actual_amount = match apply_damage_to_target(
+        if let Some(proposed) = pre_replacement_damage_gate(
             state,
             &ctx,
-            target_ref,
+            &target_ref,
             assignment.amount,
             true,
             &mut events,
         ) {
-            Ok(DamageResult::Applied(amt)) => amt,
-            // Combat damage NeedsChoice: skip this assignment (existing behavior).
-            // The helper does NOT set waiting_for when is_combat == true.
-            Ok(DamageResult::NeedsChoice) => 0,
-            Err(_) => 0,
+            entries.push(BatchEntry {
+                ctx,
+                source_is_commander,
+                assignment,
+            });
+            proposed_events.push(proposed);
+        }
+    }
+
+    // --- Phase B: Batch replacement (CR 510.2 + CR 615.7) ---
+    let (survivors, prevention_tally) =
+        replacement::replace_combat_damage_batch(state, &mut events, proposed_events);
+
+    // --- Phase C: Apply survivors + combat bookkeeping (CR 120.3 + CR 510.2) ---
+    debug_assert_eq!(
+        entries.len(),
+        survivors.len(),
+        "batch survivor count must align with collected entries"
+    );
+    for (entry, survivor) in entries.iter().zip(survivors) {
+        let actual_amount = match survivor {
+            // CR 120.3 + CR 120.4b: Apply the post-replacement event WITHOUT
+            // re-running the replacement pipeline.
+            Some(survivor_event) => match apply_damage_after_replacement(
+                state,
+                &entry.ctx,
+                survivor_event,
+                true,
+                &mut events,
+            ) {
+                DamageResult::Applied(amt) => amt,
+                // CR 510.2: Life-loss/lifelink replacement needs a choice, but no
+                // player gets priority between combat damage being assigned and
+                // dealt — combat cannot pause, so the deferred portion is dropped
+                // (mirrors the legacy `apply_damage_to_target` combat behavior).
+                DamageResult::NeedsChoice => 0,
+            },
+            // Fully prevented or skipped — no damage applied.
+            None => 0,
         };
 
         // Combat-only bookkeeping (not part of the shared damage pipeline):
-        if let DamageTarget::Player(player_id) = &assignment.target {
+        if let DamageTarget::Player(player_id) = &entry.assignment.target {
+            let source_id = entry.ctx.source_id;
             // Track CombatDamageDealtToPlayer source batching
             let player_sources = combat_damage_to_players
                 .iter_mut()
                 .find(|(damaged_player, _)| *damaged_player == *player_id)
                 .map(|(_, source_ids)| source_ids);
             if let Some(source_ids) = player_sources {
-                if !source_ids.contains(source_id) {
-                    source_ids.push(*source_id);
+                if !source_ids.contains(&source_id) {
+                    source_ids.push(source_id);
                 }
             } else {
-                combat_damage_to_players.push((*player_id, vec![*source_id]));
+                combat_damage_to_players.push((*player_id, vec![source_id]));
             }
 
             // CR 704.6c: Track commander combat damage for the 21-damage loss condition.
-            if source_is_commander && actual_amount > 0 {
+            if entry.source_is_commander && actual_amount > 0 {
                 if let Some(entry) = state
                     .commander_damage
                     .iter_mut()
-                    .find(|e| e.player == *player_id && e.commander == *source_id)
+                    .find(|e| e.player == *player_id && e.commander == source_id)
                 {
                     entry.damage += actual_amount;
                 } else {
@@ -689,7 +758,7 @@ pub(crate) fn apply_combat_damage(
                         .commander_damage
                         .push(crate::types::game_state::CommanderDamageEntry {
                             player: *player_id,
-                            commander: *source_id,
+                            commander: source_id,
                             damage: actual_amount,
                         });
                 }
@@ -704,7 +773,74 @@ pub(crate) fn apply_combat_damage(
         });
     }
 
+    // --- Phase D: Fire prevention riders once per shield (CR 615.5 + CR 615.13) ---
+    fire_combat_prevention_riders(state, &prevention_tally, &mut events);
+
     events
+}
+
+/// CR 615.5 + CR 615.13: After a simultaneous combat-damage batch, fire each
+/// `Prevention::All` shield's `runtime_execute` rider exactly once against the
+/// aggregate prevented amount.
+///
+/// Each `DamagePrevented` event for the batch is emitted here (the per-source
+/// applier suppressed them so the rider sees one un-fragmented amount). The
+/// aggregate prevented amount is stamped into `last_effect_count` immediately
+/// before the single rider call so the rider's `QuantityRef::EventContextAmount`
+/// (e.g. Inkshield's "for each 1 damage prevented this way") resolves against
+/// the whole batch total.
+fn fire_combat_prevention_riders(
+    state: &mut GameState,
+    prevention_tally: &std::collections::HashMap<crate::types::proposed_event::ReplacementId, i32>,
+    events: &mut Vec<GameEvent>,
+) {
+    for (rid, &total_prevented) in prevention_tally {
+        if total_prevented <= 0 {
+            continue;
+        }
+
+        // CR 615.3: Pending shields use sentinel ObjectId(0); object-hosted
+        // shields are found in the host's replacement_definitions.
+        let repl_def = if rid.source == ObjectId(0) {
+            state.pending_damage_replacements.get(rid.index)
+        } else {
+            state
+                .objects
+                .get(&rid.source)
+                .and_then(|obj| obj.replacement_definitions.get(rid.index))
+        };
+        let Some(repl_def) = repl_def else {
+            continue;
+        };
+
+        // CR 615.13: The `DamagePrevented` event for the whole batch — informational
+        // (no trigger consumes it yet). Target derived from the shield's player scope.
+        let prevented_target = match &repl_def.damage_target_filter {
+            Some(crate::types::ability::DamageTargetFilter::Player {
+                player: crate::types::ability::DamageTargetPlayerScope::Specific(player),
+            }) => TargetRef::Player(*player),
+            _ => TargetRef::Object(rid.source),
+        };
+        events.push(GameEvent::DamagePrevented {
+            source_id: rid.source,
+            target: prevented_target,
+            amount: total_prevented as u32,
+        });
+
+        // CR 615.5: Resolve the prevention's additional effect ("for each 1
+        // damage prevented this way, create a token"). Stamp the aggregate
+        // prevented amount so `EventContextAmount` resolves against the batch
+        // total, then run the rider continuation exactly once.
+        let Some(runtime) = repl_def.runtime_execute.clone() else {
+            continue;
+        };
+        state.last_effect_count = Some(total_prevented);
+        state.post_replacement_continuation =
+            Some(crate::types::ability::PostReplacementContinuation::Resolved(runtime));
+        let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+            state, None, None, events,
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2069,5 +2205,338 @@ mod tests {
         // "trample" must still parse to regular Trample
         let kw2: Keyword = "trample".parse().unwrap();
         assert_eq!(kw2, Keyword::Trample);
+    }
+
+    // --- #314: combat-damage prevention batch + Inkshield rider aggregation ---
+
+    /// Resolve an Inkshield-style spell ("prevent all combat damage to `player`
+    /// this turn; for each 1 damage prevented this way, create a 2/1 Inkling")
+    /// through the real `PreventDamage` effect resolver. The shield lands in
+    /// `pending_damage_replacements` with its `runtime_execute` Token rider.
+    fn install_inkshield(state: &mut GameState, player: PlayerId) {
+        use crate::game::effects::prevent_damage;
+        use crate::types::ability::{
+            PreventionAmount, PreventionScope, PtValue, ResolvedAbility, TargetFilter,
+        };
+        use crate::types::mana::ManaColor;
+
+        let shield_source = create_object(
+            state,
+            CardId(state.next_object_id),
+            player,
+            "Inkshield".to_string(),
+            Zone::Stack,
+        );
+
+        let mut token = ResolvedAbility::new(
+            Effect::Token {
+                name: "Inkling".to_string(),
+                power: PtValue::Fixed(2),
+                toughness: PtValue::Fixed(1),
+                types: vec!["Creature".to_string(), "Inkling".to_string()],
+                colors: vec![ManaColor::White, ManaColor::Black],
+                keywords: vec![Keyword::Flying],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+            vec![],
+            shield_source,
+            player,
+        );
+        token.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        });
+
+        let ability = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::Controller,
+                scope: PreventionScope::CombatDamage,
+                damage_source_filter: None,
+            },
+            vec![],
+            shield_source,
+            player,
+        )
+        .sub_ability(token);
+
+        let mut events = Vec::new();
+        prevent_damage::resolve(state, &ability, &mut events).unwrap();
+    }
+
+    fn count_inklings(state: &GameState) -> usize {
+        state
+            .objects
+            .values()
+            .filter(|obj| obj.zone == Zone::Battlefield && obj.name == "Inkling")
+            .count()
+    }
+
+    /// Step 1: Two unblocked 3/3 attackers hit an Inkshield controller. The
+    /// rider must fire once against the aggregate (6), creating 6 Inklings —
+    /// not 3+3 from two separate firings, and not 0 from a fragmented count.
+    #[test]
+    fn test_inkshield_aggregates_combat_damage_into_tokens() {
+        let mut state = setup();
+        // PlayerId(1) controls Inkshield; PlayerId(0) attacks them.
+        install_inkshield(&mut state, PlayerId(1));
+
+        let a1 = create_creature(&mut state, PlayerId(0), "Ogre", 3, 3);
+        let a2 = create_creature(&mut state, PlayerId(0), "Ogre", 3, 3);
+        setup_combat(&mut state, vec![a1, a2], vec![]);
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+
+        // CR 615.6: prevented damage never happens — 0 life lost.
+        assert_eq!(state.players[1].life, 20, "all 6 combat damage prevented");
+        // CR 615.7 + CR 615.13: one rider firing against the aggregate of 6.
+        assert_eq!(
+            count_inklings(&state),
+            6,
+            "rider fires once for the whole batch: 3 + 3 = 6 Inklings"
+        );
+    }
+
+    /// Step 6: A double-strike attacker vs Inkshield. CR 510.4 — first-strike
+    /// and regular damage are separate combat-damage steps, each its own
+    /// simultaneous batch → its own rider firing. A 4/4 double-striker
+    /// prevents 4 then 4: two firings, 8 Inklings total.
+    #[test]
+    fn test_inkshield_double_strike_fires_rider_per_combat_step() {
+        let mut state = setup();
+        install_inkshield(&mut state, PlayerId(1));
+
+        let attacker = create_creature(&mut state, PlayerId(0), "Striker", 4, 4);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::DoubleStrike);
+        setup_combat(&mut state, vec![attacker], vec![]);
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+
+        assert_eq!(state.players[1].life, 20, "both strikes prevented");
+        // CR 510.4: two separate combat-damage steps → two rider firings of 4.
+        assert_eq!(
+            count_inklings(&state),
+            8,
+            "double strike: 4 (first-strike step) + 4 (regular step) = 8"
+        );
+        // CR 510.4: two DamagePrevented events, one per combat-damage step.
+        let prevented = events
+            .iter()
+            .filter(|e| matches!(e, GameEvent::DamagePrevented { .. }))
+            .count();
+        assert_eq!(prevented, 2, "one DamagePrevented per combat-damage step");
+    }
+
+    /// Step 7: Trample attacker partially blocked, defending player shielded.
+    /// The trample-to-player damage batches with the to-creature assignment;
+    /// the shield aggregates only the player-targeted portion (CR 615.7).
+    #[test]
+    fn test_inkshield_trample_aggregates_only_player_portion() {
+        let mut state = setup();
+        install_inkshield(&mut state, PlayerId(1));
+
+        let attacker = create_creature(&mut state, PlayerId(0), "Trampler", 5, 5);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Trample);
+        let blocker = create_creature(&mut state, PlayerId(1), "Wall", 0, 2);
+        setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+
+        // 2 lethal to the blocker, 3 trample over to the shielded player.
+        assert_eq!(
+            state.objects[&blocker].damage_marked, 2,
+            "blocker takes its lethal portion — to-creature damage is not prevented"
+        );
+        assert_eq!(state.players[1].life, 20, "trample-over damage prevented");
+        // CR 615.7: only the 3 player-targeted damage is aggregated.
+        assert_eq!(count_inklings(&state), 3, "3 trample damage → 3 Inklings");
+    }
+
+    /// Step 8: A mixed batch — attacker X hits a creature, attacker Y hits the
+    /// shielded player, in one `apply_combat_damage` call. The shield
+    /// aggregates only Y's amount (CR 615.7).
+    #[test]
+    fn test_inkshield_mixed_creature_and_player_batch() {
+        let mut state = setup();
+        install_inkshield(&mut state, PlayerId(1));
+
+        let x = create_creature(&mut state, PlayerId(0), "Ogre X", 3, 3);
+        let y = create_creature(&mut state, PlayerId(0), "Ogre Y", 4, 4);
+        let blocker = create_creature(&mut state, PlayerId(1), "Wall", 0, 6);
+        setup_combat(
+            &mut state,
+            vec![x, y],
+            vec![(x, vec![blocker]), (y, vec![])],
+        );
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects[&blocker].damage_marked, 3,
+            "X's 3 to-creature damage applies normally"
+        );
+        assert_eq!(
+            state.players[1].life, 20,
+            "Y's 4 to-player damage prevented"
+        );
+        assert_eq!(count_inklings(&state), 4, "only Y's 4 damage → 4 Inklings");
+    }
+
+    /// Step 9: A deathtouch attacker in a batch alongside a prevented attacker.
+    /// The Phase A/B/C split must not disturb deathtouch marking — the
+    /// deathtouch creature still dies to SBA.
+    #[test]
+    fn test_deathtouch_unaffected_by_combat_damage_batch_split() {
+        let mut state = setup();
+        install_inkshield(&mut state, PlayerId(1));
+
+        // Deathtouch attacker vs a fat blocker; prevented attacker hits player.
+        let dt = create_creature(&mut state, PlayerId(0), "Adder", 1, 1);
+        state
+            .objects
+            .get_mut(&dt)
+            .unwrap()
+            .keywords
+            .push(Keyword::Deathtouch);
+        let blocker = create_creature(&mut state, PlayerId(1), "Giant", 6, 6);
+        let unblocked = create_creature(&mut state, PlayerId(0), "Ogre", 3, 3);
+        setup_combat(
+            &mut state,
+            vec![dt, unblocked],
+            vec![(dt, vec![blocker]), (unblocked, vec![])],
+        );
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+
+        // CR 702.2c: 1 deathtouch damage is lethal — the 6/6 blocker dies to SBA.
+        assert!(
+            state
+                .objects
+                .get(&blocker)
+                .is_none_or(|o| o.zone != Zone::Battlefield),
+            "deathtouch creature destroys the blocker via SBA"
+        );
+        // The prevented attacker still made 3 Inklings.
+        assert_eq!(state.players[1].life, 20);
+        assert_eq!(count_inklings(&state), 3);
+    }
+
+    /// Step 10: Lifelink (CR 615.6 / CR 702.15b). A fully prevented lifelink
+    /// attacker gains 0 life; a non-prevented lifelink attacker in the same
+    /// batch still gains life.
+    #[test]
+    fn test_lifelink_prevented_gains_no_life_unprevented_still_gains() {
+        // Case A: lifelink attacker fully prevented → 0 life gained.
+        let mut state = setup();
+        install_inkshield(&mut state, PlayerId(1));
+        let ll = create_creature(&mut state, PlayerId(0), "Vampire", 3, 3);
+        state
+            .objects
+            .get_mut(&ll)
+            .unwrap()
+            .keywords
+            .push(Keyword::Lifelink);
+        setup_combat(&mut state, vec![ll], vec![]);
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+        assert_eq!(
+            state.players[0].life, 20,
+            "CR 615.6: prevented damage never happens — no lifelink"
+        );
+
+        // Case B: lifelink attacker NOT prevented, batched alongside a
+        // prevented attacker → lifelink still fires.
+        let mut state = setup();
+        install_inkshield(&mut state, PlayerId(1));
+        let prevented = create_creature(&mut state, PlayerId(0), "Ogre", 3, 3);
+        let pw_target = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        let ll = create_creature(&mut state, PlayerId(0), "Vampire", 3, 3);
+        state
+            .objects
+            .get_mut(&ll)
+            .unwrap()
+            .keywords
+            .push(Keyword::Lifelink);
+        // lifelink attacker hits a creature (not the shielded player).
+        setup_combat(
+            &mut state,
+            vec![prevented, ll],
+            vec![(prevented, vec![]), (ll, vec![pw_target])],
+        );
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+        assert_eq!(
+            state.players[0].life, 23,
+            "lifelink attacker's 3 to-creature damage gains 3 life"
+        );
+        assert_eq!(state.players[1].life, 20, "the other attacker is prevented");
+    }
+
+    /// Step 11: Commander damage bookkeeping. A commander attacker prevented +
+    /// a commander attacker dealing damage in one batch — `commander_damage`
+    /// accrues only the unprevented commander (CR 704.6c).
+    #[test]
+    fn test_commander_damage_accrues_only_unprevented_commander() {
+        let mut state = setup();
+        install_inkshield(&mut state, PlayerId(1));
+
+        let prevented_cmdr = create_creature(&mut state, PlayerId(0), "Cmdr A", 4, 4);
+        state.objects.get_mut(&prevented_cmdr).unwrap().is_commander = true;
+        let dealing_cmdr = create_creature(&mut state, PlayerId(0), "Cmdr B", 5, 5);
+        state.objects.get_mut(&dealing_cmdr).unwrap().is_commander = true;
+
+        // Both attack PlayerId(1). The shield prevents ALL combat damage to
+        // PlayerId(1), so commander damage must accrue 0 for both.
+        setup_combat(&mut state, vec![prevented_cmdr, dealing_cmdr], vec![]);
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+
+        // CR 704.6c: prevented commander damage does not accrue.
+        let total: u32 = state
+            .commander_damage
+            .iter()
+            .filter(|e| e.player == PlayerId(1))
+            .map(|e| e.damage)
+            .sum();
+        assert_eq!(total, 0, "fully prevented — no commander damage accrues");
+
+        // Now an unblocked commander with the shield gone: damage accrues.
+        let mut state = setup();
+        let cmdr = create_creature(&mut state, PlayerId(0), "Cmdr", 5, 5);
+        state.objects.get_mut(&cmdr).unwrap().is_commander = true;
+        setup_combat(&mut state, vec![cmdr], vec![]);
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+        let entry = state
+            .commander_damage
+            .iter()
+            .find(|e| e.player == PlayerId(1) && e.commander == cmdr);
+        assert_eq!(
+            entry.map(|e| e.damage),
+            Some(5),
+            "unprevented commander accrues 5 combat damage"
+        );
     }
 }

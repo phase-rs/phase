@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{GameState, ShardChoice};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{
@@ -212,7 +212,7 @@ pub(crate) fn produce_mana_with_attributes_from_source_quality(
             player_id,
             mana_type: final_mana_type,
             source_id,
-            tapped_for_mana,
+            tap_state: ManaTapState::from_tap(tapped_for_mana),
         });
     }
 }
@@ -1666,7 +1666,7 @@ mod tests {
                 player_id: PlayerId(1),
                 mana_type: ManaType::Blue,
                 source_id: ObjectId(5),
-                tapped_for_mana: true,
+                tap_state: ManaTapState::FromTap,
             }
         ));
     }
@@ -1800,7 +1800,7 @@ mod tests {
                 player_id: PlayerId(0),
                 mana_type: ManaType::Green,
                 source_id,
-                tapped_for_mana: true,
+                tap_state: ManaTapState::FromTap,
             } if *source_id == land_id
         )));
     }

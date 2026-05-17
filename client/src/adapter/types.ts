@@ -1,3 +1,5 @@
+import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
+
 // ── Identifiers ──────────────────────────────────────────────────────────
 
 export type ObjectId = number;
@@ -296,15 +298,48 @@ export type ManaPip =
 
 // ── Mana ─────────────────────────────────────────────────────────────────
 
+// Mirrors `crate::types::mana::ManaRestriction` (externally-tagged serde:
+// unit variants serialize as bare strings, data variants as
+// `{ VariantName: payload }`). `KeywordKind` is the engine's large unit-only
+// keyword enum — serialized as a bare keyword string (e.g. "Flashback").
+export type KeywordKind = string;
+
 export type ManaRestriction =
+  // "Spend this mana only to cast creature/artifact spells."
   | { OnlyForSpellType: string }
+  // "Spend this mana only to cast a creature spell of the chosen type."
+  | { OnlyForCreatureType: string }
+  // "Spend this mana only to cast creature spells or activate creature abilities."
+  | { OnlyForTypeSpellsOrAbilities: string }
+  // "Spend this mana only to cast spells with flashback."
+  | { OnlyForSpellWithKeywordKind: KeywordKind }
+  // "Spend this mana only to cast spells with flashback from a graveyard."
+  | { OnlyForSpellWithKeywordKindFromZone: [KeywordKind, Zone] }
+  // "Spend this mana only to activate abilities."
+  | "OnlyForActivation"
+  // "Spend this mana only on costs that include {X}."
+  | "OnlyForXCosts"
+  // Internal convoke-tap marker — never surfaced to the player.
   | "ConvokePayment";
+
+// Mirrors `crate::types::mana::ManaSpellGrant` (CR 106.6) — properties this
+// mana grants to the spell it is spent on. Externally-tagged serde.
+export type ManaSpellGrant =
+  | "CantBeCountered"
+  | {
+      AddKeywordUntilEndOfTurn: {
+        keyword: Keyword;
+        restriction?: ManaRestriction | null;
+      };
+    };
 
 export interface ManaUnit {
   color: ManaType;
   source_id: ObjectId;
   snow: boolean;
   restrictions: ManaRestriction[];
+  // `#[serde(default, skip_serializing_if = "Vec::is_empty")]` — absent when empty.
+  grants?: ManaSpellGrant[];
 }
 
 export interface ManaPool {
@@ -805,7 +840,7 @@ export type WaitingFor =
   | { type: "ModeChoice"; data: { player: PlayerId; modal: ModalChoice; pending_cast: PendingCast } }
   | { type: "AbilityModeChoice"; data: { player: PlayerId; modal: ModalChoice; source_id: ObjectId; mode_abilities: unknown[]; is_activated: boolean; ability_index?: number; ability_cost?: unknown; unavailable_modes?: number[] } }
   | { type: "DiscardToHandSize"; data: { player: PlayerId; count: number; cards: ObjectId[] } }
-  | { type: "OptionalCostChoice"; data: { player: PlayerId; cost: AdditionalCost; pending_cast: PendingCast } }
+  | { type: "OptionalCostChoice"; data: { player: PlayerId; cost: AdditionalCost; times_kicked: number; pending_cast: PendingCast } }
   | { type: "DefilerPayment"; data: { player: PlayerId; life_cost: number; mana_reduction: ManaCost; pending_cast: PendingCast } }
   | { type: "AdventureCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId } }
   | { type: "ModalFaceChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId } }
@@ -833,7 +868,7 @@ export type WaitingFor =
   | { type: "OptionalEffectChoice"; data: { player: PlayerId; source_id: ObjectId; description?: string; may_trigger_key?: MayTriggerAutoChoiceKey } }
   | { type: "PairChoice"; data: { player: PlayerId; source_id: ObjectId; choices: ObjectId[] } }
   | { type: "OpponentMayChoice"; data: { player: PlayerId; source_id: ObjectId; description?: string; remaining: PlayerId[] } }
-  | { type: "UnlessPayment"; data: { player: PlayerId; cost: UnlessCost; pending_effect: unknown; trigger_event?: unknown; effect_description?: string } }
+  | { type: "UnlessPayment"; data: { player: PlayerId; cost: UnlessCost; pending_effect: unknown; trigger_event?: unknown; effect_description?: string; remaining?: PlayerId[] } }
   // CR 118.12a: Disjunctive unless-cost — player picks **which** sub-cost
   // to pay (or declines all). Drives Tergrid's Lantern and the broader
   // "unless they X or Y" punisher class.
@@ -843,6 +878,8 @@ export type WaitingFor =
   | { type: "UnlessBounceChoice"; data: { player: PlayerId; permanents: ObjectId[]; pending_effect: unknown; remaining: number } }
   | { type: "ChooseRingBearer"; data: { player: PlayerId; candidates: ObjectId[] } }
   | { type: "DiscoverChoice"; data: { player: PlayerId; hit_card: ObjectId; exiled_misses: ObjectId[] } }
+  | { type: "RevealUntilKeptChoice"; data: { player: PlayerId; hit_card: ObjectId; accept_zone: string; decline_zone: string; enter_tapped: boolean; revealed_misses: ObjectId[]; rest_destination: string } }
+  | { type: "RepeatDecision"; data: { player: PlayerId; ability: unknown } }
   | { type: "CascadeChoice"; data: { player: PlayerId; hit_card: ObjectId; exiled_misses: ObjectId[]; source_mv: number } }
   | { type: "TopOrBottomChoice"; data: { player: PlayerId; object_id: ObjectId } }
   | { type: "ParadigmCastOffer"; data: { player: PlayerId; offers: ObjectId[] } }
@@ -877,6 +914,7 @@ export type WaitingFor =
   | { type: "DrawnThisTurnTopdeckChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; min_count: number; life_payment: number; source_id: ObjectId } }
   | { type: "RetargetChoice"; data: { player: PlayerId; stack_entry_index: number; scope: RetargetScope; current_targets: TargetRef[]; legal_new_targets: TargetRef[] } }
   | { type: "ProliferateChoice"; data: { player: PlayerId; eligible: TargetRef[] } }
+  | { type: "ChooseObjectsSelection"; data: { player: PlayerId; eligible: TargetRef[]; trigger_event?: GameEvent } }
   | { type: "ConniveDiscard"; data: { player: PlayerId; conniver_id: ObjectId; source_id: ObjectId; cards: ObjectId[]; count: number } }
   | { type: "DiscardChoice"; data: { player: PlayerId; count: number; cards: ObjectId[]; source_id: ObjectId; effect_kind: string; up_to?: boolean; unless_filter?: TargetFilter } }
   | { type: "ManifestDreadChoice"; data: { player: PlayerId; cards: ObjectId[] } }
@@ -1157,6 +1195,7 @@ export type GameEvent =
   | { type: "SpellCast"; data: { card_id: CardId; controller: PlayerId; object_id: ObjectId } }
   | { type: "XValueChosen"; data: { player: PlayerId; object_id: ObjectId; value: number } }
   | { type: "AbilityActivated"; data: { source_id: ObjectId } }
+  | { type: "ExhaustAbilityActivated"; data: { player_id: PlayerId; source_id: ObjectId; is_mana_ability: boolean } }
   | { type: "ZoneChanged"; data: { object_id: ObjectId; from: Zone; to: Zone } }
   | { type: "LifeChanged"; data: { player_id: PlayerId; amount: number } }
   | { type: "ManaAdded"; data: { player_id: PlayerId; mana_type: ManaType; source_id: ObjectId; tapped_for_mana?: boolean } }
@@ -1200,6 +1239,7 @@ export type GameEvent =
   | { type: "CreatureExploited"; data: { exploiter: ObjectId; sacrificed: ObjectId } }
   | { type: "PowerToughnessChanged"; data: { object_id: ObjectId; power: number; toughness: number; power_delta: number; toughness_delta: number } }
   | { type: "RoomEntered"; data: { player_id: PlayerId; dungeon: DungeonId; room_index: number; room_name: string } }
+  | { type: "BecomesPlotted"; data: { object_id: ObjectId; player_id: PlayerId } }
   | { type: "DungeonCompleted"; data: { player_id: PlayerId; dungeon: DungeonId } }
   | { type: "InitiativeTaken"; data: { player_id: PlayerId } }
   | { type: "DebugActionUsed"; data: { player_id: PlayerId; description: string } }
@@ -1263,6 +1303,14 @@ export interface GameState {
   combat: CombatState | null;
   waiting_for: WaitingFor;
   has_pending_cast: boolean;
+  /**
+   * CR 601.2f: The locked-in pending cast (cost, ability, object) while the
+   * caster is mid-cast. Present during ManaPayment / cost-choice WaitingFor
+   * states; the `cost` field is the engine-resolved total (base + Strive +
+   * RaiseCost statics + commander tax - reductions). Absent when no cast is
+   * in progress.
+   */
+  pending_cast?: PendingCast;
   lands_played_this_turn: number;
   max_lands_per_turn: number;
   priority_pass_count: number;
@@ -1566,83 +1614,5 @@ export interface EngineAdapter {
    *
    * Pure — no game state, no side effects. Safe to call on every deck edit.
    */
-  estimateBracket(deck: {
-    commander: string[];
-    main_deck: string[];
-    sideboard?: string[];
-  }): Promise<BracketEstimate | null>;
+  estimateBracket(deck: BracketDeckRequest): Promise<BracketEstimate | null>;
 }
-
-// ── Bracket Estimate ───────────────────────────────────────────────────
-
-/**
- * Commander bracket tier returned by the engine estimator. Mirrors
- * `engine::game::bracket_estimate::CommanderBracketTier`. The estimator
- * never returns "cedh" — that tier is reserved for manual declaration only.
- */
-export type CommanderBracketTier =
-  | "exhibition"
-  | "core"
-  | "upgraded"
-  | "optimized"
-  | "cedh";
-
-export type BracketAxis =
-  | "game_changers"
-  | "mass_land_denial"
-  | "extra_turns"
-  | "efficient_tutors";
-
-export interface BracketAxisCounts {
-  game_changers: number;
-  mass_land_denial: number;
-  extra_turns: number;
-  efficient_tutors: number;
-}
-
-export interface BracketContributingCards {
-  game_changers: string[];
-  mass_land_denial: string[];
-  extra_turns: string[];
-  efficient_tutors: string[];
-}
-
-export interface BracketViolation {
-  axis: BracketAxis;
-  count: number;
-  prior_cap: number;
-  forced_floor: CommanderBracketTier;
-}
-
-export interface BracketAxisCaps {
-  game_changers: number | null;
-  mass_land_denial: number | null;
-  extra_turns: number | null;
-  efficient_tutors: number | null;
-}
-
-export interface BracketEstimate {
-  tier: CommanderBracketTier;
-  axes: BracketAxisCounts;
-  axis_caps_at_tier: BracketAxisCaps;
-  contributing: BracketContributingCards;
-  /**
-   * Per-axis violations recorded for axes whose count exceeded a tier
-   * ceiling. Serialized from Rust `BTreeMap<BracketAxis, BracketViolation>`
-   * — keys are axis names, missing key = axis within bounds.
-   */
-  violations: Partial<Record<BracketAxis, BracketViolation>>;
-  data_version: string;
-}
-
-/**
- * Maps tier strings to the existing `CommanderBracket` numeric values
- * (1..5) used by `BracketPicker`.
- */
-export const BRACKET_TIER_NUMERIC: Record<CommanderBracketTier, 1 | 2 | 3 | 4 | 5> = {
-  exhibition: 1,
-  core: 2,
-  upgraded: 3,
-  optimized: 4,
-  cedh: 5,
-};

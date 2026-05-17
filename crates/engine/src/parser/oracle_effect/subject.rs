@@ -984,6 +984,15 @@ fn resolve_they_pronoun(ctx: &mut ParseContext) -> TargetFilter {
     if matches!(ctx.relative_player_scope, Some(ControllerRef::ScopedPlayer)) {
         return TargetFilter::ScopedPlayer;
     }
+    // CR 608.2c + CR 109.4: "They" after a `Choose(Player)` clause refers to
+    // the chosen player — a player-only `Typed` filter carrying the chosen
+    // scope (Gluntch's "choose a player. They put two +1/+1 counters …").
+    if let Some(scope @ ControllerRef::ChosenPlayer { .. }) = &ctx.relative_player_scope {
+        return TargetFilter::Typed(crate::types::ability::TypedFilter {
+            controller: Some(scope.clone()),
+            ..Default::default()
+        });
+    }
     match &ctx.subject {
         // Player-type trigger subject: no type_filters, has controller ref
         Some(TargetFilter::Typed(tf)) if tf.type_filters.is_empty() && tf.controller.is_some() => {

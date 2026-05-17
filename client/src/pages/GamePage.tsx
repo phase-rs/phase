@@ -49,6 +49,7 @@ import { MiracleRevealModal } from "../components/modal/MiracleRevealModal.tsx";
 import { CardChoiceModal } from "../components/modal/CardChoiceModal.tsx";
 import { ChoiceModal } from "../components/modal/ChoiceModal.tsx";
 import { OptionalEffectModalContent } from "../components/modal/OptionalEffectModal.tsx";
+import { OptionalCostModalContent } from "../components/modal/OptionalCostModal.tsx";
 import { ChooseOneOfBranchModal } from "../components/modal/ChooseOneOfBranchModal.tsx";
 import { ModeChoiceModal } from "../components/modal/ModeChoiceModal.tsx";
 import { ReplacementModal } from "../components/modal/ReplacementModal.tsx";
@@ -84,6 +85,7 @@ import { PausedBanner } from "../components/chrome/PausedBanner.tsx";
 import type { P2PAdapterEvent } from "../adapter/p2p-adapter.ts";
 import { WebSocketAdapter } from "../adapter/ws-adapter.ts";
 import type { WsAdapterEvent } from "../adapter/ws-adapter.ts";
+import { MANA_PAYMENT_WAITING_FOR_TYPES } from "../game/waitingForRegistry.ts";
 import { useGameDispatch } from "../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../hooks/useInspectHoverProps.ts";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
@@ -101,7 +103,7 @@ import {
 } from "../stores/multiplayerStore.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
 import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from "../hooks/usePlayerId.ts";
-import { abilityChoiceLabel, additionalCostChoices } from "../viewmodel/costLabel.ts";
+import { abilityChoiceLabel } from "../viewmodel/costLabel.ts";
 import { getWaitingForObjectChoiceIds } from "../viewmodel/gameStateView.ts";
 import { gameButtonClass } from "../components/ui/buttonStyles.ts";
 import { cardImageLookup } from "../services/cardImageLookup.ts";
@@ -1188,7 +1190,8 @@ function GamePageContent({
         {waitingFor != null &&
           CLICK_THROUGH_WAITING_FOR_TYPES.has(waitingFor.type) &&
           canActForWaitingState && <TargetingOverlay />}
-        {waitingFor?.type === "ManaPayment" &&
+        {waitingFor != null &&
+          MANA_PAYMENT_WAITING_FOR_TYPES.has(waitingFor.type) &&
           canActForWaitingState && <ManaPaymentUI />}
         {waitingFor?.type === "ChooseXValue" &&
           canActForWaitingState && <ChooseXValueUI />}
@@ -2135,25 +2138,7 @@ function OptionalCostModal() {
 
   if (waitingFor?.type !== "OptionalCostChoice") return null;
 
-  const { cost } = waitingFor.data;
-  const { title, payLabel, skipLabel } = additionalCostChoices(cost);
-  // Mandatory Choice costs (e.g. "discard a card or pay 3 life") require picking one —
-  // no cancel/close allowed. Optional costs allow canceling the cast.
-  const isMandatoryChoice = cost.type === "Choice";
-
-  return (
-    <ChoiceModal
-      title={title}
-      options={[
-        { id: "pay", label: payLabel },
-        { id: "skip", label: skipLabel },
-      ]}
-      onChoose={(id) =>
-        dispatch({ type: "DecideOptionalCost", data: { pay: id === "pay" } })
-      }
-      onClose={isMandatoryChoice ? undefined : () => dispatch({ type: "CancelCast" })}
-    />
-  );
+  return <OptionalCostModalContent waitingFor={waitingFor} dispatch={dispatch} />;
 }
 
 // ── Defiler Payment Modal ────────────────────────────────────────────

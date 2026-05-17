@@ -2,7 +2,6 @@ import type Peer from "peerjs";
 import type { DataConnection } from "peerjs";
 
 import type {
-  BracketEstimate,
   EngineAdapter,
   FormatConfig,
   GameAction,
@@ -13,6 +12,7 @@ import type {
   PlayerId,
   SubmitResult,
 } from "./types";
+import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 
 import { AdapterError, AdapterErrorCode } from "./types";
 import { WasmAdapter } from "./wasm-adapter";
@@ -959,11 +959,7 @@ export class P2PHostAdapter implements EngineAdapter {
     throw new AdapterError("P2P_ERROR", "Undo not supported in P2P games", false);
   }
 
-  estimateBracket(_deck: {
-    commander: string[];
-    main_deck: string[];
-    sideboard?: string[];
-  }): Promise<BracketEstimate | null> {
+  estimateBracket(_deck: BracketDeckRequest): Promise<BracketEstimate | null> {
     throw new AdapterError(
       AdapterErrorCode.BRACKET_ESTIMATION_UNSUPPORTED,
       "Bracket estimation is a local feature; not available in P2P sessions.",
@@ -1571,11 +1567,7 @@ export class P2PGuestAdapter implements EngineAdapter {
     throw new AdapterError("P2P_ERROR", "Undo not supported in P2P games", false);
   }
 
-  estimateBracket(_deck: {
-    commander: string[];
-    main_deck: string[];
-    sideboard?: string[];
-  }): Promise<BracketEstimate | null> {
+  estimateBracket(_deck: BracketDeckRequest): Promise<BracketEstimate | null> {
     throw new AdapterError(
       AdapterErrorCode.BRACKET_ESTIMATION_UNSUPPORTED,
       "Bracket estimation is a local feature; not available in P2P sessions.",

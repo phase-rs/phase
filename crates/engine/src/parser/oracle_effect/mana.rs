@@ -2,9 +2,9 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::char;
-use nom::combinator::{opt, value};
+use nom::combinator::{all_consuming, opt, rest as nom_rest, value};
 use nom::multi::many1;
-use nom::sequence::{delimited, preceded, terminated};
+use nom::sequence::{delimited, preceded, separated_pair, terminated};
 use nom::Parser;
 
 use crate::parser::oracle_nom::error::OracleResult;
@@ -94,6 +94,27 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
         Some((_, rest)) => (rest, ManaContribution::Additional),
         None => (clause, ManaContribution::Base),
     };
+
+    // CR 106.1: Count-prefixed disjunctive color choice — `"X {C1} or X {C2}"`
+    // (Brigid, Doun's Mind). The combinator declines when there is no leading
+    // count token, so count-free `"{G}{G} or {W}{W}"` text still routes to
+    // `parse_mana_combinations_clause` below. Tried before
+    // `parse_mana_production_clause` so the where-X count is resolved here,
+    // co-located with `apply_where_x_count_expression`.
+    if let Some((count, color_options)) = parse_repeated_count_color_choice(clause) {
+        let count = apply_where_x_count_expression(count, where_x_expression.as_deref());
+        return Some(Effect::Mana {
+            produced: ManaProduction::AnyOneColor {
+                count,
+                color_options,
+                contribution,
+            },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target: None,
+        });
+    }
 
     if let Some((produced, target)) = parse_mana_production_clause(clause, contribution) {
         return Some(Effect::Mana {
@@ -656,6 +677,96 @@ pub(super) fn apply_where_x_count_expression(
     }
 }
 
+/// CR 106.1: Recognize a count-prefixed disjunctive color choice of the shape
+/// `"<count> {C1} or <count> {C2} [or <count> {Cn} ...]"` — the same count
+/// token repeated before each color (Brigid, Doun's Mind:
+/// `"Add X {G} or X {W}, where X is the number of other creatures you control"`).
+///
+/// Returns `Some((count, color_options))` where `count` is the raw
+/// `QuantityExpr` from the leading count prefix (the caller resolves any
+/// `where X is …` tail via `apply_where_x_count_expression`) and
+/// `color_options` is the distinct list of choosable colors. The caller maps
+/// this onto the existing `ManaProduction::AnyOneColor` variant — no new enum
+/// variant is introduced.
+///
+/// Declines (returns `None`) when:
+/// - there is no leading count token (so `"{G}{G} or {W}{W}"`-style text still
+///   routes to `parse_mana_combinations_clause`);
+/// - a later disjunct repeats a count that differs from the first (typed
+///   `QuantityExpr` equality — `"X {G} or 2 {W}"` is a different grammar);
+/// - a later disjunct omits the count entirely (`"X {G} or {W}"`);
+/// - fewer than two distinct colors are collected (a single color is the
+///   existing fixed/`AnyOneColor`-single path and must not be intercepted);
+/// - any trailing text remains unconsumed.
+///
+/// Separator and count parsing delegate to nom combinators
+/// (`parse_mana_count_prefix`, `alt`/`tag` over the joiners) and color symbol
+/// extraction to `parse_mana_color_symbol` — no string-matching dispatch.
+fn parse_repeated_count_color_choice(clause: &str) -> Option<(QuantityExpr, Vec<ManaColor>)> {
+    let trimmed = clause.trim().trim_end_matches(['.', '"']).trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // First disjunct: a leading count prefix is mandatory. If absent, decline
+    // so count-free disjunctive forms route to `parse_mana_combinations_clause`.
+    let (count, rest) = parse_mana_count_prefix(trimmed)?;
+    let (first_colors, rest) = parse_mana_color_symbol(rest)?;
+
+    let push_colors = |parsed: Vec<ManaColor>, colors: &mut Vec<ManaColor>| {
+        for color in parsed {
+            if !colors.contains(&color) {
+                colors.push(color);
+            }
+        }
+    };
+    let mut colors: Vec<ManaColor> = Vec::new();
+    push_colors(first_colors, &mut colors);
+
+    // Do NOT trim leading whitespace here: the separator tags below carry a
+    // leading space (` or `, `, or `), so the gap between a color symbol and
+    // its joiner must be preserved for the `alt`/`tag` match.
+    let mut rest = rest.trim_end();
+    loop {
+        if rest.is_empty() {
+            break;
+        }
+        // Separator: ", or " / ", and/or " / " and/or " / " or " / ", " —
+        // nom `alt`/`tag`, longest-match-first so ", or " wins over ", ".
+        let rest_lower = rest.to_lowercase();
+        let (_, after_sep) = nom_on_lower(rest, &rest_lower, |i| {
+            value(
+                (),
+                alt((
+                    tag(", or "),
+                    tag(", and/or "),
+                    tag(" and/or "),
+                    tag(" or "),
+                    tag(", "),
+                )),
+            )
+            .parse(i)
+        })?;
+
+        // Each subsequent disjunct must repeat the SAME count token. A missing
+        // or differing count is a different grammar — decline.
+        let (next_count, after_count) = parse_mana_count_prefix(after_sep)?;
+        if next_count != count {
+            return None;
+        }
+        let (next_colors, after_colors) = parse_mana_color_symbol(after_count)?;
+        push_colors(next_colors, &mut colors);
+        // Keep leading whitespace — the next separator tag needs it.
+        rest = after_colors.trim_end();
+    }
+
+    // Require at least two distinct colors to qualify as a *choice*.
+    if colors.len() < 2 {
+        return None;
+    }
+    Some((count, colors))
+}
+
 /// Parse a set of mana color symbols separated by conjunctions.
 ///
 /// Uses nom combinators for separator matching ("and/or", "or", "and", ",", "/"),
@@ -881,16 +992,58 @@ fn parse_restricted_spell_type_phrase(spell_part: &str) -> Option<String> {
     )
 }
 
-fn split_restricted_spell_and_activation(rest: &str) -> (&str, bool) {
-    match terminated(
-        take_until::<_, _, OracleError<'_>>(" or activate abilities"),
-        tag(" or activate abilities"),
-    )
+fn normalize_restricted_source_phrase(phrase: &str) -> String {
+    phrase
+        .split_whitespace()
+        .map(|word| {
+            let singular = if word != "colorless" && word.len() > 1 && word.ends_with('s') {
+                &word[..word.len() - 1]
+            } else {
+                word
+            };
+            match singular {
+                "and" | "or" => singular.to_string(),
+                _ => super::capitalize(singular),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn parse_activation_source_quality(input: &str) -> OracleResult<'_, String> {
+    let (input, _) = opt(nom_primitives::parse_article).parse(input)?;
+    let (rest, phrase) = alt((
+        terminated(
+            take_until::<_, _, OracleError<'_>>(" source"),
+            alt((tag(" sources"), tag(" source"))),
+        ),
+        nom_rest,
+    ))
+    .parse(input)?;
+    Ok((rest, normalize_restricted_source_phrase(phrase.trim())))
+}
+
+fn split_restricted_spell_and_activation(rest: &str) -> (&str, Option<String>) {
+    all_consuming(alt((
+        separated_pair(
+            take_until::<_, _, OracleError<'_>>(" or activate abilities of "),
+            tag(" or activate abilities of "),
+            parse_activation_source_quality,
+        ),
+        separated_pair(
+            take_until::<_, _, OracleError<'_>>(" or activate an ability of "),
+            tag(" or activate an ability of "),
+            parse_activation_source_quality,
+        ),
+        separated_pair(
+            take_until::<_, _, OracleError<'_>>(" or to activate an ability of "),
+            tag(" or to activate an ability of "),
+            parse_activation_source_quality,
+        ),
+    )))
     .parse(rest)
-    {
-        Ok((_, spell_part)) => (spell_part.trim(), true),
-        Err(_) => (rest.trim(), false),
-    }
+    .map(|(_, (spell_part, source_quality))| (spell_part.trim(), Some(source_quality)))
+    .unwrap_or((rest.trim(), None))
 }
 
 /// Parse a "Spend this mana only to cast..." clause into a `ManaSpendRestriction`.
@@ -941,6 +1094,15 @@ pub(crate) fn parse_mana_spend_restriction(
     // CR 106.6: Extract "and that spell can't be countered" grant before parsing restriction.
     let (rest, grants) = extract_spell_grants(rest);
     let rest = rest.trim();
+    let rest_lower = rest.to_lowercase();
+    if nom_on_lower(rest, &rest_lower, |i| {
+        value((), all_consuming(tag("spells"))).parse(i)
+    })
+    .is_some()
+    {
+        return Some((ManaSpendRestriction::SpellOnly, grants));
+    }
+
     if matches!(rest, "spells with flashback" | "a spell with flashback") {
         return Some((
             ManaSpendRestriction::SpellWithKeywordKind(KeywordKind::Flashback),
@@ -976,7 +1138,7 @@ pub(crate) fn parse_mana_spend_restriction(
 
     // CR 106.6: Check for "or activate abilities of [type]" suffix.
     // If present, emit a combined SpellTypeOrAbilityActivation restriction.
-    let (spell_part, has_ability_activation) = split_restricted_spell_and_activation(rest);
+    let (spell_part, activation_source_quality) = split_restricted_spell_and_activation(rest);
 
     if spell_part.contains("of the chosen type") {
         return Some((ManaSpendRestriction::ChosenCreatureType, grants));
@@ -990,13 +1152,13 @@ pub(crate) fn parse_mana_spend_restriction(
 
     let type_phrase = parse_restricted_spell_type_phrase(spell_part)?;
 
-    if has_ability_activation {
-        Some((
+    match activation_source_quality {
+        Some(source_quality) if source_quality.eq_ignore_ascii_case(&type_phrase) => Some((
             ManaSpendRestriction::SpellTypeOrAbilityActivation(type_phrase),
             grants,
-        ))
-    } else {
-        Some((ManaSpendRestriction::SpellType(type_phrase), grants))
+        )),
+        Some(_) => None,
+        None => Some((ManaSpendRestriction::SpellType(type_phrase), grants)),
     }
 }
 
@@ -1654,6 +1816,140 @@ mod tests {
         assert_eq!(
             typed,
             TypedFilter::default().controller(ControllerRef::Opponent)
+        );
+    }
+
+    /// CR 106.1: Brigid, Doun's Mind — `"Add X {G} or X {W}, where X is the
+    /// number of other creatures you control"`. The count-prefixed disjunctive
+    /// color choice maps to `AnyOneColor` with the resolved `where X is …`
+    /// quantity and `color_options = [Green, White]`. Previously this fell to
+    /// `Effect::Unimplemented`.
+    #[test]
+    fn brigid_x_color_or_x_color_with_where_x() {
+        let effect = try_parse_add_mana_effect(
+            "Add X {G} or X {W}, where X is the number of other creatures you control",
+        )
+        .expect("Brigid clause must parse");
+        let Effect::Mana { produced, .. } = effect else {
+            panic!("expected Effect::Mana, got something else");
+        };
+        let ManaProduction::AnyOneColor {
+            count,
+            color_options,
+            ..
+        } = produced
+        else {
+            panic!("expected AnyOneColor, got {produced:?}");
+        };
+        assert_eq!(color_options, vec![ManaColor::Green, ManaColor::White]);
+        // The `where X is …` clause must resolve X to an ObjectCount ref —
+        // NOT a bare Variable("X") and NOT Fixed.
+        match count {
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { .. },
+            } => {}
+            other => panic!("expected ObjectCount ref for X, got {other:?}"),
+        }
+    }
+
+    /// CR 106.1: Three-color count-prefixed choice — the combinator builds for
+    /// the class (any number of disjuncts), not just Brigid's two colors.
+    #[test]
+    fn three_color_count_prefixed_choice() {
+        let effect = try_parse_add_mana_effect("Add X {W}, X {U}, or X {B}")
+            .expect("three-color X choice must parse");
+        let Effect::Mana { produced, .. } = effect else {
+            panic!("expected Effect::Mana");
+        };
+        let ManaProduction::AnyOneColor {
+            count,
+            color_options,
+            ..
+        } = produced
+        else {
+            panic!("expected AnyOneColor, got {produced:?}");
+        };
+        assert_eq!(
+            color_options,
+            vec![ManaColor::White, ManaColor::Blue, ManaColor::Black]
+        );
+        // No `where X is …` tail — X stays a Variable.
+        assert_eq!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string()
+                }
+            }
+        );
+    }
+
+    /// CR 106.1: Fixed-count count-prefixed choice — `"Add 2 {G} or 2 {W}"`
+    /// also routes through the combinator (the count prefix is a number).
+    #[test]
+    fn fixed_count_prefixed_color_choice() {
+        let effect = try_parse_add_mana_effect("Add 2 {G} or 2 {W}")
+            .expect("fixed-count color choice must parse");
+        let Effect::Mana { produced, .. } = effect else {
+            panic!("expected Effect::Mana");
+        };
+        let ManaProduction::AnyOneColor {
+            count,
+            color_options,
+            ..
+        } = produced
+        else {
+            panic!("expected AnyOneColor, got {produced:?}");
+        };
+        assert_eq!(color_options, vec![ManaColor::Green, ManaColor::White]);
+        assert_eq!(count, QuantityExpr::Fixed { value: 2 });
+    }
+
+    /// Boundary: a count-free disjunctive form (`"{G}{G} or {W}{W}"`) has no
+    /// leading count token, so `parse_repeated_count_color_choice` DECLINES and
+    /// the clause routes to `parse_mana_combinations_clause` instead — yielding
+    /// `ChoiceAmongCombinations`, not `AnyOneColor`.
+    #[test]
+    fn count_free_disjunction_routes_to_combinations() {
+        let effect = try_parse_add_mana_effect("Add {G}{G} or {W}{W}")
+            .expect("combinations form must parse");
+        let Effect::Mana { produced, .. } = effect else {
+            panic!("expected Effect::Mana");
+        };
+        match produced {
+            ManaProduction::ChoiceAmongCombinations { options } => {
+                assert_eq!(
+                    options,
+                    vec![
+                        vec![ManaColor::Green, ManaColor::Green],
+                        vec![ManaColor::White, ManaColor::White],
+                    ]
+                );
+            }
+            other => panic!("expected ChoiceAmongCombinations, got {other:?}"),
+        }
+    }
+
+    /// Negative: mismatched repeated count (`"X {G} or {W}"` — second disjunct
+    /// has no count) — the combinator declines, falling through to existing
+    /// behavior rather than mis-parsing.
+    #[test]
+    fn mismatched_repeated_count_declines() {
+        assert!(
+            parse_repeated_count_color_choice("X {G} or {W}").is_none(),
+            "missing count on a later disjunct must decline"
+        );
+        assert!(
+            parse_repeated_count_color_choice("X {G} or 2 {W}").is_none(),
+            "differing count on a later disjunct must decline"
+        );
+        assert!(
+            parse_repeated_count_color_choice("{G} or {W}").is_none(),
+            "no leading count token must decline"
+        );
+        assert!(
+            parse_repeated_count_color_choice("X {G}").is_none(),
+            "single color is not a choice"
         );
     }
 

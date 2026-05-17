@@ -6,7 +6,50 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::proposed_event::ProposedEvent;
+
+/// CR 603.7e + CR 608.2c: Resolve the objects a `Tap`/`Untap` effect acts on.
+///
+/// - `SelfRef` → the source object — the printed-name "tap ~"/"untap ~"
+///   anaphor that always refers to the source regardless of `ability.targets`.
+/// - `TrackedSet` → the chain's tracked object set published by a preceding
+///   effect (e.g. `ChooseObjectsIntoTrackedSet`'s "untap those creatures"
+///   tail). The `TrackedSetId(0)` sentinel binds to the highest tracked-set
+///   id — the set the most recent effect in this chain published — exactly
+///   as `grant_permission::resolve` binds it. Empty sets are not skipped: an
+///   empty current set means the preceding effect affected nothing.
+/// - Any other filter → the ability's chosen targets (object refs only).
+fn tap_untap_target_ids(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    effect_target: &TargetFilter,
+) -> Vec<ObjectId> {
+    match effect_target {
+        TargetFilter::SelfRef => vec![ability.source_id],
+        TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        } => state
+            .tracked_object_sets
+            .iter()
+            .max_by_key(|(id, _)| id.0)
+            .map(|(_, objects)| objects.clone())
+            .unwrap_or_default(),
+        TargetFilter::TrackedSet { id } => state
+            .tracked_object_sets
+            .get(id)
+            .cloned()
+            .unwrap_or_default(),
+        _ => ability
+            .targets
+            .iter()
+            .filter_map(|t| match t {
+                TargetRef::Object(id) => Some(*id),
+                TargetRef::Player(_) => None,
+            })
+            .collect(),
+    }
+}
 
 /// CR 701.26a: Tap — turn a permanent sideways. CR 701.26b: Untap — return to upright.
 pub fn resolve_tap(
@@ -14,52 +57,41 @@ pub fn resolve_tap(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // CR 701.26a + CR 608.2c: `Effect::Tap { target: SelfRef }` is the
-    // "tap ~" idiom — the printed-name anaphor that always refers to the
-    // source object regardless of `ability.targets`. Short-circuit BEFORE
-    // the chosen-targets fallback so chained `Tap { target: SelfRef }`
-    // sub-abilities don't inherit the parent's targets via chain
-    // propagation in `effects::mod.rs::resolve_ability_chain` (issue #323
-    // class).
-    let self_targets;
-    let targets: &[TargetRef] = if matches!(
-        &ability.effect,
-        Effect::Tap {
-            target: TargetFilter::SelfRef
-        }
-    ) {
-        self_targets = [TargetRef::Object(ability.source_id)];
-        &self_targets
-    } else {
-        &ability.targets
+    // CR 701.26a + CR 608.2c: `Effect::Tap`'s subject is resolved from its own
+    // `target` filter — `SelfRef` (the printed-name "tap ~" anaphor) and
+    // `TrackedSet` ("tap those creatures") resolve regardless of
+    // `ability.targets`, so chained `Tap` sub-abilities don't inherit the
+    // parent's targets via chain propagation in
+    // `effects::mod.rs::resolve_ability_chain` (issue #323 class).
+    let Effect::Tap { target } = &ability.effect else {
+        return Err(EffectError::MissingParam("Tap".to_string()));
     };
-    for target in targets {
-        if let TargetRef::Object(obj_id) = target {
-            let proposed = ProposedEvent::Tap {
-                object_id: *obj_id,
-                applied: HashSet::new(),
-            };
+    let target_ids = tap_untap_target_ids(state, ability, target);
+    for obj_id in target_ids {
+        let proposed = ProposedEvent::Tap {
+            object_id: obj_id,
+            applied: HashSet::new(),
+        };
 
-            match replacement::replace_event(state, proposed, events) {
-                ReplacementResult::Execute(event) => {
-                    if let ProposedEvent::Tap { object_id, .. } = event {
-                        let obj = state
-                            .objects
-                            .get_mut(&object_id)
-                            .ok_or(EffectError::ObjectNotFound(object_id))?;
-                        obj.tapped = true;
-                        events.push(GameEvent::PermanentTapped {
-                            object_id,
-                            caused_by: Some(ability.source_id),
-                        });
-                    }
+        match replacement::replace_event(state, proposed, events) {
+            ReplacementResult::Execute(event) => {
+                if let ProposedEvent::Tap { object_id, .. } = event {
+                    let obj = state
+                        .objects
+                        .get_mut(&object_id)
+                        .ok_or(EffectError::ObjectNotFound(object_id))?;
+                    obj.tapped = true;
+                    events.push(GameEvent::PermanentTapped {
+                        object_id,
+                        caused_by: Some(ability.source_id),
+                    });
                 }
-                ReplacementResult::Prevented => {}
-                ReplacementResult::NeedsChoice(player) => {
-                    state.waiting_for =
-                        crate::game::replacement::replacement_choice_waiting_for(player, state);
-                    return Ok(());
-                }
+            }
+            ReplacementResult::Prevented => {}
+            ReplacementResult::NeedsChoice(player) => {
+                state.waiting_for =
+                    crate::game::replacement::replacement_choice_waiting_for(player, state);
+                return Ok(());
             }
         }
     }
@@ -78,51 +110,43 @@ pub fn resolve_untap(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // CR 701.26b + CR 608.2c: `Effect::Untap { target: SelfRef }` is the
-    // "untap ~" idiom — the printed-name anaphor that always refers to the
-    // source object regardless of `ability.targets`. Short-circuit BEFORE
-    // the chosen-targets fallback so chained `Untap { target: SelfRef }`
-    // sub-abilities don't inherit the parent's targets via chain
+    // CR 701.26b + CR 608.2c: `Effect::Untap`'s subject is resolved from its
+    // own `target` filter. `SelfRef` is the printed-name "untap ~" anaphor
+    // (runtime path for trigger shapes like Ragost's "At the beginning of
+    // each end step, if you gained life this turn, untap ~" — CR 603.4
+    // intervening-if + CR 514 end step). `TrackedSet` is the chain-unified
+    // "untap those creatures" tail of a `ChooseObjectsIntoTrackedSet` chain
+    // (CR 603.7e — Magnetic Mountain / Dream Tides / Thelon's Curse). Both
+    // resolve from the filter regardless of `ability.targets`, so chained
+    // `Untap` sub-abilities don't inherit the parent's targets via chain
     // propagation in `effects::mod.rs::resolve_ability_chain` (issue #323
-    // class). Runtime path for trigger shapes like Ragost's "At the
-    // beginning of each end step, if you gained life this turn, untap ~"
-    // (CR 603.4 intervening-if + CR 514 end step).
-    let self_targets;
-    let targets: &[TargetRef] = if matches!(
-        &ability.effect,
-        Effect::Untap {
-            target: TargetFilter::SelfRef
-        }
-    ) {
-        self_targets = [TargetRef::Object(ability.source_id)];
-        &self_targets
-    } else {
-        &ability.targets
+    // class).
+    let Effect::Untap { target } = &ability.effect else {
+        return Err(EffectError::MissingParam("Untap".to_string()));
     };
-    for target in targets {
-        if let TargetRef::Object(obj_id) = target {
-            let proposed = ProposedEvent::Untap {
-                object_id: *obj_id,
-                applied: HashSet::new(),
-            };
+    let target_ids = tap_untap_target_ids(state, ability, target);
+    for obj_id in target_ids {
+        let proposed = ProposedEvent::Untap {
+            object_id: obj_id,
+            applied: HashSet::new(),
+        };
 
-            match replacement::replace_event(state, proposed, events) {
-                ReplacementResult::Execute(event) => {
-                    if let ProposedEvent::Untap { object_id, .. } = event {
-                        let obj = state
-                            .objects
-                            .get_mut(&object_id)
-                            .ok_or(EffectError::ObjectNotFound(object_id))?;
-                        obj.tapped = false;
-                        events.push(GameEvent::PermanentUntapped { object_id });
-                    }
+        match replacement::replace_event(state, proposed, events) {
+            ReplacementResult::Execute(event) => {
+                if let ProposedEvent::Untap { object_id, .. } = event {
+                    let obj = state
+                        .objects
+                        .get_mut(&object_id)
+                        .ok_or(EffectError::ObjectNotFound(object_id))?;
+                    obj.tapped = false;
+                    events.push(GameEvent::PermanentUntapped { object_id });
                 }
-                ReplacementResult::Prevented => {}
-                ReplacementResult::NeedsChoice(player) => {
-                    state.waiting_for =
-                        crate::game::replacement::replacement_choice_waiting_for(player, state);
-                    return Ok(());
-                }
+            }
+            ReplacementResult::Prevented => {}
+            ReplacementResult::NeedsChoice(player) => {
+                state.waiting_for =
+                    crate::game::replacement::replacement_choice_waiting_for(player, state);
+                return Ok(());
             }
         }
     }

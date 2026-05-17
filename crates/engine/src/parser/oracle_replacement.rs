@@ -25,11 +25,12 @@ use super::oracle_util::{
     strip_reminder_text, TextPair,
 };
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, CombatDamageScope, Comparator,
-    ContinuousModification, ControllerRef, CopyManaValueLimit, DamageModification,
+    AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, CombatDamageScope,
+    Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit, DamageModification,
     DamageTargetFilter, DamageTargetPlayerScope, Duration, Effect, FilterProp, ManaModification,
     ManaReplacementScope, PreventionAmount, QuantityExpr, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, ReplacementMode, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+    ReplacementDefinition, ReplacementMode, ReplacementPlayerScope, StaticCondition, TargetFilter,
+    TypeFilter, TypedFilter,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::mana::{ManaColor, ManaCost, ManaType};
@@ -154,6 +155,12 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    // --- Karoo self-ETB cost lands: "If this land would enter, sacrifice ...
+    //     instead. If you do, ... If you don't, put it into its owner's graveyard." ---
+    if let Some(def) = parse_self_enters_pay_cost_replacement(&norm_lower, &normalized, &text) {
+        return Some(def);
+    }
+
     // --- "If ~ would die, {effect}" ---
     if nom_primitives::scan_contains(&norm_lower, "~ would die")
         || nom_primitives::scan_contains(&norm_lower, "~ would be destroyed")
@@ -235,30 +242,46 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     }
 
     // --- "If [player] would gain life, {effect}" ---
-    // CR 614.1a: Widened from "you would gain life" to handle opponent/player scope.
-    if nom_primitives::scan_contains(&lower, "would gain life") {
+    // CR 614.1a: Widened from "you would gain life" to handle opponent/player
+    // scope. The entry gate is a nom `alt` over the two life-gain phrasings:
+    // the direct "would gain life" and the periphrastic "would cause its
+    // controller to gain life" (Rain of Gore), which has no contiguous "would
+    // gain life" substring and would otherwise skip this branch entirely.
+    let mentions_gain_life = nom_primitives::scan_at_word_boundaries(&lower, |i| {
+        value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>("would gain life"),
+                tag("would cause its controller to gain life"),
+            )),
+        )
+        .parse(i)
+    })
+    .is_some();
+    if mentions_gain_life {
         let effect_text = extract_replacement_effect(&normalized);
         let mut def =
             ReplacementDefinition::new(ReplacementEvent::GainLife).description(text.to_string());
         if let Some(e) = effect_text {
             def = def.execute(parse_effect_chain(&e, AbilityKind::Spell));
         }
-        // Parse the subject to determine player scope
+        // CR 614.1a: Parse the subject to determine player scope.
         if nom_primitives::scan_contains(&lower, "an opponent would gain life")
             || nom_primitives::scan_contains(&lower, "opponent would gain life")
         {
-            def.valid_player = Some(ControllerRef::Opponent);
-        } else if nom_primitives::scan_contains(&lower, "a player would gain life") {
-            // "a player" applies to all players — None means controller-only,
-            // so we need a way to express "all". Use a sentinel: leave valid_player
-            // as None and let the matcher check. Actually, for "a player", the
-            // replacement applies regardless of who gains life. The matcher needs
-            // to be updated to not filter on controller when valid_player is None
-            // and the subject was "a player". For now, set valid_player to None
-            // and document that the matcher should not restrict player scope.
-            // NOTE: The existing matcher restricts to controller only. For Tainted Remedy
-            // ("an opponent"), we set Opponent. For "you", we leave None (controller-only).
+            def.valid_player = Some(ReplacementPlayerScope::Opponent);
+        } else if nom_primitives::scan_contains(&lower, "would cause its controller to gain life")
+            || nom_primitives::scan_contains(&lower, "a player would gain life")
+        {
+            // CR 614.1a: "a spell or ability would cause its controller to gain
+            // life" (Rain of Gore) and "a player would gain life" are global —
+            // the replacement watches every player's life gain, not just the
+            // source controller's. Step 4 note: the "caused by a spell or
+            // ability" qualifier is effectively universal (even combat lifelink
+            // is ability-sourced), so no `ReplacementCondition` is needed.
+            def.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
         }
+        // else: "you would gain life" → valid_player stays None (controller-only).
         // CR 614.12 + CR 614.1a: A "while [condition]" gate in the antecedent
         // suppresses the replacement when the condition is false. Phial of
         // Galadriel ("If you would gain life while you have 5 or less life,
@@ -416,6 +439,109 @@ fn parse_discard_self_to_battlefield_replacement(
             .condition(ReplacementCondition::EventSourceControlledBy {
                 controller: ControllerRef::Opponent,
             })
+            .description(original_text.to_string()),
+    )
+}
+
+/// CR 614.1a + CR 614.12 + CR 614.12a: Karoo-style self-ETB cost replacement.
+///
+/// Recognizes "If this {land|artifact} would enter, {sacrifice <filter> | you
+/// may discard <filter>} instead. If you do, put this {land|artifact} onto the
+/// battlefield. If you don't, put it into its owner's graveyard." — the 8-card
+/// Karoo class (Lotus Vale, Scorched Ruins, Mox Diamond, etc.).
+///
+/// Emits a `ReplacementMode::MayCost` on the `Moved` event: the accept-cost is
+/// the parsed `AbilityCost::Sacrifice`/`Discard`; the decline branch redirects
+/// the ETB destination to the owner's graveyard via `Effect::ChangeZone` so the
+/// permanent never appears on the battlefield (CR 614 — no ETB/LTB triggers).
+fn parse_self_enters_pay_cost_replacement(
+    norm_lower: &str,
+    normalized: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    // Prefix: "if {this land|this artifact|~} would enter, ".
+    let ((), after_prefix) = nom_on_lower(normalized, norm_lower, |i| {
+        value(
+            (),
+            preceded(
+                tag("if "),
+                alt((
+                    tag("this land would enter, "),
+                    tag("this artifact would enter, "),
+                    tag("~ would enter, "),
+                )),
+            ),
+        )
+        .parse(i)
+    })?;
+
+    // Isolate the cost body from the boilerplate tail at " instead. ".
+    let after_prefix_lower = after_prefix.to_lowercase();
+    let (cost_body, tail) = split_once_on_lower(after_prefix, &after_prefix_lower, " instead. ")?;
+
+    // Cost: strip an optional non-cost "you may " lead-in (Mox Diamond), then
+    // delegate the verb-inclusive residue to `parse_single_cost` — it consumes
+    // the "sacrifice "/"discard " verb itself.
+    let cost_body = cost_body.trim();
+    let cost_body_lower = cost_body.to_lowercase();
+    let cost_text = nom_on_lower(cost_body, &cost_body_lower, |i| {
+        value((), tag("you may ")).parse(i)
+    })
+    .map_or(cost_body, |((), rest)| rest);
+    let cost = crate::parser::oracle_cost::parse_single_cost(cost_text);
+    // Guard: only Sacrifice / Discard are valid Karoo accept-costs.
+    if !matches!(
+        cost,
+        AbilityCost::Sacrifice { .. } | AbilityCost::Discard { .. }
+    ) {
+        return None;
+    }
+
+    // Tail boilerplate must match fully (guards against false positives).
+    let tail_lower = tail.to_lowercase();
+    let ((), tail_rest) = nom_on_lower(tail, &tail_lower, |i| {
+        value(
+            (),
+            (
+                tag("if you do, put "),
+                alt((tag("this land"), tag("this artifact"), tag("~"), tag("it"))),
+                tag(" onto the battlefield. if you don't, put it into its owner's graveyard"),
+                opt(char('.')),
+            ),
+        )
+        .parse(i)
+    })?;
+    if !tail_rest.trim().is_empty() {
+        return None;
+    }
+
+    // CR 614.1 + CR 614.12: the decline branch redirects the ETB destination to
+    // the owner's graveyard so the permanent never enters the battlefield (no
+    // ETB/LTB triggers fire). Routed through the engine's existing zone-redirect
+    // path via `Effect::ChangeZone`.
+    let decline = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChangeZone {
+            origin: None,
+            destination: Zone::Graveyard,
+            target: TargetFilter::SelfRef,
+            owner_library: false,
+            enter_transformed: false,
+            under_your_control: false,
+            enter_tapped: false,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+        },
+    );
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .mode(ReplacementMode::MayCost {
+                cost,
+                decline: Some(Box::new(decline)),
+            })
+            .valid_card(TargetFilter::SelfRef)
             .description(original_text.to_string()),
     )
 }
@@ -1347,6 +1473,10 @@ pub(crate) fn rewrite_variable_x_to_cost_x_paid(expr: &mut QuantityExpr) {
         }
         QuantityExpr::UpTo { max } => rewrite_variable_x_to_cost_x_paid(max),
         QuantityExpr::Power { exponent, .. } => rewrite_variable_x_to_cost_x_paid(exponent),
+        QuantityExpr::Difference { left, right } => {
+            rewrite_variable_x_to_cost_x_paid(left);
+            rewrite_variable_x_to_cost_x_paid(right);
+        }
     }
 }
 
@@ -1427,16 +1557,29 @@ fn parse_enters_with_counters(
         counter_entries.unwrap_or_else(|| vec![(counter_type, count_expr)]),
     );
 
-    // Determine valid_card filter: self vs other creatures
-    // Strip "each other " or "other " prefix, then delegate to parse_type_phrase
-    // which handles non-X, controller, "of the chosen type", etc.
+    // Determine valid_card filter: self vs other permanents.
+    // CR 614.1c: "each other Angel you control enters with ..." is a
+    // replacement effect that applies to a general subset of permanents, not
+    // the source. Strip the "each other " / "other " prefix (nom), then let
+    // `parse_type_phrase` be the detector: accept the subject iff the parse
+    // yields a typed filter with a concrete type/subtype (not the `Any`
+    // fallback). `parse_type_phrase` already classifies "creature",
+    // "permanent", AND subtypes ("Angel", "Sliver", ...) — so subtype-only
+    // subjects are no longer rejected by a hardcoded "creature"/"permanent"
+    // keyword guard. A non-type subject parses to the `[Any]` fallback and is
+    // rejected, falling through to the `SelfRef` self-ETB branch.
     let subject = alt((tag::<_, _, OracleError<'_>>("each other "), tag("other ")))
         .parse(work_text)
         .ok()
         .map(|(rest, _)| rest)
         .filter(|s| {
-            nom_primitives::scan_contains(s, "creature")
-                || nom_primitives::scan_contains(s, "permanent")
+            let (filter, _) = parse_type_phrase(s);
+            matches!(
+                &filter,
+                TargetFilter::Typed(TypedFilter { type_filters, .. })
+                    if !type_filters.is_empty()
+                        && type_filters.as_slice() != [TypeFilter::Any]
+            )
         });
     let valid_card = if let Some(subject_text) = subject {
         let (filter, _) = parse_type_phrase(subject_text);
@@ -1494,6 +1637,11 @@ fn parse_enters_with_counters(
         // CR 207.2c (Raid): "Raid — ~ enters with [counter] on it if you
         // attacked this turn." (Cruel Administrator, Goblin Boarders, etc.)
         def = def.condition(ReplacementCondition::YouAttackedThisTurn);
+    } else if extract_cast_using_web_slinging_suffix(work_text) {
+        // CR 702.188a: "If ~ was cast using web-slinging, ..." (Scarlet Spider).
+        def = def.condition(ReplacementCondition::CastVariantPaid {
+            variant: CastVariantPaid::WebSlinging,
+        });
     } else if let Some(condition) = extract_enters_with_only_if_suffix(work_text) {
         // CR 614.1c + CR 700.4: Generic suffix gates for ETB-counter
         // replacements, e.g. Morbid's "if a creature died this turn".
@@ -1917,6 +2065,21 @@ fn extract_you_attacked_this_turn_suffix(work_text: &str) -> bool {
         return false;
     };
     tag::<_, _, OracleError<'_>>("if you attacked this turn")
+        .parse(rest)
+        .is_ok()
+}
+
+/// CR 702.188a: Scan `work_text` for "was cast using web-slinging" — the
+/// intervening-if gate on Scarlet Spider's "Sensational Save" ETB replacement.
+fn extract_cast_using_web_slinging_suffix(work_text: &str) -> bool {
+    use crate::parser::oracle_nom::error::OracleError;
+    use nom::bytes::complete::tag;
+    let Ok((rest, _)) =
+        take_until::<_, _, OracleError<'_>>("was cast using web-slinging").parse(work_text)
+    else {
+        return false;
+    };
+    tag::<_, _, OracleError<'_>>("was cast using web-slinging")
         .parse(rest)
         .is_ok()
 }
@@ -2883,7 +3046,7 @@ fn parse_mill_count_replacement(lower: &str, original_text: &str) -> Option<Repl
         .description(original_text.to_string());
 
     if matches!(subject, MillReplacementSubject::Opponent) {
-        def.valid_player = Some(ControllerRef::Opponent);
+        def.valid_player = Some(ReplacementPlayerScope::Opponent);
     }
 
     Some(def)
@@ -4266,6 +4429,83 @@ mod tests {
         }
     }
 
+    /// CR 614.1a + CR 614.12a: Karoo land — untyped multi-sacrifice cost
+    /// (Lotus Vale, Scorched Ruins). Parses to a `MayCost` `Moved` replacement
+    /// whose accept-cost is `Sacrifice { count: 2 }` and whose decline branch
+    /// redirects the ETB to the owner's graveyard.
+    #[test]
+    fn karoo_land_sacrifice_count_replacement() {
+        let def = parse_replacement_line(
+            "If this land would enter, sacrifice two untapped lands instead. If you do, \
+             put this land onto the battlefield. If you don't, put it into its owner's graveyard.",
+            "Lotus Vale",
+        )
+        .expect("Karoo land should parse as a replacement");
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        match &def.mode {
+            ReplacementMode::MayCost { cost, decline } => {
+                assert!(
+                    matches!(cost, AbilityCost::Sacrifice { count: 2, .. }),
+                    "expected Sacrifice count 2, got {cost:?}"
+                );
+                let decline = decline.as_ref().expect("Karoo decline branch");
+                assert!(matches!(
+                    &*decline.effect,
+                    Effect::ChangeZone {
+                        destination: Zone::Graveyard,
+                        ..
+                    }
+                ));
+            }
+            other => panic!("expected MayCost, got {other:?}"),
+        }
+    }
+
+    /// CR 614.1a: Karoo land — typed single-sacrifice cost (Heart of Yavimaya
+    /// "sacrifice a Forest", Balduvian Trading Post "an untapped Mountain").
+    #[test]
+    fn karoo_land_typed_single_sacrifice_replacement() {
+        let def = parse_replacement_line(
+            "If this land would enter, sacrifice a Forest instead. If you do, put this \
+             land onto the battlefield. If you don't, put it into its owner's graveyard.",
+            "Heart of Yavimaya",
+        )
+        .expect("Karoo land should parse as a replacement");
+        match &def.mode {
+            ReplacementMode::MayCost { cost, .. } => {
+                assert!(
+                    matches!(cost, AbilityCost::Sacrifice { count: 1, .. }),
+                    "expected Sacrifice count 1, got {cost:?}"
+                );
+            }
+            other => panic!("expected MayCost, got {other:?}"),
+        }
+    }
+
+    /// CR 614.12a: Karoo artifact — Mox Diamond's "you may discard ..." cost.
+    /// The non-cost "you may " lead-in is stripped before `parse_single_cost`.
+    #[test]
+    fn karoo_artifact_discard_replacement() {
+        let def = parse_replacement_line(
+            "If this artifact would enter, you may discard a land card instead. If you do, \
+             put this artifact onto the battlefield. If you don't, put it into its owner's graveyard.",
+            "Mox Diamond",
+        )
+        .expect("Mox Diamond should parse as a replacement");
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        match &def.mode {
+            ReplacementMode::MayCost { cost, decline } => {
+                assert!(
+                    matches!(cost, AbilityCost::Discard { .. }),
+                    "expected Discard cost, got {cost:?}"
+                );
+                assert!(decline.is_some(), "Mox Diamond needs a decline branch");
+            }
+            other => panic!("expected MayCost, got {other:?}"),
+        }
+    }
+
     #[test]
     fn rewrite_parent_target_controller_flips_top_level_draw_target() {
         let mut def = AbilityDefinition::new(
@@ -5310,6 +5550,72 @@ mod tests {
         ));
     }
 
+    /// Issue #204 — Giada, Font of Hope. "Each other Angel you control enters
+    /// with an additional +1/+1 counter on it for each Angel you already
+    /// control." Defect #1: the subject `"Angel you control"` is a subtype-only
+    /// phrase; the old `creature`/`permanent` keyword guard rejected it, so
+    /// `valid_card` fell back to `SelfRef`. Defect #2: the `" already"` adverb
+    /// defeated the `for each` count combinator, leaving `count` a `Fixed`.
+    #[test]
+    fn giada_other_angels_enter_with_for_each_angel_counter() {
+        let def = parse_replacement_line(
+            "Each other Angel you control enters with an additional +1/+1 counter \
+             on it for each Angel you already control.",
+            "Giada, Font of Hope",
+        )
+        .unwrap();
+
+        // Defect #1: subtype-only subject accepted → external ChangeZone.
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Subtype("Angel".to_string())],
+                controller: Some(ControllerRef::You),
+                properties: vec![FilterProp::Another],
+            })),
+            "subtype-only subject must produce a Typed Angel filter with Another, not SelfRef"
+        );
+
+        // Defect #2: the count is a dynamic ObjectCount over Angels you control,
+        // NOT the Fixed { value: 1 } fallback.
+        match *def.execute.as_ref().unwrap().effect {
+            Effect::PutCounter {
+                ref counter_type,
+                count:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { ref filter },
+                    },
+                ..
+            } => {
+                assert_eq!(*counter_type, CounterType::Plus1Plus1);
+                assert_eq!(
+                    *filter,
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Subtype("Angel".to_string())],
+                        controller: Some(ControllerRef::You),
+                        properties: Vec::new(),
+                    })
+                );
+            }
+            ref other => panic!("expected PutCounter with Ref ObjectCount count, got {other:?}"),
+        }
+    }
+
+    /// Negative control for #204: a self-referential `~ enters with` line still
+    /// resolves to a `SelfRef` valid_card and the `Moved` event — the subject
+    /// acceptance check only fires after an explicit "each other" / "other".
+    #[test]
+    fn self_enters_with_counter_still_selfref() {
+        let def = parse_replacement_line(
+            "Giada, Font of Hope enters with a +1/+1 counter on it.",
+            "Giada, Font of Hope",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
     #[test]
     fn enters_with_counters_if_event_condition() {
         let def = parse_replacement_line(
@@ -5775,6 +6081,32 @@ mod tests {
             } if *counter_type == CounterType::Plus1Plus1
         ));
         assert_eq!(def.condition, Some(ReplacementCondition::CastViaEscape));
+    }
+
+    #[test]
+    fn enters_with_counters_gated_on_web_slinging() {
+        // CR 702.188a: Scarlet Spider's "Sensational Save" — the enters-with-X
+        // replacement is gated by "If ~ was cast using web-slinging".
+        let def = parse_replacement_line(
+            "Sensational Save — If Scarlet Spider was cast using web-slinging, \
+             he enters with X +1/+1 counters on him, where X is the mana value \
+             of the returned creature.",
+            "Scarlet Spider, Ben Reilly",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::PutCounter { ref counter_type, .. }
+                if *counter_type == CounterType::Plus1Plus1
+        ));
+        assert_eq!(
+            def.condition,
+            Some(ReplacementCondition::CastVariantPaid {
+                variant: CastVariantPaid::WebSlinging,
+            }),
+        );
     }
 
     #[test]
@@ -8002,7 +8334,7 @@ mod tests {
             .expect("must parse mill replacement");
 
         assert_eq!(def.event, ReplacementEvent::Mill);
-        assert_eq!(def.valid_player, Some(ControllerRef::Opponent));
+        assert_eq!(def.valid_player, Some(ReplacementPlayerScope::Opponent));
         let execute = def.execute.as_ref().expect("mill replacement must execute");
         match &*execute.effect {
             Effect::Mill {
@@ -8033,7 +8365,7 @@ mod tests {
             parse_replacement_line(text, "The Water Crystal").expect("must parse mill replacement");
 
         assert_eq!(def.event, ReplacementEvent::Mill);
-        assert_eq!(def.valid_player, Some(ControllerRef::Opponent));
+        assert_eq!(def.valid_player, Some(ReplacementPlayerScope::Opponent));
         let execute = def.execute.as_ref().expect("mill replacement must execute");
         match &*execute.effect {
             Effect::Mill { count, .. } => assert_eq!(
@@ -8047,6 +8379,34 @@ mod tests {
             ),
             other => panic!("expected Mill execute, got {other:?}"),
         }
+    }
+
+    /// CR 614.1a: Rain of Gore — "If a spell or ability would cause its
+    /// controller to gain life, that player loses that much life instead." The
+    /// periphrastic "would cause its controller to gain life" subject has no
+    /// "would gain life" substring; the widened entry gate must still route it
+    /// to a `GainLife` replacement with `AnyPlayer` scope and a `LoseLife`
+    /// execute of the replaced magnitude.
+    #[test]
+    fn parses_rain_of_gore_all_players_gain_life_replacement() {
+        let def = parse_replacement_line(
+            "If a spell or ability would cause its controller to gain life, \
+             that player loses that much life instead.",
+            "Rain of Gore",
+        )
+        .expect("Rain of Gore should parse as a replacement");
+        assert_eq!(def.event, ReplacementEvent::GainLife);
+        assert_eq!(
+            def.valid_player,
+            Some(ReplacementPlayerScope::AnyPlayer),
+            "Rain of Gore watches every player's life gain"
+        );
+        let execute = def.execute.as_ref().expect("must have a LoseLife execute");
+        assert!(
+            matches!(&*execute.effect, Effect::LoseLife { .. }),
+            "expected LoseLife execute, got {:?}",
+            execute.effect
+        );
     }
 
     #[test]

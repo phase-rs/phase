@@ -1,6 +1,5 @@
 import type {
   BatchResolveResult,
-  BracketEstimate,
   EngineAdapter,
   FormatConfig,
   GameAction,
@@ -13,6 +12,8 @@ import type {
   WaitingFor,
 } from "./types";
 import { AdapterError, AdapterErrorCode, isStateLostMessage } from "./types";
+import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
+import { isBracketEstimate } from "../types/bracketEstimate";
 import { EngineWorkerClient } from "./engine-worker-client";
 import { AiWorkerPool } from "./ai-worker-pool";
 /**
@@ -414,22 +415,12 @@ export class WasmAdapter implements EngineAdapter {
     }
   }
 
-  async estimateBracket(deck: {
-    commander: string[];
-    main_deck: string[];
-    sideboard?: string[];
-  }): Promise<BracketEstimate | null> {
+  async estimateBracket(deck: BracketDeckRequest): Promise<BracketEstimate | null> {
     this.assertInitialized();
-    const deckWithSideboard = {
-      commander: deck.commander,
-      main_deck: deck.main_deck,
-      sideboard: deck.sideboard ?? [],
-    };
     if (this.engine) {
-      const result = await this.engine.estimateBracketForDeck(deckWithSideboard);
-      return (result ?? null) as BracketEstimate | null;
+      return this.engine.estimateBracketForDeck(deck);
     }
-    return this.fallback!.estimateBracketForDeck(deckWithSideboard);
+    return this.fallback!.estimateBracketForDeck(deck);
   }
 
   dispose(): void {
@@ -527,11 +518,7 @@ interface MainThreadFallback {
     playerCount?: number,
     firstPlayer?: number,
   ): Promise<SubmitResult>;
-  estimateBracketForDeck(deck: {
-    commander: string[];
-    main_deck: string[];
-    sideboard: string[];
-  }): Promise<BracketEstimate | null>;
+  estimateBracketForDeck(deck: BracketDeckRequest): Promise<BracketEstimate | null>;
 }
 
 async function createMainThreadFallback(): Promise<MainThreadFallback> {
@@ -646,14 +633,12 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
         return { events: r.events ?? [], log_entries: r.log_entries ?? [] };
       }),
 
-    estimateBracketForDeck: (deck: {
-      commander: string[];
-      main_deck: string[];
-      sideboard: string[];
-    }) =>
+    estimateBracketForDeck: (deck: BracketDeckRequest) =>
       enqueue(() => {
         const r = wasm.estimate_bracket_for_deck(deck);
-        return (r ?? null) as BracketEstimate | null;
+        if (r === null || r === undefined) return null;
+        if (isBracketEstimate(r)) return r;
+        throw new Error("estimate_bracket_for_deck returned an invalid bracket estimate");
       }),
   };
 }

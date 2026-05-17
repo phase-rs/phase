@@ -50,12 +50,7 @@ pub fn resolve(
     // resolving sentinel TrackedSetId(0) or TargetFilter::Any, and upgrading
     // ChangeZone → ChangeZoneAll for delayed triggers (which have empty explicit targets).
     if uses_tracked_set {
-        if let Some((&real_id, _)) = state
-            .tracked_object_sets
-            .iter()
-            .filter(|(_, objects)| !objects.is_empty())
-            .max_by_key(|(id, _)| id.0)
-        {
+        if let Some(real_id) = crate::game::targeting::latest_tracked_set_id(state) {
             bind_tracked_set_to_condition(&mut condition, real_id);
             bind_tracked_set_to_effect(&mut delayed_effect, real_id);
         }

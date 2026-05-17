@@ -6,8 +6,21 @@
 # Full pipeline (fetch new Discord messages → extract → triage → render)
 bun scripts/sync-bug-reports.ts fetch
 bun scripts/sync-bug-reports.ts extract
-bun scripts/sync-bug-reports.ts triage
+bun scripts/sync-bug-reports.ts triage     # also emits triage/triage-delta.jsonl
 bun scripts/sync-bug-reports.ts render
+
+# Review ONLY the delta — the reports new since the last fetch. NEVER scan the
+# full triage-items.jsonl looking for "what's new"; that is how orphaned
+# reports get missed. `triage` prints the delta + an orphan roll-call.
+bun scripts/sync-bug-reports.ts delta      # re-emit delta without re-classifying
+
+# Publish: create GH issues for `create_issue` triage items AND react 👀 +
+# post a tracking link inside the originating Discord thread. Also reconciles
+# threads whose triage item is already linked to an open issue (write-back
+# only — no duplicate creation). Once-per-thread; mapping persisted in
+# triage/sync-state.json under `published_threads`.
+bun scripts/sync-bug-reports.ts publish --thread=<id>[,<id>...] --dry-run   # preview without side effects
+bun scripts/sync-bug-reports.ts publish --thread=<id>[,<id>...]             # create GH issue + Discord write-back
 
 # Check a specific card's parser status
 jq '.["card name"]' client/public/card-data.json
@@ -371,7 +384,8 @@ Also at this step: audit open `collector` trackers. When a resync pass closes ch
 ```bash
 bun scripts/sync-bug-reports.ts fetch
 ```
-If new messages exist, re-run extract → triage → render and review **only new report IDs** from the current fetch window. Do not re-process every historical Discord thread as new work. The raw store and dashboards may be regenerated from the full message archive for determinism, but GitHub issue work is delta-based:
+If new messages exist, re-run extract → triage → render. Then review **`triage/triage-delta.jsonl`** — and ONLY that file. It contains exactly the triage items from the latest fetch window (messages with `fetched_at > prev_fetch_at`). Do not re-process every historical Discord thread as new work, and do not hand-filter `triage-items.jsonl` by snowflake/timestamp guesses — that is how orphaned reports get missed. The raw store and dashboards regenerate from the full message archive for determinism, but GitHub issue work is delta-based:
+- The `triage` command prints the delta breakdown + an **orphan roll-call**: delta items that are `primary_report`/`additional_report` with a non-skip action but no `github_issue`. An `append_to_existing` or `needs_human_review` item with no `github_issue` is a contradiction — it means an *unfiled* report. Every orphan in the delta must be filed (`publish --thread=`), deduped, or `mark-handled`. Never ignore one.
 - Use Discord cursors in `triage/sync-state.json` and the `fetch` command's "New messages fetched" count to decide whether there is new Discord input.
 - Treat `report_id` (`discord:<thread_id>:<message_id>:<item_index>`) as the stable idempotency key. Before creating work, search GitHub issues/comments for that report id or thread/message URL.
 - GitHub dedupe checks MUST include closed issues: use `--state all`, not `--state open`. Closed `status:fixed-unreleased`, `stale`, `duplicate`, and `wont-fix` issues are still authoritative triage records and must prevent duplicate creation.
@@ -442,6 +456,7 @@ Before calling any bug fixed, run the mandatory post-fix review gate above. Regr
 | `triage/report-items.jsonl` | Heuristic-extracted report items | yes |
 | `triage/triage-items.jsonl` | Heuristic triage classifications | yes |
 | `triage/llm-triage-items.jsonl` | LLM (Sonnet) triage — 333 items, best quality | yes |
+| `triage/triage-delta.jsonl` | Triage items from the latest fetch window ONLY — the slice to review each cycle | yes |
 | `triage/coverage-crossref.jsonl` | Cross-reference against parser coverage | yes |
 | `triage/coverage-crossref-summary.md` | Human-readable summary | yes |
 | `triage/p0-verification.md` | Manual spot-check of P0 likely-fixed bugs | yes |

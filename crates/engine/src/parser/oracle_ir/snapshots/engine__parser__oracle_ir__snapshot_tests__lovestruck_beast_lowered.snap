@@ -12,7 +12,23 @@ expression: "&lowered"
         "type": "SelfRef"
       },
       "modifications": [],
-      "condition": null,
+      "condition": {
+        "type": "Not",
+        "condition": {
+          "type": "IsPresent",
+          "filter": {
+            "type": "Typed",
+            "type_filters": [],
+            "controller": "You",
+            "properties": [
+              {
+                "type": "InZone",
+                "zone": "Battlefield"
+              }
+            ]
+          }
+        }
+      },
       "affected_zone": null,
       "effect_zone": null,
       "active_zones": [],
@@ -21,13 +37,5 @@ expression: "&lowered"
     }
   ],
   "replacements": [],
-  "extractedKeywords": [],
-  "parseWarnings": [
-    {
-      "type": "SwallowedClause",
-      "detector": "Condition_Unless",
-      "description": "This creature can't attack unless you control a 1/1 creature.",
-      "line_index": 0
-    }
-  ]
+  "extractedKeywords": []
 }

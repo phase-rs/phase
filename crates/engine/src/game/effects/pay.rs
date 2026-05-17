@@ -16,7 +16,7 @@ use super::{EffectError, ResolvedAbility};
 /// CR 107.1c + CR 107.14: Detect a "pay any amount of X" shape — the parser
 /// emits `QuantityExpr::Ref { QuantityRef::Variable { name: "X" } }` for
 /// these prompts (Galvanic Discharge, etc.). A fixed or dynamic reference
-/// (e.g., `Fixed { 2 }` or `EventContextSourcePower`) is paid unconditionally.
+/// (e.g., `Fixed { 2 }` or `Power { CostPaidObject }`) is paid unconditionally.
 fn is_pay_any_amount(amount: &QuantityExpr) -> bool {
     matches!(
         amount,
@@ -83,7 +83,8 @@ pub fn resolve(
             // IS a life-loss event, so the replacement pipeline fires and a
             // CantLoseLife lock blocks the payment (cost unpayable). The amount
             // is a `QuantityExpr` resolved here — dynamic refs like
-            // `EventContextSourcePower` resolve against the triggering event.
+            // `Power { CostPaidObject }` resolve against the cost-paid /
+            // trigger-referenced object per CR 608.2k.
             let amount = resolve_quantity_with_targets(state, amount, &payment_ability);
             let amount = u32::try_from(amount.max(0)).unwrap_or(0);
             match pay_life_as_cost(state, payer, amount, events) {
@@ -159,8 +160,52 @@ pub fn resolve(
         PaymentCost::AbilityCost { cost } => {
             resolve_ability_cost_payment(state, &payment_ability, payer, cost, events)?;
         }
+        // CR 118.1 + CR 118.5: Per-object scaled mana cost. The `base` cost
+        // (which may carry colored pips) is multiplied by `times`; when
+        // `times` resolves to 0 the scaled cost is `{0}` — paid trivially as a
+        // no-op SUCCESS (the empty selection IS the acknowledgment), never a
+        // payment failure.
+        PaymentCost::ScaledMana { base, times } => {
+            let times = resolve_quantity_with_targets(state, times, &payment_ability).max(0);
+            let times = u32::try_from(times).unwrap_or(0);
+            let scaled = scale_mana_cost(base, times);
+            if !casting::can_pay_effect_mana_cost_after_auto_tap(
+                state,
+                payer,
+                ability.source_id,
+                &scaled,
+            ) {
+                state.cost_payment_failed_flag = true;
+                return Ok(());
+            }
+            if casting::pay_effect_mana_cost(state, payer, ability.source_id, &scaled, events)
+                .is_err()
+            {
+                state.cost_payment_failed_flag = true;
+            }
+        }
     }
     Ok(())
+}
+
+/// CR 118.1: Multiply a `ManaCost` by `times` — every shard is repeated
+/// `times` times and the generic component scaled. `times == 0` yields `{0}`
+/// (`Cost { shards: [], generic: 0 }`), which the existing mana-payment path
+/// treats as trivially paid.
+fn scale_mana_cost(base: &ManaCost, times: u32) -> ManaCost {
+    match base {
+        ManaCost::NoCost | ManaCost::SelfManaCost => ManaCost::zero(),
+        ManaCost::Cost { shards, generic } => {
+            let mut scaled_shards = Vec::with_capacity(shards.len() * times as usize);
+            for _ in 0..times {
+                scaled_shards.extend(shards.iter().copied());
+            }
+            ManaCost::Cost {
+                shards: scaled_shards,
+                generic: generic.saturating_mul(times),
+            }
+        }
+    }
 }
 
 fn resolve_ability_cost_payment(
@@ -218,17 +263,23 @@ fn resolve_ability_cost_payment(
         // CR 107.14: Remove the indicated number of energy counters from `payer`.
         // Mirrors the pattern in `PaymentCost::Energy` above.
         AbilityCost::PayEnergy { amount } => {
+            // CR 107.3c: Resolve the `QuantityExpr` before any mutable borrow of
+            // `state` (the `iter_mut()` below). Dynamic amounts (e.g. "an amount
+            // of {E} equal to its mana value") read the parent target here.
+            let amount =
+                u32::try_from(resolve_quantity_with_targets(state, amount, ability).max(0))
+                    .unwrap_or(0);
             let can_pay = state
                 .players
                 .iter()
                 .find(|p| p.id == payer)
-                .is_some_and(|p| p.energy >= *amount);
+                .is_some_and(|p| p.energy >= amount);
             if can_pay {
                 if let Some(p) = state.players.iter_mut().find(|p| p.id == payer) {
-                    p.energy -= *amount;
+                    p.energy -= amount;
                     events.push(GameEvent::EnergyChanged {
                         player: payer,
-                        delta: -(*amount as i32),
+                        delta: -(amount as i32),
                     });
                 }
             } else {
@@ -342,11 +393,16 @@ fn can_pay_resolution_ability_cost(
             can_pay_life_cost(state, payer, amount)
         }
         // CR 107.14: Pay {E} requires that many energy counters.
-        AbilityCost::PayEnergy { amount } => state
-            .players
-            .iter()
-            .find(|p| p.id == payer)
-            .is_some_and(|p| p.energy >= *amount),
+        AbilityCost::PayEnergy { amount } => {
+            let amount =
+                u32::try_from(resolve_quantity_with_targets(state, amount, ability).max(0))
+                    .unwrap_or(0);
+            state
+                .players
+                .iter()
+                .find(|p| p.id == payer)
+                .is_some_and(|p| p.energy >= amount)
+        }
         // CR 702.179f: Pay speed requires that much current speed.
         AbilityCost::PaySpeed { amount } => {
             let amount = resolve_quantity_with_targets(state, amount, ability);
@@ -820,7 +876,9 @@ mod tests {
                         AbilityCost::PayLife {
                             amount: QuantityExpr::Fixed { value: 1 },
                         },
-                        AbilityCost::PayEnergy { amount: 1 },
+                        AbilityCost::PayEnergy {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                        },
                     ],
                 },
             },
@@ -848,7 +906,9 @@ mod tests {
                         AbilityCost::PayLife {
                             amount: QuantityExpr::Fixed { value: 1 },
                         },
-                        AbilityCost::PayEnergy { amount: 1 },
+                        AbilityCost::PayEnergy {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                        },
                     ],
                 },
             },
@@ -860,6 +920,47 @@ mod tests {
         // CR 118.3: pre-flight rejected the composite — life total is unchanged.
         assert_eq!(state.players[0].life, 5);
         assert_eq!(state.players[0].energy, 0);
+    }
+
+    /// CR 107.14: `AbilityCost::PayEnergy` carries a `QuantityExpr` amount.
+    /// A `Fixed` amount deducts when affordable and trips
+    /// `cost_payment_failed_flag` when the payer lacks enough energy — the
+    /// building-block contract for the widened field.
+    #[test]
+    fn resolution_pay_energy_fixed_amount_pays_when_affordable() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].energy = 5;
+        let ability = make_ability(Effect::PayCost {
+            cost: PaymentCost::AbilityCost {
+                cost: AbilityCost::PayEnergy {
+                    amount: QuantityExpr::Fixed { value: 5 },
+                },
+            },
+            payer: TargetFilter::Controller,
+        });
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert!(!state.cost_payment_failed_flag);
+        assert_eq!(state.players[0].energy, 0);
+    }
+
+    #[test]
+    fn resolution_pay_energy_fixed_amount_fails_when_insufficient() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].energy = 4;
+        let ability = make_ability(Effect::PayCost {
+            cost: PaymentCost::AbilityCost {
+                cost: AbilityCost::PayEnergy {
+                    amount: QuantityExpr::Fixed { value: 5 },
+                },
+            },
+            payer: TargetFilter::Controller,
+        });
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert!(state.cost_payment_failed_flag);
+        // No partial payment — energy unchanged.
+        assert_eq!(state.players[0].energy, 4);
     }
 
     #[test]
@@ -1468,5 +1569,48 @@ mod tests {
                 .any(|e| matches!(e, GameEvent::LifeChanged { .. })),
             "no LifeChanged event should be emitted"
         );
+    }
+
+    // CR 118.1: ScaledMana base-cost multiplication — colored-pip and
+    // generic-only bases scale uniformly; `times == 0` yields `{0}`.
+    #[test]
+    fn scale_mana_cost_repeats_colored_pip() {
+        // Thelon's Curse: {U} × 3 → {U}{U}{U}.
+        let base = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 0,
+        };
+        let scaled = scale_mana_cost(&base, 3);
+        assert_eq!(
+            scaled,
+            ManaCost::Cost {
+                shards: vec![
+                    ManaCostShard::Blue,
+                    ManaCostShard::Blue,
+                    ManaCostShard::Blue
+                ],
+                generic: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn scale_mana_cost_scales_generic() {
+        // Magnetic Mountain: {4} × 2 → {8}.
+        let scaled = scale_mana_cost(&ManaCost::generic(4), 2);
+        assert_eq!(scaled, ManaCost::generic(8));
+    }
+
+    #[test]
+    fn scale_mana_cost_zero_times_is_empty() {
+        // CR 118.5: {4} × 0 → {0} — trivially paid (no resources required).
+        let scaled = scale_mana_cost(&ManaCost::generic(4), 0);
+        assert_eq!(scaled, ManaCost::zero());
+        // Colored base × 0 also collapses to {0}.
+        let colored = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 0,
+        };
+        assert_eq!(scale_mana_cost(&colored, 0), ManaCost::zero());
     }
 }

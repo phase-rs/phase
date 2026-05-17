@@ -511,6 +511,52 @@ pub fn add_to_zone(state: &mut GameState, object_id: ObjectId, zone: Zone, owner
     }
 }
 
+/// CR 110.2a + CR 603.6a: Apply an "under your control" battlefield-entry
+/// controller override to both the live object and the zone-change snapshots
+/// created for this entry.
+pub(crate) fn apply_battlefield_entry_controller_override(
+    state: &mut GameState,
+    events: &mut [GameEvent],
+    object_id: ObjectId,
+    controller: PlayerId,
+) {
+    if let Some(obj) = state.objects.get_mut(&object_id) {
+        obj.base_controller = Some(controller);
+        obj.controller = controller;
+    }
+
+    if let Some(record) = state
+        .zone_changes_this_turn
+        .iter_mut()
+        .rev()
+        .find(|record| record.object_id == object_id && record.to_zone == Zone::Battlefield)
+    {
+        record.controller = controller;
+    }
+
+    if let Some(record) = state
+        .battlefield_entries_this_turn
+        .iter_mut()
+        .rev()
+        .find(|record| record.object_id == object_id)
+    {
+        record.controller = controller;
+    }
+
+    if let Some(GameEvent::ZoneChanged { record, .. }) = events.iter_mut().rev().find(|event| {
+        matches!(
+            event,
+            GameEvent::ZoneChanged {
+                object_id: id,
+                to: Zone::Battlefield,
+                ..
+            } if *id == object_id
+        )
+    }) {
+        record.controller = controller;
+    }
+}
+
 /// CR 614.1d: Check if any active CantEnterBattlefieldFrom static prevents this
 /// object from entering the battlefield from its current zone.
 /// e.g., Grafdigger's Cage: "Creature cards in graveyards and libraries can't enter the battlefield."

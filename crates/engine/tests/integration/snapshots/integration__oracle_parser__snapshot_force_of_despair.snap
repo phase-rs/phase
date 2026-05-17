@@ -1,0 +1,70 @@
+---
+source: crates/engine/tests/integration/oracle_parser.rs
+expression: result
+---
+{
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "DestroyAll",
+        "target": {
+          "type": "Typed",
+          "type_filters": [
+            "Creature"
+          ],
+          "controller": null,
+          "properties": []
+        },
+        "cant_regenerate": false
+      },
+      "cost": null,
+      "sub_ability": null,
+      "duration": "UntilEndOfTurn",
+      "description": "Destroy all creatures that entered this turn.",
+      "target_prompt": null,
+      "sorcery_speed": false,
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": [],
+  "castingOptions": [
+    {
+      "kind": "AlternativeCost",
+      "cost": {
+        "type": "Exile",
+        "count": 1,
+        "zone": "Hand",
+        "filter": {
+          "type": "Typed",
+          "type_filters": [
+            "Card"
+          ],
+          "controller": "You",
+          "properties": [
+            {
+              "type": "HasColor",
+              "color": "Black"
+            },
+            {
+              "type": "InZone",
+              "zone": "Hand"
+            }
+          ]
+        }
+      },
+      "condition": {
+        "type": "Not",
+        "condition": {
+          "type": "IsYourTurn"
+        }
+      }
+    }
+  ]
+}

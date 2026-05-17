@@ -30,6 +30,7 @@ import init, {
 } from "@wasm/engine";
 
 import type { GameAction } from "./types";
+import type { BracketDeckRequest } from "../types/bracketEstimate";
 
 // ── Message Protocol ─────────────────────────────────────────────────────
 
@@ -78,7 +79,7 @@ type EngineRequest =
   | { type: "takeLastPanic"; id: number }
   | { type: "applySeatMutation"; id: number; stateJson: string; mutationJson: string }
   | { type: "resolveAll"; id: number; requester: number; aiSeatsJson: string; maxResolutions: number }
-  | { type: "estimateBracketForDeck"; id: number; deck: { commander: string[]; main_deck: string[]; sideboard: string[] } };
+  | { type: "estimateBracketForDeck"; id: number; deck: BracketDeckRequest };
 
 type EngineResponse =
   | { type: "ready" }

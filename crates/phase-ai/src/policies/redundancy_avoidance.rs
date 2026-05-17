@@ -297,6 +297,7 @@ fn redundancy_delta(
         | Effect::TakeTheInitiative
         | Effect::GrantCastingPermission { .. }
         | Effect::ChooseFromZone { .. }
+        | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }
         | Effect::Exploit { .. }
         | Effect::GainEnergy { .. }

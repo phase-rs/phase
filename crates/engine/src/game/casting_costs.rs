@@ -5,7 +5,7 @@ use crate::types::ability::{
     Effect, KickerVariant, QuantityExpr, ResolvedAbility, SpellCastingOptionKind, TargetFilter,
     TypedFilter,
 };
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     CastingVariant, ConvokeMode, DistributionUnit, GameState, PendingCast, StackEntry,
     StackEntryKind, WaitingFor,
@@ -57,11 +57,18 @@ pub(crate) fn handle_decide_additional_cost(
 
     let mut ability = pending.ability;
 
+    // CR 702.166a: Track whether this decision paid an optional additional cost
+    // (Bargain), so the self-spell cost-modifier passes can be re-run afterward —
+    // a `ReduceCost { condition: AdditionalCostPaid }` static only applies once
+    // `additional_cost_paid` is set.
+    let mut optional_cost_paid = false;
+
     let cost_to_pay = match additional_cost {
         // CR 702.33a: Kicker is an optional additional cost.
         AdditionalCost::Optional(cost) => {
             if pay {
                 ability.context.additional_cost_paid = true;
+                optional_cost_paid = true;
                 // CR 702.175a: Offspring (and similar optional costs) synthesize
                 // ETB triggers conditioned on TriggerCondition::AdditionalCostPaid,
                 // which evaluates obj.kickers_paid.len(). Push First so the
@@ -114,6 +121,22 @@ pub(crate) fn handle_decide_additional_cost(
     {
         updated_pending.additional_cost_flow = None;
         updated_pending.additional_cost_decided = true;
+    }
+
+    // CR 601.2f + CR 601.2g: Now that the optional additional cost (Bargain) has
+    // been declared and `additional_cost_paid` is set, re-derive the total mana
+    // cost before mana payment begins. The recompute reads the in-flight cast's
+    // flag via `state.pending_cast`, so publish `updated_pending` there for the
+    // duration of the recompute, then restore the prior value.
+    if optional_cost_paid {
+        let object_id = updated_pending.object_id;
+        let prior_pending = state.pending_cast.take();
+        state.pending_cast = Some(Box::new(updated_pending.clone()));
+        let recomputed = super::casting::recompute_pending_cast_cost(state, player, object_id);
+        state.pending_cast = prior_pending;
+        if let Some(cost) = recomputed {
+            updated_pending.cost = cost;
+        }
     }
 
     if let Some(cost) = cost_to_pay {
@@ -299,10 +322,19 @@ fn finish_pending_cost_or_cast(
         Some(AdditionalCost::Kicker { .. })
     ) {
         if pending.deferred_target_selection {
-            if let Some((_, current_cost, _)) = next_kicker_option(state, player, &pending) {
+            if let Some((_, current_cost, repeatable)) = next_kicker_option(state, player, &pending)
+            {
+                // CR 702.33c/d: present the live Kicker cost (not a laundered
+                // Optional) so the frontend can render a kicker-aware modal and
+                // know whether the kicker is repeatable.
+                let times_kicked = pending.ability.context.kickers_paid.len() as u32;
                 return Ok(WaitingFor::OptionalCostChoice {
                     player,
-                    cost: AdditionalCost::Optional(current_cost),
+                    cost: AdditionalCost::Kicker {
+                        costs: vec![current_cost],
+                        repeatable,
+                    },
+                    times_kicked,
                     pending_cast: Box::new(pending),
                 });
             }
@@ -313,10 +345,17 @@ fn finish_pending_cost_or_cast(
                 return pay_additional_cost(state, player, cost, pending, events);
             }
         }
-        if let Some((_, current_cost, _)) = next_kicker_option(state, player, &pending) {
+        if let Some((_, current_cost, repeatable)) = next_kicker_option(state, player, &pending) {
+            // CR 702.33c/d: present the live Kicker cost (not a laundered Optional)
+            // so the frontend renders the kicker re-prompt with the running kick count.
+            let times_kicked = pending.ability.context.kickers_paid.len() as u32;
             return Ok(WaitingFor::OptionalCostChoice {
                 player,
-                cost: AdditionalCost::Optional(current_cost),
+                cost: AdditionalCost::Kicker {
+                    costs: vec![current_cost],
+                    repeatable,
+                },
+                times_kicked,
                 pending_cast: Box::new(pending),
             });
         }
@@ -335,6 +374,7 @@ fn finish_pending_cost_or_cast(
             return Ok(WaitingFor::OptionalCostChoice {
                 player,
                 cost: optional_cost,
+                times_kicked: 0,
                 pending_cast: Box::new(pending),
             });
         }
@@ -800,6 +840,23 @@ pub(crate) fn handle_exile_for_cost(
         }
     }
 
+    // CR 608.2k: Capture the first exiled card's public characteristics BEFORE
+    // it leaves the zone, stamping it (recursively into the sub_ability) onto
+    // the resolving ability so `TargetFilter::CostPaidObject` ("the exiled
+    // card") resolves at ability resolution. Inert for pitch/escape callers —
+    // their effects never reference the cost-paid object.
+    let mut pending = pending;
+    if let Some(&first) = chosen.first() {
+        if let Some(obj) = state.objects.get(&first) {
+            pending
+                .ability
+                .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
+                    object_id: first,
+                    lki: obj.snapshot_for_mana_spent(),
+                });
+        }
+    }
+
     for &id in chosen {
         super::zones::move_to_zone(state, id, Zone::Exile, events);
     }
@@ -931,7 +988,7 @@ fn push_ability_entry(
     state.pending_activations.push((source_id, ability_index));
     events.push(GameEvent::AbilityActivated { source_id });
     // CR 702.142b: Emit additional event when a boast ability is activated.
-    super::casting_targets::emit_boast_event_if_tagged(
+    super::casting_targets::emit_keyword_ability_event_if_tagged(
         state,
         source_id,
         ability_index,
@@ -1270,6 +1327,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
             return Ok(WaitingFor::OptionalCostChoice {
                 player,
                 cost: AdditionalCost::Choice(alt_cost, AbilityCost::Mana { cost: cost.clone() }),
+                times_kicked: 0,
                 pending_cast: Box::new(pending),
             });
         }
@@ -1336,6 +1394,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 return Ok(WaitingFor::OptionalCostChoice {
                     player,
                     cost: additional_cost,
+                    times_kicked: 0,
                     pending_cast: Box::new(pending),
                 });
             }
@@ -1359,6 +1418,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 return Ok(WaitingFor::OptionalCostChoice {
                     player,
                     cost: additional_cost,
+                    times_kicked: 0,
                     pending_cast: Box::new(pending),
                 });
             }
@@ -1388,7 +1448,11 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         return pay_additional_cost(
             state,
             player,
-            AbilityCost::PayEnergy { amount: energy_mv },
+            AbilityCost::PayEnergy {
+                amount: QuantityExpr::Fixed {
+                    value: energy_mv as i32,
+                },
+            },
             pending,
             events,
         );
@@ -1399,8 +1463,8 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     // mana cost"). The mana cost was already overridden to zero in
     // `casting::cast_spell` via `alt_cost_from_exile`; here we route the stored
     // `AbilityCost` through `pay_additional_cost` so dynamic-quantity refs
-    // (`EventContextSourceManaValue`, etc.) resolve at cast time against the
-    // spell's mana value. Single-authority — `AbilityCost::PayLife` and friends
+    // (`ObjectManaValue { CostPaidObject }`, etc.) resolve at cast time
+    // against the spell's mana value. Single-authority — `AbilityCost::PayLife` and friends
     // are paid through the same pipeline as flashback's non-mana cost.
     let alt_ability_cost = state.objects.get(&object_id).and_then(|obj| {
         if obj.zone == Zone::Exile {
@@ -1870,6 +1934,12 @@ fn pay_additional_cost(
         }
         AbilityCost::PayEnergy { amount } => {
             // CR 107.14: A player can pay {E} only if they have enough energy.
+            // CR 107.3c: Resolve the `QuantityExpr` so dynamic amounts read game
+            // state at cast time.
+            let amount = u32::try_from(
+                super::quantity::resolve_quantity(state, &amount, player, pending.object_id).max(0),
+            )
+            .unwrap_or(0);
             let player_state = &mut state.players[player.0 as usize];
             if player_state.energy < amount {
                 return Err(EngineError::ActionNotAllowed("Not enough energy".into()));
@@ -2385,6 +2455,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     // permanent spells with no on-resolve ability still need this for ETB
     // replacements on X-cost cards like Astral Cornucopia, Walking Ballista, etc.
     let cost_x_paid = ability.chosen_x;
+    let kickers_paid = ability.context.kickers_paid.clone();
     let convoked_creatures = state
         .pending_cast
         .as_ref()
@@ -2424,6 +2495,18 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     if !convoked_creatures.is_empty() {
         if let Some(obj) = state.objects.get_mut(&object_id) {
             obj.convoked_creatures = convoked_creatures;
+        }
+    }
+    // CR 603.4 + CR 702.33d: Stamp kicker payments onto the spell-on-stack
+    // object so cast-triggers ("When you cast this spell, if it was kicked,
+    // ...") can evaluate their intervening-'if' AdditionalCostPaid condition.
+    // Cast-triggers resolve BEFORE the spell does (CR 603.3), so the
+    // permanent-entry stamp in stack.rs is too late for them. The stamped
+    // Vec<KickerVariant> also carries multikicker counts (CR 702.33c). Mirrors
+    // the cost_x_paid / convoked_creatures stamps directly above.
+    if !kickers_paid.is_empty() {
+        if let Some(obj) = state.objects.get_mut(&object_id) {
+            obj.kickers_paid.clone_from(&kickers_paid);
         }
     }
     if let Some(permission) = cast_timing_permission {
@@ -2542,7 +2625,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         .get(&object_id)
         .expect("spell object still exists after stack push")
         .clone();
-    restrictions::record_spell_cast_from_zone(state, player, &obj, source_zone);
+    restrictions::record_spell_cast_from_zone(state, player, &obj, source_zone, casting_variant);
 
     // CR 601.2f: Consume any one-shot pending cost reductions now that the spell is finalized.
     super::casting::consume_pending_spell_cost_reduction(state, player);
@@ -3153,6 +3236,16 @@ fn auto_tap_mana_sources_inner(
                 true,
                 events,
             );
+            // CR 106.12 + CR 106.12a: a basic land's intrinsic mana ability
+            // always includes `{T}` in its cost, so this auto-tap fallback
+            // taps the land for mana. Emit one `TappedForMana` per resolution
+            // so `TapsForMana` triggers fire exactly once.
+            events.push(GameEvent::TappedForMana {
+                player_id: player,
+                source_id: option.object_id,
+                produced: vec![option.mana_type],
+                tap_state: ManaTapState::FromTap,
+            });
         }
     }
 }
@@ -3355,16 +3448,20 @@ pub fn max_x_value(state: &GameState, player: PlayerId, cost: &ManaCost) -> u32 
         .find(|p| p.id == player)
         .map_or(0, |p| p.mana_pool.total() as u32);
 
-    let all_producers: u32 = state
+    // CR 107.1b: Sum each producer's *actual* mana output. Counting producers
+    // as one mana apiece understated X for multi-mana sources (Sol Ring,
+    // bounce lands, `{T}: Add {C} for each ~`), capping the X chooser below
+    // what the caster could truly pay.
+    let producible: u32 = state
         .battlefield
         .iter()
-        .filter(|&&id| !mana_sources::activatable_mana_options(state, id, player).is_empty())
-        .count() as u32;
+        .map(|&id| mana_sources::max_mana_yield(state, id, player))
+        .sum();
 
     // CR 107.1b: Each `ManaCostShard::X` in the cost contributes `value` generic,
     // so for `{X}{X}` each point of X costs 2 mana. Dividing by `x_count` yields
     // the largest X the caster can actually afford.
-    let remaining = (pool + all_producers).saturating_sub(fixed_portion);
+    let remaining = (pool + producible).saturating_sub(fixed_portion);
     remaining / x_count
 }
 
@@ -3745,7 +3842,11 @@ pub(super) fn maybe_pause_for_phyrexian_choice(
 
     // CR 601.2h + CR 605: Auto-tap mana sources before shard-options computation so
     // the simulation reflects the actual post-tap pool.
+    let events_before = events.len();
     auto_tap_mana_sources(state, player, cost, events, Some(source_id));
+    // CR 605.4a: Resolve coupled `TapsForMana` triggered mana abilities inline so
+    // the bonus mana is in the pool before Phyrexian shard options are computed.
+    super::triggers::resolve_tap_mana_triggers_inline(state, events, events_before);
 
     let spell_meta = super::casting::build_spell_meta(state, player, source_id);
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
@@ -6960,5 +7061,262 @@ mod tests {
         // 3 lands + 2 Treasures = 5 sources, minus 1 for the {R} = max X of 4.
         let max = max_x_value(&state, player, &cost);
         assert_eq!(max, 4, "max X should count Treasure tokens as mana sources");
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #454: multikicker (Everflowing Chalice) — the repeatable kicker
+    // prompt must carry the live `AdditionalCost::Kicker` discriminant (not a
+    // laundered `Optional`) and the running kick count, so the frontend can
+    // render a kick-count-aware modal. CR 702.33c/d.
+    // -----------------------------------------------------------------------
+
+    const EVERFLOWING_CHALICE_ORACLE: &str = "Multikicker {2} (You may pay an additional {2} \
+any number of times as you cast this spell.)\nThis artifact enters with a charge counter on \
+it for each time it was kicked.\n{T}: Add {C} for each charge counter on this artifact.";
+
+    /// Build an Everflowing Chalice in P0's hand at PreCombatMain, parsed from
+    /// its real Oracle text (so the Multikicker additional cost and the
+    /// `KickerCount`-driven PutCounter replacement are exactly as shipped).
+    fn everflowing_chalice_scenario() -> (crate::game::scenario::GameRunner, ObjectId, CardId) {
+        use crate::game::scenario::GameScenario;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::Phase::PreCombatMain);
+
+        // {0} mana cost — the base cost is free; only the kicker costs mana.
+        let mut builder = scenario.add_spell_to_hand_from_oracle(
+            PlayerId(0),
+            "Everflowing Chalice",
+            false,
+            EVERFLOWING_CHALICE_ORACLE,
+        );
+        builder.as_artifact();
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 0,
+        });
+        let spell_id = builder.id();
+        let card_id = scenario.state.objects[&spell_id].card_id;
+
+        let runner = scenario.build();
+        (runner, spell_id, card_id)
+    }
+
+    /// Give P0 `count` colorless mana so the {2}-per-kick total can be paid
+    /// without modelling lands (the ManaPayment step auto-completes from pool).
+    fn fund_colorless(runner: &mut crate::game::scenario::GameRunner, count: usize) {
+        use crate::types::mana::ManaUnit;
+        let p0 = runner
+            .state_mut()
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(0))
+            .unwrap();
+        for _ in 0..count {
+            p0.mana_pool.add(ManaUnit {
+                color: ManaType::Colorless,
+                source_id: ObjectId(0),
+                snow: false,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: Vec::new(),
+                grants: vec![],
+                expiry: None,
+            });
+        }
+    }
+
+    fn charge_counters(state: &GameState, object_id: ObjectId) -> u32 {
+        state
+            .objects
+            .get(&object_id)
+            .and_then(|o| {
+                o.counters.get(&crate::types::counter::CounterType::Generic(
+                    "charge".to_string(),
+                ))
+            })
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Engine test 1 — multikicker paid twice. The re-prompt must remain a
+    /// real `Kicker` (regression guard for the `Optional` laundering bug),
+    /// `times_kicked` must round-trip, and the artifact must enter with 2
+    /// charge counters (exercises `KickerCount` → PutCounter).
+    #[test]
+    fn multikicker_paid_twice_enters_with_two_charge_counters() {
+        use crate::types::GameAction;
+        let (mut runner, spell_id, card_id) = everflowing_chalice_scenario();
+        fund_colorless(&mut runner, 4); // {2} + {2} for two kicks
+
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell_id,
+                card_id,
+                targets: vec![],
+            })
+            .expect("casting Everflowing Chalice must be accepted");
+
+        // First prompt: real Kicker, repeatable, times_kicked == 0.
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalCostChoice {
+                cost, times_kicked, ..
+            } => {
+                assert!(
+                    matches!(
+                        cost,
+                        AdditionalCost::Kicker {
+                            repeatable: true,
+                            ..
+                        }
+                    ),
+                    "first prompt must be a repeatable Kicker, not laundered Optional: {cost:?}"
+                );
+                assert_eq!(times_kicked, 0, "first prompt times_kicked must be 0");
+            }
+            other => panic!("expected OptionalCostChoice, got {other:?}"),
+        }
+
+        runner
+            .act(GameAction::DecideOptionalCost { pay: true })
+            .expect("first kick must be accepted");
+
+        // Re-prompt after one kick.
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalCostChoice {
+                cost, times_kicked, ..
+            } => {
+                assert!(
+                    matches!(
+                        cost,
+                        AdditionalCost::Kicker {
+                            repeatable: true,
+                            ..
+                        }
+                    ),
+                    "re-prompt must still be a Kicker: {cost:?}"
+                );
+                assert_eq!(times_kicked, 1, "times_kicked must be 1 after one kick");
+            }
+            other => panic!("expected OptionalCostChoice re-prompt, got {other:?}"),
+        }
+
+        runner
+            .act(GameAction::DecideOptionalCost { pay: true })
+            .expect("second kick must be accepted");
+
+        // Re-prompt after two kicks.
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalCostChoice {
+                cost, times_kicked, ..
+            } => {
+                assert!(matches!(cost, AdditionalCost::Kicker { .. }));
+                assert_eq!(times_kicked, 2, "times_kicked must be 2 after two kicks");
+            }
+            other => panic!("expected OptionalCostChoice re-prompt, got {other:?}"),
+        }
+
+        // Decline ("Done") — finish casting; spell resolves.
+        runner
+            .act(GameAction::DecideOptionalCost { pay: false })
+            .expect("declining further kicks must finish the cast");
+        runner.advance_until_stack_empty();
+
+        assert_eq!(
+            charge_counters(runner.state(), spell_id),
+            2,
+            "Everflowing Chalice kicked twice must enter with 2 charge counters"
+        );
+        assert!(
+            !runner.state().cancelled_casts.contains(&spell_id),
+            "a completed multikicker cast must not be in cancelled_casts"
+        );
+    }
+
+    /// Engine test 2 — declining the kicker at the first prompt COMPLETES the
+    /// cast (decline != abort). The artifact enters with 0 charge counters.
+    #[test]
+    fn declined_kicker_completes_cast_with_zero_counters() {
+        use crate::types::GameAction;
+        let (mut runner, spell_id, card_id) = everflowing_chalice_scenario();
+        // {0} base cost — no extra mana needed.
+
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell_id,
+                card_id,
+                targets: vec![],
+            })
+            .expect("casting Everflowing Chalice must be accepted");
+
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalCostChoice {
+                    times_kicked: 0,
+                    ..
+                }
+            ),
+            "expected the first kicker prompt"
+        );
+
+        runner
+            .act(GameAction::DecideOptionalCost { pay: false })
+            .expect("declining the kicker must finish the cast");
+        runner.advance_until_stack_empty();
+
+        assert_eq!(
+            charge_counters(runner.state(), spell_id),
+            0,
+            "an unkicked Everflowing Chalice enters with 0 charge counters"
+        );
+        assert!(
+            !runner.state().cancelled_casts.contains(&spell_id),
+            "declining the kicker must NOT cancel the cast"
+        );
+        assert_eq!(
+            runner.state().objects[&spell_id].zone,
+            Zone::Battlefield,
+            "the unkicked artifact must have resolved onto the battlefield"
+        );
+    }
+
+    /// Engine test 2b — `CancelCast` at the first kicker prompt aborts the
+    /// cast: the spell returns to its origin zone and lands in `cancelled_casts`.
+    /// Proves abort and decline are genuinely distinct engine outcomes.
+    #[test]
+    fn cancel_cast_at_first_kicker_prompt_aborts_the_cast() {
+        use crate::types::GameAction;
+        let (mut runner, spell_id, card_id) = everflowing_chalice_scenario();
+
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell_id,
+                card_id,
+                targets: vec![],
+            })
+            .expect("casting Everflowing Chalice must be accepted");
+
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalCostChoice { .. }
+        ));
+
+        runner
+            .act(GameAction::CancelCast)
+            .expect("CancelCast at the kicker prompt must be accepted");
+
+        assert!(
+            runner.state().cancelled_casts.contains(&spell_id),
+            "aborting the cast must record the spell in cancelled_casts"
+        );
+        assert_eq!(
+            runner.state().objects[&spell_id].zone,
+            Zone::Hand,
+            "an aborted cast must return the card to its origin (hand) zone"
+        );
+        assert!(
+            runner.state().stack.is_empty(),
+            "an aborted cast must not leave the spell on the stack"
+        );
     }
 }

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderHook, act, waitFor } from "@testing-library/react";
 import { useBracketEstimate, clearBracketEstimateCache } from "../useBracketEstimate";
 import { AdapterError, AdapterErrorCode } from "../../adapter/types";
-import type { BracketEstimate } from "../../adapter/types";
+import type { BracketEstimate } from "../../types/bracket";
 import type { ParsedDeck } from "../../services/deckParser";
 
 const mockEstimate: BracketEstimate = {

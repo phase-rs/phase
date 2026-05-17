@@ -129,7 +129,7 @@ pub enum TriggerMode {
     Shuffled,
 
     // Life — CR 119 (Life)
-    /// CR 119.4: Triggers when a player gains life.
+    /// CR 119.3: Triggers when a player gains life.
     LifeGained,
     /// CR 119.3: Triggers when a player loses life.
     LifeLost,
@@ -199,6 +199,8 @@ pub enum TriggerMode {
     NinjutsuActivated,
     /// CR 702.142b: Triggers when a player activates a boast ability.
     BoastAbilityActivated,
+    /// CR 702.177a: Triggers when a player activates an exhaust ability.
+    ExhaustAbilityActivated,
     /// CR 702.100: Evolve trigger — when a creature enters with greater power/toughness.
     Evolved,
     /// CR 701.44: Triggers when a creature explores.
@@ -450,6 +452,7 @@ impl FromStr for TriggerMode {
             "NewGame" => TriggerMode::NewGame,
             "NinjutsuActivated" => TriggerMode::NinjutsuActivated,
             "BoastAbilityActivated" => TriggerMode::BoastAbilityActivated,
+            "ExhaustAbilityActivated" => TriggerMode::ExhaustAbilityActivated,
             "PayCumulativeUpkeep" => TriggerMode::PayCumulativeUpkeep,
             "PayEcho" => TriggerMode::PayEcho,
             "PayLife" => TriggerMode::PayLife,
@@ -710,6 +713,7 @@ mod tests {
             "NewGame",
             "NinjutsuActivated",
             "BoastAbilityActivated",
+            "ExhaustAbilityActivated",
             "PayCumulativeUpkeep",
             "PayEcho",
             "PayLife",

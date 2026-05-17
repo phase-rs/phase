@@ -209,14 +209,14 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
         // [type]` resolve to the source object → SelfPower; `target ...`
         // / `Ref_TargetPermanent*` resolve to the targeted object → TargetPower;
         // `that creature` / `that permanent` / `that other...` (trigger
-        // referents) resolve through the trigger-event source →
-        // EventContextSourcePower (mirrors oracle_quantity.rs).
+        // referents) resolve through the cost-paid / trigger-event source →
+        // `Power { CostPaidObject }` (mirrors oracle_quantity.rs).
         GameNumber::PowerOfPermanent(perm) => QuantityExpr::Ref {
             qty: power_or_toughness_ref(perm, ObjectProperty::Power)?,
         },
 
         // CR 107.3 + CR 208.1: "[permanent]'s toughness" — symmetric to
-        // PowerOfPermanent; SelfToughness / EventContextSourceToughness
+        // PowerOfPermanent; SelfToughness / Toughness { CostPaidObject }
         // depending on the referent. No TargetToughness primitive yet, so
         // target-anaphoric refs strict-fail.
         GameNumber::ToughnessOfPermanent(perm) => QuantityExpr::Ref {
@@ -564,8 +564,8 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
         // CR 202.3: "[permanent]'s mana value". `~` / `it` / `this [type]`
         // resolve to the source object → SelfManaValue (correct at any
         // resolver scope per ability.rs:1818). Trigger anaphors
-        // (`that creature` / `that permanent`) resolve through the trigger
-        // event source → EventContextSourceManaValue (ability.rs:1886).
+        // (`that creature` / `that permanent`) resolve through the cost-paid /
+        // trigger-event source → `ObjectManaValue { CostPaidObject }`.
         // `Ref_TargetPermanent*` lacks an engine `TargetManaValue` primitive
         // (see power_or_toughness_ref's same gap) and strict-fails.
         GameNumber::ManaValueOfPermanent(perm) => QuantityExpr::Ref {
@@ -574,7 +574,7 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
 
         // CR 202.3: "[spell]'s mana value". `ThisSpell` reads the source
         // object → SelfManaValue. `Trigger_ThatSpell` / `ThatSpell` (the
-        // triggering spell-cast event subject) → EventContextSourceManaValue.
+        // triggering spell-cast event subject) → `ObjectManaValue { CostPaidObject }`.
         // `Ref_TargetSpell` would need a TargetManaValue primitive; defer.
         GameNumber::ManaValueOfSpell(spell) => QuantityExpr::Ref {
             qty: mana_value_of_spell_ref(spell)?,
@@ -613,7 +613,7 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
         // sacrificed/devoured/exiled/discarded/revealed/dead [creature|card]".
         // Each refers back to the source object captured by the triggering
         // event (sacrifice/devour/exile/discard/reveal/dies trigger), so they
-        // resolve through `EventContextSource{Power,Toughness}`. Matches the
+        // resolve through `{Power,Toughness} { CostPaidObject }`. Matches the
         // native parser's `parse_event_context_quantity` behavior for "the
         // sacrificed creature's power" (oracle_quantity.rs:1152).
         GameNumber::PowerOfTheSacrificedCreature
@@ -622,7 +622,9 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
         | GameNumber::PowerOfTheDiscardedCard
         | GameNumber::PowerOfTheRevealedCard
         | GameNumber::PowerOfDeadPermanent => QuantityExpr::Ref {
-            qty: QuantityRef::EventContextSourcePower,
+            qty: QuantityRef::Power {
+                scope: engine::types::ability::ObjectScope::CostPaidObject,
+            },
         },
         GameNumber::ToughnessOfTheSacrificedCreature
         | GameNumber::Emerge_ToughnessOfTheSacrificedCreature
@@ -631,7 +633,9 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
         | GameNumber::ToughnessOfDeadPermanent
         | GameNumber::ToughnessOfCreatureDestroyedThisWay
         | GameNumber::ToughnessOfCreatureSacrificedThisWay => QuantityExpr::Ref {
-            qty: QuantityRef::EventContextSourceToughness,
+            qty: QuantityRef::Toughness {
+                scope: engine::types::ability::ObjectScope::CostPaidObject,
+            },
         },
 
         // CR 603.7c + CR 202.3: Mana-value anaphors on triggering-event
@@ -641,7 +645,7 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
         // native parser emits for the literal "the sacrificed creature's mana
         // value" cost-payment idiom; see oracle_nom/quantity.rs:826).
         // The schema's `_ManaValueOf*ThisWay` and `Trigger_ManaValueOf*`
-        // variants are uniformly trigger-event anaphors → EventContextSourceManaValue.
+        // variants are uniformly cost-paid / trigger-event anaphors → `ObjectManaValue { CostPaidObject }`.
         GameNumber::ManaValueOfTheSacrificedPermanent
         | GameNumber::Trigger_ManaValueOfTheSacrificedPermanent
         | GameNumber::ManaValueOfThePermanentSacrificedThisWay
@@ -656,7 +660,9 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
         | GameNumber::ManaValueOfTheCardFoundThisWay
         | GameNumber::ManaValueOfTheFoundCard
         | GameNumber::TheManaValueOfTheCardDiscoveredThisWay => QuantityExpr::Ref {
-            qty: QuantityRef::EventContextSourceManaValue,
+            qty: QuantityRef::ObjectManaValue {
+                scope: engine::types::ability::ObjectScope::CostPaidObject,
+            },
         },
 
         // CR 609.3: "the number of permanents tapped this way" — the
@@ -920,7 +926,7 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
         // CR 603.7c + CR 202.3: "the mana value of the [exiled] card" anaphor
         // — `CardInExile` distinguishes triggering-exile referents
         // ("this way" / "the exiled card" / etc.) from targeted-exile refs.
-        // Trigger anaphors → EventContextSourceManaValue (mirrors the
+        // Trigger anaphors → `ObjectManaValue { CostPaidObject }` (mirrors the
         // ManaValueOf*ThisWay block above for graveyard/sacrifice referents).
         // `ThisExiledCard` / `ThisExiledPermanentCard` resolve to the source
         // object itself → SelfManaValue. Targeted-exile refs lack a
@@ -935,7 +941,7 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
 
 /// CR 202.3: Map a `Permanent` reference to its mana-value resolver.
 /// Mirrors `power_or_toughness_ref`: source → SelfManaValue; trigger anaphors
-/// → EventContextSourceManaValue; targeted-permanent refs lack a
+/// → `ObjectManaValue { CostPaidObject }`; targeted-permanent refs lack a
 /// TargetManaValue primitive in the engine and strict-fail.
 fn mana_value_of_permanent_ref(perm: &Permanent) -> ConvResult<QuantityRef> {
     match perm {
@@ -946,7 +952,9 @@ fn mana_value_of_permanent_ref(perm: &Permanent) -> ConvResult<QuantityRef> {
         | Permanent::Trigger_ThatOtherCreature
         | Permanent::Trigger_ThatCreatureOrPlaneswalker
         | Permanent::Trigger_ThatDeadPermanent
-        | Permanent::ThatEnteringPermanent => Ok(QuantityRef::EventContextSourceManaValue),
+        | Permanent::ThatEnteringPermanent => Ok(QuantityRef::ObjectManaValue {
+            scope: engine::types::ability::ObjectScope::CostPaidObject,
+        }),
         other => Err(ConversionGap::EnginePrerequisiteMissing {
             engine_type: "QuantityRef",
             needed_variant: format!("ManaValueOfPermanent/{other:?}"),
@@ -957,11 +965,13 @@ fn mana_value_of_permanent_ref(perm: &Permanent) -> ConvResult<QuantityRef> {
 /// CR 202.3: Map a `Spell` reference to its mana-value resolver.
 /// `ThisSpell` (the source object on the stack) → SelfManaValue.
 /// `Trigger_ThatSpell` / `ThatSpell` (triggering spell-cast event subject)
-/// → EventContextSourceManaValue. Other spell anaphors lack engine support.
+/// → `ObjectManaValue { CostPaidObject }`. Other spell anaphors lack engine support.
 fn mana_value_of_spell_ref(spell: &Spell) -> ConvResult<QuantityRef> {
     match spell {
         Spell::ThisSpell => Ok(QuantityRef::SelfManaValue),
-        Spell::Trigger_ThatSpell | Spell::ThatSpell => Ok(QuantityRef::EventContextSourceManaValue),
+        Spell::Trigger_ThatSpell | Spell::ThatSpell => Ok(QuantityRef::ObjectManaValue {
+            scope: engine::types::ability::ObjectScope::CostPaidObject,
+        }),
         other => Err(ConversionGap::EnginePrerequisiteMissing {
             engine_type: "QuantityRef",
             needed_variant: format!("ManaValueOfSpell/{other:?}"),
@@ -997,9 +1007,10 @@ fn mana_spent_to_cast_ref(spell: &Spell) -> ConvResult<QuantityRef> {
 /// CR 208.1 / CR 107.3: Map a `Permanent` reference to either the source
 /// object's stat (`SelfPower` / `SelfToughness`), the targeted object's
 /// stat (`TargetPower` — toughness has no `TargetToughness` primitive yet),
-/// or the trigger-event source's stat (`EventContextSourcePower` /
-/// `EventContextSourceToughness` — for "that creature" / "that permanent"
-/// trigger anaphors that resolve via the current trigger event).
+/// or the cost-paid / trigger-event source's stat
+/// (`Power { CostPaidObject }` / `Toughness { CostPaidObject }` — for "that
+/// creature" / "that permanent" trigger anaphors that resolve via the
+/// cost-paid object then the current trigger event, per CR 608.2k).
 fn power_or_toughness_ref(perm: &Permanent, prop: ObjectProperty) -> ConvResult<QuantityRef> {
     match (perm, prop) {
         (Permanent::ThisPermanent | Permanent::Self_It, ObjectProperty::Power) => {
@@ -1034,9 +1045,10 @@ fn power_or_toughness_ref(perm: &Permanent, prop: ObjectProperty) -> ConvResult<
         ) => Ok(QuantityRef::Toughness {
             scope: engine::types::ability::ObjectScope::Target,
         }),
-        // CR 603.7c: Trigger anaphors (`that creature` / `that permanent`)
-        // resolve through the trigger event source. Mirrors oracle_quantity.rs
-        // mapping of "that creature's power" → EventContextSourcePower.
+        // CR 608.2k: Trigger anaphors (`that creature` / `that permanent`)
+        // resolve through the cost-paid / trigger-event source. Mirrors
+        // oracle_quantity.rs mapping of "that creature's power" →
+        // `Power { CostPaidObject }`.
         (
             Permanent::Trigger_ThatPermanent
             | Permanent::Trigger_ThatCreature
@@ -1046,7 +1058,9 @@ fn power_or_toughness_ref(perm: &Permanent, prop: ObjectProperty) -> ConvResult<
             | Permanent::Trigger_ThatDeadPermanent
             | Permanent::ThatEnteringPermanent,
             ObjectProperty::Power,
-        ) => Ok(QuantityRef::EventContextSourcePower),
+        ) => Ok(QuantityRef::Power {
+            scope: engine::types::ability::ObjectScope::CostPaidObject,
+        }),
         (
             Permanent::Trigger_ThatPermanent
             | Permanent::Trigger_ThatCreature
@@ -1056,7 +1070,9 @@ fn power_or_toughness_ref(perm: &Permanent, prop: ObjectProperty) -> ConvResult<
             | Permanent::Trigger_ThatDeadPermanent
             | Permanent::ThatEnteringPermanent,
             ObjectProperty::Toughness,
-        ) => Ok(QuantityRef::EventContextSourceToughness),
+        ) => Ok(QuantityRef::Toughness {
+            scope: engine::types::ability::ObjectScope::CostPaidObject,
+        }),
         // No TargetToughness or TargetManaValue primitive in the engine yet.
         (other, prop) => Err(ConversionGap::EnginePrerequisiteMissing {
             engine_type: "QuantityRef",
@@ -1311,7 +1327,7 @@ fn cards_in_exile_to_filter(cards: &CardsInExile) -> ConvResult<TargetFilter> {
 
 /// CR 603.7c + CR 202.3: Map a `CardInExile` referent to its mana-value
 /// resolver. Triggering-exile anaphors ("this way" / "the exiled card") read
-/// the trigger event source → EventContextSourceManaValue. `ThisExiledCard`
+/// the cost-paid / trigger-event source → `ObjectManaValue { CostPaidObject }`. `ThisExiledCard`
 /// / `ThisExiledPermanentCard` (the source object itself) → SelfManaValue.
 /// Targeted-exile refs lack a TargetManaValue primitive and strict-fail.
 fn mana_value_of_exiled_ref(card: &CardInExile) -> ConvResult<QuantityRef> {
@@ -1336,7 +1352,9 @@ fn mana_value_of_exiled_ref(card: &CardInExile) -> ConvResult<QuantityRef> {
         | CardInExile::TheSingleCardExiledThisWay
         | CardInExile::TheSinglePermanentExiledThisWay
         | CardInExile::TheSpecificCardExiledThisWay
-        | CardInExile::Trigger_ThatExiledCard => Ok(QuantityRef::EventContextSourceManaValue),
+        | CardInExile::Trigger_ThatExiledCard => Ok(QuantityRef::ObjectManaValue {
+            scope: engine::types::ability::ObjectScope::CostPaidObject,
+        }),
         other => Err(ConversionGap::EnginePrerequisiteMissing {
             engine_type: "QuantityRef",
             needed_variant: format!("ManaValueOfExiled/{other:?}"),

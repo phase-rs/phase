@@ -87,13 +87,20 @@ pub(crate) fn parse_spell_casting_option_line(
 
     parse_self_flash_option(primary_body, &body_lower, card_name)
         .or_else(|| parse_self_alternative_cost_option(primary_body, &body_lower, card_name))
-        .map(|mut option| {
+        .and_then(|mut option| {
             if option.condition.is_none() {
                 if let Some(condition_text) = condition {
-                    option.condition = parse_restriction_condition(condition_text);
+                    // CR 118.9 + CR 601.3d: A leading-if gate on a casting option
+                    // (alternative cost / flash permission) must NOT be dropped
+                    // silently when the predicate is unrecognized — that would
+                    // emit the option unconditionally, strictly more permissive
+                    // than the printed text. Refuse to emit the option entirely,
+                    // matching the trailing-if `?` contract in
+                    // `parse_self_flash_option` / `parse_self_alternative_cost_option`.
+                    option.condition = Some(parse_restriction_condition(condition_text)?);
                 }
             }
-            option
+            Some(option)
         })
 }
 
@@ -1245,6 +1252,44 @@ mod tests {
         assert!(
             option.is_none(),
             "unrecognized if-clause must drop the alt-cost option entirely, got: {option:?}"
+        );
+    }
+
+    #[test]
+    fn alt_cost_leading_if_not_your_turn_condition_binds() {
+        // Force of Despair — leading "If it's not your turn, " gates the alt-cost.
+        // CR 102.1: the active player is the player whose turn it is. Nom parses
+        // "it's not your turn" → `StaticCondition::Not(DuringYourTurn)`, which the
+        // restriction bridge maps to `Not(IsYourTurn)`.
+        let option = parse_spell_casting_option_line(
+            "If it's not your turn, you may exile a black card from your hand rather than pay this spell's mana cost.",
+            "Force of Despair",
+        )
+        .expect("alt-cost should parse with leading-if not-your-turn condition");
+        match option {
+            SpellCastingOption {
+                kind: crate::types::ability::SpellCastingOptionKind::AlternativeCost,
+                condition: Some(ParsedCondition::Not { condition }),
+                ..
+            } if matches!(*condition, ParsedCondition::IsYourTurn) => {}
+            other => panic!("expected Not(IsYourTurn) condition, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn alt_cost_leading_if_unrecognized_predicate_drops_option() {
+        // CR 118.9 + CR 601.3d: when the leading-if predicate cannot decompose
+        // into a typed `ParsedCondition`, the casting option must be dropped
+        // entirely — not emitted unconditionally. This mirrors the trailing-if
+        // `?` contract; the prior `.map()` silently assigned `None` and emitted
+        // the alt-cost regardless of the gate.
+        let option = parse_spell_casting_option_line(
+            "If the sky is green, you may exile a black card from your hand rather than pay this spell's mana cost.",
+            "Test Card",
+        );
+        assert!(
+            option.is_none(),
+            "unrecognized leading-if predicate must drop the alt-cost option, got: {option:?}"
         );
     }
 

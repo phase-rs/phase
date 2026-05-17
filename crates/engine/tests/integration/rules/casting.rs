@@ -177,6 +177,106 @@ fn optional_cost_skipped_clears_flag() {
     );
 }
 
+/// CR 702.166a + CR 601.2f/601.2g: Bargain cost-ordering proof. A spell with a
+/// self-spell `ReduceCost {2}` static gated on `StaticCondition::AdditionalCostPaid`
+/// plus an optional additional cost. When the optional cost is PAID, the cost
+/// modifiers are re-run (recompute_pending_cast_cost) and the {4} cost drops to
+/// {2}, so only 2 of 4 lands are tapped. When SKIPPED, the full {4} is charged.
+#[test]
+fn bargain_additional_cost_paid_reduces_self_spell_cost() {
+    use engine::types::ability::{StaticCondition, StaticDefinition};
+    use engine::types::statics::StaticMode;
+
+    fn build_scenario() -> (engine::game::scenario::GameRunner, ObjectId, Vec<ObjectId>) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        // Four lands — exactly the base {4} cost.
+        let lands: Vec<ObjectId> = (0..4)
+            .map(|_| scenario.add_basic_land(P0, ManaColor::Green))
+            .collect();
+
+        let reduce_static = StaticDefinition::new(StaticMode::ReduceCost {
+            amount: ManaCost::generic(2),
+            spell_filter: None,
+            dynamic_count: None,
+        })
+        .affected(TargetFilter::SelfRef)
+        .condition(StaticCondition::AdditionalCostPaid)
+        .active_zones(vec![Zone::Hand, Zone::Stack]);
+
+        let spell_id = scenario
+            .add_creature_to_hand(P0, "Bargain Beast", 3, 3)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![],
+                generic: 4,
+            })
+            .with_additional_cost(AdditionalCost::Optional(AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+            }))
+            .with_static_definition(reduce_static)
+            .id();
+
+        (scenario.build(), spell_id, lands)
+    }
+
+    fn tapped_count(runner: &engine::game::scenario::GameRunner, lands: &[ObjectId]) -> usize {
+        lands
+            .iter()
+            .filter(|id| runner.state().objects[id].tapped)
+            .count()
+    }
+
+    // --- Paid: cost recomputed to {2}, only 2 lands tapped. ---
+    {
+        let (mut runner, spell_id, lands) = build_scenario();
+        let card_id = runner.state().objects[&spell_id].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell_id,
+                card_id,
+                targets: vec![],
+            })
+            .expect("cast should succeed at base cost");
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalCostChoice { .. }
+            ),
+            "expected OptionalCostChoice, got {:?}",
+            runner.state().waiting_for,
+        );
+        runner
+            .act(GameAction::DecideOptionalCost { pay: true })
+            .expect("paying the optional cost should succeed");
+        assert_eq!(
+            tapped_count(&runner, &lands),
+            2,
+            "Bargain paid → {{4}} reduced to {{2}} → only 2 lands tapped"
+        );
+    }
+
+    // --- Skipped: full {4} charged, all 4 lands tapped. ---
+    {
+        let (mut runner, spell_id, lands) = build_scenario();
+        let card_id = runner.state().objects[&spell_id].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell_id,
+                card_id,
+                targets: vec![],
+            })
+            .expect("cast should succeed at base cost");
+        runner
+            .act(GameAction::DecideOptionalCost { pay: false })
+            .expect("skipping the optional cost should succeed");
+        assert_eq!(
+            tapped_count(&runner, &lands),
+            4,
+            "Bargain skipped → full {{4}} charged → all 4 lands tapped"
+        );
+    }
+}
+
 /// Cast a spell without an additional cost -- should skip OptionalCostChoice entirely.
 #[test]
 fn no_additional_cost_skips_choice() {

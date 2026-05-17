@@ -1,5 +1,4 @@
 import type {
-  BracketEstimate,
   EngineAdapter,
   GameAction,
   GameEvent,
@@ -11,6 +10,7 @@ import type {
   SubmitResult,
 } from "./types";
 import { AdapterError, AdapterErrorCode } from "./types";
+import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import {
   HandshakeError,
   openPhaseSocket,
@@ -324,11 +324,7 @@ export class WebSocketAdapter implements EngineAdapter {
     );
   }
 
-  estimateBracket(_deck: {
-    commander: string[];
-    main_deck: string[];
-    sideboard?: string[];
-  }): Promise<BracketEstimate | null> {
+  estimateBracket(_deck: BracketDeckRequest): Promise<BracketEstimate | null> {
     throw new AdapterError(
       AdapterErrorCode.BRACKET_ESTIMATION_UNSUPPORTED,
       "Bracket estimation is a local feature; not available in WebSocket sessions.",

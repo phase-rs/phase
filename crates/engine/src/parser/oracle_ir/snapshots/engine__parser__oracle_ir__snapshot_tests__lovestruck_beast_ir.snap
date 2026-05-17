@@ -11,7 +11,23 @@ expression: "&ir"
           "type": "SelfRef"
         },
         "modifications": [],
-        "condition": null,
+        "condition": {
+          "type": "Not",
+          "condition": {
+            "type": "IsPresent",
+            "filter": {
+              "type": "Typed",
+              "type_filters": [],
+              "controller": "You",
+              "properties": [
+                {
+                  "type": "InZone",
+                  "zone": "Battlefield"
+                }
+              ]
+            }
+          }
+        },
         "affected_zone": null,
         "effect_zone": null,
         "active_zones": [],
@@ -21,13 +37,5 @@ expression: "&ir"
     }
   ],
   "source_text": "This creature can't attack unless you control a 1/1 creature.",
-  "card_name": "Lovestruck Beast",
-  "diagnostics": [
-    {
-      "type": "SwallowedClause",
-      "detector": "Condition_Unless",
-      "description": "This creature can't attack unless you control a 1/1 creature.",
-      "line_index": 0
-    }
-  ]
+  "card_name": "Lovestruck Beast"
 }

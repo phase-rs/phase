@@ -247,6 +247,36 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
+        // CR 701.20a + CR 608.2c: "You may put that card onto the battlefield" —
+        // both accept (put onto the battlefield) and decline (hand / rest pile)
+        // are legitimate plays, so emit both for the search to explore.
+        WaitingFor::RevealUntilKeptChoice { player, .. } => vec![
+            candidate(
+                GameAction::DecideOptionalEffect { accept: true },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+            candidate(
+                GameAction::DecideOptionalEffect { accept: false },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+        ],
+        // CR 107.1c: "you may repeat this process any number of times" — both
+        // repeating and stopping are legitimate plays, so emit both for the
+        // search to explore.
+        WaitingFor::RepeatDecision { player, .. } => vec![
+            candidate(
+                GameAction::DecideOptionalEffect { accept: true },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+            candidate(
+                GameAction::DecideOptionalEffect { accept: false },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+        ],
         // CR 702.85a: Cascade offers a binary cast/decline choice. Tactical
         // ordering: place Cast first when the hit has at least one legal
         // target (or no targets at all — typically a permanent or untargeted
@@ -1651,6 +1681,40 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             }
             actions
         }
+        // CR 608.2c: ChooseObjectsIntoTrackedSet — choose any subset of the
+        // eligible battlefield permanents (or decline with an empty selection).
+        WaitingFor::ChooseObjectsSelection {
+            player, eligible, ..
+        } => {
+            let mut actions = vec![
+                // Pay for all affordable: select every eligible permanent.
+                candidate(
+                    GameAction::SelectTargets {
+                        targets: eligible.clone(),
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                ),
+                // Decline: empty selection.
+                candidate(
+                    GameAction::SelectTargets {
+                        targets: Vec::new(),
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                ),
+            ];
+            for target in eligible {
+                actions.push(candidate(
+                    GameAction::SelectTargets {
+                        targets: vec![target.clone()],
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                ));
+            }
+            actions
+        }
         // CR 701.36a: Populate — choose a creature token to copy.
         WaitingFor::PopulateChoice {
             player,
@@ -1882,6 +1946,8 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
         | WaitingFor::DiscoverChoice { .. }
+        | WaitingFor::RevealUntilKeptChoice { .. }
+        | WaitingFor::RepeatDecision { .. }
         | WaitingFor::CascadeChoice { .. }
         | WaitingFor::LearnChoice { .. }
         | WaitingFor::TopOrBottomChoice { .. }
@@ -2332,7 +2398,15 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
             if let Some(obj) = state.objects.get(&obj_id) {
                 if obj.controller == player {
                     for kw in &obj.keywords {
-                        if let crate::types::keywords::Keyword::Crew(_) = kw {
+                        if let crate::types::keywords::Keyword::Crew { once_per_turn, .. } = kw {
+                            // CR 602.5b: "Activate only once each turn" — don't offer a
+                            // second crew candidate for a Vehicle already crewed this turn.
+                            if *once_per_turn
+                                == crate::types::keywords::ActivationCadence::OncePerTurn
+                                && state.crew_activated_this_turn.contains(&obj_id)
+                            {
+                                break;
+                            }
                             let has_eligible = state.battlefield.iter().any(|&cid| {
                                 cid != obj_id
                                     && state.objects.get(&cid).is_some_and(|c| {

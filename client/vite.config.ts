@@ -121,11 +121,18 @@ export default defineConfig({
             },
           },
           {
-            urlPattern: /card-data\.json$/,
-            handler: "StaleWhileRevalidate",
+            // Production publishes card data as a content-addressed
+            // `card-data-<hash>.json` on R2 (see deploy.yml); local dev and
+            // Tauri serve a plain `card-data.json`. Match both — the earlier
+            // `/card-data\.json$/` pattern silently missed the hashed
+            // production URL, so the SW never cached the card database.
+            // Content addressing makes the file immutable: `CacheFirst` is
+            // correct, mirroring the hashed WASM-bundle rules above.
+            urlPattern: /card-data(-[0-9a-f]+)?\.json$/,
+            handler: "CacheFirst",
             options: {
               cacheName: "card-database",
-              expiration: { maxEntries: 1, maxAgeSeconds: 604800 },
+              expiration: { maxEntries: 1, maxAgeSeconds: 2592000 },
             },
           },
           {

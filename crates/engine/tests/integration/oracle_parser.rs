@@ -428,3 +428,18 @@ fn corpse_harvester_lowers_to_dual_search_into_hand() {
         "expected one ChangeZone for found set"
     );
 }
+
+#[test]
+fn snapshot_force_of_despair() {
+    // CR 118.9 + CR 102.1: leading-if conditional alternative cost. The
+    // "If it's not your turn" gate must bind to the casting option's
+    // `condition` slot as `Not(IsYourTurn)` — never `null`.
+    let result = parse(
+        "If it's not your turn, you may exile a black card from your hand rather than pay this spell's mana cost.\nDestroy all creatures that entered this turn.",
+        "Force of Despair",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    insta::assert_json_snapshot!(result);
+}

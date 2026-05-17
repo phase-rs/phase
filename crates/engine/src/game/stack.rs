@@ -72,6 +72,14 @@ fn move_prevented_permanent_spell_to_graveyard_if_still_on_stack(
 
 /// CR 608.2: Resolve the top object on the stack.
 pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    // CR 707.10: A fresh resolution invalidates any previously stashed
+    // resolving entry. `resolving_stack_entry` is set below and must persist
+    // across an optional-choice round-trip (the Chain cycle's "you may copy
+    // this spell" defers the copy past a player decision, by which point the
+    // spell has left the stack) — so it is cleared here at the start of the
+    // *next* resolution rather than at the end of this one.
+    state.resolving_stack_entry = None;
+
     // CR 405.5: When all players pass in succession, the top object on the stack resolves.
     let entry = match state.stack.pop_back() {
         Some(e) => e,
@@ -185,6 +193,14 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             bestow_reverted_at_resolution = true;
         }
     }
+
+    // CR 707.10: Expose the resolving stack entry so a `CopySpell` carried as
+    // the spell's own effect (the Chain cycle's "you may copy this spell")
+    // can copy itself even though `resolve_top` has already popped it off the
+    // stack — and even after the spell has moved to the graveyard while an
+    // optional copy decision is pending. Cleared at the start of the next
+    // `resolve_top`.
+    state.resolving_stack_entry = Some(entry.clone());
 
     // Only run targeting validation and effect execution when an ability exists.
     // Permanent spells with no spell ability (ability is None) skip straight to
@@ -374,6 +390,22 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     {
                         enter_with_counters.extend(intrinsic);
                     }
+                }
+            }
+
+            // CR 702.188a: Web-slinging is a casting alternative cost. Tag the
+            // permanent BEFORE the ETB replacement pipeline runs so a
+            // `ReplacementCondition::CastVariantPaid` gate (Scarlet Spider's
+            // "Sensational Save" enters-with-counters replacement) can read it.
+            // `cast_variant_paid` is also written post-resolution for other
+            // variants (Sneak/Evoke/Escape), but those have no ETB-replacement
+            // gate; web-slinging does, so its write must precede `replace_event`.
+            if let CastingVariant::WebSlinging { .. } = casting_variant {
+                if let Some(obj) = state.objects.get_mut(&entry.id) {
+                    obj.cast_variant_paid = Some((
+                        crate::types::ability::CastVariantPaid::WebSlinging,
+                        state.turn_number,
+                    ));
                 }
             }
 
@@ -693,17 +725,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 }
             }
 
-            // CR 702.188a: Web-slinging is a casting alternative cost, so tag
-            // the resolved permanent through the same cast-variant channel as
-            // other alternative-cost casting variants.
-            if let CastingVariant::WebSlinging { .. } = casting_variant {
-                if let Some(obj) = state.objects.get_mut(&entry.id) {
-                    obj.cast_variant_paid = Some((
-                        crate::types::ability::CastVariantPaid::WebSlinging,
-                        state.turn_number,
-                    ));
-                }
-            }
+            // CR 702.188a: Web-slinging's `cast_variant_paid` tag is written
+            // before `replace_event` above (so the ETB-replacement gate can
+            // read it) — no post-resolution write is needed here.
 
             // CR 702.74a: Evoke-cast permanent gets the `cast_variant_paid` tag
             // so the synthesized intervening-if ETB sacrifice trigger fires.

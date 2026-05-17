@@ -210,6 +210,13 @@ fn controller_ref_player(
         ControllerRef::DefendingPlayer => {
             crate::game::combat::defending_player_for_attacker(state, source_id)
         }
+        // CR 608.2c + CR 109.4: The player chosen by the Nth `Choose(Player)`
+        // in this resolution — read from the resolution-scoped list.
+        ControllerRef::ChosenPlayer { index } => {
+            ability.and_then(|a| a.chosen_players.get(*index as usize).copied())
+        }
+        // CR 603.2 + CR 109.4: The player identified by the triggering event.
+        ControllerRef::TriggeringPlayer => crate::game::quantity::triggering_event_player(state),
     }
 }
 
@@ -443,7 +450,9 @@ fn filter_inner_for_object(
     match filter {
         TargetFilter::None => false,
         TargetFilter::Any => true,
-        TargetFilter::Player => false,     // Players are not objects
+        TargetFilter::Player => false, // Players are not objects
+        // CR 118.12a: unless-payer population — never matches an object.
+        TargetFilter::AllPlayers => false,
         TargetFilter::Controller => false, // Controller is a player, not an object
         // CR 109.5: OriginalController is a player reference, not an object.
         TargetFilter::OriginalController => false,
@@ -513,6 +522,23 @@ fn filter_inner_for_object(
                     }
                     ControllerRef::DefendingPlayer => {
                         match crate::game::combat::defending_player_for_attacker(state, source_id) {
+                            Some(pid) if pid == obj.controller => {}
+                            _ => return false,
+                        }
+                    }
+                    // CR 608.2c + CR 109.4: "a creature they control" following a
+                    // `Choose(Player)` — match the object's controller against the
+                    // resolution-scoped chosen player.
+                    ControllerRef::ChosenPlayer { index } => {
+                        match ability.and_then(|a| a.chosen_players.get(*index as usize).copied()) {
+                            Some(pid) if pid == obj.controller => {}
+                            _ => return false,
+                        }
+                    }
+                    // CR 603.2 + CR 109.4: "an opponent who controls F" — match
+                    // the object's controller against the triggering player.
+                    ControllerRef::TriggeringPlayer => {
+                        match crate::game::quantity::triggering_event_player(state) {
                             Some(pid) if pid == obj.controller => {}
                             _ => return false,
                         }
@@ -605,10 +631,12 @@ fn filter_inner_for_object(
         // type filter. Used by Zimone's Experiment to route "X cards revealed
         // this way" — the Dig resolver populates a tracked set with the kept
         // (revealed) cards; this filter restricts the target space to the
-        // subset matching the inner type. `TrackedSetId(0)` is a sentinel
-        // resolved to the most recent tracked set by the same binding pass
-        // that handles plain `TrackedSet` continuations (see
-        // `effects::delayed_trigger::bind_tracked_set_to_effect`).
+        // subset matching the inner type. The `id` here is already concrete:
+        // the parser emits `TrackedSetId(0)` as a sentinel, but every resolver
+        // path binds it to a real set before this match is reached via
+        // `targeting::resolve_tracked_set_sentinel`. A still-sentinel `0`
+        // therefore matches no objects, which is the correct fallback when no
+        // tracked set is available.
         TargetFilter::TrackedSetFiltered { id, filter } => {
             let in_set = state
                 .tracked_object_sets
@@ -731,6 +759,8 @@ fn zone_change_filter_inner(
         TargetFilter::None => false,
         TargetFilter::Any => true,
         TargetFilter::Player => false,
+        // CR 118.12a: unless-payer population — never matches an object.
+        TargetFilter::AllPlayers => false,
         TargetFilter::Controller => false,
         // CR 109.5: OriginalController is a player reference, not an object.
         TargetFilter::OriginalController => false,
@@ -781,6 +811,14 @@ fn zone_change_filter_inner(
                             crate::game::ability_utils::parent_target_controller(a, state)
                         });
                         match target_player {
+                            Some(pid) if pid == record.controller => {}
+                            _ => return false,
+                        }
+                    }
+                    // CR 608.2c + CR 109.4: match the spell record's controller
+                    // against the resolution-scoped chosen player.
+                    ControllerRef::ChosenPlayer { index } => {
+                        match ability.and_then(|a| a.chosen_players.get(*index as usize).copied()) {
                             Some(pid) if pid == record.controller => {}
                             _ => return false,
                         }
@@ -1042,6 +1080,13 @@ pub fn spell_record_matches_filter(
                     ControllerRef::TargetPlayer => return false,
                     ControllerRef::ParentTargetController => return false,
                     ControllerRef::DefendingPlayer => return false,
+                    // CR 109.4: A chosen-player scope has no meaning for a
+                    // spell-history record (no resolution context). Fail closed.
+                    ControllerRef::ChosenPlayer { .. } => return false,
+                    // CR 603.2 + CR 109.4: A triggering-player scope has no
+                    // meaning for a spell-history record (no event context).
+                    // Fail closed.
+                    ControllerRef::TriggeringPlayer => return false,
                 }
             }
 
@@ -1063,6 +1108,8 @@ pub fn spell_record_matches_filter(
         // All remaining variants are inapplicable to spell snapshots.
         TargetFilter::None
         | TargetFilter::Player
+        // CR 118.12a: unless-payer population, never an object filter.
+        | TargetFilter::AllPlayers
         | TargetFilter::Controller
         | TargetFilter::OriginalController
         | TargetFilter::ScopedPlayer
@@ -1191,6 +1238,7 @@ fn spell_cast_record_from_object(spell_obj: &GameObject) -> SpellCastRecord {
         mana_value: spell_obj.mana_cost.mana_value(),
         has_x_in_cost: crate::game::casting_costs::cost_has_x(&spell_obj.mana_cost),
         from_zone: spell_obj.zone,
+        cast_variant: crate::types::game_state::CastingVariant::Normal,
     }
 }
 
@@ -1227,6 +1275,9 @@ fn spell_object_matches_filter_inner(
                     ControllerRef::TargetPlayer => return false,
                     ControllerRef::ParentTargetController => return false,
                     ControllerRef::DefendingPlayer => return false,
+                    // CR 109.4: Chosen-player scope is undefined for spell-cast
+                    // history (no resolution context). Fail closed.
+                    ControllerRef::ChosenPlayer { .. } => return false,
                     _ => {}
                 }
             }
@@ -1270,6 +1321,8 @@ fn spell_object_matches_filter_inner(
         ),
         TargetFilter::None
         | TargetFilter::Player
+        // CR 118.12a: unless-payer population, never an object filter.
+        | TargetFilter::AllPlayers
         | TargetFilter::Controller
         | TargetFilter::OriginalController
         | TargetFilter::ScopedPlayer
@@ -1825,6 +1878,9 @@ fn matches_filter_prop(
                         perm.controller == pid
                     }
                     (Some(ControllerRef::DefendingPlayer), Some(pid)) => perm.controller == pid,
+                    (Some(ControllerRef::ChosenPlayer { .. }), Some(pid)) => perm.controller == pid,
+                    // CR 603.2 + CR 109.4: triggering-player-scoped name match.
+                    (Some(ControllerRef::TriggeringPlayer), Some(pid)) => perm.controller == pid,
                     (Some(_), None) => false,
                     (None, _) => true,
                 };
@@ -1858,6 +1914,16 @@ fn matches_filter_prop(
                 .is_some_and(|pid| pid == obj.owner),
             ControllerRef::DefendingPlayer => {
                 crate::game::combat::defending_player_for_attacker(state, source.id)
+                    .is_some_and(|pid| pid == obj.owner)
+            }
+            // CR 608.2c + CR 109.4: Ownership relative to a resolution-chosen player.
+            ControllerRef::ChosenPlayer { index } => source
+                .ability
+                .and_then(|a| a.chosen_players.get(*index as usize).copied())
+                .is_some_and(|pid| pid == obj.owner),
+            // CR 603.2 + CR 109.4: Ownership relative to the triggering player.
+            ControllerRef::TriggeringPlayer => {
+                crate::game::quantity::triggering_event_player(state)
                     .is_some_and(|pid| pid == obj.owner)
             }
         },
@@ -2346,6 +2412,15 @@ fn zone_change_record_matches_property(
                 crate::game::combat::defending_player_for_attacker(state, source.id)
                     .is_some_and(|pid| pid == record.owner)
             }
+            // CR 608.2c + CR 109.4: Ownership relative to a resolution-chosen player.
+            ControllerRef::ChosenPlayer { index } => source
+                .ability
+                .and_then(|a| a.chosen_players.get(*index as usize).copied())
+                .is_some_and(|pid| pid == record.owner),
+            // CR 603.2 + CR 109.4: Ownership relative to the triggering player.
+            ControllerRef::TriggeringPlayer => {
+                crate::game::quantity::triggering_event_player(state).is_some_and(|pid| pid == record.owner)
+            }
         },
         // CR 701.12: Source's chosen creature type applied to the snapshot subtypes.
         FilterProp::IsChosenCreatureType => source.chosen_creature_type.is_some_and(|chosen| {
@@ -2522,6 +2597,16 @@ fn attachment_controller_matches(
             .is_some_and(|pid| pid == attachment_controller),
         Some(ControllerRef::DefendingPlayer) => {
             combat::defending_player_for_attacker(state, source.id)
+                .is_some_and(|pid| pid == attachment_controller)
+        }
+        // CR 608.2c + CR 109.4: Attachment controller relative to a chosen player.
+        Some(ControllerRef::ChosenPlayer { index }) => source
+            .ability
+            .and_then(|a| a.chosen_players.get(*index as usize).copied())
+            .is_some_and(|pid| pid == attachment_controller),
+        // CR 603.2 + CR 109.4: Attachment controller relative to the triggering player.
+        Some(ControllerRef::TriggeringPlayer) => {
+            crate::game::quantity::triggering_event_player(state)
                 .is_some_and(|pid| pid == attachment_controller)
         }
     }
@@ -2972,6 +3057,12 @@ pub fn player_matches_target_filter(
             Some(ControllerRef::TargetPlayer) => false,
             Some(ControllerRef::ParentTargetController) => false,
             Some(ControllerRef::DefendingPlayer) => false,
+            // CR 109.4: Chosen-player scope has no meaning without resolution
+            // context. Fail closed (mirrors `TargetPlayer`).
+            Some(ControllerRef::ChosenPlayer { .. }) => false,
+            // CR 603.2 + CR 109.4: Triggering-player scope has no meaning
+            // without event/game-state context here. Fail closed.
+            Some(ControllerRef::TriggeringPlayer) => false,
             None => true,
         },
         // Typed filters with type_filters don't match players
@@ -3210,6 +3301,7 @@ mod tests {
             mana_value: 3,
             has_x_in_cost: false,
             from_zone: Zone::Hand,
+            cast_variant: crate::types::game_state::CastingVariant::Normal,
         };
         let filter = TargetFilter::Typed(
             TypedFilter::creature()
@@ -3250,6 +3342,7 @@ mod tests {
             mana_value: 3,
             has_x_in_cost: true,
             from_zone: Zone::Hand,
+            cast_variant: crate::types::game_state::CastingVariant::Normal,
         };
         let non_x_record = SpellCastRecord {
             has_x_in_cost: false,
@@ -3281,6 +3374,7 @@ mod tests {
             mana_value: 2,
             has_x_in_cost: false,
             from_zone: Zone::Hand,
+            cast_variant: crate::types::game_state::CastingVariant::Normal,
         };
         let exile_record = SpellCastRecord {
             from_zone: Zone::Exile,
@@ -6045,6 +6139,7 @@ mod tests {
                 mana_value: 0,
                 has_x_in_cost: false,
                 from_zone: Zone::Hand,
+                cast_variant: crate::types::game_state::CastingVariant::Normal,
             }
         };
 
@@ -6442,6 +6537,7 @@ mod tests {
             mana_value: 7,
             has_x_in_cost: false,
             from_zone: Zone::Hand,
+            cast_variant: crate::types::game_state::CastingVariant::Normal,
         };
         let dragon_filter = make_subtype_filter("Dragon");
         let plains_filter = make_subtype_filter("Plains");

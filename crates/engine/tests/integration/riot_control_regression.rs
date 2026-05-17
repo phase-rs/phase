@@ -64,6 +64,7 @@ fn riot_control_chain_gains_life_and_prevents_damage() {
     let prevent = ResolvedAbility::new(
         Effect::PreventDamage {
             amount: PreventionAmount::All,
+            amount_dynamic: None,
             target: TargetFilter::Controller,
             scope: PreventionScope::AllDamage,
             damage_source_filter: None,

@@ -238,6 +238,12 @@ pub struct GameObject {
     pub id: ObjectId,
     pub card_id: CardId,
     pub owner: PlayerId,
+    /// CR 110.2a + CR 613.1b: The controller before continuous control effects
+    /// are applied. Usually the owner, but effects that put a permanent onto
+    /// the battlefield under another player's control set this as the permanent
+    /// enters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_controller: Option<PlayerId>,
     pub controller: PlayerId,
     pub zone: Zone,
 
@@ -700,6 +706,7 @@ impl GameObject {
             id,
             card_id,
             owner,
+            base_controller: Some(owner),
             controller: owner,
             zone,
             tapped: false,
@@ -816,6 +823,8 @@ impl GameObject {
     /// A permanent entering the battlefield is a new object with no memory of its previous
     /// existence. Callers that need enter_tapped=true override `tapped` after this call.
     pub fn reset_for_battlefield_entry(&mut self, turn_number: u32) {
+        self.base_controller = Some(self.owner);
+        self.controller = self.owner;
         self.entered_battlefield_turn = Some(turn_number);
         // CR 302.6: A permanent that enters the battlefield has not been
         // continuously under its controller's control since that player's
@@ -874,6 +883,7 @@ impl GameObject {
     /// Separate from entry reset because some state (counters, transform) is already handled
     /// by `apply_zone_exit_cleanup` in zones.rs.
     pub fn reset_for_battlefield_exit(&mut self) {
+        self.base_controller = Some(self.owner);
         // CR 701.37b: Monstrous designation clears when a permanent leaves the battlefield.
         self.monstrous = false;
         // CR 701.15a / CR 701.35a: Goad and detain are battlefield-only designations.
@@ -893,6 +903,11 @@ impl GameObject {
         // this permanent to the battlefield. When the permanent leaves, the value
         // is no longer meaningful; a re-cast will re-populate it via `finalize_cast`.
         self.cost_x_paid = None;
+        // CR 400.7 + CR 603.4: `cast_from_zone` records how this permanent
+        // arrived on the battlefield, kept alive so `WasCast` ETB intervening-if
+        // re-checks resolve correctly. A permanent that leaves the battlefield
+        // is a new object on any re-entry — clear the stale cast provenance.
+        self.cast_from_zone = None;
         self.convoked_creatures.clear();
         // CR 702.103f: `bestow_form` is intentionally NOT cleared here.
         // The zone-exit cleanup in `apply_zone_exit_cleanup` (zones.rs) reads

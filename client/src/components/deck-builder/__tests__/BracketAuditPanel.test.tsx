@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, fireEvent } from "@testing-library/react";
 import { BracketAuditPanel } from "../BracketAuditPanel";
-import type { BracketEstimate } from "../../../adapter/types";
+import type { BracketEstimate } from "../../../types/bracket";
 
 afterEach(cleanup);
 

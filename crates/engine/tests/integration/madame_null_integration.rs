@@ -5,8 +5,12 @@
 //!   Whenever another creature you control enters, you may pay life equal to
 //!   its power. If you do, put that many +1/+1 counters on it.
 //!
-//! These tests pin the `PayCost { Life(Ref(EventContextSourcePower)) }`
-//! resolution enabled by the PaymentCost::Life → QuantityExpr widening:
+//! These tests pin the
+//! `PayCost { Life(Ref(Power { scope: CostPaidObject })) }`
+//! resolution enabled by the PaymentCost::Life → QuantityExpr widening. The
+//! `CostPaidObject` scope resolves (CR 608.2k) via cost-paid object →
+//! trigger-event source → effect-context object; with no cost-paid object
+//! these tests exercise the trigger-event-source (slot 2) fallback:
 //!   - Live source: power read from `current_trigger_event`'s source object.
 //!   - LKI fallback (CR 400.7 / CR 608.2f): if the source has left its zone
 //!     between trigger firing and resolution, power is read from the LKI
@@ -23,7 +27,8 @@
 use engine::game::effects;
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityKind, Effect, PaymentCost, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter,
+    AbilityKind, Effect, ObjectScope, PaymentCost, QuantityExpr, QuantityRef, ResolvedAbility,
+    TargetFilter,
 };
 use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
@@ -54,7 +59,9 @@ fn build_madame_null_pay_chain(source_id: ObjectId, controller: PlayerId) -> Res
         Effect::PayCost {
             cost: PaymentCost::Life {
                 amount: QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextSourcePower,
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::CostPaidObject,
+                    },
                 },
             },
             payer: TargetFilter::Controller,
@@ -68,7 +75,8 @@ fn build_madame_null_pay_chain(source_id: ObjectId, controller: PlayerId) -> Res
 }
 
 /// Set up a ZoneChanged trigger event keyed on the entering creature so
-/// `EventContextSourcePower` resolves to that creature's printed power.
+/// `Power { scope: CostPaidObject }` resolves (via the trigger-event-source
+/// slot) to that creature's printed power.
 fn set_etb_event(state: &mut GameState, entering: ObjectId) {
     state.current_trigger_event = Some(GameEvent::ZoneChanged {
         object_id: entering,

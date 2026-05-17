@@ -10,9 +10,10 @@
 //! type-system lookup; there is no semantic translation. Cost/filter
 //! keywords need real conversion logic, so they land with their phase.
 
+use engine::types::ability::QuantityExpr;
 use engine::types::keywords::{
-    BloodthirstValue, BuybackCost, CyclingCost, FlashbackCost, HexproofFilter, ProtectionTarget,
-    WardCost,
+    ActivationCadence, BloodthirstValue, BuybackCost, CyclingCost, FlashbackCost, HexproofFilter,
+    ProtectionTarget, WardCost,
 };
 use engine::types::mana::ManaColor;
 use engine::types::Keyword;
@@ -111,7 +112,10 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
         Rule::Amplify(n) => Keyword::Amplify(non_negative(*n)?),
         Rule::Afterlife(n) => Keyword::Afterlife(non_negative(*n)?),
         Rule::Afflict(n) => Keyword::Afflict(non_negative(*n)?),
-        Rule::Crew(n) => Keyword::Crew(non_negative(*n)?),
+        Rule::Crew(n) => Keyword::Crew {
+            power: non_negative(*n)?,
+            once_per_turn: ActivationCadence::Unlimited,
+        },
         Rule::Fabricate(n) => Keyword::Fabricate(non_negative(*n)?),
         Rule::Fading(n) => Keyword::Fading(non_negative(*n)?),
         Rule::Graft(n) => Keyword::Graft(non_negative(*n)?),
@@ -313,7 +317,9 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
             }
         }
         // Firebending N — Avatar crossover. mtgish stores N as a GameNumber.
-        Rule::Firebending(g) => Keyword::Firebending(int_or_gap(g, "Rule::Firebending", path)?),
+        Rule::Firebending(g) => Keyword::Firebending(QuantityExpr::Fixed {
+            value: int_or_gap(g, "Rule::Firebending", path)? as i32,
+        }),
         // CR 702.81: Devour N — engine encodes only N (the "creatures you
         // sacrifice" filter is implicit).
         Rule::Devour(_perm, g) => Keyword::Devour(int_or_gap(g, "Rule::Devour", path)?),

@@ -346,6 +346,84 @@ fn archelos_untapped_makes_other_taplands_enter_untapped() {
     );
 }
 
+// ── Karoo self-ETB cost land integration tests ──
+
+const KAROO_LOTUS_VALE: &str = "If this land would enter, sacrifice two untapped \
+    lands instead. If you do, put this land onto the battlefield. If you don't, \
+    put it into its owner's graveyard.";
+
+/// CR 614.12a: declining a Karoo land's `MayCost` cost redirects the ETB to the
+/// owner's graveyard — the land never appears on the battlefield.
+#[test]
+fn karoo_land_decline_routes_to_graveyard() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let land_id = scenario
+        .add_land_to_hand(P0, "Lotus Vale")
+        .from_oracle_text(KAROO_LOTUS_VALE)
+        .id();
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&land_id].card_id;
+
+    runner
+        .act(GameAction::PlayLand {
+            object_id: land_id,
+            card_id,
+        })
+        .expect("play land should succeed");
+
+    let decline = replacement_choice_index(&runner, "Decline");
+    runner
+        .act(GameAction::ChooseReplacement { index: decline })
+        .expect("declining the Karoo cost should resolve");
+
+    let obj = &runner.state().objects[&land_id];
+    assert_eq!(
+        obj.zone,
+        Zone::Graveyard,
+        "a declined Karoo land must be routed to its owner's graveyard"
+    );
+}
+
+/// CR 614.12a: accepting a Karoo land's cost when it is unpayable (no untapped
+/// lands to sacrifice) falls through to the decline branch — the land still
+/// goes to the graveyard, never the battlefield.
+#[test]
+fn karoo_land_accept_with_unpayable_cost_routes_to_graveyard() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let land_id = scenario
+        .add_land_to_hand(P0, "Lotus Vale")
+        .from_oracle_text(KAROO_LOTUS_VALE)
+        .id();
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&land_id].card_id;
+
+    runner
+        .act(GameAction::PlayLand {
+            object_id: land_id,
+            card_id,
+        })
+        .expect("play land should succeed");
+
+    // Accept (index 0) — but no untapped lands exist to sacrifice.
+    let accept = replacement_choice_index(&runner, "Sacrifice");
+    runner
+        .act(GameAction::ChooseReplacement { index: accept })
+        .expect("accepting the Karoo cost should resolve");
+
+    let obj = &runner.state().objects[&land_id];
+    assert_eq!(
+        obj.zone,
+        Zone::Graveyard,
+        "an unpayable Karoo cost must fall through to the graveyard redirect"
+    );
+}
+
 #[test]
 fn archelos_tapped_makes_other_lands_enter_tapped() {
     let mut scenario = GameScenario::new();

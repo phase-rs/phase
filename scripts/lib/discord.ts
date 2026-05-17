@@ -50,27 +50,114 @@ export interface DiscordMessage {
   referenced_message_id: string | null;
 }
 
-export async function discordGet<T>(path: string): Promise<T> {
+async function discordRequest<T>(
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
+  path: string,
+  body?: unknown,
+): Promise<T | null> {
   const token = Bun.env.DISCORD_BOT_TOKEN;
   for (;;) {
     const response = await fetch(`${API}${path}`, {
-      headers: { Authorization: `Bot ${token}` },
+      method,
+      headers: {
+        Authorization: `Bot ${token}`,
+        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
     });
 
     if (response.status === 429) {
-      const body = (await response.json()) as { retry_after: number };
-      await Bun.sleep(Math.ceil(body.retry_after * 1000));
+      const retry = (await response.json()) as { retry_after: number };
+      await Bun.sleep(Math.ceil(retry.retry_after * 1000));
       continue;
     }
 
     if (!response.ok) {
       throw new Error(
-        `${response.status} ${response.statusText} for ${path}: ${await response.text()}`,
+        `${response.status} ${response.statusText} for ${method} ${path}: ${await response.text()}`,
       );
     }
 
+    if (response.status === 204) return null;
     return response.json() as Promise<T>;
   }
+}
+
+export async function discordGet<T>(path: string): Promise<T> {
+  return (await discordRequest<T>("GET", path)) as T;
+}
+
+// PUT /channels/{channel.id}/messages/{message.id}/reactions/{emoji}/@me — CR n/a, Discord API.
+// `channelId` is the thread id for thread reactions; emoji must be URL-encoded.
+export async function addReaction(
+  channelId: string,
+  messageId: string,
+  emoji: string,
+): Promise<void> {
+  const encoded = encodeURIComponent(emoji);
+  await discordRequest<null>(
+    "PUT",
+    `/channels/${channelId}/messages/${messageId}/reactions/${encoded}/@me`,
+  );
+}
+
+export interface DiscordPostedMessage {
+  id: string;
+  channel_id: string;
+}
+
+// DELETE /channels/{channel.id}/messages/{message.id}/reactions/{emoji}/@me
+export async function removeOwnReaction(
+  channelId: string,
+  messageId: string,
+  emoji: string,
+): Promise<void> {
+  const encoded = encodeURIComponent(emoji);
+  await discordRequest<null>(
+    "DELETE",
+    `/channels/${channelId}/messages/${messageId}/reactions/${encoded}/@me`,
+  );
+}
+
+// DELETE /channels/{channel.id}/messages/{message.id}
+export async function deleteMessage(
+  channelId: string,
+  messageId: string,
+): Promise<void> {
+  await discordRequest<null>(
+    "DELETE",
+    `/channels/${channelId}/messages/${messageId}`,
+  );
+}
+
+// PATCH /channels/{thread.id} — toggles archived state. Requires MANAGE_THREADS.
+// Used to unarchive a thread before writing into it (Discord rejects reactions
+// and messages on archived threads with error 50083).
+export async function setThreadArchived(
+  threadId: string,
+  archived: boolean,
+): Promise<void> {
+  await discordRequest<unknown>(
+    "PATCH",
+    `/channels/${threadId}`,
+    { archived },
+  );
+}
+
+// POST /channels/{channel.id}/messages — when `channelId` is a thread id, this posts inside the thread.
+export async function createMessage(
+  channelId: string,
+  content: string,
+): Promise<DiscordPostedMessage> {
+  const posted = await discordRequest<DiscordPostedMessage>(
+    "POST",
+    `/channels/${channelId}/messages`,
+    { content },
+  );
+  if (posted === null) {
+    throw new Error(`createMessage to channel ${channelId} returned no body`);
+  }
+  return posted;
 }
 
 export async function fetchActiveThreads(

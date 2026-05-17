@@ -1,7 +1,6 @@
-//! Bracket list data — hand-curated card names that drive the
-//! Commander bracket estimator (Game Changers / Mass Land Denial /
-//! Extra Turns / Efficient Tutors). Loaded once at `CardDatabase`
-//! construction from `data/bracket_lists.json`.
+//! Bracket list data — hand-curated card names that drive Commander bracket
+//! estimator axes not supplied by MTGJSON (Mass Land Denial / Extra Turns /
+//! Efficient Tutors). Game Changers come from MTGJSON `isGameChanger`.
 //!
 //! This is NOT a Comprehensive Rules artifact — the bracket system is
 //! WotC's Commander Format Panel policy, not part of the CR.
@@ -32,13 +31,12 @@ impl BracketSignals {
     }
 }
 
-/// The four name lists + a version tag, loaded from `data/bracket_lists.json`.
+/// The non-MTGJSON name lists + a version tag, loaded from `data/bracket_lists.json`.
 /// Names are stored lowercased for case-insensitive lookup.
 #[derive(Debug, Clone, Default)]
 pub struct BracketLists {
     pub version: String,
     pub source: String,
-    pub game_changers: HashSet<String>,
     pub mass_land_denial: HashSet<String>,
     pub extra_turns: HashSet<String>,
     pub efficient_tutors: HashSet<String>,
@@ -49,8 +47,6 @@ struct RawBracketLists {
     version: String,
     #[serde(default)]
     source: String,
-    #[serde(default)]
-    game_changers: Vec<String>,
     #[serde(default)]
     mass_land_denial: Vec<String>,
     #[serde(default)]
@@ -72,11 +68,6 @@ impl BracketLists {
         Ok(Self {
             version: parsed.version,
             source: parsed.source,
-            game_changers: parsed
-                .game_changers
-                .into_iter()
-                .map(|s| s.to_lowercase())
-                .collect(),
             mass_land_denial: parsed
                 .mass_land_denial
                 .into_iter()
@@ -100,7 +91,7 @@ impl BracketLists {
     pub fn signals_for(&self, name: &str) -> BracketSignals {
         let key = name.to_lowercase();
         BracketSignals {
-            game_changer: self.game_changers.contains(&key),
+            game_changer: false,
             mass_land_denial: self.mass_land_denial.contains(&key),
             extra_turn: self.extra_turns.contains(&key),
             efficient_tutor: self.efficient_tutors.contains(&key),
@@ -111,9 +102,8 @@ impl BracketLists {
     /// export pipeline to warn on names that don't match any printed card.
     pub fn all_names(&self) -> impl Iterator<Item = &str> {
         let mut seen = HashSet::new();
-        self.game_changers
+        self.mass_land_denial
             .iter()
-            .chain(self.mass_land_denial.iter())
             .chain(self.extra_turns.iter())
             .chain(self.efficient_tutors.iter())
             .filter(move |s| seen.insert(s.as_str()))
@@ -128,7 +118,6 @@ mod tests {
     const SAMPLE: &str = r#"{
         "version": "test-1",
         "source": "test",
-        "game_changers": ["Sol Ring", "Smothering Tithe"],
         "mass_land_denial": ["Armageddon"],
         "extra_turns": ["Time Warp"],
         "efficient_tutors": ["Demonic Tutor", "Vampiric Tutor"]
@@ -138,7 +127,6 @@ mod tests {
     fn parses_version_and_lists() {
         let lists = BracketLists::from_json_str(SAMPLE).unwrap();
         assert_eq!(lists.version, "test-1");
-        assert_eq!(lists.game_changers.len(), 2);
         assert_eq!(lists.efficient_tutors.len(), 2);
     }
 
@@ -153,10 +141,10 @@ mod tests {
     }
 
     #[test]
-    fn signals_for_card_on_multiple_lists() {
+    fn signals_for_game_changer_is_not_curated() {
         let lists = BracketLists::from_json_str(SAMPLE).unwrap();
         let sig = lists.signals_for("Sol Ring");
-        assert!(sig.game_changer);
+        assert!(!sig.game_changer);
         assert!(!sig.efficient_tutor);
     }
 
@@ -178,6 +166,6 @@ mod tests {
     fn all_names_iterates_every_list() {
         let lists = BracketLists::from_json_str(SAMPLE).unwrap();
         let count = lists.all_names().count();
-        assert_eq!(count, 6);
+        assert_eq!(count, 4);
     }
 }

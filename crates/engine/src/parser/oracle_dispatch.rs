@@ -1,4 +1,4 @@
-use crate::types::ability::{AbilityDefinition, AbilityKind, Effect};
+use crate::types::ability::{AbilityDefinition, AbilityKind, Effect, TargetFilter};
 
 use super::oracle::has_unimplemented;
 use super::oracle_classifier::{
@@ -8,12 +8,22 @@ use super::oracle_classifier::{
 use super::oracle_effect::parse_effect_chain_with_context;
 use super::oracle_ir::context::ParseContext;
 
-pub(super) fn dispatch_line_nom(line: &str, card_name: &str) -> Effect {
+/// CR 303.4 + CR 702.103: `host_self_reference` carries the enclosing card's
+/// typed attachment-host self-reference (set by `parse_oracle_ir` for
+/// Aura/bestow cards) so a `"that creature"` copy-token anaphor dispatched
+/// through this nom path remaps to the enchanted host. `None` for non-Aura
+/// cards leaves `ParentTarget` semantics intact.
+pub(super) fn dispatch_line_nom(
+    line: &str,
+    card_name: &str,
+    host_self_reference: Option<TargetFilter>,
+) -> Effect {
     let lower = line.to_lowercase();
     let mut ctx = ParseContext {
         subject: None,
         card_name: Some(card_name.to_string()),
         actor: None,
+        host_self_reference,
         ..Default::default()
     };
 

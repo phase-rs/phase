@@ -1,5 +1,5 @@
 use indexmap::IndexMap;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, CombatDamageScope, ControllerRef, DamageModification,
@@ -100,7 +100,7 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
                         .and_then(|obj| obj.replacement_definitions.get(p.candidates[0].index))
                         .map(|repl| match &repl.mode {
                             ReplacementMode::MayCost { cost, .. } => {
-                                format!("Pay {}", replacement_cost_description(cost))
+                                replacement_cost_description(cost)
                             }
                             ReplacementMode::Mandatory | ReplacementMode::Optional { .. } => repl
                                 .description
@@ -133,11 +133,46 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
     }
 }
 
+/// CR 614.12a: Human-readable accept-label for a `MayCost` replacement prompt.
+/// Returns a complete imperative phrase (the caller no longer prepends "Pay ")
+/// so non-mana costs read naturally. Exhaustive — a new `AbilityCost` variant
+/// forces a deliberate label decision here.
 fn replacement_cost_description(cost: &AbilityCost) -> String {
     match cost {
-        AbilityCost::Mana { cost } => format!("{cost:?}"),
-        AbilityCost::PayLife { amount } => format!("{amount:?} life"),
-        _ => "cost".to_string(),
+        AbilityCost::Mana { cost } => format!("Pay {cost:?}"),
+        AbilityCost::PayLife { amount } => format!("Pay {amount:?} life"),
+        // CR 614.12a: Karoo self-ETB cost lands.
+        AbilityCost::Sacrifice { count, .. } => {
+            if *count == 1 {
+                "Sacrifice a permanent".to_string()
+            } else {
+                format!("Sacrifice {count} permanents")
+            }
+        }
+        AbilityCost::Discard { .. } => "Discard a card".to_string(),
+        AbilityCost::ManaDynamic { .. }
+        | AbilityCost::Tap
+        | AbilityCost::Untap
+        | AbilityCost::Loyalty { .. }
+        | AbilityCost::Exile { .. }
+        | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::TapCreatures { .. }
+        | AbilityCost::RemoveCounter { .. }
+        | AbilityCost::PayEnergy { .. }
+        | AbilityCost::PaySpeed { .. }
+        | AbilityCost::ReturnToHand { .. }
+        | AbilityCost::Unattach
+        | AbilityCost::Mill { .. }
+        | AbilityCost::Exert
+        | AbilityCost::Blight { .. }
+        | AbilityCost::Reveal { .. }
+        | AbilityCost::Behold { .. }
+        | AbilityCost::Composite { .. }
+        | AbilityCost::OneOf { .. }
+        | AbilityCost::Waterbend { .. }
+        | AbilityCost::NinjutsuFamily { .. }
+        | AbilityCost::EffectCost { .. }
+        | AbilityCost::Unimplemented { .. } => "Pay cost".to_string(),
     }
 }
 
@@ -381,6 +416,13 @@ fn damage_done_applier(
         {
             let prevented_amount;
             let result;
+            // CR 510.2 + CR 615.7: A `Prevention::All` shield encountered during a
+            // simultaneous combat-damage batch defers its prevented-amount
+            // bookkeeping to the post-batch aggregate. While the batch tally is
+            // active, this branch accumulates per-shield and the combat resolver
+            // emits a single `DamagePrevented` + fires the rider once for the
+            // whole batch. `Prevention::Next(N)` keeps the per-event path.
+            let mut accumulated_in_batch = false;
 
             match amount {
                 PreventionAmount::All => {
@@ -398,6 +440,14 @@ fn damage_done_applier(
                     // events in the same turn re-fire the prevention.
                     prevented_amount = dmg;
                     result = ApplyResult::Prevented;
+                    // CR 510.2 + CR 615.7: In a combat-damage batch, route the
+                    // prevented amount into the per-shield aggregate keyed by
+                    // `rid`. The single rider firing happens post-batch in
+                    // `combat_damage.rs` against the summed total.
+                    if let Some(tally) = state.combat_prevention_tally.as_mut() {
+                        *tally.entry(rid).or_insert(0) += prevented_amount as i32;
+                        accumulated_in_batch = true;
+                    }
                 }
                 PreventionAmount::Next(n) => {
                     // CR 615.7: Each 1 damage prevented reduces the remaining shield by 1.
@@ -431,8 +481,13 @@ fn damage_done_applier(
                 }
             }
 
-            // Emit DamagePrevented event for "when damage is prevented" triggers
-            if prevented_amount > 0 {
+            // Emit DamagePrevented event for "when damage is prevented" triggers.
+            // CR 510.2 + CR 615.13: When this prevention was accumulated into the
+            // combat-damage batch tally, the single `DamagePrevented` event and
+            // `last_effect_count` stamp are deferred to the post-batch step in
+            // `combat_damage.rs` — emitting them per-source here would fragment
+            // the rider's `EventContextAmount` across attackers.
+            if prevented_amount > 0 && !accumulated_in_batch {
                 events.push(GameEvent::DamagePrevented {
                     source_id,
                     target,
@@ -713,6 +768,16 @@ fn resolve_event_replacement_quantity(expr: &QuantityExpr, event_count: u32) -> 
         QuantityExpr::Power { base, exponent } => {
             let exp = resolve_event_replacement_quantity(exponent, event_count)?.max(0) as u32;
             Some(base.saturating_pow(exp))
+        }
+        // "The difference between A and B" being unsigned is an Oracle
+        // templating convention with no dedicated CR number — resolves to the
+        // absolute value of the gap. (CR 107.1b is distinct: it clamps a
+        // negative result to zero, not the operand-order-independent magnitude
+        // taken here.)
+        QuantityExpr::Difference { left, right } => {
+            let l = resolve_event_replacement_quantity(left, event_count)?;
+            let r = resolve_event_replacement_quantity(right, event_count)?;
+            Some((l - r).abs())
         }
         QuantityExpr::Ref { .. } => None,
     }
@@ -2035,6 +2100,12 @@ fn evaluate_replacement_condition(
                 Some(ControllerRef::TargetPlayer) => false,
                 Some(ControllerRef::ParentTargetController) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
+                // CR 109.4: Chosen-player scope is undefined at replacement-check
+                // time (no resolution context). Fail closed.
+                Some(ControllerRef::ChosenPlayer { .. }) => false,
+                // CR 603.2 + CR 109.4: Triggering-player scope is undefined at
+                // replacement-check time (no event context). Fail closed.
+                Some(ControllerRef::TriggeringPlayer) => false,
                 None => true,
             };
             if !turn_ok {
@@ -2061,6 +2132,12 @@ fn evaluate_replacement_condition(
                 Some(ControllerRef::TargetPlayer) => false,
                 Some(ControllerRef::ParentTargetController) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
+                // CR 109.4: Chosen-player scope is undefined at replacement-check
+                // time (no resolution context). Fail closed.
+                Some(ControllerRef::ChosenPlayer { .. }) => false,
+                // CR 603.2 + CR 109.4: Triggering-player scope is undefined at
+                // replacement-check time (no event context). Fail closed.
+                Some(ControllerRef::TriggeringPlayer) => false,
                 None => true,
             };
             if !turn_ok {
@@ -2078,6 +2155,13 @@ fn evaluate_replacement_condition(
             .objects
             .get(&source_id)
             .is_some_and(|o| o.cast_from_zone == Some(Zone::Graveyard)),
+        // CR 702.188a: applies only when the source permanent's spell was cast
+        // using the named alternative cost. Mirrors
+        // `TriggerCondition::CastVariantPaid` (triggers.rs).
+        ReplacementCondition::CastVariantPaid { variant } => state
+            .objects
+            .get(&source_id)
+            .is_some_and(|o| o.cast_variant_paid == Some((*variant, state.turn_number))),
         // CR 603.4: "if you cast it from [zone]" — applies only when the source
         // permanent was cast from the gated zone. Equivalent to CastViaEscape
         // for arbitrary zones (Hand for Myojin, Exile for foretell-style, etc.).
@@ -2171,7 +2255,9 @@ fn evaluate_replacement_condition(
                 ControllerRef::ScopedPlayer
                 | ControllerRef::TargetPlayer
                 | ControllerRef::ParentTargetController
-                | ControllerRef::DefendingPlayer => false,
+                | ControllerRef::DefendingPlayer
+                | ControllerRef::ChosenPlayer { .. }
+                | ControllerRef::TriggeringPlayer => false,
             }
         }
         // CR 500.7 + CR 614.10: Replacement applies only for extra turns.
@@ -2407,6 +2493,13 @@ pub fn find_applicable_replacements(
                                     false
                                 }
                                 crate::types::ability::ControllerRef::DefendingPlayer => false,
+                                // CR 109.4: Chosen-player scope has no meaning
+                                // for static token-creation replacements.
+                                crate::types::ability::ControllerRef::ChosenPlayer { .. } => false,
+                                // CR 603.2 + CR 109.4: Triggering-player scope
+                                // has no meaning for static token-creation
+                                // replacements. Fail closed.
+                                crate::types::ability::ControllerRef::TriggeringPlayer => false,
                             };
                             if !matches {
                                 continue;
@@ -2422,20 +2515,17 @@ pub fn find_applicable_replacements(
                     | ProposedEvent::Mill { player_id, .. } = event
                     {
                         let player_ok = match &repl_def.valid_player {
-                            Some(crate::types::ability::ControllerRef::Opponent) => {
+                            // CR 614.1a: opponent-scoped replacement (Tainted Remedy).
+                            Some(crate::types::ability::ReplacementPlayerScope::Opponent) => {
                                 *player_id != obj.controller
                             }
-                            Some(crate::types::ability::ControllerRef::You) => {
+                            // Explicit controller scope.
+                            Some(crate::types::ability::ReplacementPlayerScope::You) => {
                                 *player_id == obj.controller
                             }
-                            // CR 109.4: Target-player scope has no meaning at
-                            // replacement-application time. Fail closed.
-                            Some(crate::types::ability::ControllerRef::ScopedPlayer) => false,
-                            Some(crate::types::ability::ControllerRef::TargetPlayer) => false,
-                            Some(crate::types::ability::ControllerRef::ParentTargetController) => {
-                                false
-                            }
-                            Some(crate::types::ability::ControllerRef::DefendingPlayer) => false,
+                            // CR 614.1a: all-players replacement (Rain of Gore) —
+                            // applies regardless of who controls the source.
+                            Some(crate::types::ability::ReplacementPlayerScope::AnyPlayer) => true,
                             None => {
                                 // Default: controller-only (backward compatible)
                                 *player_id == obj.controller
@@ -2980,8 +3070,22 @@ fn apply_single_replacement(
                 ReplacementBranch::Execute => repl_def.execute.as_deref(),
                 ReplacementBranch::Decline => replacement_mode_decline(&repl_def.mode),
             };
+            // CR 510.2 + CR 615.13: A `Prevention::All` shield firing inside an
+            // active combat-damage batch must NOT stash its rider per-source —
+            // the rider fires once post-batch (`combat_damage.rs`) against the
+            // summed prevented amount. Suppress the per-event stash here so the
+            // batch step owns the single continuation.
+            let batched_combat_all_shield = state.combat_prevention_tally.is_some()
+                && matches!(
+                    repl_def.shield_kind,
+                    ShieldKind::Prevention {
+                        amount: PreventionAmount::All
+                    }
+                );
             let post_effect = match (branch, &repl_def.mode) {
-                (ReplacementBranch::Execute, ReplacementMode::Mandatory) => {
+                (ReplacementBranch::Execute, ReplacementMode::Mandatory)
+                    if !batched_combat_all_shield =>
+                {
                     // CR 615.5: Damage prevention follow-ups (e.g. Phyrexian
                     // Hydra's "Put a -1/-1 counter on ~ for each 1 damage
                     // prevented this way") must always stash as a post-effect
@@ -3202,6 +3306,78 @@ pub fn replace_event(
     pipeline_loop(state, proposed, 0, &registry, events)
 }
 
+/// CR 510.2 + CR 615.7 + CR 615.13: Run the replacement pipeline over a whole
+/// simultaneous combat-damage batch.
+///
+/// Each proposed `Damage` event is passed through `replace_event` individually
+/// (the pipeline is inherently per-event), but for the duration of the batch
+/// `state.combat_prevention_tally` is active: the damage-replacement applier's
+/// `Prevention::All` branch routes each prevented amount into a per-shield
+/// aggregate keyed by `ReplacementId` instead of stamping `last_effect_count`
+/// or emitting a per-source `DamagePrevented`. `Prevention::Next(N)` shields
+/// keep the existing per-event sequential path — depletion-style shields are
+/// not aggregated here.
+///
+/// `// strict-failure: CR 615.7 multi-source Next(N) prevention requires a
+/// player choice — out of scope (#314 is Prevention::All)`. When two or more
+/// `Next(N)` shields apply to the same simultaneous batch, CR 615.7 requires
+/// the shielded player to choose which damage each shield prevents; that
+/// player-choice path is not modeled — the shields apply per-event in pipeline
+/// order instead.
+///
+/// Returns a vector aligned 1:1 with `proposed`: `Some(event)` is a survivor
+/// post-replacement `Damage` event for `combat_damage.rs` Phase C to apply;
+/// `None` means that source's damage was fully prevented or skipped. The
+/// `HashMap` is the per-`Prevention::All`-shield aggregate prevented amount.
+pub(crate) fn replace_combat_damage_batch(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    proposed: Vec<ProposedEvent>,
+) -> (Vec<Option<ProposedEvent>>, HashMap<ReplacementId, i32>) {
+    let registry = build_replacement_registry();
+
+    // CR 510.2: Activate the batch tally so the applier aggregates per shield.
+    let restore_tally = state.combat_prevention_tally.take();
+    state.combat_prevention_tally = Some(HashMap::new());
+
+    let mut survivors = Vec::with_capacity(proposed.len());
+    for event in proposed {
+        let result = pipeline_loop(state, event, 0, &registry, events);
+        // CR 615.5: A `Prevention::Next(N)` shield's rider is stashed per-event
+        // by the applier (the `Prevention::All` batch path suppresses its stash
+        // and fires once post-batch instead). Resolve any such per-event
+        // continuation inline — for both full prevention (`Prevented`) and
+        // partial prevention (`Modified` → `Execute`) — so a depletion-shield
+        // rider fires "immediately afterward" and never leaks past the batch.
+        if !matches!(result, ReplacementResult::NeedsChoice(_))
+            && state.post_replacement_continuation.is_some()
+        {
+            let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+                state, None, None, events,
+            );
+        }
+        match result {
+            ReplacementResult::Execute(survivor) => survivors.push(Some(survivor)),
+            ReplacementResult::Prevented => {
+                survivors.push(None);
+            }
+            ReplacementResult::NeedsChoice(_) => {
+                // CR 510.2: Combat damage cannot pause for a replacement
+                // ordering choice. Mirror the legacy per-event behavior
+                // (`apply_damage_to_target`'s combat `NeedsChoice` arm) — skip
+                // this source's damage. Clear the pending pause so it does not
+                // leak out of the batch.
+                state.pending_replacement = None;
+                survivors.push(None);
+            }
+        }
+    }
+
+    let tally = state.combat_prevention_tally.take().unwrap_or_default();
+    state.combat_prevention_tally = restore_tally;
+    (survivors, tally)
+}
+
 pub fn continue_replacement(
     state: &mut GameState,
     chosen_index: usize,
@@ -3334,8 +3510,8 @@ mod tests {
     use crate::game::effects::token::apply_create_token_after_replacement;
     use crate::game::game_object::{AttachTarget, GameObject};
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, GainLifePlayer,
-        QuantityExpr, ReplacementDefinition, TargetFilter, TargetRef,
+        AbilityCost, AbilityDefinition, AbilityKind, Effect, GainLifePlayer, QuantityExpr,
+        ReplacementDefinition, ReplacementPlayerScope, TargetFilter, TargetRef,
     };
     use crate::types::game_state::DamageRecord;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -3851,7 +4027,7 @@ mod tests {
                     destination: Zone::Graveyard,
                 },
             ));
-        repl.valid_player = Some(ControllerRef::Opponent);
+        repl.valid_player = Some(ReplacementPlayerScope::Opponent);
         let state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
         let registry = build_replacement_registry();
 
@@ -3872,6 +4048,49 @@ mod tests {
         assert_eq!(
             find_applicable_replacements(&state, &opponent_event, &registry).len(),
             1
+        );
+    }
+
+    /// CR 614.1a: a `valid_player: Some(AnyPlayer)` replacement (Rain of Gore)
+    /// applies to EVERY player's event — both the source controller's and a
+    /// non-controller's. The non-controller case is the bug all-players scope
+    /// fixes (the controller-only default would have skipped it).
+    #[test]
+    fn any_player_gain_life_replacement_applies_to_every_player() {
+        let mut repl =
+            ReplacementDefinition::new(ReplacementEvent::GainLife).execute(AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Spell,
+                Effect::LoseLife {
+                    amount: QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::EventContextAmount,
+                    },
+                    target: Some(TargetFilter::Controller),
+                },
+            ));
+        repl.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
+        let state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
+        let registry = build_replacement_registry();
+
+        let controller_event = ProposedEvent::LifeGain {
+            player_id: PlayerId(0),
+            amount: 3,
+            applied: HashSet::new(),
+        };
+        let opponent_event = ProposedEvent::LifeGain {
+            player_id: PlayerId(1),
+            amount: 3,
+            applied: HashSet::new(),
+        };
+
+        assert_eq!(
+            find_applicable_replacements(&state, &controller_event, &registry).len(),
+            1,
+            "AnyPlayer scope must apply to the source controller"
+        );
+        assert_eq!(
+            find_applicable_replacements(&state, &opponent_event, &registry).len(),
+            1,
+            "AnyPlayer scope must also apply to a non-controller (the fixed bug)"
         );
     }
 
@@ -4504,6 +4723,57 @@ mod tests {
         ));
         assert!(!evaluate_replacement_condition(
             &ReplacementCondition::SourceTappedState { tapped: false },
+            PlayerId(0),
+            ObjectId(10),
+            &state,
+            None,
+            &dummy_begin_turn_event(),
+        ));
+    }
+
+    #[test]
+    fn cast_variant_paid_condition_matches_web_slinging_tag() {
+        // CR 702.188a: Scarlet Spider's "Sensational Save" replacement applies
+        // only when the source's spell was cast using web-slinging.
+        use crate::types::ability::CastVariantPaid;
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, Vec::new());
+        let cond = ReplacementCondition::CastVariantPaid {
+            variant: CastVariantPaid::WebSlinging,
+        };
+
+        // Untagged (cast normally) → condition false, no counters.
+        assert!(!evaluate_replacement_condition(
+            &cond,
+            PlayerId(0),
+            ObjectId(10),
+            &state,
+            None,
+            &dummy_begin_turn_event(),
+        ));
+
+        // Tagged this turn with web-slinging → condition true.
+        state
+            .objects
+            .get_mut(&ObjectId(10))
+            .unwrap()
+            .cast_variant_paid = Some((CastVariantPaid::WebSlinging, state.turn_number));
+        assert!(evaluate_replacement_condition(
+            &cond,
+            PlayerId(0),
+            ObjectId(10),
+            &state,
+            None,
+            &dummy_begin_turn_event(),
+        ));
+
+        // Tagged with a different variant → condition false.
+        state
+            .objects
+            .get_mut(&ObjectId(10))
+            .unwrap()
+            .cast_variant_paid = Some((CastVariantPaid::Evoke, state.turn_number));
+        assert!(!evaluate_replacement_condition(
+            &cond,
             PlayerId(0),
             ObjectId(10),
             &state,

@@ -287,6 +287,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::None => "none".into(),
         TargetFilter::Any => "any target".into(),
         TargetFilter::Player => "player".into(),
+        TargetFilter::AllPlayers => "any player".into(),
         TargetFilter::Controller => "controller".into(),
         TargetFilter::OriginalController => "original controller".into(),
         TargetFilter::ScopedPlayer => "scoped player".into(),
@@ -455,6 +456,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     ControllerRef::TargetPlayer => "target player's",
                     ControllerRef::ParentTargetController => "parent target's",
                     ControllerRef::DefendingPlayer => "defending player's",
+                    ControllerRef::ChosenPlayer { .. } => "chosen player's",
+                    ControllerRef::TriggeringPlayer => "triggering player's",
                 };
                 let zone_str = format!("{zone:?}").to_lowercase();
                 parts.push(format!(
@@ -559,6 +562,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 ControllerRef::TargetPlayer => "target player",
                 ControllerRef::ParentTargetController => "parent target's controller",
                 ControllerRef::DefendingPlayer => "defending player",
+                ControllerRef::ChosenPlayer { .. } => "chosen player",
+                ControllerRef::TriggeringPlayer => "triggering player",
             };
             parts.push(label.into());
         } else {
@@ -624,6 +629,8 @@ fn fmt_controller(ctrl: &ControllerRef) -> String {
         ControllerRef::TargetPlayer => "target player controls",
         ControllerRef::ParentTargetController => "parent target's controller controls",
         ControllerRef::DefendingPlayer => "defending player controls",
+        ControllerRef::ChosenPlayer { .. } => "chosen player controls",
+        ControllerRef::TriggeringPlayer => "triggering player controls",
     }
     .into()
 }
@@ -669,6 +676,9 @@ fn fmt_quantity(q: &QuantityExpr) -> String {
         QuantityExpr::UpTo { max } => format!("up to {}", fmt_quantity(max)),
         QuantityExpr::Power { base, exponent } => {
             format!("{}^{}", base, fmt_quantity(exponent))
+        }
+        QuantityExpr::Difference { left, right } => {
+            format!("|{} - {}|", fmt_quantity(left), fmt_quantity(right))
         }
     }
 }
@@ -751,7 +761,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::LifeTotal { player } => {
             format!("life total ({})", fmt_player_scope(*player))
         }
-        QuantityRef::GraveyardSize => "cards in graveyard".into(),
+        QuantityRef::GraveyardSize { player } => {
+            format!("cards in graveyard ({})", fmt_player_scope(*player))
+        }
         QuantityRef::LifeAboveStarting => "life above starting".into(),
         QuantityRef::StartingLifeTotal => "starting life total".into(),
         QuantityRef::Speed => "speed".into(),
@@ -798,21 +810,21 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::Target => "target's power".into(),
             ObjectScope::Recipient => "recipient's power".into(),
             ObjectScope::EventSource => "event source's power".into(),
-            ObjectScope::CostPaidObject => "cost-paid object's power".into(),
+            ObjectScope::CostPaidObject => "referenced object's power".into(),
         },
         QuantityRef::Toughness { scope } => match scope {
             ObjectScope::Source => "self toughness".into(),
             ObjectScope::Target => "target's toughness".into(),
             ObjectScope::Recipient => "recipient's toughness".into(),
             ObjectScope::EventSource => "event source's toughness".into(),
-            ObjectScope::CostPaidObject => "cost-paid object's toughness".into(),
+            ObjectScope::CostPaidObject => "referenced object's toughness".into(),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
             ObjectScope::Source => "self mana value".into(),
             ObjectScope::Target => "target's mana value".into(),
             ObjectScope::Recipient => "recipient's mana value".into(),
             ObjectScope::EventSource => "event source's mana value".into(),
-            ObjectScope::CostPaidObject => "cost-paid object's mana value".into(),
+            ObjectScope::CostPaidObject => "referenced object's mana value".into(),
         },
         QuantityRef::ObjectColorCount { scope } => match scope {
             ObjectScope::Source => "self colors".into(),
@@ -914,9 +926,6 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             format!("life lost this turn ({})", fmt_player_scope(*player))
         }
         QuantityRef::EventContextAmount => "event amount".into(),
-        QuantityRef::EventContextSourcePower => "source's power".into(),
-        QuantityRef::EventContextSourceToughness => "source's toughness".into(),
-        QuantityRef::EventContextSourceManaValue => "source's mana value".into(),
         QuantityRef::SpellsCastThisTurn { scope, filter } => match filter {
             Some(filter) => format!(
                 "{} spells cast this turn ({})",
@@ -1814,6 +1823,20 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("count".into(), count.to_string()));
             d.push(("zone".into(), fmt_zone(zone)));
         }
+        Effect::ChooseObjectsIntoTrackedSet {
+            chooser,
+            filter,
+            min,
+            max,
+        } => {
+            d.push(("chooser".into(), fmt_target(chooser)));
+            d.push(("filter".into(), fmt_target(filter)));
+            d.push(("min".into(), min.to_string()));
+            d.push((
+                "max".into(),
+                max.map_or_else(|| "any".to_string(), |m| m.to_string()),
+            ));
+        }
         Effect::GainEnergy { amount } => {
             d.push(("amount".into(), fmt_quantity(amount)));
         }
@@ -2194,6 +2217,13 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::RemoveSubtype { subtype } => {
             format!("remove subtype {subtype}")
         }
+        ContinuousModification::SetCardTypes { core_types } => {
+            let types: Vec<_> = core_types.iter().map(fmt_core_type).collect();
+            format!("set card types {}", types.join("/"))
+        }
+        ContinuousModification::RemoveAllSubtypes { set } => {
+            format!("remove all {set:?} subtypes")
+        }
         ContinuousModification::SetDynamicPower { .. } => "dynamic power".into(),
         ContinuousModification::SetDynamicToughness { .. } => "dynamic toughness".into(),
         ContinuousModification::SetPowerDynamic { .. } => "set base power dynamic".into(),
@@ -2218,6 +2248,7 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
             format!("add color {}", fmt_mana_color_full(color))
         }
         ContinuousModification::AddStaticMode { mode } => format!("{mode}"),
+        ContinuousModification::GrantStaticAbility { .. } => "grant static ability".into(),
         ContinuousModification::SwitchPowerToughness => "switch P/T".into(),
         ContinuousModification::AssignDamageFromToughness => "damage from toughness".into(),
         ContinuousModification::AssignDamageAsThoughUnblocked => {
@@ -4214,7 +4245,7 @@ fn collect_ability_cost_missing_parts(cost: &AbilityCost, missing: &mut Vec<Stri
 pub struct ResolverFeature {
     /// Broad category: "structural", "condition", "quantity_ref"
     pub category: String,
-    /// Specific feature tag, e.g. "else_ability", "QuantityCheck", "EventContextSourcePower"
+    /// Specific feature tag, e.g. "else_ability", "QuantityCheck", "CostPaidObjectPower"
     pub feature: String,
 }
 
@@ -4685,6 +4716,10 @@ fn extract_quantity_features(qty: &QuantityExpr, features: &mut HashMap<String, 
         }
         QuantityExpr::UpTo { max } => extract_quantity_features(max, features),
         QuantityExpr::Power { exponent, .. } => extract_quantity_features(exponent, features),
+        QuantityExpr::Difference { left, right } => {
+            extract_quantity_features(left, features);
+            extract_quantity_features(right, features);
+        }
     }
 }
 
@@ -4748,6 +4783,13 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::TargetHasKeywordInstead { .. } => ("TargetHasKeywordInstead", Handled),
         // CR 608.2c: active-player check; handled by `evaluate_condition` (effects/mod.rs).
         AbilityCondition::IsYourTurn => ("IsYourTurn", Handled),
+        // CR 103.1: starting-player check; handled by `evaluate_condition` (effects/mod.rs).
+        AbilityCondition::WasStartingPlayer { .. } => ("WasStartingPlayer", Handled),
+        // CR 702.185c: "a spell was warped this turn"; handled by
+        // `evaluate_condition` (effects/mod.rs).
+        AbilityCondition::SpellCastWithVariantThisTurn { .. } => {
+            ("SpellCastWithVariantThisTurn", Handled)
+        }
         // CR 500.8 + CR 506.1 + CR 608.2c: combat-phase count check; handled by
         // `evaluate_condition` (effects/mod.rs).
         AbilityCondition::FirstCombatPhaseOfTurn => ("FirstCombatPhaseOfTurn", Handled),
@@ -4795,7 +4837,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
     match qref {
         QuantityRef::HandSize { .. } => ("HandSize", Handled),
         QuantityRef::LifeTotal { .. } => ("LifeTotal", Handled),
-        QuantityRef::GraveyardSize => ("GraveyardSize", Handled),
+        QuantityRef::GraveyardSize { .. } => ("GraveyardSize", Handled),
         QuantityRef::LifeAboveStarting => ("LifeAboveStarting", Handled),
         QuantityRef::StartingLifeTotal => ("StartingLifeTotal", Unhandled),
         QuantityRef::Speed => ("Speed", Handled),
@@ -4862,9 +4904,6 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::ExiledFromHandThisResolution => ("ExiledFromHandThisResolution", Handled),
         QuantityRef::LifeLostThisTurn { .. } => ("LifeLostThisTurn", Handled),
         QuantityRef::EventContextAmount => ("EventContextAmount", Handled),
-        QuantityRef::EventContextSourcePower => ("EventContextSourcePower", Handled),
-        QuantityRef::EventContextSourceToughness => ("EventContextSourceToughness", Handled),
-        QuantityRef::EventContextSourceManaValue => ("EventContextSourceManaValue", Handled),
         QuantityRef::SpellsCastThisTurn { .. } => ("SpellsCastThisTurn", Handled),
         QuantityRef::EnteredThisTurn { .. } => ("EnteredThisTurn", Handled),
         QuantityRef::SacrificedThisTurn { .. } => ("SacrificedThisTurn", Handled),
@@ -4960,8 +4999,16 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::SourceIsBlocking => ("SourceIsBlocking", Unhandled),
         StaticCondition::SourceIsBlocked => ("SourceIsBlocked", Unhandled),
         StaticCondition::IsMonarch => ("IsMonarch", Handled),
+        StaticCondition::NoMonarch => ("NoMonarch", Handled),
         StaticCondition::HasCityBlessing => ("HasCityBlessing", Handled),
         StaticCondition::CompletedADungeon => ("CompletedADungeon", Unhandled),
+        // CR 103.1: bridges to Ability/Trigger `WasStartingPlayer`, both runtime-handled.
+        StaticCondition::WasStartingPlayer { .. } => ("WasStartingPlayer", Handled),
+        // CR 702.185c: "a spell was warped this turn"; bridges to Ability/Trigger
+        // `SpellCastWithVariantThisTurn`, both runtime-handled.
+        StaticCondition::SpellCastWithVariantThisTurn { .. } => {
+            ("SpellCastWithVariantThisTurn", Handled)
+        }
         StaticCondition::OpponentPoisonAtLeast { .. } => ("OpponentPoisonAtLeast", Unhandled),
         StaticCondition::UnlessPay { .. } => ("UnlessPay", Handled),
         StaticCondition::ControlsCommander => ("ControlsCommander", Unhandled),
@@ -4972,6 +5019,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::SourceIsPaired => ("SourceIsPaired", Handled),
         StaticCondition::SourceInZone { .. } => ("SourceInZone", Unhandled),
         StaticCondition::EnchantedIsFaceDown => ("EnchantedIsFaceDown", Handled),
+        StaticCondition::AdditionalCostPaid => ("AdditionalCostPaid", Handled),
     }
 }
 
@@ -6145,6 +6193,10 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             },
             StaticMode::CanAttackWithDefender => {
                 effective_lower.contains("as though it didn't have defender")
+            }
+            StaticMode::CanActivateAbilitiesAsThoughHaste => {
+                effective_lower.contains("as though those creatures had haste")
+                    || effective_lower.contains("as though that creature had haste")
             }
             _ => false,
         });
@@ -8486,6 +8538,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::PreventDamage {
                     amount: PreventionAmount::All,
+                    amount_dynamic: None,
                     target: TargetFilter::Any,
                     scope: PreventionScope::AllDamage,
                     damage_source_filter: None,
