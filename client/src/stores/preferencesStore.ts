@@ -114,6 +114,7 @@ function buildDefaultPreferences(): PreferencesState {
     battlefieldCardDisplay: "art_crop",
     tapRotation: "mtga",
     showKeywordStrip: true,
+    battlefieldPeekOnHover: true,
     aiSeats: [defaultAiSeat()],
     aiArchetypeFilter: "Any",
     aiCoverageFloor: DEFAULT_AI_COVERAGE_FLOOR,
@@ -155,6 +156,10 @@ interface PreferencesState {
   battlefieldCardDisplay: BattlefieldCardDisplay;
   tapRotation: TapRotation;
   showKeywordStrip: boolean;
+  /** When true, hovering an unfocused opponent's tab opens a small popover
+   *  previewing that opponent's nonland permanents. Disable for a quieter
+   *  HUD — focus is still reachable via tab click. */
+  battlefieldPeekOnHover: boolean;
   aiSeats: AiSeatPref[];
   aiArchetypeFilter: AiArchetypeFilter;
   aiCoverageFloor: number;
@@ -196,6 +201,7 @@ interface PreferencesActions {
   setBattlefieldCardDisplay: (display: BattlefieldCardDisplay) => void;
   setTapRotation: (rotation: TapRotation) => void;
   setShowKeywordStrip: (show: boolean) => void;
+  setBattlefieldPeekOnHover: (enabled: boolean) => void;
   setAiSeatDifficulty: (index: number, difficulty: AIDifficulty) => void;
   setAiSeatDeckId: (index: number, id: AiDeckSelection) => void;
   /** Grow or shrink `aiSeats` to `count` slots. New slots inherit defaults;
@@ -298,6 +304,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setBattlefieldCardDisplay: (display) => set({ battlefieldCardDisplay: display }),
       setTapRotation: (rotation) => set({ tapRotation: rotation }),
       setShowKeywordStrip: (show) => set({ showKeywordStrip: show }),
+      setBattlefieldPeekOnHover: (enabled) => set({ battlefieldPeekOnHover: enabled }),
       setAiSeatDifficulty: (index, difficulty) =>
         set((state) => {
           if (index < 0 || index >= state.aiSeats.length) return state;

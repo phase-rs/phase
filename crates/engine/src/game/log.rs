@@ -99,6 +99,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::AbilityActivated { .. }
         | GameEvent::NinjutsuActivated { .. }
         | GameEvent::BoastAbilityActivated { .. }
+        | GameEvent::ExhaustAbilityActivated { .. }
         | GameEvent::StackPushed { .. }
         | GameEvent::StackResolved { .. }
         | GameEvent::SpellCountered { .. } => LogCategory::Stack,
@@ -128,6 +129,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         GameEvent::LifeChanged { .. } => LogCategory::Life,
 
         GameEvent::ManaAdded { .. }
+        | GameEvent::TappedForMana { .. }
         | GameEvent::ManaPoolEmptied { .. }
         | GameEvent::ManaRecolored { .. } => LogCategory::Mana,
 
@@ -152,7 +154,8 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::PowerToughnessChanged { .. }
         | GameEvent::VehicleCrewed { .. }
         | GameEvent::Stationed { .. }
-        | GameEvent::Saddled { .. } => LogCategory::State,
+        | GameEvent::Saddled { .. }
+        | GameEvent::BecomesPlotted { .. } => LogCategory::State,
 
         GameEvent::SpeedChanged { .. } => LogCategory::Special,
 
@@ -261,6 +264,25 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             player_seg(state, *player_id),
             text(" activates boast: "),
             card_seg(state, *source_id),
+        ],
+
+        GameEvent::ExhaustAbilityActivated {
+            player_id,
+            source_id,
+            ..
+        } => vec![
+            player_seg(state, *player_id),
+            text(" activates exhaust: "),
+            card_seg(state, *source_id),
+        ],
+
+        GameEvent::BecomesPlotted {
+            object_id,
+            player_id,
+        } => vec![
+            card_seg(state, *object_id),
+            text(" becomes plotted for "),
+            player_seg(state, *player_id),
         ],
 
         GameEvent::StackPushed { object_id } => {
@@ -940,6 +962,11 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(" revoked debug actions from "),
             player_seg(state, *player_id),
         ],
+        // CR 106.12a: `TappedForMana` is the per-resolution trigger event for
+        // `TapsForMana` matchers. The per-unit `ManaAdded` events already
+        // produce the user-facing "adds X mana" log lines, so this event is
+        // internal plumbing and emits no segments of its own.
+        GameEvent::TappedForMana { .. } => vec![],
     }
 }
 

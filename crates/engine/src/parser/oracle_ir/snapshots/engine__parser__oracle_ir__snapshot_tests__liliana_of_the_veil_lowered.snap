@@ -1,5 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 221
 expression: "&lowered"
 ---
 {
@@ -117,7 +118,8 @@ expression: "&lowered"
         "condition": null,
         "optional_targeting": false,
         "optional": false,
-        "forward_result": false
+        "forward_result": false,
+        "sub_link": "SequentialSibling"
       },
       "duration": null,
       "description": "[−6]: Separate all permanents target player controls into two piles. That player sacrifices all permanents in the pile of their choice.",

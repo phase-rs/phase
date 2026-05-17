@@ -254,6 +254,10 @@ fn rewrite_bound_x_in_quantity_expr(expr: &mut QuantityExpr, binding: &QuantityE
             .iter_mut()
             .map(|inner| rewrite_bound_x_in_quantity_expr(inner, binding))
             .sum(),
+        QuantityExpr::Difference { left, right } => {
+            rewrite_bound_x_in_quantity_expr(left, binding)
+                + rewrite_bound_x_in_quantity_expr(right, binding)
+        }
     }
 }
 
@@ -304,6 +308,9 @@ fn rewrite_bound_x_in_payment_cost(cost: &mut PaymentCost, binding: &QuantityExp
         | PaymentCost::Speed { amount }
         | PaymentCost::Energy { amount } => rewrite_bound_x_in_quantity_expr(amount, binding),
         PaymentCost::AbilityCost { cost } => rewrite_bound_x_in_ability_cost(cost, binding),
+        // CR 118.1: ScaledMana's `times` is a QuantityExpr that may carry a
+        // bound X — rewrite it like the other amount-bearing variants.
+        PaymentCost::ScaledMana { times, .. } => rewrite_bound_x_in_quantity_expr(times, binding),
         PaymentCost::Mana { .. } => 0,
     }
 }

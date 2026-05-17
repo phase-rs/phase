@@ -3,7 +3,7 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::keywords::{HexproofFilter, Keyword};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -93,6 +93,12 @@ pub fn find_legal_targets(
                     Some(ControllerRef::TargetPlayer) => false,
                     Some(ControllerRef::ParentTargetController) => false,
                     Some(ControllerRef::DefendingPlayer) => false,
+                    // CR 109.4: A chosen player is fixed during resolution, not
+                    // enumerated as a target candidate. Fail closed.
+                    Some(ControllerRef::ChosenPlayer { .. }) => false,
+                    // CR 603.2 + CR 109.4: The triggering player is fixed by
+                    // the event, not enumerated as a target candidate. Fail closed.
+                    Some(ControllerRef::TriggeringPlayer) => false,
                     None => true,
                 };
                 if include {
@@ -364,6 +370,18 @@ pub fn resolved_targets(
             })
             .unwrap_or_default();
     }
+    // CR 608.2k: "the exiled/sacrificed/discarded <noun>" — an untargeted
+    // reference to the object referred to by this ability's cost. Resolved
+    // from the recursively-stamped `cost_paid_object`. Mirrors the local
+    // resolution `token_copy.rs` already performs for `CopyTokenOf`; this is
+    // the general chokepoint for every effect that targets a cost-paid object.
+    if matches!(target_filter, TargetFilter::CostPaidObject) {
+        return ability
+            .cost_paid_object
+            .iter()
+            .map(|snap| TargetRef::Object(snap.object_id))
+            .collect();
+    }
     let use_self = matches!(
         target_filter,
         TargetFilter::None | TargetFilter::ParentTarget
@@ -526,6 +544,12 @@ pub fn resolve_effect_player_ref(
                 })
             })
         }
+        // CR 608.2c + CR 109.4: A player-only reference to the Nth chosen
+        // player resolves from the resolution-scoped `chosen_players` list.
+        TargetFilter::Typed(_) if filter.chosen_player_index().is_some() => {
+            let index = filter.chosen_player_index().expect("checked by guard");
+            ability.chosen_players.get(index as usize).copied()
+        }
         _ => resolve_event_context_target(state, filter, ability.source_id).and_then(|target| {
             match target {
                 TargetRef::Player(player) => Some(player),
@@ -551,6 +575,9 @@ pub(crate) fn extract_source_from_event(
         // CR 106.3 + CR 605.1a: For TapsForMana triggers, "that land" / "that permanent"
         // resolves to the mana source — the land/permanent being tapped for mana.
         GameEvent::ManaAdded { source_id, .. } => Some(*source_id),
+        // CR 106.12a: `TappedForMana` is the per-resolution event a `TapsForMana`
+        // trigger fires from; `source_id` is the permanent tapped for mana.
+        GameEvent::TappedForMana { source_id, .. } => Some(*source_id),
         GameEvent::CounterAdded { object_id, .. } => Some(*object_id),
         GameEvent::CounterRemoved { object_id, .. } => Some(*object_id),
         GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
@@ -564,6 +591,17 @@ pub(crate) fn extract_source_from_event(
         GameEvent::CaseSolved { object_id } => Some(*object_id),
         GameEvent::AttackersDeclared { attacker_ids, .. } if attacker_ids.len() == 1 => {
             attacker_ids.first().copied()
+        }
+        // CR 509.1: For a `Blocks` / `AttacksOrBlocks` trigger, "it" / the
+        // triggering source is the creature that blocked. A single creature
+        // blocking multiple attackers yields one `(blocker, attacker)` entry
+        // per attacker, all sharing the same blocker — still an unambiguous
+        // source. The source is only ambiguous when distinct blockers were
+        // declared, in which case no single triggering object exists.
+        GameEvent::BlockersDeclared { assignments } => {
+            let mut blockers = assignments.iter().map(|(blocker, _)| *blocker);
+            let first = blockers.next()?;
+            blockers.all(|blocker| blocker == first).then_some(first)
         }
         _ => None,
     }
@@ -585,6 +623,9 @@ pub(crate) fn extract_player_from_event(
         // rebinds as the resolving ability's controller so the bonus mana
         // routes to the tapper even when the Aura is opponent-controlled.
         GameEvent::ManaAdded { player_id, .. } => Some(*player_id),
+        // CR 106.12a + CR 605.1b: `TappedForMana` carries the player who tapped
+        // the source for mana — the triggering player for `TapsForMana`.
+        GameEvent::TappedForMana { player_id, .. } => Some(*player_id),
         GameEvent::CardsDrawn { player_id, .. } => Some(*player_id),
         GameEvent::CardDrawn { player_id, .. } => Some(*player_id),
         GameEvent::Discarded { player_id, .. } => Some(*player_id),
@@ -638,6 +679,9 @@ pub(crate) fn extract_amount_from_event(event: &crate::types::events::GameEvent)
         GameEvent::CounterAdded { count, .. } => Some(*count as i32),
         GameEvent::CounterRemoved { count, .. } => Some(*count as i32),
         GameEvent::Discarded { .. } => Some(1),
+        // CR 706.2: the final number of a die roll is its result. Lets
+        // `EventContextAmount` resolve "where X is the result" pump effects.
+        GameEvent::DieRolled { result, .. } => Some(*result as i32),
         _ => None,
     }
 }
@@ -1108,6 +1152,69 @@ fn extract_explicit_zones(filter: &TargetFilter) -> Vec<Zone> {
         }
         TargetFilter::Not { filter } => extract_explicit_zones(filter),
         _ => vec![],
+    }
+}
+
+/// CR 608.2c: Find the id of the most recently published non-empty tracked
+/// object set.
+///
+/// The parser emits `TargetFilter::TrackedSet`/`TrackedSetFiltered` with the
+/// sentinel id `TrackedSetId(0)` for inline "the milled/revealed/exiled cards"
+/// continuations; the concrete set id is only known at resolution time. An
+/// effect that publishes its affected objects records them under a fresh,
+/// monotonically increasing `TrackedSetId`, so the highest non-empty id is the
+/// set the immediately following continuation refers to.
+///
+/// Empty sets are skipped because a continuation can only meaningfully refer to
+/// a set that still has members. Returns `None` when no non-empty set exists.
+pub(crate) fn latest_tracked_set_id(state: &GameState) -> Option<TrackedSetId> {
+    state
+        .tracked_object_sets
+        .iter()
+        .filter(|(_, objects)| !objects.is_empty())
+        .max_by_key(|(id, _)| id.0)
+        .map(|(&id, _)| id)
+}
+
+/// CR 608.2c: Bind the `TrackedSetId(0)` sentinel in a `TargetFilter` to the
+/// most recent non-empty tracked set.
+///
+/// Handles both the bare `TrackedSet` continuation ("the milled cards", "the
+/// exiled card") and its type-filtered intersection `TrackedSetFiltered` ("X
+/// cards revealed this way"). Filters that are not sentinel-backed — already
+/// bound tracked-set filters and every non-tracked-set filter — are returned
+/// unchanged. When no tracked set is available the sentinel is left in place so
+/// downstream resolution still sees a (vacuously matching nothing) filter
+/// rather than a silently mismatched concrete id.
+///
+/// This is the single authority for sentinel binding: `ChangeZone` resolution,
+/// chained-ability resolution, and the delayed-trigger / counter / permission
+/// resolvers all route through it so every path resolves the sentinel
+/// identically.
+pub(crate) fn resolve_tracked_set_sentinel(
+    state: &GameState,
+    filter: TargetFilter,
+) -> TargetFilter {
+    match filter {
+        TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        } => match latest_tracked_set_id(state) {
+            Some(id) => TargetFilter::TrackedSet { id },
+            None => TargetFilter::TrackedSet {
+                id: TrackedSetId(0),
+            },
+        },
+        TargetFilter::TrackedSetFiltered {
+            id: TrackedSetId(0),
+            filter,
+        } => match latest_tracked_set_id(state) {
+            Some(id) => TargetFilter::TrackedSetFiltered { id, filter },
+            None => TargetFilter::TrackedSetFiltered {
+                id: TrackedSetId(0),
+                filter,
+            },
+        },
+        other => other,
     }
 }
 
@@ -2469,5 +2576,17 @@ mod tests {
             vec![TargetRef::Object(c1)],
             "Should fall through to ability.targets when no other tier applies"
         );
+    }
+
+    /// CR 706.2: a die roll's result is the amount `EventContextAmount`
+    /// resolves "where X is the result" against.
+    #[test]
+    fn extract_amount_from_die_rolled_returns_result() {
+        let event = crate::types::events::GameEvent::DieRolled {
+            player_id: PlayerId(0),
+            sides: 8,
+            result: 7,
+        };
+        assert_eq!(extract_amount_from_event(&event), Some(7));
     }
 }

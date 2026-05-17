@@ -113,6 +113,8 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::WardSacrificeChoice { .. }
         | WaitingFor::UnlessBounceChoice { .. }
         | WaitingFor::DiscoverChoice { .. }
+        | WaitingFor::RevealUntilKeptChoice { .. }
+        | WaitingFor::RepeatDecision { .. }
         | WaitingFor::CascadeChoice { .. }
         | WaitingFor::TopOrBottomChoice { .. }
         | WaitingFor::PopulateChoice { .. }
@@ -123,6 +125,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::CommanderZoneChoice { .. }
         | WaitingFor::BattleProtectorChoice { .. }
         | WaitingFor::ProliferateChoice { .. }
+        | WaitingFor::ChooseObjectsSelection { .. }
         | WaitingFor::CategoryChoice { .. }
         | WaitingFor::AssignCombatDamage { .. }
         // CR 107.1c + CR 107.14: "Pay any amount of X" prompts are forced

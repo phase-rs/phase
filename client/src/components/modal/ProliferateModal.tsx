@@ -8,20 +8,52 @@ import { gameButtonClass } from "../ui/buttonStyles.ts";
 import { targetKey, targetLabel } from "./targetRef.ts";
 
 type ProliferateChoice = Extract<WaitingFor, { type: "ProliferateChoice" }>;
+type ChooseObjectsSelection = Extract<
+  WaitingFor,
+  { type: "ChooseObjectsSelection" }
+>;
 
 // CR 701.34a: Proliferate — choose any number (including zero) of permanents
 // and players that have counters; each chosen target gets one more counter of
-// each kind already there. Engine pre-filters `eligible`; the modal is purely
-// a chooser. Default-select-all is a UX choice (one-click confirm for the
-// common case), not a rules requirement.
-export function ProliferateModal({ data }: { data: ProliferateChoice["data"] }) {
+// each kind already there.
+// CR 603.7e: ChooseObjectsSelection — choose any number of battlefield
+// permanents (Magnetic Mountain class). Both prompts carry the identical
+// `{ player, eligible: TargetRef[] }` shape and dispatch `SelectTargets`, so a
+// single modal serves both; `variant` only adapts the title/subtitle copy.
+// Engine pre-filters `eligible`; the modal is purely a chooser. Default-select-
+// all is a UX choice (one-click confirm for the common case), not a rules
+// requirement.
+type ProliferateModalData =
+  | ProliferateChoice["data"]
+  | ChooseObjectsSelection["data"];
+
+const VARIANT_COPY = {
+  proliferate: {
+    title: "Proliferate",
+    subtitle:
+      "Choose any number of permanents and players with counters. Each chosen target gets one more counter of each kind already there.",
+  },
+  chooseObjects: {
+    title: "Choose Permanents",
+    subtitle:
+      "Choose any number of permanents. You pay a cost for each one chosen.",
+  },
+} as const;
+
+export function ProliferateModal({
+  data,
+  variant = "proliferate",
+}: {
+  data: ProliferateModalData;
+  variant?: keyof typeof VARIANT_COPY;
+}) {
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
 
   const [selected, setSelected] = useState<TargetRef[]>(data.eligible);
 
-  // Reset selection when a fresh ProliferateChoice arrives (back-to-back
-  // proliferates from one ability resolution don't remount this component).
+  // Reset selection when a fresh choice arrives (back-to-back prompts from one
+  // ability resolution don't remount this component).
   useEffect(() => {
     setSelected(data.eligible);
   }, [data.eligible]);
@@ -41,8 +73,8 @@ export function ProliferateModal({ data }: { data: ProliferateChoice["data"] }) 
 
   return (
     <ChoiceOverlay
-      title="Proliferate"
-      subtitle="Choose any number of permanents and players with counters. Each chosen target gets one more counter of each kind already there."
+      title={VARIANT_COPY[variant].title}
+      subtitle={VARIANT_COPY[variant].subtitle}
       footer={<ConfirmButton onClick={handleConfirm} label="Confirm" />}
     >
       <div className="mb-4 space-y-2">

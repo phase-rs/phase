@@ -7,9 +7,9 @@ use nom::multi::many0;
 use nom::Parser;
 
 use crate::types::ability::{
-    AttachmentKind, Comparator, ControllerRef, FilterProp, ObjectScope, QuantityExpr, QuantityRef,
-    SharedQuality, SharedQualityRelation, TargetFilter, TargetSelectionMode, TypeFilter,
-    TypedFilter,
+    AggregateFunction, AttachmentKind, Comparator, ControllerRef, FilterProp, ObjectProperty,
+    ObjectScope, QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation, TargetFilter,
+    TargetSelectionMode, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
@@ -390,7 +390,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
     }
     if let Some((filter, rest)) = nom_on_lower(text, &lower, |input| {
         alt((
-            parse_cost_paid_object_reference,
+            |i| parse_cost_paid_object_reference(i, ctx),
             value(
                 TargetFilter::TriggeringSource,
                 (
@@ -1555,7 +1555,7 @@ pub fn parse_type_phrase_with_ctx<'a>(
         parse_ownership_or_controller_suffix(&lower[pos..], &mut properties, &mut controller, ctx);
 
     // Check "with power N or less/greater" suffix
-    if let Some((prop, consumed)) = parse_mana_value_suffix(&lower[pos..]) {
+    if let Some((prop, consumed)) = parse_mana_value_suffix(&lower[pos..], ctx) {
         properties.push(prop);
         pos += consumed;
     }
@@ -1948,7 +1948,7 @@ fn target_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
     }
 }
 
-pub(crate) fn scope_target_spell_phrase(filter: TargetFilter, phrase: &str) -> TargetFilter {
+fn scope_target_spell_phrase(filter: TargetFilter, phrase: &str) -> TargetFilter {
     if !target_phrase_mentions_spell_word(phrase) {
         return filter;
     }
@@ -2503,12 +2503,57 @@ fn parse_pt_quantity_comparison_tail(input: &str) -> Option<(Comparator, Quantit
     Some((comparator, value, after_qty))
 }
 
-/// Parse "with/that have/that each have mana value N or less" / "… or greater"
-/// suffixes, and dynamic "with mana value less than or equal to that [type]"
-/// patterns.
+/// CR 202.3 + CR 608.2h: Postnominal superlative mana-value qualifier —
+/// "with the greatest|highest mana value among <type-set> <controller> control(s)".
+/// Encoded as `FilterProp::Cmc { EQ, QuantityRef::Aggregate { Max, ManaValue,
+/// <eligible set> } }`, mirroring the library-search path in
+/// `oracle_effect/search.rs::parse_highest_mana_value_library_suffix`.
+/// The eligible set after "among " is parsed by the authoritative
+/// `parse_type_phrase_with_ctx` combinator (type list + controller suffix).
 /// Returns (FilterProp, bytes consumed from the original text).
-pub(crate) fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)> {
+fn parse_superlative_mana_value_suffix(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<(FilterProp, usize)> {
     let trimmed = text.trim_start();
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("with the greatest mana value among "),
+        tag::<_, _, OracleError<'_>>("with the highest mana value among "),
+    ))
+    .parse(trimmed)
+    .ok()?;
+    // Delegate the "<type-set> <controller> control(s)" clause to the
+    // authoritative type-phrase combinator — it parses the multi-type
+    // or/and list, any leading article, and the trailing controller suffix.
+    let (eligible, after) = parse_type_phrase_with_ctx(rest, ctx);
+    let prop = FilterProp::Cmc {
+        comparator: Comparator::EQ,
+        value: QuantityExpr::Ref {
+            qty: QuantityRef::Aggregate {
+                function: AggregateFunction::Max,
+                property: ObjectProperty::ManaValue,
+                filter: eligible,
+            },
+        },
+    };
+    Some((prop, text.len() - after.len()))
+}
+
+/// Parse "with/that have/that each have mana value N or less" / "… or greater"
+/// suffixes, dynamic "with mana value less than or equal to that [type]"
+/// patterns, and the superlative "with the greatest/highest mana value among
+/// <set>" form.
+/// Returns (FilterProp, bytes consumed from the original text).
+pub(crate) fn parse_mana_value_suffix(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<(FilterProp, usize)> {
+    let trimmed = text.trim_start();
+    // CR 202.3: try the more specific superlative head ("with the
+    // greatest/highest mana value among ...") before the comparator forms.
+    if let Some((prop, consumed)) = parse_superlative_mana_value_suffix(text, ctx) {
+        return Some((prop, consumed));
+    }
     if let Some((prop, after)) = parse_relative_mana_value_suffix(trimmed) {
         return Some((prop, text.len() - after.len()));
     }
@@ -2523,8 +2568,9 @@ pub(crate) fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)>
 
     // CR 202.3 + CR 120.3: Dynamic comparisons referencing the triggering event.
     // "that damage" → `EventContextAmount` (damage amount captured at trigger).
-    // "that <type>" (e.g. "that creature", "that spell") → `EventContextSourceManaValue`
-    // (mana value of the triggering source object).
+    // "that <type>" (e.g. "that creature", "that spell") →
+    // `ObjectManaValue { CostPaidObject }` (mana value of the triggering /
+    // cost-paid source object per CR 608.2k).
     // Staged checks: first detect "less than" / "greater than", then check for "or equal to".
     type Vbe<'a> = OracleError<'a>;
     let try_dynamic = |rest: &str, is_le: bool| -> Option<(FilterProp, usize)> {
@@ -2552,8 +2598,33 @@ pub(crate) fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)>
                 // single word terminating at punctuation/space (e.g., "creature",
                 // "spell"). Uses the source object's mana value.
                 let after = a2.find([',', '.', ' ']).map_or(a2, |i| &a2[i..]);
-                (QuantityRef::EventContextSourceManaValue, after)
+                (
+                    QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::CostPaidObject,
+                    },
+                    after,
+                )
             }
+        } else if let Some((rest, qty)) =
+            nom_quantity::parse_quantity_ref
+                .parse(a)
+                .ok()
+                .filter(|(rest, _)| {
+                    // CR 119.3 + CR 400.1: Accept the combinator's partial parse
+                    // only when the remainder is empty or a trailing zone clause
+                    // recognized by `parse_zone_suffix` ("from your graveyard",
+                    // "in exile", …). This leaves "the amount of life you lost this
+                    // turn from your graveyard" (Betor, Ancestor's Voice) for the
+                    // caller's `parse_zone_suffix` pass instead of swallowing it and
+                    // failing the whole mana-value suffix — while keeping every
+                    // other partial-match phrase on the punctuation-bounded path.
+                    // The zone clause is detected via the nom `parse_zone_suffix`
+                    // building block, never a `starts_with` string heuristic.
+                    let r = rest.trim_start();
+                    r.is_empty() || parse_zone_suffix(r).is_some()
+                })
+        {
+            (qty, rest)
         } else {
             // CR 119.3: Generic quantity-ref RHS — extract the phrase up to the
             // next sentence-terminating punctuation and delegate to the shared
@@ -2709,7 +2780,9 @@ fn parse_relative_mana_value_suffix(text: &str) -> Option<(FilterProp, &str)> {
     } else {
         (
             QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourceManaValue,
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject,
+                },
             },
             rest,
         )
@@ -2813,7 +2886,9 @@ fn parse_mana_value_reference_qty(
             )),
         ),
         value(
-            QuantityRef::EventContextSourceManaValue,
+            QuantityRef::ObjectManaValue {
+                scope: ObjectScope::CostPaidObject,
+            },
             alt((
                 tag::<_, _, Vbe>("that spell's mana value"),
                 tag("the creature that died"),
@@ -3203,7 +3278,11 @@ fn parse_shared_quality(input: &str) -> nom::IResult<&str, SharedQuality, Oracle
 fn parse_shared_quality_reference(
     input: &str,
 ) -> nom::IResult<&str, TargetFilter, OracleError<'_>> {
-    if let Ok((rest, filter)) = parse_cost_paid_object_reference(input) {
+    // Shared-quality clauses ("creatures that share a type with the sacrificed
+    // creature") only ever back-reference a *sacrificed* cost object; the
+    // context-gated "exiled" participle is irrelevant here, so a default
+    // `ParseContext` (no exile cost) is correct — "exiled" stays a fall-through.
+    if let Ok((rest, filter)) = parse_cost_paid_object_reference(input, &ParseContext::default()) {
         return Ok((rest, filter));
     }
 
@@ -3236,11 +3315,25 @@ fn parse_shared_quality_reference(
     }
 }
 
-fn parse_cost_paid_object_reference(
-    input: &str,
-) -> nom::IResult<&str, TargetFilter, OracleError<'_>> {
+/// CR 608.2k: "the sacrificed/exiled <noun>" — an untargeted reference to the
+/// object referred to by this ability's cost. "sacrificed" is always a cost
+/// participle. "exiled" is a cost participle ONLY when the enclosing ability
+/// carries a non-self exile cost (`ctx.current_ability_exile_cost_zone`);
+/// otherwise it is an effect participle and the combinator returns
+/// `nom::Err::Error`, so dispatch falls through to the `TRACKED_SET_PHRASES`
+/// table, which keeps "the exiled card" → `TrackedSet` for the common
+/// effect-exile case.
+fn parse_cost_paid_object_reference<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> nom::IResult<&'a str, TargetFilter, OracleError<'a>> {
     let (rest, _) = opt(tag("the ")).parse(input)?;
-    let (rest, _) = tag("sacrificed ").parse(rest)?;
+    let exile_is_cost = ctx.current_ability_exile_cost_zone.is_some();
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("sacrificed "),
+        nom::combinator::verify(tag("exiled "), |_: &str| exile_is_cost),
+    ))
+    .parse(rest)?;
     let (rest, _) = alt((
         tag("creature"),
         tag("card"),
@@ -5068,7 +5161,9 @@ mod tests {
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
                 comparator: Comparator::LT,
                 value: QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextSourceManaValue,
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::CostPaidObject,
+                    },
                 },
             }]))
         );
@@ -5739,6 +5834,31 @@ mod tests {
     #[test]
     fn the_exiled_permanents_produces_tracked_set() {
         let (f, _) = parse_target("the exiled permanents");
+        assert_eq!(
+            f,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            }
+        );
+    }
+
+    #[test]
+    fn the_exiled_card_with_exile_cost_context_produces_cost_paid_object() {
+        // CR 608.2k: with an active exile cost, "the exiled card" is the
+        // cost-paid object (Jhoira of the Ghitu), not an effect tracked set.
+        let mut ctx = ParseContext {
+            current_ability_exile_cost_zone: Some(Zone::Hand),
+            ..ParseContext::default()
+        };
+        let (f, _) = parse_target_with_ctx("the exiled card", &mut ctx);
+        assert_eq!(f, TargetFilter::CostPaidObject);
+    }
+
+    #[test]
+    fn the_exiled_card_without_exile_cost_stays_tracked_set() {
+        // No exile cost → "exiled" is an effect participle → TrackedSet.
+        let mut ctx = ParseContext::default();
+        let (f, _) = parse_target_with_ctx("the exiled card", &mut ctx);
         assert_eq!(
             f,
             TargetFilter::TrackedSet {
@@ -6953,7 +7073,9 @@ mod tests {
             FilterProp::Cmc {
                 comparator: Comparator::LE,
                 value: QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextSourceManaValue
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::CostPaidObject
+                    }
                 }
             }
         )));
@@ -8330,6 +8452,93 @@ mod tests {
                 tf.type_filters
             ),
             other => panic!("expected Typed filter, got {other:?}"),
+        }
+    }
+
+    /// CR 202.3 + CR 608.2h: the superlative "with the greatest mana value
+    /// among <set>" suffix must emit a `FilterProp::Cmc { EQ, Aggregate { Max,
+    /// ManaValue, <eligible set> } }`, not be silently dropped (issue #463).
+    #[test]
+    fn superlative_mana_value_suffix_emits_aggregate_cmc() {
+        let mut ctx = ParseContext::default();
+        let input = "with the greatest mana value among creatures and planeswalkers they control";
+        let (prop, consumed) =
+            parse_mana_value_suffix(input, &mut ctx).expect("superlative suffix should parse");
+        assert_eq!(consumed, input.len(), "should consume the whole suffix");
+        let FilterProp::Cmc { comparator, value } = prop else {
+            panic!("expected FilterProp::Cmc, got {prop:?}");
+        };
+        assert_eq!(comparator, Comparator::EQ);
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::Aggregate {
+                    function,
+                    property,
+                    filter,
+                },
+        } = value
+        else {
+            panic!("expected QuantityRef::Aggregate, got {value:?}");
+        };
+        assert_eq!(function, AggregateFunction::Max);
+        assert_eq!(property, ObjectProperty::ManaValue);
+        // The eligible set is an Or of Creature/Planeswalker, controller You.
+        match filter {
+            TargetFilter::Or { filters } => {
+                assert_eq!(filters.len(), 2);
+                for leg in &filters {
+                    let tf = typed_leg(leg).expect("each leg is Typed");
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                }
+                assert!(filters
+                    .iter()
+                    .any(|f| typed_leg(f).is_some_and(|tf| has_type(tf, TypeFilter::Creature))));
+                assert!(
+                    filters
+                        .iter()
+                        .any(|f| typed_leg(f)
+                            .is_some_and(|tf| has_type(tf, TypeFilter::Planeswalker)))
+                );
+            }
+            other => panic!("expected Or eligible set, got {other:?}"),
+        }
+    }
+
+    /// Issue #463: Soul Shatter's full target phrase must carry the superlative
+    /// `FilterProp::Cmc` on **both** Or legs (Creature and Planeswalker).
+    #[test]
+    fn soul_shatter_target_carries_superlative_on_both_legs() {
+        let mut ctx = ParseContext::default();
+        let (filter, _rest) = parse_target_with_ctx(
+            "a creature or planeswalker with the greatest mana value among creatures and \
+             planeswalkers they control",
+            &mut ctx,
+        );
+        let TargetFilter::Or { filters } = &filter else {
+            panic!("expected Or filter, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        for leg in filters {
+            let tf = typed_leg(leg).expect("each leg is Typed");
+            let has_superlative = tf.properties.iter().any(|p| {
+                matches!(
+                    p,
+                    FilterProp::Cmc {
+                        comparator: Comparator::EQ,
+                        value: QuantityExpr::Ref {
+                            qty: QuantityRef::Aggregate {
+                                function: AggregateFunction::Max,
+                                property: ObjectProperty::ManaValue,
+                                ..
+                            },
+                        },
+                    }
+                )
+            });
+            assert!(
+                has_superlative,
+                "leg {tf:?} missing superlative Cmc/Aggregate prop"
+            );
         }
     }
 }

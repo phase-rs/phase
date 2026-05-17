@@ -122,7 +122,9 @@ pub fn apnap_order_from(
             | ControllerRef::ScopedPlayer
             | ControllerRef::TargetPlayer
             | ControllerRef::ParentTargetController
-            | ControllerRef::DefendingPlayer,
+            | ControllerRef::DefendingPlayer
+            | ControllerRef::ChosenPlayer { .. }
+            | ControllerRef::TriggeringPlayer,
         ) => state.active_player,
     };
 

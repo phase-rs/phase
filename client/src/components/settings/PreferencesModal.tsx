@@ -135,6 +135,8 @@ export function PreferencesModal({
   const setAnimationSpeedMultiplier = usePreferencesStore((s) => s.setAnimationSpeedMultiplier);
   const showKeywordStrip = usePreferencesStore((s) => s.showKeywordStrip) ?? true;
   const setShowKeywordStrip = usePreferencesStore((s) => s.setShowKeywordStrip);
+  const battlefieldPeekOnHover = usePreferencesStore((s) => s.battlefieldPeekOnHover) ?? true;
+  const setBattlefieldPeekOnHover = usePreferencesStore((s) => s.setBattlefieldPeekOnHover);
   const artChain = usePreferencesStore((s) => s.artChain);
   const addArtChainEntry = usePreferencesStore((s) => s.addArtChainEntry);
   const removeArtChainEntry = usePreferencesStore((s) => s.removeArtChainEntry);
@@ -299,6 +301,18 @@ export function PreferencesModal({
                         className="accent-cyan-500"
                       />
                       <span className="text-sm text-slate-200">Show keywords on battlefield cards</span>
+                    </label>
+                  </SettingGroup>
+
+                  <SettingGroup label="Opponent Hover Preview">
+                    <label className="flex min-h-11 items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={battlefieldPeekOnHover}
+                        onChange={(e) => setBattlefieldPeekOnHover(e.target.checked)}
+                        className="accent-cyan-500"
+                      />
+                      <span className="text-sm text-slate-200">Show opponent's board on HUD hover</span>
                     </label>
                   </SettingGroup>
 

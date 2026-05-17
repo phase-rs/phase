@@ -642,6 +642,7 @@ mod tests {
         let token_ability = ResolvedAbility::new(
             Effect::CopyTokenOf {
                 target: TargetFilter::Any,
+                owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
                 tapped: false,

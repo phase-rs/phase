@@ -12,7 +12,7 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::combinator::value;
-use nom::sequence::terminated;
+use nom::sequence::{pair, terminated};
 use nom::Parser;
 
 use super::oracle_ir::context::ParseContext;
@@ -225,7 +225,9 @@ pub(crate) fn canonicalize_quantity_ref(qty: QuantityRef) -> QuantityRef {
             zone: ZoneRef::Graveyard,
             card_types,
             scope: CountScope::Controller,
-        } if card_types.is_empty() => QuantityRef::GraveyardSize,
+        } if card_types.is_empty() => QuantityRef::GraveyardSize {
+            player: PlayerScope::Controller,
+        },
         other => other,
     }
 }
@@ -308,6 +310,65 @@ pub(crate) fn parse_cda_quantity_with_context(
             return Some(QuantityExpr::Offset {
                 inner: Box::new(inner_expr),
                 offset: n as i32,
+            });
+        }
+    }
+
+    // CR 208.1: "the difference between its power and toughness" — the
+    // unsigned gap between an object's two current post-layer characteristics.
+    // ("The difference between A and B" being unsigned is an Oracle templating
+    // convention with no dedicated CR number; the resolver takes `.abs()`.)
+    // Composed from `tag`s by axis (subject form ×
+    // power/toughness ordering), emitting a general `QuantityExpr::Difference`
+    // over existing `QuantityRef::Power`/`Toughness` leaves. Placed before the
+    // generic `parse_quantity_ref` arm so the whole difference phrase is
+    // recognized as a unit. Operand order is irrelevant — `Difference`
+    // resolves to an absolute value — but both orderings are parsed so the
+    // remainder is fully consumed.
+    //
+    // CR 115.10: the P/T refs are scoped to `ObjectScope::Recipient`. On a
+    // trigger pump like Doran's ("Whenever a creature you control attacks or
+    // blocks, it gets +X/+X … where X is the difference between its power and
+    // toughness"), "its" anaphors back to the *affected* creature, not the
+    // ability's own source — `Recipient` resolves to the first object target
+    // (the pumped creature) and only falls back to the source when no target
+    // is present (the CDA case), so a single scope is correct for every
+    // parse path that lands a difference phrase.
+    if let Ok((rest, (left_ref, right_ref))) = (
+        tag::<_, _, OracleError<'_>>("the difference between "),
+        alt((tag("its "), tag("~'s "), tag("this creature's "))),
+        alt((
+            value(
+                (
+                    QuantityRef::Power {
+                        scope: ObjectScope::Recipient,
+                    },
+                    QuantityRef::Toughness {
+                        scope: ObjectScope::Recipient,
+                    },
+                ),
+                pair(tag("power and "), tag("toughness")),
+            ),
+            value(
+                (
+                    QuantityRef::Toughness {
+                        scope: ObjectScope::Recipient,
+                    },
+                    QuantityRef::Power {
+                        scope: ObjectScope::Recipient,
+                    },
+                ),
+                pair(tag("toughness and "), tag("power")),
+            ),
+        )),
+    )
+        .parse(text)
+        .map(|(rest, (_, _, refs))| (rest, refs))
+    {
+        if rest.is_empty() {
+            return Some(QuantityExpr::Difference {
+                left: Box::new(QuantityExpr::Ref { qty: left_ref }),
+                right: Box::new(QuantityExpr::Ref { qty: right_ref }),
             });
         }
     }
@@ -485,17 +546,23 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
         }
         "its power" => {
             return Some(QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourcePower,
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject,
+                },
             })
         }
         "its toughness" => {
             return Some(QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourceToughness,
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::CostPaidObject,
+                },
             })
         }
         "its mana value" | "its converted mana cost" => {
             return Some(QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourceManaValue,
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject,
+                },
             })
         }
         _ => {}
@@ -513,12 +580,36 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
     // CR 603.7c: Decompose possessive noun phrases: "{referent}'s {property}"
     if let Some((prefix, suffix)) = lower.split_once("'s ") {
         let suffix = suffix.trim();
-        let qty = match suffix {
-            "power" => Some(QuantityRef::EventContextSourcePower),
-            "toughness" => Some(QuantityRef::EventContextSourceToughness),
-            "mana value" | "converted mana cost" => Some(QuantityRef::EventContextSourceManaValue),
-            _ => None,
-        };
+        // CR 608.2k: the trailing property word maps to the cost-paid /
+        // trigger-referenced object's characteristic. Nom `alt` over the
+        // property keywords (longest-match first for "mana value" variants).
+        let qty = alt((
+            value(
+                QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject,
+                },
+                alt((
+                    tag::<_, _, OracleError<'_>>("mana value"),
+                    tag("converted mana cost"),
+                )),
+            ),
+            value(
+                QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject,
+                },
+                tag("power"),
+            ),
+            value(
+                QuantityRef::Toughness {
+                    scope: ObjectScope::CostPaidObject,
+                },
+                tag("toughness"),
+            ),
+        ))
+        .parse(suffix)
+        .ok()
+        .filter(|(rest, _): &(&str, QuantityRef)| rest.is_empty())
+        .map(|(_, qty)| qty);
         if let Some(qty) = qty {
             let prefix = prefix.trim();
             if is_event_context_referent(prefix) {
@@ -614,13 +705,16 @@ fn parse_mana_spent_to_cast_amount(input: &str) -> Option<QuantityRef> {
 }
 
 /// CR 603.7c: Check if a possessive prefix refers to the triggering event's source object.
-/// Matches event-context anaphoric referents like "the sacrificed creature", "that spell", etc.
+/// Matches event-context anaphoric referents like "the destroyed creature", "that spell", etc.
+///
+/// Note: `sacrificed`/`exiled`/`discarded` participle-possessives are deliberately
+/// NOT here — those refer to a *cost-paid object* (CR 608.2k), not an event-context
+/// source. Excluding them lets the possessive block fall through to
+/// `parse_quantity_ref` → `parse_cost_paid_object_ref`, which yields
+/// `Power { ObjectScope::CostPaidObject }` (Greater Good, issue #338).
 fn is_event_context_referent(prefix: &str) -> bool {
     let event_adjectives = [
-        "sacrificed",
         "destroyed",
-        "exiled",
-        "discarded",
         "countered",
         "returned",
         "targeted",
@@ -1233,6 +1327,68 @@ mod tests {
     };
     use crate::types::mana::ManaColor;
 
+    /// The expected `QuantityExpr::Difference` for "power and toughness" order:
+    /// `Difference { Ref(Power{Recipient}), Ref(Toughness{Recipient}) }`.
+    /// Operand order is irrelevant at resolution (`Difference` resolves to an
+    /// unsigned magnitude — an Oracle templating convention) but the
+    /// constructor pins it for assertion.
+    fn pt_difference() -> QuantityExpr {
+        QuantityExpr::Difference {
+            left: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Recipient,
+                },
+            }),
+            right: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::Recipient,
+                },
+            }),
+        }
+    }
+
+    #[test]
+    fn difference_between_its_power_and_toughness() {
+        assert_eq!(
+            parse_cda_quantity("the difference between its power and toughness"),
+            Some(pt_difference()),
+            "Doran's `where X is` tail must resolve to a typed Difference, not a Variable"
+        );
+    }
+
+    #[test]
+    fn difference_between_self_ref_power_and_toughness() {
+        // `~`-normalized self-reference form
+        assert_eq!(
+            parse_cda_quantity("the difference between ~'s power and toughness"),
+            Some(pt_difference()),
+        );
+    }
+
+    #[test]
+    fn difference_between_this_creatures_power_and_toughness() {
+        assert_eq!(
+            parse_cda_quantity("the difference between this creature's power and toughness"),
+            Some(pt_difference()),
+        );
+    }
+
+    #[test]
+    fn difference_between_toughness_and_power_order_irrelevant() {
+        // The reversed ordering parses to a Difference with swapped operands;
+        // resolution is absolute, so both produce the same value at runtime.
+        let expr = parse_cda_quantity("the difference between its toughness and power");
+        assert!(
+            matches!(
+                expr,
+                Some(QuantityExpr::Difference { ref left, ref right })
+                    if matches!(**left, QuantityExpr::Ref { qty: QuantityRef::Toughness { scope: ObjectScope::Recipient } })
+                    && matches!(**right, QuantityExpr::Ref { qty: QuantityRef::Power { scope: ObjectScope::Recipient } })
+            ),
+            "reversed ordering should still parse to a Difference, got {expr:?}"
+        );
+    }
+
     #[test]
     fn for_each_counter_on_self_normalized() {
         let qty = parse_for_each_clause("+1/+1 counter on ~").unwrap();
@@ -1242,6 +1398,22 @@ mod tests {
                 counter_type: Some(counter_type),
             } => assert_eq!(counter_type, CounterType::Plus1Plus1),
             other => panic!("Expected CountersOn{{Source, P1P1}}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quantity_ref_age_counters_on_normalized_self() {
+        // Phase-1 prerequisite for the dynamic damage-prevention amount
+        // (Cover of Winter): "this enchantment" is `~`-normalized before the
+        // imperative effect parser sees the clause, so the quantity text that
+        // reaches parse_quantity_ref is "the number of age counters on ~".
+        let qty = parse_quantity_ref("the number of age counters on ~").unwrap();
+        match qty {
+            QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: Some(ref counter_type),
+            } => assert_eq!(*counter_type, CounterType::Generic("age".to_string())),
+            other => panic!("Expected CountersOn{{Source, age}}, got {other:?}"),
         }
     }
 
@@ -1793,7 +1965,9 @@ mod tests {
         assert_eq!(
             parse_event_context_quantity("its power"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourcePower
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject
+                }
             })
         );
     }
@@ -1803,7 +1977,9 @@ mod tests {
         assert_eq!(
             parse_event_context_quantity("its toughness"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourceToughness
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::CostPaidObject
+                }
             })
         );
     }
@@ -1813,7 +1989,9 @@ mod tests {
         assert_eq!(
             parse_event_context_quantity("its mana value"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourceManaValue
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject
+                }
             })
         );
     }
@@ -1823,7 +2001,9 @@ mod tests {
         assert_eq!(
             parse_event_context_quantity("that spell's mana value"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourceManaValue
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject
+                }
             })
         );
     }
@@ -1860,12 +2040,31 @@ mod tests {
         );
     }
 
+    // Issue #338: `sacrificed`/`exiled`/`discarded` participle-possessives are
+    // cost-paid-object referents (CR 608.2k), not event-context referents.
+    // They must fall through `parse_event_context_quantity`'s possessive block
+    // to the `parse_quantity_ref` → `parse_cost_paid_object_ref` fallback,
+    // yielding `ObjectScope::CostPaidObject`-scoped refs.
     #[test]
     fn parse_event_context_possessive_sacrificed_creature_power() {
         assert_eq!(
             parse_event_context_quantity("the sacrificed creature's power"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourcePower
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn parse_event_context_possessive_sacrificed_creature_toughness() {
+        assert_eq!(
+            parse_event_context_quantity("the sacrificed creature's toughness"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::CostPaidObject
+                }
             })
         );
     }
@@ -1875,7 +2074,9 @@ mod tests {
         assert_eq!(
             parse_event_context_quantity("that creature's toughness"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourceToughness
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::CostPaidObject
+                }
             })
         );
     }
@@ -1885,7 +2086,21 @@ mod tests {
         assert_eq!(
             parse_event_context_quantity("the exiled card's mana value"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourceManaValue
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn parse_event_context_possessive_discarded_creature_power() {
+        assert_eq!(
+            parse_event_context_quantity("the discarded creature's power"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject
+                }
             })
         );
     }
@@ -1895,7 +2110,9 @@ mod tests {
         assert_eq!(
             parse_event_context_quantity("the destroyed creature's power"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourcePower
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject
+                }
             })
         );
     }
@@ -2167,7 +2384,9 @@ mod tests {
         assert_eq!(
             result,
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::GraveyardSize,
+                qty: QuantityRef::GraveyardSize {
+                    player: PlayerScope::Controller,
+                },
             })
         );
     }

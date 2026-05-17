@@ -1,8 +1,8 @@
 import { act } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { GameState } from "../../../adapter/types.ts";
+import type { GameState, TargetRef, WaitingFor } from "../../../adapter/types.ts";
 import { OpponentHud } from "../OpponentHud.tsx";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
@@ -130,6 +130,107 @@ describe("OpponentHud", () => {
     render(<OpponentHud />);
 
     expect(screen.queryByTitle(/Poison counters:/)).toBeNull();
+  });
+
+  describe("FFA targeting intent disambiguation", () => {
+    // Regression coverage for the Goblin Sharpshooter bug: in a 4-player
+    // FFA, clicking an opponent's tab during a target-selection waiting
+    // state used to fire `ChooseTarget(Player)` immediately, making the
+    // opponent's board unreachable when their player was simultaneously a
+    // legal target. The model is now two-step at the whole-tab level:
+    // first click on an unfocused tab focuses it (navigate); the second
+    // click on the now-focused tab commits the player target (commit).
+    function targetSelectionWaitingFor(legalPlayers: number[]): WaitingFor {
+      const targets: TargetRef[] = legalPlayers.map((p) => ({ Player: p }));
+      // OpponentHud reads `data.player`, `data.selection.current_legal_targets`,
+      // and (only for CopyRetarget) `data.target_slots`. The other fields
+      // (`pending_cast`, `target_slots`) are required by the TS discriminated
+      // union but the renderer never reads them under TargetSelection, so a
+      // shallow cast keeps the fixture small.
+      return {
+        type: "TargetSelection",
+        data: {
+          player: 0,
+          selection: {
+            current_slot: 0,
+            current_legal_targets: targets,
+          },
+          target_slots: [{ legal_targets: targets }],
+          pending_cast: {} as never,
+        },
+      } as WaitingFor;
+    }
+
+    function mountWithTargeting(legalPlayers: number[] = [1, 2, 3]) {
+      const dispatch = vi.fn().mockResolvedValue([]);
+      const wf = targetSelectionWaitingFor(legalPlayers);
+      useGameStore.setState({ dispatch });
+      act(() => {
+        useGameStore.setState({
+          gameState: createGameState({ waiting_for: wf }),
+          waitingFor: wf,
+        });
+      });
+      return { dispatch };
+    }
+
+    it("first click on an unfocused targetable tab focuses it (does NOT target)", async () => {
+      // Opp 4 is player 3. beforeEach set focus to player 1, so player 3
+      // is unfocused at start. First click should focus, not target.
+      const { dispatch } = mountWithTargeting();
+      render(<OpponentHud />);
+
+      fireEvent.click(screen.getByRole("button", { name: /Opp 4/ }));
+
+      await waitFor(() => {
+        expect(useUiStore.getState().focusedOpponent).toBe(3);
+      });
+      expect(dispatch).not.toHaveBeenCalled();
+    });
+
+    it("second click on the focused targetable tab commits the player target", () => {
+      const { dispatch } = mountWithTargeting();
+      // Pre-focus player 3 so the click is the *second* click (commit step).
+      useUiStore.setState({ focusedOpponent: 3 });
+      render(<OpponentHud />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Target Opp 4" }));
+
+      expect(dispatch).toHaveBeenCalledWith({
+        type: "ChooseTarget",
+        data: { target: { Player: 3 } },
+      });
+      expect(useUiStore.getState().focusedOpponent).toBe(3);
+    });
+
+    it("click on a non-targetable opponent always focuses, never targets", async () => {
+      // Only player 2 is a legal target. Clicking Opp 4 (player 3) — even
+      // when already focused — must focus, never dispatch.
+      const { dispatch } = mountWithTargeting([2]);
+      useUiStore.setState({ focusedOpponent: 3 });
+      render(<OpponentHud />);
+
+      fireEvent.click(screen.getByRole("button", { name: /Opp 4/ }));
+
+      await waitFor(() => {
+        expect(useUiStore.getState().focusedOpponent).toBe(3);
+      });
+      expect(dispatch).not.toHaveBeenCalled();
+    });
+
+    it("tab tooltip reflects the next-click action (focus vs commit)", () => {
+      mountWithTargeting();
+      // Player 1 (Opp 2) starts focused, player 3 (Opp 4) does not.
+      render(<OpponentHud />);
+
+      // Unfocused + targetable → tooltip explains the two-step path.
+      const unfocusedTitle = screen.getByRole("button", { name: /Opp 4/ }).getAttribute("title");
+      expect(unfocusedTitle).toContain("click again to target");
+
+      // Focused + targetable → tooltip is the commit verb only.
+      expect(screen.getByRole("button", { name: "Target Opp 2" }))
+        .toHaveAttribute("title", "Click to target Opp 2");
+    });
   });
 
   it("renders compact poison and speed badges for the 1v1 opponent HUD", () => {

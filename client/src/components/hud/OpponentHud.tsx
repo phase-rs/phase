@@ -16,6 +16,7 @@ import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { ScoreBadge } from "../draft/ScoreBadge.tsx";
 import { CityBlessingBadge, CounterBadge, DungeonBadge, InitiativeBadge, MonarchBadge, StatusBadge } from "./HudBadges.tsx";
 import { AvatarHoverPreview } from "./AvatarHoverPreview.tsx";
+import { BattlefieldPeekPopover } from "./BattlefieldPeekPopover.tsx";
 import { EnchantmentsBadge } from "./EnchantmentsBadge.tsx";
 import { HudPlate } from "./HudPlate.tsx";
 import { IncomingAttackersPopover } from "./IncomingAttackersPopover.tsx";
@@ -24,7 +25,7 @@ import { UnderAttackOverlay } from "./UnderAttackOverlay.tsx";
 
 import type { ObjectId } from "../../adapter/types.ts";
 
-const EMPTY_ATTACKER_IDS: readonly ObjectId[] = [];
+const EMPTY_OBJECT_IDS: readonly ObjectId[] = [];
 
 interface OpponentHudProps {
   opponentName?: string | null;
@@ -121,20 +122,40 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
     (waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection")
     && waitingFor.data.player === playerId;
   const isCopyRetargetForMe = waitingFor?.type === "CopyRetarget" && waitingFor.data.player === playerId;
-  const validPlayerTargetIds = useMemo(() => {
+  const isTargeting = isHumanTargetSelection || isCopyRetargetForMe;
+  const currentLegalTargets = useMemo(() => {
     if (isHumanTargetSelection) {
-      return (waitingFor.data.selection?.current_legal_targets ?? [])
-        .filter((target): target is { Player: number } => "Player" in target)
-        .map((target) => target.Player);
+      return waitingFor.data.selection?.current_legal_targets ?? [];
     }
     if (isCopyRetargetForMe) {
       const slot = waitingFor.data.target_slots[waitingFor.data.current_slot ?? 0];
-      return (slot?.legal_alternatives ?? [])
-        .filter((t): t is { Player: number } => "Player" in t)
-        .map((t) => t.Player);
+      return slot?.legal_alternatives ?? [];
     }
-    return [] as number[];
+    return [];
   }, [isHumanTargetSelection, isCopyRetargetForMe, waitingFor]);
+  const validPlayerTargetIds = useMemo(
+    () => currentLegalTargets
+      .filter((t): t is { Player: number } => "Player" in t)
+      .map((t) => t.Player),
+    [currentLegalTargets],
+  );
+  // Object targets grouped by their controller, so each `OpponentTab` can
+  // show only that opponent's legal targets in the peek popover. The set
+  // is empty when no object-targeting is in progress.
+  const objectsMapForTargets = gameState?.objects;
+  const legalObjectTargetsByController = useMemo(() => {
+    const map = new Map<PlayerId, ObjectId[]>();
+    if (!objectsMapForTargets) return map;
+    for (const t of currentLegalTargets) {
+      if (!("Object" in t)) continue;
+      const obj = objectsMapForTargets[t.Object];
+      if (!obj) continue;
+      const list = map.get(obj.controller) ?? [];
+      list.push(t.Object);
+      map.set(obj.controller, list);
+    }
+    return map;
+  }, [currentLegalTargets, objectsMapForTargets]);
 
   const handlePlayerTarget = useCallback(
     (targetPlayerId: number) => {
@@ -239,9 +260,12 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
           isEliminated={eliminated.includes(opId)}
           isTeammate={teamBased && isTeammate(playerId, opId)}
           isValidTarget={validPlayerTargetIds.includes(opId)}
+          isTargeting={isTargeting}
+          legalObjectTargetIds={legalObjectTargetsByController.get(opId) ?? EMPTY_OBJECT_IDS}
           showMana={focusedId === opId}
-          incomingAttackerIds={incomingByOpponent.get(opId) ?? EMPTY_ATTACKER_IDS}
-          onClick={() => validPlayerTargetIds.includes(opId) ? handlePlayerTarget(opId) : setFocusedOpponent(opId)}
+          incomingAttackerIds={incomingByOpponent.get(opId) ?? EMPTY_OBJECT_IDS}
+          onSelectFocus={() => setFocusedOpponent(opId)}
+          onTargetPlayer={() => handlePlayerTarget(opId)}
           onKick={
             onKickPlayer && !eliminated.includes(opId)
               ? () => setKickTarget(opId)
@@ -326,27 +350,57 @@ interface OpponentTabProps {
   isFocused: boolean;
   isEliminated: boolean;
   isTeammate: boolean;
+  /** This opponent (the player) is a legal target right now. Drives the
+   *  avatar's pulsing-crosshair target overlay and the tab's informational
+   *  cyan accent. Distinct from `isTargeting` — the local player can be in
+   *  a target-selection state where no player is legal but some of this
+   *  opponent's permanents are. */
   isValidTarget: boolean;
+  /** The local player is currently in a target-selection state (either
+   *  human, trigger, or copy-retarget). When true, hovering this tab opens
+   *  the battlefield peek popover so the targeter can read this opponent's
+   *  board without committing to a focus switch. */
+  isTargeting: boolean;
+  /** Object ids legal to target right now that are controlled by this
+   *  opponent. Empty when no object-targeting is active or when none of
+   *  this opponent's permanents are legal. */
+  legalObjectTargetIds: readonly ObjectId[];
   showMana: boolean;
   /** Attacker object ids this opponent has declared against me / my stuff.
    *  When non-empty, the tab renders a red ⚔×N badge and a hover popover
    *  with mini card images so the defender can assess incoming threats
    *  without first focusing this opponent's board. */
   incomingAttackerIds: readonly ObjectId[];
-  onClick: () => void;
+  /** Tab body click — always navigates focus, never targets. */
+  onSelectFocus: () => void;
+  /** Avatar click — fires `ChooseTarget` for this opponent. Only invoked
+   *  when `isValidTarget`; the avatar is non-interactive otherwise. */
+  onTargetPlayer: () => void;
   /** Host-only: when provided, render a small kick affordance on the tab. */
   onKick?: () => void;
 }
 
-function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isValidTarget, showMana, incomingAttackerIds, onClick, onKick }: OpponentTabProps) {
+function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isValidTarget, isTargeting, legalObjectTargetIds, showMana, incomingAttackerIds, onSelectFocus, onTargetPlayer, onKick }: OpponentTabProps) {
   const gameState = useGameStore((s) => s.gameState);
   const isTheirTurn = gameState?.active_player === playerId;
   const seatColor = getSeatColor(playerId, gameState?.seat_order);
   const isUnderAttack = gameState?.combat?.attackers.some(
     (a) => a.attack_target.type === "Player" && a.attack_target.data === playerId,
   ) ?? false;
-  const [showIncomingPopover, setShowIncomingPopover] = useState(false);
+  const [hoverPopover, setHoverPopover] = useState<"none" | "incoming" | "peek">("none");
   const hasIncoming = incomingAttackerIds.length > 0;
+  const battlefieldPeekOnHover = usePreferencesStore((s) => s.battlefieldPeekOnHover);
+  // Peek opens for any non-focused opponent on hover — a permanent scout
+  // affordance — gated by user preference. Incoming-attackers popover
+  // takes precedence during combat (when not in a target-selection state)
+  // because the block-planning keyword detail it surfaces is the more
+  // tactically relevant view. Incoming runs independently of the peek
+  // preference: it's a different kind of affordance (threat surfacing,
+  // not exploration) and disabling peek shouldn't hide imminent attacks.
+  const peekEligible = !isFocused && battlefieldPeekOnHover;
+  const showIncomingOnHover = hasIncoming && !isFocused && !isTargeting;
+  const showPeekOnHover = peekEligible && !showIncomingOnHover;
+  const hoverEnabled = showPeekOnHover || showIncomingOnHover;
   const tabRef = useRef<HTMLButtonElement>(null);
   // Short close delay so cursor moving through the gap between the tab and
   // the popover below doesn't flicker the popover shut. The popover itself
@@ -358,18 +412,26 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
       window.clearTimeout(closeTimerRef.current);
       closeTimerRef.current = null;
     }
-    setShowIncomingPopover(true);
-  }, []);
+    // Peek wins over incoming when both apply — peek is the more relevant
+    // affordance while the local player is actively choosing targets.
+    setHoverPopover(showPeekOnHover ? "peek" : showIncomingOnHover ? "incoming" : "none");
+  }, [showPeekOnHover, showIncomingOnHover]);
   const scheduleClosePopover = useCallback(() => {
     if (closeTimerRef.current != null) window.clearTimeout(closeTimerRef.current);
     closeTimerRef.current = window.setTimeout(() => {
-      setShowIncomingPopover(false);
+      setHoverPopover("none");
       closeTimerRef.current = null;
     }, 180);
   }, []);
   useEffect(() => () => {
     if (closeTimerRef.current != null) window.clearTimeout(closeTimerRef.current);
   }, []);
+  // When targeting state changes mid-hover, the open popover may no longer
+  // apply (e.g., player committed a target while hovering). Close so the
+  // next mouseenter recomputes which popover should open.
+  useEffect(() => {
+    if (!hoverEnabled && hoverPopover !== "none") setHoverPopover("none");
+  }, [hoverEnabled, hoverPopover]);
   const player = gameState?.players[playerId];
   const isDisconnected = useMultiplayerStore((s) => s.disconnectedPlayers.has(playerId));
   const isOnline = useMultiplayerStore((s) => s.connectionStatus) !== "disconnected";
@@ -403,33 +465,59 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
 
   const label = ally ? "Ally" : getOpponentDisplayName(playerId);
 
-  const borderClass = isValidTarget
-    ? "border-cyan-400/45 bg-cyan-950/45 ring-1 ring-cyan-300/45 shadow-[0_14px_28px_rgba(34,211,238,0.16)] cursor-pointer"
-    : isTheirTurn
-      ? "border-rose-400/45 bg-rose-950/40 ring-2 ring-rose-300/70 ring-offset-2 ring-offset-black/40 shadow-[0_14px_28px_rgba(244,63,94,0.22)]"
-      : ally
-        ? isFocused
-          ? "border-emerald-400/40 bg-emerald-950/40 ring-1 ring-emerald-300/30"
-          : "border-emerald-700/40 bg-slate-950/70 hover:border-emerald-400/40 hover:bg-slate-900/72"
-        : isFocused
-          ? "border-amber-400/40 bg-amber-950/38 ring-1 ring-amber-300/30"
-          : "border-white/10 bg-slate-950/70 hover:border-white/20 hover:bg-slate-900/72";
+  // Two-step click for player-targeting (Option B at the tab level):
+  //   - Unfocused tab click → focus this opponent (navigate).
+  //   - Focused + targetable click → commit target on the player (commit).
+  //   - Focused + not targetable click → no-op (already viewing).
+  // The visual affordance reflects which step the next click will perform:
+  // cyan accent on any targetable opponent, but the prominent commit-ready
+  // treatment (crosshair cursor, pulsing glow, bright ring) appears only
+  // when also focused — so the user gets clear "the next click commits"
+  // feedback before they pull the trigger.
+  const commitReady = isValidTarget && isFocused;
+  const borderClass = commitReady
+    ? "border-cyan-300/70 bg-cyan-950/40 ring-2 ring-cyan-300/70 shadow-[0_0_22px_rgba(34,211,238,0.55)] cursor-crosshair"
+    : isValidTarget
+      ? "border-cyan-400/45 bg-cyan-950/30 ring-1 ring-cyan-300/35"
+      : isTheirTurn
+        ? "border-rose-400/45 bg-rose-950/40 ring-2 ring-rose-300/70 ring-offset-2 ring-offset-black/40 shadow-[0_14px_28px_rgba(244,63,94,0.22)]"
+        : ally
+          ? isFocused
+            ? "border-emerald-400/40 bg-emerald-950/40 ring-1 ring-emerald-300/30"
+            : "border-emerald-700/40 bg-slate-950/70 hover:border-emerald-400/40 hover:bg-slate-900/72"
+          : isFocused
+            ? "border-amber-400/40 bg-amber-950/38 ring-1 ring-amber-300/30"
+            : "border-white/10 bg-slate-950/70 hover:border-white/20 hover:bg-slate-900/72";
+
+  const ariaLabel = commitReady
+    ? `Target ${label}`
+    : isValidTarget
+      ? `View ${label}'s board (click again to target ${label})`
+      : `View ${label}'s board`;
+  const titleTooltip = commitReady
+    ? `Click to target ${label}`
+    : isValidTarget
+      ? `Click to view ${label}'s board, then click again to target ${label}`
+      : `Click to view ${label}'s board`;
+  const onTabClick = commitReady ? onTargetPlayer : onSelectFocus;
 
   return (
     <button
       ref={tabRef}
       type="button"
-      onClick={onClick}
+      onClick={onTabClick}
       disabled={isEliminated}
+      aria-label={ariaLabel}
+      title={titleTooltip}
       data-player-hud={String(playerId)}
       data-phased-out={isPhasedOut ? "true" : undefined}
-      onMouseEnter={hasIncoming ? openPopover : undefined}
-      onMouseLeave={hasIncoming ? scheduleClosePopover : undefined}
-      onFocus={hasIncoming ? openPopover : undefined}
-      onBlur={hasIncoming ? scheduleClosePopover : undefined}
+      onMouseEnter={hoverEnabled ? openPopover : undefined}
+      onMouseLeave={hoverEnabled ? scheduleClosePopover : undefined}
+      onFocus={hoverEnabled ? openPopover : undefined}
+      onBlur={hoverEnabled ? scheduleClosePopover : undefined}
       className={`relative flex items-center gap-1.5 rounded-xl border px-2 py-1.5 backdrop-blur-xl transition-all duration-200 lg:gap-3 lg:rounded-[18px] lg:px-3 lg:py-2 ${borderClass} ${isEliminated || isPhasedOut ? "opacity-40 grayscale" : ""}`}
     >
-      {isTheirTurn && !shouldReduceMotion && (
+      {isTheirTurn && !shouldReduceMotion && !commitReady && (
         <motion.div
           aria-hidden
           className="pointer-events-none absolute -inset-0.5 rounded-[20px]"
@@ -447,31 +535,40 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
           }}
         />
       )}
+      {commitReady && !shouldReduceMotion && (
+        <motion.div
+          aria-hidden
+          className="pointer-events-none absolute -inset-0.5 rounded-[20px]"
+          animate={{
+            boxShadow: [
+              "0 0 0 0 rgba(34, 211, 238, 0.45), 0 0 14px 2px rgba(34, 211, 238, 0.45)",
+              "0 0 0 2px rgba(34, 211, 238, 0.8), 0 0 28px 8px rgba(34, 211, 238, 0.7)",
+            ],
+          }}
+          transition={{
+            duration: 1.1,
+            repeat: Infinity,
+            repeatType: "reverse",
+            ease: "easeInOut",
+          }}
+        />
+      )}
       {isUnderAttack && (
         <>
           <UnderAttackOverlay />
           <span className="sr-only">{label} is under attack</span>
         </>
       )}
-      {avatarUrl ? (
-        <OpponentAvatar
-          label={label}
-          avatarUrl={avatarUrl}
-          seatColor={seatColor}
-        />
-      ) : null}
+      <OpponentAvatar
+        label={label}
+        avatarUrl={avatarUrl}
+        seatColor={seatColor}
+      />
       <div className="flex min-w-[4.5rem] flex-col items-start leading-none">
         <span
           className="relative mb-1 flex w-full min-w-0 items-center gap-1 text-[10px] font-semibold uppercase tracking-[0.18em]"
           style={{ color: seatColor }}
         >
-          {!avatarUrl && (
-            <span
-              aria-hidden
-              className="h-2.5 w-2.5 shrink-0 rounded-full ring-1 ring-black/30 shadow-[0_0_6px_var(--seat-glow)]"
-              style={{ backgroundColor: seatColor, "--seat-glow": `${seatColor}88` } as CSSProperties}
-            />
-          )}
           <span className="truncate">{label}</span>
         </span>
         <div className="flex items-center gap-1">
@@ -538,27 +635,36 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
           ×
         </span>
       )}
-      {/* Cross-board attacker badge + hover popover — only when this
-          non-focused opponent has declared attackers against me/my stuff.
-          Left-positioned to avoid colliding with the right-edge kick `×`
-          affordance rendered above. */}
+      {/* Cross-board attacker badge — left-positioned to avoid colliding
+          with the right-edge kick `×` affordance rendered above. The badge
+          stays even while the peek popover is showing instead, so the
+          defender doesn't lose track of incoming threats during targeting. */}
       {hasIncoming && (
-        <>
-          <span
-            aria-label={`${incomingAttackerIds.length} creature${incomingAttackerIds.length === 1 ? "" : "s"} attacking you`}
-            className={`absolute -left-1.5 -top-1.5 z-10 flex h-5 min-w-5 items-center justify-center rounded-full bg-red-600 px-1 text-[10px] font-bold text-white shadow ring-2 ring-red-300 ${shouldReduceMotion ? "" : "animate-pulse"}`}
-          >
-            ⚔×{incomingAttackerIds.length}
-          </span>
-          {showIncomingPopover && tabRef.current && (
-            <PortaledPopover anchorEl={tabRef.current}>
-              <IncomingAttackersPopover
-                attackerIds={incomingAttackerIds}
-                opponentName={label}
-              />
-            </PortaledPopover>
-          )}
-        </>
+        <span
+          aria-label={`${incomingAttackerIds.length} creature${incomingAttackerIds.length === 1 ? "" : "s"} attacking you`}
+          className={`absolute -left-1.5 -top-1.5 z-10 flex h-5 min-w-5 items-center justify-center rounded-full bg-red-600 px-1 text-[10px] font-bold text-white shadow ring-2 ring-red-300 ${shouldReduceMotion ? "" : "animate-pulse"}`}
+        >
+          ⚔×{incomingAttackerIds.length}
+        </span>
+      )}
+      {hoverPopover === "incoming" && tabRef.current && (
+        <PortaledPopover anchorEl={tabRef.current}>
+          <IncomingAttackersPopover
+            attackerIds={incomingAttackerIds}
+            opponentName={label}
+          />
+        </PortaledPopover>
+      )}
+      {hoverPopover === "peek" && tabRef.current && (
+        <PortaledPopover anchorEl={tabRef.current}>
+          <BattlefieldPeekPopover
+            playerId={playerId}
+            opponentName={label}
+            seatColor={seatColor}
+            isTargeting={isTargeting}
+            legalTargetIds={legalObjectTargetIds}
+          />
+        </PortaledPopover>
       )}
     </button>
   );
@@ -570,22 +676,47 @@ function OpponentAvatar({
   seatColor,
 }: {
   label: string;
-  avatarUrl: string;
+  avatarUrl: string | null;
   seatColor: string;
 }) {
+  // Inner avatar visuals: real portrait when known, synthesized
+  // seat-color tile with the player's initial otherwise.
+  const inner = avatarUrl ? (
+    <>
+      <img src={avatarUrl} alt={label} className="h-full w-full object-cover" />
+      <div className="absolute inset-0 bg-gradient-to-b from-white/12 via-transparent to-black/35" />
+    </>
+  ) : (
+    <>
+      <div
+        className="flex h-full w-full items-center justify-center text-sm font-bold text-white/90"
+        style={{ backgroundColor: `${seatColor}55` }}
+      >
+        {label.charAt(0).toUpperCase()}
+      </div>
+      <div className="absolute inset-0 bg-gradient-to-b from-white/10 via-transparent to-black/40" />
+    </>
+  );
+
+  const tileClassName = "relative h-10 w-9 shrink-0 overflow-hidden rounded-lg border border-white/15 bg-slate-950 shadow-[0_8px_18px_rgba(0,0,0,0.32)]";
+  const tileStyle: CSSProperties = {
+    borderColor: `${seatColor}cc`,
+    boxShadow: `0 0 0 1px ${seatColor}55, 0 8px 18px rgba(0,0,0,0.32), 0 0 14px ${seatColor}2e`,
+  };
+
+  if (!avatarUrl) {
+    return <div className={tileClassName} style={tileStyle}>{inner}</div>;
+  }
+
   return (
     <AvatarHoverPreview
       avatarUrl={avatarUrl}
       label={label}
       seatColor={seatColor}
-      className="relative h-10 w-9 shrink-0 overflow-hidden rounded-lg border border-white/15 bg-slate-950 shadow-[0_8px_18px_rgba(0,0,0,0.32)]"
-      style={{
-        borderColor: `${seatColor}cc`,
-        boxShadow: `0 0 0 1px ${seatColor}55, 0 8px 18px rgba(0,0,0,0.32), 0 0 14px ${seatColor}2e`,
-      }}
+      className={tileClassName}
+      style={tileStyle}
     >
-      <img src={avatarUrl} alt={label} className="h-full w-full object-cover" />
-      <div className="absolute inset-0 bg-gradient-to-b from-white/12 via-transparent to-black/35" />
+      {inner}
     </AvatarHoverPreview>
   );
 }

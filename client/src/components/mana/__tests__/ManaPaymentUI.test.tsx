@@ -241,6 +241,204 @@ describe("ManaPaymentUI", () => {
     });
   });
 
+  // Issue #457 — CR 601.2f: ManaPaymentUI must display the engine-resolved
+  // locked-in cost (`pending_cast.cost`), not the printed base `mana_cost`.
+  // Call the Coppercoats is a Strive spell; with multiple target opponents the
+  // engine inflates {2}{W} to {4}{W}{W}{W}. The panel must show the inflated total.
+  it("displays the Strive-inflated pending_cast cost, not the printed mana_cost", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const spellObj = {
+      id: 400,
+      name: "Call the Coppercoats",
+      controller: 0,
+      owner: 0,
+      card_id: 4,
+      // Printed base cost {2}{W} — must NOT be what the panel shows.
+      mana_cost: { type: "Cost", shards: ["White"], generic: 2 },
+      zone: "Stack",
+      tapped: false,
+      card_types: { core_types: ["Instant"], subtypes: [], supertypes: [] },
+      abilities: [],
+      colors: ["White"],
+      counters: {},
+      damage: 0,
+      is_summon_sick: false,
+      attached_to: null,
+      cast_from_zone: null,
+      face_down: false,
+      is_commander: false,
+      is_attacking: null,
+      is_blocking: null,
+      mana_spent_to_cast: false,
+      colors_spent_to_cast: { W: 0, U: 0, B: 0, R: 0, G: 0, C: 0 },
+    } as unknown as GameState["objects"][number];
+    const gameState = createGameState({
+      objects: { 400: spellObj },
+      stack: [
+        {
+          id: 400,
+          source_id: 400,
+          controller: 0,
+          kind: {
+            type: "Spell",
+            card_id: 4,
+            ability: null,
+            casting_variant: { type: "Normal" },
+            actual_mana_spent: 0,
+          },
+        },
+      ] as unknown as GameState["stack"],
+      // Engine-resolved locked-in total: {2}{W} + 2 × {1}{W} Strive surcharge.
+      pending_cast: {
+        object_id: 400,
+        cost: { type: "Cost", shards: ["White", "White", "White"], generic: 4 },
+      } as unknown as GameState["pending_cast"],
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+        legalActions: [{ type: "CancelCast" }, { type: "PassPriority" }],
+      });
+    });
+
+    render(<ManaPaymentUI />);
+
+    // ManaSymbol renders each shard as an <img> with alt={shard}. The inflated
+    // total {4}{W}{W}{W} → generic shard "4" plus three "W" shards.
+    expect(screen.getByAltText("4")).toBeInTheDocument();
+    expect(screen.getAllByAltText("W")).toHaveLength(3);
+    // The base printed cost generic of 2 must NOT appear.
+    expect(screen.queryByAltText("2")).not.toBeInTheDocument();
+  });
+
+  // Regression guard — no Strive, no statics: pending_cast.cost equals the
+  // printed mana_cost, so the panel renders the unchanged base cost.
+  it("renders the base cost when pending_cast.cost equals the printed mana_cost", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const spellObj = {
+      id: 500,
+      name: "Plain Spell",
+      controller: 0,
+      owner: 0,
+      card_id: 5,
+      mana_cost: { type: "Cost", shards: ["White"], generic: 2 },
+      zone: "Stack",
+      tapped: false,
+      card_types: { core_types: ["Instant"], subtypes: [], supertypes: [] },
+      abilities: [],
+      colors: ["White"],
+      counters: {},
+      damage: 0,
+      is_summon_sick: false,
+      attached_to: null,
+      cast_from_zone: null,
+      face_down: false,
+      is_commander: false,
+      is_attacking: null,
+      is_blocking: null,
+      mana_spent_to_cast: false,
+      colors_spent_to_cast: { W: 0, U: 0, B: 0, R: 0, G: 0, C: 0 },
+    } as unknown as GameState["objects"][number];
+    const gameState = createGameState({
+      objects: { 500: spellObj },
+      stack: [
+        {
+          id: 500,
+          source_id: 500,
+          controller: 0,
+          kind: {
+            type: "Spell",
+            card_id: 5,
+            ability: null,
+            casting_variant: { type: "Normal" },
+            actual_mana_spent: 0,
+          },
+        },
+      ] as unknown as GameState["stack"],
+      pending_cast: {
+        object_id: 500,
+        cost: { type: "Cost", shards: ["White"], generic: 2 },
+      } as unknown as GameState["pending_cast"],
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+        legalActions: [{ type: "CancelCast" }, { type: "PassPriority" }],
+      });
+    });
+
+    render(<ManaPaymentUI />);
+
+    expect(screen.getByAltText("2")).toBeInTheDocument();
+    expect(screen.getByAltText("W")).toBeInTheDocument();
+  });
+
+  // pending_cast absent — fall back to the stack spell object's mana_cost.
+  it("falls back to the stack spell object mana_cost when pending_cast is absent", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const spellObj = {
+      id: 600,
+      name: "Fallback Spell",
+      controller: 0,
+      owner: 0,
+      card_id: 6,
+      mana_cost: { type: "Cost", shards: ["Blue"], generic: 3 },
+      zone: "Stack",
+      tapped: false,
+      card_types: { core_types: ["Instant"], subtypes: [], supertypes: [] },
+      abilities: [],
+      colors: ["Blue"],
+      counters: {},
+      damage: 0,
+      is_summon_sick: false,
+      attached_to: null,
+      cast_from_zone: null,
+      face_down: false,
+      is_commander: false,
+      is_attacking: null,
+      is_blocking: null,
+      mana_spent_to_cast: false,
+      colors_spent_to_cast: { W: 0, U: 0, B: 0, R: 0, G: 0, C: 0 },
+    } as unknown as GameState["objects"][number];
+    const gameState = createGameState({
+      objects: { 600: spellObj },
+      stack: [
+        {
+          id: 600,
+          source_id: 600,
+          controller: 0,
+          kind: {
+            type: "Spell",
+            card_id: 6,
+            ability: null,
+            casting_variant: { type: "Normal" },
+            actual_mana_spent: 0,
+          },
+        },
+      ] as unknown as GameState["stack"],
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+        legalActions: [{ type: "CancelCast" }, { type: "PassPriority" }],
+      });
+    });
+
+    render(<ManaPaymentUI />);
+
+    expect(screen.getByAltText("3")).toBeInTheDocument();
+    expect(screen.getByAltText("U")).toBeInTheDocument();
+  });
+
   // CR 107.4f: With PayLife toggled on a ManaOrLife shard, dispatch carries PayLife.
   it("dispatches PayLife when the shard toggle is flipped", () => {
     const dispatch = vi.fn().mockResolvedValue([]);

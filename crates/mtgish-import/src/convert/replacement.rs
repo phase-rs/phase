@@ -617,15 +617,15 @@ pub fn convert_replace_would_draw(
 /// per-event runtime support and strict-fail today.
 fn draw_event_to_valid_player(
     event: &ReplacableEventWouldDraw,
-) -> ConvResult<Option<engine::types::ability::ControllerRef>> {
-    use engine::types::ability::ControllerRef;
+) -> ConvResult<Option<engine::types::ability::ReplacementPlayerScope>> {
+    use engine::types::ability::ReplacementPlayerScope;
     use ReplacableEventWouldDraw as E;
     match event {
         E::APlayerWouldDrawACard(_)
         | E::APlayerWouldDrawOneOrMoreCards(_)
         | E::APlayerWouldDrawTwoOrMoreCards(_) => Ok(None),
         E::PlayerWouldDrawDuringTheirDrawStep(p) => match &**p {
-            Player::You => Ok(Some(ControllerRef::You)),
+            Player::You => Ok(Some(ReplacementPlayerScope::You)),
             _ => Ok(None),
         },
         other => Err(ConversionGap::UnknownVariant {
@@ -1216,26 +1216,25 @@ pub fn convert_replace_would_gain_life(
     Ok(out)
 }
 
-/// CR 614.1a: Map the schema event variant to a `valid_player` filter.
+/// CR 614.1a: Map the schema event variant to a `valid_player` scope.
 /// `APlayerWouldGainLife` → broad (None); `PlayerWouldGainLife(You)` →
-/// `Some(You)`. Spell/ability-caused life gain strict-fails (event
-/// distinction the engine matcher doesn't yet expose).
+/// `Some(You)`; `ASpellOrAbilityWouldCauseItsControllerToGainLife` (Rain of
+/// Gore) → `Some(AnyPlayer)` — a global all-players replacement.
 fn gain_life_event_to_valid_player(
     event: &ReplacableEventWouldGainLife,
-) -> ConvResult<Option<engine::types::ability::ControllerRef>> {
-    use engine::types::ability::ControllerRef;
+) -> ConvResult<Option<engine::types::ability::ReplacementPlayerScope>> {
+    use engine::types::ability::ReplacementPlayerScope;
     use ReplacableEventWouldGainLife as E;
     match event {
         E::APlayerWouldGainLife(_) => Ok(None),
         E::PlayerWouldGainLife(p) => match &**p {
-            Player::You => Ok(Some(ControllerRef::You)),
+            Player::You => Ok(Some(ReplacementPlayerScope::You)),
             _ => Ok(None),
         },
+        // CR 614.1a: Rain of Gore — the replacement watches every player's
+        // spell/ability-sourced life gain regardless of who controls it.
         E::ASpellOrAbilityWouldCauseItsControllerToGainLife(_) => {
-            Err(ConversionGap::EnginePrerequisiteMissing {
-                engine_type: "ReplacementDefinition",
-                needed_variant: "valid_player gating on spell-or-ability source".into(),
-            })
+            Ok(Some(ReplacementPlayerScope::AnyPlayer))
         }
     }
 }
@@ -2563,6 +2562,10 @@ fn rewrite_variable_x_to_cost_x_paid(expr: &mut QuantityExpr) {
         }
         QuantityExpr::UpTo { max } => rewrite_variable_x_to_cost_x_paid(max),
         QuantityExpr::Power { exponent, .. } => rewrite_variable_x_to_cost_x_paid(exponent),
+        QuantityExpr::Difference { left, right } => {
+            rewrite_variable_x_to_cost_x_paid(left);
+            rewrite_variable_x_to_cost_x_paid(right);
+        }
     }
 }
 
@@ -2605,6 +2608,7 @@ pub fn convert_create_replace_would_deal_damage_until(
     let (scope, source_filter) = damage_event_to_prevent_scope(event)?;
     Ok(engine::types::ability::Effect::PreventDamage {
         amount,
+        amount_dynamic: None,
         target: engine::types::ability::TargetFilter::Any,
         scope,
         damage_source_filter: source_filter,
@@ -2640,6 +2644,7 @@ pub fn convert_create_future_replace_would_deal_damage(
     let (amount, scope, source_filter) = future_damage_event_to_prevent_params(event)?;
     Ok(engine::types::ability::Effect::PreventDamage {
         amount,
+        amount_dynamic: None,
         target: engine::types::ability::TargetFilter::Any,
         scope,
         damage_source_filter: source_filter,

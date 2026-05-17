@@ -11,7 +11,7 @@ use crate::types::ability::{
 };
 
 use super::oracle::{find_activated_colon, strip_activated_constraints};
-use super::oracle_effect::{parse_effect_chain, parse_effect_chain_with_context};
+use super::oracle_effect::parse_effect_chain_with_context;
 use super::oracle_ir::context::ParseContext;
 use super::oracle_nom::condition as nom_condition;
 use super::oracle_nom::primitives::{self as nom_primitives, scan_preceded};
@@ -420,6 +420,7 @@ fn split_triggered_modal_header(line: &str) -> Option<(String, String)> {
 pub(crate) fn lower_oracle_block(
     block: OracleBlockAst,
     card_name: &str,
+    host_self_reference: Option<TargetFilter>,
     result: &mut super::oracle::ParsedAbilities,
 ) {
     use super::oracle_cost::parse_oracle_cost;
@@ -432,8 +433,9 @@ pub(crate) fn lower_oracle_block(
             modes,
             constraints,
         } => {
-            let mut def = build_modal_ability(AbilityKind::Activated, &header, &modes)
-                .cost(parse_oracle_cost(&cost_text));
+            let mut def =
+                build_modal_ability(AbilityKind::Activated, &header, &modes, host_self_reference)
+                    .cost(parse_oracle_cost(&cost_text));
             if constraints.sorcery_speed() {
                 def.sorcery_speed = true;
             }
@@ -442,7 +444,8 @@ pub(crate) fn lower_oracle_block(
         }
         OracleBlockAst::Modal { header, modes } => {
             let modal = build_modal_choice(&header, &modes);
-            let mode_abilities = lower_mode_abilities(&modes, AbilityKind::Spell);
+            let mode_abilities =
+                lower_mode_abilities(&modes, AbilityKind::Spell, host_self_reference);
             result.abilities.extend(mode_abilities);
             result.modal = Some(modal);
         }
@@ -465,6 +468,7 @@ pub(crate) fn lower_oracle_block(
                 &header,
                 &modes,
                 modal_subject,
+                host_self_reference,
             ));
             for trigger in &mut triggers {
                 trigger.execute = Some(modal_execute.clone());
@@ -478,24 +482,29 @@ pub(crate) fn build_modal_ability(
     kind: AbilityKind,
     header: &ModalHeaderAst,
     modes: &[ModeAst],
+    host_self_reference: Option<TargetFilter>,
 ) -> AbilityDefinition {
     AbilityDefinition::new(kind, modal_marker_effect(header)).with_modal(
         build_modal_choice(header, modes),
-        lower_mode_abilities(modes, kind),
+        lower_mode_abilities(modes, kind, host_self_reference),
     )
 }
 
 /// Build a modal ability with a trigger-context subject so mode-body pronoun
 /// anaphora resolve against the triggering object (CR 608.2k + CR 301.5a).
+///
+/// CR 303.4 + CR 702.103: `host_self_reference` propagates the enclosing
+/// card's typed attachment-host self-reference into modal mode bodies.
 fn build_modal_ability_with_subject(
     kind: AbilityKind,
     header: &ModalHeaderAst,
     modes: &[ModeAst],
     subject: Option<TargetFilter>,
+    host_self_reference: Option<TargetFilter>,
 ) -> AbilityDefinition {
     AbilityDefinition::new(kind, modal_marker_effect(header)).with_modal(
         build_modal_choice(header, modes),
-        lower_mode_abilities_with_subject(modes, kind, subject),
+        lower_mode_abilities_with_subject(modes, kind, subject, host_self_reference),
     )
 }
 
@@ -561,27 +570,32 @@ fn cap_modal_constraints(
         .collect()
 }
 
-fn lower_mode_abilities(modes: &[ModeAst], kind: AbilityKind) -> Vec<AbilityDefinition> {
-    modes
-        .iter()
-        .map(|mode| {
-            let parsed = parse_effect_chain(&mode.body, kind);
-            guard_unsupported_mode_qualifiers(&mode.body, parsed, kind)
-        })
-        .collect()
+fn lower_mode_abilities(
+    modes: &[ModeAst],
+    kind: AbilityKind,
+    host_self_reference: Option<TargetFilter>,
+) -> Vec<AbilityDefinition> {
+    lower_mode_abilities_with_subject(modes, kind, None, host_self_reference)
 }
 
 /// Variant of `lower_mode_abilities` that threads a trigger subject through
 /// mode-body parsing so anaphoric pronouns ("that creature") resolve against
 /// the triggering object (CR 608.2k + CR 301.5a). When `subject` is `None`,
 /// behavior is identical to `lower_mode_abilities`.
+///
+/// CR 303.4 + CR 702.103: `host_self_reference` carries the enclosing card's
+/// typed attachment-host self-reference so a `"that creature"` copy-token
+/// anaphor inside a modal mode body of an Aura/bestow card remaps to the
+/// enchanted host. `None` for non-Aura cards.
 fn lower_mode_abilities_with_subject(
     modes: &[ModeAst],
     kind: AbilityKind,
     subject: Option<TargetFilter>,
+    host_self_reference: Option<TargetFilter>,
 ) -> Vec<AbilityDefinition> {
     let mut ctx = ParseContext {
         subject,
+        host_self_reference,
         ..Default::default()
     };
     modes

@@ -1,7 +1,7 @@
 import { act } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { EngineAdapter, GameEvent, GameState } from "../../adapter/types";
+import type { EngineAdapter, GameEvent, GameState, StackEntry } from "../../adapter/types";
 import { useGameStore } from "../gameStore";
 
 function createMockState(overrides: Partial<GameState> = {}): GameState {
@@ -110,6 +110,35 @@ describe("gameStore", () => {
 
     expect(useGameStore.getState().stateHistory).toHaveLength(1);
     expect(useGameStore.getState().stateHistory[0]).toEqual(state1);
+  });
+
+  it("dispatch does not push to stateHistory when the stack is non-empty", async () => {
+    // Even an undoable action like PassPriority must skip the checkpoint
+    // while something is mid-resolution. Otherwise undoing later would
+    // land the player back on a stack-with-stuff state instead of a clean
+    // pre-trigger boundary.
+    const triggerOnStack: StackEntry = {
+      id: 100,
+      source_id: 1,
+      controller: 0,
+      kind: {
+        type: "TriggeredAbility",
+        data: {
+          source_id: 1,
+          ability: { targets: [] },
+        },
+      },
+    };
+    const state1 = createMockState({ turn_number: 1, stack: [triggerOnStack] });
+    const state2 = createMockState({ turn_number: 2 });
+    const adapter = createMockAdapter(state1);
+
+    await act(() => useGameStore.getState().initGame("test-id", adapter));
+    (adapter.getState as ReturnType<typeof vi.fn>).mockResolvedValue(state2);
+
+    await act(() => useGameStore.getState().dispatch({ type: "PassPriority" }));
+
+    expect(useGameStore.getState().stateHistory).toHaveLength(0);
   });
 
   it("dispatch does not push to stateHistory for revealed-info actions", async () => {

@@ -91,11 +91,14 @@ impl ContinuousModification {
             | ContinuousModification::GrantAbility { .. }
             | ContinuousModification::GrantTrigger { .. }
             | ContinuousModification::RemoveAllAbilities
-            | ContinuousModification::AddStaticMode { .. } => Layer::Ability,
+            | ContinuousModification::AddStaticMode { .. }
+            | ContinuousModification::GrantStaticAbility { .. } => Layer::Ability,
             ContinuousModification::AddType { .. }
             | ContinuousModification::RemoveType { .. }
+            | ContinuousModification::SetCardTypes { .. }
             | ContinuousModification::AddSubtype { .. }
             | ContinuousModification::RemoveSubtype { .. }
+            | ContinuousModification::RemoveAllSubtypes { .. }
             | ContinuousModification::AddSupertype { .. }
             | ContinuousModification::RemoveSupertype { .. }
             | ContinuousModification::AddAllCreatureTypes
@@ -277,6 +280,24 @@ mod tests {
         assert_eq!(
             ContinuousModification::RemoveType {
                 core_type: crate::types::card_type::CoreType::Creature
+            }
+            .layer(),
+            Layer::Type
+        );
+        // CR 613.1d: SetCardTypes / RemoveAllSubtypes are type-changing (Layer 4).
+        assert_eq!(
+            ContinuousModification::SetCardTypes {
+                core_types: vec![
+                    crate::types::card_type::CoreType::Artifact,
+                    crate::types::card_type::CoreType::Creature,
+                ]
+            }
+            .layer(),
+            Layer::Type
+        );
+        assert_eq!(
+            ContinuousModification::RemoveAllSubtypes {
+                set: crate::types::card_type::SubtypeSet::Creature
             }
             .layer(),
             Layer::Type

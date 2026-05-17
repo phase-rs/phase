@@ -3,8 +3,8 @@ use serde::Serialize;
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ActivationRestriction, CastingPermission, Duration,
-    Effect, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint, PaymentCost, PtValue,
-    QuantityExpr, SearchSelectionConstraint, StaticDefinition, TargetFilter,
+    Effect, LibraryPosition, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint,
+    PaymentCost, PtValue, QuantityExpr, SearchSelectionConstraint, StaticDefinition, TargetFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::DistributionUnit;
@@ -204,6 +204,10 @@ pub(crate) enum ContinuationAst {
     CounterSourceStatic {
         source_static: Box<StaticDefinition>,
     },
+    /// CR 707.10c: "You may choose new targets for the copy/copies." after a
+    /// CopySpell (possibly wrapped in a CreateDelayedTrigger) — patches
+    /// `retarget = MayChooseNewTargets` on the inner Effect::CopySpell.
+    CopyMayRetarget,
     /// "create a ... token and suspect it" → chain Suspect { target: LastCreated }
     SuspectLastCreated,
     /// "The flashback cost is equal to its mana cost." after a flashback grant.
@@ -232,6 +236,11 @@ pub(crate) enum ContinuationAst {
         chosen_destination: Zone,
         rest_destination: Zone,
     },
+    /// "Put those cards on top ..." after a search/dig/choice producer.
+    /// Count is supplied by the already-selected target set.
+    PutChosenCardsAtLibraryPosition { position: LibraryPosition },
+    /// CR 702.170c-d: "It/that card/they become plotted" after an exile effect.
+    BecomesPlotted,
     /// "Put the rest on the bottom/into your graveyard" after Dig/RevealTop —
     /// sets `rest_destination` on the preceding Dig effect. The destination is
     /// parsed from the text (bottom of library, graveyard, hand, etc.).
@@ -278,6 +287,13 @@ pub(crate) enum ContinuationAst {
         destination: Zone,
         enter_tapped: bool,
         rest_destination: Option<Zone>,
+        /// CR 701.20a + CR 608.2c: `Some(decline_zone)` when the kept clause is
+        /// optional ("you may put that card onto the battlefield"). `destination`
+        /// is then the accept zone and `decline_zone` is where the kept card
+        /// goes if the controller declines (the explicit "if you don't, put it
+        /// into your hand" zone, or the bottom-of-library rest pile by default).
+        /// `None` → mandatory kept destination (absorbs into `kept_destination`).
+        optional_decline: Option<Zone>,
     },
     /// CR 701.20a: "puts those cards into [zone]" after RevealUntil — the entire
     /// revealed pile (the matching card AND everything revealed before it) goes
@@ -779,6 +795,16 @@ pub(crate) enum ChooseImperativeAst {
         count: u32,
         chooser: crate::types::ability::Chooser,
     },
+    /// "choose a [filter] card in/from [player's] [zone]" — direct selection
+    /// from visible/resolution-scoped zone contents. Lowered to `Effect::ChooseFromZone`.
+    FromZone {
+        count: u32,
+        zones: Vec<crate::types::zones::Zone>,
+        zone_owner: crate::types::ability::ZoneOwner,
+        filter: crate::types::ability::TargetFilter,
+        chooser: crate::types::ability::Chooser,
+        up_to: bool,
+    },
     /// "choose from among the permanents ... an artifact, a creature, ..." —
     /// multi-category selection where each player keeps one per type, then sacrifices the rest.
     /// Lowered to `Effect::ChooseAndSacrificeRest`.
@@ -796,19 +822,6 @@ pub(crate) enum ChooseImperativeAst {
     TwoTargets {
         target_a: TargetFilter,
         target_b: TargetFilter,
-    },
-    /// CR 608.2c + CR 102.1: "Choose a [player|opponent] to <verb>" — the
-    /// infinitive body is the sub-ability that runs after the player is
-    /// chosen. Lowers to `Effect::Choose { choice_type, persist: false }`
-    /// with `sub_ability = Some(body)`, where `body` was parsed with
-    /// `relative_player_scope = Some(ScopedPlayer)` so its subject anaphors
-    /// route to `TargetFilter::ScopedPlayer` (read at runtime from
-    /// `ability.scoped_player`, bound by `engine_resolution_choices` when
-    /// the `NamedChoice` resolves). Used by the Gluntch the Bestower class:
-    /// "Choose a second player to draw a card."
-    ChoosePlayerThen {
-        choice_type: crate::types::ability::ChoiceType,
-        body: Box<AbilityDefinition>,
     },
 }
 
@@ -922,6 +935,10 @@ pub(crate) enum ZoneCounterImperativeAst {
         origin: Option<Zone>,
         target: TargetFilter,
         all: bool,
+        /// CR 122.1 + CR 614.1c: counters the exiled object enters Exile with
+        /// ("exile a card … with N <type> counters on it"). Empty for the
+        /// common no-counter case. Mirrors `Effect::ChangeZone.enter_with_counters`.
+        enter_with_counters: Vec<(CounterType, QuantityExpr)>,
     },
     ExileTop {
         player: TargetFilter,

@@ -3,7 +3,7 @@ use thiserror::Error;
 
 use crate::types::ability::{EffectKind, KeywordAction, TargetRef};
 use crate::types::actions::GameAction;
-use crate::types::events::{BendingType, GameEvent};
+use crate::types::events::{BendingType, GameEvent, ManaTapState};
 use crate::types::game_state::{
     ActionResult, AutoPassMode, AutoPassRequest, ConvokeMode, GameState, StackEntry,
     StackEntryKind, WaitingFor,
@@ -397,7 +397,8 @@ mod auto_pass_decision_tests {
 
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, QuantityExpr, ResolvedAbility, TargetFilter,
+        AbilityDefinition, AbilityKind, CopyRetargetPermission, Effect, QuantityExpr,
+        ResolvedAbility, TargetFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -773,6 +774,7 @@ mod auto_pass_decision_tests {
         let copy_ability = ResolvedAbility::new(
             Effect::CopySpell {
                 target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
             },
             Vec::new(),
             copy_id,
@@ -1502,6 +1504,7 @@ fn apply_action(
                 player,
                 cost,
                 pending_cast,
+                ..
             },
             GameAction::DecideOptionalCost { pay },
         ) => engine_casting::handle_optional_cost_choice(
@@ -1798,11 +1801,26 @@ fn apply_action(
                     )?
                 }
             };
-            // CR 605.1b: Process TapsForMana triggers inline after mana color
-            // choice resolves (dual land during mana payment).
+            // CR 603.2c + CR 605.4a: A mana color choice produces mana inline.
+            // Scan its events for TapsForMana mana multipliers and for
+            // cost-payment triggers HERE, because for `ManaPayment` /
+            // `UnlessPayment` resumes the post-action pipeline is skipped
+            // (it is guarded by `matches!(waiting_for, WaitingFor::Priority)`),
+            // so this is the only scan site — and CR 605.4a requires the bonus
+            // mana to enter the pool before the spell's payment step continues.
+            // Do NOT "simplify" this scan away for non-Priority resumes.
             if events.len() > events_before {
                 let mana_events: Vec<_> = events[events_before..].to_vec();
                 super::triggers::process_triggers(state, &mana_events);
+            }
+            // CR 603.2c: For a `Priority` resume the post-action pipeline WOULD
+            // re-scan these same events, double-firing the multiplier (issue
+            // #443: Delighted Halfling under a mana multiplier yields 5 not 3).
+            // Claim the scan via `triggers_processed_inline` — the same
+            // mechanism `DeclareAttackers` uses — so the pipeline runs SBAs,
+            // delayed/state triggers, and layers but skips the trigger re-scan.
+            if matches!(wf, WaitingFor::Priority { .. }) {
+                triggers_processed_inline = true;
             }
             wf
         }
@@ -2396,7 +2414,7 @@ fn apply_action(
                     player_id: *player,
                     mana_type: resolved_mana_type,
                     source_id: object_id,
-                    tapped_for_mana: false,
+                    tap_state: ManaTapState::NotFromTap,
                 });
             }
             if tapped_creature_for_convoke {
@@ -3126,6 +3144,58 @@ fn apply_action(
             effects::drain_pending_continuation(state, &mut events);
             state.waiting_for.clone()
         }
+        // CR 608.2c: ChooseObjectsIntoTrackedSet — player submitted their
+        // battlefield-permanent selection. Publish a fresh tracked set so the
+        // downstream `PayCost { ScaledMana }` and the `IfYouDo`/`Untap` tail
+        // resolve against exactly this selection, then resume the chain.
+        (
+            WaitingFor::ChooseObjectsSelection {
+                player,
+                eligible,
+                trigger_event,
+            },
+            GameAction::SelectTargets { targets },
+        ) => {
+            let p = *player;
+            let eligible_set = eligible.clone();
+            let pending_event = trigger_event.clone();
+            // Validate all selected targets are in the eligible set.
+            for t in &targets {
+                if !eligible_set.contains(t) {
+                    return Err(EngineError::InvalidAction(
+                        "Selected target not eligible for object selection".to_string(),
+                    ));
+                }
+            }
+            // Map TargetRef → ObjectId. The eligible set is all battlefield
+            // permanents, so every selected target is an Object.
+            let ids: Vec<ObjectId> = targets
+                .iter()
+                .filter_map(|t| match t {
+                    TargetRef::Object(id) => Some(*id),
+                    TargetRef::Player(_) => None,
+                })
+                .collect();
+            // CR 603.7: Always allocate a fresh tracked set — a player-chosen
+            // "those creatures" set is a new resolution scope. An empty
+            // selection yields an empty fresh set (size 0).
+            effects::publish_fresh_tracked_set(state, ids);
+            events.push(GameEvent::EffectResolved {
+                kind: crate::types::ability::EffectKind::ChooseObjectsIntoTrackedSet,
+                source_id: ObjectId(0), // Source not tracked through choice state
+            });
+            state.waiting_for = WaitingFor::Priority { player: p };
+            state.priority_player = p;
+            // CR 608.2: restore the triggering event so the stashed
+            // `PayCost { ScaledMana, payer: TriggeringPlayer }` continuation
+            // resolves the payer correctly — the trigger's resolution is still
+            // in flight.
+            let previous_trigger_event = state.current_trigger_event.clone();
+            state.current_trigger_event = pending_event;
+            effects::drain_pending_continuation(state, &mut events);
+            state.current_trigger_event = previous_trigger_event;
+            state.waiting_for.clone()
+        }
         // CR 707.10c: Copy retarget — player chose target for the current slot
         // via battlefield click. Advances slot-by-slot; finalizes on the last slot.
         (
@@ -3298,7 +3368,16 @@ fn apply_action(
                 triggers::push_pending_trigger_to_stack(state, pending_trigger, &mut events);
                 state.priority_passes.clear();
                 state.priority_pass_count = 0;
-                WaitingFor::Priority { player: p }
+                // CR 113.2c + CR 603.2 + CR 603.3b: Drain siblings deferred
+                // behind this distribute-among trigger so each independent
+                // instance reaches the stack (issue #416).
+                if let Some(waiting_for) =
+                    triggers::drain_deferred_trigger_queue(state, &mut events)
+                {
+                    waiting_for
+                } else {
+                    WaitingFor::Priority { player: p }
+                }
             } else {
                 // Resolution-time distribution continuation path.
                 state.waiting_for = WaitingFor::Priority { player: p };
@@ -3964,6 +4043,16 @@ pub(super) fn handle_tap_land_for_mana(
             true,
             events,
         );
+        // CR 106.12 + CR 106.12a: a basic/subtype-only land's intrinsic mana
+        // ability always includes `{T}`. Emit one `TappedForMana` per
+        // resolution so `TapsForMana` triggers fire exactly once (mirrors the
+        // ability-resolution path in `produce_mana_from_ability`).
+        events.push(GameEvent::TappedForMana {
+            player_id: player,
+            source_id: object_id,
+            produced: vec![mana_option.mana_type],
+            tap_state: crate::types::events::ManaTapState::FromTap,
+        });
         state
             .lands_tapped_for_mana
             .entry(player)
@@ -4171,18 +4260,32 @@ fn handle_crew_activation(
         ));
     }
 
-    // Extract crew power from keywords
-    let crew_power = obj
+    // Extract crew power and activation cadence from keywords
+    let (crew_power, crew_cadence) = obj
         .keywords
         .iter()
         .find_map(|kw| {
-            if let crate::types::keywords::Keyword::Crew(n) = kw {
-                Some(*n)
+            if let crate::types::keywords::Keyword::Crew {
+                power,
+                once_per_turn,
+            } = kw
+            {
+                Some((*power, *once_per_turn))
             } else {
                 None
             }
         })
         .ok_or_else(|| EngineError::InvalidAction("Vehicle has no Crew keyword".to_string()))?;
+
+    // CR 602.5b: "Activate only once each turn" — reject a second crew activation
+    // of this Vehicle in the same turn.
+    if crew_cadence == crate::types::keywords::ActivationCadence::OncePerTurn
+        && state.crew_activated_this_turn.contains(&vehicle_id)
+    {
+        return Err(EngineError::ActionNotAllowed(
+            "This Vehicle's crew ability can be activated only once each turn".to_string(),
+        ));
+    }
 
     // Find eligible creatures: untapped creatures controlled by player, excluding the Vehicle
     // TODO: CR 702.122c — filter out creatures with "can't crew Vehicles" restriction when implemented
@@ -4329,6 +4432,10 @@ fn handle_crew_announcement(
             caused_by: None,
         });
     }
+
+    // CR 602.5b: Record this crew activation so an "Activate only once each turn"
+    // Vehicle cannot be crewed a second time this turn. Cleared at turn start.
+    state.crew_activated_this_turn.insert(vehicle_id);
 
     Ok(push_keyword_action(
         state,
@@ -8641,6 +8748,306 @@ mod tests {
         );
     }
 
+    /// Issue #443: A `TapsForMana` mana multiplier must fire exactly once when
+    /// an `AnyOneColor` mana ability routes through a `ChooseManaColor` prompt
+    /// during a `Priority` resume. Pre-fix, the inline scan in the
+    /// `ChooseManaColor` arm AND the post-action pipeline both scanned the same
+    /// `FromTap` `ManaAdded` event, double-firing the multiplier (1 base + 2 +
+    /// 2 = 5 instead of 1 base + 2 = 3). CR 603.2c.
+    #[test]
+    fn taps_for_mana_multiplier_fires_once_on_color_choice_priority_resume() {
+        let mut state = setup_game_at_main_phase();
+
+        // A `TapsForMana` multiplier on a creature: whenever a permanent the
+        // controller controls taps for mana, add mana of that type.
+        // `TriggerEventManaType` adds one unit per fire; two trigger
+        // definitions give a deterministic +2 multiplier (base 1 + 2 = 3).
+        let mana_doubler = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Mana Multiplier".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&mana_doubler).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.entered_battlefield_turn = Some(1);
+            let multiplier_trigger = || {
+                TriggerDefinition::new(TriggerMode::TapsForMana)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Mana {
+                            produced: crate::types::ability::ManaProduction::TriggerEventManaType,
+                            restrictions: vec![],
+                            grants: vec![],
+                            expiry: None,
+                            target: None,
+                        },
+                    ))
+                    .valid_card(TargetFilter::Any)
+                    .valid_target(TargetFilter::Controller)
+            };
+            obj.trigger_definitions.push(multiplier_trigger());
+            obj.trigger_definitions.push(multiplier_trigger());
+        }
+
+        // An `AnyOneColor` source with >1 color option — this routes through
+        // `WaitingFor::ChooseManaColor`.
+        let any_color = create_object(
+            &mut state,
+            CardId(201),
+            PlayerId(0),
+            "Any Color Rock".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&any_color).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.entered_battlefield_turn = Some(1);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: crate::types::ability::ManaProduction::AnyOneColor {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            color_options: vec![
+                                crate::types::mana::ManaColor::White,
+                                crate::types::mana::ManaColor::Blue,
+                                crate::types::mana::ManaColor::Black,
+                                crate::types::mana::ManaColor::Red,
+                                crate::types::mana::ManaColor::Green,
+                            ],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+        }
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: any_color,
+                ability_index: 0,
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                result.waiting_for,
+                WaitingFor::ChooseManaColor {
+                    player: PlayerId(0),
+                    ..
+                }
+            ),
+            "expected ChooseManaColor, got {:?}",
+            result.waiting_for,
+        );
+        assert_eq!(state.players[0].mana_pool.total(), 0);
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::ChooseManaColor {
+                choice: crate::types::game_state::ManaChoice::SingleColor(
+                    crate::types::mana::ManaType::Green,
+                ),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
+
+        // 1 base + 2 from the multiplier = 3. Pre-fix this yields 5 (the
+        // multiplier double-fires). Assert it is neither 1 (multiplier dropped)
+        // nor 5 (double-fire).
+        let total = state.players[0].mana_pool.total();
+        assert_ne!(total, 1, "multiplier must fire (got base mana only)");
+        assert_ne!(total, 5, "multiplier must fire exactly once, not twice");
+        assert_eq!(total, 3, "expected 1 base + 2 multiplier = 3, got {total}",);
+        assert_eq!(
+            state.players[0]
+                .mana_pool
+                .count_color(crate::types::mana::ManaType::Green),
+            3,
+        );
+    }
+
+    /// Issue #443 companion: the same `TapsForMana` multiplier must also fire
+    /// exactly once when the `AnyOneColor` ability is activated mid-payment
+    /// (`ManaAbilityResume::ManaPayment`). For that resume the post-action
+    /// pipeline is skipped entirely, so the inline scan in the
+    /// `ChooseManaColor` arm is the ONLY scan site — proving the fix does not
+    /// drop the multiplier on the non-`Priority` path. CR 603.2c + CR 605.4a.
+    #[test]
+    fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
+        let mut state = setup_game_at_main_phase();
+
+        // Mirror the production precondition: ManaPayment is only entered with
+        // `pending_cast` populated (see the drift invariant in `derived`).
+        state.pending_cast = Some(Box::new(crate::types::game_state::PendingCast {
+            object_id: ObjectId(0),
+            card_id: CardId(0),
+            ability: crate::types::ability::ResolvedAbility::new(
+                crate::types::ability::Effect::Unimplemented {
+                    name: "Test".to_string(),
+                    description: None,
+                },
+                vec![],
+                ObjectId(0),
+                PlayerId(0),
+            ),
+            cost: crate::types::mana::ManaCost::NoCost,
+            activation_cost: None,
+            activation_ability_index: None,
+            target_constraints: vec![],
+            casting_variant: crate::types::game_state::CastingVariant::Normal,
+            cast_timing_permission: None,
+            distribute: None,
+            origin_zone: crate::types::zones::Zone::Hand,
+            additional_cost_flow: None,
+            deferred_modal_choice: None,
+            deferred_target_selection: false,
+            additional_cost_decided: false,
+            declared_kickers_to_pay: Vec::new(),
+            declined_kickers: Vec::new(),
+            convoked_creatures: Vec::new(),
+        }));
+        state.waiting_for = WaitingFor::ManaPayment {
+            player: PlayerId(0),
+            convoke_mode: None,
+        };
+
+        let mana_doubler = create_object(
+            &mut state,
+            CardId(202),
+            PlayerId(0),
+            "Mana Multiplier".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&mana_doubler).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.entered_battlefield_turn = Some(1);
+            let multiplier_trigger = || {
+                TriggerDefinition::new(TriggerMode::TapsForMana)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Mana {
+                            produced: crate::types::ability::ManaProduction::TriggerEventManaType,
+                            restrictions: vec![],
+                            grants: vec![],
+                            expiry: None,
+                            target: None,
+                        },
+                    ))
+                    .valid_card(TargetFilter::Any)
+                    .valid_target(TargetFilter::Controller)
+            };
+            obj.trigger_definitions.push(multiplier_trigger());
+            obj.trigger_definitions.push(multiplier_trigger());
+        }
+
+        let any_color = create_object(
+            &mut state,
+            CardId(203),
+            PlayerId(0),
+            "Any Color Rock".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&any_color).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.entered_battlefield_turn = Some(1);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: crate::types::ability::ManaProduction::AnyOneColor {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            color_options: vec![
+                                crate::types::mana::ManaColor::White,
+                                crate::types::mana::ManaColor::Blue,
+                                crate::types::mana::ManaColor::Black,
+                                crate::types::mana::ManaColor::Red,
+                                crate::types::mana::ManaColor::Green,
+                            ],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+        }
+
+        // Activate the AnyOneColor ability mid-payment → ManaAbilityResume::ManaPayment.
+        let result = apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: any_color,
+                ability_index: 0,
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                result.waiting_for,
+                WaitingFor::ChooseManaColor {
+                    player: PlayerId(0),
+                    ..
+                }
+            ),
+            "expected ChooseManaColor, got {:?}",
+            result.waiting_for,
+        );
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::ChooseManaColor {
+                choice: crate::types::game_state::ManaChoice::SingleColor(
+                    crate::types::mana::ManaType::Green,
+                ),
+            },
+        )
+        .unwrap();
+
+        // The resume returns to ManaPayment (the post-action pipeline never
+        // runs for this `WaitingFor`), so the inline scan is the sole scan site.
+        assert!(
+            matches!(
+                result.waiting_for,
+                WaitingFor::ManaPayment {
+                    player: PlayerId(0),
+                    ..
+                }
+            ),
+            "expected ManaPayment resume, got {:?}",
+            result.waiting_for,
+        );
+
+        // 1 base + 2 multiplier = 3 — fired exactly once, not dropped, not doubled.
+        let total = state.players[0].mana_pool.total();
+        assert_ne!(
+            total, 1,
+            "multiplier must still fire on the ManaPayment path"
+        );
+        assert_ne!(total, 5, "multiplier must fire exactly once, not twice");
+        assert_eq!(total, 3, "expected 1 base + 2 multiplier = 3, got {total}",);
+    }
+
     #[test]
     fn holdout_settlement_second_mana_ability_prompts_for_creature_then_adds_mana() {
         let mut state = setup_game_at_main_phase();
@@ -12542,6 +12949,7 @@ mod phase_trigger_regression_tests {
             pending_effect: Box::new(ability),
             trigger_event: None,
             effect_description: None,
+            remaining: Vec::new(),
         };
 
         let result =
@@ -12602,10 +13010,13 @@ mod phase_trigger_regression_tests {
         state.players[1].energy = 2;
         state.waiting_for = WaitingFor::UnlessPayment {
             player: PlayerId(1),
-            cost: AbilityCost::PayEnergy { amount: 2 },
+            cost: AbilityCost::PayEnergy {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
             pending_effect: Box::new(primary),
             trigger_event: None,
             effect_description: None,
+            remaining: Vec::new(),
         };
 
         let starting_life = state.players[0].life;
@@ -12655,10 +13066,13 @@ mod phase_trigger_regression_tests {
 
         state.waiting_for = WaitingFor::UnlessPayment {
             player: PlayerId(1),
-            cost: AbilityCost::PayEnergy { amount: 2 },
+            cost: AbilityCost::PayEnergy {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
             pending_effect: Box::new(primary),
             trigger_event: None,
             effect_description: None,
+            remaining: Vec::new(),
         };
 
         let starting_life = state.players[0].life;
@@ -12697,10 +13111,13 @@ mod phase_trigger_regression_tests {
         state.players[1].energy = 2;
         state.waiting_for = WaitingFor::UnlessPayment {
             player: PlayerId(1),
-            cost: AbilityCost::PayEnergy { amount: 2 },
+            cost: AbilityCost::PayEnergy {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
             pending_effect: Box::new(primary),
             trigger_event: None,
             effect_description: None,
+            remaining: Vec::new(),
         };
 
         let starting_life = state.players[0].life;
@@ -12754,10 +13171,13 @@ mod phase_trigger_regression_tests {
         state.players[1].energy = 2;
         state.waiting_for = WaitingFor::UnlessPayment {
             player: PlayerId(1),
-            cost: AbilityCost::PayEnergy { amount: 2 },
+            cost: AbilityCost::PayEnergy {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
             pending_effect: Box::new(primary),
             trigger_event: None,
             effect_description: None,
+            remaining: Vec::new(),
         };
 
         let starting_life = state.players[0].life;
@@ -12784,7 +13204,9 @@ mod phase_trigger_regression_tests {
         state.players[0].energy = 2;
         state.waiting_for = WaitingFor::UnlessPayment {
             player: PlayerId(0),
-            cost: AbilityCost::PayEnergy { amount: 2 },
+            cost: AbilityCost::PayEnergy {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
             pending_effect: Box::new(ResolvedAbility::new(
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 1 },
@@ -12796,6 +13218,7 @@ mod phase_trigger_regression_tests {
             )),
             trigger_event: None,
             effect_description: None,
+            remaining: Vec::new(),
         };
 
         let result = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
@@ -12857,6 +13280,7 @@ mod phase_trigger_regression_tests {
             pending_effect: Box::new(draw_that_many(source_id, PlayerId(0))),
             trigger_event: None,
             effect_description: None,
+            remaining: Vec::new(),
         };
 
         let result = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
@@ -13831,6 +14255,185 @@ mod phase_trigger_regression_tests {
         );
     }
 
+    /// Issue #429 — CR 113.2c + CR 603.3b + CR 707.10: When the copy-replacement
+    /// ETB event is replayed by `handle_copy_target_choice`, multiple interactive
+    /// triggers can fire simultaneously. `process_triggers` sets the first as
+    /// `state.pending_trigger` and stashes the rest into `state.deferred_triggers`.
+    /// The handler previously returned `WaitingFor::Priority` unconditionally,
+    /// silently dropping the first trigger's target-selection prompt. The handler
+    /// must hand back the active trigger's `TriggerTargetSelection` instead.
+    #[test]
+    fn copy_target_choice_surfaces_interactive_trigger_prompt_for_deferred_entry() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, QuantityExpr, TriggerDefinition, TypedFilter,
+        };
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Two observers, each with a *targeted* "when a creature enters, deal 1
+        // damage to target creature" ETB trigger. Both watch the replayed
+        // Callidus entry event, so two interactive triggers fire at once.
+        let make_observer = |state: &mut GameState, card: u64| -> ObjectId {
+            let obs = zones::create_object(
+                state,
+                CardId(card),
+                PlayerId(0),
+                format!("Observer {card}"),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&obs).unwrap();
+                obj.card_types
+                    .core_types
+                    .push(crate::types::card_type::CoreType::Creature);
+                obj.base_power = Some(1);
+                obj.base_toughness = Some(1);
+                obj.power = Some(1);
+                obj.toughness = Some(1);
+                obj.trigger_definitions.push(
+                    TriggerDefinition::new(TriggerMode::ChangesZone)
+                        .execute(AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::DealDamage {
+                                amount: QuantityExpr::Fixed { value: 1 },
+                                target: TargetFilter::Typed(TypedFilter::creature()),
+                                damage_source: None,
+                            },
+                        ))
+                        .valid_card(TargetFilter::Typed(TypedFilter::creature()))
+                        .destination(Zone::Battlefield),
+                );
+            }
+            obs
+        };
+        let observer_a = make_observer(&mut state, 10);
+        let observer_b = make_observer(&mut state, 11);
+
+        // Copy target on the battlefield.
+        let bear = zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&bear).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            // CR 707.2: `BecomeCopy` copies the *intrinsic copiable values*
+            // (`base_*` fields), not the layer-derived ones. The bear's
+            // creature type must live on `base_card_types` / `base_name` so the
+            // realized copy is a creature — otherwise the observers' creature-
+            // filtered ETB triggers never match the replayed copy entry.
+            obj.base_card_types = obj.card_types.clone();
+            obj.base_name = obj.name.clone();
+        }
+
+        // Callidus Assassin with a plain BecomeCopy "enter as a copy" replacement.
+        let assassin = zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Callidus Assassin".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&assassin).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+            obj.base_power = Some(3);
+            obj.base_toughness = Some(3);
+            obj.power = Some(3);
+            obj.toughness = Some(3);
+            obj.replacement_definitions.push(
+                crate::types::ability::ReplacementDefinition::new(
+                    crate::types::replacements::ReplacementEvent::Moved,
+                )
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::BecomeCopy {
+                        target: TargetFilter::Typed(TypedFilter::creature()),
+                        duration: None,
+                        mana_value_limit: None,
+                        additional_modifications: Vec::new(),
+                    },
+                )),
+            );
+        }
+
+        // Capture a real `ZoneChanged` for Callidus entering, mirroring what the
+        // post-action pipeline stashes when `CopyTargetChoice` is set up.
+        {
+            let mut warmup_events: Vec<GameEvent> = Vec::new();
+            zones::move_to_zone(&mut state, assassin, Zone::Stack, &mut warmup_events);
+            warmup_events.clear();
+            zones::move_to_zone(&mut state, assassin, Zone::Battlefield, &mut warmup_events);
+            let entry_event = warmup_events
+                .into_iter()
+                .find(|e| {
+                    matches!(
+                        e,
+                        GameEvent::ZoneChanged { object_id, to, .. }
+                            if *object_id == assassin && *to == Zone::Battlefield
+                    )
+                })
+                .expect("move_to_zone must emit a ZoneChanged for the entry");
+            state.deferred_entry_events.push(entry_event);
+        }
+        state.waiting_for = WaitingFor::CopyTargetChoice {
+            player: PlayerId(0),
+            source_id: assassin,
+            valid_targets: vec![bear],
+            max_mana_value: None,
+        };
+
+        let waiting = apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(bear)),
+            },
+        )
+        .expect("copy target choice should resolve")
+        .waiting_for;
+
+        // The first interactive trigger's target-selection prompt must be
+        // surfaced — not silently dropped in favor of Priority.
+        assert!(
+            matches!(waiting, WaitingFor::TriggerTargetSelection { .. }),
+            "expected the first interactive ETB trigger's prompt, got {waiting:?}"
+        );
+        assert!(
+            state.pending_trigger.is_some(),
+            "the active interactive trigger must be set as pending_trigger"
+        );
+        // The second simultaneously-fired trigger must be retained in the
+        // deferred queue so it reaches the stack after the first resolves.
+        assert_eq!(
+            state.deferred_triggers.len(),
+            1,
+            "the sibling interactive trigger must be deferred, not dropped"
+        );
+        // Both observers must be the trigger sources (one active, one deferred).
+        let pending_src = state.pending_trigger.as_ref().unwrap().source_id;
+        let deferred_src = state.deferred_triggers[0].pending.source_id;
+        let mut srcs = [pending_src, deferred_src];
+        srcs.sort_by_key(|id| id.0);
+        let mut expected = [observer_a, observer_b];
+        expected.sort_by_key(|id| id.0);
+        assert_eq!(
+            srcs, expected,
+            "both observers' ETB triggers must be accounted for"
+        );
+    }
+
     #[test]
     fn copy_target_choice_rejects_invalid_target() {
         let mut state = GameState::new_two_player(42);
@@ -14367,7 +14970,10 @@ mod crew_tests {
                 .core_types
                 .push(crate::types::card_type::CoreType::Artifact);
             obj.card_types.subtypes.push("Vehicle".to_string());
-            obj.keywords.push(crate::types::keywords::Keyword::Crew(3));
+            obj.keywords.push(crate::types::keywords::Keyword::Crew {
+                power: 3,
+                once_per_turn: crate::types::keywords::ActivationCadence::Unlimited,
+            });
             obj.base_power = Some(6);
             obj.base_toughness = Some(5);
             obj.power = Some(6);
@@ -14599,7 +15205,10 @@ mod crew_tests {
             obj.card_types
                 .core_types
                 .push(crate::types::card_type::CoreType::Artifact);
-            obj.keywords.push(crate::types::keywords::Keyword::Crew(1));
+            obj.keywords.push(crate::types::keywords::Keyword::Crew {
+                power: 1,
+                once_per_turn: crate::types::keywords::ActivationCadence::Unlimited,
+            });
         }
 
         let result = apply_as_current(
@@ -15041,8 +15650,10 @@ mod keyword_action_stack_tests {
         let obj = state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(CoreType::Artifact);
         obj.card_types.subtypes.push("Vehicle".to_string());
-        obj.keywords
-            .push(crate::types::keywords::Keyword::Crew(crew_n));
+        obj.keywords.push(crate::types::keywords::Keyword::Crew {
+            power: crew_n,
+            once_per_turn: crate::types::keywords::ActivationCadence::Unlimited,
+        });
         obj.base_power = Some(6);
         obj.base_toughness = Some(5);
         obj.power = Some(6);
@@ -15187,6 +15798,107 @@ mod keyword_action_stack_tests {
         assert!(
             state.objects.get(&creature_a).unwrap().tapped,
             "CR 118.7: cost persists after counter"
+        );
+    }
+
+    fn make_vehicle_once_per_turn(state: &mut GameState, crew_n: u32) -> ObjectId {
+        let id = make_vehicle(state, crew_n);
+        let obj = state.objects.get_mut(&id).unwrap();
+        // CR 602.5b: "Activate only once each turn" crew restriction.
+        obj.keywords.clear();
+        obj.card_types.subtypes = vec!["Vehicle".to_string()];
+        obj.keywords.push(crate::types::keywords::Keyword::Crew {
+            power: crew_n,
+            once_per_turn: crate::types::keywords::ActivationCadence::OncePerTurn,
+        });
+        id
+    }
+
+    #[test]
+    fn crew_once_per_turn_vehicle_rejects_second_activation_same_turn() {
+        // CR 602.5b: Luxurious Locomotive — "Crew 1. Activate only once each
+        // turn." A second CrewVehicle activation in the same turn is rejected.
+        let mut state = setup_main_phase();
+        let vehicle_id = make_vehicle_once_per_turn(&mut state, 1);
+        let creature_a = make_creature(&mut state, "Bear", 3);
+        let creature_b = make_creature(&mut state, "Elk", 3);
+
+        // First crew: full announcement, vehicle recorded as crewed this turn.
+        apply_as_current(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id,
+                creature_ids: vec![],
+            },
+        )
+        .unwrap();
+        apply_as_current(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id,
+                creature_ids: vec![creature_a],
+            },
+        )
+        .unwrap();
+        assert!(
+            state.crew_activated_this_turn.contains(&vehicle_id),
+            "first crew records the vehicle as crewed this turn"
+        );
+
+        // Second crew activation this turn — must be rejected. `creature_b` is
+        // a fresh untapped creature, so power is not the blocker.
+        let second = apply_as_current(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id,
+                creature_ids: vec![],
+            },
+        );
+        assert!(
+            matches!(second, Err(EngineError::ActionNotAllowed(_))),
+            "second crew of an 'Activate only once each turn' Vehicle must be \
+             rejected; got {second:?}"
+        );
+        let _ = creature_b;
+    }
+
+    #[test]
+    fn crew_unlimited_vehicle_allows_second_activation_same_turn() {
+        // A normal (non-once-per-turn) Vehicle may be crewed repeatedly.
+        let mut state = setup_main_phase();
+        let vehicle_id = make_vehicle(&mut state, 1);
+        let creature_a = make_creature(&mut state, "Bear", 3);
+        let _creature_b = make_creature(&mut state, "Elk", 3);
+
+        apply_as_current(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id,
+                creature_ids: vec![],
+            },
+        )
+        .unwrap();
+        apply_as_current(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id,
+                creature_ids: vec![creature_a],
+            },
+        )
+        .unwrap();
+
+        // Second crew activation — an Unlimited Vehicle accepts it (the
+        // once-per-turn restriction does not apply).
+        let second = apply_as_current(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id,
+                creature_ids: vec![],
+            },
+        );
+        assert!(
+            second.is_ok(),
+            "an unrestricted Vehicle may be crewed again the same turn; got {second:?}"
         );
     }
 

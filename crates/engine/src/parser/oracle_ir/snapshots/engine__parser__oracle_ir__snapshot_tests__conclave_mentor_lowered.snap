@@ -15,7 +15,10 @@ expression: "&lowered"
           "amount": {
             "type": "Ref",
             "qty": {
-              "type": "EventContextSourcePower"
+              "type": "Power",
+              "scope": {
+                "type": "CostPaidObject"
+              }
             }
           },
           "player": "controller"

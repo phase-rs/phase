@@ -217,6 +217,12 @@ pub(crate) fn extract_keyword_line(
         }
     }
 
+    if mtgjson_keyword_names.iter().any(|n| n == "firebending") {
+        if let Some(kw) = parse_firebending_keyword_line(line) {
+            return Some(vec![kw]);
+        }
+    }
+
     if mtgjson_keyword_names.iter().any(|n| n == "bloodthirst") {
         if let Some(kw) = parse_bloodthirst_keyword_line(line) {
             if kw == Keyword::Bloodthirst(BloodthirstValue::Fixed(1)) {
@@ -327,6 +333,32 @@ fn parse_mobilize_keyword_line(line: &str) -> Option<Keyword> {
     .parse(rest)
     .ok()?;
     parse_cda_quantity(quantity_text).map(Keyword::Mobilize)
+}
+
+fn parse_firebending_keyword_line(line: &str) -> Option<Keyword> {
+    let lower = line.trim().trim_end_matches('.').to_ascii_lowercase();
+    let (rest, _) = tag::<_, _, OracleError<'_>>("firebending ")
+        .parse(lower.as_str())
+        .ok()?;
+    let rest = rest.trim();
+
+    if let Ok((remaining, value)) = nom_primitives::parse_number.parse(rest) {
+        if remaining.trim().is_empty() {
+            return Some(Keyword::Firebending(QuantityExpr::Fixed {
+                value: value as i32,
+            }));
+        }
+    }
+
+    let (rest, _) = tag::<_, _, OracleError<'_>>("x").parse(rest).ok()?;
+    let (rest, _) = space0::<_, OracleError<'_>>.parse(rest).ok()?;
+    let (quantity_text, _) = alt((
+        tag::<_, _, OracleError<'_>>(", where x is "),
+        tag("where x is "),
+    ))
+    .parse(rest)
+    .ok()?;
+    parse_cda_quantity(quantity_text).map(Keyword::Firebending)
 }
 
 /// Nom leaf combinator: match one of the six enchantable core types and yield
@@ -667,6 +699,10 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
         return Some(kw);
     }
 
+    if let Some(kw) = parse_firebending_keyword_line(text) {
+        return Some(kw);
+    }
+
     // First try direct parse (handles simple keywords like "flying")
     let direct: Keyword = text.parse().unwrap();
     if !matches!(direct, Keyword::Unknown(_)) {
@@ -981,7 +1017,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Vanishing(_) => "vanishing".to_string(),
         Keyword::Rampage(_) => "rampage".to_string(),
         Keyword::Absorb(_) => "absorb".to_string(),
-        Keyword::Crew(_) => "crew".to_string(),
+        Keyword::Crew { .. } => "crew".to_string(),
         Keyword::Poisonous(_) => "poisonous".to_string(),
         Keyword::Bloodthirst(_) => "bloodthirst".to_string(),
         Keyword::Amplify(_) => "amplify".to_string(),
@@ -1840,6 +1876,115 @@ mod tests {
         assert_eq!(
             result,
             vec![Keyword::Mobilize(QuantityExpr::Fixed { value: 2 })]
+        );
+    }
+
+    #[test]
+    fn extract_keyword_line_firebending_source_power() {
+        use crate::types::ability::{ObjectScope, QuantityRef};
+
+        let mtgjson_kws = vec!["firebending".to_string()];
+        let result = extract_keyword_line("Firebending X, where X is ~'s power.", &mtgjson_kws)
+            .expect("firebending source-power line should be recognized");
+
+        assert_eq!(result.len(), 1);
+        assert!(matches!(
+            &result[0],
+            Keyword::Firebending(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Source
+                }
+            })
+        ));
+    }
+
+    #[test]
+    fn extract_keyword_line_firebending_comma_separated_fixed_amounts() {
+        let mtgjson_kws = vec![
+            "flying".to_string(),
+            "firebending".to_string(),
+            "menace".to_string(),
+            "trample".to_string(),
+            "haste".to_string(),
+        ];
+
+        let flying = extract_keyword_line("Flying, firebending 2", &mtgjson_kws)
+            .expect("comma-separated flying/firebending should parse");
+        assert_eq!(
+            flying,
+            vec![Keyword::Firebending(QuantityExpr::Fixed { value: 2 })]
+        );
+
+        let menace = extract_keyword_line("Menace, firebending 3", &mtgjson_kws)
+            .expect("comma-separated menace/firebending should parse");
+        assert_eq!(
+            menace,
+            vec![Keyword::Firebending(QuantityExpr::Fixed { value: 3 })]
+        );
+
+        let trample_haste = extract_keyword_line("Trample, firebending 4, haste", &mtgjson_kws)
+            .expect("comma-separated trample/firebending/haste should parse");
+        assert_eq!(
+            trample_haste,
+            vec![Keyword::Firebending(QuantityExpr::Fixed { value: 4 })]
+        );
+    }
+
+    #[test]
+    fn extract_keyword_line_firebending_creatures_you_control() {
+        use crate::types::ability::{ControllerRef, QuantityRef, TargetFilter, TypeFilter};
+
+        let mtgjson_kws = vec!["firebending".to_string()];
+        let result = extract_keyword_line(
+            "Firebending X, where X is the number of creatures you control.",
+            &mtgjson_kws,
+        )
+        .expect("firebending creature-count line should be recognized");
+
+        assert_eq!(result.len(), 1);
+        match &result[0] {
+            Keyword::Firebending(QuantityExpr::Ref {
+                qty:
+                    QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(filter),
+                    },
+            }) => {
+                assert_eq!(filter.type_filters, vec![TypeFilter::Creature]);
+                assert_eq!(filter.controller, Some(ControllerRef::You));
+            }
+            other => panic!("expected dynamic Firebending ObjectCount, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_keyword_line_firebending_experience_counters() {
+        use crate::types::ability::{CountScope, QuantityRef};
+        use crate::types::player::PlayerCounterKind;
+
+        let mtgjson_kws = vec!["firebending".to_string()];
+        let result = extract_keyword_line(
+            "Firebending X, where X is the number of experience counters you have.",
+            &mtgjson_kws,
+        )
+        .expect("firebending experience-count line should be recognized");
+
+        assert_eq!(result.len(), 1);
+        assert!(matches!(
+            &result[0],
+            Keyword::Firebending(QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCounter {
+                    kind: PlayerCounterKind::Experience,
+                    scope: CountScope::Controller,
+                }
+            })
+        ));
+    }
+
+    #[test]
+    fn parse_keyword_from_oracle_firebending_fixed_amount() {
+        assert_eq!(
+            parse_keyword_from_oracle("firebending 5"),
+            Some(Keyword::Firebending(QuantityExpr::Fixed { value: 5 }))
         );
     }
 

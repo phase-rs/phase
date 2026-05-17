@@ -1420,27 +1420,6 @@ pub fn declare_attackers(
         attacks: attacks.to_vec(),
     });
 
-    // Emit Firebend events for each attacking creature with firebending.
-    // These go into the same events batch so process_triggers catches both
-    // AttackersDeclared (for the mana trigger) and Firebend (for Avatar Aang).
-    for &obj_id in &attacker_ids {
-        if let Some(obj) = state.objects.get(&obj_id) {
-            if obj
-                .keywords
-                .iter()
-                .any(|k| matches!(k, Keyword::Firebending(_)))
-            {
-                super::bending::record_bending(
-                    state,
-                    events,
-                    crate::types::events::BendingType::Fire,
-                    obj_id,
-                    obj.controller,
-                );
-            }
-        }
-    }
-
     // CR 508.1a: Record attacker object IDs for per-turn tracking.
     state
         .creatures_attacked_this_turn
@@ -1620,6 +1599,51 @@ pub fn get_valid_attacker_ids(state: &GameState) -> Vec<ObjectId> {
             }
         })
         .collect()
+}
+
+/// CR 508.1a / CR 509.1a: Rebuild the eligibility snapshot carried by the
+/// `DeclareAttackers` / `DeclareBlockers` waiting states from the live game
+/// queries. The declare-step waiting payloads are computed exactly once by
+/// `turns::auto_advance` when combat enters the step, but a mid-step state
+/// mutation (notably debug actions that flip summoning sickness — CR 302.6 —
+/// tapped status, or grant/remove Haste/Defender) can change which creatures
+/// are legal attackers/blockers. Re-deriving the payload mirrors the
+/// `turns.rs` declare-step arms so there is a single authority for the payload
+/// shape. A no-op for every non-declaration `WaitingFor` variant.
+pub fn refresh_combat_declaration_waiting_for(state: &mut GameState) {
+    match &state.waiting_for {
+        crate::types::game_state::WaitingFor::DeclareAttackers { .. } => {
+            // CR 508.1a: Mirror turns.rs:1369-1370 — rebuild both payload fields.
+            let valid_attacker_ids = get_valid_attacker_ids(state);
+            let valid_attack_targets = get_valid_attack_targets(state);
+            if let crate::types::game_state::WaitingFor::DeclareAttackers {
+                valid_attacker_ids: ids,
+                valid_attack_targets: targets,
+                ..
+            } = &mut state.waiting_for
+            {
+                *ids = valid_attacker_ids;
+                *targets = valid_attack_targets;
+            }
+        }
+        crate::types::game_state::WaitingFor::DeclareBlockers { player, .. } => {
+            // Copy `player` out before the immutable-borrowing queries below.
+            let player = *player;
+            // CR 509.1a: Mirror turns.rs:1394-1396 — player-scoped block targets.
+            let valid_block_targets = get_valid_block_targets_for_player(state, player);
+            let valid_blocker_ids: Vec<_> = valid_block_targets.keys().copied().collect();
+            if let crate::types::game_state::WaitingFor::DeclareBlockers {
+                valid_blocker_ids: ids,
+                valid_block_targets: targets,
+                ..
+            } = &mut state.waiting_for
+            {
+                *ids = valid_blocker_ids;
+                *targets = valid_block_targets;
+            }
+        }
+        _ => {}
+    }
 }
 
 /// CR 702.14c: A creature with landwalk can't be blocked as long as the defending
@@ -2236,6 +2260,131 @@ mod tests {
         obj.entered_battlefield_turn = Some(2);
         obj.summoning_sick = true;
         assert!(validate_attackers(&state, &[id]).is_err());
+    }
+
+    /// Issue #428 — CR 302.6 / CR 508.1a: A debug `SetSummoningSickness { sick:
+    /// false }` applied while paused at `DeclareAttackers` must refresh the
+    /// frozen `valid_attacker_ids` snapshot so the creature becomes a legal
+    /// attacker. Drives the real `engine::apply` → `apply_debug_action` →
+    /// `refresh_combat_declaration_waiting_for` pipeline. FAILS on pre-fix code:
+    /// the snapshot stays stale and the creature is never surfaced.
+    #[test]
+    fn debug_clear_summoning_sickness_refreshes_valid_attackers() {
+        use crate::types::actions::{DebugAction, GameAction};
+        use crate::types::game_state::WaitingFor;
+
+        let mut state = setup();
+        state.debug_mode = true;
+        state.phase = crate::types::phase::Phase::DeclareAttackers;
+        state.priority_player = PlayerId(0);
+        state.combat = Some(CombatState::default());
+
+        // Summoning-sick creature controlled by the active player.
+        let id = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        state.objects.get_mut(&id).unwrap().summoning_sick = true;
+
+        // Build the DeclareAttackers waiting state exactly as the engine does
+        // (turns.rs:1369-1370): the creature is sick, so the snapshot is empty.
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: get_valid_attacker_ids(&state),
+            valid_attack_targets: get_valid_attack_targets(&state),
+        };
+        match &state.waiting_for {
+            WaitingFor::DeclareAttackers {
+                valid_attacker_ids, ..
+            } => assert!(
+                !valid_attacker_ids.contains(&id),
+                "precondition: sick creature must not be a valid attacker yet"
+            ),
+            other => panic!("expected DeclareAttackers, got {other:?}"),
+        }
+
+        // Lift summoning sickness via the debug pipeline.
+        let result = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::Debug(DebugAction::SetSummoningSickness {
+                object_id: id,
+                sick: false,
+            }),
+        )
+        .expect("debug SetSummoningSickness should succeed");
+
+        match &result.waiting_for {
+            WaitingFor::DeclareAttackers {
+                valid_attacker_ids, ..
+            } => assert!(
+                valid_attacker_ids.contains(&id),
+                "refreshed snapshot must surface the no-longer-sick creature"
+            ),
+            other => panic!("expected refreshed DeclareAttackers, got {other:?}"),
+        }
+
+        // The creature can now actually be declared as an attacker.
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DeclareAttackers {
+                attacks: vec![(id, AttackTarget::Player(PlayerId(1)))],
+            },
+        )
+        .expect("declaring the no-longer-sick creature should succeed");
+    }
+
+    /// Issue #428 negative control — CR 302.6 / CR 508.1a: the refresh is
+    /// bidirectional. A debug `SetSummoningSickness { sick: true }` on an
+    /// otherwise-eligible creature must REMOVE it from the refreshed
+    /// `valid_attacker_ids`, proving the refresh re-derives the live snapshot
+    /// rather than one-way unlocking.
+    #[test]
+    fn debug_set_summoning_sickness_removes_from_valid_attackers() {
+        use crate::types::actions::{DebugAction, GameAction};
+        use crate::types::game_state::WaitingFor;
+
+        let mut state = setup();
+        state.debug_mode = true;
+        state.phase = crate::types::phase::Phase::DeclareAttackers;
+        state.priority_player = PlayerId(0);
+        state.combat = Some(CombatState::default());
+
+        // Non-sick, eligible creature (create_creature leaves summoning_sick false).
+        let id = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: get_valid_attacker_ids(&state),
+            valid_attack_targets: get_valid_attack_targets(&state),
+        };
+        match &state.waiting_for {
+            WaitingFor::DeclareAttackers {
+                valid_attacker_ids, ..
+            } => assert!(
+                valid_attacker_ids.contains(&id),
+                "precondition: eligible creature must be a valid attacker"
+            ),
+            other => panic!("expected DeclareAttackers, got {other:?}"),
+        }
+
+        let result = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::Debug(DebugAction::SetSummoningSickness {
+                object_id: id,
+                sick: true,
+            }),
+        )
+        .expect("debug SetSummoningSickness should succeed");
+
+        match &result.waiting_for {
+            WaitingFor::DeclareAttackers {
+                valid_attacker_ids, ..
+            } => assert!(
+                !valid_attacker_ids.contains(&id),
+                "refreshed snapshot must drop the now-sick creature"
+            ),
+            other => panic!("expected refreshed DeclareAttackers, got {other:?}"),
+        }
     }
 
     #[test]
@@ -3462,6 +3611,101 @@ mod tests {
 
         // No untapped blockers available — constraint satisfied
         assert!(validate_blockers(&state, &[]).is_ok());
+    }
+
+    /// CR 509.1c (GAP-7): a `MustBeBlocked` requirement granted *transiently*
+    /// via `Effect::GenericEffect` (the Deadly Allure path) must reach
+    /// `combat.rs` enforcement. Unlike `add_must_be_blocked` (which pushes onto
+    /// the BASE `static_definitions`), this drives the full
+    /// `resolve` → transient continuous effect → `evaluate_layers` →
+    /// `static_definitions` pipeline. The `AddStaticMode` modification is what
+    /// propagates the mode — `register_transient_effect` snapshots only
+    /// `modifications`, never the inert `mode` field.
+    #[test]
+    fn generic_effect_granted_must_be_blocked_reaches_enforcement() {
+        use crate::game::effects::effect::resolve;
+        use crate::game::layers::evaluate_layers;
+        use crate::types::ability::{
+            ContinuousModification, Duration, Effect, ResolvedAbility, TargetFilter,
+        };
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Lure Beast", 3, 3);
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+
+        let static_def = StaticDefinition::new(StaticMode::MustBeBlocked)
+            .affected(TargetFilter::SpecificObject { id: attacker })
+            .modifications(vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::MustBeBlocked,
+            }]);
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![static_def],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+            },
+            vec![],
+            attacker,
+            PlayerId(0),
+        )
+        .duration(Duration::UntilEndOfTurn);
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+        evaluate_layers(&mut state);
+
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+        // The transiently-granted MustBeBlocked must force a blocker assignment.
+        assert!(
+            validate_blockers(&state, &[]).is_err(),
+            "transient MustBeBlocked must reach combat enforcement"
+        );
+        assert!(validate_blockers(&state, &[(blocker, attacker)]).is_ok());
+    }
+
+    /// CR 508.1d (GAP-7): the `MustAttack` carrier fix. This drives the
+    /// *parser-produced* `GenericEffect` for "attack this combat if able"
+    /// through `resolve` → transient continuous effect → `evaluate_layers` →
+    /// `static_definitions` → `declare_attackers` enforcement. It FAILS against
+    /// pre-fix code — `try_parse_attack_if_able` emitted a `StaticDefinition`
+    /// with empty `modifications`, so `register_transient_effect` snapshotted
+    /// nothing and the `MustAttack` mode never reached `combat.rs`. The step-4
+    /// `AddStaticMode` carrier fix is what makes this pass.
+    #[test]
+    fn generic_effect_granted_must_attack_reaches_enforcement() {
+        use crate::game::effects::effect::resolve;
+        use crate::game::layers::evaluate_layers;
+        use crate::types::ability::{Duration, Effect, ResolvedAbility, TargetFilter};
+        let mut state = setup_combat_phase();
+        let attacker = create_creature(&mut state, PlayerId(0), "Berserker", 3, 3);
+
+        // The parser output for the standalone attack requirement — this is the
+        // exact `GenericEffect` `try_parse_attack_if_able` builds.
+        let mut effect = crate::parser::oracle_effect::parse_effect("attack this combat if able");
+        // Point the requirement at the attacker (the standalone parser leaves
+        // `affected` at the default — the conjunction-split / subject pipeline
+        // fills it; here we set it directly to isolate the carrier behaviour).
+        match &mut effect {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => {
+                for sd in static_abilities.iter_mut() {
+                    sd.affected = Some(TargetFilter::SpecificObject { id: attacker });
+                }
+            }
+            other => panic!("expected GenericEffect from parser, got {other:?}"),
+        }
+        let ability = ResolvedAbility::new(effect, vec![], attacker, PlayerId(0))
+            .duration(Duration::UntilEndOfTurn);
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+        evaluate_layers(&mut state);
+
+        // Declaring no attackers must be illegal: the creature is forced to attack.
+        let result = declare_attackers(&mut state, &[], &mut Vec::new());
+        assert!(
+            result.is_err(),
+            "transient MustAttack must reach declare_attackers enforcement"
+        );
     }
 
     #[test]

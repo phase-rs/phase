@@ -1,6 +1,6 @@
 ---
 source: crates/engine/tests/integration/oracle_parser.rs
-assertion_line: 92
+assertion_line: 96
 expression: result
 ---
 {
@@ -50,7 +50,8 @@ expression: result
         "condition": null,
         "optional_targeting": false,
         "optional": true,
-        "forward_result": false
+        "forward_result": false,
+        "sub_link": "SequentialSibling"
       },
       "duration": null,
       "description": "+2: Look at the top card of target player's library. You may put that card on the bottom of that player's library.",

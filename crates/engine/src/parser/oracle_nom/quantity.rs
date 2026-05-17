@@ -1316,18 +1316,24 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
         value(QuantityRef::EventContextAmount, tag("that many")),
         value(QuantityRef::EventContextAmount, tag("that damage")),
         value(
-            QuantityRef::EventContextSourcePower,
+            QuantityRef::Power {
+                scope: ObjectScope::CostPaidObject,
+            },
             tag("that creature's power"),
         ),
         value(
-            QuantityRef::EventContextSourceToughness,
+            QuantityRef::Toughness {
+                scope: ObjectScope::CostPaidObject,
+            },
             tag("that creature's toughness"),
         ),
         // "Whenever you cast an enchantment spell, ... equal to that spell's
         // mana value" (Dusty Parlor) — the SpellCast event's source object is
         // the spell itself, so CMC reads cleanly off it.
         value(
-            QuantityRef::EventContextSourceManaValue,
+            QuantityRef::ObjectManaValue {
+                scope: ObjectScope::CostPaidObject,
+            },
             tag("that spell's mana value"),
         ),
     ))
@@ -2198,17 +2204,24 @@ fn parse_for_each_battlefield_type(input: &str) -> OracleResult<'_, QuantityRef>
 }
 
 fn parse_for_each_controlled_type(input: &str) -> OracleResult<'_, QuantityRef> {
-    // CR 109.1: Optional "other " / "another " prefix excludes the source from
-    // the count. Lowered to FilterProp::Another (CR 109.1), preserving the
-    // self-exclusion semantic at runtime via filter evaluation against the
-    // source object's identity.
+    // CR 109.4: Only objects on the stack or on the battlefield have a
+    // controller, so a "you control" count is over battlefield permanents
+    // under the source's controller. An optional leading "other " / "another "
+    // prefix is lowered to `FilterProp::Another`, which excludes the source
+    // object at runtime via filter evaluation against its identity.
     let (rest, has_other) = nom::combinator::opt(alt((
         nom::combinator::value((), tag::<_, _, OracleError<'_>>("other ")),
         nom::combinator::value((), tag("another ")),
     )))
     .parse(input)?;
     let (rest, tf) = parse_type_filter_word(rest)?;
-    let (rest, _) = tag(" you control").parse(rest)?;
+    // Tolerate the "already" adverb in "<type> you already control" so the
+    // count matches tribal payoffs like Giada ("for each Angel you already
+    // control"). The adverb sits between "you" and "control", so the literal
+    // " you control" tag is split around an optional " already".
+    let (rest, _) = tag(" you").parse(rest)?;
+    let (rest, _) = opt(tag(" already")).parse(rest)?;
+    let (rest, _) = tag(" control").parse(rest)?;
     let (rest, chosen_type_prop) = opt(alt((
         value(FilterProp::IsChosenCreatureType, tag(" of that type")),
         value(FilterProp::IsChosenCreatureType, tag(" of the chosen type")),
@@ -2771,6 +2784,43 @@ mod tests {
             "other creature you control of that type",
             TypeFilter::Creature,
             vec![FilterProp::Another, FilterProp::IsChosenCreatureType],
+        );
+    }
+
+    /// Issue #204 — Giada, Font of Hope: "for each Angel you already control".
+    /// The `already` adverb between the subtype word and " you control" must be
+    /// tolerated so the count resolves to a dynamic `ObjectCount`.
+    #[test]
+    fn parse_for_each_subtype_you_already_control() {
+        let (rest, q) = parse_for_each_clause_ref("Angel you already control").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Subtype("Angel".to_string())],
+                    controller: Some(ControllerRef::You),
+                    properties: Vec::new(),
+                }),
+            }
+        );
+    }
+
+    /// Negative control: the same phrase without the `already` adverb parses
+    /// identically — the `opt(tag(" already"))` is non-consuming when absent.
+    #[test]
+    fn parse_for_each_subtype_you_control_no_adverb() {
+        let (rest, q) = parse_for_each_clause_ref("Angel you control").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Subtype("Angel".to_string())],
+                    controller: Some(ControllerRef::You),
+                    properties: Vec::new(),
+                }),
+            }
         );
     }
 
@@ -3400,7 +3450,12 @@ mod tests {
         assert_eq!(rest, "");
 
         let (rest2, q2) = parse_quantity_ref("that creature's power").unwrap();
-        assert_eq!(q2, QuantityRef::EventContextSourcePower);
+        assert_eq!(
+            q2,
+            QuantityRef::Power {
+                scope: ObjectScope::CostPaidObject,
+            }
+        );
         assert_eq!(rest2, "");
     }
 

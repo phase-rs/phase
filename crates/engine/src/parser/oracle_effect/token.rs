@@ -9,11 +9,12 @@ use nom::Parser;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_nom::error::OracleResult;
 use crate::types::ability::{
-    ContinuousModification, Effect, FilterProp, PtValue, QuantityExpr, QuantityRef,
+    ContinuousModification, ControllerRef, Effect, FilterProp, PtValue, QuantityExpr, QuantityRef,
     StaticDefinition, TargetFilter,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
+use crate::types::zones::Zone;
 
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_static::{parse_quoted_ability_modifications, parse_static_line_multi};
@@ -80,8 +81,26 @@ pub(super) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
                 }
             }
         }
+        // CR 303.4 + CR 702.103: Inside an Aura/bestow card, a `"that creature"`
+        // anaphor in the copy-token clause is the antecedent of the attachment
+        // host ("a creature you control") in the enclosing condition — not a
+        // chosen target. The generic `parse_target` family returns
+        // `TargetFilter::ParentTarget` for "that creature" because attachment
+        // context is not threaded through the effect parser. When the parse
+        // context exposes a typed host self-reference (`host_self_reference`,
+        // set by `parse_oracle_ir` only for Aura/bestow cards), remap a
+        // `ParentTarget` copy target to the host filter so the runtime resolves
+        // the copy against the enchanted creature. Non-Aura cards leave
+        // `host_self_reference` `None`, so `ParentTarget` keeps its
+        // chosen-target meaning (Twinflame Strike's "for each of them").
+        if let (TargetFilter::ParentTarget, Some(host)) = (&target, &ctx.host_self_reference) {
+            target = host.clone();
+        }
         return Some(Effect::CopyTokenOf {
             target,
+            // CR 109.4: Default to the controller; a "target [player] creates"
+            // subject is lifted into `owner` later by `inject_subject_target`.
+            owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking,
             tapped,
@@ -718,6 +737,54 @@ fn extract_token_where_x_expression(text: &str) -> Option<String> {
     Some(x_expr.trim().to_string())
 }
 
+/// CR 109.4: In a token effect's `for each` clause, a "their <zone>"
+/// possessive binds to the player creating the token. The parsed ObjectCount
+/// filter comes back with `controller: None` (parse_zone_qual maps "their " to
+/// a scope-less `OtherPoss`); stamp `ScopedPlayer` so a per-player "each player
+/// creates …" iteration counts each player's OWN zone, not all zones combined.
+/// When only the controller creates the token, `ScopedPlayer` falls back to
+/// the ability controller at runtime — rules-correct in both cases.
+///
+/// Called from `try_parse_for_each_effect`'s Token arm in `mod.rs`, which is
+/// the single site that lowers "create … token … for each <clause>" to an
+/// `Effect::Token` with a dynamic `count`.
+pub(super) fn scope_token_for_each_to_iterating_player(expr: QuantityExpr) -> QuantityExpr {
+    fn fix_filter(filter: TargetFilter) -> TargetFilter {
+        match filter {
+            TargetFilter::Typed(tf)
+                if tf.controller.is_none()
+                    && tf.properties.iter().any(
+                        |p| matches!(p, FilterProp::InZone { zone } if *zone != Zone::Battlefield),
+                    ) =>
+            {
+                // `TypedFilter::controller` is `pub`; call it directly. The
+                // `None`-guard must live here, so do NOT route through the
+                // module-private `inject_controller` (it stamps
+                // unconditionally). A filter that already carries a
+                // controller, or whose zone is the battlefield, is untouched.
+                TargetFilter::Typed(tf.controller(ControllerRef::ScopedPlayer))
+            }
+            other => other,
+        }
+    }
+    match expr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } => QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: fix_filter(filter),
+            },
+        },
+        QuantityExpr::Sum { exprs } => QuantityExpr::Sum {
+            exprs: exprs
+                .into_iter()
+                .map(scope_token_for_each_to_iterating_player)
+                .collect(),
+        },
+        other => other,
+    }
+}
+
 fn extract_token_count_expression(text: &str) -> Option<String> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
@@ -887,9 +954,11 @@ pub(super) fn map_token_keyword(text: &str) -> Option<Keyword> {
         return Some(Keyword::Changeling);
     }
     match Keyword::from_str(trimmed) {
-        Ok(Keyword::Unknown(_)) => None,
+        Ok(Keyword::Unknown(_)) => {
+            super::super::oracle_keyword::parse_keyword_from_oracle(&trimmed.to_lowercase())
+        }
         Ok(keyword) => Some(keyword),
-        Err(_) => None,
+        Err(_) => super::super::oracle_keyword::parse_keyword_from_oracle(&trimmed.to_lowercase()),
     }
 }
 
@@ -910,6 +979,7 @@ pub(super) fn push_unique_string(values: &mut Vec<String>, value: impl Into<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::QuantityExpr;
 
     #[test]
     fn copy_tokens_of_exiled_cost_card_use_cost_paid_object_source() {
@@ -924,6 +994,147 @@ mod tests {
         };
         assert_eq!(target, TargetFilter::CostPaidObject);
         assert_eq!(count, QuantityExpr::Fixed { value: 2 });
+    }
+
+    #[test]
+    fn token_keyword_clause_parses_firebending_amount() {
+        assert_eq!(
+            parse_token_keyword_clause("with firebending 1"),
+            vec![Keyword::Firebending(QuantityExpr::Fixed { value: 1 })]
+        );
+    }
+
+    #[test]
+    fn copy_token_of_that_creature_remaps_to_attached_to_for_aura_card() {
+        // CR 303.4 + CR 702.103: Inside an Aura/bestow card (Springheart
+        // Nantuko), `host_self_reference` is set to `AttachedTo`. The
+        // "that creature" anaphor in "create a token that's a copy of that
+        // creature" must remap from `ParentTarget` to `AttachedTo` — "that
+        // creature" is the enchanted host.
+        let mut ctx = ParseContext {
+            host_self_reference: Some(TargetFilter::AttachedTo),
+            ..ParseContext::default()
+        };
+        let effect = try_parse_token(
+            "create a token that's a copy of that creature",
+            "Create a token that's a copy of that creature",
+            &mut ctx,
+        )
+        .expect("expected CopyTokenOf");
+        let Effect::CopyTokenOf { target, .. } = effect else {
+            panic!("expected CopyTokenOf, got {effect:?}");
+        };
+        assert_eq!(target, TargetFilter::AttachedTo);
+    }
+
+    #[test]
+    fn copy_token_of_that_creature_keeps_parent_target_for_non_aura_card() {
+        // Twinflame Strike class: a non-Aura card leaves `host_self_reference`
+        // `None`, so the "that creature" anaphor keeps its `ParentTarget`
+        // chosen-target semantics. The Aura-only remap must not corrupt it.
+        let effect = try_parse_token(
+            "create a token that's a copy of that creature",
+            "Create a token that's a copy of that creature",
+            &mut ParseContext::default(),
+        )
+        .expect("expected CopyTokenOf");
+        let Effect::CopyTokenOf { target, .. } = effect else {
+            panic!("expected CopyTokenOf, got {effect:?}");
+        };
+        assert_eq!(target, TargetFilter::ParentTarget);
+    }
+
+    /// CR 109.4: `try_parse_token` emits the default `owner` of
+    /// `TargetFilter::Controller`; a "target [player] creates" subject is
+    /// lifted into `owner` later by `inject_subject_target` (issue #403).
+    #[test]
+    fn copy_token_emits_default_controller_owner() {
+        let effect = try_parse_token(
+            "create a token that's a copy of it",
+            "Create a token that's a copy of it",
+            &mut ParseContext::default(),
+        )
+        .expect("expected CopyTokenOf");
+        let Effect::CopyTokenOf { owner, target, .. } = effect else {
+            panic!("expected CopyTokenOf, got {effect:?}");
+        };
+        assert_eq!(owner, TargetFilter::Controller);
+        // The copy source is left as the context ref — not overwritten.
+        assert_eq!(target, TargetFilter::ParentTarget);
+    }
+
+    #[test]
+    fn scope_token_for_each_stamps_scoped_player_on_their_graveyard() {
+        // SUB-FIX A: a `controller: None` ObjectCount on a non-battlefield
+        // zone — the shape `parse_for_each_clause_expr` returns for "creature
+        // card in their graveyard" — gets ScopedPlayer stamped (CR 109.4).
+        use crate::types::ability::{TypeFilter, TypedFilter};
+        let parsed = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: None,
+                    properties: vec![FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    }],
+                }),
+            },
+        };
+        let scoped = scope_token_for_each_to_iterating_player(parsed);
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(tf),
+                },
+        } = scoped
+        else {
+            panic!("expected a Typed ObjectCount filter");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::ScopedPlayer));
+        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+    }
+
+    #[test]
+    fn scope_token_for_each_leaves_controllered_and_battlefield_filters_untouched() {
+        use crate::types::ability::{TypeFilter, TypedFilter};
+        // Already-controllered filter: untouched.
+        let already = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    }],
+                }),
+            },
+        };
+        assert_eq!(
+            scope_token_for_each_to_iterating_player(already.clone()),
+            already,
+        );
+        // Battlefield-zone filter: untouched (battlefield is a shared zone).
+        let battlefield = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: None,
+                    properties: vec![FilterProp::InZone {
+                        zone: Zone::Battlefield,
+                    }],
+                }),
+            },
+        };
+        assert_eq!(
+            scope_token_for_each_to_iterating_player(battlefield.clone()),
+            battlefield,
+        );
+        // Fixed quantity: passes through untouched.
+        let fixed = QuantityExpr::Fixed { value: 3 };
+        assert_eq!(
+            scope_token_for_each_to_iterating_player(fixed.clone()),
+            fixed,
+        );
     }
 
     #[test]

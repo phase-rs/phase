@@ -6,12 +6,12 @@ use crate::parser::oracle::{oracle_text_allows_commander, parse_oracle_text};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
     AggregateFunction, CardPlayMode, CastVariantPaid, ChoiceType, ContinuousModification,
-    ControllerRef, CounterTriggerFilter, Duration, Effect, FilterProp, KickerVariant,
-    ManaContribution, ManaProduction, ModalSelectionCondition, ModalSelectionConstraint,
-    NinjutsuVariant, ObjectScope, PtValue, QuantityExpr, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint, StaticDefinition,
-    TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessPayModifier,
+    ControllerRef, CopyRetargetPermission, CounterTriggerFilter, Duration, Effect, FilterProp,
+    KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
+    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, PtValue, QuantityExpr, QuantityRef,
+    ReplacementCondition, ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint,
+    StaticDefinition, TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition,
+    TypeFilter, TypedFilter, UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -1087,8 +1087,11 @@ fn typecycling_subtype_to_filter(subtype: &str) -> TargetFilter {
 pub fn casualty_copy_ability_definition() -> AbilityDefinition {
     AbilityDefinition::new(
         AbilityKind::Spell,
+        // CR 702.153a: Casualty — "If the spell has any targets, you may choose
+        // new targets for the copy."
         Effect::CopySpell {
             target: TargetFilter::SelfRef,
+            retarget: CopyRetargetPermission::MayChooseNewTargets,
         },
     )
     .condition(AbilityCondition::additional_cost_paid_any())
@@ -1370,6 +1373,7 @@ pub fn synthesize_offspring(face: &mut CardFace) {
         AbilityKind::Spell,
         Effect::CopyTokenOf {
             target: TargetFilter::SelfRef,
+            owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking: false,
             tapped: false,
@@ -4557,24 +4561,40 @@ mod undying_persist_runtime_tests {
     /// CR 702.79a "under its owner's control" — the returned permanent must
     /// route to its OWNER, not the controller at the moment of death.
     ///
-    /// Setup: a Persist creature owned by player 0 but with `controller`
-    /// directly set to player 1 (a synthetic stand-in for the
-    /// Threaten / Act-of-Treason class — no live control-changing layered
-    /// effect is installed, so the post-return layers pass resets controller
-    /// to owner via CR 613.1b). Kill it, drain the trigger, run SBAs so the
-    /// `state.layers_dirty` flag set by the return-zone-change is consumed.
-    /// Assert the returned permanent ends under player 0's control.
+    /// Setup: a Persist creature owned by player 0 with a REAL Layer-2
+    /// control-changing continuous effect (CR 613.1b) installed via
+    /// `add_transient_continuous_effect` — a Threaten / Act-of-Treason-style
+    /// `ChangeController` modification making player 1 the controller. The
+    /// precondition `obj.controller == PlayerId(1)` is then asserted *through*
+    /// `evaluate_layers`, so the test genuinely exercises the layer system
+    /// the routing implicitly depends on, instead of poking `obj.controller`
+    /// directly.
+    ///
+    /// Discrimination mechanism (`under_your_control: false` vs a
+    /// `true`-regression): when the creature dies, `apply_zone_exit_cleanup`
+    /// (`zones.rs`) prunes the `SpecificObject`-bound control effect via
+    /// `prune_affected_object_left_effects` regardless of duration, but does
+    /// NOT reset `obj.controller` — only `reset_for_battlefield_exit` resets
+    /// `base_controller`. So the graveyard object still reads
+    /// `controller = P1`, and the dies-trigger captures
+    /// `ability.controller = P1`. With `under_your_control: false`,
+    /// `ctrl_override = None` → `reset_for_battlefield_entry` sets
+    /// `controller`/`base_controller` to the owner → Layer 2 yields P0
+    /// (test passes). With a `true`-regression,
+    /// `apply_battlefield_entry_controller_override` writes
+    /// `base_controller = Some(P1)`, which Layer 2 preserves → P1 (test fails).
+    /// The mutation check (flipping the synthesized Persist trigger's
+    /// `under_your_control` to `true`) was performed during implementation and
+    /// confirmed to make this test fail — proof the assertion discriminates.
+    ///
+    /// The post-return lookup uses `state.objects.get(&obj_id)` directly:
+    /// Persist's return does not create a new object — `move_to_zone` mutates
+    /// the existing `GameObject` in place, keeping the same `ObjectId` across
+    /// Battlefield→Graveyard→Battlefield.
     ///
     /// This pins the `under_your_control: false` field's "send to owner"
     /// semantics: without it, a control-grab would steal the Persist /
-    /// Undying creature permanently on death. The assertion guards the
-    /// composition of:
-    ///   * `ctrl_override = None` in `effects/change_zone.rs:515-519`
-    ///     (because `under_your_control == false`).
-    ///   * No direct controller mutation in `move_to_zone` /
-    ///     `deliver_replaced_zone_change`.
-    ///   * Layer 2 (control-changing) reset to owner during the next
-    ///     `evaluate_layers` pass (`layers.rs:523` — CR 613.1b).
+    /// Undying creature permanently on death.
     #[test]
     fn persist_returns_under_owner_not_controller_after_control_grab() {
         // Use a 2/2 base so the post-return -1/-1 counter doesn't push the
@@ -4592,15 +4612,30 @@ mod undying_persist_runtime_tests {
         synthesize_all(&mut face);
         let (mut state, obj_id) = setup_with_creature(&face, PlayerId(0));
 
-        // CR 110.2: Simulate a Threaten-style temporary control swap so the
-        // creature is OWNED by player 0 but CONTROLLED by player 1 at the
-        // moment it dies. (Two-player state from `setup_with_creature` gives
-        // us PlayerId(0) and PlayerId(1).)
+        // CR 613.1b: install a REAL Threaten / Act-of-Treason-style
+        // Layer-2 control-changing continuous effect so player 1 genuinely
+        // controls the creature via the continuous-effect system — not a raw
+        // `obj.controller =` mutation. The precondition is then derived
+        // through `evaluate_layers`, exercising the layer system the
+        // owner-vs-controller routing implicitly depends on.
         {
-            let obj = state.objects.get_mut(&obj_id).unwrap();
+            let obj = state.objects.get(&obj_id).unwrap();
             assert_eq!(obj.owner, PlayerId(0), "precondition: owner is P0");
-            obj.controller = PlayerId(1);
         }
+        state.add_transient_continuous_effect(
+            obj_id,      // source (self-referential is fine)
+            PlayerId(1), // new effective controller
+            crate::types::ability::Duration::Permanent,
+            TargetFilter::SpecificObject { id: obj_id },
+            vec![crate::types::ability::ContinuousModification::ChangeController],
+            None,
+        );
+        crate::game::layers::evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&obj_id].controller,
+            PlayerId(1),
+            "precondition: real Layer-2 control effect makes P1 the controller"
+        );
 
         let _ = kill_and_resolve(&mut state, obj_id);
 

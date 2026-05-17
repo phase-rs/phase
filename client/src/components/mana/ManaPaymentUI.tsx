@@ -49,10 +49,17 @@ export function ManaPaymentUI() {
   );
   const spellObjectId = isPhyrexianPayment ? waitingFor.data.spell_object : null;
 
-  // Infer the cost being paid from the top stack entry (ManaPayment) or the
-  // engine-provided spell_object (PhyrexianPayment).
+  // CR 601.2f/601.2g: The cost being paid is the engine-resolved locked-in
+  // total carried in `GameState::pending_cast.cost` (base mana cost + Strive
+  // surcharge + RaiseCost statics + commander tax - reductions). Falling back
+  // to the printed `mana_cost` of the stack/spell object only when no pending
+  // cast is present keeps the panel correct for cost-modified spells without
+  // any frontend cost computation.
   const costShards = useMemo(() => {
     if (!gameState) return null;
+    if (gameState.pending_cast) {
+      return manaCostToShards(gameState.pending_cast.cost);
+    }
     if (isPhyrexianPayment && spellObjectId != null) {
       const sourceObj = gameState.objects[spellObjectId];
       if (!sourceObj || sourceObj.mana_cost.type !== "Cost") return null;

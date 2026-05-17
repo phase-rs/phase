@@ -465,6 +465,38 @@ impl GameScenario {
         }
     }
 
+    /// Add a creature card to a player's graveyard. Returns a `CardBuilder` for
+    /// fluent chaining (e.g. `.with_mana_cost(...)`). Used to stage targets for
+    /// graveyard-return effects (CR 404 — the graveyard zone).
+    pub fn add_creature_to_graveyard(
+        &mut self,
+        player: PlayerId,
+        name: &str,
+        power: i32,
+        toughness: i32,
+    ) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Graveyard,
+        );
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.power = Some(power);
+        obj.toughness = Some(toughness);
+        obj.base_power = Some(power);
+        obj.base_toughness = Some(toughness);
+
+        CardBuilder {
+            state: &mut self.state,
+            id,
+        }
+    }
+
     // --- Oracle text convenience constructors ---
 
     /// Add a creature to the battlefield with abilities parsed from Oracle text.
@@ -827,6 +859,18 @@ impl<'a> CardBuilder<'a> {
             .core_types
             .retain(|t| *t != CoreType::Creature);
         obj.card_types.core_types.push(CoreType::Artifact);
+        self.sync_base_card_types();
+        self
+    }
+
+    /// Add the Legendary supertype (CR 205.4a: a card's supertypes are printed
+    /// on the type line; CR 205.4d: a permanent with the legendary supertype is
+    /// subject to the "legend rule" state-based action).
+    pub fn as_legendary(&mut self) -> &mut Self {
+        let obj = self.obj();
+        if !obj.card_types.supertypes.contains(&Supertype::Legendary) {
+            obj.card_types.supertypes.push(Supertype::Legendary);
+        }
         self.sync_base_card_types();
         self
     }
@@ -1236,11 +1280,14 @@ impl GameRunner {
             WaitingFor::CollectEvidenceChoice { .. } => "CollectEvidenceChoice",
             WaitingFor::HarmonizeTapChoice { .. } => "HarmonizeTapChoice",
             WaitingFor::DiscoverChoice { .. } => "DiscoverChoice",
+            WaitingFor::RevealUntilKeptChoice { .. } => "RevealUntilKeptChoice",
+            WaitingFor::RepeatDecision { .. } => "RepeatDecision",
             WaitingFor::CascadeChoice { .. } => "CascadeChoice",
             WaitingFor::TopOrBottomChoice { .. } => "TopOrBottomChoice",
             WaitingFor::ChooseLegend { .. } => "ChooseLegend",
             WaitingFor::BattleProtectorChoice { .. } => "BattleProtectorChoice",
             WaitingFor::ProliferateChoice { .. } => "ProliferateChoice",
+            WaitingFor::ChooseObjectsSelection { .. } => "ChooseObjectsSelection",
             WaitingFor::CopyRetarget { .. } => "CopyRetarget",
             WaitingFor::AssignCombatDamage { .. } => "AssignCombatDamage",
             WaitingFor::DistributeAmong { .. } => "DistributeAmong",

@@ -219,10 +219,17 @@ impl AbilityCost {
                 }
             },
             // CR 107.14: A player can pay {E} only if they have enough energy.
-            AbilityCost::PayEnergy { amount } => state
-                .players
-                .get(player.0 as usize)
-                .is_some_and(|p| p.energy >= *amount),
+            // CR 107.3c: Resolve the `QuantityExpr` so dynamic amounts read game
+            // state. `Variable("X")` resolves to 0 — always payable, which
+            // triggers the variable-payment flow (mirrors `PaySpeed` below).
+            AbilityCost::PayEnergy { amount } => {
+                let resolved =
+                    super::quantity::resolve_quantity(state, amount, player, source).max(0);
+                state
+                    .players
+                    .get(player.0 as usize)
+                    .is_some_and(|p| (p.energy as i64) >= resolved as i64)
+            }
             // CR 702.179f: Pay-speed resolves the quantity, then checks against
             // current speed. `QuantityExpr::Ref(Variable)` resolves to 0, which
             // is always payable and triggers the variable-payment flow.
@@ -476,8 +483,14 @@ mod tests {
     fn pay_energy_requires_sufficient_energy() {
         let mut state = new_state();
         state.players[0].energy = 3;
-        assert!(AbilityCost::PayEnergy { amount: 3 }.is_payable(&state, P0, ObjectId(0)));
-        assert!(!AbilityCost::PayEnergy { amount: 4 }.is_payable(&state, P0, ObjectId(0)));
+        assert!(AbilityCost::PayEnergy {
+            amount: QuantityExpr::Fixed { value: 3 }
+        }
+        .is_payable(&state, P0, ObjectId(0)));
+        assert!(!AbilityCost::PayEnergy {
+            amount: QuantityExpr::Fixed { value: 4 }
+        }
+        .is_payable(&state, P0, ObjectId(0)));
     }
 
     #[test]

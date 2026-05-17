@@ -263,23 +263,6 @@ pub fn resolve_add(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // CR 609.3 + CR 102.1: When the PutCounter target filter requires
-    // `ability.scoped_player` (e.g., "they put two +1/+1 counters on a
-    // creature they control" after "choose a player") but no player was
-    // chosen — because the choice was skipped for lack of legal options
-    // (Gluntch in a two-player game) — do nothing. Falling back to source
-    // controller via `scoped_player_or_controller` in filter.rs would put
-    // counters on the caster's creatures instead.
-    if let Effect::PutCounter { target, .. } | Effect::AddCounter { target, .. } = &ability.effect {
-        if ability.scoped_player.is_none() && target.requires_bound_scoped_player() {
-            events.push(GameEvent::EffectResolved {
-                kind: EffectKind::from(&ability.effect),
-                source_id: ability.source_id,
-            });
-            return Ok(());
-        }
-    }
-
     let (counter_type, counter_num) = match &ability.effect {
         Effect::AddCounter {
             counter_type,
@@ -356,6 +339,12 @@ pub fn resolve_add_all(
         }
         _ => return Ok(()),
     };
+    // CR 608.2c: Bind the `TrackedSetId(0)` sentinel emitted by the parser for
+    // "put a counter on each [card] this way" continuations to the highest
+    // tracked set id — the set the immediately preceding effect in this chain
+    // published. Empty sets are *not* skipped here (unlike
+    // `targeting::resolve_tracked_set_sentinel`): a chained counter effect
+    // refers to the preceding effect's set even when it ended up empty.
     let target_filter = match crate::game::effects::resolved_object_filter(ability, &target_filter)
     {
         TargetFilter::TrackedSet {
@@ -492,6 +481,18 @@ fn resolve_defined_or_targets(
         if ability.targets.is_empty() {
             return vec![ability.source_id];
         }
+    }
+
+    // CR 608.2k: "the exiled card" — an untargeted reference to the object
+    // referred to by this ability's cost (Jhoira of the Ghitu: "Put four time
+    // counters on the exiled card"). Resolved from the recursively-stamped
+    // `cost_paid_object`; mirrors the `resolved_targets` chokepoint arm.
+    if let Some(TargetFilter::CostPaidObject) = target_spec {
+        return ability
+            .cost_paid_object
+            .iter()
+            .map(|snap| snap.object_id)
+            .collect();
     }
 
     if let Some(filter) = target_spec {
@@ -1448,6 +1449,7 @@ mod tests {
             PlayerId(0),
         );
         crate::game::ability_utils::assign_selected_slots_in_chain(
+            &state,
             &mut ability,
             &[
                 Some(TargetRef::Object(counter_source_id)),

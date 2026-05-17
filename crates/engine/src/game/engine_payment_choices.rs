@@ -36,8 +36,16 @@ pub(super) fn handle_optional_effect_choice(
         } else {
             AutoMayChoice::Decline
         };
-        effects::resolve_optional_effect_decision(state, *ability, choice, events, 1)
-            .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+        // CR 608.2: an ability's resolution is a single process; a triggered
+        // ability suspended for its optional ("may") decision retains its
+        // triggering event context. Restore it for the resumed resolution so
+        // `TriggeringPlayer` and other event-context refs resolve correctly.
+        let pending_event = state.pending_optional_trigger_event.take();
+        let previous_trigger_event = state.current_trigger_event.clone();
+        state.current_trigger_event = pending_event;
+        let result = effects::resolve_optional_effect_decision(state, *ability, choice, events, 1);
+        state.current_trigger_event = previous_trigger_event;
+        result.map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
     }
 
     resume_pending_continuation_if_priority(state, events)?;
@@ -258,6 +266,9 @@ pub(super) fn handle_unless_payment_choose_cost(
                 pending_effect,
                 trigger_event,
                 effect_description,
+                // Disjunctive (`OneOf`) unless-costs are single-payer — the
+                // "any player" poll never co-occurs with a sub-cost choice.
+                remaining: Vec::new(),
             };
             handle_unless_payment(state, next, true, events)
         }
@@ -280,6 +291,7 @@ pub(super) fn handle_unless_payment_choose_cost(
                 pending_effect,
                 trigger_event,
                 effect_description,
+                remaining: Vec::new(),
             };
             handle_unless_payment(state, next, false, events)
         }
@@ -297,13 +309,18 @@ pub(super) fn handle_unless_payment(
         cost,
         pending_effect,
         trigger_event,
-        ..
+        effect_description,
+        remaining,
     } = waiting_for
     else {
         return Err(EngineError::InvalidAction(
             "Not waiting for unless payment".to_string(),
         ));
     };
+
+    // CR 118.12a: Preserved for the "unless any player pays" poll re-emit —
+    // `cost` itself is moved by the `match cost` below on the pay path.
+    let poll_cost = cost.clone();
 
     let mut payment_failed = !pay;
     if pay {
@@ -348,18 +365,28 @@ pub(super) fn handle_unless_payment(
             // are tracked on `Player.energy` (no zone), so the deduction is
             // a direct counter-state mutation.
             AbilityCost::PayEnergy { amount } => {
+                // CR 107.3c: Resolve the `QuantityExpr` against game state
+                // before the mutable borrow below so dynamic amounts (e.g.
+                // "an amount of {E} equal to its mana value") read the parent
+                // target at payment time.
+                let energy_amount = crate::game::quantity::resolve_quantity_with_targets(
+                    state,
+                    &amount,
+                    pending_effect.as_ref(),
+                );
+                let energy_amount = u32::try_from(energy_amount.max(0)).unwrap_or(0);
                 let Some(player_state) = state.players.iter_mut().find(|p| p.id == player) else {
                     return Err(EngineError::InvalidAction(
                         "Unless payment player not found".to_string(),
                     ));
                 };
-                if player_state.energy < amount {
+                if player_state.energy < energy_amount {
                     payment_failed = true;
                 } else {
-                    player_state.energy -= amount;
+                    player_state.energy -= energy_amount;
                     events.push(GameEvent::EnergyChanged {
                         player,
-                        delta: -(amount as i32),
+                        delta: -(energy_amount as i32),
                     });
                 }
             }
@@ -573,6 +600,24 @@ pub(super) fn handle_unless_payment(
     }
 
     if !pay || payment_failed {
+        // CR 118.12a: "[Effect] unless any player pays ..." poll — when the
+        // current player declines (or cannot pay) and more players remain,
+        // prompt the next player in APNAP order rather than resolving the
+        // effect. The first player to pay prevents the effect; only when every
+        // polled player has declined does the effect resolve (once). Mirrors
+        // the `OpponentMayChoice` decline-branch poll re-emit.
+        if let Some((&next, rest)) = remaining.split_first() {
+            state.waiting_for = WaitingFor::UnlessPayment {
+                player: next,
+                cost: poll_cost,
+                pending_effect: pending_effect.clone(),
+                trigger_event: trigger_event.clone(),
+                effect_description: effect_description.clone(),
+                remaining: rest.to_vec(),
+            };
+            return Ok(action_result(events, state.waiting_for.clone()));
+        }
+
         let ability = pending_effect.as_ref().clone();
         clear_echo_due_for_echo_payment(state, &ability);
         // Post-fold: `unless_pay` was already cleared on `pending_effect`
@@ -627,6 +672,7 @@ pub(super) fn handle_unless_payment_tap_land_for_mana(
         pending_effect,
         trigger_event,
         effect_description,
+        remaining,
     } = waiting_for
     else {
         return Err(EngineError::InvalidAction(
@@ -647,6 +693,7 @@ pub(super) fn handle_unless_payment_tap_land_for_mana(
         pending_effect,
         trigger_event,
         effect_description,
+        remaining,
     })
 }
 
@@ -662,6 +709,7 @@ pub(super) fn handle_unless_payment_untap_land_for_mana(
         pending_effect,
         trigger_event,
         effect_description,
+        remaining,
     } = waiting_for
     else {
         return Err(EngineError::InvalidAction(
@@ -676,6 +724,7 @@ pub(super) fn handle_unless_payment_untap_land_for_mana(
         pending_effect,
         trigger_event,
         effect_description,
+        remaining,
     })
 }
 
@@ -692,6 +741,7 @@ pub(super) fn handle_unless_payment_activate_ability(
         pending_effect,
         trigger_event,
         effect_description,
+        remaining,
     } = waiting_for
     else {
         return Err(EngineError::InvalidAction(
@@ -724,6 +774,7 @@ pub(super) fn handle_unless_payment_activate_ability(
             pending_effect,
             trigger_event,
             effect_description,
+            remaining,
         },
         None,
     )?;
@@ -889,7 +940,9 @@ fn action_result(events: &mut Vec<GameEvent>, waiting_for: WaitingFor) -> Action
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{AbilityCondition, GainLifePlayer, QuantityExpr, ResolvedAbility};
+    use crate::types::ability::{
+        AbilityCondition, GainLifePlayer, QuantityExpr, ResolvedAbility, SubAbilityLink,
+    };
     use crate::types::game_state::{AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin};
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
@@ -1019,12 +1072,13 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let mut optional = ResolvedAbility::new(gain_life(1), vec![], ObjectId(100), PlayerId(0));
         optional.optional = true;
-        optional.sub_ability = Some(Box::new(ResolvedAbility::new(
-            gain_life(3),
-            vec![],
-            ObjectId(100),
-            PlayerId(0),
-        )));
+        let mut continuation_sub =
+            ResolvedAbility::new(gain_life(3), vec![], ObjectId(100), PlayerId(0));
+        // CR 608.2c: This sub is a within-clause continuation step of the
+        // declined action — declining the optional must skip it. Made explicit
+        // so the case under test is unambiguous to a future reader.
+        continuation_sub.sub_link = SubAbilityLink::ContinuationStep;
+        optional.sub_ability = Some(Box::new(continuation_sub));
         state.pending_optional_effect = Some(Box::new(optional));
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
@@ -1143,6 +1197,7 @@ mod tests {
             pending_effect: Box::new(pending),
             trigger_event: None,
             effect_description: None,
+            remaining: Vec::new(),
         };
 
         let mut events = Vec::new();
@@ -1151,6 +1206,82 @@ mod tests {
             .expect("unless-pay-life should resolve");
         // Player paid 3 life — life total drops by 3, gain-life effect skipped.
         assert_eq!(state.players[0].life, 17);
+    }
+
+    /// CR 118.12a: "unless any player pays" poll — when the prompted player
+    /// declines and `remaining` is non-empty, the next player is prompted and
+    /// the pending effect is NOT yet resolved. When the last player declines,
+    /// the effect resolves exactly once.
+    #[test]
+    fn unless_pay_any_player_poll_advances_then_resolves_once() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 20;
+        state.players[1].life = 20;
+        let pending = ResolvedAbility::new(gain_life(4), vec![], ObjectId(100), PlayerId(0));
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(0),
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+            },
+            pending_effect: Box::new(pending),
+            trigger_event: None,
+            effect_description: None,
+            remaining: vec![PlayerId(1)],
+        };
+
+        // P0 declines → P1 is prompted, poll list drained, effect not resolved.
+        let mut events = Vec::new();
+        let wf = state.waiting_for.clone();
+        handle_unless_payment(&mut state, wf, false, &mut events).expect("poll advance");
+        match &state.waiting_for {
+            WaitingFor::UnlessPayment {
+                player, remaining, ..
+            } => {
+                assert_eq!(*player, PlayerId(1));
+                assert!(remaining.is_empty());
+            }
+            other => panic!("expected UnlessPayment for P1, got {other:?}"),
+        }
+        assert_eq!(
+            state.players[0].life, 20,
+            "effect must not resolve mid-poll"
+        );
+
+        // P1 (last) declines → the effect resolves exactly once.
+        let mut events = Vec::new();
+        let wf = state.waiting_for.clone();
+        handle_unless_payment(&mut state, wf, false, &mut events).expect("poll resolve");
+        assert_eq!(
+            state.players[0].life, 24,
+            "GainLife(4) resolves exactly once"
+        );
+    }
+
+    /// CR 118.12a: "unless any player pays" poll — a later player paying
+    /// prevents the effect; earlier decliners do not stop the poll.
+    #[test]
+    fn unless_pay_any_player_poll_pay_prevents_effect() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 20;
+        state.players[1].life = 20;
+        let pending = ResolvedAbility::new(gain_life(4), vec![], ObjectId(100), PlayerId(0));
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(1),
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+            },
+            pending_effect: Box::new(pending),
+            trigger_event: None,
+            effect_description: None,
+            remaining: Vec::new(),
+        };
+
+        // P1 pays 1 life → effect prevented; P0's life unchanged.
+        let mut events = Vec::new();
+        let wf = state.waiting_for.clone();
+        handle_unless_payment(&mut state, wf, true, &mut events).expect("poll pay");
+        assert_eq!(state.players[1].life, 19, "payer paid 1 life");
+        assert_eq!(state.players[0].life, 20, "effect prevented by payment");
     }
 
     /// CR 118.12 + CR 107.14: Unless-PayEnergy stamps an `EnergyChanged`
@@ -1162,10 +1293,13 @@ mod tests {
         let pending = ResolvedAbility::new(gain_life(2), vec![], ObjectId(100), PlayerId(0));
         state.waiting_for = WaitingFor::UnlessPayment {
             player: PlayerId(0),
-            cost: AbilityCost::PayEnergy { amount: 2 },
+            cost: AbilityCost::PayEnergy {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
             pending_effect: Box::new(pending),
             trigger_event: None,
             effect_description: None,
+            remaining: Vec::new(),
         };
 
         let mut events = Vec::new();
@@ -1350,6 +1484,7 @@ mod tests {
             pending_effect: Box::new(pending),
             trigger_event: None,
             effect_description: None,
+            remaining: Vec::new(),
         };
 
         let mut events = Vec::new();

@@ -28,21 +28,12 @@ pub fn resolve(
         }
     };
 
-    let options = compute_options(state, &choice_type, ability.controller);
-
-    // CR 609.3: "If an effect attempts to do something impossible, it does
-    // only as much as possible." When a Player or Opponent choice has no
-    // legal options (every eligible player has already been chosen earlier
-    // in the same top-level resolution — the Gluntch class in a 2-player
-    // game), skip the NamedChoice entirely and emit `EffectResolved` so the
-    // continuation drain proceeds to the next sub-ability.
-    if options.is_empty() && matches!(choice_type, ChoiceType::Player | ChoiceType::Opponent) {
-        events.push(GameEvent::EffectResolved {
-            kind: EffectKind::from(&ability.effect),
-            source_id: ability.source_id,
-        });
-        return Ok(());
-    }
+    let options = compute_options(
+        state,
+        &choice_type,
+        ability.controller,
+        &ability.chosen_players,
+    );
 
     state.waiting_for = WaitingFor::NamedChoice {
         player: ability.controller,
@@ -125,10 +116,19 @@ const LAND_TYPES: &[&str] = &[
 /// Compute the valid options for a given choice type.
 /// CR 700.2: The controller of a modal spell or ability chooses options as part of
 /// casting or resolution. If an option would be illegal, it can't be chosen.
+///
+/// `already_chosen` is the resolution-scoped list of players picked by earlier
+/// `Choose(Player)` instructions in this chain. CR 608.2c + the Gluntch card
+/// ruling ("three distinct players") require each successive "choose a player"
+/// to exclude players already chosen — `ChoiceType::Player` and
+/// `ChoiceType::Opponent` filter them out. When fewer eligible players remain
+/// than the card asks for, the options list is empty and the choice (and its
+/// dependent effect) does nothing — the standard empty-options path.
 fn compute_options(
     state: &GameState,
     choice_type: &ChoiceType,
     controller: PlayerId,
+    already_chosen: &[PlayerId],
 ) -> Vec<String> {
     match choice_type {
         // CR 205.3m: Creature types are shared between creature and kindred cards.
@@ -163,22 +163,18 @@ fn compute_options(
         // CR 205.3i: Land types include the basic land types plus Cave, Desert, Gate, etc.
         ChoiceType::LandType => to_strings(LAND_TYPES),
         // CR 800.4a: An opponent is any other player in the game.
-        // CR 608.2c + CR 102.1: Players already chosen by an earlier
-        // `Effect::Choose { Player | Opponent }` within the same top-level
-        // resolution are excluded — implements the Gluntch the Bestower
-        // 2022-06-10 ruling: "All three players must be different players."
+        // CR 608.2c: Exclude players already chosen earlier in this resolution.
         ChoiceType::Opponent => players::opponents(state, controller)
             .iter()
-            .filter(|pid| !state.chosen_players_this_resolution.contains(pid))
+            .filter(|id| !already_chosen.contains(id))
             .map(|id| id.0.to_string())
             .collect(),
         // CR 102.1: A player is one of the people in the game.
-        // CR 608.2c: Per-resolution ledger filters out already-chosen players
-        // for "choose a second/third/another player" patterns.
+        // CR 608.2c: Exclude players already chosen earlier in this resolution.
         ChoiceType::Player => state
             .seat_order
             .iter()
-            .filter(|pid| !state.chosen_players_this_resolution.contains(pid))
+            .filter(|id| !already_chosen.contains(id))
             .map(|id| id.0.to_string())
             .collect(),
         ChoiceType::TwoColors => two_color_options(),
@@ -501,84 +497,38 @@ mod tests {
         }
     }
 
-    fn new_three_player(seed: u64) -> GameState {
-        use crate::types::format::FormatConfig;
-        GameState::new(FormatConfig::standard(), 3, seed)
-    }
-
     #[test]
-    fn choose_player_options_exclude_already_chosen() {
-        // CR 608.2c + CR 102.1: 3-player game; ledger contains P0. compute_options
-        // for ChoiceType::Player should exclude P0 so the next "choose a player"
-        // can pick a different player (Gluntch 2022-06-10 ruling).
-        let mut state = new_three_player(42);
-
-        state.chosen_players_this_resolution.push_back(PlayerId(0));
-
-        let options = compute_options(&state, &ChoiceType::Player, PlayerId(0));
-        assert!(
-            !options.contains(&"0".to_string()),
-            "already-chosen player 0 must be excluded; got {options:?}"
-        );
-        assert!(options.contains(&"1".to_string()));
-        assert!(options.contains(&"2".to_string()));
-    }
-
-    #[test]
-    fn choose_opponent_options_exclude_already_chosen() {
-        // CR 608.2c + CR 800.4a: 3-player game; controller P0, ledger contains
-        // P1 (an opponent). compute_options for ChoiceType::Opponent should
-        // return only P2 (the remaining opponent).
-        let mut state = new_three_player(42);
-
-        state.chosen_players_this_resolution.push_back(PlayerId(1));
-
-        let options = compute_options(&state, &ChoiceType::Opponent, PlayerId(0));
-        assert_eq!(options, vec!["2".to_string()]);
-    }
-
-    #[test]
-    fn choose_player_two_player_game_after_one_chosen_returns_empty() {
-        // CR 609.3: In a 2-seat game with P0 already chosen, the next
-        // "choose a player" must return [] so resolve() takes the
-        // skip-effect path per "do as much as possible."
+    fn choose_player_excludes_already_chosen_players() {
+        // CR 608.2c + Gluntch ruling: a successive "choose a player" omits
+        // players already chosen earlier in the same resolution.
         let mut state = GameState::new_two_player(42);
-        state.chosen_players_this_resolution.push_back(PlayerId(0));
-        state.chosen_players_this_resolution.push_back(PlayerId(1));
-
-        let options = compute_options(&state, &ChoiceType::Player, PlayerId(0));
-        assert!(
-            options.is_empty(),
-            "expected no remaining players, got {options:?}"
-        );
-    }
-
-    #[test]
-    fn choose_resolve_with_empty_options_skips_named_choice_for_player() {
-        // CR 609.3: When no legal player remains, resolve() must emit
-        // EffectResolved without transitioning to WaitingFor::NamedChoice.
-        // The continuation drain proceeds to the next sub-ability.
-        let mut state = GameState::new_two_player(42);
-        // Seed the ledger so both players are excluded.
-        state.chosen_players_this_resolution.push_back(PlayerId(0));
-        state.chosen_players_this_resolution.push_back(PlayerId(1));
-
-        let prior_waiting = state.waiting_for.clone();
-        let ability = make_choose_ability(ChoiceType::Player);
+        let mut ability = make_choose_ability(ChoiceType::Player);
+        ability.chosen_players = vec![PlayerId(0)];
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
+        match &state.waiting_for {
+            WaitingFor::NamedChoice { options, .. } => {
+                assert_eq!(options, &["1"]);
+            }
+            other => panic!("Expected NamedChoice, got {:?}", other),
+        }
+    }
 
-        assert_eq!(
-            state.waiting_for, prior_waiting,
-            "waiting_for must not transition to NamedChoice when no options remain"
-        );
-        assert!(matches!(
-            events.last(),
-            Some(GameEvent::EffectResolved {
-                kind: EffectKind::Choose,
-                ..
-            })
-        ));
+    #[test]
+    fn choose_player_with_all_players_chosen_offers_no_options() {
+        // Edge: when every player is already chosen, the option set is empty
+        // — the choice (and its dependent effect) does nothing.
+        let mut state = GameState::new_two_player(42);
+        let mut ability = make_choose_ability(ChoiceType::Player);
+        ability.chosen_players = vec![PlayerId(0), PlayerId(1)];
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        match &state.waiting_for {
+            WaitingFor::NamedChoice { options, .. } => {
+                assert!(options.is_empty());
+            }
+            other => panic!("Expected NamedChoice, got {:?}", other),
+        }
     }
 
     #[test]

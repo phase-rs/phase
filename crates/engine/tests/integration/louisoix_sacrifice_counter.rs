@@ -1,60 +1,43 @@
-//! Regression: Louisoix's Sacrifice (issue #408) targets must include all
-//! three legs of its counter clause — activated ability, triggered ability,
-//! AND noncreature spell. Pre-fix, the `scan_contains("activated or triggered
-//! ability")` precheck at `imperative.rs:3788` short-circuited and produced
-//! `TargetFilter::StackAbility` only, silently dropping the noncreature-spell
-//! leg. Runtime symptoms:
-//!   - the Counter effect didn't resolve cleanly (no legal noncreature-spell
-//!     targets even when one was on the stack),
-//!   - the target restriction wasn't enforced (the malformed downstream filter
-//!     skipped its zone scoping and routed to player-targeting via
-//!     `find_legal_targets`).
+//! Issue #408 — Louisoix's Sacrifice (counter target).
 //!
-//! Oracle text:
-//!   "As an additional cost to cast this spell, sacrifice a legendary creature.
-//!    Counter target activated ability, triggered ability, or noncreature spell."
+//! Louisoix's Sacrifice reads "Counter target activated ability, triggered
+//! ability, or noncreature spell." Before the fix, `parse_counter_ast` routed
+//! the whole disjunction through bare `parse_target`, producing a degenerate
+//! empty-`type_filters` `Typed { InZone: Stack }` filter — the noncreature
+//! restriction was dropped and the runtime counter-target legality check
+//! rejected the filter, so the counter no-opped.
 //!
-//! CR cites grep-verified (`grep -n "^XXX" docs/MagicCompRules.txt`):
-//! - CR 113.3a/b/c: Spell, activated ability, triggered ability classification.
-//! - CR 115.1: Targeting fundamentals.
-//! - CR 115.2: Legal-target requirements (only permanents unless the
-//!   spell explicitly targets stack/zone objects).
-//! - CR 601.2f: Additional costs (sacrifice a legendary creature).
-//! - CR 701.6a: Counter — moves the targeted spell to graveyard / removes
-//!   the targeted ability from the stack.
+//! The fix adds `parse_stack_object_target` (a nom combinator in
+//! `oracle_nom/target.rs`) that recognizes the three-way "activated ability,
+//! triggered ability, or noncreature spell" disjunction and wires it into
+//! `parse_counter_ast`. The produced filter is
+//! `Or { StackAbility, Typed { Non(Creature), InZone: Stack } }`.
 //!
-//! These tests pin the post-fix shape:
-//!
-//!   1. **Parser** — the parsed `Counter.target` is `Or { 3 legs }`:
-//!      two `StackAbility` (no controller scope) + one
-//!      `And { StackSpell, Typed(noncreature) }`. This is verified by the
-//!      `snapshot_louisoixs_sacrifice` test in `oracle_parser.rs`; the
-//!      assertion is duplicated here so a runtime-side regression breaking
-//!      `find_legal_targets` is also caught.
-//!
-//!   2. **Targeting** — `find_legal_targets(state, &counter.target, P0, src)`
-//!      returns the noncreature spell on the stack when one is present. The
-//!      old shape (bare `StackAbility`) returned an empty list because no
-//!      `StackAbility` entry existed → the cast would have no legal target →
-//!      cast aborts. The new shape returns the spell as a legal target.
-//!
-//!   3. **Negative target** — a creature spell on the stack is NOT a legal
-//!      target (the `noncreature` predicate is enforced). Pre-fix this leg
-//!      was silently dropped, which is a different bug; this test pins the
-//!      complementary fix path.
+//! These tests drive the real engine:
+//!   - the parser (via `CardDatabase::from_export`) to confirm the produced
+//!     `Effect::Counter` target filter;
+//!   - `find_legal_targets` — the exact target-legality path `apply` uses at
+//!     target-declaration time — to confirm activated abilities, triggered
+//!     abilities, and noncreature spells ARE legal targets while a creature
+//!     spell is NOT;
+//!   - `counter::resolve` to confirm each legal target type is actually
+//!     countered (CR 701.6a).
 
 use std::path::Path;
 use std::sync::OnceLock;
 
 use engine::database::card_db::CardDatabase;
-use engine::game::scenario::{GameScenario, P0, P1};
-use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::targeting::find_legal_targets;
-use engine::types::ability::{Effect, TargetFilter, TargetRef};
-use engine::types::game_state::{StackEntry, StackEntryKind};
-use engine::types::identifiers::ObjectId;
-use engine::types::phase::Phase;
+use engine::game::zones::create_object;
+use engine::types::ability::{
+    AbilityKind, Effect, ResolvedAbility, TargetFilter, TargetRef, TypeFilter,
+};
+use engine::types::card_type::{CardType, CoreType};
+use engine::types::events::GameEvent;
+use engine::types::game_state::{CastingVariant, GameState, StackEntry, StackEntryKind};
+use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::zones::Zone;
+use engine::types::PlayerId;
 
 fn load_db() -> Option<&'static CardDatabase> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
@@ -65,323 +48,349 @@ fn load_db() -> Option<&'static CardDatabase> {
     Some(DB.get_or_init(|| CardDatabase::from_export(&path).expect("export should load")))
 }
 
-/// Walks a card's parsed abilities to find the first `Counter` effect.
-fn find_counter_effect_target(db: &CardDatabase, name: &str) -> TargetFilter {
+/// Extract the `Effect::Counter` target filter from Louisoix's Sacrifice's
+/// parsed card definition.
+fn louisoix_counter_target(db: &CardDatabase) -> TargetFilter {
     let face = db
-        .get_face_by_name(name)
-        .unwrap_or_else(|| panic!("card '{name}' not in database"));
-    for ability in &face.abilities {
-        if let Effect::Counter { target, .. } = &*ability.effect {
-            return target.clone();
-        }
-    }
-    panic!(
-        "card '{name}' must have a Counter effect; abilities: {:?}",
-        face.abilities
-            .iter()
-            .map(|a| std::mem::discriminant(&*a.effect))
-            .collect::<Vec<_>>()
+        .get_face_by_name("Louisoix's Sacrifice")
+        .expect("Louisoix's Sacrifice should be in the card database");
+    face.abilities
+        .iter()
+        .find_map(|a| match a.effect.as_ref() {
+            Effect::Counter { target, .. } => Some(target.clone()),
+            _ => None,
+        })
+        .expect("Louisoix's Sacrifice should parse a Counter effect")
+}
+
+/// Issue #408 — the parser must produce the full three-way disjunction, not a
+/// degenerate empty-`type_filters` stack filter. The noncreature restriction
+/// must survive on the spell disjunct.
+#[test]
+fn louisoix_sacrifice_parses_disjunctive_counter_target() {
+    let Some(db) = load_db() else {
+        return;
+    };
+
+    let target = louisoix_counter_target(db);
+
+    let TargetFilter::Or { filters } = &target else {
+        panic!(
+            "expected Or {{ StackAbility, noncreature-spell }}, got {target:?} \
+             — the degenerate empty-typed `Typed` regression has returned"
+        );
+    };
+    assert_eq!(
+        filters.len(),
+        2,
+        "disjunction must have ability + spell legs"
     );
-}
 
-/// Verifies the parsed `Counter` target shape: `Or` with exactly 3 legs.
-/// This is the unit-level claim, duplicated from the parser snapshot test
-/// so a runtime crate consumer breaking the shape is caught here too.
-#[test]
-fn louisoix_sacrifice_counter_target_is_or_with_three_legs() {
-    let Some(db) = load_db() else {
-        return;
-    };
-
-    let target = find_counter_effect_target(db, "Louisoix's Sacrifice");
-    match target {
-        TargetFilter::Or { filters } => {
-            assert_eq!(
-                filters.len(),
-                3,
-                "expected 3 legs (activated ability, triggered ability, noncreature spell), got {filters:?}"
-            );
-            // Two `StackAbility` legs (in some order) + one stack-spell leg.
-            let stack_ability_count = filters
-                .iter()
-                .filter(|f| matches!(f, TargetFilter::StackAbility { .. }))
-                .count();
-            assert_eq!(
-                stack_ability_count, 2,
-                "expected exactly 2 StackAbility legs, got: {filters:?}"
-            );
-            // Third (spell) leg is `And { StackSpell, Typed(...) }`.
-            let spell_legs: Vec<_> = filters
-                .iter()
-                .filter(|f| !matches!(f, TargetFilter::StackAbility { .. }))
-                .collect();
-            assert_eq!(spell_legs.len(), 1, "expected exactly 1 spell leg");
-            assert!(matches!(
-                spell_legs[0],
-                TargetFilter::And { .. } | TargetFilter::StackSpell
-            ));
-        }
-        other => panic!("expected Or, got {other:?}"),
-    }
-}
-
-/// CR 115.1 + CR 115.2: `find_legal_targets` returns a noncreature spell on
-/// the stack as a legal target for Louisoix's Sacrifice. This is the runtime
-/// targeting layer's view of the new `Or` filter — it must enumerate stack
-/// objects (not just battlefield), correctly union the three legs, and
-/// produce the spell as legal.
-///
-/// Pre-fix this test would fail because the parsed target was bare
-/// `StackAbility`, which never matches a `StackEntryKind::Spell` on the
-/// stack — `find_legal_targets` would return an empty Vec.
-#[test]
-fn louisoix_sacrifice_finds_noncreature_spell_on_stack() {
-    let Some(db) = load_db() else {
-        return;
-    };
-
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let sac_id = scenario.add_real_card(P0, "Louisoix's Sacrifice", Zone::Hand, db);
-    // P1's noncreature spell to be on the stack. Divination is a non-creature
-    // sorcery; its presence on the stack is what we want the target list to
-    // surface as a legal target.
-    let spell_id = scenario.add_real_card(P1, "Divination", Zone::Hand, db);
-    let mut runner = scenario.build();
-    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
-
-    // Manually place the Divination spell on the stack as P1's spell. Using
-    // direct state manipulation rather than driving the cast pipeline avoids
-    // the priority/active-player setup churn — what we want to verify here
-    // is the targeting layer's behavior with the new `Or` filter, not the
-    // full cast UX.
-    let spell_card_id = runner.state().objects[&spell_id].card_id;
-    {
-        let state = runner.state_mut();
-        // Move Divination from P1's hand to the stack.
-        let p1 = state
-            .players
-            .iter_mut()
-            .find(|p| p.id == P1)
-            .expect("P1 must exist");
-        p1.hand.retain(|id| *id != spell_id);
-        state.stack.push_back(StackEntry {
-            id: spell_id,
-            source_id: spell_id,
-            controller: P1,
-            kind: StackEntryKind::Spell {
-                card_id: spell_card_id,
-                ability: None,
-                casting_variant: engine::types::game_state::CastingVariant::Normal,
-                actual_mana_spent: 0,
-            },
-        });
-        // Sync the object's zone.
-        state.objects.get_mut(&spell_id).unwrap().zone = Zone::Stack;
-    }
-
-    // Pull the parsed Counter target from the (rehydrated) Louisoix object.
-    let target_filter = {
-        let obj = &runner.state().objects[&sac_id];
-        let mut found = None;
-        for ability in obj.abilities.iter() {
-            if let Effect::Counter { target, .. } = &*ability.effect {
-                found = Some(target.clone());
-                break;
-            }
-        }
-        found.expect("Louisoix's Sacrifice must have a Counter ability")
-    };
-
-    let legal = find_legal_targets(runner.state(), &target_filter, P0, sac_id);
-
-    // CR 701.6a: The Divination spell (noncreature) on the stack must be a
-    // legal target. Pre-fix this list would be empty (only StackAbility was
-    // searched for, and there are no abilities on the stack).
+    // Ability leg — any activated/triggered ability on the stack.
     assert!(
-        legal.iter().any(|t| matches!(t, TargetRef::Object(id) if *id == spell_id)),
-        "Divination (noncreature spell) on the stack must be a legal target for Louisoix's Sacrifice; got legal targets: {legal:?}"
-    );
-}
-
-/// CR 115.2: A creature spell on the stack must NOT be a legal target — the
-/// `noncreature` predicate on the spell leg is enforced via the
-/// `And { StackSpell, Typed(noncreature) }` shape. Pre-fix the noncreature
-/// leg was silently dropped, so a creature spell would either be a legal
-/// target (if a different leg matched) or trivially excluded (since only
-/// `StackAbility` was searched). Post-fix this test pins the negative case.
-#[test]
-fn louisoix_sacrifice_rejects_creature_spell_on_stack() {
-    let Some(db) = load_db() else {
-        return;
-    };
-
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let sac_id = scenario.add_real_card(P0, "Louisoix's Sacrifice", Zone::Hand, db);
-    // Grizzly Bears is a creature spell — should NOT be a legal target.
-    let bear_id = scenario.add_real_card(P1, "Grizzly Bears", Zone::Hand, db);
-    let mut runner = scenario.build();
-    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
-
-    let bear_card_id = runner.state().objects[&bear_id].card_id;
-    {
-        let state = runner.state_mut();
-        let p1 = state
-            .players
-            .iter_mut()
-            .find(|p| p.id == P1)
-            .expect("P1 must exist");
-        p1.hand.retain(|id| *id != bear_id);
-        state.stack.push_back(StackEntry {
-            id: bear_id,
-            source_id: bear_id,
-            controller: P1,
-            kind: StackEntryKind::Spell {
-                card_id: bear_card_id,
-                ability: None,
-                casting_variant: engine::types::game_state::CastingVariant::Normal,
-                actual_mana_spent: 0,
-            },
-        });
-        state.objects.get_mut(&bear_id).unwrap().zone = Zone::Stack;
-    }
-
-    let target_filter = {
-        let obj = &runner.state().objects[&sac_id];
-        let mut found = None;
-        for ability in obj.abilities.iter() {
-            if let Effect::Counter { target, .. } = &*ability.effect {
-                found = Some(target.clone());
-                break;
-            }
-        }
-        found.expect("Louisoix's Sacrifice must have a Counter ability")
-    };
-
-    let legal = find_legal_targets(runner.state(), &target_filter, P0, sac_id);
-    assert!(
-        !legal
+        filters
             .iter()
-            .any(|t| matches!(t, TargetRef::Object(id) if *id == bear_id)),
-        "Grizzly Bears (creature spell) must NOT be a legal target — the noncreature predicate is enforced; got: {legal:?}"
+            .any(|f| matches!(f, TargetFilter::StackAbility { controller: None })),
+        "missing the activated/triggered ability disjunct: {target:?}"
+    );
+
+    // Spell leg — noncreature restriction is carried as `Non(Creature)` and
+    // the leg is pinned to the stack zone.
+    let spell_leg = filters
+        .iter()
+        .find_map(|f| match f {
+            TargetFilter::Typed(tf) => Some(tf),
+            _ => None,
+        })
+        .expect("missing the typed noncreature-spell disjunct");
+    assert_eq!(
+        spell_leg.type_filters,
+        vec![TypeFilter::Non(Box::new(TypeFilter::Creature))],
+        "the spell disjunct must EXCLUDE creature spells (noncreature restriction)"
+    );
+    assert!(
+        spell_leg.properties.iter().any(|p| matches!(
+            p,
+            engine::types::ability::FilterProp::InZone { zone: Zone::Stack }
+        )),
+        "the spell disjunct must be pinned to the stack zone"
     );
 }
 
-/// CR 113.3a + CR 115.1: Drives the actual cast pipeline. P0 casts Louisoix's
-/// Sacrifice. The cast accepts (mana is added; the additional sacrifice cost
-/// has a legendary creature available). The waiting state advances through
-/// the additional cost flow to target selection, where the noncreature spell
-/// on the stack is offered as a legal target.
-///
-/// This test exercises the cast pipeline end-to-end up to the target-selection
-/// state — it stops short of resolution to keep the cost-payment flow under
-/// control. Resolution semantics for the resolved `Counter` effect with this
-/// target shape are covered by `find_legal_targets` returning a legal target
-/// (above) and by the existing resolver-level Counter tests.
-#[test]
-fn louisoix_sacrifice_cast_pipeline_reaches_target_selection() {
-    use engine::types::actions::GameAction;
-    use engine::types::game_state::{StackEntry, WaitingFor};
-    use engine::types::mana::{ManaType, ManaUnit};
+/// Build a `GameState` whose stack carries one activated ability, one
+/// triggered ability, one noncreature (instant) spell, and one creature spell.
+/// Returns the four object ids in that order.
+fn stack_with_four_entries() -> (GameState, ObjectId, ObjectId, ObjectId, ObjectId) {
+    let mut state = GameState::new_two_player(42);
 
-    let Some(db) = load_db() else {
-        return;
-    };
+    let perm = create_object(
+        &mut state,
+        CardId(1),
+        PlayerId(1),
+        "Ability Source".to_string(),
+        Zone::Battlefield,
+    );
 
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let sac_id = scenario.add_real_card(P0, "Louisoix's Sacrifice", Zone::Hand, db);
-    // P0 needs a legendary creature on the battlefield to pay the additional
-    // sacrifice cost (CR 601.2f).
-    let _legendary = scenario.add_real_card(P0, "Tinybones, Trinket Thief", Zone::Battlefield, db);
-    // P1's noncreature spell on the stack.
-    let spell_id = scenario.add_real_card(P1, "Divination", Zone::Hand, db);
-    let mut runner = scenario.build();
-    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
-
-    // Place Divination on the stack.
-    let spell_card_id = runner.state().objects[&spell_id].card_id;
-    {
-        let state = runner.state_mut();
-        let p1 = state.players.iter_mut().find(|p| p.id == P1).unwrap();
-        p1.hand.retain(|id| *id != spell_id);
-        state.stack.push_back(StackEntry {
-            id: spell_id,
-            source_id: spell_id,
-            controller: P1,
-            kind: StackEntryKind::Spell {
-                card_id: spell_card_id,
-                ability: None,
-                casting_variant: engine::types::game_state::CastingVariant::Normal,
-                actual_mana_spent: 0,
-            },
-        });
-        state.objects.get_mut(&spell_id).unwrap().zone = Zone::Stack;
-    }
-
-    // Add {U} to P0's mana pool for casting cost.
-    let dummy = ObjectId(0);
-    runner
-        .state_mut()
-        .players
-        .iter_mut()
-        .find(|p| p.id == P0)
-        .unwrap()
-        .mana_pool
-        .add(ManaUnit::new(ManaType::Blue, dummy, false, vec![]));
-
-    let sac_card_id = runner.state().objects[&sac_id].card_id;
-    // Cast Louisoix's Sacrifice. The cast pipeline should accept the action
-    // and either start the additional cost flow or proceed to target
-    // selection (depending on the engine's ordering). We assert only that
-    // the cast did not abort.
-    let cast_result = runner.act(GameAction::CastSpell {
-        object_id: sac_id,
-        card_id: sac_card_id,
-        targets: vec![],
+    let activated = ObjectId(901);
+    let triggered = ObjectId(902);
+    state.stack.push_back(StackEntry {
+        id: activated,
+        source_id: perm,
+        controller: PlayerId(1),
+        kind: StackEntryKind::ActivatedAbility {
+            source_id: perm,
+            ability: ResolvedAbility::new(
+                Effect::Unimplemented {
+                    name: "Act".to_string(),
+                    description: None,
+                },
+                vec![],
+                perm,
+                PlayerId(1),
+            ),
+        },
     });
-    assert!(
-        cast_result.is_ok(),
-        "cast must be accepted; got {cast_result:?}. waiting_for={:?}",
-        runner.state().waiting_for
-    );
+    state.stack.push_back(StackEntry {
+        id: triggered,
+        source_id: perm,
+        controller: PlayerId(1),
+        kind: StackEntryKind::TriggeredAbility {
+            source_id: perm,
+            ability: Box::new(ResolvedAbility::new(
+                Effect::Unimplemented {
+                    name: "Trig".to_string(),
+                    description: None,
+                },
+                vec![],
+                perm,
+                PlayerId(1),
+            )),
+            condition: None,
+            trigger_event: None,
+            description: None,
+            source_name: String::new(),
+        },
+    });
 
-    // The pipeline now expects either an additional-cost choice (sacrifice
-    // the legendary) or has already advanced into target selection. Drive
-    // forward a bounded number of steps, picking the legendary as the
-    // sacrifice and the noncreature spell as the target when prompted.
-    //
-    // The exact `WaitingFor` variants for the additional-cost flow are
-    // engine-internal; we treat anything other than `TargetSelection` as
-    // an in-progress step we should advance with PassPriority or the
-    // appropriate choice. This is a regression-bracket test, not a UX test.
-    for _ in 0..20 {
-        match &runner.state().waiting_for {
-            WaitingFor::TargetSelection { target_slots, .. } => {
-                // CR 115.2: The noncreature spell on the stack should be in
-                // the legal-target list. This is the assertion the test
-                // exists to make.
-                let legal = &target_slots[0].legal_targets;
-                assert!(
-                    legal
-                        .iter()
-                        .any(|t| matches!(t, TargetRef::Object(id) if *id == spell_id)),
-                    "Divination must be a legal target; legal_targets: {legal:?}"
-                );
-                return;
-            }
-            _ => {
-                // Try passing priority to advance the flow.
-                if runner.act(GameAction::PassPriority).is_err() {
-                    break;
-                }
-            }
-        }
+    // Noncreature spell — an instant.
+    let noncreature_spell = create_object(
+        &mut state,
+        CardId(20),
+        PlayerId(1),
+        "Lightning Bolt".to_string(),
+        Zone::Stack,
+    );
+    // Creature spell — must NOT be a legal target.
+    let creature_spell = create_object(
+        &mut state,
+        CardId(21),
+        PlayerId(1),
+        "Grizzly Bears".to_string(),
+        Zone::Stack,
+    );
+    {
+        let instant = CardType {
+            core_types: vec![CoreType::Instant],
+            ..Default::default()
+        };
+        let obj = state.objects.get_mut(&noncreature_spell).unwrap();
+        obj.card_types = instant.clone();
+        obj.base_card_types = instant;
+    }
+    {
+        let creature = CardType {
+            core_types: vec![CoreType::Creature],
+            ..Default::default()
+        };
+        let obj = state.objects.get_mut(&creature_spell).unwrap();
+        obj.card_types = creature.clone();
+        obj.base_card_types = creature;
+    }
+    for (id, card_id) in [
+        (noncreature_spell, CardId(20)),
+        (creature_spell, CardId(21)),
+    ] {
+        state.stack.push_back(StackEntry {
+            id,
+            source_id: id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id,
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
     }
 
-    panic!(
-        "did not reach TargetSelection within 20 steps; final waiting_for: {:?}",
-        runner.state().waiting_for
+    (
+        state,
+        activated,
+        triggered,
+        noncreature_spell,
+        creature_spell,
+    )
+}
+
+/// Issue #408 — `find_legal_targets` (the path `apply` uses at target
+/// declaration) must offer the activated ability, the triggered ability, and
+/// the noncreature spell, and must REJECT the creature spell.
+#[test]
+fn louisoix_counter_target_legality() {
+    let Some(db) = load_db() else {
+        return;
+    };
+
+    let filter = louisoix_counter_target(db);
+    let (state, activated, triggered, noncreature_spell, creature_spell) =
+        stack_with_four_entries();
+
+    // Louisoix's Sacrifice is itself a spell on the stack; its controller is
+    // P0. Use a fresh object id as the counter source.
+    let source = ObjectId(1000);
+    let legal = find_legal_targets(&state, &filter, PlayerId(0), source);
+
+    let is_legal = |id: ObjectId| legal.contains(&TargetRef::Object(id));
+
+    assert!(
+        is_legal(activated),
+        "an activated ability on the stack must be a legal target"
+    );
+    assert!(
+        is_legal(triggered),
+        "a triggered ability on the stack must be a legal target"
+    );
+    assert!(
+        is_legal(noncreature_spell),
+        "a noncreature spell must be a legal target"
+    );
+    assert!(
+        !is_legal(creature_spell),
+        "a CREATURE spell must NOT be a legal target — the noncreature \
+         restriction must be enforced at target-legality time"
+    );
+}
+
+/// Drive `counter::resolve` for each legal target type — the runtime must
+/// actually counter an activated ability, a triggered ability, and a
+/// noncreature spell (CR 701.6a). The countered spell goes to its owner's
+/// graveyard; countered abilities just leave the stack.
+#[test]
+fn louisoix_counter_resolves_each_legal_target() {
+    let Some(db) = load_db() else {
+        return;
+    };
+
+    let filter = louisoix_counter_target(db);
+
+    // --- Counter an activated ability ---
+    {
+        let (mut state, activated, _, _, _) = stack_with_four_entries();
+        let ability = ResolvedAbility::new(
+            Effect::Counter {
+                target: filter.clone(),
+                source_static: None,
+            },
+            vec![TargetRef::Object(activated)],
+            ObjectId(1000),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        engine::game::effects::counter::resolve(&mut state, &ability, &mut events).unwrap();
+        assert!(
+            !state.stack.iter().any(|e| e.id == activated),
+            "the activated ability must be removed from the stack"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::SpellCountered { .. })),
+            "a SpellCountered event must be emitted for the countered ability"
+        );
+    }
+
+    // --- Counter a triggered ability ---
+    {
+        let (mut state, _, triggered, _, _) = stack_with_four_entries();
+        let ability = ResolvedAbility::new(
+            Effect::Counter {
+                target: filter.clone(),
+                source_static: None,
+            },
+            vec![TargetRef::Object(triggered)],
+            ObjectId(1000),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        engine::game::effects::counter::resolve(&mut state, &ability, &mut events).unwrap();
+        assert!(
+            !state.stack.iter().any(|e| e.id == triggered),
+            "the triggered ability must be removed from the stack"
+        );
+    }
+
+    // --- Counter a noncreature spell (CR 701.6a: → owner's graveyard) ---
+    {
+        let (mut state, _, _, noncreature_spell, _) = stack_with_four_entries();
+        let ability = ResolvedAbility::new(
+            Effect::Counter {
+                target: filter.clone(),
+                source_static: None,
+            },
+            vec![TargetRef::Object(noncreature_spell)],
+            ObjectId(1000),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        engine::game::effects::counter::resolve(&mut state, &ability, &mut events).unwrap();
+        assert!(
+            !state.stack.iter().any(|e| e.id == noncreature_spell),
+            "the noncreature spell must be removed from the stack"
+        );
+        assert!(
+            state.players[1].graveyard.contains(&noncreature_spell),
+            "CR 701.6a: a countered spell goes to its owner's graveyard"
+        );
+    }
+}
+
+/// Regression guard — a plain "Counter target spell" (Counterspell) must still
+/// yield a stack-spell filter; the new combinator must not steal the simple
+/// case or change Counterspell's behavior.
+#[test]
+fn counterspell_still_targets_spells_only() {
+    let Some(db) = load_db() else {
+        return;
+    };
+
+    let face = db
+        .get_face_by_name("Counterspell")
+        .expect("Counterspell should be in the card database");
+    let counter_effect = face
+        .abilities
+        .iter()
+        .find(|a| matches!(a.kind, AbilityKind::Spell))
+        .map(|a| a.effect.as_ref())
+        .expect("Counterspell should have a spell ability");
+
+    let Effect::Counter { target, .. } = counter_effect else {
+        panic!("Counterspell should parse a Counter effect, got {counter_effect:?}");
+    };
+
+    // Build a stack with one creature spell and one activated ability. Assert
+    // Counterspell CAN target the creature spell — "Counter target spell" has
+    // no type restriction, so a creature spell is a legal target (this
+    // distinguishes it from Louisoix's noncreature) — and CANNOT target the
+    // ability, since "Counter target spell" has no ability disjunct.
+    let (state, activated, _, _, creature_spell) = stack_with_four_entries();
+    let legal = find_legal_targets(&state, target, PlayerId(0), ObjectId(1000));
+    assert!(
+        legal.contains(&TargetRef::Object(creature_spell)),
+        "Counterspell (\"Counter target spell\") must still be able to \
+         target a creature spell — got legal set {legal:?}"
+    );
+    assert!(
+        !legal.contains(&TargetRef::Object(activated)),
+        "Counterspell must not target activated abilities — got legal set {legal:?}"
     );
 }

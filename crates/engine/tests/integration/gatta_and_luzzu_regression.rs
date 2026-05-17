@@ -75,6 +75,7 @@ fn build_gatta_prevention_chain(
     let mut prevent = ResolvedAbility::new(
         Effect::PreventDamage {
             amount: PreventionAmount::All,
+            amount_dynamic: None,
             target: TargetFilter::ParentTarget,
             scope: PreventionScope::AllDamage,
             damage_source_filter: None,

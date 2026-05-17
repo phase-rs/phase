@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, QuantityExpr, QuantityRef, RoundingMode, TargetFilter,
+    AbilityDefinition, AbilityKind, PlayerScope, QuantityExpr, QuantityRef, RoundingMode,
+    TargetFilter,
 };
 
 use super::effect::translate_effect;
@@ -158,7 +159,9 @@ impl<'a> SvarResolver<'a> {
                 },
             }),
             "CardsInYourGrave" | "CardsInYourGraveyard" => Ok(QuantityExpr::Ref {
-                qty: QuantityRef::GraveyardSize,
+                qty: QuantityRef::GraveyardSize {
+                    player: PlayerScope::Controller,
+                },
             }),
             "X" | "xPaid" => Ok(QuantityExpr::Ref {
                 qty: QuantityRef::Variable {

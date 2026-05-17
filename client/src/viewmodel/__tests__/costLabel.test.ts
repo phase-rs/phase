@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import type { GameAction, GameObject, Keyword } from "../../adapter/types.ts";
-import { abilityChoiceLabel } from "../costLabel.ts";
+import type { AdditionalCost, GameAction, GameObject, Keyword } from "../../adapter/types.ts";
+import { abilityChoiceLabel, additionalCostChoices } from "../costLabel.ts";
 
 function makeObject(overrides: Partial<GameObject> = {}): GameObject {
   return {
@@ -46,7 +46,11 @@ describe("abilityChoiceLabel per-variant formatting", () => {
   it("labels CrewVehicle with the keyword N extracted from engine keywords", () => {
     const object = makeObject({
       name: "Skysovereign, Consul Flagship",
-      keywords: [{ Crew: 3 } as Keyword],
+      keywords: [
+        {
+          Crew: { power: 3, once_per_turn: { type: "Unlimited" } },
+        } as unknown as Keyword,
+      ],
     });
     const action: GameAction = {
       type: "CrewVehicle",
@@ -205,5 +209,38 @@ describe("abilityChoiceLabel per-variant formatting", () => {
     const result = abilityChoiceLabel(action, object);
     expect(result.label).toBe("{T}");
     expect(result.description).toBe("Draw a card.");
+  });
+});
+
+describe("additionalCostChoices — multikicker (issue #454)", () => {
+  const repeatableKicker: AdditionalCost = {
+    type: "Kicker",
+    data: {
+      costs: [{ type: "Mana", cost: { type: "Cost", shards: [], generic: 2 } }],
+      repeatable: true,
+    },
+  };
+
+  it("first prompt (timesKicked 0) offers a non-cancel 'cast without kicking' decline", () => {
+    const { title, options } = additionalCostChoices(repeatableKicker, 0);
+
+    expect(title.toLowerCase()).toContain("multikicker");
+    const pay = options.find((o) => o.id === "pay")!;
+    const decline = options.find((o) => o.id === "decline")!;
+    expect(pay.label).toContain("kick it");
+    expect(decline.label).toBe("Cast without kicking");
+    expect(decline.label.toLowerCase()).not.toContain("skip");
+    expect(decline.label.toLowerCase()).not.toContain("cancel");
+    expect(decline.description?.toLowerCase()).toContain("still resolves");
+  });
+
+  it("re-prompt (timesKicked 2) shows the kick count and a 'finish casting' decline", () => {
+    const { title, options } = additionalCostChoices(repeatableKicker, 2);
+
+    expect(title).toContain("kicked 2");
+    const decline = options.find((o) => o.id === "decline")!;
+    expect(decline.label).toContain("finish casting");
+    expect(decline.label).toContain("(kicked 2×)");
+    expect(decline.label.toLowerCase()).not.toContain("cancel");
   });
 });

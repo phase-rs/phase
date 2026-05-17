@@ -724,6 +724,135 @@ mod tests {
         }
     }
 
+    /// Runtime regression test for issue #420 (Birthing Ritual). Drives the
+    /// real `resolve()` Dig pipeline with the ability the *parser* produces for
+    /// Birthing Ritual's triggered effect, and asserts the mana-value-relative
+    /// filter restricts the looked-at pile to creature cards with mana value
+    /// ≤ (sacrificed creature's mana value + 1).
+    ///
+    /// CR 202.3 + CR 608.2k: the "where X is 1 plus the sacrificed creature's
+    /// mana value" bound resolves `QuantityRef::ObjectManaValue { CostPaidObject
+    /// }` against the sacrificed creature snapshot held in
+    /// `ResolvedAbility.effect_context_object`. CR 701.20e: the cards are looked
+    /// at (private), then a matching creature is put onto the battlefield.
+    ///
+    /// Pre-fix (#420): the parser dropped clause 3 into a bare
+    /// `ChangeZone { ParentTarget }`, leaving the `Dig` with `filter: Any` and
+    /// `destination: None` — every library creature would be selectable and the
+    /// `selectable_cards.len() == 1` assertion fails. Post-fix the `Dig` carries
+    /// `Cmc { LE, Offset { ObjectManaValue { CostPaidObject }, +1 } }`, so only
+    /// the mana-value-4 creature (≤ 3 + 1) is selectable.
+    #[test]
+    fn birthing_ritual_runtime_dig_filter_respects_sacrificed_creature_mana_value() {
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::{AbilityKind, CostPaidObjectSnapshot};
+        use crate::types::card_type::CoreType;
+        use crate::types::mana::ManaCost;
+
+        // Parse the effect text of Birthing Ritual's triggered ability — the
+        // portion after the "At the beginning of your end step, if you control
+        // a creature, " trigger/intervening-if prefix. The first def in the
+        // chain is the looked-at-top-seven `Dig`.
+        let def = parse_effect_chain(
+            "look at the top seven cards of your library. Then you may sacrifice a creature. \
+             If you do, you may put a creature card with mana value X or less from among those \
+             cards onto the battlefield, where X is 1 plus the sacrificed creature's mana value. \
+             Put the rest on the bottom of your library in a random order.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(&*def.effect, Effect::Dig { .. }),
+            "parser must assemble a Dig as the first effect, got {:?}",
+            def.effect
+        );
+
+        let mut state = GameState::new_two_player(42);
+
+        // The creature being sacrificed lives on the battlefield with mana
+        // value 3 — the bound becomes mana value ≤ 3 + 1 = 4.
+        let sacrificed = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Sacrificed Creature".into(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&sacrificed).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::generic(3);
+        }
+        let sac_snapshot = CostPaidObjectSnapshot {
+            object_id: sacrificed,
+            lki: state
+                .objects
+                .get(&sacrificed)
+                .unwrap()
+                .snapshot_for_mana_spent(),
+        };
+
+        // Library top: a mana-value-4 creature (selectable, 4 ≤ 4) and a
+        // mana-value-5 creature (NOT selectable, 5 > 4).
+        let mv4 = create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(0),
+            "MV4 Creature".into(),
+            Zone::Library,
+        );
+        let mv5 = create_object(
+            &mut state,
+            CardId(902),
+            PlayerId(0),
+            "MV5 Creature".into(),
+            Zone::Library,
+        );
+        for (id, cmc) in [(mv4, 4u64), (mv5, 5)] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::generic(cmc as u32);
+        }
+
+        // Build the ResolvedAbility from the parser-produced Dig, carrying the
+        // sacrificed creature snapshot the runtime reads for the CMC bound.
+        let mut ability =
+            ResolvedAbility::new((*def.effect).clone(), vec![], ObjectId(100), PlayerId(0));
+        ability.effect_context_object = Some(sac_snapshot);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::DigChoice {
+                selectable_cards,
+                cards,
+                kept_destination,
+                ..
+            } => {
+                assert_eq!(
+                    cards.len(),
+                    2,
+                    "both library creatures are looked at (CR 701.20e)"
+                );
+                assert_eq!(
+                    selectable_cards,
+                    &vec![mv4],
+                    "only the mana-value-4 creature is ≤ (sacrificed MV 3 + 1)"
+                );
+                assert!(
+                    !selectable_cards.contains(&mv5),
+                    "the mana-value-5 creature exceeds the bound and is not selectable"
+                );
+                assert_eq!(
+                    *kept_destination,
+                    Some(Zone::Battlefield),
+                    "the chosen creature is put onto the battlefield"
+                );
+            }
+            other => panic!("Expected DigChoice, got {:?}", other),
+        }
+    }
+
     /// CR 201.2 + CR 201.2a: `FilterProp::NameMatchesAnyPermanent` must restrict
     /// the Dig's selectable set to library cards whose printed name equals the
     /// name of some permanent on the battlefield. Controllers of the on-board

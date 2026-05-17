@@ -59,6 +59,14 @@ pub(super) fn finalize_trigger_target_selection(
     triggers::push_pending_trigger_to_stack(state, trigger, events);
     state.priority_passes.clear();
     state.priority_pass_count = 0;
+    // CR 113.2c + CR 603.2 + CR 603.3b: After the active trigger is on the
+    // stack, drain any siblings that were deferred because this one needed
+    // input (e.g., the second Boggart Prankster's "you attack" trigger waiting
+    // behind the first). If a deferred trigger itself needs input, hand back
+    // its WaitingFor; otherwise continue to Priority.
+    if let Some(waiting_for) = triggers::drain_deferred_trigger_queue(state, events) {
+        return waiting_for;
+    }
     WaitingFor::Priority { player: controller }
 }
 
@@ -149,7 +157,7 @@ pub(super) fn handle_trigger_target_selection_choose_target(
                 .take()
                 .ok_or_else(|| EngineError::InvalidAction("No pending trigger".to_string()))?;
             let mut ability = trigger.ability.clone();
-            assign_selected_slots_in_chain(&mut ability, &selected_slots)?;
+            assign_selected_slots_in_chain(state, &mut ability, &selected_slots)?;
 
             Ok(finalize_trigger_target_selection(
                 state, trigger, ability, events,

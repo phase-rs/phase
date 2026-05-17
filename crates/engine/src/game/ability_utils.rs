@@ -58,6 +58,9 @@ pub fn build_resolved_from_def_with_targets(
     resolved.multi_target = def.multi_target.clone();
     resolved.target_choice_timing = def.target_choice_timing;
     resolved.repeat_for = def.repeat_for.clone();
+    // CR 608.2c + CR 107.1c: Carry the loop-continuation predicate through so the
+    // `repeat_until` dispatch in `resolve_ability_chain` can re-follow the chain.
+    resolved.repeat_until = def.repeat_until.clone();
     resolved.min_x_value = def.min_x_value;
     resolved.cant_be_copied = def.cant_be_copied;
     resolved.description = def.description.clone();
@@ -74,6 +77,9 @@ pub fn build_resolved_from_def_with_targets(
     // through to the resolved ability so target-selection sites can short-circuit
     // `WaitingFor::TargetSelection` for `Random` abilities.
     resolved.target_selection_mode = def.target_selection_mode;
+    // CR 608.2c: Carry the parent-link kind through so the decline classifier can
+    // distinguish a separate-sentence sibling from a within-clause continuation.
+    resolved.sub_link = def.sub_link;
     resolved
 }
 
@@ -731,6 +737,7 @@ pub fn assign_targets_in_chain(
 }
 
 pub fn assign_selected_slots_in_chain(
+    state: &GameState,
     ability: &mut ResolvedAbility,
     selected_slots: &[Option<TargetRef>],
 ) -> Result<(), EngineError> {
@@ -739,7 +746,7 @@ pub fn assign_selected_slots_in_chain(
         return Ok(());
     }
     let mut next_slot = 0usize;
-    assign_selected_slots_recursive(ability, selected_slots, &mut next_slot)?;
+    assign_selected_slots_recursive(state, ability, selected_slots, &mut next_slot)?;
     if next_slot != selected_slots.len() {
         return Err(EngineError::InvalidAction(
             "Unused selected target slots".to_string(),
@@ -931,10 +938,16 @@ fn collect_target_slots(
                 optional: ability.optional_targeting,
             });
         }
-        if ability.target_choice_timing == TargetChoiceTiming::Stack {
+        if ability.target_choice_timing == TargetChoiceTiming::Stack
+            && !effect_target_filter_references_chosen_player(&ability.effect)
+        {
             if let Some(filter) = triggers::extract_target_filter_from_effect(&ability.effect) {
                 let legal_targets = legal_choices_for_ability_filter(state, ability, filter, slots);
-                if legal_targets.is_empty() && !ability.optional_targeting {
+                // CR 601.2c: An "up to N" ability (`multi_target.min == 0`) — or an
+                // ability-wide "up to one" (`optional_targeting`) — may legally
+                // choose zero targets, so an empty legal-target set is acceptable.
+                // Only abilities that require at least one target error out here.
+                if legal_targets.is_empty() && !ability.targeting_is_optional() {
                     return Err(EngineError::ActionNotAllowed(
                         "No legal targets available".to_string(),
                     ));
@@ -1041,6 +1054,10 @@ fn quantity_expr_has_unresolved_variable(
         QuantityExpr::Sum { exprs } => exprs
             .iter()
             .any(|expr| quantity_expr_has_unresolved_variable(state, ability, expr)),
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_has_unresolved_variable(state, ability, left)
+                || quantity_expr_has_unresolved_variable(state, ability, right)
+        }
         QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => false,
     }
 }
@@ -1097,6 +1114,78 @@ fn effect_references_target_player(effect: &Effect) -> bool {
             matches!(target, TargetFilter::Player) || filter_references_target_player(target)
         }
         _ => false,
+    }
+}
+
+/// CR 608.2c + CR 109.4: Tree-walks a `TargetFilter` and returns true if any
+/// `TypedFilter` inside it is scoped to `ControllerRef::ChosenPlayer`. Such a
+/// filter resolves against a player chosen *during* resolution (an earlier
+/// `Effect::Choose`), so it must NOT surface a stack-push target slot — the
+/// chosen player (and therefore the legal-target set) is not known when the
+/// ability goes on the stack. The dependent effect selects its target during
+/// resolution instead.
+fn filter_references_chosen_player(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(TypedFilter { controller, .. }) => {
+            matches!(controller, Some(ControllerRef::ChosenPlayer { .. }))
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_references_chosen_player)
+        }
+        TargetFilter::Not { filter } => filter_references_chosen_player(filter),
+        _ => false,
+    }
+}
+
+/// True when the effect's primary target filter is scoped to a resolution-time
+/// chosen player — see `filter_references_chosen_player`.
+fn effect_target_filter_references_chosen_player(effect: &Effect) -> bool {
+    effect
+        .target_filter()
+        .is_some_and(filter_references_chosen_player)
+}
+
+/// CR 608.2c + CR 109.4: First `ControllerRef::ChosenPlayer` index found in
+/// the filter tree, if any. Used at resolution time to bind the chosen player
+/// before enumerating the dependent effect's legal targets.
+pub(crate) fn filter_chosen_player_index(filter: &TargetFilter) -> Option<u8> {
+    match filter {
+        TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::ChosenPlayer { index }),
+            ..
+        }) => Some(*index),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().find_map(filter_chosen_player_index)
+        }
+        TargetFilter::Not { filter } => filter_chosen_player_index(filter),
+        _ => None,
+    }
+}
+
+/// CR 109.4: Rewrite every `ControllerRef::ChosenPlayer` in the filter tree to
+/// `ControllerRef::You` so `find_legal_targets`' source-controller plumbing
+/// can enumerate the chosen player's objects by passing that player as the
+/// `controller` argument. Mirrors the `TargetPlayer → You` rewrite at
+/// `legal_targets_for_ability_filter`.
+pub(crate) fn rewrite_chosen_player_to_you(filter: &TargetFilter) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(tf)
+            if matches!(tf.controller, Some(ControllerRef::ChosenPlayer { .. })) =>
+        {
+            let mut rewritten = tf.clone();
+            rewritten.controller = Some(ControllerRef::You);
+            TargetFilter::Typed(rewritten)
+        }
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters.iter().map(rewrite_chosen_player_to_you).collect(),
+        },
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters.iter().map(rewrite_chosen_player_to_you).collect(),
+        },
+        TargetFilter::Not { filter } => TargetFilter::Not {
+            filter: Box::new(rewrite_chosen_player_to_you(filter)),
+        },
+        other => other.clone(),
     }
 }
 
@@ -2145,11 +2234,16 @@ fn assign_targets_recursive(
                 .map(minimum_targets_in_chain)
                 .unwrap_or(0);
             let remaining_after_current = targets.len().saturating_sub(*next_target);
-            let current_count = remaining_after_current.saturating_sub(remaining_minimum);
-            if current_count < spec.min
-                || resolve_multi_target_max(state, ability, spec)
-                    .is_some_and(|max_targets| current_count > max_targets.max(spec.min))
-            {
+            // Issue #321: cap at this node's own resolved `multi_target` max so a
+            // node does not claim a downstream `up to N` effect's optional
+            // targets. Mirrors the cap in `assign_selected_slots_recursive`.
+            let node_max = resolve_multi_target_max(state, ability, spec)
+                .map(|max_targets| max_targets.max(spec.min))
+                .unwrap_or(remaining_after_current);
+            let current_count = remaining_after_current
+                .saturating_sub(remaining_minimum)
+                .min(node_max);
+            if current_count < spec.min {
                 return Err(EngineError::InvalidAction(
                     "Incorrect number of multi-target selections".to_string(),
                 ));
@@ -2189,6 +2283,7 @@ fn assign_targets_recursive(
 }
 
 fn assign_selected_slots_recursive(
+    state: &GameState,
     ability: &mut ResolvedAbility,
     selected_slots: &[Option<TargetRef>],
     next_slot: &mut usize,
@@ -2200,7 +2295,7 @@ fn assign_selected_slots_recursive(
         )
     }) {
         if ability.context.additional_cost_paid {
-            assign_selected_slots_recursive(sub_ability, selected_slots, next_slot)?;
+            assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)?;
             ability.targets = sub_ability.targets.clone();
             return Ok(());
         }
@@ -2228,6 +2323,7 @@ fn assign_selected_slots_recursive(
         }
         if defers_sub_ability_target_selection(&ability.effect) {
             assign_selected_slots_after_deferred_effect(
+                state,
                 ability.sub_ability.as_deref_mut(),
                 selected_slots,
                 next_slot,
@@ -2238,7 +2334,7 @@ fn assign_selected_slots_recursive(
             if defers_conditional_target_selection(sub_ability) {
                 return Ok(());
             }
-            assign_selected_slots_recursive(sub_ability, selected_slots, next_slot)?;
+            assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)?;
         }
         return Ok(());
     }
@@ -2265,6 +2361,7 @@ fn assign_selected_slots_recursive(
         }
         if defers_sub_ability_target_selection(&ability.effect) {
             assign_selected_slots_after_deferred_effect(
+                state,
                 ability.sub_ability.as_deref_mut(),
                 selected_slots,
                 next_slot,
@@ -2275,7 +2372,7 @@ fn assign_selected_slots_recursive(
             if defers_conditional_target_selection(sub_ability) {
                 return Ok(());
             }
-            assign_selected_slots_recursive(sub_ability, selected_slots, next_slot)?;
+            assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)?;
         }
         return Ok(());
     }
@@ -2312,7 +2409,21 @@ fn assign_selected_slots_recursive(
                 .map(minimum_targets_in_chain)
                 .unwrap_or(0);
             let remaining_after_current = selected_slots.len().saturating_sub(*next_slot);
-            let current_slots = remaining_after_current.saturating_sub(remaining_minimum);
+            // Issue #321: A multi-target node must consume only as many slots as
+            // `collect_target_slots` produced for it — i.e. its own resolved
+            // `multi_target` max (clamped to `spec.min`). Subtracting only the
+            // sub-chain's *minimum* is not enough: when a downstream effect is
+            // itself `up to N` (min 0), the current node would greedily claim
+            // the sub-effect's optional slots too, applying its effect (e.g.
+            // Betor's "+1/+1 counters" PutCounter) to the graveyard-return
+            // target as well. Cap at this node's max so each effect resolves
+            // against exactly its own chosen targets (CR 601.2c).
+            let node_max = resolve_multi_target_max(state, ability, spec)
+                .map(|max_targets| max_targets.max(spec.min))
+                .unwrap_or(remaining_after_current);
+            let current_slots = remaining_after_current
+                .saturating_sub(remaining_minimum)
+                .min(node_max);
             let end_slot = *next_slot + current_slots;
             let Some(window) = selected_slots.get(*next_slot..end_slot) else {
                 return Err(EngineError::InvalidAction(
@@ -2347,6 +2458,7 @@ fn assign_selected_slots_recursive(
     }
     if defers_sub_ability_target_selection(&ability.effect) {
         assign_selected_slots_after_deferred_effect(
+            state,
             ability.sub_ability.as_deref_mut(),
             selected_slots,
             next_slot,
@@ -2357,7 +2469,7 @@ fn assign_selected_slots_recursive(
         if defers_conditional_target_selection(sub_ability) {
             return Ok(());
         }
-        assign_selected_slots_recursive(sub_ability, selected_slots, next_slot)?;
+        assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)?;
     }
     Ok(())
 }
@@ -2386,6 +2498,7 @@ fn assign_targets_after_deferred_effect(
 }
 
 fn assign_selected_slots_after_deferred_effect(
+    state: &GameState,
     sub_ability: Option<&mut ResolvedAbility>,
     selected_slots: &[Option<TargetRef>],
     next_slot: &mut usize,
@@ -2398,12 +2511,13 @@ fn assign_selected_slots_after_deferred_effect(
     }
     if skips_stack_targets_after_deferred_effect(&sub_ability.effect) {
         return assign_selected_slots_after_deferred_effect(
+            state,
             sub_ability.sub_ability.as_deref_mut(),
             selected_slots,
             next_slot,
         );
     }
-    assign_selected_slots_recursive(sub_ability, selected_slots, next_slot)
+    assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)
 }
 
 /// CR 115.3: Validate targeting constraints — e.g., different target players must be distinct.
@@ -3240,6 +3354,7 @@ mod tests {
             .contains(&TargetRef::Object(artifact)));
 
         assign_selected_slots_in_chain(
+            &state,
             &mut ability,
             &[
                 Some(TargetRef::Player(PlayerId(0))),
@@ -3256,6 +3371,83 @@ mod tests {
             .and_then(|shuffle| shuffle.sub_ability.as_deref())
             .expect("counter continuation must exist");
         assert_eq!(counter_step.targets, vec![TargetRef::Object(artifact)]);
+    }
+
+    /// CR 109.4 + CR 707.2: "target opponent creates a token that's a copy of
+    /// it" — Wedding Ring's shape. `CopyTokenOf` with a context-ref copy source
+    /// (`ParentTarget`) and a `Typed{Opponent}` owner must surface exactly one
+    /// player target slot, scoped to the opponent (issue #403 defect 1).
+    #[test]
+    fn build_target_slots_copy_token_owner_target_opponent_is_opponent_only() {
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::ParentTarget,
+                owner: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                ),
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let state = GameState::new_two_player(42);
+
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        assert_eq!(
+            slots.len(),
+            1,
+            "the `owner` axis must surface one player target slot"
+        );
+        assert_eq!(slots[0].legal_targets, vec![TargetRef::Player(PlayerId(1))]);
+    }
+
+    /// Regression guard: "create a token that's a copy of target creature" —
+    /// the copy *source* is the targeted axis, so the slot is the creature
+    /// filter, not the (default) `owner`.
+    #[test]
+    fn build_target_slots_copy_token_targeted_source_surfaces_creature_slot() {
+        let creature = {
+            let mut s = GameState::new_two_player(42);
+            let id = create_object(
+                &mut s,
+                CardId(9),
+                PlayerId(1),
+                "Grizzly Bears".to_string(),
+                Zone::Battlefield,
+            );
+            s.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+            (s, id)
+        };
+        let (state, creature_id) = creature;
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        assert_eq!(slots.len(), 1, "the copy-source axis surfaces one slot");
+        assert!(
+            slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(creature_id)),
+            "the slot must enumerate creature copy-source candidates"
+        );
     }
 
     #[test]
@@ -4076,8 +4268,13 @@ mod tests {
             PlayerId(0),
         ));
 
-        assign_selected_slots_in_chain(&mut ability, &[None, Some(TargetRef::Player(PlayerId(1)))])
-            .expect("slot-based assignment should support skipped optional targets");
+        let state = GameState::new_two_player(42);
+        assign_selected_slots_in_chain(
+            &state,
+            &mut ability,
+            &[None, Some(TargetRef::Player(PlayerId(1)))],
+        )
+        .expect("slot-based assignment should support skipped optional targets");
 
         assert!(ability.targets.is_empty());
         assert_eq!(
@@ -4555,7 +4752,9 @@ mod tests {
         let counter_source = TargetRef::Object(ObjectId(1));
         let destination = TargetRef::Object(ObjectId(2));
 
+        let state = GameState::new_two_player(42);
         assign_selected_slots_in_chain(
+            &state,
             &mut ability,
             &[Some(counter_source.clone()), Some(destination.clone())],
         )
@@ -4787,7 +4986,9 @@ mod tests {
         );
         ability.multi_target = Some(crate::types::ability::MultiTargetSpec::fixed(0, 2));
 
+        let state = GameState::new_two_player(42);
         assign_selected_slots_in_chain(
+            &state,
             &mut ability,
             &[
                 Some(TargetRef::Object(ObjectId(1))),

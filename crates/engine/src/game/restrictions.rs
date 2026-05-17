@@ -148,8 +148,15 @@ pub fn record_spell_cast(
     state: &mut crate::types::game_state::GameState,
     player: PlayerId,
     obj: &GameObject,
+    cast_variant: crate::types::game_state::CastingVariant,
 ) {
-    record_spell_cast_from_zone(state, player, obj, obj.cast_from_zone.unwrap_or(Zone::Hand));
+    record_spell_cast_from_zone(
+        state,
+        player,
+        obj,
+        obj.cast_from_zone.unwrap_or(Zone::Hand),
+        cast_variant,
+    );
 }
 
 pub fn record_spell_cast_from_zone(
@@ -157,6 +164,7 @@ pub fn record_spell_cast_from_zone(
     player: PlayerId,
     obj: &GameObject,
     from_zone: Zone,
+    cast_variant: crate::types::game_state::CastingVariant,
 ) {
     state.spells_cast_this_turn = state.spells_cast_this_turn.saturating_add(1);
     *state.spells_cast_this_game.entry(player).or_insert(0) += 1;
@@ -174,6 +182,10 @@ pub fn record_spell_cast_from_zone(
         // mana cost each turn") does not need to re-examine the spell object.
         has_x_in_cost: crate::game::casting_costs::cost_has_x(&obj.mana_cost),
         from_zone,
+        // CR 702.185c: Capture the alternative-cast variant so per-turn
+        // spell-history conditions ("a spell was warped this turn") can
+        // resolve after the spell has left the stack.
+        cast_variant,
     };
     state
         .spells_cast_this_turn_by_player
@@ -188,6 +200,22 @@ pub fn record_spell_cast_from_zone(
         .entry(player)
         .or_default()
         .push_back(record);
+}
+
+/// CR 702.185c: True when any player cast a spell using `variant` this turn.
+/// `spells_cast_this_turn_by_player` is turn-scoped (cleared between turns), so
+/// this answers "a spell was warped this turn" (and any future "cast via X this
+/// turn" query) without inspecting the spell objects, which may have left the
+/// stack. Not controller-scoped — every player's history is scanned.
+pub fn spell_cast_with_variant_this_turn(
+    state: &crate::types::game_state::GameState,
+    variant: &crate::types::game_state::CastingVariant,
+) -> bool {
+    state
+        .spells_cast_this_turn_by_player
+        .values()
+        .flat_map(|records| records.iter())
+        .any(|record| &record.cast_variant == variant)
 }
 
 /// CR 508.1m: Any abilities that trigger on attackers being declared trigger.
@@ -405,7 +433,9 @@ pub fn check_activation_restrictions(
 /// This is a universal rule applied to every activated ability whose cost contains Tap
 /// or Untap, regardless of Oracle text — it is not an `ActivationRestriction` variant
 /// because it is not derivable from printed text. Delegates the summoning-sickness
-/// determination to the canonical `combat::has_summoning_sickness` helper.
+/// determination to `summoning_sick_for_tap_ability`, which consults both the
+/// `combat::has_summoning_sickness` base rule and the
+/// `StaticMode::CanActivateAbilitiesAsThoughHaste` bypass (Tyvar, Jubilant Brawler).
 ///
 /// Non-creature permanents with tap costs (e.g., Sensei's Divining Top) are unaffected:
 /// `combat::has_summoning_sickness` returns false for non-creatures, matching the
@@ -413,14 +443,14 @@ pub fn check_activation_restrictions(
 /// creatures are correctly subject to the rule because the check reads the current
 /// `GameObject::card_types` after layer evaluation.
 pub(crate) fn check_summoning_sickness_for_cost(
-    _state: &crate::types::game_state::GameState,
+    state: &crate::types::game_state::GameState,
     source: &GameObject,
     cost: &AbilityCost,
 ) -> Result<(), EngineError> {
     if !cost_contains_tap_or_untap(cost) {
         return Ok(());
     }
-    if super::combat::has_summoning_sickness(source) {
+    if summoning_sick_for_tap_ability(state, source) {
         return Err(EngineError::ActionNotAllowed(
             "Creature has summoning sickness: activated abilities with {T} or {Q} \
              can't be activated this turn (CR 302.6)"
@@ -428,6 +458,33 @@ pub(crate) fn check_summoning_sickness_for_cost(
         ));
     }
     Ok(())
+}
+
+/// CR 602.5a + CR 702.10c: Does `obj` count as summoning-sick for the purpose of
+/// activating a `{T}`/`{Q}` ability?
+///
+/// Returns `false` when `obj` is not summoning-sick at all. Otherwise it is
+/// summoning-sick under the base rule, and we return `false` only when a
+/// `StaticMode::CanActivateAbilitiesAsThoughHaste` static (Tyvar, Jubilant
+/// Brawler) applies to `obj` — that static lifts the CR 602.5a activation gate
+/// "as though those creatures had haste". This is the single shared predicate
+/// used by both the activation-time check and the mana-source candidate
+/// generation, so the bypass is honored uniformly across both paths.
+pub(crate) fn summoning_sick_for_tap_ability(
+    state: &crate::types::game_state::GameState,
+    obj: &GameObject,
+) -> bool {
+    if !super::combat::has_summoning_sickness(obj) {
+        return false;
+    }
+    !super::static_abilities::check_static_ability(
+        state,
+        StaticMode::CanActivateAbilitiesAsThoughHaste,
+        &super::static_abilities::StaticCheckContext {
+            target_id: Some(obj.id),
+            ..Default::default()
+        },
+    )
 }
 
 /// Recursively inspects an `AbilityCost` for a `Tap` or `Untap` component, descending
@@ -473,6 +530,7 @@ fn effective_activation_limit(
     };
     let keyword = match tag {
         AbilityTag::Boast => "boast",
+        AbilityTag::Exhaust => "exhaust",
     };
     // Scan battlefield for ModifyActivationLimit statics that affect this keyword
     let mut limit: u32 = 1;
@@ -910,9 +968,14 @@ pub(crate) fn evaluate_condition(
                     && obj.name.contains(name.as_str())
             }) >= 1
         }
-        ParsedCondition::YouControlCreatureWithKeyword { keyword } => {
-            you_control_creature_with_keyword(state, player, keyword)
-        }
+        // CR 602.5b: honor the parameterized controller scope.
+        ParsedCondition::ControlsCreatureWithKeyword {
+            controller,
+            keyword,
+        } => match controller {
+            ControllerRef::You => you_control_creature_with_keyword(state, player, keyword),
+            _ => opponent_controls_creature_with_keyword(state, player, keyword),
+        },
         ParsedCondition::YouControlCreatureWithPowerAtLeast { minimum } => {
             controlled_objects_matching_count(state, player, |obj| {
                 obj.card_types.core_types.contains(&CoreType::Creature)
@@ -1053,6 +1116,8 @@ pub(crate) fn evaluate_condition(
         // CR 702.131c: The city's blessing is a player designation that effects
         // and restrictions may identify.
         ParsedCondition::HasCityBlessing => state.city_blessing.contains(&player),
+        // CR 102.1: "The active player is the player whose turn it is."
+        ParsedCondition::IsYourTurn => state.active_player == player,
         // CR 601.3d + CR 608.2c: "if it targets a [filter]" — gates a casting
         // permission on the chosen targets of the in-flight spell. Read from
         // `state.pending_cast.ability.targets` when targets have been committed.
@@ -1205,6 +1270,112 @@ pub(crate) fn target_dependent_flash_permission_satisfied(
         })
 }
 
+/// CR 601.3d: For a spell whose only instant-speed permission is a
+/// target-dependent flash option, a cast can only legally proceed if at
+/// least one legal target for the spell ALSO satisfies the flash option's
+/// `SpellTargetsFilter`. This is the pre-target (candidate-generation)
+/// FEASIBILITY check — distinct from the post-target SATISFACTION gate
+/// `target_dependent_flash_permission_satisfied`, which tests the player's
+/// already-chosen targets. CR 702.8a: a real Flash keyword bypasses entirely.
+pub(crate) fn target_dependent_flash_permission_feasible(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    use crate::types::ability::{SpellCastingOptionKind, TargetRef};
+
+    // CR 702.8a: A real Flash keyword (printed or granted via continuous
+    // effect) authorizes instant-speed casting independent of any conditional
+    // flash option — short-circuit before any feasibility analysis.
+    let has_real_flash = super::casting::effective_spell_keyword_kinds(state, player, object_id)
+        .contains(&crate::types::keywords::KeywordKind::Flash);
+    if has_real_flash {
+        return true;
+    }
+
+    let Some(obj) = state.objects.get(&object_id) else {
+        return true;
+    };
+
+    // Collect every target-dependent flash gating filter. With none, there is
+    // no target-dependent flash permission to police (unconditional or
+    // non-target-dependent flash) — mirror the post-target gate's deferral.
+    let gating_filters: Vec<&crate::types::ability::TargetFilter> = obj
+        .casting_options
+        .iter()
+        .filter(|o| o.kind == SpellCastingOptionKind::AsThoughHadFlash)
+        .filter_map(|o| match o.condition.as_ref() {
+            Some(ParsedCondition::SpellTargetsFilter { filter }) => Some(filter),
+            _ => None,
+        })
+        .collect();
+    if gating_filters.is_empty() {
+        return true;
+    }
+
+    // CR 601.3d: Layers must be evaluated before computing legal targets so
+    // granted types/keywords are visible — mirror `spell_has_legal_targets`
+    // (casting.rs). `find_legal_targets` does not evaluate layers itself.
+    let mut simulated = state.clone();
+    if simulated.layers_dirty {
+        super::layers::evaluate_layers(&mut simulated);
+    }
+    let Some(obj) = simulated.objects.get(&object_id) else {
+        return true;
+    };
+
+    // Branch dispatch mirrors `spell_has_legal_targets`: Aura → modal → normal.
+    let base_legal_targets: Vec<TargetRef> = if obj.card_types.subtypes.iter().any(|s| s == "Aura")
+    {
+        // 4a. Aura: targets via the Enchant keyword filter.
+        let Some(enchant_filter) = obj.keywords.iter().find_map(|k| match k {
+            Keyword::Enchant(filter) => Some(filter.clone()),
+            _ => None,
+        }) else {
+            return false;
+        };
+        super::targeting::find_legal_targets(&simulated, &enchant_filter, player, obj.id)
+    } else if obj.modal.is_some() {
+        // 4b. Modal: targets are chosen after mode selection — defer to the
+        // finalize-time satisfaction gate.
+        return true;
+    } else {
+        // 4c. Normal: union of every Spell-ability target slot's legal targets.
+        let Some(def) = super::casting::combined_spell_ability_def(obj) else {
+            // Permanent with no spell ability needs no targets.
+            return true;
+        };
+        let resolved = super::ability_utils::build_resolved_from_def(&def, obj.id, player);
+        match super::ability_utils::build_target_slots(&simulated, &resolved) {
+            Ok(slots) => {
+                if slots.is_empty() {
+                    // A SpellTargetsFilter condition requires a target slot to
+                    // satisfy — an empty slot set cannot be feasible.
+                    return false;
+                }
+                slots
+                    .into_iter()
+                    .flat_map(|slot| slot.legal_targets)
+                    .collect()
+            }
+            Err(_) => return false,
+        }
+    };
+
+    // CR 601.3d: Feasibility = some base legal target ALSO matches a gating
+    // flash filter. The flash filter is object-scoped, so a `Player` target can
+    // never satisfy it — mirror `target_dependent_flash_permission_satisfied`.
+    let ctx = super::filter::FilterContext::from_source(&simulated, object_id);
+    gating_filters.iter().any(|flash_filter| {
+        base_legal_targets.iter().any(|target| match target {
+            TargetRef::Object(id) => {
+                super::filter::matches_target_filter(&simulated, *id, flash_filter, &ctx)
+            }
+            TargetRef::Player(_) => false,
+        })
+    })
+}
+
 /// CR 307.1: Sorcery-speed timing — main phase, stack empty, active player has priority.
 pub(crate) fn is_sorcery_speed_window(
     state: &crate::types::game_state::GameState,
@@ -1248,6 +1419,17 @@ fn you_control_creature_with_keyword(
     controlled_objects_matching_count(state, player, |obj| {
         obj.card_types.core_types.contains(&CoreType::Creature) && obj.has_keyword(keyword)
     }) >= 1
+}
+
+/// CR 602.5b: True when any opponent of `player` controls a creature with `keyword`.
+fn opponent_controls_creature_with_keyword(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    keyword: &Keyword,
+) -> bool {
+    crate::game::players::opponents(state, player)
+        .into_iter()
+        .any(|opponent| you_control_creature_with_keyword(state, opponent, keyword))
 }
 
 fn you_control_land_with_any_subtype(
@@ -1567,6 +1749,56 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_opponent_controls_creature_with_flying_condition() {
+        // CR 602.5b: Groundling Pouncer — "an opponent controls a creature with flying".
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+
+        // No flyers anywhere → condition false.
+        assert!(!parse_and_evaluate_condition(
+            &state,
+            PlayerId(0),
+            ObjectId(1),
+            "an opponent controls a creature with flying"
+        ));
+
+        // YOU control a flyer → still false (the controller scope is honored).
+        let your_bird = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Your Bird".to_string(),
+            Zone::Battlefield,
+        );
+        let your_bird_obj = state.objects.get_mut(&your_bird).unwrap();
+        your_bird_obj.card_types.core_types.push(CoreType::Creature);
+        your_bird_obj.keywords.push(Keyword::Flying);
+        assert!(!parse_and_evaluate_condition(
+            &state,
+            PlayerId(0),
+            your_bird,
+            "an opponent controls a creature with flying"
+        ));
+
+        // An OPPONENT controls a flyer → condition true.
+        let opp_bird = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Bird".to_string(),
+            Zone::Battlefield,
+        );
+        let opp_bird_obj = state.objects.get_mut(&opp_bird).unwrap();
+        opp_bird_obj.card_types.core_types.push(CoreType::Creature);
+        opp_bird_obj.keywords.push(Keyword::Flying);
+        assert!(parse_and_evaluate_condition(
+            &state,
+            PlayerId(0),
+            your_bird,
+            "an opponent controls a creature with flying"
+        ));
+    }
+
+    #[test]
     fn evaluates_you_control_two_or_more_vampires_condition() {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
         for card_id in 1..=2 {
@@ -1640,6 +1872,46 @@ mod tests {
             PlayerId(0),
             ObjectId(1),
             "you attacked this turn"
+        ));
+    }
+
+    #[test]
+    fn is_your_turn_condition_tracks_active_player() {
+        // CR 102.1: the active player is the player whose turn it is.
+        // Drives the real `evaluate_condition` over `IsYourTurn` and its
+        // `Not` wrapper (the form produced for "if it's not your turn").
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let is_your_turn = ParsedCondition::IsYourTurn;
+        let not_your_turn = ParsedCondition::Not {
+            condition: Box::new(ParsedCondition::IsYourTurn),
+        };
+
+        state.active_player = PlayerId(0);
+        assert!(evaluate_condition(
+            &state,
+            PlayerId(0),
+            ObjectId(1),
+            &is_your_turn
+        ));
+        assert!(!evaluate_condition(
+            &state,
+            PlayerId(0),
+            ObjectId(1),
+            &not_your_turn
+        ));
+
+        state.active_player = PlayerId(1);
+        assert!(!evaluate_condition(
+            &state,
+            PlayerId(0),
+            ObjectId(1),
+            &is_your_turn
+        ));
+        assert!(evaluate_condition(
+            &state,
+            PlayerId(0),
+            ObjectId(1),
+            &not_your_turn
         ));
     }
 
@@ -1775,6 +2047,7 @@ mod tests {
                 mana_value: 1,
                 has_x_in_cost: false,
                 from_zone: Zone::Hand,
+                cast_variant: crate::types::game_state::CastingVariant::Normal,
             }]),
         );
 
@@ -1808,6 +2081,7 @@ mod tests {
                     mana_value: 1,
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
+                    cast_variant: crate::types::game_state::CastingVariant::Normal,
                 },
                 crate::types::game_state::SpellCastRecord {
                     name: String::new(),
@@ -1819,6 +2093,7 @@ mod tests {
                     mana_value: 2,
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
+                    cast_variant: crate::types::game_state::CastingVariant::Normal,
                 },
                 crate::types::game_state::SpellCastRecord {
                     name: String::new(),
@@ -1830,6 +2105,7 @@ mod tests {
                     mana_value: 3,
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
+                    cast_variant: crate::types::game_state::CastingVariant::Normal,
                 },
             ]),
         );
@@ -2185,6 +2461,285 @@ mod tests {
         );
     }
 
+    /// CR 601.3d: The pre-target FEASIBILITY check for a target-dependent flash
+    /// permission. A conditional-flash Enchantment whose only instant-speed
+    /// permission is `SpellTargetsFilter { IsCommander }` is castable at instant
+    /// speed only if a commander target legally exists. With only a
+    /// non-commander creature present the cast is infeasible; adding a commander
+    /// makes it feasible.
+    #[test]
+    fn target_dependent_flash_permission_feasible_requires_a_commander_target() {
+        use crate::game::game_object::GameObject;
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, Effect, FilterProp, ParsedCondition,
+            SpellCastingOption, TargetFilter, TypedFilter,
+        };
+
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let caster = PlayerId(0);
+        let opponent = PlayerId(1);
+
+        // Conditional-flash Enchantment with a Spell-kind ability that targets
+        // a creature; the only flash permission is gated on IsCommander.
+        let mut spell = GameObject::new(
+            ObjectId(10),
+            CardId(10),
+            caster,
+            "Timely Ward".to_string(),
+            Zone::Hand,
+        );
+        spell.card_types.core_types.push(CoreType::Enchantment);
+        spell
+            .casting_options
+            .push(SpellCastingOption::as_though_had_flash().condition(
+                ParsedCondition::SpellTargetsFilter {
+                    filter: TargetFilter::Typed(TypedFilter {
+                        properties: vec![FilterProp::IsCommander],
+                        ..Default::default()
+                    }),
+                },
+            ));
+        std::sync::Arc::make_mut(&mut spell.abilities).push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Destroy {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                cant_regenerate: false,
+            },
+        ));
+        state.objects.insert(spell.id, spell);
+
+        // Non-commander creature only — no commander target exists.
+        let plain = create_object(
+            &mut state,
+            CardId(21),
+            opponent,
+            "Ordinary Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&plain)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        assert!(
+            !target_dependent_flash_permission_feasible(&state, caster, ObjectId(10)),
+            "no commander on the battlefield ⇒ the conditional flash cast is infeasible"
+        );
+
+        // Add a commander creature: a satisfying target now exists.
+        let commander = create_object(
+            &mut state,
+            CardId(20),
+            opponent,
+            "Some Commander".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&commander).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.is_commander = true;
+        }
+        assert!(
+            target_dependent_flash_permission_feasible(&state, caster, ObjectId(10)),
+            "a commander creature on the battlefield ⇒ the conditional flash cast is feasible"
+        );
+    }
+
+    /// CR 702.8a: A printed Flash keyword short-circuits the pre-target
+    /// feasibility check — even with no condition-satisfying target the cast is
+    /// feasible because real Flash authorizes instant-speed casting outright.
+    #[test]
+    fn target_dependent_flash_permission_feasible_real_flash_bypass() {
+        use crate::game::game_object::GameObject;
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, Effect, FilterProp, ParsedCondition,
+            SpellCastingOption, TargetFilter, TypedFilter,
+        };
+        use crate::types::keywords::Keyword;
+
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let caster = PlayerId(0);
+        let opponent = PlayerId(1);
+
+        let mut spell = GameObject::new(
+            ObjectId(10),
+            CardId(10),
+            caster,
+            "Has Both".to_string(),
+            Zone::Hand,
+        );
+        spell.card_types.core_types.push(CoreType::Enchantment);
+        spell.keywords.push(Keyword::Flash);
+        spell
+            .casting_options
+            .push(SpellCastingOption::as_though_had_flash().condition(
+                ParsedCondition::SpellTargetsFilter {
+                    filter: TargetFilter::Typed(TypedFilter {
+                        properties: vec![FilterProp::IsCommander],
+                        ..Default::default()
+                    }),
+                },
+            ));
+        std::sync::Arc::make_mut(&mut spell.abilities).push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Destroy {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                cant_regenerate: false,
+            },
+        ));
+        state.objects.insert(spell.id, spell);
+
+        // Only a non-commander target — would fail the conditional flash filter.
+        let plain = create_object(
+            &mut state,
+            CardId(21),
+            opponent,
+            "Ordinary Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&plain)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        assert!(
+            target_dependent_flash_permission_feasible(&state, caster, ObjectId(10)),
+            "printed Flash must bypass the pre-target feasibility check (CR 702.8a)"
+        );
+    }
+
+    /// CR 601.3d: Modal cards choose targets after mode selection, so the
+    /// pre-target feasibility check defers to the finalize-time satisfaction
+    /// gate — `obj.modal.is_some()` ⇒ feasible even with no satisfying target.
+    #[test]
+    fn target_dependent_flash_permission_feasible_modal_defers() {
+        use crate::game::game_object::GameObject;
+        use crate::types::ability::{
+            FilterProp, ModalChoice, ParsedCondition, SpellCastingOption, TargetFilter, TypedFilter,
+        };
+
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let caster = PlayerId(0);
+
+        let mut spell = GameObject::new(
+            ObjectId(10),
+            CardId(10),
+            caster,
+            "Modal Conditional Flash".to_string(),
+            Zone::Hand,
+        );
+        spell.card_types.core_types.push(CoreType::Instant);
+        spell.modal = Some(ModalChoice {
+            min_choices: 1,
+            max_choices: 1,
+            mode_count: 2,
+            ..Default::default()
+        });
+        spell
+            .casting_options
+            .push(SpellCastingOption::as_though_had_flash().condition(
+                ParsedCondition::SpellTargetsFilter {
+                    filter: TargetFilter::Typed(TypedFilter {
+                        properties: vec![FilterProp::IsCommander],
+                        ..Default::default()
+                    }),
+                },
+            ));
+        state.objects.insert(spell.id, spell);
+
+        // No commander, no targets at all — but the modal branch defers.
+        assert!(
+            target_dependent_flash_permission_feasible(&state, caster, ObjectId(10)),
+            "modal cards defer the feasibility verdict to the finalize-time gate"
+        );
+    }
+
+    /// CR 601.3d: Aura branch — a conditional-flash Aura targets via its
+    /// `Keyword::Enchant` filter. Feasibility requires a battlefield object that
+    /// matches BOTH the Enchant filter AND the flash `SpellTargetsFilter`.
+    #[test]
+    fn target_dependent_flash_permission_feasible_aura_branch() {
+        use crate::game::game_object::GameObject;
+        use crate::types::ability::{
+            FilterProp, ParsedCondition, SpellCastingOption, TargetFilter, TypedFilter,
+        };
+        use crate::types::keywords::Keyword;
+
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let caster = PlayerId(0);
+        let opponent = PlayerId(1);
+
+        // Conditional-flash Aura: Enchant creature, flash gated on IsCommander.
+        let mut aura = GameObject::new(
+            ObjectId(10),
+            CardId(10),
+            caster,
+            "Conditional Flash Aura".to_string(),
+            Zone::Hand,
+        );
+        aura.card_types.core_types.push(CoreType::Enchantment);
+        aura.card_types.subtypes.push("Aura".to_string());
+        aura.keywords.push(Keyword::Enchant(TargetFilter::Typed(
+            TypedFilter::creature(),
+        )));
+        aura.casting_options
+            .push(SpellCastingOption::as_though_had_flash().condition(
+                ParsedCondition::SpellTargetsFilter {
+                    filter: TargetFilter::Typed(TypedFilter {
+                        properties: vec![FilterProp::IsCommander],
+                        ..Default::default()
+                    }),
+                },
+            ));
+        state.objects.insert(aura.id, aura);
+
+        // Non-commander creature only: matches Enchant filter but not the flash
+        // filter ⇒ infeasible.
+        let plain = create_object(
+            &mut state,
+            CardId(21),
+            opponent,
+            "Ordinary Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&plain)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        assert!(
+            !target_dependent_flash_permission_feasible(&state, caster, ObjectId(10)),
+            "Aura with only a non-commander enchantable target ⇒ infeasible"
+        );
+
+        // Commander creature: matches both the Enchant filter and the flash
+        // filter ⇒ feasible.
+        let commander = create_object(
+            &mut state,
+            CardId(20),
+            opponent,
+            "Some Commander".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&commander).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.is_commander = true;
+        }
+        assert!(
+            target_dependent_flash_permission_feasible(&state, caster, ObjectId(10)),
+            "Aura with a commander enchantable target ⇒ feasible"
+        );
+    }
+
     /// CR 117.1 + CR 201.2 + CR 601.2: Cast-pipeline integration for Approach
     /// of the Second Sun's "another spell named ~ this game" gate. Exercises
     /// the full path: `record_spell_cast_from_zone` → `SpellCastRecord.name`
@@ -2240,7 +2795,12 @@ mod tests {
         );
 
         // First cast: pipeline records the spell.
-        record_spell_cast(&mut state, caster, &approach);
+        record_spell_cast(
+            &mut state,
+            caster,
+            &approach,
+            crate::types::game_state::CastingVariant::Normal,
+        );
         let history = state
             .spells_cast_this_game_by_player
             .get(&caster)
@@ -2258,7 +2818,12 @@ mod tests {
 
         // Second cast: same name, same player. The "another" gate (>= 2)
         // is now satisfied.
-        record_spell_cast(&mut state, caster, &approach);
+        record_spell_cast(
+            &mut state,
+            caster,
+            &approach,
+            crate::types::game_state::CastingVariant::Normal,
+        );
         assert_eq!(
             resolve_quantity(&state, &approach_count, caster, ObjectId(10)),
             2,
@@ -2268,11 +2833,65 @@ mod tests {
         // Cross-player scope safety: a different player's casts of the same
         // name must NOT count toward the caster's controller-scoped gate.
         let opponent = PlayerId(1);
-        record_spell_cast(&mut state, opponent, &approach);
+        record_spell_cast(
+            &mut state,
+            opponent,
+            &approach,
+            crate::types::game_state::CastingVariant::Normal,
+        );
         assert_eq!(
             resolve_quantity(&state, &approach_count, caster, ObjectId(10)),
             2,
             "controller-scoped count must ignore an opponent's named-Approach casts"
         );
+    }
+
+    /// CR 702.185c: `record_spell_cast` threads the `CastingVariant` onto the
+    /// persisted `SpellCastRecord`, and `spell_cast_with_variant_this_turn`
+    /// reads it. A warp cast makes "a spell was warped this turn" true; a
+    /// normal cast does not. Verifies the building block — the recording hook
+    /// and the resolver — independent of any single card.
+    #[test]
+    fn spell_cast_with_variant_this_turn_tracks_warp() {
+        use crate::game::game_object::GameObject;
+        use crate::types::game_state::CastingVariant;
+
+        let mut state = crate::types::game_state::GameState::new_two_player(7);
+        let caster = PlayerId(0);
+        let spell = GameObject::new(
+            ObjectId(20),
+            CardId(20),
+            caster,
+            "Warp Spell".to_string(),
+            Zone::Stack,
+        );
+
+        // No casts yet → false.
+        assert!(!spell_cast_with_variant_this_turn(
+            &state,
+            &CastingVariant::Warp
+        ));
+
+        // A normal cast records `CastingVariant::Normal` → warp query still false.
+        record_spell_cast(&mut state, caster, &spell, CastingVariant::Normal);
+        assert_eq!(
+            state.spells_cast_this_turn_by_player[&caster][0].cast_variant,
+            CastingVariant::Normal
+        );
+        assert!(!spell_cast_with_variant_this_turn(
+            &state,
+            &CastingVariant::Warp
+        ));
+
+        // A warp cast records `CastingVariant::Warp` → warp query becomes true.
+        record_spell_cast(&mut state, caster, &spell, CastingVariant::Warp);
+        assert_eq!(
+            state.spells_cast_this_turn_by_player[&caster][1].cast_variant,
+            CastingVariant::Warp
+        );
+        assert!(spell_cast_with_variant_this_turn(
+            &state,
+            &CastingVariant::Warp
+        ));
     }
 }

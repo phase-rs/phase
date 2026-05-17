@@ -1,12 +1,15 @@
+use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::players;
 use crate::types::ability::{
-    ChooseFromZoneConstraint, Chooser, Effect, EffectError, EffectKind, ResolvedAbility, TargetRef,
+    ChooseFromZoneConstraint, Chooser, Effect, EffectError, EffectKind, ResolvedAbility,
+    TargetFilter, TargetRef, ZoneOwner,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
+use crate::types::zones::Zone;
 
 /// CR 700.2: Choose card(s) from a tracked set — player selects from exiled/revealed cards.
 /// The available cards come from the most recent tracked set recorded by the parent effect
@@ -17,25 +20,35 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (count, chooser, up_to, constraint) = match &ability.effect {
-        Effect::ChooseFromZone {
-            count,
-            chooser,
-            up_to,
-            constraint,
-            ..
-        } => (*count as usize, *chooser, *up_to, constraint.clone()),
-        _ => return Err(EffectError::MissingParam("ChooseFromZone".to_string())),
-    };
+    let (count, zone, additional_zones, zone_owner, filter, chooser, up_to, constraint) =
+        match &ability.effect {
+            Effect::ChooseFromZone {
+                count,
+                zone,
+                additional_zones,
+                zone_owner,
+                filter,
+                chooser,
+                up_to,
+                constraint,
+                ..
+            } => (
+                *count as usize,
+                *zone,
+                additional_zones.clone(),
+                *zone_owner,
+                filter.clone(),
+                *chooser,
+                *up_to,
+                constraint.clone(),
+            ),
+            _ => return Err(EffectError::MissingParam("ChooseFromZone".to_string())),
+        };
 
     // Read available cards from the most recent tracked set (same pattern as delayed_trigger.rs).
     // The tracked set was recorded by the preceding ChangeZone effect via next_sub_needs_tracked_set.
-    let cards: Vec<ObjectId> = state
-        .tracked_object_sets
-        .iter()
-        .filter(|(_, objects)| !objects.is_empty())
-        .max_by_key(|(id, _)| id.0)
-        .map(|(_, objects)| objects.clone())
+    let cards: Vec<ObjectId> = crate::game::targeting::latest_tracked_set_id(state)
+        .and_then(|id| state.tracked_object_sets.get(&id).cloned())
         .unwrap_or_default();
 
     // Fallback: if tracked set is empty, try ability targets filtered to objects.
@@ -48,6 +61,19 @@ pub fn resolve(
                 _ => None,
             })
             .collect()
+    } else {
+        cards
+    };
+
+    let cards = if cards.is_empty() {
+        collect_direct_zone_cards(
+            state,
+            ability,
+            zone,
+            &additional_zones,
+            zone_owner,
+            filter.as_ref(),
+        )?
     } else {
         cards
     };
@@ -81,6 +107,87 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+fn collect_direct_zone_cards(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    zone: Zone,
+    additional_zones: &[Zone],
+    zone_owner: ZoneOwner,
+    filter: Option<&TargetFilter>,
+) -> Result<Vec<ObjectId>, EffectError> {
+    let owner = resolve_zone_owner(state, ability, zone_owner)?;
+    let filter_ctx = FilterContext::from_ability(ability);
+    let mut zones = Vec::with_capacity(1 + additional_zones.len());
+    zones.push(zone);
+    zones.extend_from_slice(additional_zones);
+
+    Ok(zones
+        .into_iter()
+        .flat_map(|zone| object_ids_in_player_zone(state, owner, zone))
+        .filter(|id| {
+            filter.is_none_or(|filter| matches_target_filter(state, *id, filter, &filter_ctx))
+        })
+        .collect())
+}
+
+fn resolve_zone_owner(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    zone_owner: ZoneOwner,
+) -> Result<PlayerId, EffectError> {
+    match zone_owner {
+        ZoneOwner::Controller => Ok(ability.controller),
+        ZoneOwner::TargetedPlayer => ability
+            .targets
+            .iter()
+            .find_map(|target| match target {
+                TargetRef::Player(player) => Some(*player),
+                _ => None,
+            })
+            .ok_or_else(|| EffectError::MissingParam("ChooseFromZone targeted player".to_string())),
+        ZoneOwner::Opponent => players::opponents(state, ability.controller)
+            .into_iter()
+            .next()
+            .ok_or_else(|| EffectError::MissingParam("ChooseFromZone opponent".to_string())),
+    }
+}
+
+fn object_ids_in_player_zone(state: &GameState, player: PlayerId, zone: Zone) -> Vec<ObjectId> {
+    let Some(player_state) = state.players.iter().find(|p| p.id == player) else {
+        return Vec::new();
+    };
+
+    match zone {
+        Zone::Hand => player_state.hand.iter().copied().collect(),
+        Zone::Library => player_state.library.iter().copied().collect(),
+        Zone::Graveyard => player_state.graveyard.iter().copied().collect(),
+        Zone::Exile => state
+            .exile
+            .iter()
+            .copied()
+            .filter(|id| state.objects.get(id).is_some_and(|obj| obj.owner == player))
+            .collect(),
+        Zone::Battlefield => state
+            .battlefield
+            .iter()
+            .copied()
+            .filter(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| obj.controller == player && obj.is_phased_in())
+            })
+            .collect(),
+        Zone::Stack => state
+            .stack
+            .iter()
+            .filter(|entry| entry.controller == player)
+            .map(|entry| entry.id)
+            .collect(),
+        Zone::Command => Vec::new(),
+    }
 }
 
 /// CR 700.2: Resolve the `Chooser` enum to an actual `PlayerId`.
@@ -180,6 +287,7 @@ fn assign_distinct_categories(card_options: &[Vec<usize>], used: &mut [bool], id
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::{TypeFilter, TypedFilter};
     use crate::types::identifiers::{CardId, TrackedSetId};
     use crate::types::zones::Zone;
 
@@ -211,6 +319,9 @@ mod tests {
             Effect::ChooseFromZone {
                 count: 1,
                 zone: Zone::Exile,
+                additional_zones: Vec::new(),
+                zone_owner: ZoneOwner::Controller,
+                filter: None,
                 chooser: Chooser::Controller,
                 up_to: false,
                 constraint: None,
@@ -262,6 +373,9 @@ mod tests {
             Effect::ChooseFromZone {
                 count: 1,
                 zone: Zone::Exile,
+                additional_zones: Vec::new(),
+                zone_owner: ZoneOwner::Controller,
+                filter: None,
                 chooser: Chooser::Opponent,
                 up_to: false,
                 constraint: None,
@@ -304,6 +418,9 @@ mod tests {
             Effect::ChooseFromZone {
                 count: 1,
                 zone: Zone::Exile,
+                additional_zones: Vec::new(),
+                zone_owner: ZoneOwner::Controller,
+                filter: None,
                 chooser: Chooser::Opponent,
                 up_to: false,
                 constraint: None,
@@ -336,6 +453,9 @@ mod tests {
             Effect::ChooseFromZone {
                 count: 1,
                 zone: Zone::Exile,
+                additional_zones: Vec::new(),
+                zone_owner: ZoneOwner::Controller,
+                filter: None,
                 chooser: Chooser::Opponent,
                 up_to: false,
                 constraint: None,
@@ -376,6 +496,9 @@ mod tests {
             Effect::ChooseFromZone {
                 count: 3,
                 zone: Zone::Exile,
+                additional_zones: Vec::new(),
+                zone_owner: ZoneOwner::Controller,
+                filter: None,
                 chooser: Chooser::Controller,
                 up_to: false,
                 constraint: None,
@@ -394,6 +517,149 @@ mod tests {
             }
             other => panic!("Expected ChooseFromZoneChoice, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn direct_zone_choice_filters_controller_hand() {
+        let mut state = GameState::new_two_player(42);
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+        let land = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Hand,
+        );
+        state.objects.get_mut(&land).unwrap().card_types.core_types = vec![CoreType::Land];
+
+        let ability = ResolvedAbility::new(
+            Effect::ChooseFromZone {
+                count: 1,
+                zone: Zone::Hand,
+                additional_zones: Vec::new(),
+                zone_owner: ZoneOwner::Controller,
+                filter: Some(TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    ..Default::default()
+                })),
+                chooser: Chooser::Controller,
+                up_to: false,
+                constraint: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::ChooseFromZoneChoice { cards, count, .. } => {
+                assert_eq!(*cards, vec![creature]);
+                assert_eq!(*count, 1);
+            }
+            other => panic!("Expected ChooseFromZoneChoice, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn direct_zone_choice_uses_targeted_players_zones() {
+        let mut state = GameState::new_two_player(42);
+        let graveyard_card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Graveyard Card".to_string(),
+            Zone::Graveyard,
+        );
+        let hand_card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Hand Card".to_string(),
+            Zone::Hand,
+        );
+        let controller_hand_card = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Controller Hand Card".to_string(),
+            Zone::Hand,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::ChooseFromZone {
+                count: 1,
+                zone: Zone::Graveyard,
+                additional_zones: vec![Zone::Hand],
+                zone_owner: ZoneOwner::TargetedPlayer,
+                filter: None,
+                chooser: Chooser::Controller,
+                up_to: false,
+                constraint: None,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::ChooseFromZoneChoice { cards, .. } => {
+                assert_eq!(*cards, vec![graveyard_card, hand_card]);
+                assert!(!cards.contains(&controller_hand_card));
+            }
+            other => panic!("Expected ChooseFromZoneChoice, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn direct_zone_choice_requires_targeted_player() {
+        let mut state = GameState::new_two_player(42);
+        let _card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Hand Card".to_string(),
+            Zone::Hand,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::ChooseFromZone {
+                count: 1,
+                zone: Zone::Hand,
+                additional_zones: Vec::new(),
+                zone_owner: ZoneOwner::TargetedPlayer,
+                filter: None,
+                chooser: Chooser::Controller,
+                up_to: false,
+                constraint: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        let err = resolve(&mut state, &ability, &mut events).unwrap_err();
+        assert!(
+            matches!(err, EffectError::MissingParam(message) if message == "ChooseFromZone targeted player")
+        );
     }
 
     #[test]

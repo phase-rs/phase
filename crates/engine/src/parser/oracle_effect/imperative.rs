@@ -25,10 +25,10 @@ use crate::parser::oracle_static::{
 use crate::types::ability::TypeFilter;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CategoryChooserScope, ChoiceType, Chooser,
-    ContinuousModification, ControllerRef, Duration, Effect, FilterProp, GainLifePlayer,
-    LibraryPosition, MultiTargetSpec, PaymentCost, PlayerScope, PreventionAmount, PreventionScope,
-    PtValue, QuantityExpr, QuantityRef, SearchSelectionConstraint, StaticDefinition, TargetFilter,
-    TypedFilter,
+    ContinuousModification, ControllerRef, CopyRetargetPermission, Duration, Effect, FilterProp,
+    GainLifePlayer, LibraryPosition, MultiTargetSpec, PaymentCost, PlayerScope, PreventionAmount,
+    PreventionScope, PtValue, QuantityExpr, QuantityRef, SearchSelectionConstraint,
+    StaticDefinition, TargetFilter, TypedFilter, ZoneOwner,
 };
 use crate::types::card_type::CoreType;
 use crate::types::phase::Phase;
@@ -726,17 +726,22 @@ fn strip_sacrifice_count_suffix(target_text: &str) -> String {
     }
 }
 
-/// CR 701.21a + CR 107.1c: Parse "one or more [objects]" sacrifice choices.
-/// `UpTo(ObjectCount(filter))` provides the dynamic upper bound, while
-/// `min_count = 1` preserves the printed lower bound after the player accepts
-/// the surrounding optional action.
-fn parse_one_or_more_sacrifice(
+/// CR 701.21a + CR 107.1c: Parse "one or more [objects]" / "any number of
+/// [objects]" sacrifice choices. `UpTo(ObjectCount(filter))` provides the
+/// dynamic upper bound; `min_count` carries the printed lower bound — `1` for
+/// "one or more", and `0` for "any number of" (CR 107.1c: a player choosing
+/// "any number" may choose any positive number or zero).
+pub(super) fn parse_one_or_more_sacrifice(
     text: &str,
     ctx: &mut ParseContext,
 ) -> Option<(QuantityExpr, TargetFilter, usize)> {
     let lower = text.to_lowercase();
-    let (_, filter_text) = nom_on_lower(text, &lower, |input| {
-        value((), tag("one or more ")).parse(input)
+    let (min_count, filter_text) = nom_on_lower(text, &lower, |input| {
+        alt((
+            value(1usize, tag("one or more ")),
+            value(0usize, tag("any number of ")),
+        ))
+        .parse(input)
     })?;
     let target_text = strip_sacrifice_count_suffix(&strip_sacrifice_choice_marker(
         strip_article(filter_text.trim_start()).trim_end_matches('.'),
@@ -751,7 +756,7 @@ fn parse_one_or_more_sacrifice(
             filter: target.clone(),
         },
     });
-    Some((count, target, 1))
+    Some((count, target, min_count))
 }
 
 /// NOTE: Shares verb prefixes with `try_parse_verb_and_target` in `mod.rs`.
@@ -1536,6 +1541,10 @@ pub(super) fn parse_search_and_creation_ast(
     if let Some((_, _)) = nom_on_lower(text, lower, |input| value((), tag("create ")).parse(input))
     {
         return match try_parse_token(lower, text, ctx) {
+            // `owner` is absorbed by `..`: this search/creation path always
+            // yields the `TargetFilter::Controller` default, and the lowering
+            // below re-emits it. A "target [player] creates" subject is lifted
+            // by `inject_subject_target` after lowering.
             Some(Effect::CopyTokenOf {
                 target,
                 source_filter,
@@ -1544,6 +1553,7 @@ pub(super) fn parse_search_and_creation_ast(
                 count,
                 extra_keywords,
                 additional_modifications,
+                ..
             }) => Some(SearchCreationImperativeAst::CopyTokenOf {
                 target,
                 count,
@@ -1685,6 +1695,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             additional_modifications,
         } => Effect::CopyTokenOf {
             target,
+            owner: TargetFilter::Controller,
             source_filter,
             enters_attacking,
             tapped,
@@ -1896,6 +1907,10 @@ pub(super) fn parse_choose_ast(
     lower: &str,
     ctx: &mut ParseContext,
 ) -> Option<ChooseImperativeAst> {
+    if let Some(ast) = try_parse_choose_from_zone(lower, ctx) {
+        return Some(ast);
+    }
+
     if let Some((_, rest)) =
         nom_on_lower(text, lower, |input| value((), tag("choose ")).parse(input))
     {
@@ -1931,14 +1946,6 @@ pub(super) fn parse_choose_ast(
         }
     }
 
-    // CR 608.2c + CR 102.1: "Choose a [player|opponent] to <verb>" — infinitive
-    // form where the body that runs after the choice is in the same sentence.
-    // Try this BEFORE the bare NamedChoice path so the infinitive body is
-    // captured as a chained sub_ability rather than dropped.
-    if let Some(ast) = try_parse_choose_player_then(text, lower) {
-        return Some(ast);
-    }
-
     if let Some(choice_type) = super::try_parse_named_choice(lower) {
         return Some(ChooseImperativeAst::NamedChoice { choice_type });
     }
@@ -1966,75 +1973,129 @@ pub(super) fn parse_choose_ast(
     None
 }
 
-/// CR 608.2c + CR 102.1: Recognize "Choose a [cardinal] [player|opponent] to
-/// <verb>" — the infinitive form where the body follows the choice in the
-/// same sentence (Gluntch the Bestower: "Choose a second player to draw a
-/// card."). Synthesizes "they <verb>" and parses it with
-/// `relative_player_scope = Some(ScopedPlayer)` so the body's subject
-/// anaphors route to `TargetFilter::ScopedPlayer`. At runtime,
-/// `engine_resolution_choices` binds `ability.scoped_player` to the chosen
-/// player when the `NamedChoice` resolves.
-///
-/// The cardinal/article (`a / an / another / a second / a third / a fourth`)
-/// is consumed by `try_parse_player_or_opponent_choice`; the body that
-/// remains after " to " is parsed verbatim. Returns `None` when the choose
-/// phrase has no infinitive tail (the caller falls back to the bare
-/// `NamedChoice` arm).
-fn try_parse_choose_player_then(text: &str, lower: &str) -> Option<ChooseImperativeAst> {
+fn try_parse_choose_from_zone(lower: &str, ctx: &mut ParseContext) -> Option<ChooseImperativeAst> {
     type E<'a> = OracleError<'a>;
-    // Strip "choose ".
-    let (_, rest_lower) =
-        nom_on_lower(text, lower, |input| value((), tag("choose ")).parse(input))?;
-    let rest_lower_str = &lower[lower.len() - rest_lower.len()..];
 
-    // Strip the cardinal/article — same ordered alt as
-    // `try_parse_player_or_opponent_choice` (longer first).
-    let (after_cardinal, _) = alt((
-        value((), tag::<_, _, E>("a second ")),
-        value((), tag::<_, _, E>("a third ")),
-        value((), tag::<_, _, E>("a fourth ")),
-        value((), tag::<_, _, E>("another ")),
-        value((), tag::<_, _, E>("a ")),
-        value((), tag::<_, _, E>("an ")),
+    let (_, choice_text) = alt((
+        preceded(tag::<_, _, E>("choose "), rest),
+        preceded(tag("you choose "), rest),
     ))
-    .parse(rest_lower_str)
-    .unwrap_or((rest_lower_str, ()));
-
-    // Match "player " or "opponent " (note: trailing space required so we
-    // distinguish "player to <verb>" from "player." / "player,").
-    let (after_subject, choice_type) = alt((
-        value(ChoiceType::Player, tag::<_, _, E>("player ")),
-        value(ChoiceType::Opponent, tag::<_, _, E>("opponent ")),
-    ))
-    .parse(after_cardinal)
+    .parse(lower)
     .ok()?;
 
-    // Consume "to " (the infinitive marker).
-    let (body_lower, _) = tag::<_, _, E>("to ").parse(after_subject).ok()?;
-    if body_lower.is_empty() {
+    if nom_primitives::scan_contains(choice_text, "at random") {
         return None;
     }
 
-    // Map the body remainder back to the original-case slice. The body is a
-    // suffix of `text`, so its length-offset is preserved.
-    let body_orig = &text[text.len() - body_lower.len()..];
+    let (filter_prefix, (zone_owner, zones), zone_suffix) =
+        nom_primitives::scan_preceded(choice_text, parse_choose_zone_connector)?;
+    if filter_prefix.trim().is_empty() {
+        return None;
+    }
 
-    // Synthesize a sentence with subject "they" so the existing pronoun
-    // resolution path (`resolve_they_pronoun`) routes the subject through
-    // `relative_player_scope = ScopedPlayer` and emits
-    // `TargetFilter::ScopedPlayer`. Parse the chain with that scope set.
-    let synthesized = format!("they {body_orig}");
-    let mut body_ctx = ParseContext {
-        relative_player_scope: Some(ControllerRef::ScopedPlayer),
-        ..Default::default()
+    // The post-zone suffix ("with mana value 3 or greater") is an optional
+    // search-filter restriction. `parse_search_filter`'s suffix dispatch is
+    // strict: an unmodeled clause ("without blitz", "that hasn't been chosen")
+    // emits a `search-filter-suffix unmatched` TargetFallback diagnostic. Probe
+    // the prefix+suffix on a throwaway context first; only fold the suffix into
+    // the real parse when it classifies cleanly. An unmodeled suffix is dropped
+    // (the type filter still parses) rather than surfacing a false regression.
+    let bare_filter_text = strip_choose_article(filter_prefix.trim())?.to_string();
+    let suffix = zone_suffix.trim();
+    let filter_text = if suffix.is_empty() {
+        bare_filter_text
+    } else {
+        let with_suffix = format!("{bare_filter_text} {suffix}");
+        let mut probe = ParseContext::default();
+        super::search::parse_search_filter(&with_suffix, &mut probe);
+        let suffix_classified = !probe.diagnostics.iter().any(|d| {
+            matches!(
+                d,
+                OracleDiagnostic::TargetFallback { context, .. }
+                    if context == "search-filter-suffix unmatched"
+            )
+        });
+        if suffix_classified {
+            with_suffix
+        } else {
+            bare_filter_text
+        }
     };
-    let body_def =
-        super::parse_effect_chain_with_context(&synthesized, AbilityKind::Spell, &mut body_ctx);
 
-    Some(ChooseImperativeAst::ChoosePlayerThen {
-        choice_type,
-        body: Box::new(body_def),
+    let filter = super::search::parse_search_filter(&filter_text, ctx);
+    Some(ChooseImperativeAst::FromZone {
+        count: 1,
+        zones,
+        zone_owner,
+        filter,
+        chooser: Chooser::Controller,
+        up_to: false,
     })
+}
+
+fn strip_choose_article(input: &str) -> Option<&str> {
+    type E<'a> = OracleError<'a>;
+
+    alt((
+        preceded(tag::<_, _, E>("a "), rest),
+        preceded(tag("an "), rest),
+        preceded(tag("one "), rest),
+    ))
+    .parse(input)
+    .map(|(_, stripped)| stripped)
+    .ok()
+}
+
+fn parse_choose_zone_connector(
+    input: &str,
+) -> nom::IResult<&str, (ZoneOwner, Vec<Zone>), OracleError<'_>> {
+    type E<'a> = OracleError<'a>;
+
+    preceded(
+        alt((tag::<_, _, E>("in "), tag("from "))),
+        alt((
+            map(preceded(tag("your "), parse_choose_zone_list), |zones| {
+                (ZoneOwner::Controller, zones)
+            }),
+            map(
+                preceded(tag("that player's "), parse_choose_zone_list),
+                |zones| (ZoneOwner::TargetedPlayer, zones),
+            ),
+            map(
+                preceded(tag("target opponent's "), parse_choose_zone_list),
+                |zones| (ZoneOwner::TargetedPlayer, zones),
+            ),
+            map(
+                preceded(tag("an opponent's "), parse_choose_zone_list),
+                |zones| (ZoneOwner::Opponent, zones),
+            ),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_choose_zone_list(input: &str) -> nom::IResult<&str, Vec<Zone>, OracleError<'_>> {
+    type E<'a> = OracleError<'a>;
+
+    let (rest, first) = parse_choose_zone(input)?;
+    let (rest, second) = opt(preceded(tag::<_, _, E>(" or "), parse_choose_zone)).parse(rest)?;
+    let mut zones = vec![first];
+    if let Some(second) = second {
+        zones.push(second);
+    }
+    Ok((rest, zones))
+}
+
+fn parse_choose_zone(input: &str) -> nom::IResult<&str, Zone, OracleError<'_>> {
+    type E<'a> = OracleError<'a>;
+
+    alt((
+        value(Zone::Graveyard, tag::<_, _, E>("graveyard")),
+        value(Zone::Library, tag("library")),
+        value(Zone::Hand, tag("hand")),
+        value(Zone::Exile, tag("exile")),
+    ))
+    .parse(input)
 }
 
 /// CR 115.1c + CR 601.2c + CR 608.2c: Detect "target X and target Y" wording
@@ -2321,10 +2382,34 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
         ChooseImperativeAst::FromTrackedSet { count, chooser } => Effect::ChooseFromZone {
             count,
             zone: Zone::Exile,
+            additional_zones: Vec::new(),
+            zone_owner: ZoneOwner::Controller,
+            filter: None,
             chooser,
             up_to: false,
             constraint: None,
         },
+        ChooseImperativeAst::FromZone {
+            count,
+            zones,
+            zone_owner,
+            filter,
+            chooser,
+            up_to,
+        } => {
+            let mut zones = zones.into_iter();
+            let zone = zones.next().unwrap_or(Zone::Hand);
+            Effect::ChooseFromZone {
+                count,
+                zone,
+                additional_zones: zones.collect(),
+                zone_owner,
+                filter: Some(filter),
+                chooser,
+                up_to,
+                constraint: None,
+            }
+        }
         // CR 101.4 + CR 701.21a: Multi-category permanent selection + sacrifice rest.
         ChooseImperativeAst::CategoryAndSacrificeRest {
             categories,
@@ -2341,15 +2426,6 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
         // `lower_choose_ast` are restricted to single-effect contexts and do
         // not exercise this variant.
         ChooseImperativeAst::TwoTargets { target_a, .. } => Effect::TargetOnly { target: target_a },
-        // CR 608.2c + CR 102.1: "Choose a player to <verb>" — the bare-Effect
-        // lowering surfaces only the Choose; the infinitive body sub_ability
-        // is attached by `lower_imperative_family_ast`. Direct callers of
-        // `lower_choose_ast` are restricted to single-effect contexts and do
-        // not exercise this variant.
-        ChooseImperativeAst::ChoosePlayerThen { choice_type, .. } => Effect::Choose {
-            choice_type,
-            persist: false,
-        },
     }
 }
 
@@ -2531,202 +2607,6 @@ fn parse_copy_stack_ability_target(input: &str) -> Option<(TargetFilter, &str)> 
     None
 }
 
-/// CR 113.3b/c + CR 115.1: Parse a single stack-ability leg. Matches the four
-/// noun-phrase phrasings of an "ability" target plus an optional controller
-/// scope suffix ("you control" / "an opponent controls"). Used as a building
-/// block for both single-target counters (Squelch — "Counter target activated
-/// ability or triggered ability.") and N-way comma lists (Disallow, Voidslime,
-/// Louisoix's Sacrifice).
-///
-/// Phrasings:
-///   - "activated or triggered ability" / "triggered or activated ability"
-///   - "activated ability" / "triggered ability"
-///   - bare "ability" (CR 113.3b/c restricts stack-targetable abilities to
-///     activated + triggered, so an unqualified "ability" reference targets
-///     the same set as the explicit two-leg phrasing — used by Stern Dismissal
-///     style "Counter target spell or ability" cards).
-///
-/// Returns `TargetFilter::StackAbility { controller }`. Does NOT consume a
-/// leading "target " — the list combinator strips that once at the top.
-/// Bare "ability" requires a word-boundary terminator (end-of-input, ",",
-/// ".", " you", " an opponent", or " or" / " and") so it cannot accidentally
-/// match the start of "abilities" or "ability counter".
-fn parse_stack_ability_leg(input: &str) -> nom::IResult<&str, TargetFilter, OracleError<'_>> {
-    // Try the qualified phrasings first (longest match wins): unambiguous,
-    // no boundary guard needed because the qualifier ("activated"/"triggered")
-    // is unique to the stack-ability noun phrase.
-    if let Ok((rest, _)) = alt((
-        tag::<_, _, OracleError<'_>>("activated or triggered ability"),
-        tag("triggered or activated ability"),
-        tag("activated ability"),
-        tag("triggered ability"),
-    ))
-    .parse(input)
-    {
-        let (rest, controller) = opt(alt((
-            value(ControllerRef::You, tag(" you control")),
-            value(ControllerRef::Opponent, tag(" an opponent controls")),
-        )))
-        .parse(rest)?;
-        return Ok((rest, TargetFilter::StackAbility { controller }));
-    }
-
-    // Bare "ability" — accept only with an explicit word boundary so we don't
-    // accidentally match prefixes of "abilities" (mass-mode), "ability counter"
-    // (counter type), or compound noun-modified phrases.
-    let (rest, _) = tag::<_, _, OracleError<'_>>("ability").parse(input)?;
-    let next = rest.chars().next();
-    let is_word_boundary = match next {
-        None => true,
-        Some(c) => !c.is_ascii_alphanumeric() && c != '_',
-    };
-    if !is_word_boundary {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Tag,
-        )));
-    }
-    let (rest, controller) = opt(alt((
-        value(ControllerRef::You, tag(" you control")),
-        value(ControllerRef::Opponent, tag(" an opponent controls")),
-    )))
-    .parse(rest)?;
-    Ok((rest, TargetFilter::StackAbility { controller }))
-}
-
-/// CR 115.1 + CR 113.3a/b/c + CR 701.6a: Parse the target phrase of a counter
-/// spell that lists 1+ legs of stack-targetable objects joined by commas and
-/// "or" (e.g. "target activated ability, triggered ability, or noncreature
-/// spell"). Each leg is either a stack-ability noun phrase (via
-/// `parse_stack_ability_leg`) or a spell noun phrase parsed via
-/// `parse_type_phrase` then scoped to the stack by `scope_target_spell_phrase`
-/// (yielding `StackSpell` or `And { StackSpell, Typed(...) }`).
-///
-/// On success, a single leg returns its bare filter; 2+ legs wrap in
-/// `TargetFilter::Or { filters }`. The combinator is the single dispatch path
-/// for "counter target …" lists — replacing the old `scan_contains` precheck
-/// that only matched the two-leg "activated or triggered ability" phrasing and
-/// silently dropped the other legs in three-way lists.
-///
-/// Separator policy: only comma-based separators (`", "` and `", or "`) are
-/// treated as leg boundaries. A bare ` or ` is a noun-phrase-internal token
-/// (e.g. "spell with mana value 4 or greater"; "activated or triggered ability"
-/// handled inside `parse_stack_ability_leg`) and is never a list separator —
-/// real Oracle text always uses ", or " for the Oxford comma in multi-leg
-/// counter lists (Disallow, Louisoix's Sacrifice, Voidslime, Ertai Resurrected,
-/// Deny the Witch, Overcharged Amalgam).
-fn parse_counter_target_list(input: &str) -> nom::IResult<&str, TargetFilter, OracleError<'_>> {
-    // CR 115.1: Strip the obligatory "target " prefix once. Every leg shares
-    // this article; the list combinator is the single owner of that strip.
-    let (input, _) = tag("target ").parse(input)?;
-
-    // Find the end of a single leg's text — the position just before the
-    // next comma separator (or end-of-input / terminal period). `parse_type_phrase`
-    // is greedy across some non-comma whitespace constructs (e.g. " with mana
-    // value 4 or greater"), so we let it consume past " or " freely; we only
-    // bound it at comma boundaries (which never appear inside a single leg
-    // for any counter Oracle text observed).
-    //
-    // Implementation: `take_until` for each candidate separator yields the
-    // prefix that doesn't contain that separator. The smallest such prefix
-    // (earliest separator) wins; fall back to the entire input if no
-    // candidate separator is present. Structural slicing via nom only — no
-    // `str::find` parsing dispatch.
-    fn leg_slice(input: &str) -> &str {
-        use nom::bytes::complete::take_until;
-        let mut end = input.len();
-        for sep in [", ", "."] {
-            if let Ok((_after, before)) = take_until::<_, _, OracleError<'_>>(sep).parse(input) {
-                if before.len() < end {
-                    end = before.len();
-                }
-            }
-        }
-        &input[..end]
-    }
-
-    // Parse one leg: a stack ability noun phrase or a spell type phrase
-    // (e.g. "noncreature spell", "instant or sorcery spell", "spell").
-    // Returns the consumed length so the outer loop can advance `input`.
-    fn parse_one_leg(input: &str) -> nom::IResult<&str, TargetFilter, OracleError<'_>> {
-        if let Ok((rest, leg)) = parse_stack_ability_leg(input) {
-            return Ok((rest, leg));
-        }
-        // Spell leg: defer to parse_type_phrase on a bounded slice so its
-        // internal comma handling can't cross the list separator. The slice
-        // is then scoped to the stack via the same helper parse_target uses
-        // for "target [type] spell". The helper produces `StackSpell` (bare)
-        // or `And { StackSpell, Typed }` (typed). Bail if no type word lies
-        // under our cursor or the consumed phrase doesn't name a spell.
-        let bounded = leg_slice(input);
-        if bounded.is_empty() {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Alt,
-            )));
-        }
-        let (filter, rest_of_bounded) = parse_type_phrase(bounded);
-        let consumed_len = bounded.len() - rest_of_bounded.len();
-        if consumed_len == 0 {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Alt,
-            )));
-        }
-        let consumed = &input[..consumed_len];
-        // Only treat this as a counter-list leg if the phrase actually names a
-        // spell. Otherwise (e.g. "creature you control"), bail so dispatch
-        // falls through to the existing `parse_target` + `constrain_filter_to_stack`
-        // path for the bare-Counterspell case. `scope_target_spell_phrase`
-        // returns the filter unchanged when no "spell"/"spells" word is in
-        // the phrase, so checking that the result no longer looks like a
-        // raw `Typed` is the discriminator between "this is a stack leg" and
-        // "this is a battlefield-type phrase we shouldn't be parsing here".
-        let scoped = crate::parser::oracle_target::scope_target_spell_phrase(filter, consumed);
-        let consumed_anything_stack = matches!(
-            &scoped,
-            TargetFilter::StackSpell | TargetFilter::And { .. } | TargetFilter::Or { .. }
-        );
-        if !consumed_anything_stack {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Alt,
-            )));
-        }
-        Ok((&input[consumed_len..], scoped))
-    }
-
-    let (mut input, first) = parse_one_leg(input)?;
-    let mut legs = vec![first];
-
-    // Comma-anchored separator loop. Each iteration consumes a separator + one
-    // more leg. The list terminates when no further separator applies or when
-    // the next leg fails to parse. Only ", or " and ", " are accepted —
-    // bare " or " is leg-internal, never a list separator (see the doc-comment).
-    loop {
-        let sep_input = input;
-        let sep_result = alt((tag::<_, _, OracleError<'_>>(", or "), tag(", "))).parse(sep_input);
-        let Ok((after_sep, _)) = sep_result else {
-            break;
-        };
-        let Ok((after_leg, leg)) = parse_one_leg(after_sep) else {
-            // Separator without a parsable next leg — leave the separator in
-            // the remainder so the outer caller sees an unparsed tail rather
-            // than silently accepting a malformed list.
-            break;
-        };
-        legs.push(leg);
-        input = after_leg;
-    }
-
-    let filter = if legs.len() == 1 {
-        legs.into_iter().next().unwrap()
-    } else {
-        TargetFilter::Or { filters: legs }
-    };
-    Ok((input, filter))
-}
-
 pub(super) fn stack_ability_filter_from_text(input: &str) -> TargetFilter {
     let controller = if nom_primitives::scan_contains(input, "you control") {
         Some(ControllerRef::You)
@@ -2818,7 +2698,12 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
             let (target, _) = parse_target(rest);
             Effect::Regenerate { target }
         }
-        UtilityImperativeAst::Copy { target } => Effect::CopySpell { target },
+        UtilityImperativeAst::Copy { target } => Effect::CopySpell {
+            target,
+            // Step 4 continuation absorption upgrades this to MayChooseNewTargets
+            // when "you may choose new targets for the copy" follows (CR 707.10c).
+            retarget: CopyRetargetPermission::KeepOriginalTargets,
+        },
         UtilityImperativeAst::Transform { target } => Effect::Transform { target },
         UtilityImperativeAst::Attach { attachment, target } => {
             Effect::Attach { attachment, target }
@@ -2891,8 +2776,15 @@ fn parse_prevent_effect(text: &str) -> Effect {
         TargetFilter::Any
     };
 
+    // CR 615.11 + CR 107.3i: `amount_dynamic` (the "prevent X … where X is
+    // <quantity>" override) is populated at chunk level by
+    // `apply_where_x_effect_expression`, not here — the chunk machinery
+    // strips the trailing "where x is …" binding before this parser ever
+    // sees it. `amount` is the Next(1) fallback used when no dynamic clause
+    // is present (or when the binding fails to resolve to a known quantity).
     Effect::PreventDamage {
         amount,
+        amount_dynamic: None,
         target,
         scope,
         damage_source_filter: None,
@@ -3913,6 +3805,7 @@ pub(super) fn parse_exile_ast(
             origin,
             target,
             all: true,
+            enter_with_counters: vec![],
         });
     }
 
@@ -3936,20 +3829,32 @@ pub(super) fn parse_exile_ast(
             origin,
             target,
             all: true,
+            enter_with_counters: vec![],
         });
     }
 
-    if let Ok((_, (_, filter_text))) = (
+    // "exile <filter> from your hand [with <counter suffix>]"
+    // Mirror the original arm's `terminated(take_until, tag)`; the ONLY change
+    // vs. the original is dropping the trailing `eof` from the terminator so a
+    // post-hand tail is allowed. `terminated` returns the `take_until` slice
+    // (the card filter) and consumes " from your hand"; the parser remainder
+    // (`after_hand`) is the post-hand tail.
+    if let Ok((after_hand, (_, filter_text))) = (
         opt(nom_primitives::parse_article),
-        terminated(
-            take_until(" from your hand"),
-            (tag(" from your hand"), opt(tag(".")), eof),
-        ),
+        terminated(take_until(" from your hand"), tag(" from your hand")),
     )
         .parse(rest_lower)
     {
         let (mut target, rem) = parse_type_phrase(filter_text.trim());
-        if rem.trim().is_empty() && !matches!(target, TargetFilter::Any) {
+        // `after_hand` is the parser remainder AFTER "from your hand": empty/"."
+        // (no-tail case) or " with a number of … counters on it equal to …".
+        let enter_with_counters = super::parse_with_counters_suffix(after_hand);
+        let tail_clean = after_hand.trim().trim_start_matches('.').trim();
+        // Guard against silently dropping an unrecognized trailing clause: the
+        // arm declines unless the tail is empty or fully consumed as a counter
+        // suffix. An unconsumed tail falls through to the generic exile path.
+        let tail_is_consumed = tail_clean.is_empty() || !enter_with_counters.is_empty();
+        if rem.trim().is_empty() && !matches!(target, TargetFilter::Any) && tail_is_consumed {
             attach_controller_if_absent(&mut target, ControllerRef::You);
             if let TargetFilter::Typed(typed) = &mut target {
                 typed
@@ -3960,6 +3865,35 @@ pub(super) fn parse_exile_ast(
                 origin: Some(Zone::Hand),
                 target,
                 all: false,
+                enter_with_counters,
+            });
+        }
+    }
+
+    // CR 608.2c: "exile a nonland card from among them" selects from the
+    // previous effect's published set, then moves that selected card to exile.
+    // The destination is the effect's job; the origin is intentionally open
+    // because the tracked set already identifies the exact object(s).
+    if let Ok((after_among, (_, filter_text))) = (
+        opt(nom_primitives::parse_article),
+        terminated(
+            take_until(" from among "),
+            alt((tag(" from among them"), tag(" from among those cards"))),
+        ),
+    )
+        .parse(rest_lower)
+    {
+        let (target, rem) = parse_type_phrase(filter_text.trim());
+        let tail_clean = after_among.trim().trim_start_matches('.').trim(); // allow-noncombinator: punctuation cleanup after typed terminator
+        if rem.trim().is_empty() && !matches!(target, TargetFilter::Any) && tail_clean.is_empty() {
+            return Some(ZoneCounterImperativeAst::Exile {
+                origin: None,
+                target: TargetFilter::TrackedSetFiltered {
+                    id: crate::types::identifiers::TrackedSetId(0),
+                    filter: Box::new(target),
+                },
+                all: false,
+                enter_with_counters: vec![],
             });
         }
     }
@@ -3983,6 +3917,7 @@ pub(super) fn parse_exile_ast(
         origin,
         target,
         all: false,
+        enter_with_counters: vec![],
     })
 }
 
@@ -4058,72 +3993,49 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
         (false, rest_orig, rest_lower)
     };
 
-    // CR 115.1 + CR 113.3a/b/c + CR 701.6a: single-target mode first dispatches
-    // through `parse_counter_target_list`, the typed combinator that produces
-    // a `TargetFilter::Or` of stack-ability / stack-spell legs for any 1+-way
-    // comma list ("target activated ability, triggered ability, or noncreature
-    // spell"). The combinator returns:
-    //   - `StackAbility { controller }` for a single-ability leg (Squelch,
-    //     Tale's End, "counter target triggered ability you control"),
-    //   - `StackSpell` / `And { StackSpell, Typed(...) }` for a single spell
-    //     leg with or without a type qualifier,
-    //   - `Or { filters }` for multi-leg lists (Louisoix's Sacrifice, Disallow,
-    //     Voidslime, Deny the Witch, Overcharged Amalgam, Ertai Resurrected).
-    //
-    // This replaces the prior `scan_contains("activated or triggered ability")`
-    // string-matching precheck (which only fired for the exact two-leg phrasing
-    // and silently dropped legs from three-way lists) per CLAUDE.md's
-    // "nom combinators on the first pass" mandate. The old fallback at the
-    // bottom of this function still handles cases the combinator declines
-    // (bare-Counterspell shapes, "spell or ability" — handled by `parse_target`
-    // + `constrain_filter_to_stack`).
-    //
-    // The result is accepted only if the combinator consumed the entire target
-    // phrase (modulo a terminal period and optional "unless its controller
-    // pays" tail). Otherwise the combinator dropped trailing meaning (e.g.
-    // " or ability" after a "spell" leg) and we must defer to the legacy path
-    // so dispatch stays loss-free.
-    if !mass_consumed {
-        if let Ok((remainder, target)) = parse_counter_target_list(rest_orig) {
-            // Structural cleanup: strip a single terminal "." plus the
-            // whitespace flanking it. The dispatch decision ("is this
-            // remainder accepted?") then runs through a nom combinator on
-            // the cleaned string, not a `str::starts_with`. CR 118.12: the
-            // "unless its controller pays X" tail is the only acceptable
-            // remainder for the typed-list path.
-            let cleaned = remainder.trim_start().trim_start_matches('.').trim_start();
-            let cleaned_lower = cleaned.to_ascii_lowercase();
-            let accepted = cleaned.is_empty()
-                || tag::<_, _, OracleError<'_>>("unless")
-                    .parse(cleaned_lower.as_str())
-                    .is_ok();
-            if accepted {
-                // CR 118.12: Parse "unless its controller pays {X}" even for the
-                // typed-list path so Mana Leak class costs still flow through.
-                let unless_pay =
-                    super::parse_unless_payment(rest).map(super::counter_unless_pay_modifier);
-                return Some(ZoneCounterImperativeAst::Counter {
-                    target,
-                    source_static: None,
-                    unless_pay,
-                    all: false,
-                });
-            }
-        }
-    }
-
-    // CR 113.3: Mass mode bare "abilities" head ("counter all abilities your
-    // opponents control" — Kadena's Silencer). Single-target ability lists are
-    // already handled above by the typed combinator; this branch is reached
-    // only when `mass_consumed` is true.
+    // CR 113.3: "abilities" (or "activated or triggered ability") with no
+    // intervening type phrase ⇒ stack-ability filter. Mass mode also accepts
+    // bare "abilities" (Kadena's Silencer: "counter all abilities your
+    // opponents control"). Single-target mode keeps the original strict
+    // `activated or triggered ability` requirement to avoid false positives
+    // on noun-counter phrases like "page counter on this artifact".
+    // Bare "abilities" head: tag-match (skipping leading whitespace) so the
+    // dispatch is a real nom combinator, not a string starts_with.
     fn abilities_head(i: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
         preceded(nom::character::complete::multispace0, tag("abilities")).parse(i)
     }
-    if mass_consumed && abilities_head(rest).is_ok() {
+    let abilities_match = nom_primitives::scan_contains(rest, "activated or triggered ability")
+        || (mass_consumed && abilities_head(rest).is_ok());
+    if abilities_match {
         // CR 118.12: Parse "unless pays" even for ability counters.
         let unless_pay = super::parse_unless_payment(rest).map(super::counter_unless_pay_modifier);
         return Some(ZoneCounterImperativeAst::Counter {
             target: stack_ability_filter_from_text(rest),
+            source_static: None,
+            unless_pay,
+            all: mass_consumed,
+        });
+    }
+
+    // CR 701.6a + CR 115.1: "Counter target <stack-object phrase>" where the
+    // phrase is a multi-way disjunction of spells and/or activated/triggered
+    // abilities — e.g. Louisoix's Sacrifice's "activated ability, triggered
+    // ability, or noncreature spell". Bare `parse_target` cannot recognize the
+    // "activated ability" disjunct (it is not a card type) and silently drops
+    // the noncreature restriction, yielding a degenerate empty-`type_filters`
+    // stack filter. Strip the leading "target " token (nom `tag`, not string
+    // matching) and try the dedicated stack-object combinator first; it
+    // composes the ability-kind axis with an optional restricted-spell tail.
+    let stack_phrase = opt(tag::<_, _, OracleError<'_>>("target "))
+        .parse(rest)
+        .map(|(after, _)| after)
+        .unwrap_or(rest);
+    if let Ok((_, stack_target)) =
+        crate::parser::oracle_nom::target::parse_stack_object_target(stack_phrase)
+    {
+        let unless_pay = super::parse_unless_payment(rest).map(super::counter_unless_pay_modifier);
+        return Some(ZoneCounterImperativeAst::Counter {
+            target: stack_target,
             source_static: None,
             unless_pay,
             all: mass_consumed,
@@ -4292,17 +4204,17 @@ pub(super) fn parse_cost_resource_ast(
                 },
             });
         }
-        // "pay an amount of {e} equal to ..." → variable energy payment
-        if let Ok((rest_after, _)) =
-            tag::<_, _, OracleError<'_>>("an amount of {e} equal to ").parse(rest)
+        // "pay an amount of {e} equal to ..." → dynamic energy payment.
+        // Delegates to the single-authority combinator
+        // `parse_dynamic_energy_unless_cost`; the `Variable("X")` fallback
+        // below covers "equal to" tails the quantity parser cannot resolve.
+        if tag::<_, _, OracleError<'_>>("an amount of {e} equal to ")
+            .parse(rest)
+            .is_ok()
         {
-            // Parse the quantity reference after "equal to"
-            let rest_trimmed = rest_after.trim().trim_end_matches('.');
-            if let Some(qty) = super::super::oracle_quantity::parse_quantity_ref(rest_trimmed) {
+            if let Some(amount) = super::parse_dynamic_energy_unless_cost(rest) {
                 return Some(CostResourceImperativeAst::Pay {
-                    cost: PaymentCost::Energy {
-                        amount: QuantityExpr::Ref { qty },
-                    },
+                    cost: PaymentCost::Energy { amount },
                 });
             }
             // Fallback: variable energy payment
@@ -5458,24 +5370,6 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             )));
             clause
         }
-        // CR 608.2c + CR 102.1: "Choose a [player|opponent] to <verb>" — the
-        // infinitive body becomes a chained sub_ability after the Choose.
-        // The body was parsed with `relative_player_scope = ScopedPlayer`
-        // (see `parse_choose_ast`), so its subject anaphors route to
-        // `TargetFilter::ScopedPlayer`. At runtime,
-        // `engine_resolution_choices` binds `ability.scoped_player` to the
-        // chosen player when the `NamedChoice` resolves; the body then runs
-        // with the correct scoped player.
-        ImperativeFamilyAst::Structured(ImperativeAst::Choose(
-            ChooseImperativeAst::ChoosePlayerThen { choice_type, body },
-        )) => {
-            let mut clause = parsed_clause(Effect::Choose {
-                choice_type,
-                persist: false,
-            });
-            clause.sub_ability = Some(body);
-            clause
-        }
         // CR 701.23a + CR 107.1: Dual/N-way search ("a X card and a Y card") lowers
         // to a chain of independent `SearchLibrary` effects linked via sub_ability,
         // mirroring `lower_put_counter_list`. Intercepted here because the bare
@@ -5683,6 +5577,19 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
     }
 }
 
+/// CR 122.1: Detect a *mass* counter placement ("on each" / "on all") within a
+/// single counter-placement clause. The caller MUST pass only the primary
+/// clause text — never a full compound string — otherwise a trailing "on each"
+/// conjunct would wrongly promote a targeted primary clause.
+pub(super) fn counter_placement_is_mass(clause_lower: &str) -> bool {
+    nom_primitives::scan_contains(clause_lower, "counter on each")
+        || nom_primitives::scan_contains(clause_lower, "counters on each")
+        || nom_primitives::scan_contains(clause_lower, "counter on all")
+        || nom_primitives::scan_contains(clause_lower, "counters on all")
+        || nom_primitives::scan_contains(clause_lower, "on each ")
+        || nom_primitives::scan_contains(clause_lower, "on all ")
+}
+
 pub(super) fn parse_zone_counter_ast(
     text: &str,
     lower: &str,
@@ -5742,12 +5649,7 @@ pub(super) fn parse_zone_counter_ast(
         // between the counter noun and the target — e.g. Gruff Triplets:
         // "put a number of +1/+1 counters equal to its power on each creature you
         // control named ~".
-        let is_all = nom_primitives::scan_contains(lower, "counter on each")
-            || nom_primitives::scan_contains(lower, "counters on each")
-            || nom_primitives::scan_contains(lower, "counter on all")
-            || nom_primitives::scan_contains(lower, "counters on all")
-            || nom_primitives::scan_contains(lower, "on each ")
-            || nom_primitives::scan_contains(lower, "on all ");
+        let is_all = counter_placement_is_mass(lower);
         return match try_parse_put_counter(lower, text, ctx) {
             Some((
                 Effect::PutCounter {
@@ -5834,8 +5736,12 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
             origin,
             target,
             all,
+            enter_with_counters,
         } => {
             if all {
+                // `ChangeZoneAll` has no counter slot; mass exile never carries
+                // a "with counters" clause (all five non-from-hand construction
+                // sites pass `vec![]`).
                 Effect::ChangeZoneAll {
                     origin,
                     destination: Zone::Exile,
@@ -5853,7 +5759,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,
-                    enter_with_counters: vec![],
+                    enter_with_counters,
                 }
             }
         }
@@ -6032,8 +5938,6 @@ fn try_parse_adapt(lower: &str) -> Option<Effect> {
 ///
 /// Emits a `GenericEffect` with `StaticMode::MustAttack` and the appropriate duration.
 fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
-    use crate::types::statics::StaticMode;
-
     let trimmed = lower.trim_end_matches('.');
 
     // First try: bare forms without a player reference.
@@ -6061,7 +5965,7 @@ fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
 
     if let Ok((_, duration)) = result {
         return Some(ImperativeFamilyAst::GainKeyword(Effect::GenericEffect {
-            static_abilities: vec![StaticDefinition::new(StaticMode::MustAttack)],
+            static_abilities: vec![must_attack_static_definition()],
             duration: Some(duration),
             target: None,
         }));
@@ -6096,7 +6000,7 @@ fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
         ] {
             if rest.ends_with(suffix_tag) {
                 return Some(ImperativeFamilyAst::GainKeyword(Effect::GenericEffect {
-                    static_abilities: vec![StaticDefinition::new(StaticMode::MustAttack)],
+                    static_abilities: vec![must_attack_static_definition()],
                     duration: Some(dur),
                     target: None,
                 }));
@@ -6108,10 +6012,50 @@ fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
     let (_, duration) = duration_suffix.ok()?;
 
     Some(ImperativeFamilyAst::GainKeyword(Effect::GenericEffect {
-        static_abilities: vec![StaticDefinition::new(StaticMode::MustAttack)],
+        static_abilities: vec![must_attack_static_definition()],
         duration: Some(duration),
         target: None,
     }))
+}
+
+/// CR 508.1d: Build the `StaticDefinition` for a transient "attacks if able"
+/// requirement. `Effect::GenericEffect` resolution snapshots only
+/// `static_def.modifications` (the `mode` field is inert for a transient grant —
+/// `snapshot_transient_modifications` never reads it), so the `MustAttack` mode
+/// must be carried by an explicit `AddStaticMode` modification to actually reach
+/// the layer system and `combat.rs` enforcement. Mirrors the block path's
+/// `ImperativeFamilyAst::MustBeBlocked` lowering.
+fn must_attack_static_definition() -> StaticDefinition {
+    use crate::types::statics::StaticMode;
+    StaticDefinition::new(StaticMode::MustAttack).modifications(vec![
+        ContinuousModification::AddStaticMode {
+            mode: StaticMode::MustAttack,
+        },
+    ])
+}
+
+/// CR 508.1d / CR 509.1c: True iff `lower` (already lowercased, trimmed) is a
+/// recognized *standalone* combat requirement — "attack(s) [player] this
+/// turn/combat if able" or "must be blocked [this turn] [if able]". Used by
+/// `split_clause_sequence` to gate the trailing-conjunct split of
+/// "gains <keyword> until end of turn and <combat requirement>" so the
+/// requirement reaches its existing standalone parser. Composes the existing
+/// recognizers as Some/None classifiers; their produced AST is discarded.
+pub(crate) fn is_standalone_combat_requirement(lower: &str) -> bool {
+    let trimmed = lower.trim().trim_end_matches('.').trim();
+    if try_parse_attack_if_able(trimmed).is_some() {
+        return true;
+    }
+    // CR 509.1c: "must be blocked [this turn] [if able]" — mirrors the
+    // imperative `"must"` verb arm.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("must be blocked").parse(trimmed) {
+        let rest = rest.trim();
+        return rest.is_empty()
+            || rest == "this turn if able"
+            || rest == "if able"
+            || rest == "this turn";
+    }
+    false
 }
 
 /// Handles "can't be blocked [this turn]", "can't attack [this turn]", "can't block [this turn]",
@@ -6196,6 +6140,85 @@ mod tests {
 
     fn has_prop(tf: &TypedFilter, prop: FilterProp) -> bool {
         tf.properties.iter().any(|candidate| candidate == &prop)
+    }
+
+    /// CR 122.1: `counter_placement_is_mass` recognizes "on each"/"on all"
+    /// mass placements and rejects targeted ("on target") or anaphoric
+    /// ("on it") single-object placements.
+    #[test]
+    fn counter_placement_is_mass_predicate() {
+        assert!(counter_placement_is_mass(
+            "a +1/+1 counter on each creature"
+        ));
+        assert!(counter_placement_is_mass(
+            "a loyalty counter on all planeswalkers"
+        ));
+        assert!(!counter_placement_is_mass(
+            "a +1/+1 counter on target creature"
+        ));
+        assert!(!counter_placement_is_mass("a stun counter on it"));
+    }
+
+    /// Issue #408 — "Counter target activated ability, triggered ability, or
+    /// noncreature spell" (Louisoix's Sacrifice) must parse to the full
+    /// three-way disjunction, not a degenerate empty-`type_filters` stack
+    /// filter. The noncreature restriction must survive on the spell leg.
+    #[test]
+    fn parse_counter_louisoix_three_way_disjunction() {
+        let text = "Counter target activated ability, triggered ability, or noncreature spell.";
+        let ast = parse_counter_ast(text, &text.to_lowercase())
+            .expect("Louisoix's Sacrifice counter clause should parse");
+        let ZoneCounterImperativeAst::Counter { target, .. } = ast else {
+            panic!("expected a Counter AST");
+        };
+        let TargetFilter::Or { filters } = &target else {
+            panic!("expected Or {{ ability, noncreature-spell }}, got {target:?}");
+        };
+        assert!(
+            filters
+                .iter()
+                .any(|f| matches!(f, TargetFilter::StackAbility { controller: None })),
+            "missing the activated/triggered ability disjunct: {target:?}"
+        );
+        let spell_leg = filters
+            .iter()
+            .find_map(typed_leg)
+            .expect("missing the typed noncreature-spell disjunct");
+        assert!(
+            has_type(spell_leg, TypeFilter::Non(Box::new(TypeFilter::Creature))),
+            "the spell leg must EXCLUDE creature spells (noncreature restriction)"
+        );
+        assert!(
+            has_prop(spell_leg, FilterProp::InZone { zone: Zone::Stack }),
+            "the spell leg must be pinned to the stack zone"
+        );
+    }
+
+    /// Issue #408 regression guard — a plain "Counter target spell"
+    /// (Counterspell) must still yield a stack-spell filter; the new
+    /// stack-object combinator must not steal the simple case.
+    #[test]
+    fn parse_counter_plain_spell_unchanged() {
+        let text = "Counter target spell.";
+        let ast = parse_counter_ast(text, &text.to_lowercase())
+            .expect("\"Counter target spell\" should parse");
+        let ZoneCounterImperativeAst::Counter { target, .. } = ast else {
+            panic!("expected a Counter AST");
+        };
+        // "Counter target spell" → a stack-pinned spell filter (StackSpell or
+        // a stack-constrained Typed Card filter). It must NOT be an Or with an
+        // ability disjunct.
+        assert!(
+            !matches!(&target, TargetFilter::Or { .. }),
+            "plain \"Counter target spell\" must not gain an ability disjunct: {target:?}"
+        );
+        let is_spell_filter = is_stack_spell_leg(&target)
+            || typed_leg(&target)
+                .is_some_and(|tf| has_prop(tf, FilterProp::InZone { zone: Zone::Stack }));
+        assert!(
+            is_spell_filter,
+            "plain \"Counter target spell\" must yield a stack-spell filter, got {target:?}"
+        );
     }
 
     #[test]
@@ -6380,11 +6403,13 @@ mod tests {
             origin: Some(Zone::Hand),
             target: TargetFilter::Typed(filter),
             all: false,
+            enter_with_counters,
         }) = result
         else {
             panic!("{input}: expected hand-origin typed exile, got {result:?}");
         };
 
+        assert!(enter_with_counters.is_empty());
         assert_eq!(filter.controller, Some(ControllerRef::You));
         assert!(filter.type_filters.contains(&TypeFilter::Card));
         assert!(filter
@@ -6410,6 +6435,7 @@ mod tests {
                 origin: Some(Zone::Hand),
                 target: TargetFilter::Typed(filter),
                 all: false,
+                enter_with_counters: _,
             }) = result
             else {
                 panic!("{input}: expected hand-origin typed exile, got {result:?}");
@@ -6421,6 +6447,67 @@ mod tests {
                 .properties
                 .contains(&FilterProp::InZone { zone: Zone::Hand }));
         }
+    }
+
+    #[test]
+    fn parse_exile_from_hand_with_dynamic_counter_suffix() {
+        use crate::types::ability::{ObjectScope, QuantityExpr, QuantityRef, TypeFilter};
+        use crate::types::counter::CounterType;
+        // The Eleventh Doctor: "exile a card from your hand with a number of
+        // time counters on it equal to its mana value."
+        let input =
+            "exile a card from your hand with a number of time counters on it equal to its mana value";
+        let lower = input.to_lowercase();
+        let result = parse_zone_counter_ast(input, &lower, &mut ParseContext::default());
+        let Some(ZoneCounterImperativeAst::Exile {
+            origin: Some(Zone::Hand),
+            target: TargetFilter::Typed(filter),
+            all: false,
+            enter_with_counters,
+        }) = result
+        else {
+            panic!("{input}: expected hand-origin typed exile, got {result:?}");
+        };
+        assert_eq!(filter.controller, Some(ControllerRef::You));
+        assert!(filter.type_filters.contains(&TypeFilter::Card));
+        assert!(filter
+            .properties
+            .contains(&FilterProp::InZone { zone: Zone::Hand }));
+        assert_eq!(
+            enter_with_counters,
+            vec![(
+                CounterType::Time,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::Recipient,
+                    },
+                },
+            )],
+        );
+    }
+
+    #[test]
+    fn parse_exile_from_hand_unrecognized_tail_attributes_no_counters() {
+        // Negative: an unrecognized `with …` tail that is NOT a counter suffix
+        // makes the from-hand arm's `tail_is_consumed` guard fail, so the arm
+        // declines and the parse falls through to the generic exile path.
+        // The key invariant: an unrecognized tail must NEVER be misinterpreted
+        // as a counter suffix — `enter_with_counters` stays empty regardless of
+        // which arm produces the AST.
+        let input = "exile a card from your hand with flying";
+        let lower = input.to_lowercase();
+        let result = parse_zone_counter_ast(input, &lower, &mut ParseContext::default());
+        let Some(ZoneCounterImperativeAst::Exile {
+            enter_with_counters,
+            ..
+        }) = result
+        else {
+            panic!("{input}: expected an Exile AST, got {result:?}");
+        };
+        assert!(
+            enter_with_counters.is_empty(),
+            "unrecognized `with` tail must not yield counters: {enter_with_counters:?}"
+        );
     }
 
     #[test]
@@ -6522,6 +6609,40 @@ mod tests {
                     }
                     other => panic!("expected Typed target, got {other:?}"),
                 }
+                match count {
+                    QuantityExpr::UpTo { max } => match *max {
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount { filter },
+                        } => assert_eq!(filter, target),
+                        other => panic!("expected ObjectCount max, got {other:?}"),
+                    },
+                    other => panic!("expected UpTo count, got {other:?}"),
+                }
+            }
+            other => panic!("expected Effect::Sacrifice, got {other:?}"),
+        }
+    }
+
+    // Issue #458: "sacrifice any number of <filter>" — Scapeshift class.
+    // CR 107.1c: "any number" includes zero, so `min_count` is 0 (vs. 1 for
+    // "one or more"). The dynamic `UpTo(ObjectCount)` ceiling is unchanged.
+    #[test]
+    fn parse_sacrifice_any_number_of_lands_uses_zero_min_count() {
+        let text = "sacrifice any number of lands";
+        let lower = text.to_lowercase();
+        let mut ctx = ParseContext {
+            actor: Some(ControllerRef::You),
+            ..Default::default()
+        };
+        let result =
+            parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
+        match lower_targeted_action_ast(result) {
+            Effect::Sacrifice {
+                target,
+                count,
+                min_count,
+            } => {
+                assert_eq!(min_count, 0, "\"any number\" includes zero (CR 107.1c)");
                 match count {
                     QuantityExpr::UpTo { max } => match *max {
                         QuantityExpr::Ref {
@@ -7042,10 +7163,12 @@ mod tests {
                     matches!(
                         amount,
                         QuantityExpr::Ref {
-                            qty: QuantityRef::EventContextSourceManaValue
+                            qty: QuantityRef::ObjectManaValue {
+                                scope: crate::types::ability::ObjectScope::CostPaidObject
+                            }
                         }
                     ),
-                    "Expected EventContextSourceManaValue, got {amount:?}"
+                    "Expected ObjectManaValue {{ CostPaidObject }}, got {amount:?}"
                 );
             }
             other => panic!("Expected LoseLife, got {other:?}"),
@@ -7087,10 +7210,12 @@ mod tests {
                     matches!(
                         amount,
                         QuantityExpr::Ref {
-                            qty: QuantityRef::EventContextSourcePower
+                            qty: QuantityRef::Power {
+                                scope: crate::types::ability::ObjectScope::CostPaidObject
+                            }
                         }
                     ),
-                    "Expected EventContextSourcePower, got {amount:?}"
+                    "Expected Power {{ CostPaidObject }}, got {amount:?}"
                 );
             }
             other => panic!("Expected GainLife, got {other:?}"),
@@ -7623,6 +7748,128 @@ mod tests {
     }
 
     #[test]
+    fn parse_choose_creature_card_in_your_hand() {
+        let text = "choose a creature card in your hand";
+        let lower = text.to_lowercase();
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        match result {
+            Some(ChooseImperativeAst::FromZone {
+                zones,
+                zone_owner,
+                filter,
+                ..
+            }) => {
+                assert_eq!(zones, vec![Zone::Hand]);
+                assert_eq!(zone_owner, ZoneOwner::Controller);
+                let TargetFilter::Typed(tf) = filter else {
+                    panic!("expected Typed creature filter, got {filter:?}");
+                };
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            }
+            other => panic!("Expected FromZone, got {other:?}"),
+        }
+    }
+
+    /// D-09 regression: Riveteers Provocateur's "choose a creature card in your
+    /// hand without blitz" has an unmodeled post-zone restriction ("without
+    /// blitz"). The bare type filter (`Creature`) must still parse, but the
+    /// unparseable suffix must NOT be force-fed to the strict search-filter
+    /// suffix dispatch — doing so emits a `search-filter-suffix unmatched`
+    /// TargetFallback diagnostic, which trips the parser-diagnostic ratchet.
+    #[test]
+    fn parse_choose_creature_card_with_unmodeled_post_zone_suffix_emits_no_diagnostic() {
+        let text = "choose a creature card in your hand without blitz";
+        let lower = text.to_lowercase();
+        let mut ctx = ParseContext::default();
+        let result = parse_choose_ast(text, &lower, &mut ctx);
+        match result {
+            Some(ChooseImperativeAst::FromZone {
+                zones,
+                zone_owner,
+                filter,
+                ..
+            }) => {
+                assert_eq!(zones, vec![Zone::Hand]);
+                assert_eq!(zone_owner, ZoneOwner::Controller);
+                let TargetFilter::Typed(tf) = filter else {
+                    panic!("expected Typed creature filter, got {filter:?}");
+                };
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            }
+            other => panic!("Expected FromZone, got {other:?}"),
+        }
+        assert!(
+            !ctx.diagnostics.iter().any(|d| matches!(
+                d,
+                OracleDiagnostic::TargetFallback { context, .. }
+                    if context == "search-filter-suffix unmatched"
+            )),
+            "unmodeled post-zone suffix must not emit a search-filter-suffix \
+             unmatched diagnostic, got {:?}",
+            ctx.diagnostics
+        );
+    }
+
+    #[test]
+    fn parse_choose_instant_or_sorcery_card_in_hand_or_graveyard() {
+        let text = "choose an instant or sorcery card in your hand or graveyard";
+        let lower = text.to_lowercase();
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        match result {
+            Some(ChooseImperativeAst::FromZone {
+                zones,
+                zone_owner,
+                filter,
+                ..
+            }) => {
+                assert_eq!(zones, vec![Zone::Hand, Zone::Graveyard]);
+                assert_eq!(zone_owner, ZoneOwner::Controller);
+                let TargetFilter::Or { filters } = filter else {
+                    panic!("expected Or instant/sorcery filter, got {filter:?}");
+                };
+                assert_eq!(filters.len(), 2);
+            }
+            other => panic!("Expected FromZone, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_choose_targeted_players_graveyard_or_hand() {
+        let text = "you choose a nonland card from that player's graveyard or hand";
+        let lower = text.to_lowercase();
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        match result {
+            Some(ChooseImperativeAst::FromZone {
+                zones,
+                zone_owner,
+                filter,
+                ..
+            }) => {
+                assert_eq!(zones, vec![Zone::Graveyard, Zone::Hand]);
+                assert_eq!(zone_owner, ZoneOwner::TargetedPlayer);
+                let TargetFilter::Typed(tf) = filter else {
+                    panic!("expected Typed nonland filter, got {filter:?}");
+                };
+                assert!(tf
+                    .type_filters
+                    .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))));
+            }
+            other => panic!("Expected FromZone, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_choose_random_card_in_graveyard_is_not_direct_choice() {
+        let text = "choose a card at random in your graveyard";
+        let lower = text.to_lowercase();
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        assert!(
+            !matches!(result, Some(ChooseImperativeAst::FromZone { .. })),
+            "random choices must not become player-directed ChooseFromZone prompts"
+        );
+    }
+
+    #[test]
     fn parse_choose_creature_they_control() {
         // Imperial Edict pattern: "choose a creature they control"
         let text = "choose a creature they control";
@@ -7854,12 +8101,18 @@ mod tests {
             Effect::ChooseFromZone {
                 count,
                 zone,
+                additional_zones,
+                zone_owner,
+                filter,
                 chooser,
                 up_to,
                 constraint,
             } => {
                 assert_eq!(count, 3);
                 assert_eq!(zone, Zone::Exile);
+                assert!(additional_zones.is_empty());
+                assert_eq!(zone_owner, ZoneOwner::Controller);
+                assert!(filter.is_none());
                 assert_eq!(chooser, Chooser::Opponent);
                 assert!(!up_to);
                 assert!(constraint.is_none());
@@ -7933,6 +8186,27 @@ mod tests {
             }
             other => panic!("Expected GenericEffect, got {other:?}"),
         }
+    }
+
+    /// CR 508.1d / CR 509.1c: the standalone-combat-requirement recognizer
+    /// used to gate the conjunction split. Recognizes both attack and
+    /// must-be-blocked forms, and rejects non-requirements.
+    #[test]
+    fn standalone_combat_requirement_recognizer() {
+        assert!(is_standalone_combat_requirement(
+            "attack this combat if able"
+        ));
+        assert!(is_standalone_combat_requirement(
+            "attacks this turn if able"
+        ));
+        assert!(is_standalone_combat_requirement(
+            "must be blocked this turn if able"
+        ));
+        assert!(is_standalone_combat_requirement("must be blocked if able"));
+        // Not combat requirements.
+        assert!(!is_standalone_combat_requirement("haste"));
+        assert!(!is_standalone_combat_requirement("gains flying"));
+        assert!(!is_standalone_combat_requirement("draw a card"));
     }
 
     /// CR 400.6 + CR 701.24a: "shuffle the cards from your hand into your
@@ -8181,330 +8455,5 @@ mod tests {
             try_parse_gain_quoted_ability("gain flying until end of turn").is_none(),
             "no quote marks → not a quoted-ability candidate"
         );
-    }
-
-    // ---------------------------------------------------------------------
-    // Counter target list combinator — CR 115.1 + CR 113.3 + CR 701.6a
-    //
-    // These exercise `parse_counter_target_list` directly so the building
-    // block is verified independent of the larger `parse_counter_ast`
-    // dispatch path. Each test pins one structural axis of the combinator.
-    // ---------------------------------------------------------------------
-
-    /// Louisoix's Sacrifice — three-way list with two ability legs + a
-    /// noncreature-spell leg. The historical bug at imperative.rs:3788
-    /// silently dropped the noncreature-spell leg because the
-    /// `scan_contains("activated or triggered ability")` precheck stole
-    /// dispatch and produced a bare `StackAbility` filter, leaving the
-    /// spell leg unrepresented. This test pins all three legs are kept.
-    #[test]
-    fn parse_counter_target_list_louisoix_three_way() {
-        let (rest, filter) = parse_counter_target_list(
-            "target activated ability, triggered ability, or noncreature spell",
-        )
-        .expect("Louisoix's Sacrifice target list must parse");
-        assert_eq!(rest, "", "every byte should be consumed by the list");
-        match filter {
-            TargetFilter::Or { ref filters } => {
-                assert_eq!(filters.len(), 3, "expected 3 legs, got {filters:?}");
-                assert!(matches!(
-                    filters[0],
-                    TargetFilter::StackAbility { controller: None }
-                ));
-                assert!(matches!(
-                    filters[1],
-                    TargetFilter::StackAbility { controller: None }
-                ));
-                // Third leg is `And { StackSpell, Typed(noncreature) }` because
-                // `noncreature spell` produces a typed filter that scopes to the
-                // stack via `scope_target_spell_phrase`.
-                let TargetFilter::And { filters: inner } = &filters[2] else {
-                    panic!("third leg must be And, got {:?}", filters[2]);
-                };
-                assert!(inner.iter().any(|f| matches!(f, TargetFilter::StackSpell)));
-                assert!(inner.iter().any(|f| matches!(
-                    f,
-                    TargetFilter::Typed(tf) if tf
-                        .type_filters
-                        .iter()
-                        .any(|t| matches!(t, TypeFilter::Non(_)))
-                )));
-            }
-            other => panic!("expected Or, got {other:?}"),
-        }
-    }
-
-    /// Squelch — single activated-ability leg. The combinator must collapse
-    /// a one-leg list to the bare filter, not wrap it in `Or`.
-    #[test]
-    fn parse_counter_target_list_squelch_single_activated() {
-        let (rest, filter) = parse_counter_target_list("target activated ability")
-            .expect("single activated-ability leg must parse");
-        assert_eq!(rest, "");
-        assert!(matches!(
-            filter,
-            TargetFilter::StackAbility { controller: None }
-        ));
-    }
-
-    /// Tale's End — three-leg list with two ability legs + a bare-spell leg
-    /// ("target activated ability, triggered ability, or legendary spell").
-    /// Variant: this also verifies that a `legendary` supertype prefix on the
-    /// spell leg flows through to the `Typed` portion of the And-spell.
-    #[test]
-    fn parse_counter_target_list_tales_end_three_way_legendary() {
-        let (rest, filter) = parse_counter_target_list(
-            "target activated ability, triggered ability, or legendary spell",
-        )
-        .expect("Tale's End target list must parse");
-        assert_eq!(rest, "");
-        let TargetFilter::Or { filters } = filter else {
-            panic!("expected Or");
-        };
-        assert_eq!(filters.len(), 3);
-        // Third leg: And { StackSpell, Typed { ..., HasSupertype { Legendary } } }
-        let TargetFilter::And { filters: inner } = &filters[2] else {
-            panic!("expected And, got {:?}", filters[2]);
-        };
-        assert!(inner.iter().any(|f| matches!(f, TargetFilter::StackSpell)));
-        assert!(inner.iter().any(|f| matches!(
-            f,
-            TargetFilter::Typed(tf) if tf
-                .properties
-                .iter()
-                .any(|p| matches!(p, FilterProp::HasSupertype { .. }))
-        )));
-    }
-
-    /// Disallow — "target activated ability, triggered ability, or spell".
-    /// Three legs with a bare-spell third leg (no type qualifier), so the
-    /// spell leg collapses to bare `StackSpell` (no And-wrap).
-    #[test]
-    fn parse_counter_target_list_disallow_three_way_bare_spell() {
-        let (rest, filter) =
-            parse_counter_target_list("target activated ability, triggered ability, or spell")
-                .expect("Disallow target list must parse");
-        assert_eq!(rest, "");
-        let TargetFilter::Or { filters } = filter else {
-            panic!("expected Or");
-        };
-        assert_eq!(filters.len(), 3);
-        assert!(matches!(filters[2], TargetFilter::StackSpell));
-    }
-
-    /// "you control" suffix on the ability leg flows through. Mirrors the
-    /// existing `parse_copy_stack_ability_target` behavior so single-target
-    /// counters like Holding the Line ("target activated ability you control")
-    /// produce `StackAbility { controller: Some(You) }`.
-    #[test]
-    fn parse_counter_target_list_ability_leg_with_you_control() {
-        let (rest, filter) = parse_counter_target_list("target triggered ability you control")
-            .expect("controller-scoped ability leg must parse");
-        assert_eq!(rest, "");
-        assert!(matches!(
-            filter,
-            TargetFilter::StackAbility {
-                controller: Some(ControllerRef::You)
-            }
-        ));
-    }
-
-    /// Negative: "target creature" (no "spell" word, no "ability" word) must
-    /// fail so dispatch falls through to the existing `parse_target` +
-    /// `constrain_filter_to_stack` path. This guards the bare-Counterspell
-    /// fallback we deliberately preserved.
-    #[test]
-    fn parse_counter_target_list_rejects_creature_phrase() {
-        assert!(parse_counter_target_list("target creature you control").is_err());
-    }
-
-    /// Negative: "target creature spell" — has the spell word, so the
-    /// combinator should accept it (collapse to `And { StackSpell, Typed(creature) }`),
-    /// proving that legitimate one-leg spell targets still flow through.
-    /// This is the Counterspell-class shape for typed spell targets.
-    #[test]
-    fn parse_counter_target_list_accepts_target_creature_spell() {
-        let (rest, filter) = parse_counter_target_list("target creature spell")
-            .expect("typed-spell single leg must parse");
-        assert_eq!(rest, "");
-        let TargetFilter::And { filters } = filter else {
-            panic!("expected And, got {filter:?}");
-        };
-        assert!(filters
-            .iter()
-            .any(|f| matches!(f, TargetFilter::StackSpell)));
-        assert!(filters.iter().any(|f| matches!(
-            f,
-            TargetFilter::Typed(tf) if tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Creature))
-        )));
-    }
-
-    /// Squelch and Tale's End at the top-level `parse_counter_ast` entry —
-    /// proves the combinator is wired in correctly (not just unit-testable).
-    /// Both must produce a single-target counter ast, not the malformed shape
-    /// that triggered the original bug.
-    #[test]
-    fn parse_counter_ast_single_target_activated_ability_collapses() {
-        let text = "Counter target activated ability.";
-        let lower = text.to_lowercase();
-        let ast = parse_counter_ast(text, &lower).expect("Squelch-shape must parse");
-        match ast {
-            ZoneCounterImperativeAst::Counter {
-                target, all: false, ..
-            } => {
-                assert!(matches!(
-                    target,
-                    TargetFilter::StackAbility { controller: None }
-                ));
-            }
-            other => panic!("expected single Counter, got {other:?}"),
-        }
-    }
-
-    /// End-to-end via `parse_counter_ast` for the three-way Louisoix list.
-    /// Confirms the wiring at the dispatch site, not just the combinator.
-    #[test]
-    fn parse_counter_ast_louisoix_three_way_produces_or_with_three_legs() {
-        let text = "Counter target activated ability, triggered ability, or noncreature spell.";
-        let lower = text.to_lowercase();
-        let ast = parse_counter_ast(text, &lower).expect("Louisoix oracle must parse");
-        match ast {
-            ZoneCounterImperativeAst::Counter {
-                target: TargetFilter::Or { filters },
-                all: false,
-                ..
-            } => assert_eq!(filters.len(), 3),
-            other => panic!("expected 3-leg Or target, got {other:?}"),
-        }
-    }
-
-    /// Disdainful Stroke regression: "Counter target spell with mana value 4
-    /// or greater." The CMC predicate contains " or greater", which must NOT
-    /// be treated as a list separator. The combinator's `leg_slice` uses
-    /// comma-anchored separators only; bare " or " is leg-internal.
-    #[test]
-    fn parse_counter_ast_disdainful_stroke_keeps_cmc_predicate() {
-        let text = "Counter target spell with mana value 4 or greater.";
-        let lower = text.to_lowercase();
-        let ast = parse_counter_ast(text, &lower).expect("Disdainful Stroke must parse");
-        let ZoneCounterImperativeAst::Counter { target, .. } = ast else {
-            panic!("expected single Counter");
-        };
-        // Expect And { StackSpell, Typed(card, [Cmc(GE, 4)]) }. The combinator
-        // could produce this OR the legacy parse_target path could — either is
-        // correct as long as the CMC predicate survives.
-        let TargetFilter::And { filters } = target else {
-            panic!("expected And target, got {target:?}");
-        };
-        assert!(filters
-            .iter()
-            .any(|f| matches!(f, TargetFilter::StackSpell)));
-        assert!(filters.iter().any(|f| matches!(
-            f,
-            TargetFilter::Typed(tf)
-                if tf.properties.iter().any(|p| matches!(
-                    p,
-                    FilterProp::Cmc { value: QuantityExpr::Fixed { value: 4 }, .. }
-                ))
-        )));
-    }
-
-    /// Mana Leak class regression: "Counter target spell unless its controller
-    /// pays {3}." The "unless" tail must flow through to `unless_pay` even on
-    /// the typed-list combinator path (single-leg spell case).
-    #[test]
-    fn parse_counter_ast_mana_leak_unless_pay_preserved() {
-        let text = "Counter target spell unless its controller pays {3}.";
-        let lower = text.to_lowercase();
-        let ast = parse_counter_ast(text, &lower).expect("Mana Leak must parse");
-        let ZoneCounterImperativeAst::Counter {
-            target, unless_pay, ..
-        } = ast
-        else {
-            panic!("expected Counter");
-        };
-        assert!(matches!(target, TargetFilter::StackSpell));
-        assert!(unless_pay.is_some(), "unless_pay must be parsed");
-    }
-
-    /// "Counter target spell or ability." — heterogeneous two-leg list with a
-    /// bare "ability" noun phrase (CR 113.3b/c — only activated/triggered
-    /// abilities exist on the stack, so bare "ability" targets the union).
-    /// Must produce `Or { StackSpell, StackAbility }`, NOT bare `StackSpell`
-    /// which would silently drop the "or ability" leg (pre-existing bug
-    /// before `parse_stack_ability_leg`'s bare-"ability" extension).
-    ///
-    /// `parse_counter_target_list` here:
-    ///   1. first leg: `parse_stack_ability_leg("spell or ability.")` fails
-    ///      (no "ability" prefix; "spell" doesn't match);
-    ///   2. spell leg: `parse_type_phrase("spell or ability")` consumes
-    ///      "spell" only and returns " or ability" as rest;
-    ///   3. comma separator loop fails on " or " (not a comma-anchored sep),
-    ///      so the combinator returns with remainder " or ability.".
-    ///
-    /// The remainder is non-empty → `parse_counter_ast` falls through to the
-    /// legacy `parse_target` path, which has the same comma-blindness.
-    ///
-    /// To produce the correct two-leg `Or`, the bare-"ability" noun phrase
-    /// must be reached by the FIRST leg attempt. Real Oracle text reorders
-    /// to "Counter target ability or spell." in some printings; for those,
-    /// the combinator handles it cleanly. For the "spell or ability" word
-    /// order, the legacy fallback's behavior is preserved (bare `StackSpell`
-    /// — pre-existing limitation, not introduced by this change).
-    #[test]
-    fn parse_counter_ast_spell_or_ability_preserves_legacy_behavior() {
-        // Word-order variant that the combinator CAN parse cleanly: "ability
-        // or spell". `parse_stack_ability_leg` matches the bare "ability"
-        // first leg; the comma separator loop fails on " or " (no comma);
-        // remainder check rejects → falls through to legacy path. So this
-        // also produces the legacy shape (bare `StackAbility` or similar).
-        //
-        // This test pins that we do not regress the "spell or ability"
-        // word order — whatever the legacy path produced, we still produce.
-        // A future card or a fix to the legacy path could change the exact
-        // shape; this test is a regression boundary, not a positive
-        // assertion.
-        let text = "Counter target spell or ability.";
-        let lower = text.to_lowercase();
-        let ast = parse_counter_ast(text, &lower).expect("must parse");
-        // Only assert the AST was produced (some `Counter`). Exact shape is
-        // owned by the dispatcher; this test guards against the combinator
-        // hard-failing on heterogeneous lists.
-        assert!(matches!(ast, ZoneCounterImperativeAst::Counter { .. }));
-    }
-
-    /// Bare "ability" target — verifies `parse_stack_ability_leg`'s
-    /// bare-"ability" extension produces `StackAbility` without requiring
-    /// the "activated"/"triggered" qualifier. Distinct test from the
-    /// "spell or ability" word-order case because the word-boundary guard
-    /// and leg-collapse path are easier to verify standalone.
-    #[test]
-    fn parse_counter_target_list_bare_ability_single_leg() {
-        let (rest, filter) =
-            parse_counter_target_list("target ability").expect("bare 'ability' target must parse");
-        assert_eq!(rest, "");
-        assert!(matches!(
-            filter,
-            TargetFilter::StackAbility { controller: None }
-        ));
-    }
-
-    /// Bare "ability" must NOT match the prefix of "abilities" (mass mode is
-    /// handled by `parse_counter_ast`'s mass-consumed branch, not the typed
-    /// single-target combinator). Word-boundary guard pins this. The "ability
-    /// counter" noun-counter case naturally falls through via the
-    /// `parse_counter_ast` remainder check (the combinator matches "ability"
-    /// but leaves " counter on …" as remainder, which is non-empty so the
-    /// legacy path takes over).
-    #[test]
-    fn parse_stack_ability_leg_bare_ability_word_boundary() {
-        // "abilities" — must NOT match (the `s` is an alphanumeric continuation).
-        assert!(parse_stack_ability_leg("abilities your opponents control").is_err());
-        // "ability" with end-of-input → matches.
-        assert!(parse_stack_ability_leg("ability").is_ok());
-        // "ability." — matches (period is a word boundary).
-        assert!(parse_stack_ability_leg("ability.").is_ok());
-        // "ability," — matches (comma is a word boundary).
-        assert!(parse_stack_ability_leg("ability, triggered ability").is_ok());
     }
 }

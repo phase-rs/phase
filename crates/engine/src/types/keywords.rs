@@ -181,6 +181,8 @@ pub enum KeywordKind {
     Freerunning,
     /// CR 702.191: Increment — see `Keyword::Increment`.
     Increment,
+    /// CR 702.189: Firebending — see `Keyword::Firebending`.
+    Firebending,
     /// CR ???: Specialize — not in CR text (needs manual verification).
     /// See `Keyword::Specialize`.
     Specialize,
@@ -340,6 +342,17 @@ pub enum BloodthirstValue {
     X,
 }
 
+/// CR 602.5b: Activation-frequency restriction on an activated-ability-like
+/// action (e.g. Crew). `OncePerTurn` models "Activate only once each turn";
+/// `Unlimited` is the default with no restriction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "type", content = "data")]
+pub enum ActivationCadence {
+    #[default]
+    Unlimited,
+    OncePerTurn,
+}
+
 /// All MTG keywords as typed enum variants.
 /// Simple (unit) variants for keywords with no parameters.
 /// Parameterized variants carry associated data (ManaCost for costs, amounts, etc.).
@@ -461,7 +474,13 @@ pub enum Keyword {
     Landwalk(String),
     Rampage(u32),
     Absorb(u32),
-    Crew(u32),
+    /// CR 702.122 (Crew) + CR 602.5b: `power` is the total power required to
+    /// crew; `once_per_turn` carries an optional "Activate only once each turn"
+    /// restriction.
+    Crew {
+        power: u32,
+        once_per_turn: ActivationCadence,
+    },
     /// CR 702.124: Partner and its variant keywords for co-commander pairing.
     Partner(PartnerType),
     /// CR 702.139: Companion — deckbuilding restriction that allows this card
@@ -635,7 +654,7 @@ pub enum Keyword {
     },
 
     /// Firebending N — produces N {R} when this creature attacks (Avatar crossover).
-    Firebending(u32),
+    Firebending(QuantityExpr),
 
     /// CR 702.46a: Splice onto [type] — reveal from hand and pay splice cost while casting
     /// a spell of the specified type to add this card's effects to that spell.
@@ -891,7 +910,7 @@ impl Keyword {
             Keyword::Landwalk(_) => KeywordKind::Landwalk,
             Keyword::Rampage(_) => KeywordKind::Rampage,
             Keyword::Absorb(_) => KeywordKind::Absorb,
-            Keyword::Crew(_) => KeywordKind::Crew,
+            Keyword::Crew { .. } => KeywordKind::Crew,
             Keyword::Partner(PartnerType::DoctorsCompanion) => KeywordKind::Doctor,
             Keyword::Partner(PartnerType::ChooseABackground) => KeywordKind::Background,
             Keyword::Partner(_) => KeywordKind::Partner,
@@ -938,6 +957,7 @@ impl Keyword {
             Keyword::MoreThanMeetsTheEye(_) => KeywordKind::MoreThanMeetsTheEye,
             Keyword::Freerunning(_) => KeywordKind::Freerunning,
             Keyword::Increment => KeywordKind::Increment,
+            Keyword::Firebending(_) => KeywordKind::Firebending,
             Keyword::Specialize(_) => KeywordKind::Specialize,
             Keyword::Offering(_) => KeywordKind::Offering,
             Keyword::Escalate(_) => KeywordKind::Escalate,
@@ -973,7 +993,6 @@ impl Keyword {
             | Keyword::Entwine(_)
             | Keyword::Epic
             | Keyword::Evoke(_)
-            | Keyword::Firebending(_)
             | Keyword::Fortify(_)
             | Keyword::Fuse
             | Keyword::Graft(_)
@@ -1293,7 +1312,12 @@ impl FromStr for Keyword {
                 "absorb" => return Ok(Keyword::Absorb(p.parse().unwrap_or(1))),
                 "fading" => return Ok(Keyword::Fading(p.parse().unwrap_or(0))),
                 "vanishing" => return Ok(Keyword::Vanishing(p.parse().unwrap_or(0))),
-                "crew" => return Ok(Keyword::Crew(p.parse().unwrap_or(1))),
+                "crew" => {
+                    return Ok(Keyword::Crew {
+                        power: p.parse().unwrap_or(1),
+                        once_per_turn: ActivationCadence::Unlimited,
+                    });
+                }
                 "partner" => return Ok(Keyword::Partner(PartnerType::With(p.clone()))),
                 "companion" => return Ok(Keyword::Companion(parse_companion_condition(p))),
                 "commanderninjutsu" | "commander ninjutsu" => {
@@ -1401,7 +1425,10 @@ impl FromStr for Keyword {
                     }
                     return Ok(Keyword::Unknown(s.to_string()));
                 }
-                "firebending" => return Ok(Keyword::Firebending(p.parse().unwrap_or(1))),
+                "firebending" => {
+                    let n: i32 = p.parse().unwrap_or(1);
+                    return Ok(Keyword::Firebending(QuantityExpr::Fixed { value: n }));
+                }
                 // CR 702.47a: Splice onto [type] [cost]
                 "splice" => {
                     // Strip "onto " prefix if present (e.g., "onto arcane {w}" → "arcane {w}")
@@ -1563,7 +1590,7 @@ impl FromStr for Keyword {
             "dethrone" => Ok(Keyword::Dethrone),
             "doubleteam" => Ok(Keyword::DoubleTeam),
             "livingmetal" => Ok(Keyword::LivingMetal),
-            "firebending" => Ok(Keyword::Firebending(1)),
+            "firebending" => Ok(Keyword::Firebending(QuantityExpr::Fixed { value: 1 })),
             "bloodthirst" => Ok(Keyword::Bloodthirst(BloodthirstValue::Fixed(1))),
             "hideaway" => Ok(Keyword::Hideaway(4)),
             "cumulative" => Ok(Keyword::CumulativeUpkeep(String::new())),
@@ -1905,7 +1932,28 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Afterlife" => Ok(Keyword::Afterlife(uint(data))),
         "Fading" => Ok(Keyword::Fading(uint(data))),
         "Vanishing" => Ok(Keyword::Vanishing(uint(data))),
-        "Crew" => Ok(Keyword::Crew(uint(data))),
+        "Crew" => {
+            // Struct variant: {"Crew": {"power": N, "once_per_turn": {...}}}.
+            // A bare number is also accepted for forward/back compatibility.
+            if let Some(obj) = data.as_object() {
+                let power = obj.get("power").map(uint).unwrap_or(1);
+                let once_per_turn = obj
+                    .get("once_per_turn")
+                    .map(|v| serde_json::from_value(v.clone()))
+                    .transpose()
+                    .map_err(|e| format!("ActivationCadence: {e}"))?
+                    .unwrap_or(ActivationCadence::Unlimited);
+                Ok(Keyword::Crew {
+                    power,
+                    once_per_turn,
+                })
+            } else {
+                Ok(Keyword::Crew {
+                    power: uint(data),
+                    once_per_turn: ActivationCadence::Unlimited,
+                })
+            }
+        }
         "Rampage" => Ok(Keyword::Rampage(uint(data))),
         "Absorb" => Ok(Keyword::Absorb(uint(data))),
         "Poisonous" => Ok(Keyword::Poisonous(uint(data))),
@@ -1919,7 +1967,17 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Soulshift" => Ok(Keyword::Soulshift(uint(data))),
         "Backup" => Ok(Keyword::Backup(uint(data))),
         // Avatar crossover: Firebending
-        "Firebending" => Ok(Keyword::Firebending(uint(data))),
+        "Firebending" => {
+            if let Some(n) = data.as_u64() {
+                Ok(Keyword::Firebending(QuantityExpr::Fixed {
+                    value: n as i32,
+                }))
+            } else {
+                let expr: QuantityExpr = serde_json::from_value(data.clone())
+                    .map_err(|e| format!("Firebending: {e}"))?;
+                Ok(Keyword::Firebending(expr))
+            }
+        }
         // CR 702.157
         "Squad" => Ok(Keyword::Squad(mana(data)?)),
         // CR 702.29
@@ -2104,7 +2162,13 @@ mod tests {
 
     #[test]
     fn parse_numeric_keywords_unchanged() {
-        assert_eq!(Keyword::from_str("Crew:3").unwrap(), Keyword::Crew(3));
+        assert_eq!(
+            Keyword::from_str("Crew:3").unwrap(),
+            Keyword::Crew {
+                power: 3,
+                once_per_turn: ActivationCadence::Unlimited
+            }
+        );
         assert_eq!(Keyword::from_str("Rampage:2").unwrap(), Keyword::Rampage(2));
     }
 
@@ -2566,5 +2630,50 @@ mod tests {
         let json = serde_json::to_value(&kw).unwrap();
         let deserialized: Keyword = serde_json::from_value(json.clone()).unwrap();
         assert_eq!(kw, deserialized, "round-trip failed for {json}");
+    }
+
+    #[test]
+    fn firebending_from_str_parses_fixed_amount() {
+        assert_eq!(
+            Keyword::from_str("Firebending:2").unwrap(),
+            Keyword::Firebending(QuantityExpr::Fixed { value: 2 })
+        );
+        assert_eq!(
+            Keyword::from_str("Firebending").unwrap(),
+            Keyword::Firebending(QuantityExpr::Fixed { value: 1 })
+        );
+    }
+
+    #[test]
+    fn firebending_deserializes_legacy_number_and_quantity_expr() {
+        let legacy: Keyword = serde_json::from_value(serde_json::json!({
+            "Firebending": 3
+        }))
+        .unwrap();
+        assert_eq!(
+            legacy,
+            Keyword::Firebending(QuantityExpr::Fixed { value: 3 })
+        );
+
+        let quantity: Keyword = serde_json::from_value(serde_json::json!({
+            "Firebending": {
+                "type": "Ref",
+                "qty": {
+                    "type": "Power",
+                    "scope": {
+                        "type": "Source"
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            quantity,
+            Keyword::Firebending(QuantityExpr::Ref {
+                qty: crate::types::ability::QuantityRef::Power {
+                    scope: crate::types::ability::ObjectScope::Source
+                }
+            })
+        );
     }
 }

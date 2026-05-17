@@ -1008,6 +1008,7 @@ fn target_filter_variant_name(f: &TargetFilter) -> &'static str {
         TargetFilter::None => "None",
         TargetFilter::Any => "Any",
         TargetFilter::Player => "Player",
+        TargetFilter::AllPlayers => "AllPlayers",
         TargetFilter::Controller => "Controller",
         TargetFilter::OriginalController => "OriginalController",
         TargetFilter::ScopedPlayer => "ScopedPlayer",
@@ -1612,7 +1613,9 @@ pub fn convert_player_predicate_trigger(
             let (comparator, rhs) = comparison_to_pair(cmp)?;
             TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::GraveyardSize,
+                    qty: QuantityRef::GraveyardSize {
+                        player: PlayerScope::Controller,
+                    },
                 },
                 comparator,
                 rhs,
@@ -1900,7 +1903,9 @@ pub fn convert_player_predicate_ability(
             let (comparator, rhs) = comparison_to_pair(cmp)?;
             AbilityCondition::QuantityCheck {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::GraveyardSize,
+                    qty: QuantityRef::GraveyardSize {
+                        player: PlayerScope::Controller,
+                    },
                 },
                 comparator,
                 rhs,
@@ -2224,7 +2229,9 @@ pub fn convert_player_predicate_static(
             let (comparator, rhs) = comparison_to_pair(cmp)?;
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::GraveyardSize,
+                    qty: QuantityRef::GraveyardSize {
+                        player: PlayerScope::Controller,
+                    },
                 },
                 comparator,
                 rhs,

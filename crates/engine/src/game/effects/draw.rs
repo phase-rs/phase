@@ -61,22 +61,6 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // CR 609.3 + CR 102.1: When the drawing-player filter requires
-    // `ability.scoped_player` (e.g., "they draw a card" after "choose a
-    // player") but no player was chosen — because the choice was skipped
-    // for lack of legal options (Gluntch two-player game) — do nothing.
-    // Falling back to `ability.controller` would draw for the caster,
-    // which is the wrong player.
-    if let Effect::Draw { target, .. } = &ability.effect {
-        if ability.scoped_player.is_none() && target.requires_bound_scoped_player() {
-            events.push(GameEvent::EffectResolved {
-                kind: EffectKind::from(&ability.effect),
-                source_id: ability.source_id,
-            });
-            return Ok(());
-        }
-    }
-
     let (num_cards, drawing_player) = match &ability.effect {
         // CR 107.1b: Resolve with full ability context so `QuantityRef::Variable { "X" }`
         // finds the caster-chosen X on the ability.

@@ -255,7 +255,9 @@ fn extract_keywords(segments: &[&str]) -> Vec<Keyword> {
                 .get(i + 1)
                 .and_then(|v| v.parse::<u32>().ok())
                 .unwrap_or(1);
-            keywords.push(Keyword::Firebending(n));
+            keywords.push(Keyword::Firebending(QuantityExpr::Fixed {
+                value: n as i32,
+            }));
             skip_next = segments
                 .get(i + 1)
                 .is_some_and(|v| v.parse::<u32>().is_ok());
@@ -317,22 +319,6 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // CR 609.3 + CR 102.1: When the token-owner filter requires
-    // `ability.scoped_player` (e.g., "they create two Treasure tokens" after
-    // "choose a player") but no player was chosen — because the choice was
-    // skipped for lack of legal options (Gluntch in a two-player game) — do
-    // nothing. Falling back to `ability.controller` would create the tokens
-    // for the caster, which is the wrong player.
-    if let Effect::Token { owner, .. } = &ability.effect {
-        if ability.scoped_player.is_none() && owner.requires_bound_scoped_player() {
-            events.push(GameEvent::EffectResolved {
-                kind: EffectKind::from(&ability.effect),
-                source_id: ability.source_id,
-            });
-            return Ok(());
-        }
-    }
-
     let (
         script_name,
         fallback_power,
@@ -730,7 +716,12 @@ pub fn apply_create_token_after_replacement(
     state.last_created_token_ids = created_ids;
 }
 
-fn resolve_token_owner(
+/// CR 109.4 + CR 111.2: Resolve the player who creates (and therefore
+/// controls) a token from its `owner: TargetFilter`. Single authority for
+/// both `Effect::Token` and `Effect::CopyTokenOf` — the latter delegates here
+/// so "target opponent creates a token that's a copy of it" routes through the
+/// exact same resolution path.
+pub(crate) fn resolve_token_owner(
     state: &GameState,
     ability: &ResolvedAbility,
     owner_filter: &TargetFilter,
@@ -742,15 +733,21 @@ fn resolve_token_owner(
     if owner_filter.is_context_ref() {
         return super::resolve_player_for_context_ref(state, ability, owner_filter);
     }
-    // Non-context-ref (e.g., explicit "target opponent creates a token"): the
-    // chosen Player target wins; falls back to the parent's targeted Object's
-    // controller for cases like "target creature's controller creates a token".
+    // CR 109.4: Non-context-ref `owner` (e.g. "target opponent creates a
+    // token") — the token's creator is the chosen *player* target. Scan
+    // `ability.targets` in reverse for the last `TargetRef::Player`, mirroring
+    // `relative_filter_controller`. `TargetRef::Object` slots are deliberately
+    // ignored: `Effect::CopyTokenOf` can carry an Object slot for the copy
+    // *source* alongside the player `owner` slot, and resolving the source
+    // object's controller as the token owner would be wrong. When no player
+    // slot exists, the controller creates the token.
     ability
         .targets
         .iter()
+        .rev()
         .find_map(|target| match target {
             TargetRef::Player(pid) => Some(*pid),
-            TargetRef::Object(id) => state.objects.get(id).map(|object| object.controller),
+            TargetRef::Object(_) => None,
         })
         .unwrap_or(ability.controller)
 }

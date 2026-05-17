@@ -1,7 +1,7 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until};
 use nom::combinator::{all_consuming, map, rest, value};
-use nom::sequence::terminated;
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::oracle_modal::split_short_label_prefix;
@@ -181,6 +181,7 @@ fn parse_behold_cost(lower: &str) -> Option<AbilityCost> {
 }
 
 pub fn parse_single_cost(text: &str) -> AbilityCost {
+    type E<'a> = super::oracle_nom::error::OracleError<'a>;
     let text = text.trim();
     let lower = text.to_lowercase();
 
@@ -266,7 +267,36 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             };
         }
         if scan_contains(&rest_lower, "life") {
-            if let Some((n, _)) = parse_number(&rest_lower) {
+            if let Some((n, after_n)) = parse_number(&rest_lower) {
+                // CR 119.4 + CR 122.1: "Pay N life for each <clause>" — a
+                // per-object multiplier on the life cost (e.g. Tornado's
+                // "Pay 3 life for each velocity counter on this enchantment").
+                // Model on parse_unless_for_each_payment
+                // (oracle_effect/mod.rs:14482). `after_n` is
+                // "life for each <clause>" because parse_number trim_start()s
+                // the remainder, so "life " / "for each " carry their
+                // separators on the TRAILING side.
+                if let Ok((_, for_each_clause)) = preceded(
+                    tag::<_, _, E<'_>>("life "),
+                    preceded(
+                        tag::<_, _, E<'_>>("for each "),
+                        nom::combinator::rest::<&str, E<'_>>,
+                    ),
+                )
+                .parse(after_n)
+                {
+                    if let Some(qty) =
+                        parse_for_each_clause(for_each_clause.trim().trim_end_matches('.'))
+                    {
+                        return AbilityCost::PayLife {
+                            amount: QuantityExpr::Multiply {
+                                factor: n as i32,
+                                inner: Box::new(QuantityExpr::Ref { qty }),
+                            },
+                        };
+                    }
+                }
+                // Flat "Pay N life" — no " for each " tail.
                 return AbilityCost::PayLife {
                     amount: QuantityExpr::Fixed { value: n as i32 },
                 };
@@ -498,7 +528,11 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
 
     // "Pay {E}" / "Pay {E}{E}" / "Pay N {E}" — energy costs (CR 107.14)
     if let Some(energy) = try_parse_energy_cost(&lower) {
-        return AbilityCost::PayEnergy { amount: energy };
+        return AbilityCost::PayEnergy {
+            amount: QuantityExpr::Fixed {
+                value: energy as i32,
+            },
+        };
     }
 
     // "Return a land you control to its owner's hand" — bounce cost
@@ -1098,6 +1132,54 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 }
             }
         );
+        // Regression: flat "Pay 2 life" is unaffected by the for-each arm.
+        assert_eq!(
+            parse_oracle_cost("Pay 2 life"),
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 }
+            }
+        );
+    }
+
+    #[test]
+    fn cost_pay_life_for_each_counter() {
+        // CR 119.4 + CR 122.1: Tornado — "Pay 3 life for each velocity counter
+        // on this enchantment". The per-counter multiplier must be preserved.
+        let expected_qty =
+            parse_for_each_clause("velocity counter on this enchantment").expect("for-each clause");
+        assert!(matches!(
+            expected_qty,
+            QuantityRef::CountersOn {
+                scope: crate::types::ability::ObjectScope::Source,
+                counter_type: Some(_),
+            }
+        ));
+        assert_eq!(
+            parse_oracle_cost("Pay 3 life for each velocity counter on this enchantment"),
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Multiply {
+                    factor: 3,
+                    inner: Box::new(QuantityExpr::Ref { qty: expected_qty }),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn cost_pay_life_for_each_creature() {
+        // Building-block test: the for-each composition covers any
+        // `parse_for_each_clause` form, not just counter scopes. factor: 1 is
+        // kept intentionally (resolves identically to a bare Ref).
+        let expected_qty = parse_for_each_clause("creature you control").expect("for-each clause");
+        assert_eq!(
+            parse_oracle_cost("Pay 1 life for each creature you control"),
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Multiply {
+                    factor: 1,
+                    inner: Box::new(QuantityExpr::Ref { qty: expected_qty }),
+                },
+            }
+        );
     }
 
     #[test]
@@ -1400,7 +1482,9 @@ mod tests {
     fn cost_pay_energy_single() {
         assert_eq!(
             parse_oracle_cost("Pay {E}"),
-            AbilityCost::PayEnergy { amount: 1 }
+            AbilityCost::PayEnergy {
+                amount: QuantityExpr::Fixed { value: 1 }
+            }
         );
     }
 
@@ -1408,7 +1492,9 @@ mod tests {
     fn cost_pay_energy_triple() {
         assert_eq!(
             parse_oracle_cost("Pay {E}{E}{E}"),
-            AbilityCost::PayEnergy { amount: 3 }
+            AbilityCost::PayEnergy {
+                amount: QuantityExpr::Fixed { value: 3 }
+            }
         );
     }
 

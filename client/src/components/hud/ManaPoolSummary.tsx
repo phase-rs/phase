@@ -1,4 +1,9 @@
-import type { ManaType, ManaUnit } from "../../adapter/types.ts";
+import type {
+  ManaRestriction,
+  ManaSpellGrant,
+  ManaType,
+  ManaUnit,
+} from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 
 const EMPTY_MANA: ManaUnit[] = [];
@@ -14,6 +19,61 @@ const MANA_COLORS: Record<ManaType, string> = {
 
 const MANA_ORDER: ManaType[] = ["White", "Blue", "Black", "Red", "Green", "Colorless"];
 
+// Discriminant key of a `ManaRestriction` — the bare string for unit variants,
+// or the single object key for data variants. Keyed exhaustively below so
+// TypeScript enforces completeness when a new restriction variant is added.
+type ManaRestrictionTag =
+  | "OnlyForSpellType"
+  | "OnlyForCreatureType"
+  | "OnlyForTypeSpellsOrAbilities"
+  | "OnlyForSpellWithKeywordKind"
+  | "OnlyForSpellWithKeywordKindFromZone"
+  | "OnlyForActivation"
+  | "OnlyForXCosts"
+  | "ConvokePayment";
+
+// Human-readable tooltip text per restriction variant. Exhaustive `Record` —
+// adding a `ManaRestriction` variant without a tooltip here is a type error.
+const RESTRICTION_LABELS: Record<ManaRestrictionTag, string> = {
+  OnlyForSpellType: "Spend only to cast spells of a specific type",
+  OnlyForCreatureType: "Spend only to cast a creature spell of the chosen type",
+  OnlyForTypeSpellsOrAbilities:
+    "Spend only on spells or abilities of a specific type",
+  OnlyForSpellWithKeywordKind: "Spend only to cast spells with a specific keyword",
+  OnlyForSpellWithKeywordKindFromZone:
+    "Spend only to cast keyword spells from a graveyard",
+  OnlyForActivation: "Spend only to activate abilities",
+  OnlyForXCosts: "Spend only on costs that include {X}",
+  ConvokePayment: "Convoke payment",
+};
+
+function restrictionTag(restriction: ManaRestriction): ManaRestrictionTag {
+  return (
+    typeof restriction === "string"
+      ? restriction
+      : (Object.keys(restriction)[0] as ManaRestrictionTag)
+  );
+}
+
+// Canonical, payload-inclusive string for a restriction — so "Legendary-only
+// green" and "Creature-only green" hash to distinct group keys.
+function canonRestriction(restriction: ManaRestriction): string {
+  return typeof restriction === "string"
+    ? restriction
+    : JSON.stringify(restriction);
+}
+
+function canonGrant(grant: ManaSpellGrant): string {
+  return typeof grant === "string" ? grant : JSON.stringify(grant);
+}
+
+interface ManaGroup {
+  color: ManaType;
+  restrictions: ManaRestriction[];
+  grants: ManaSpellGrant[];
+  count: number;
+}
+
 interface ManaPoolSummaryProps {
   playerId: number;
 }
@@ -23,28 +83,67 @@ export function ManaPoolSummary({ playerId }: ManaPoolSummaryProps) {
     (s) => s.gameState?.players[playerId]?.mana_pool.mana ?? EMPTY_MANA,
   );
 
-  const counts = new Map<ManaType, number>();
+  // Group by a deterministic composite key (color, restrictions, grants) so
+  // distinctly-restricted mana of the same color renders as separate pills.
+  const groups = new Map<string, ManaGroup>();
   for (const unit of manaUnits) {
     if (unit.restrictions.includes("ConvokePayment")) continue;
-    counts.set(unit.color, (counts.get(unit.color) ?? 0) + 1);
+    const restrictions = unit.restrictions;
+    const grants = unit.grants ?? [];
+    const key = JSON.stringify([
+      unit.color,
+      [...restrictions].map(canonRestriction).sort(),
+      [...grants].map(canonGrant).sort(),
+    ]);
+    const existing = groups.get(key);
+    if (existing) {
+      existing.count += 1;
+    } else {
+      groups.set(key, { color: unit.color, restrictions, grants, count: 1 });
+    }
   }
 
-  const entries = MANA_ORDER
-    .filter((color) => (counts.get(color) ?? 0) > 0)
-    .map((color) => ({ color, count: counts.get(color)! }));
+  // Stable display order: by color, plain (unrestricted) groups before
+  // restricted/granting ones of the same color.
+  const entries = [...groups.values()].sort((a, b) => {
+    const colorDelta =
+      MANA_ORDER.indexOf(a.color) - MANA_ORDER.indexOf(b.color);
+    if (colorDelta !== 0) return colorDelta;
+    const aSpecial = a.restrictions.length > 0 || a.grants.length > 0 ? 1 : 0;
+    const bSpecial = b.restrictions.length > 0 || b.grants.length > 0 ? 1 : 0;
+    return aSpecial - bSpecial;
+  });
 
   if (entries.length === 0) return null;
 
   return (
     <div className="flex items-center gap-1">
-      {entries.map(({ color, count }) => (
-        <span
-          key={color}
-          className={`inline-flex h-6 min-w-6 items-center justify-center rounded-full px-1.5 text-[11px] font-bold tabular-nums ${MANA_COLORS[color]}`}
-        >
-          {count}
-        </span>
-      ))}
+      {entries.map((group, index) => {
+        const special =
+          group.restrictions.length > 0 || group.grants.length > 0;
+        const tooltipParts = group.restrictions.map(
+          (r) => RESTRICTION_LABELS[restrictionTag(r)],
+        );
+        if (group.grants.length > 0) tooltipParts.push("Grants a property to the spell");
+        const title = special ? tooltipParts.join("; ") : undefined;
+        return (
+          <span
+            key={index}
+            title={title}
+            className={`relative inline-flex h-6 min-w-6 items-center justify-center rounded-full px-1.5 text-[11px] font-bold tabular-nums ${MANA_COLORS[group.color]} ${
+              special ? "ring-2 ring-dashed ring-white/70" : ""
+            }`}
+          >
+            {group.count}
+            {special && (
+              <span
+                aria-hidden
+                className="absolute -top-1 -right-1 h-2 w-2 rounded-full bg-white/90 ring-1 ring-slate-900/40"
+              />
+            )}
+          </span>
+        );
+      })}
     </div>
   );
 }

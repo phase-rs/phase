@@ -223,7 +223,8 @@ mod tests {
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, QuantityExpr, ResolvedAbility, TargetFilter,
+        AbilityDefinition, AbilityKind, CopyRetargetPermission, Effect, QuantityExpr,
+        ResolvedAbility, TargetFilter,
     };
     use engine::types::card_type::{CardType, CoreType};
     use engine::types::game_state::{GameState, StackEntry, StackEntryKind, WaitingFor};
@@ -448,6 +449,7 @@ mod tests {
             2,
             Effect::CopySpell {
                 target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
             },
         );
         let (context, config) = make_context(0.8);
@@ -501,6 +503,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::CopySpell {
                 target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
             },
         ));
         let (context, config) = make_context(0.8);

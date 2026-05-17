@@ -117,8 +117,8 @@ mod tests {
     use crate::game::effects::resolve_ability_chain;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ControllerRef, PlayerFilter, QuantityExpr, QuantityRef,
-        ReplacementDefinition, TargetFilter, TargetRef,
+        AbilityDefinition, AbilityKind, PlayerFilter, QuantityExpr, QuantityRef,
+        ReplacementDefinition, ReplacementPlayerScope, TargetFilter, TargetRef,
     };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -230,7 +230,7 @@ mod tests {
                     destination: Zone::Graveyard,
                 },
             ));
-        replacement.valid_player = Some(ControllerRef::Opponent);
+        replacement.valid_player = Some(ReplacementPlayerScope::Opponent);
         state
             .objects
             .get_mut(&replacement_source)
@@ -278,7 +278,7 @@ mod tests {
                     destination: Zone::Graveyard,
                 },
             ));
-        replacement.valid_player = Some(ControllerRef::Opponent);
+        replacement.valid_player = Some(ReplacementPlayerScope::Opponent);
         state
             .objects
             .get_mut(&replacement_source)

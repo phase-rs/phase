@@ -1,7 +1,7 @@
 import { registerSW } from "virtual:pwa-register";
 import { isTauri } from "../services/sidecar";
 import { isMultiplayerGameLive, whenMultiplayerGameEnds } from "./multiplayerGuard";
-import { markPendingAutoUpdate } from "./updateMarker";
+import { claimServiceWorkerReload, markPendingAutoUpdate } from "./updateMarker";
 import {
   setUpdateStatus,
   getUpdateStatus,
@@ -123,6 +123,13 @@ export function registerServiceWorker() {
   pushUpdateDebug("Registering service worker updater.");
   let hasReloadedOnControllerChange = false;
 
+  // A `controllerchange` fires both on a genuine SW update AND on the first
+  // `clientsClaim()` of a page that loaded *uncontrolled* — a cold PWA
+  // launch, or after the OS evicted the SW. Only the former should reload;
+  // capture the controller now so the handler can tell them apart, mirroring
+  // the `!navigator.serviceWorker.controller` guard used for `updatefound`.
+  const hadControllerAtRegister = !!navigator.serviceWorker.controller;
+
   navigator.serviceWorker.addEventListener("controllerchange", () => {
     // `hasReloadedOnControllerChange` latches true on the first event so we
     // don't reload twice if the browser fires it again. Set *after* the
@@ -132,10 +139,34 @@ export function registerServiceWorker() {
     // do anything useful (the deferred reload, when it fires, fetches the
     // live SW anyway).
     if (hasReloadedOnControllerChange) return;
+
+    // Initial control handoff — the page loaded with no controller and the
+    // SW just claimed it. That is not an update: the page already loaded its
+    // current assets from the network, so reloading would only interrupt the
+    // user (e.g. mid game-setup). Skip without latching, so a genuine update
+    // later this session still reloads.
+    if (!hadControllerAtRegister) {
+      pushUpdateDebug(
+        "Service worker took initial control of an uncontrolled page; skipping reload.",
+      );
+      return;
+    }
+
     clearActivationTimeout();
     hasReloadedOnControllerChange = true;
 
     const doReload = () => {
+      // Circuit-breaker: allow only the first SW-driven reload per session.
+      // iOS standalone PWAs fire repeated spurious `controllerchange` events
+      // while the SW lifecycle settles — suppressing every reload after the
+      // first breaks the loop that makes the early game unplayable.
+      if (!claimServiceWorkerReload()) {
+        pushUpdateDebug(
+          "Service worker controller changed again this session; suppressing reload to break a loop.",
+          "warn",
+        );
+        return;
+      }
       pushUpdateDebug("Service worker controller changed; reloading.");
       window.location.reload();
     };

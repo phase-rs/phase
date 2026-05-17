@@ -6,7 +6,7 @@ use serde::ser::SerializeStructVariant;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
-use super::card_type::{CardType, CoreType, Supertype};
+use super::card_type::{CardType, CoreType, SubtypeSet, Supertype};
 use super::counter::{CounterMatch, CounterType};
 use super::events::BendingType;
 use super::game_state::{
@@ -35,6 +35,19 @@ pub enum Chooser {
     Controller,
     /// An opponent of the controller makes the choice (CR 700.2).
     /// In 2-player, the single opponent. In multiplayer, controller chooses which opponent.
+    Opponent,
+}
+
+/// CR 400.1 + CR 608.2c: Which player's zone supplies cards for a direct
+/// zone choice during resolution.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ZoneOwner {
+    /// The controller of the spell/ability owns the referenced zone.
+    #[default]
+    Controller,
+    /// The first player target of the resolving spell/ability owns the referenced zone.
+    TargetedPlayer,
+    /// An opponent of the controller owns the referenced zone.
     Opponent,
 }
 
@@ -1083,6 +1096,8 @@ impl<'de> serde::Deserialize<'de> for ManaProduction {
 /// by reading runtime state (e.g., chosen creature type from the source object).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ManaSpendRestriction {
+    /// "Spend this mana only to cast spells."
+    SpellOnly,
     /// "Spend this mana only to cast creature spells."
     SpellType(String),
     /// "Spend this mana only to cast a creature spell of the chosen type."
@@ -1538,6 +1553,26 @@ pub enum ControllerRef {
     /// `combat::defending_player_for_attacker`. Used by intervening-if
     /// quantity checks such as "defending player controls more lands than you."
     DefendingPlayer,
+    /// CR 608.2c + CR 109.4: Filter controller is the player chosen by the
+    /// Nth `Effect::Choose { choice_type: ChoiceType::Player }` in this
+    /// resolving ability chain (`index` is 0-based: 0 = the first choose).
+    /// Distinct from `TargetPlayer` (a target declared when the ability went
+    /// on the stack): a chosen player is selected *during* resolution via the
+    /// `WaitingFor::NamedChoice` round-trip. Resolved by reading
+    /// `ResolvedAbility.chosen_players[index]`, the resolution-scoped list the
+    /// `NamedChoice` answer handler appends to. Powers the
+    /// "choose a player. They <verb> … choose a second player to <verb>"
+    /// card class (Gluntch, the Bestower; the Tempt cycle).
+    ChosenPlayer {
+        index: u8,
+    },
+    /// CR 603.2 + CR 109.4: Filter controller is the player identified by the
+    /// triggering event (the drawer, life-gainer, attacker, etc.). Resolved
+    /// against `state.current_trigger_event` via `extract_player_from_event`.
+    /// Mirrors `PlayerFilter::TriggeringPlayer` and `TargetFilter::TriggeringPlayer`.
+    /// Used by control-relative trigger restrictions
+    /// ("an opponent who controls F draws a card").
+    TriggeringPlayer,
 }
 
 /// CR 301 / CR 303: Kinds of attachments to permanents.
@@ -2277,6 +2312,13 @@ pub enum TargetFilter {
     /// Nexus of Fate's shuffle-back replacement when the card is under opposing
     /// control via Mind Control).
     Owner,
+    /// CR 118.12a: Every player in the game (controller + opponents), polled in
+    /// APNAP order. The unless-payer population for "[Effect] unless any player
+    /// pays ..." clauses (Cleansing, Rhystic cycle, Soul Strings). Resolution is
+    /// a sequential poll — the first player to pay prevents the effect — so this
+    /// variant is only valid as an `UnlessPayModifier.payer`; it is never used
+    /// as a target or affected filter.
+    AllPlayers,
 }
 
 /// CR 102 + CR 119 + CR 402: Player axis for player-scoped quantity references.
@@ -2345,8 +2387,12 @@ pub enum ObjectScope {
     Recipient,
     /// CR 603.2: The object referenced by the current trigger event.
     EventSource,
-    /// CR 117.1 + CR 400.7j + CR 608.2k: The object paid as a cost for the
-    /// resolving spell or ability, read from `ResolvedAbility.cost_paid_object`.
+    /// CR 608.2k: The specific untargeted object previously referred to by
+    /// this ability's cost OR trigger condition. Resolved (first match wins)
+    /// via `ResolvedAbility.cost_paid_object` → trigger-event source →
+    /// `effect_context_object`. Subsumes the former `EventContextSource*`
+    /// trio (CR 117.1 + CR 400.7j cost referent and CR 603.2 trigger
+    /// referent are the two enumerated members of CR 608.2k's single clause).
     CostPaidObject,
 }
 
@@ -2394,8 +2440,12 @@ pub enum QuantityRef {
     /// CR 119: `player`'s current life total. See `HandSize` for player-axis
     /// semantics.
     LifeTotal { player: PlayerScope },
-    /// Number of cards in the controller's graveyard.
-    GraveyardSize,
+    /// CR 404: Number of cards in the scoped player's graveyard. `PlayerScope`
+    /// follows the same player-axis semantics as `HandSize` / `LifeTotal`:
+    /// `Controller` is the default ("your graveyard"); `Opponent { aggregate }`
+    /// covers "an opponent['s] graveyard" thresholds (e.g. Merfolk Windrobber,
+    /// See Double — "if an opponent has eight or more cards in their graveyard").
+    GraveyardSize { player: PlayerScope },
     /// Controller's life total minus the format's starting life total.
     /// Used for "N or more life more than your starting life total" conditions.
     LifeAboveStarting,
@@ -2485,16 +2535,20 @@ pub enum QuantityRef {
     /// CR 208.1 + CR 113.6: Current power of an object, scoped via ObjectScope
     /// (Round Π-6). Replaces the `SelfPower` / `TargetPower` sibling pair.
     /// `Source` reads the source object's power (post-layer); `Target` reads
-    /// the first object target's power.
+    /// the first object target's power. `CostPaidObject` subsumes the former
+    /// `EventContextSourcePower` (CR 608.2k: cost OR trigger-condition
+    /// referent).
     Power { scope: ObjectScope },
     /// CR 208.1 + CR 113.6: Current toughness of an object, scoped via
     /// ObjectScope (Round Π-6). Mirrors `Power`. Replaces the `SelfToughness`
-    /// variant.
+    /// variant. `CostPaidObject` subsumes the former
+    /// `EventContextSourceToughness` (CR 608.2k).
     Toughness { scope: ObjectScope },
     /// CR 202.3: Mana value of an object, scoped via ObjectScope.
     /// `Source` is the resolving ability's source; `Target` is the first object
     /// target. Used by source/target-relative mana-value filters such as
-    /// "with the same mana value as that spell".
+    /// "with the same mana value as that spell". `CostPaidObject` subsumes the
+    /// former `EventContextSourceManaValue` (CR 608.2k).
     ObjectManaValue { scope: ObjectScope },
     /// CR 105.1 + CR 105.2: Number of colors of an object, scoped via
     /// ObjectScope. Counts the object's current W/U/B/R/G color set; colorless
@@ -2521,10 +2575,10 @@ pub enum QuantityRef {
     /// as `source` to `resolve_quantity`. For an alt-cost cast (CR 118.9) this
     /// is the spell-being-cast, so "pay life equal to its mana value" reads
     /// the right value at cost-payment time. Distinct from
-    /// `EventContextSourceManaValue` (which reads the triggering source via
-    /// `current_trigger_event`); that ref returns 0 outside trigger
-    /// resolution, whereas this one is correct any time the resolver has a
-    /// `source_id` (cost payment, ability resolution, etc.).
+    /// `ObjectManaValue { scope: CostPaidObject }` (which reads the
+    /// cost-paid / trigger-referenced object per CR 608.2k); that ref returns
+    /// 0 outside cost/trigger resolution, whereas this one is correct any time
+    /// the resolver has a `source_id` (cost payment, ability resolution, etc.).
     SelfManaValue,
     /// CR 107.3e: Aggregate query (max/min/sum) over a property of battlefield objects.
     Aggregate {
@@ -2601,14 +2655,6 @@ pub enum QuantityRef {
     /// CR 603.7c: Numeric value from the triggering event.
     /// Extracts amount/count from DamageDealt, LifeChanged, CardsDrawn, CounterAdded, etc.
     EventContextAmount,
-    /// CR 603.7c: Power of the source object from the triggering event.
-    /// Falls back to LKI cache for dies/leaves-battlefield triggers.
-    EventContextSourcePower,
-    /// CR 603.7c: Toughness of the source object from the triggering event.
-    /// Falls back to LKI cache for dies/leaves-battlefield triggers.
-    EventContextSourceToughness,
-    /// CR 603.7c: Mana value of the source object from the triggering event.
-    EventContextSourceManaValue,
     /// CR 603.10a + CR 603.6e: Count of attachments of a given kind that were attached
     /// to the leaving-battlefield object at the moment it left, optionally filtered by
     /// attachment controller. Resolved via the triggering `ZoneChangeRecord`'s
@@ -3029,6 +3075,21 @@ pub enum QuantityExpr {
         base: i32,
         exponent: Box<QuantityExpr>,
     },
+    /// The (unsigned) difference between two dynamic quantities. Resolves to
+    /// `(resolve(left) - resolve(right)).abs()`. "The difference between A and
+    /// B" is an unsigned-magnitude Oracle templating convention — it has no
+    /// dedicated Comprehensive Rules number; `.abs()` implements that
+    /// convention. (CR 107.1b is related but distinct: it governs clamping a
+    /// negative *result* to zero, not taking an absolute value — it confirms
+    /// only that the resulting amount is non-negative, not the operation.)
+    /// A general arithmetic peer of `Offset`/`Multiply`/`Sum`: composes any
+    /// "difference between A and B" card from existing `QuantityExpr` leaves
+    /// (e.g. Doran's "the difference between its power and toughness" is
+    /// `Difference { Ref(Power{Recipient}), Ref(Toughness{Recipient}) }`).
+    Difference {
+        left: Box<QuantityExpr>,
+        right: Box<QuantityExpr>,
+    },
 }
 
 impl QuantityExpr {
@@ -3259,11 +3320,30 @@ pub enum StaticCondition {
     SourceIsBlocked,
     /// CR 725.1: True when the controller is the monarch.
     IsMonarch,
+    /// CR 725.1: True when no player holds the monarch designation. Distinct
+    /// from `Not(IsMonarch)`, which is also true when an opponent is monarch.
+    NoMonarch,
     /// CR 702.131a: True when the controller has the city's blessing (Ascend).
     HasCityBlessing,
     /// CR 309.7: True when the controller has completed at least one dungeon.
     /// Used by "as long as you've completed a dungeon" statics (Nadaar, etc.).
     CompletedADungeon,
+    /// CR 103.1: True when the scoped player was the starting player (took the
+    /// first turn of the game). Fixed at game start
+    /// (`GameState.current_starting_player`). For "if you weren't the starting
+    /// player", wrap with `StaticCondition::Not`. `controller` selects whose
+    /// start status is checked; `ControllerRef::You` is the canonical reading.
+    WasStartingPlayer {
+        controller: ControllerRef,
+    },
+    /// CR 702.185c: True when any player cast a spell using the named
+    /// alternative-cast `variant` (e.g. Warp) this turn. Parameterized by
+    /// `CastingVariant` so every "cast via X this turn" history query — not
+    /// just Warp — shares one variant. Not controller-scoped: "a spell was
+    /// warped this turn" matches a cast by any player.
+    SpellCastWithVariantThisTurn {
+        variant: crate::types::game_state::CastingVariant,
+    },
     /// CR 701.27: True when any opponent has at least this many poison counters.
     OpponentPoisonAtLeast {
         count: u32,
@@ -3315,7 +3395,7 @@ pub enum StaticCondition {
     /// CR 903.3: True when the controller controls at least one of their commander(s).
     /// Used for Lieutenant mechanic ("if you control your commander").
     ControlsCommander,
-    /// CR 611.2b: True when the source object is tapped.
+    /// CR 110.5b: True when the source object is tapped.
     /// Used for "for as long as ~ remains tapped" duration conditions.
     SourceIsTapped,
     /// CR 702.62a + CR 611.2b: True when the source object's current controller
@@ -3355,6 +3435,11 @@ pub enum StaticCondition {
     /// face-down. Resolves against the attached-to object's `face_down` status. Used by
     /// "as long as enchanted creature is face down" gated statics (Unable to Scream, etc.).
     EnchantedIsFaceDown,
+    /// CR 702.166a + CR 601.2f: True when an optional additional cost (Bargain) was paid
+    /// for the spell currently being cast. Gates self-spell `ReduceCost` statics like
+    /// Hamlet Glutton's "This spell costs {2} less to cast if it's bargained." Evaluated
+    /// against the in-flight cast's `additional_cost_paid` flag (`state.pending_cast`).
+    AdditionalCostPaid,
     None,
 }
 
@@ -3467,7 +3552,12 @@ pub enum ParsedCondition {
     YouControlNamedPlaneswalker {
         name: String,
     },
-    YouControlCreatureWithKeyword {
+    /// CR 602.5b: "[you / an opponent] control(s) a creature with [keyword]"
+    /// activation restriction. `controller` selects whose creatures are
+    /// inspected — `ControllerRef::You` for "you control", `Opponent` for
+    /// "an opponent controls".
+    ControlsCreatureWithKeyword {
+        controller: ControllerRef,
         keyword: Keyword,
     },
     YouControlCreatureWithPowerAtLeast {
@@ -3530,6 +3620,14 @@ pub enum ParsedCondition {
     },
     /// CR 702.131a: True when the activating player has the city's blessing.
     HasCityBlessing,
+    /// CR 102.1: "The active player is the player whose turn it is." True when
+    /// the scoped player is the active player — gates a casting/restriction
+    /// predicate on "if it's your turn". For "if it's not your turn" the parser
+    /// wraps this leaf with `ParsedCondition::Not`. Mirrors
+    /// `AbilityCondition::IsYourTurn` (the structural analogue at the
+    /// ability-resolution layer), the same way `ParsedCondition::And` mirrors
+    /// `AbilityCondition::And`.
+    IsYourTurn,
     /// CR 601.3d + CR 702.8a + CR 608.2c: The in-flight spell being cast targets at
     /// least one object that matches `filter`. Gates a target-dependent casting
     /// permission (Timely Ward — "you may cast this spell as though it had flash if
@@ -3603,6 +3701,17 @@ pub enum PaymentCost {
     /// payment hierarchy.
     AbilityCost {
         cost: AbilityCost,
+    },
+    /// CR 118.1: Per-object scaled mana cost. The `base` `ManaCost` (which may
+    /// carry colored pips, e.g. `{U}`) is multiplied by `times` at payment
+    /// resolution — every pip is repeated and the generic component scaled.
+    /// Models "pay {N} for each [object] chosen this way" uniformly across
+    /// generic ({4}×N) and colored ({U}×N) bases.
+    /// CR 118.5: when `times` resolves to 0 the scaled cost is `{0}`, paid by
+    /// the player's acknowledgment (the empty selection) — a no-op SUCCESS.
+    ScaledMana {
+        base: ManaCost,
+        times: QuantityExpr,
     },
 }
 
@@ -3775,7 +3884,7 @@ pub enum AbilityCost {
         target: Option<TargetFilter>,
     },
     PayEnergy {
-        amount: u32,
+        amount: QuantityExpr,
     },
     /// CR 118.3 + CR 702.179f: Pay speed as an activation or additional cost.
     PaySpeed {
@@ -4159,7 +4268,11 @@ impl LegacyUnlessCost {
             LegacyUnlessCost::PayLife { amount } => AbilityCost::PayLife {
                 amount: QuantityExpr::Fixed { value: amount },
             },
-            LegacyUnlessCost::PayEnergy { amount } => AbilityCost::PayEnergy { amount },
+            LegacyUnlessCost::PayEnergy { amount } => AbilityCost::PayEnergy {
+                amount: QuantityExpr::Fixed {
+                    value: amount as i32,
+                },
+            },
             LegacyUnlessCost::DiscardCard { filter } => AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter,
@@ -4701,6 +4814,9 @@ pub enum Effect {
     CopySpell {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
+        /// CR 707.10c: whether the controller may choose new targets for the copy.
+        #[serde(default = "default_copy_keep_targets")]
+        retarget: CopyRetargetPermission,
     },
     /// CR 707.2 / CR 707.5: Create a token that's a copy of a permanent.
     /// Copies copiable characteristics (name, mana cost, color, types, P/T, abilities, keywords)
@@ -4710,6 +4826,13 @@ pub enum Effect {
         /// Any/Typed are selected as targets when `source_filter` is absent.
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
+        /// CR 109.4: The player who creates (and therefore controls) the copy
+        /// token(s). Mirrors `Effect::Token.owner` — defaults to
+        /// `TargetFilter::Controller`, but "target opponent creates a token
+        /// that's a copy of it" lifts the chosen opponent into this field via
+        /// `inject_subject_target`. The copy *source* stays in `target`.
+        #[serde(default = "default_target_filter_controller")]
+        owner: TargetFilter,
         /// CR 115.1 + CR 608.2c: Non-targeting copy source set for "for each
         /// [object], create a token that's a copy of it" effects. These objects
         /// are chosen by the effect at resolution, not by target declaration.
@@ -5215,6 +5338,13 @@ pub enum Effect {
     /// CR 615: Prevent damage to a target.
     PreventDamage {
         amount: PreventionAmount,
+        /// CR 615.11 + CR 107.3i: When present, overrides `amount` at effect
+        /// resolution — the dynamic quantity is resolved to a concrete count and
+        /// the prevention shield is created as a static `Next(n)` depletion shield.
+        /// Set by "prevent X … where X is <quantity>" clauses. `None` for the
+        /// common fixed/All forms.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        amount_dynamic: Option<QuantityExpr>,
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
         #[serde(default)]
@@ -5296,7 +5426,8 @@ pub enum Effect {
     },
     /// Choose card(s) from a zone (typically exiled cards from a prior effect).
     /// Building block for impulse draw, cascade, hideaway, and similar exile-then-select patterns.
-    /// The selection is from the tracked set of the parent effect's result.
+    /// The selection is from the tracked set of the parent effect's result, falling back to
+    /// direct zone contents for wordings like "choose a card in your hand."
     /// CR 700.2: The `chooser` field determines who makes the selection.
     ChooseFromZone {
         /// How many cards to choose.
@@ -5304,6 +5435,15 @@ pub enum Effect {
         count: u32,
         /// Which zone the cards are in (usually Exile).
         zone: Zone,
+        /// Additional zones that share the same owner and filter.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        additional_zones: Vec<Zone>,
+        /// Which player's zone(s) are searched when no tracked set is available.
+        #[serde(default)]
+        zone_owner: ZoneOwner,
+        /// Optional filter for direct zone-backed choices.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<TargetFilter>,
         /// Who makes the choice: controller (default) or opponent.
         #[serde(default)]
         chooser: Chooser,
@@ -5313,6 +5453,24 @@ pub enum Effect {
         /// Additional validation rules for the chosen subset.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         constraint: Option<ChooseFromZoneConstraint>,
+    },
+    /// CR 603.7e: An affected-player-chosen battlefield permanent set, written
+    /// into the chain's tracked object set so downstream effects ("pay {N} for
+    /// each ... chosen this way", "untap those creatures") reference the exact
+    /// selection. `chooser` is a `TargetFilter` (not `Chooser`) so it rebinds
+    /// per-trigger-instance to the affected player — e.g. the player whose
+    /// upkeep it is for an "at the beginning of each player's upkeep" trigger.
+    /// `filter` constrains the eligible permanents; `min`/`max` express the
+    /// cardinality ("any number" → `min: 0, max: None`).
+    ChooseObjectsIntoTrackedSet {
+        /// The player who makes the selection — resolved per-instance.
+        chooser: TargetFilter,
+        /// Constrains which battlefield permanents are eligible.
+        filter: TargetFilter,
+        /// Minimum number of objects that must be selected.
+        min: u32,
+        /// Maximum number of objects selectable (`None` = "any number").
+        max: Option<u32>,
     },
     /// CR 101.4 + CR 701.21a: Each player chooses one permanent per type category
     /// from among the permanents they control, then sacrifices the rest.
@@ -5380,13 +5538,22 @@ pub enum Effect {
         #[serde(default = "default_target_filter_controller")]
         player: TargetFilter,
         filter: TargetFilter,
-        /// Where the matching card goes (Hand or Battlefield).
+        /// Where the matching card goes (Hand or Battlefield). When
+        /// `kept_optional_to` is `Some`, this is repurposed as the *decline*
+        /// zone (where the kept card goes if the controller declines).
         kept_destination: Zone,
         /// Where non-matching revealed cards go (Library bottom or Graveyard).
         rest_destination: Zone,
         /// CR 110.5b: When true, the matching card enters the battlefield tapped.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         enter_tapped: bool,
+        /// CR 701.20a + CR 608.2c: Optional kept destination — `Some(accept_zone)`
+        /// encodes "you may put that card onto the battlefield": the controller
+        /// chooses the kept card's destination. Accept → `accept_zone`; decline →
+        /// `kept_destination` (repurposed as the decline zone). `None` → the
+        /// kept card unconditionally goes to `kept_destination` (mandatory).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kept_optional_to: Option<Zone>,
     },
     /// CR 701.57a: Discover N — exile from top until nonland with MV ≤ N,
     /// cast free or put to hand, rest to bottom in random order.
@@ -5791,8 +5958,27 @@ fn default_two_i32() -> i32 {
     2
 }
 
+/// CR 707.10c: Whether a copy effect grants its controller the choice to pick
+/// new targets for the copy. Only effects whose Oracle text states "you may
+/// choose new targets for the copy/copies" permit retargeting; a bare "copy"
+/// keeps the original's targets unchanged (CR 115.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum CopyRetargetPermission {
+    /// No "choose new targets" clause — copy inherits the original's targets.
+    KeepOriginalTargets,
+    /// Oracle text grants "you may choose new targets for the copy."
+    MayChooseNewTargets,
+}
+
 pub(crate) fn default_target_filter_any() -> TargetFilter {
     TargetFilter::Any
+}
+
+/// CR 115.1: a copy keeps the original spell's declared targets unless an
+/// effect explicitly grants new-target choice (CR 707.10c).
+fn default_copy_keep_targets() -> CopyRetargetPermission {
+    CopyRetargetPermission::KeepOriginalTargets
 }
 
 fn default_target_filter_none() -> TargetFilter {
@@ -6046,6 +6232,13 @@ impl TargetFilter {
         if self.references_exiled_by_source() {
             return true;
         }
+        // CR 608.2c + CR 109.4: A player-only reference to a resolution-chosen
+        // player is resolved during resolution (from `ResolvedAbility.
+        // chosen_players`), never declared as a target — so it is a context
+        // ref and surfaces no target slot.
+        if self.chosen_player_index().is_some() {
+            return true;
+        }
         matches!(
             self,
             TargetFilter::None
@@ -6072,31 +6265,22 @@ impl TargetFilter {
         )
     }
 
-    /// CR 609.3 + CR 102.1: Returns `true` when correct resolution of this
-    /// filter requires `ability.scoped_player` to be `Some(_)`. When the
-    /// resolver hits this filter with `scoped_player == None`, the effect
-    /// must be skipped per "do as much as possible" — falling back to the
-    /// source's controller would assign the effect to the wrong player (the
-    /// caster instead of the chosen player who was never chosen because no
-    /// legal choice existed; see Gluntch the Bestower in a two-player game).
-    ///
-    /// Recognized shapes:
-    /// - `TargetFilter::ScopedPlayer` (the direct player reference)
-    /// - `TargetFilter::Typed { ..., controller: Some(ControllerRef::ScopedPlayer), ... }`
-    ///   (object selection scoped to the chosen player's permanents)
-    /// - `Or`/`And`/`Not` filters that contain any of the above
-    ///   (composed targets — every leg participates so a single
-    ///   ScopedPlayer-dependent leg flips the whole filter to "requires
-    ///   bound").
-    pub fn requires_bound_scoped_player(&self) -> bool {
+    /// CR 608.2c + CR 109.4: If this filter is a player-only reference to the
+    /// Nth resolution-chosen player (a type-filter-free `Typed` whose only
+    /// distinguishing property is `controller: ChosenPlayer { index }`), return
+    /// that index. Used by effect-player resolvers to bind a "choose a player
+    /// to <verb>" sub-effect's acting/recipient player without surfacing a
+    /// target slot — the chosen player is fixed during resolution, not at
+    /// target declaration.
+    pub fn chosen_player_index(&self) -> Option<u8> {
         match self {
-            TargetFilter::ScopedPlayer => true,
-            TargetFilter::Typed(tf) => matches!(tf.controller, Some(ControllerRef::ScopedPlayer)),
-            TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-                filters.iter().any(Self::requires_bound_scoped_player)
+            TargetFilter::Typed(tf) if tf.type_filters.is_empty() && tf.properties.is_empty() => {
+                match tf.controller {
+                    Some(ControllerRef::ChosenPlayer { index }) => Some(index),
+                    _ => None,
+                }
             }
-            TargetFilter::Not { filter } => filter.requires_bound_scoped_player(),
-            _ => false,
+            _ => None,
         }
     }
 
@@ -6256,11 +6440,36 @@ impl Effect {
             | Effect::GiveControl { target, .. }
             | Effect::RemoveFromCombat { target, .. } => Some(target),
 
+            // CR 109.4 + CR 115.1 + CR 707.2: `CopyTokenOf` has two
+            // potentially-targetable axes — the copy *source* (`target`) and
+            // the token *creator/owner* (`owner`). `target_filter()` surfaces
+            // exactly one as the stack-push target slot:
+            //  * When the copy source is a declared target (`source_filter` is
+            //    `None` and `target` is a real targetable filter, e.g.
+            //    "create a token that's a copy of target creature"), the
+            //    copy-source axis wins — it must keep its slot.
+            //  * Otherwise the copy source is a context ref (`SelfRef` /
+            //    `ParentTarget` — Wedding Ring, Twinflame Strike) or a
+            //    non-targeting `source_filter` set, so the copy-source axis
+            //    needs no slot; the `owner` filter is surfaced instead so
+            //    "target opponent creates a token that's a copy of it" can
+            //    declare the opponent as a target. This mirrors `Effect::Token`
+            //    below, which surfaces its `owner` unconditionally.
+            // No real card targets both axes at once; if one ever exists, the
+            // copy-source axis is surfaced and `owner` resolution falls back to
+            // the controller (documented at `token::resolve_token_owner`).
             Effect::CopyTokenOf {
                 target,
+                owner,
                 source_filter,
                 ..
-            } => source_filter.is_none().then_some(target),
+            } => {
+                if source_filter.is_none() && !target.is_context_ref() {
+                    Some(target)
+                } else {
+                    Some(owner)
+                }
+            }
 
             Effect::ExileTop { player, .. } | Effect::ExileFromTopUntil { player, .. } => {
                 Some(player)
@@ -6370,6 +6579,10 @@ impl Effect {
             | Effect::Conjure { .. }
             | Effect::ChooseOneOf { .. }
             | Effect::Unimplemented { .. }
+            // CR 603.7e: ChooseObjectsIntoTrackedSet has no discrete effect-target
+            // slot — `chooser` is a player ref resolved like `PayCost.payer`, and
+            // `filter` constrains the interactive selection, not a targeting slot.
+            | Effect::ChooseObjectsIntoTrackedSet { .. }
             // CR 701.20a: RevealFromHand implicitly targets the controller's own hand;
             // it has no discrete `target` field for the generic targeting layer.
             | Effect::RevealFromHand { .. } => None,
@@ -6493,6 +6706,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::ProcessRadCounters => "ProcessRadCounters",
         Effect::GrantCastingPermission { .. } => "GrantCastingPermission",
         Effect::ChooseFromZone { .. } => "ChooseFromZone",
+        Effect::ChooseObjectsIntoTrackedSet { .. } => "ChooseObjectsIntoTrackedSet",
         Effect::ChooseAndSacrificeRest { .. } => "ChooseAndSacrificeRest",
         Effect::Exploit { .. } => "Exploit",
         Effect::GainEnergy { .. } => "GainEnergy",
@@ -6661,6 +6875,7 @@ pub enum EffectKind {
     ProcessRadCounters,
     GrantCastingPermission,
     ChooseFromZone,
+    ChooseObjectsIntoTrackedSet,
     ChooseAndSacrificeRest,
     Exploit,
     GainEnergy,
@@ -6833,6 +7048,7 @@ impl From<&Effect> for EffectKind {
             Effect::ProcessRadCounters => EffectKind::ProcessRadCounters,
             Effect::GrantCastingPermission { .. } => EffectKind::GrantCastingPermission,
             Effect::ChooseFromZone { .. } => EffectKind::ChooseFromZone,
+            Effect::ChooseObjectsIntoTrackedSet { .. } => EffectKind::ChooseObjectsIntoTrackedSet,
             Effect::ChooseAndSacrificeRest { .. } => EffectKind::ChooseAndSacrificeRest,
             Effect::Exploit { .. } => EffectKind::Exploit,
             Effect::GainEnergy { .. } => EffectKind::GainEnergy,
@@ -7036,6 +7252,8 @@ impl<'de> Deserialize<'de> for ModalSelectionCondition {
 pub enum AbilityTag {
     /// CR 702.142a: This ability originated from a Boast keyword definition.
     Boast,
+    /// CR 702.177a: This ability originated from an Exhaust keyword definition.
+    Exhaust,
 }
 
 /// Structured activation-time restrictions parsed from Oracle text.
@@ -7260,6 +7478,67 @@ pub struct AbilityDefinition {
     /// Read at target-selection time to short-circuit `WaitingFor::TargetSelection`.
     #[serde(default, skip_serializing_if = "TargetSelectionMode::is_chosen")]
     pub target_selection_mode: TargetSelectionMode,
+    /// CR 608.2c + CR 107.1c: per-iteration loop-continuation predicate, the
+    /// non-count companion to `repeat_for`. When `Some`, the resolution chain
+    /// is re-followed ("repeat this process") under this predicate instead of
+    /// a fixed iteration count. Mutually exclusive with `repeat_for` in
+    /// practice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_until: Option<RepeatContinuation>,
+    /// CR 608.2c: How this ability links to its parent when present as a
+    /// `sub_ability`. `ContinuationStep` (default) = part of the parent's action;
+    /// `SequentialSibling` = independent following instruction. Set during
+    /// `lower_effect_chain_ir` from the `ClauseBoundary` PRECEDING this clause.
+    #[serde(default, skip_serializing_if = "SubAbilityLink::is_continuation")]
+    pub sub_link: SubAbilityLink,
+}
+
+/// CR 608.2c: How a `sub_ability` relates to its parent in the resolution chain.
+/// Determines whether the sub is part of the parent's action (skipped when an
+/// optional parent is declined) or an independent following instruction (always
+/// resolves). Derived at parse time from the `ClauseBoundary` separating the
+/// two clauses in the printed Oracle text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SubAbilityLink {
+    /// Within-sentence continuation (comma / "then" joined). The sub is a
+    /// resolution step of the parent's instruction — Squadron Hawk
+    /// "...put them into your hand, then shuffle." Skipped when an optional
+    /// parent is declined. This is the default: an unmarked sub is a
+    /// continuation, preserving today's runtime behavior for every existing
+    /// chain.
+    #[default]
+    ContinuationStep,
+    /// Separate-sentence sibling instruction (sentence boundary). The sub is
+    /// the NEXT printed instruction, independent of the parent — Ponder
+    /// "You may shuffle." "Draw a card." Always resolves, even when an
+    /// optional parent is declined (CR 608.2c "in the order written").
+    SequentialSibling,
+}
+
+impl SubAbilityLink {
+    /// `skip_serializing_if` predicate — the default needs no JSON byte.
+    pub fn is_continuation(link: &Self) -> bool {
+        matches!(link, Self::ContinuationStep)
+    }
+}
+
+/// CR 608.2c + CR 107.1c: how a "repeat this process" loop decides whether to
+/// run another iteration. The non-count companion to `AbilityDefinition`'s
+/// `repeat_for` (a fixed `QuantityExpr` count) — this predicate decides
+/// per-iteration whether to re-follow the resolving ability's instructions.
+///
+/// Currently a single-variant enum: only the controller-decision form ("you
+/// may repeat this process any number of times") is modeled. The game-state
+/// predicate form ("if you do, repeat this process" — Primal Surge) is a
+/// separately-tracked deferred unit; it will add a `While(...)` variant once
+/// the optional-put pause semantics it depends on are designed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum RepeatContinuation {
+    /// CR 107.1c: "you may repeat this process [any number of times]" — after
+    /// each iteration fully resolves, the controller is prompted
+    /// (`WaitingFor::RepeatDecision`) to repeat or stop.
+    ControllerChoice,
 }
 
 impl fmt::Debug for AbilityDefinition {
@@ -7317,6 +7596,8 @@ impl AbilityDefinition {
             player_scope: None,
             starting_with: None,
             target_selection_mode: TargetSelectionMode::Chosen,
+            repeat_until: None,
+            sub_link: SubAbilityLink::ContinuationStep,
         }
     }
 
@@ -7473,14 +7754,19 @@ pub enum AbilityCondition {
         )]
         min_count: u32,
     },
-    /// CR 608.2e: "Instead" clause — replaces the parent effect when the additional cost was paid.
+    /// CR 614.1a / CR 614.15: "Instead" clause — a self-replacement effect that replaces
+    /// the parent effect when the additional cost was paid.
     /// The resolver swaps the override sub's effect in place of the parent before resolution.
     AdditionalCostPaidInstead,
     /// CR 608.2c: "If you do" — sub_ability executes only if the parent optional effect was performed.
     IfYouDo,
-    /// CR 603.12: "When you do" — reflexive trigger that always fires when the parent
-    /// (non-optional) effect was performed. Unlike `IfYouDo` which gates on
-    /// `optional_effect_performed`, this is unconditionally true for non-optional parents.
+    /// CR 603.12: "When you do" — reflexive trigger that fires based on whether the
+    /// parent's trigger event actually occurred. For a non-cost parent (e.g. a
+    /// `BecomeCopy` reflexive or a copy/exile replacement sub-ability) the "do"
+    /// always occurred, so this is unconditionally true. For a cost-payment parent
+    /// (`Effect::PayCost`), an unpayable or declined cost is not an occurrence, so
+    /// the reflexive sub-ability is skipped — `evaluate_condition` gates on
+    /// `cost_payment_failed_flag` for that case (mirrors `IfYouDo`).
     WhenYouDo,
     /// CR 603.4: "If you cast it from [zone]" — sub_ability executes only if the spell
     /// was cast from the specified zone. Evaluated against SpellContext.cast_from_zone.
@@ -7581,6 +7867,21 @@ pub enum AbilityCondition {
     /// is the ability's controller. For "if it's not your turn", wrap with
     /// `AbilityCondition::Not`.
     IsYourTurn,
+    /// CR 103.1 + CR 608.2c: "if you were the starting player" — gates a
+    /// follow-up effect on whether the scoped player took the first turn of
+    /// the game. The starting player is fixed at game start
+    /// (`GameState.current_starting_player`). For "if you weren't the starting
+    /// player" (Radiant Smite, Cindercone Smite), wrap with
+    /// `AbilityCondition::Not`. `controller` selects whose start status is
+    /// checked; `ControllerRef::You` is the canonical reading.
+    WasStartingPlayer { controller: ControllerRef },
+    /// CR 702.185c + CR 608.2c: "if a spell was warped this turn" — gates a
+    /// follow-up effect on whether any player cast a spell using the named
+    /// alternative-cast `variant` this turn. Parameterized by `CastingVariant`
+    /// so every "cast via X this turn" history query shares one variant.
+    SpellCastWithVariantThisTurn {
+        variant: crate::types::game_state::CastingVariant,
+    },
     /// CR 500.8 + CR 506.1 + CR 608.2c: "if it's the first combat phase of the turn".
     /// Gates a follow-up effect on whether this is the first combat phase started this turn.
     FirstCombatPhaseOfTurn,
@@ -7594,11 +7895,12 @@ pub enum AbilityCondition {
     /// [filter] this way" checks the object paid as a cost for this resolving
     /// ability using its cost-payment-time public characteristics.
     CostPaidObjectMatchesFilter { filter: TargetFilter },
-    /// CR 611.2b: "if this [permanent] is tapped" — checks the source's tapped status.
+    /// CR 110.5b: "if this [permanent] is tapped" — checks the source's tapped status.
     /// For the untapped sense, wrap with `AbilityCondition::Not`.
     SourceIsTapped,
-    /// CR 608.2c: General "instead" replacement — wraps any `AbilityCondition` with
-    /// replacement semantics. When the inner condition is met at resolution, the sub's
+    /// CR 614.1a / CR 614.15: General "instead" self-replacement — wraps any
+    /// `AbilityCondition` with replacement semantics. When the inner condition is
+    /// met at resolution, the sub's
     /// effect chain replaces the parent's entire effect chain. When not met, the base
     /// continuation chain (stored in `else_ability`) runs after the parent's own effect.
     ///
@@ -7809,9 +8111,6 @@ pub enum TriggerCondition {
     LostLife,
     /// "if you descended this turn" (a permanent card was put into your graveyard)
     Descended,
-    /// Deprecated: Use `ControlCount { minimum, filter }` instead.
-    /// Kept for backward compatibility with serialized card data.
-    ControlCreatures { minimum: u32 },
     /// "if you control a [type]" — general control presence check.
     ControlsType { filter: TargetFilter },
     /// CR 603.4: "if no spells were cast last turn" — werewolf transform condition.
@@ -7875,6 +8174,10 @@ pub enum TriggerCondition {
     /// is expressed via `Not { Box::new(CastVariantPaid { variant }) }`.
     CastVariantPaid { variant: CastVariantPaid },
 
+    /// CR 605.1a + CR 603.4: Event qualifier for "that isn't a mana ability"
+    /// on activated-ability trigger events.
+    ActivatedAbilityIsNonMana,
+
     /// CR 700.4 + CR 120.1: "a creature dealt damage by ~ this turn dies" — death trigger
     /// gated on the dying creature having been dealt damage by the trigger source this turn.
     DealtDamageBySourceThisTurn,
@@ -7917,6 +8220,23 @@ pub enum TriggerCondition {
 
     /// CR 725.1: "if you're the monarch" is true when the controller is the monarch.
     IsMonarch,
+    /// CR 725.1: "if there is no monarch" is true when no player holds the
+    /// monarch designation. Distinct from `Not(IsMonarch)`.
+    NoMonarch,
+    /// CR 103.1: "if you were/weren't the starting player" — true when the
+    /// scoped player took the first turn of the game
+    /// (`GameState.current_starting_player`). Used by Radiant Smite's Cycling
+    /// trigger ("When you cycle Radiant Smite, if you weren't the starting
+    /// player, ..."). Negation is expressed via `Not`. `controller` selects
+    /// whose start status is checked.
+    WasStartingPlayer { controller: ControllerRef },
+    /// CR 702.185c: "if a spell was warped this turn" — true when any player
+    /// cast a spell using the named alternative-cast `variant` this turn.
+    /// Parameterized by `CastingVariant` so every "cast via X this turn"
+    /// history query shares one variant.
+    SpellCastWithVariantThisTurn {
+        variant: crate::types::game_state::CastingVariant,
+    },
     /// CR 702.131a: "if you have the city's blessing" — true when the controller has Ascend.
     HasCityBlessing,
     /// CR 309.7: True when the controller has completed a dungeon.
@@ -7927,7 +8247,7 @@ pub enum TriggerCondition {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         specific: Option<crate::game::dungeon::DungeonId>,
     },
-    /// CR 611.2b: "if this [permanent] is tapped" — checks the source's tapped status.
+    /// CR 110.5b: "if this [permanent] is tapped" — checks the source's tapped status.
     /// Negation ("untapped") is expressed via `Not { Box::new(SourceIsTapped) }`.
     SourceIsTapped,
     /// CR 701.27g: "if this [permanent] is transformed" — checks the source's transformed status.
@@ -7996,6 +8316,16 @@ pub enum TriggerCondition {
         destination: Zone,
         filter: TargetFilter,
     },
+    /// CR 603.4 + CR 603.6a + CR 110.5b: Intervening-if for an "enters
+    /// tapped" rider whose subject is the permanent named by the trigger
+    /// event (the entering permanent), NOT the permanent that owns the
+    /// ability. Distinct from `SourceIsTapped`, which checks the ability's
+    /// own source. Used by "Whenever a [filter] enters tapped" observer
+    /// triggers (Amulet of Vigor, Tiller Engine) and, via `Not`, "enters
+    /// untapped" (Charismatic Conqueror). Mirrors the source-vs-event-object
+    /// split already established by `SourceMatchesFilter` /
+    /// `ZoneChangeObjectMatchesFilter`.
+    ZoneChangeObjectIsTapped,
     /// CR 603.4 + CR 611.2b: Source-bound intervening-if predicate expressed
     /// as a normal target filter evaluated against the trigger source.
     SourceMatchesFilter { filter: TargetFilter },
@@ -8111,6 +8441,12 @@ pub enum ReplacementCondition {
     /// CR 702.138c: "escapes with" — replacement applies only when the creature
     /// entered the battlefield via escape.
     CastViaEscape,
+    /// CR 702.188a: "if ~ was cast using [variant]" — replacement applies only
+    /// when the source permanent's spell was cast paying the named alternative
+    /// cost. Mirrors `TriggerCondition::CastVariantPaid` /
+    /// `AbilityCondition::CastVariantPaid`. Evaluated against
+    /// `GameObject.cast_variant_paid`. Used by Scarlet Spider (web-slinging).
+    CastVariantPaid { variant: CastVariantPaid },
     /// CR 603.4: "if you cast it from [zone]" — replacement applies only when
     /// the source object was cast from the specified zone (e.g., Myojin's
     /// "enters with an indestructible counter on it if you cast it from your
@@ -8223,6 +8559,40 @@ pub enum TriggerConstraint {
     MaxTimesPerTurn { max: u32 },
 }
 
+/// CR 603.6c: source-zone constraint for one clause of a zone-change trigger.
+/// CR 400.1 enumerates the seven zones; a zone-change event's `from` field is
+/// `Some(zone)` for an object that moved between zones and `None` for an object
+/// created directly in its destination (CR 111.1 token creation).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum OriginConstraint {
+    /// No source-zone restriction. Matches any `from`, including `None`.
+    Any,
+    /// Matches only when the object moved from exactly this zone.
+    Equals(Zone),
+    /// "from anywhere other than the battlefield" — matches any source zone
+    /// except this one. An object with `from = None` does not match.
+    NotEquals(Zone),
+    /// Matches when the source zone is one of these. Subsumes inclusion sets.
+    OneOf(Vec<Zone>),
+}
+
+/// CR 603.6 + CR 603.2: one clause of a disjunctive zone-change trigger.
+/// A zone-change event satisfies the trigger if it matches ANY clause
+/// (CR 603.2 — a game event matching the trigger condition fires the ability).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ZoneChangeClause {
+    /// CR 603.6c: the source-zone constraint for this clause.
+    pub origin: OriginConstraint,
+    /// The required destination zone, or `None` for "leaves [zone]" triggers
+    /// (CR 603.10a) where the destination is unconstrained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<Zone>,
+    /// Filter the moved card must satisfy for this clause to match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_card: Option<TargetFilter>,
+}
+
 /// Filter for counter-related trigger modes (CounterAdded, CounterRemoved).
 /// When set, the trigger only matches events for the specified counter type,
 /// optionally requiring that the count crosses a threshold.
@@ -8253,6 +8623,16 @@ pub struct TriggerDefinition {
     /// (and `origin` is ignored). Leave empty for single-zone triggers that use `origin`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub origin_zones: Vec<Zone>,
+    /// CR 603.6 + CR 603.2: Disjunctive zone-change clauses. A single triggered
+    /// ability (CR 603.1) whose trigger event is a disjunction of distinct
+    /// zone-change shapes (e.g. Syr Konrad: "another creature dies, OR a creature
+    /// card is put into a graveyard from anywhere other than the battlefield, OR
+    /// a creature card leaves your graveyard"). When non-empty, the matcher fires
+    /// if the event matches ANY clause and the scalar
+    /// `origin`/`origin_zones`/`destination`/`valid_card` fields are ignored.
+    /// Leave empty for single-clause triggers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub zone_change_clauses: Vec<ZoneChangeClause>,
     #[serde(default)]
     pub destination: Option<Zone>,
     #[serde(default)]
@@ -8304,6 +8684,7 @@ impl TriggerDefinition {
             valid_card: None,
             origin: None,
             origin_zones: vec![],
+            zone_change_clauses: vec![],
             destination: None,
             trigger_zones: vec![],
             phase: None,
@@ -8403,6 +8784,11 @@ impl TriggerDefinition {
         self.player_actions = Some(actions);
         self
     }
+
+    pub fn zone_change_clauses(mut self, clauses: Vec<ZoneChangeClause>) -> Self {
+        self.zone_change_clauses = clauses;
+        self
+    }
 }
 
 /// Static ability definition with typed fields. Zero params HashMap.
@@ -8414,6 +8800,29 @@ pub struct StaticDefinition {
     pub affected: Option<TargetFilter>,
     #[serde(default)]
     pub modifications: Vec<ContinuousModification>,
+    /// Optional gate on whether this definition's modifications apply.
+    ///
+    /// CR 603.4 + CR 608.2h: This field has **dual semantics** depending on
+    /// which code path reaches it:
+    ///
+    /// - **Continuous "as long as" gate** — when a `StaticDefinition` belongs
+    ///   to a permanent's intrinsic static ability and is evaluated via the
+    ///   def-index path in `layers.rs`, the condition is re-checked every time
+    ///   layers are recomputed, so the modifications turn on and off with the
+    ///   game state ("creatures you control get +1/+1 as long as you control a
+    ///   Forest").
+    /// - **Resolution-time gate** — when a `StaticDefinition` is carried by an
+    ///   `Effect::GenericEffect` resolved through `effect.rs::resolve`, the
+    ///   condition models an in-effect "if <condition>" (Odric, Lunarch
+    ///   Marshal). Per CR 608.2h / CR 611.2d the condition's truth is
+    ///   determined exactly once, when the effect is applied: `effect.rs`
+    ///   evaluates it, registers a transient continuous effect only for the
+    ///   satisfied subset, and zeroes `condition` to `None` so `layers.rs`
+    ///   never re-evaluates it — the resulting grant then persists for the
+    ///   effect's duration regardless of later state changes.
+    ///
+    /// This is a load-bearing invariant: a `GenericEffect`-borne
+    /// `StaticDefinition` must reach `layers.rs` only with `condition: None`.
     #[serde(default)]
     pub condition: Option<StaticCondition>,
     #[serde(default)]
@@ -8601,6 +9010,25 @@ pub enum CombatDamageScope {
     NoncombatOnly,
 }
 
+/// CR 614.1a: Which player(s) a replacement effect applies to, scoped relative
+/// to the replacement source's controller. `valid_player: None` keeps the
+/// controller-only default; `Some(You)` is the explicit controller scope,
+/// `Some(Opponent)` an opponent-scoped replacement (Tainted Remedy), and
+/// `Some(AnyPlayer)` a global all-players replacement (Rain of Gore).
+///
+/// Serialized as a bare string (no `#[serde(tag)]`) to match the prior
+/// `Option<ControllerRef>` field encoding — existing persisted / in-flight
+/// `valid_player` values (`"You"` / `"Opponent"`) deserialize unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReplacementPlayerScope {
+    /// The replacement source's controller.
+    You,
+    /// Any opponent of the replacement source's controller.
+    Opponent,
+    /// Every player in the game, regardless of who controls the source.
+    AnyPlayer,
+}
+
 /// Whether a replacement effect is mandatory or offers the affected player a choice.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -8703,10 +9131,11 @@ pub struct ReplacementDefinition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_owner_redirect: Option<ControllerRef>,
     /// CR 614.1a: Restricts which player this replacement applies to.
-    /// "an opponent would gain life" → Some(Opponent). None = applies to controller only.
-    /// Parallel to `token_owner_scope` pattern.
+    /// "an opponent would gain life" → Some(Opponent); "a spell or ability would
+    /// cause its controller to gain life" (Rain of Gore) → Some(AnyPlayer).
+    /// None = applies to the replacement source's controller only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub valid_player: Option<ControllerRef>,
+    pub valid_player: Option<ReplacementPlayerScope>,
     /// Marks this replacement as consumed (one-shot). Skipped by find_applicable_replacements.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_consumed: bool,
@@ -9027,6 +9456,19 @@ pub enum ContinuousModification {
     RemoveSubtype {
         subtype: String,
     },
+    /// CR 205.1a + CR 613.1d: Replace the object's entire core card-type set
+    /// (Layer 4). Models "becomes a [type] ... and loses all other card types"
+    /// — set-replacement semantics, atomic, so the parser need not enumerate
+    /// the full `CoreType` space to express "becomes exactly artifact creature".
+    SetCardTypes {
+        core_types: Vec<CoreType>,
+    },
+    /// CR 205.1a + CR 613.1d: Remove every subtype belonging to a given subtype
+    /// set (Layer 4). "loses all other creature types" emits
+    /// `RemoveAllSubtypes { set: SubtypeSet::Creature }`.
+    RemoveAllSubtypes {
+        set: SubtypeSet,
+    },
     /// Set power to a dynamically computed value (CDA, layer 7a).
     SetDynamicPower {
         value: QuantityExpr,
@@ -9085,6 +9527,20 @@ pub enum ContinuousModification {
     /// to the affected object. Applied at layer 6 (ability-modifying).
     AddStaticMode {
         mode: StaticMode,
+    },
+    /// CR 113.3d + CR 604.1 + CR 613.1f: Grant a full static ability to the
+    /// affected object — used for quoted continuous statics whose own
+    /// `affected`/`condition`/`modifications` are independent of the recipient
+    /// (e.g. "...and \"Other commanders you control get +2/+2 and have
+    /// lifelink\""). The recipient receives the granted static as if it were
+    /// printed on it (CR 604.1); the granted static then operates per CR 611.2c
+    /// (continuous effect from a static — set of affected objects is
+    /// re-evaluated continuously). Unlike `AddStaticMode` (which manufactures a
+    /// `SelfRef` static against the recipient), this variant carries the inner
+    /// `StaticDefinition` verbatim so the inner scope, condition, and layered
+    /// modifications are all preserved. Applied at layer 6 (CR 613.1f).
+    GrantStaticAbility {
+        definition: Box<StaticDefinition>,
     },
     /// CR 613.4d: Switch power and toughness. Applied in layer 7d.
     SwitchPowerToughness,
@@ -9332,6 +9788,28 @@ pub struct ResolvedAbility {
     /// to short-circuit `WaitingFor::TargetSelection` for `Random` abilities.
     #[serde(default, skip_serializing_if = "TargetSelectionMode::is_chosen")]
     pub target_selection_mode: TargetSelectionMode,
+    /// CR 608.2c + CR 109.4: Players chosen by `Effect::Choose { choice_type:
+    /// ChoiceType::Player }` instructions during this resolution, in chain
+    /// order. The `WaitingFor::NamedChoice` answer handler appends to this list
+    /// as each `Choose(Player)` resolves; `ControllerRef::ChosenPlayer { index }`
+    /// reads it. Resolution-scoped (mirrors `chosen_x`): it survives the
+    /// `Choose` → `drain_pending_continuation` → next `Choose` cycle within one
+    /// ability resolution because it travels on the continuation chain, but it
+    /// never leaks across abilities. Distinct-player rulings (Gluntch) read
+    /// this list as the exclusion set when computing the next choice's options.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chosen_players: Vec<PlayerId>,
+    /// CR 608.2c + CR 107.1c: per-iteration loop-continuation predicate carried
+    /// through from the originating `AbilityDefinition`. When `Some`, the
+    /// resolution chain is re-followed ("repeat this process") under this
+    /// predicate. Read by the `repeat_until` dispatch in `resolve_ability_chain`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_until: Option<RepeatContinuation>,
+    /// CR 608.2c: How this ability links to its parent when present as a
+    /// `sub_ability`. Copied through from the originating `AbilityDefinition`.
+    /// `SequentialSibling` subs resolve even when an optional parent is declined.
+    #[serde(default, skip_serializing_if = "SubAbilityLink::is_continuation")]
+    pub sub_link: SubAbilityLink,
 }
 
 impl ResolvedAbility {
@@ -9375,6 +9853,9 @@ impl ResolvedAbility {
             ability_index: None,
             may_trigger_origin: None,
             target_selection_mode: TargetSelectionMode::Chosen,
+            chosen_players: Vec::new(),
+            repeat_until: None,
+            sub_link: SubAbilityLink::ContinuationStep,
         }
     }
 
@@ -9440,40 +9921,18 @@ impl ResolvedAbility {
         }
     }
 
-    /// CR 608.2c + CR 102.1: Propagate `scoped_player` through the `sub_ability`
-    /// chain only up to (but not including) the next sub-ability whose effect is
-    /// itself `Effect::Choose { ChoiceType::Player | ChoiceType::Opponent, .. }` —
-    /// that node represents a fresh "Choose a player" instruction and will
-    /// rebind via its own `NamedChoice` continuation when it resolves.
-    /// `else_ability` is propagated identically (no Choose-boundary
-    /// inspection — an "Otherwise" branch is a sibling instruction, not the
-    /// next chained instruction).
-    ///
-    /// Used by `engine_resolution_choices` for the Gluntch class so that the
-    /// FIRST chosen player's bindings ("they put counters", "they draw")
-    /// route correctly until the SECOND `choose a player` reaches the stack
-    /// and binds a new player.
-    pub fn set_scoped_player_until_next_player_choose(&mut self, player: PlayerId) {
-        self.scoped_player = Some(player);
+    /// CR 608.2c: Stamp `context.optional_effect_performed` across the local
+    /// ability chain. Used when an optional effect is accepted after its prompt
+    /// suspended the parent chain — the stashed "If you do" continuation was
+    /// captured before the choice, so its context must be updated retroactively
+    /// for `IfYouDo` / `IfAPlayerDoes` gates to evaluate correctly.
+    pub fn set_optional_effect_performed_recursive(&mut self, performed: bool) {
+        self.context.optional_effect_performed = performed;
         if let Some(sub) = self.sub_ability.as_mut() {
-            if matches!(
-                sub.effect,
-                Effect::Choose {
-                    choice_type: ChoiceType::Player | ChoiceType::Opponent,
-                    ..
-                }
-            ) {
-                // Stop propagation: the next Choose-Player node will rebind
-                // via its own NamedChoice continuation when it resolves.
-                if let Some(else_branch) = self.else_ability.as_mut() {
-                    else_branch.set_scoped_player_until_next_player_choose(player);
-                }
-                return;
-            }
-            sub.set_scoped_player_until_next_player_choose(player);
+            sub.set_optional_effect_performed_recursive(performed);
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.set_scoped_player_until_next_player_choose(player);
+            else_branch.set_optional_effect_performed_recursive(performed);
         }
     }
 
@@ -9484,6 +9943,21 @@ impl ResolvedAbility {
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_original_controller_recursive(player);
+        }
+    }
+
+    /// CR 608.2c + CR 109.4: Propagate the resolution-scoped chosen-players
+    /// list across this ability and every sub/else branch. Called by the
+    /// `WaitingFor::NamedChoice` answer handler after appending a freshly
+    /// chosen player, so a later `Choose(Player)` or a `ChosenPlayer { index }`
+    /// reference deeper in the continuation chain sees every earlier choice.
+    pub fn set_chosen_players_recursive(&mut self, players: &[PlayerId]) {
+        self.chosen_players = players.to_vec();
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_chosen_players_recursive(players);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_chosen_players_recursive(players);
         }
     }
 
@@ -9537,6 +10011,16 @@ impl ResolvedAbility {
                 _ => None,
             })
             .unwrap_or(self.controller)
+    }
+
+    /// CR 601.2c: Whether this ability permits choosing zero targets — i.e. an
+    /// empty legal-target set is acceptable rather than an error. True when the
+    /// ability-wide `optional_targeting` ("up to one") flag is set, or when its
+    /// `multi_target` spec ("up to N") has a minimum of zero. Both fields encode
+    /// the same "zero targets is legal" fact, so target-slot collection must
+    /// honor either.
+    pub fn targeting_is_optional(&self) -> bool {
+        self.optional_targeting || self.multi_target.as_ref().is_some_and(|spec| spec.min == 0)
     }
 }
 
@@ -9920,6 +10404,7 @@ mod tests {
             valid_card: Some(TargetFilter::SelfRef),
             origin: Some(Zone::Battlefield),
             origin_zones: vec![],
+            zone_change_clauses: vec![],
             destination: Some(Zone::Graveyard),
             trigger_zones: vec![Zone::Battlefield],
             phase: None,
@@ -10550,7 +11035,10 @@ mod tests {
         #[test]
         fn pay_energy() {
             assert_eq!(
-                AbilityCost::PayEnergy { amount: 3 }.categories(),
+                AbilityCost::PayEnergy {
+                    amount: QuantityExpr::Fixed { value: 3 }
+                }
+                .categories(),
                 vec![CostCategory::PaysEnergy]
             );
         }
@@ -10683,162 +11171,6 @@ mod tests {
             assert_eq!(
                 def.cost_categories(),
                 vec![CostCategory::SacrificesPermanent]
-            );
-        }
-    }
-
-    mod set_scoped_player_until_next_player_choose {
-        use super::*;
-        use crate::types::identifiers::ObjectId;
-
-        fn make_chain(effect: Effect, sub: Option<ResolvedAbility>) -> ResolvedAbility {
-            let mut ability = ResolvedAbility::new(effect, vec![], ObjectId(1), PlayerId(0));
-            if let Some(sub) = sub {
-                ability.sub_ability = Some(Box::new(sub));
-            }
-            ability
-        }
-
-        #[test]
-        fn propagates_to_non_choose_sub_ability() {
-            // chain: Draw -> PutCounter; bind should reach both nodes.
-            let sub = make_chain(
-                Effect::PutCounter {
-                    counter_type: CounterType::Plus1Plus1,
-                    count: QuantityExpr::Fixed { value: 1 },
-                    target: TargetFilter::Any,
-                },
-                None,
-            );
-            let mut chain = make_chain(
-                Effect::Draw {
-                    count: QuantityExpr::Fixed { value: 1 },
-                    target: TargetFilter::ScopedPlayer,
-                },
-                Some(sub),
-            );
-            chain.set_scoped_player_until_next_player_choose(PlayerId(2));
-
-            assert_eq!(chain.scoped_player, Some(PlayerId(2)));
-            assert_eq!(
-                chain.sub_ability.as_ref().unwrap().scoped_player,
-                Some(PlayerId(2))
-            );
-        }
-
-        #[test]
-        fn stops_at_next_choose_player() {
-            // chain: Draw -> Choose(Player) -> PutCounter
-            // bind should reach Draw only; Choose(Player) and its sub stay None.
-            let inner_sub = make_chain(
-                Effect::PutCounter {
-                    counter_type: CounterType::Plus1Plus1,
-                    count: QuantityExpr::Fixed { value: 1 },
-                    target: TargetFilter::Any,
-                },
-                None,
-            );
-            let choose_node = make_chain(
-                Effect::Choose {
-                    choice_type: ChoiceType::Player,
-                    persist: false,
-                },
-                Some(inner_sub),
-            );
-            let mut chain = make_chain(
-                Effect::Draw {
-                    count: QuantityExpr::Fixed { value: 1 },
-                    target: TargetFilter::ScopedPlayer,
-                },
-                Some(choose_node),
-            );
-            chain.set_scoped_player_until_next_player_choose(PlayerId(2));
-
-            assert_eq!(chain.scoped_player, Some(PlayerId(2)));
-            let choose = chain.sub_ability.as_ref().unwrap();
-            assert_eq!(
-                choose.scoped_player, None,
-                "next Choose-Player node MUST NOT be rebound — it picks a fresh player at runtime"
-            );
-            let beyond = choose.sub_ability.as_ref().unwrap();
-            assert_eq!(
-                beyond.scoped_player, None,
-                "nodes beyond the next Choose-Player node are bound by that node's own NamedChoice continuation"
-            );
-        }
-
-        #[test]
-        fn stops_at_next_choose_opponent() {
-            // Same guard for Choose(Opponent).
-            let choose_node = make_chain(
-                Effect::Choose {
-                    choice_type: ChoiceType::Opponent,
-                    persist: false,
-                },
-                None,
-            );
-            let mut chain = make_chain(
-                Effect::Draw {
-                    count: QuantityExpr::Fixed { value: 1 },
-                    target: TargetFilter::ScopedPlayer,
-                },
-                Some(choose_node),
-            );
-            chain.set_scoped_player_until_next_player_choose(PlayerId(2));
-
-            assert_eq!(chain.scoped_player, Some(PlayerId(2)));
-            assert_eq!(chain.sub_ability.as_ref().unwrap().scoped_player, None);
-        }
-
-        #[test]
-        fn does_not_stop_at_non_player_choose() {
-            // Choose(CreatureType) does not gate — only Player/Opponent do.
-            let sub = make_chain(
-                Effect::Choose {
-                    choice_type: ChoiceType::CreatureType,
-                    persist: true,
-                },
-                None,
-            );
-            let mut chain = make_chain(
-                Effect::Draw {
-                    count: QuantityExpr::Fixed { value: 1 },
-                    target: TargetFilter::ScopedPlayer,
-                },
-                Some(sub),
-            );
-            chain.set_scoped_player_until_next_player_choose(PlayerId(2));
-
-            assert_eq!(chain.scoped_player, Some(PlayerId(2)));
-            assert_eq!(
-                chain.sub_ability.as_ref().unwrap().scoped_player,
-                Some(PlayerId(2))
-            );
-        }
-
-        #[test]
-        fn propagates_through_else_ability() {
-            let else_branch = make_chain(
-                Effect::Draw {
-                    count: QuantityExpr::Fixed { value: 1 },
-                    target: TargetFilter::ScopedPlayer,
-                },
-                None,
-            );
-            let mut chain = make_chain(
-                Effect::Draw {
-                    count: QuantityExpr::Fixed { value: 1 },
-                    target: TargetFilter::ScopedPlayer,
-                },
-                None,
-            );
-            chain.else_ability = Some(Box::new(else_branch));
-            chain.set_scoped_player_until_next_player_choose(PlayerId(2));
-
-            assert_eq!(chain.scoped_player, Some(PlayerId(2)));
-            assert_eq!(
-                chain.else_ability.as_ref().unwrap().scoped_player,
-                Some(PlayerId(2))
             );
         }
     }

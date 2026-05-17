@@ -208,6 +208,13 @@ pub struct SpellCastRecord {
         deserialize_with = "deserialize_spell_cast_record_from_zone"
     )]
     pub from_zone: Zone,
+    /// CR 702.185c: The alternative-cast variant chosen when this spell was
+    /// cast (Warp, etc.), captured at cast-time so per-turn spell-history
+    /// conditions ("a spell was warped this turn") can answer after the spell
+    /// has left the stack. `#[serde(default)]` yields `CastingVariant::Normal`
+    /// for serialized snapshots predating this field.
+    #[serde(default)]
+    pub cast_variant: CastingVariant,
 }
 
 /// CR 601.2a: Default origin zone for `SpellCastRecord.from_zone`. Hand is the
@@ -229,6 +236,7 @@ impl Default for SpellCastRecord {
             mana_value: 0,
             has_x_in_cost: false,
             from_zone: Zone::Hand,
+            cast_variant: CastingVariant::Normal,
         }
     }
 }
@@ -636,6 +644,22 @@ pub struct PendingRepeatIteration {
     pub total_iterations: usize,
 }
 
+/// CR 608.2c + CR 107.1c: Resume state for a "repeat this process" loop
+/// (`RepeatContinuation`) paused when an iteration's process entered an
+/// interactive `WaitingFor` state.
+///
+/// The loop in `resolve_ability_chain` cannot set the repeat prompt while a
+/// player choice from the iteration is still unresolved. It stashes this
+/// struct and `drain_pending_continuation` re-checks it once the choice (and
+/// any chained continuation) drains.
+///
+/// - `ability` — the loop ability, retaining `repeat_until` so the drain knows
+///   which continuation mode to apply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingRepeatUntil {
+    pub ability: Box<crate::types::ability::ResolvedAbility>,
+}
+
 /// CR 701.55d: Remaining players queued to face the same resolution-time
 /// branch choice after the current chosen branch finishes resolving.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -798,6 +822,11 @@ pub enum ManaAbilityResume {
         trigger_event: Option<GameEvent>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effect_description: Option<String>,
+        /// CR 118.12a: Carried-through "unless any player pays" poll list — see
+        /// `WaitingFor::UnlessPayment.remaining`. Survives the player tapping a
+        /// mana ability mid-payment.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        remaining: Vec<PlayerId>,
     },
 }
 
@@ -1526,6 +1555,11 @@ pub enum WaitingFor {
     OptionalCostChoice {
         player: PlayerId,
         cost: AdditionalCost,
+        /// CR 702.33c/d: How many times this spell has already been kicked. Lets the
+        /// frontend present a kick-count-aware modal for repeatable multikicker re-prompts.
+        /// Zero for the first prompt and for non-kicker optional costs.
+        #[serde(default)]
+        times_kicked: u32,
         pending_cast: Box<PendingCast>,
     },
     /// CR 601.2b: Defiler cycle — player may pay life to reduce mana cost of a colored
@@ -1720,6 +1754,13 @@ pub enum WaitingFor {
         /// Human-readable description for the frontend (e.g., "counter target spell", "draw a card").
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effect_description: Option<String>,
+        /// CR 118.12a: Players still to poll after the current `player`, in
+        /// APNAP order. Non-empty only for "unless any player pays ..." clauses
+        /// (`TargetFilter::AllPlayers` payer): if `player` declines, the next
+        /// player in `remaining` is prompted; the first to pay prevents the
+        /// effect. Empty for ordinary single-payer unless-costs (Mana Leak).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        remaining: Vec<PlayerId>,
     },
     /// CR 118.12a: Player must choose **which** sub-cost to pay from a
     /// disjunctive ("unless they X or Y") unless-cost. Once a sub-cost is
@@ -1955,6 +1996,30 @@ pub enum WaitingFor {
         /// Cards exiled as misses (go to bottom in random order).
         exiled_misses: Vec<ObjectId>,
     },
+    /// CR 701.20a + CR 608.2c: "You may put that card onto the battlefield" — the
+    /// controller chooses the kept card's destination after `RevealUntil` finds a
+    /// hit. Accept → `accept_zone`; decline → `decline_zone`. The misses (and, on
+    /// decline, the hit card when its zone is the rest pile) are moved by the
+    /// choice handler so the random-order shuffle includes the declined card.
+    RevealUntilKeptChoice {
+        player: PlayerId,
+        hit_card: ObjectId,
+        accept_zone: Zone,
+        decline_zone: Zone,
+        enter_tapped: bool,
+        revealed_misses: Vec<ObjectId>,
+        rest_destination: Zone,
+    },
+    /// CR 107.1c + CR 608.2c: After one iteration of a "you may repeat this
+    /// process any number of times" effect resolves, the controller chooses
+    /// whether to run the process again. Answered by
+    /// `GameAction::DecideOptionalEffect { accept }`.
+    RepeatDecision {
+        player: PlayerId,
+        /// The ability chain to re-resolve on accept (one further iteration).
+        /// `repeat_until` is retained so the next iteration re-prompts.
+        ability: Box<crate::types::ability::ResolvedAbility>,
+    },
     /// CR 702.85a: Player chooses to cast the cascaded card without paying its
     /// mana cost or decline. Unlike `DiscoverChoice`, the declined card goes to
     /// the bottom of the library in a random order together with the misses
@@ -2098,6 +2163,21 @@ pub enum WaitingFor {
         player: PlayerId,
         /// Eligible permanents (with counters) and players (with poison/energy).
         eligible: Vec<TargetRef>,
+    },
+    /// CR 603.7e: The affected player of a `ChooseObjectsIntoTrackedSet` effect
+    /// selects any number of battlefield permanents from `eligible`. The
+    /// chosen objects are written into a fresh tracked set so a downstream
+    /// `PayCost { ScaledMana }` and `IfYouDo`/`Untap` reference the exact
+    /// selection. An empty selection is legal — the player declines.
+    ChooseObjectsSelection {
+        player: PlayerId,
+        /// Eligible battlefield permanents matching the effect's filter.
+        eligible: Vec<TargetRef>,
+        /// CR 608.2: triggering event of the ability whose `ChooseObjectsIntoTrackedSet`
+        /// raised this prompt. Restored around the continuation drain so the stashed
+        /// `PayCost { payer: TriggeringPlayer }` resolves to the correct player.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger_event: Option<crate::types::events::GameEvent>,
     },
     /// CR 101.4 + CR 701.21a: Player selects one permanent per type category
     /// from among those they (or another player) control, then the rest are sacrificed.
@@ -2378,6 +2458,8 @@ impl WaitingFor {
             | WaitingFor::UnlessPayment { player, .. }
             | WaitingFor::UnlessPaymentChooseCost { player, .. }
             | WaitingFor::DiscoverChoice { player, .. }
+            | WaitingFor::RevealUntilKeptChoice { player, .. }
+            | WaitingFor::RepeatDecision { player, .. }
             | WaitingFor::CascadeChoice { player, .. }
             | WaitingFor::TopOrBottomChoice { player, .. }
             | WaitingFor::ParadigmCastOffer { player, .. }
@@ -2387,6 +2469,7 @@ impl WaitingFor {
             | WaitingFor::ChooseLegend { player, .. }
             | WaitingFor::BattleProtectorChoice { player, .. }
             | WaitingFor::ProliferateChoice { player, .. }
+            | WaitingFor::ChooseObjectsSelection { player, .. }
             | WaitingFor::CategoryChoice { player, .. }
             | WaitingFor::CopyRetarget { player, .. }
             | WaitingFor::AssignCombatDamage { player, .. }
@@ -2995,6 +3078,16 @@ pub struct GameState {
     /// trigger context, consumed when the pending trigger is put on the stack.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_trigger_event_batch: Vec<GameEvent>,
+    /// CR 113.2c + CR 603.2 + CR 603.3b: Queue of triggers that fired in the
+    /// same pass but were deferred because an earlier trigger needed player
+    /// input (modal choice, target selection, or division). Each instance of a
+    /// printed ability fires independently, so multiple copies of the same
+    /// permanent (e.g., two Boggart Pranksters seeing "you attack") must each
+    /// reach the stack. Drained in FIFO order by
+    /// `triggers::drain_deferred_trigger_queue` after the active
+    /// `pending_trigger` is pushed to the stack.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deferred_triggers: Vec<crate::game::triggers::DeferredTrigger>,
 
     // CR 607.2a + CR 406.5: Exile tracking for "until leaves" linked abilities.
     #[serde(default)]
@@ -3163,6 +3256,13 @@ pub struct GameState {
         with = "tuple_key_map"
     )]
     pub activated_abilities_this_game: HashMap<(ObjectId, usize), u32>,
+    /// CR 602.5b + CR 702.122: Vehicles whose crew ability has been activated this
+    /// turn. Populated on a successful crew announcement; read to enforce an
+    /// "Activate only once each turn" crew restriction. Crew is not an
+    /// `abilities[]` entry, so it cannot use `activated_abilities_this_turn`
+    /// (keyed by `(source_id, ability_index)`). Cleared at turn start.
+    #[serde(default)]
+    pub crew_activated_this_turn: HashSet<ObjectId>,
     /// CR 603.4: Per-ability per-turn resolution counter.
     /// Keyed by `(source_id, ability_index)` — identifies a specific printed
     /// ability on a specific source object. Incremented at the top of
@@ -3353,6 +3453,14 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_repeat_iteration: Option<PendingRepeatIteration>,
 
+    /// CR 608.2c + CR 107.1c: Pending "repeat this process" loop paused because
+    /// an iteration's process entered an interactive `WaitingFor` state.
+    /// Drained by `drain_pending_continuation` after `pending_continuation`,
+    /// so the iteration's player choice fully resolves before the loop decides
+    /// whether to run another pass. See [`PendingRepeatUntil`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_repeat_until: Option<PendingRepeatUntil>,
+
     /// CR 701.55d: Pending continuation of a multi-player ChooseOneOf after a
     /// selected branch has finished resolving, including any nested choices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3361,6 +3469,18 @@ pub struct GameState {
     /// Pending optional effect ability chain, awaiting player accept/decline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_optional_effect: Option<Box<crate::types::ability::ResolvedAbility>>,
+
+    /// Transient: the triggering event of the ability stashed in
+    /// `pending_optional_effect`, captured while it is still live (before
+    /// `resolve_top` clears `current_trigger_event`). Restored around
+    /// `resolve_optional_effect_decision` so an optional ("may") triggered
+    /// ability's effect resolves `TriggeringPlayer` / event-context refs
+    /// exactly as a non-optional trigger would. Mirrors
+    /// `WaitingFor::UnlessPayment.trigger_event`. Set ONLY for the
+    /// `OptionalEffectChoice` stash; taken by `handle_optional_effect_choice`.
+    /// CR 608.2: an ability's resolution is a single process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_optional_trigger_event: Option<crate::types::events::GameEvent>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub may_trigger_auto_choices: Vec<MayTriggerAutoChoiceRecord>,
@@ -3441,17 +3561,6 @@ pub struct GameState {
     /// in `resolve_ability_chain` so cross-resolution leakage is impossible.
     #[serde(default)]
     pub last_vote_ballots: im::Vector<(PlayerId, u8)>,
-
-    /// CR 608.2c + CR 102.1: Per-resolution ledger of PlayerIds already
-    /// resolved by `Effect::Choose { ChoiceType::Player | ChoiceType::Opponent }`
-    /// in the current top-level ability resolution. Append-only; cleared at
-    /// `depth == 0` of `resolve_ability_chain` (mirrors `last_zone_changed_ids`).
-    /// Read by `choose::compute_options` to skip already-chosen players for
-    /// "choose a second/third/another player" patterns (Gluntch the Bestower
-    /// 2022-06-10 ruling) and to leave no legal choice in two-player games
-    /// (CR 609.3 "do as much as possible" — the second Choose Player skips).
-    #[serde(default)]
-    pub chosen_players_this_resolution: im::Vector<PlayerId>,
 
     /// CR 608.2c + CR 109.5: Player actions performed during the current
     /// top-level ability resolution. Distinct from turn-level trackers like
@@ -3535,6 +3644,22 @@ pub struct GameState {
     /// Used by event-context TargetFilter variants to resolve trigger event data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_trigger_event: Option<GameEvent>,
+    /// CR 707.10: Transient snapshot of the spell or ability stack entry
+    /// currently resolving. `resolve_top` pops the entry off `state.stack`
+    /// before running its effect, so a `CopySpell { target: SelfRef }` carried
+    /// as the resolving spell's own effect (the Chain cycle — Chain of Acid /
+    /// Plasma / Smog / Vapor — "you may copy this spell") can no longer find
+    /// itself on the stack. This holds the popped entry; `copy_spell::resolve`
+    /// falls back to it for `SelfRef`. Set by `resolve_top` before
+    /// `execute_effect` and cleared at the START of the next `resolve_top` —
+    /// it must survive a `WaitingFor::OptionalEffectChoice` round-trip (the
+    /// Chain cycle defers the copy past a player decision). For that same
+    /// reason it must be serialized: a server game persisted while a
+    /// Chain-cycle optional-copy prompt is pending and later reloaded would
+    /// otherwise lose the entry and silently drop the accepted copy. Mirrors
+    /// `current_trigger_event`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolving_stack_entry: Option<StackEntry>,
     /// Transient plural form of `current_trigger_event` for batched triggers.
     /// Event-context filters that can legally compare against a group read this.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -3573,6 +3698,18 @@ pub struct GameState {
     /// CR 725: The initiative designation (like monarch — one player at a time).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initiative: Option<PlayerId>,
+
+    /// CR 510.2 + CR 615.7: Transient per-shield combat-damage prevention tally.
+    /// Set to `Some(empty)` by `apply_combat_damage` for the duration of one
+    /// simultaneous combat-damage batch. While `Some`, the `Prevention::All`
+    /// branch of the damage-replacement applier accumulates each prevented
+    /// amount into this map (keyed by the shield's `ReplacementId`) instead of
+    /// stamping `last_effect_count` per source. After the batch, the combat
+    /// resolver reads the aggregate to fire each shield's `runtime_execute`
+    /// rider exactly once (CR 615.13). Always `None` at every `apply()`
+    /// boundary, so it is excluded from serialization and structural equality.
+    #[serde(skip)]
+    pub combat_prevention_tally: Option<HashMap<ReplacementId, i32>>,
 }
 
 /// A runtime-generated continuous effect stored at state level.
@@ -3777,6 +3914,7 @@ impl GameState {
             spells_cast_last_turn: None,
             pending_trigger: None,
             pending_trigger_event_batch: Vec::new(),
+            deferred_triggers: Vec::new(),
             exile_links: Vec::new(),
             paradigm_primed: Vec::new(),
             delayed_triggers: Vec::new(),
@@ -3812,6 +3950,7 @@ impl GameState {
             triggers_fired_this_game: HashSet::new(),
             activated_abilities_this_turn: HashMap::new(),
             activated_abilities_this_game: HashMap::new(),
+            crew_activated_this_turn: HashSet::new(),
             ability_resolutions_this_turn: HashMap::new(),
             graveyard_cast_permissions_used: HashSet::new(),
             graveyard_cast_permissions_used_per_type: HashSet::new(),
@@ -3851,8 +3990,10 @@ impl GameState {
             revealed_cards: HashSet::new(),
             pending_continuation: None,
             pending_repeat_iteration: None,
+            pending_repeat_until: None,
             pending_choose_one_of: None,
             pending_optional_effect: None,
+            pending_optional_trigger_event: None,
             may_trigger_auto_choices: Vec::new(),
             pending_begin_game_abilities: Vec::new(),
             resolving_begin_game_abilities: false,
@@ -3866,7 +4007,6 @@ impl GameState {
             last_revealed_ids: Vec::new(),
             last_zone_changed_ids: Vec::new(),
             last_vote_ballots: im::Vector::new(),
-            chosen_players_this_resolution: im::Vector::new(),
             player_actions_this_way: HashSet::new(),
             last_effect_amount: None,
             last_effect_count: None,
@@ -3879,6 +4019,7 @@ impl GameState {
             pending_step_end_mana_handlers: Vec::new(),
             pending_phase_transition_progress: None,
             current_trigger_event: None,
+            resolving_stack_entry: None,
             current_trigger_events: Vec::new(),
             stack_trigger_event_batches: HashMap::new(),
             lki_cache: HashMap::new(),
@@ -3888,6 +4029,7 @@ impl GameState {
             ring_bearer: HashMap::new(),
             dungeon_progress: HashMap::new(),
             initiative: None,
+            combat_prevention_tally: None,
             cancelled_casts: Vec::new(),
             pending_activations: Vec::new(),
             commander_declined_zone_return: HashSet::new(),
@@ -4039,6 +4181,7 @@ impl PartialEq for GameState {
             && self.spells_cast_this_turn == other.spells_cast_this_turn
             && self.spells_cast_last_turn == other.spells_cast_last_turn
             && self.pending_trigger == other.pending_trigger
+            && self.deferred_triggers == other.deferred_triggers
             && self.exile_links == other.exile_links
             && self.paradigm_primed == other.paradigm_primed
             && self.delayed_triggers == other.delayed_triggers
@@ -4074,6 +4217,7 @@ impl PartialEq for GameState {
             && self.triggers_fired_this_game == other.triggers_fired_this_game
             && self.activated_abilities_this_turn == other.activated_abilities_this_turn
             && self.activated_abilities_this_game == other.activated_abilities_this_game
+            && self.crew_activated_this_turn == other.crew_activated_this_turn
             && self.ability_resolutions_this_turn == other.ability_resolutions_this_turn
             && self.graveyard_cast_permissions_used == other.graveyard_cast_permissions_used
             && self.graveyard_cast_permissions_used_per_type
@@ -4115,6 +4259,7 @@ impl PartialEq for GameState {
             && self.modal_modes_chosen_this_game == other.modal_modes_chosen_this_game
             && self.pending_continuation == other.pending_continuation
             && self.pending_repeat_iteration == other.pending_repeat_iteration
+            && self.pending_repeat_until == other.pending_repeat_until
             && self.pending_choose_one_of == other.pending_choose_one_of
             && self.may_trigger_auto_choices == other.may_trigger_auto_choices
             && self.pending_begin_game_abilities == other.pending_begin_game_abilities
@@ -4124,7 +4269,6 @@ impl PartialEq for GameState {
             && self.last_revealed_ids == other.last_revealed_ids
             && self.last_zone_changed_ids == other.last_zone_changed_ids
             && self.last_vote_ballots == other.last_vote_ballots
-            && self.chosen_players_this_resolution == other.chosen_players_this_resolution
             && self.player_actions_this_way == other.player_actions_this_way
             && self.last_effect_count == other.last_effect_count
             && self.last_effect_counts_by_player == other.last_effect_counts_by_player
@@ -4399,6 +4543,7 @@ mod tests {
         variants.push(Box::new(WaitingFor::OptionalCostChoice {
             player: PlayerId(0),
             cost: AdditionalCost::Optional(crate::types::ability::AbilityCost::Blight { count: 1 }),
+            times_kicked: 0,
             pending_cast: dummy_pending(),
         }));
         variants.push(Box::new(WaitingFor::AbilityModeChoice {
@@ -5044,6 +5189,7 @@ mod tests {
             mana_value: 4,
             has_x_in_cost: false,
             from_zone: Zone::Graveyard,
+            cast_variant: CastingVariant::Normal,
         };
         let json = serde_json::to_string(&original).unwrap();
         let round_tripped: SpellCastRecord = serde_json::from_str(&json).unwrap();

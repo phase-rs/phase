@@ -744,6 +744,12 @@ pub enum StaticMode {
     /// CR 702.3b: Allows creatures with defender to attack despite having the keyword.
     /// "can attack as though it didn't have defender" overrides the defender restriction.
     CanAttackWithDefender,
+    /// CR 602.5a: Bypasses the summoning-sickness gate on a creature's `{T}`/`{Q}`
+    /// activated abilities — "You may activate abilities of creatures you control as
+    /// though those creatures had haste." This is NOT `AddKeyword(Haste)`: only the
+    /// CR 602.5a activation restriction is lifted, combat attacker validation
+    /// (CR 508.1a) is untouched. Canonical card: Tyvar, Jubilant Brawler.
+    CanActivateAbilitiesAsThoughHaste,
     /// CR 510.1a: This creature assigns no combat damage.
     /// Used for creatures like Ornithopter of Paradise and various Walls that can
     /// attack/block but deal 0 combat damage.
@@ -991,6 +997,9 @@ impl fmt::Display for StaticMode {
                 write!(f, "StepEndUnspentMana({filter:?},{action})")
             }
             StaticMode::CanAttackWithDefender => write!(f, "CanAttackWithDefender"),
+            StaticMode::CanActivateAbilitiesAsThoughHaste => {
+                write!(f, "CanActivateAbilitiesAsThoughHaste")
+            }
             StaticMode::AssignNoCombatDamage => write!(f, "AssignNoCombatDamage"),
             StaticMode::UntapsDuringEachOtherPlayersUntapStep => {
                 write!(f, "UntapsDuringEachOtherPlayersUntapStep")
@@ -1212,6 +1221,7 @@ impl FromStr for StaticMode {
             "CantWinTheGame" => StaticMode::CantWinTheGame,
             "CantLoseTheGame" => StaticMode::CantLoseTheGame,
             "CanAttackWithDefender" => StaticMode::CanAttackWithDefender,
+            "CanActivateAbilitiesAsThoughHaste" => StaticMode::CanActivateAbilitiesAsThoughHaste,
             s if s.starts_with("StepEndUnspentMana(") => StaticMode::Other(s.to_string()),
             "UntapsDuringEachOtherPlayersUntapStep" => {
                 StaticMode::UntapsDuringEachOtherPlayersUntapStep

@@ -34,6 +34,14 @@ pub fn resolve(
     // `effects::mod.rs::resolve_ability_chain`.
     let target_ids: Vec<_> = match target_filter {
         TargetFilter::SelfRef => vec![ability.source_id],
+        // CR 608.2c: The `TrackedSetId(0)` sentinel binds to the highest tracked
+        // set id — the set the immediately preceding effect in this chain
+        // published. Empty sets are *not* skipped: an empty current set means
+        // the preceding effect affected nothing, not "fall back to a stale
+        // set." This deliberately differs from `targeting::latest_tracked_set_id`
+        // (which skips empties for inline "from among the milled cards"
+        // continuations) — see the regression test
+        // `tracked_set_sentinel_does_not_reuse_prior_non_empty_set_when_current_move_is_empty`.
         TargetFilter::TrackedSet {
             id: TrackedSetId(0),
         } => state
@@ -47,7 +55,15 @@ pub fn resolve(
             .get(id)
             .cloned()
             .unwrap_or_default(),
-        _ if !ability.targets.is_empty() => ability
+        TargetFilter::ParentTarget => ability
+            .targets
+            .iter()
+            .filter_map(|target| match target {
+                TargetRef::Object(obj_id) => Some(*obj_id),
+                TargetRef::Player(_) => None,
+            })
+            .collect(),
+        TargetFilter::Any | TargetFilter::None if !ability.targets.is_empty() => ability
             .targets
             .iter()
             .filter_map(|target| match target {
@@ -143,11 +159,22 @@ pub fn resolve(
             if let CastingPermission::Plotted { turn_plotted } = &mut granted {
                 *turn_plotted = state.turn_number;
             }
+            let plotted_for = if matches!(granted, CastingPermission::Plotted { .. }) {
+                Some(granted_to_pid)
+            } else {
+                None
+            };
             if let CastingPermission::Foretold { turn_foretold, .. } = &mut granted {
                 *turn_foretold = state.turn_number;
                 obj.foretold = true;
             }
             obj.casting_permissions.push(granted);
+            if let Some(player_id) = plotted_for {
+                events.push(GameEvent::BecomesPlotted {
+                    object_id: obj_id,
+                    player_id,
+                });
+            }
         }
     }
 
@@ -209,6 +236,83 @@ mod tests {
             }
             _ => panic!("expected PlayFromExile"),
         }
+    }
+
+    #[test]
+    fn plotted_permission_stamps_turn_and_emits_event() {
+        let mut state = GameState::new_two_player(1);
+        state.turn_number = 7;
+        let target = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Plotted Card".to_string(),
+            Zone::Exile,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::Plotted { turn_plotted: 0 },
+                target: TargetFilter::Any,
+                grantee: PermissionGrantee::ObjectOwner,
+            },
+            vec![TargetRef::Object(target)],
+            crate::types::identifiers::ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects[&target].casting_permissions,
+            vec![CastingPermission::Plotted { turn_plotted: 7 }]
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::BecomesPlotted {
+                object_id,
+                player_id: PlayerId(1)
+            } if *object_id == target
+        )));
+    }
+
+    #[test]
+    fn plotted_permission_uses_parent_target_not_source_when_targets_are_present() {
+        let mut state = GameState::new_two_player(1);
+        state.turn_number = 1;
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Aven Interrupter".to_string(),
+            Zone::Battlefield,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Target Spell".to_string(),
+            Zone::Exile,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::Plotted { turn_plotted: 0 },
+                target: TargetFilter::ParentTarget,
+                grantee: PermissionGrantee::ObjectOwner,
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.objects[&source].casting_permissions.is_empty());
+        assert_eq!(
+            state.objects[&target].casting_permissions,
+            vec![CastingPermission::Plotted { turn_plotted: 1 }]
+        );
     }
 
     /// CR 108.3: `ObjectOwner` grants the permission to each iterated object's

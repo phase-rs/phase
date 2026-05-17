@@ -441,6 +441,8 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.triggers_fired_this_turn.clear();
     state.trigger_fire_counts_this_turn.clear();
     state.activated_abilities_this_turn.clear();
+    // CR 602.5b: "Activate only once each turn" crew restriction resets each turn.
+    state.crew_activated_this_turn.clear();
     // CR 514 + CR 603.4: Per-ability per-turn resolution counter resets at turn
     // boundary alongside other "this turn" trackers (mirrors the cleanup of
     // `trigger_fire_counts_this_turn`).
@@ -1342,7 +1344,7 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
             Phase::BeginCombat => {
                 // CR 507.1: "At the beginning of combat" triggers fire here.
                 // Process triggers regardless of attackers — CR 507.1 says the step
-                // happens unconditionally; trigger conditions (e.g., ControlCreatures)
+                // happens unconditionally; trigger conditions (e.g., ControlCount)
                 // are checked by the trigger system, not by skipping the step.
                 let triggers_fired = process_phase_triggers(state);
                 if triggers_fired {

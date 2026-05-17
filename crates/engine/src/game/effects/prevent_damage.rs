@@ -1,7 +1,8 @@
+use crate::game::quantity::resolve_quantity;
 use crate::types::ability::{
     CombatDamageScope, DamageTargetFilter, DamageTargetPlayerScope, Effect, EffectError,
-    EffectKind, FilterProp, PreventionScope, ReplacementDefinition, ResolvedAbility, TargetFilter,
-    TargetRef,
+    EffectKind, FilterProp, PreventionAmount, PreventionScope, ReplacementDefinition,
+    ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -122,15 +123,16 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (amount, target, scope, effect_source_filter) = match &ability.effect {
+    let (amount, amount_dynamic, target, scope, effect_source_filter) = match &ability.effect {
         Effect::PreventDamage {
             amount,
+            amount_dynamic,
             target,
             scope,
             damage_source_filter,
-            ..
         } => (
             *amount,
+            amount_dynamic.clone(),
             target.clone(),
             *scope,
             damage_source_filter.clone(),
@@ -140,6 +142,16 @@ pub fn resolve(
                 "expected PreventDamage effect".to_string(),
             ))
         }
+    };
+
+    // CR 615.11: A dynamic prevention amount is resolved to a concrete depletion
+    // count at effect-resolution time; the Next(n) shield itself is always static.
+    let amount = match amount_dynamic {
+        Some(expr) => {
+            let n = resolve_quantity(state, &expr, ability.controller, ability.source_id);
+            PreventionAmount::Next(u32::try_from(n.max(0)).unwrap_or(0))
+        }
+        None => amount,
     };
 
     // Build the prevention shield replacement definition.
@@ -281,6 +293,7 @@ mod tests {
         ResolvedAbility::new(
             Effect::PreventDamage {
                 amount,
+                amount_dynamic: None,
                 target: TargetFilter::Any,
                 scope,
                 damage_source_filter: None,
@@ -327,6 +340,49 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_amount_resolves_to_static_next_shield() {
+        // CR 615.11: a dynamic prevention amount is resolved to a concrete
+        // Next(n) depletion shield at effect-resolution time. Building-block
+        // test for the amount_dynamic override path, independent of any card.
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Cover of Winter".to_string(),
+            Zone::Battlefield,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::Next(1),
+                amount_dynamic: Some(QuantityExpr::Fixed { value: 4 }),
+                target: TargetFilter::Any,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let obj = state.objects.get(&source).unwrap();
+        assert_eq!(obj.replacement_definitions.len(), 1);
+        assert!(
+            matches!(
+                obj.replacement_definitions[0].shield_kind,
+                ShieldKind::Prevention {
+                    amount: PreventionAmount::Next(4)
+                }
+            ),
+            "dynamic Fixed(4) should resolve to a Next(4) shield, got {:?}",
+            obj.replacement_definitions[0].shield_kind
+        );
+    }
+
+    #[test]
     fn chosen_damage_source_resolves_to_specific_source_and_rechecked_filter() {
         let mut state = GameState::new_two_player(42);
         let source = create_object(
@@ -358,6 +414,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::PreventDamage {
                 amount: PreventionAmount::All,
+                amount_dynamic: None,
                 target: TargetFilter::Any,
                 scope: PreventionScope::AllDamage,
                 damage_source_filter: Some(TargetFilter::ChosenDamageSource),
@@ -486,18 +543,43 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        let ctx = deal_damage::DamageContext::from_source(&state, damage_source).unwrap();
-        let result = deal_damage::apply_damage_to_target(
+        // CR 510.2 + CR 615.13: A `Prevention::All` combat shield's rider fires
+        // once per simultaneous combat-damage batch. Drive the batch primitive
+        // directly (combat damage no longer routes through the per-source
+        // `apply_damage_to_target` inline-rider path).
+        let proposed = crate::types::proposed_event::ProposedEvent::Damage {
+            source_id: damage_source,
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 3,
+            is_combat: true,
+            applied: std::collections::HashSet::new(),
+        };
+        let (survivors, tally) = crate::game::replacement::replace_combat_damage_batch(
             &mut state,
-            &ctx,
-            TargetRef::Player(PlayerId(0)),
-            3,
-            true,
             &mut events,
-        )
-        .unwrap();
+            vec![proposed],
+        );
+        assert_eq!(survivors, vec![None], "all 3 combat damage prevented");
+        // CR 615.7: the shield aggregated 3 prevented damage.
+        let total: i32 = tally.values().sum();
+        assert_eq!(total, 3);
 
-        assert!(matches!(result, deal_damage::DamageResult::Applied(0)));
+        // CR 615.5: fire the rider once against the aggregate prevented amount.
+        let (rid, &prevented) = tally.iter().next().unwrap();
+        let runtime = state.pending_damage_replacements[rid.index]
+            .runtime_execute
+            .clone()
+            .unwrap();
+        state.last_effect_count = Some(prevented);
+        state.post_replacement_continuation =
+            Some(crate::types::ability::PostReplacementContinuation::Resolved(runtime));
+        let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+            &mut state,
+            None,
+            None,
+            &mut events,
+        );
+
         assert_eq!(state.players[0].life, 20);
         let inklings = state
             .objects
@@ -528,6 +610,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::PreventDamage {
                 amount: PreventionAmount::All,
+                amount_dynamic: None,
                 target: TargetFilter::Controller,
                 scope: PreventionScope::CombatDamage,
                 damage_source_filter: None,
@@ -792,6 +875,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::PreventDamage {
                 amount: PreventionAmount::All,
+                amount_dynamic: None,
                 target: TargetFilter::ParentTarget,
                 scope: PreventionScope::AllDamage,
                 damage_source_filter: None,

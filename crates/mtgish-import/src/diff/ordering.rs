@@ -94,6 +94,12 @@ pub const ORDERING_MANIFEST: &[((&str, &str), OrderingClass)] = &[
         ("TriggerDefinition", "trigger_zones"),
         OrderingClass::SetEquivalent,
     ),
+    // CR 603.2: disjunctive zone-change clauses — the trigger fires if the
+    // event matches ANY clause, so clause order is incidental. Set.
+    (
+        ("TriggerDefinition", "zone_change_clauses"),
+        OrderingClass::SetEquivalent,
+    ),
     // Player actions enumerate equivalent triggers; order is incidental.
     (
         ("TriggerDefinition", "player_actions"),
@@ -251,6 +257,13 @@ pub const ORDERING_MANIFEST: &[((&str, &str), OrderingClass)] = &[
         ("ContinuousModification", "colors"),
         OrderingClass::SetEquivalent,
     ),
+    // CR 205.1a + CR 613.1d: `SetCardTypes` replaces the object's entire core
+    // card-type set (Layer 4). A type set is unordered — only membership
+    // matters — so reordering is incidental. Set.
+    (
+        ("ContinuousModification", "core_types"),
+        OrderingClass::SetEquivalent,
+    ),
     (("CopiableValues", "color"), OrderingClass::SetEquivalent),
     (("CopiableValues", "keywords"), OrderingClass::SetEquivalent),
     // ----- Effect embedded lists -----
@@ -258,6 +271,10 @@ pub const ORDERING_MANIFEST: &[((&str, &str), OrderingClass)] = &[
         ("Effect", "additional_modifications"),
         OrderingClass::SetEquivalent,
     ),
+    // `ChooseFromZone.additional_zones` unions extra search zones with the
+    // primary `zone` (e.g. "choose a card from your hand or graveyard").
+    // The choosable pool is a zone union — order is incidental. Set.
+    (("Effect", "additional_zones"), OrderingClass::SetEquivalent),
     (("Effect", "branches"), OrderingClass::OrderSignificant),
     (("Effect", "cards"), OrderingClass::SetEquivalent),
     (("Effect", "categories"), OrderingClass::SetEquivalent),
@@ -304,6 +321,13 @@ pub const ORDERING_MANIFEST: &[((&str, &str), OrderingClass)] = &[
     ),
     (
         ("ResolvedAbility", "targets"),
+        OrderingClass::OrderSignificant,
+    ),
+    // CR 608.2c: players chosen mid-resolution, in chain order.
+    // `ControllerRef::ChosenPlayer { index }` reads this list positionally,
+    // so reordering re-binds which player a given index resolves to.
+    (
+        ("ResolvedAbility", "chosen_players"),
         OrderingClass::OrderSignificant,
     ),
     (

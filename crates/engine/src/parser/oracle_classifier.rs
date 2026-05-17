@@ -234,6 +234,8 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     "as though it weren't blocked",
     "attacking doesn't cause",
     "as though they had flash",
+    "as though those creatures had haste",
+    "as though that creature had haste",
 ];
 
 const STATIC_PREFIX_PATTERNS: &[&str] = &[

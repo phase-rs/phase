@@ -9,7 +9,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ActionResult, ChosenDamageSource, GameState, PayableResource, PendingContinuation, WaitingFor,
 };
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
 use crate::types::zones::Zone;
 
@@ -24,12 +24,48 @@ pub(super) enum ResolutionChoiceOutcome {
     ActionResult(ActionResult),
 }
 
+/// CR 603.2 + CR 603.3b: After a resolution-choice handler has moved objects
+/// (sacrifice, change-zone, bounce, discard) and resolved any reflexive
+/// continuation, dispatch the observer triggers (dies-, discarded-, etc.)
+/// produced by that move across a possible continuation pause.
+///
+/// `event_slice_start..event_slice_end` MUST bound the move's OWN events,
+/// captured BEFORE the continuation drain so that continuation-produced events
+/// are excluded.
+///
+/// Returns `Some(WaitingFor)` only in the B1 settled case when a drained
+/// deferred trigger itself needs player input; the caller must propagate it.
+fn batch_or_drain_observer_triggers(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    event_slice_start: usize,
+    event_slice_end: usize,
+) -> Option<WaitingFor> {
+    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        // B1: this action settled — `run_post_action_pipeline` scans this
+        // action's own events; only the prior parked queue needs draining.
+        super::triggers::drain_deferred_trigger_queue(state, events)
+    } else {
+        // B2: paused — `run_post_action_pipeline` will not scan this action.
+        // Park this move's observer triggers for a later settle.
+        let trigger_events: Vec<GameEvent> = events[event_slice_start..event_slice_end]
+            .iter()
+            .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+            .cloned()
+            .collect();
+        super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+        None
+    }
+}
+
 pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
     matches!(
         waiting_for,
         WaitingFor::ScryChoice { .. }
             | WaitingFor::ManifestDreadChoice { .. }
             | WaitingFor::DiscoverChoice { .. }
+            | WaitingFor::RevealUntilKeptChoice { .. }
+            | WaitingFor::RepeatDecision { .. }
             | WaitingFor::CascadeChoice { .. }
             | WaitingFor::LearnChoice { .. }
             | WaitingFor::TopOrBottomChoice { .. }
@@ -161,6 +197,69 @@ pub(super) fn handle_resolution_choice(
             }
 
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+        }
+        // CR 701.20a + CR 608.2c: "You may put that card onto the battlefield" —
+        // the controller routes the kept card after RevealUntil found a hit.
+        // Accept → `accept_zone`; decline → `decline_zone`. On decline, when the
+        // decline zone IS the rest pile, the hit card joins the misses so the
+        // random-order placement covers it in one shuffle (CR 701.20a).
+        (
+            WaitingFor::RevealUntilKeptChoice {
+                player,
+                hit_card,
+                accept_zone,
+                decline_zone,
+                enter_tapped,
+                revealed_misses,
+                rest_destination,
+            },
+            GameAction::DecideOptionalEffect { accept },
+        ) => {
+            let mut misses = revealed_misses;
+            if accept {
+                zones::move_to_zone(state, hit_card, accept_zone, events);
+                // CR 110.5b: the kept card enters tapped when requested.
+                if enter_tapped {
+                    if let Some(obj) = state.objects.get_mut(&hit_card) {
+                        obj.tapped = true;
+                    }
+                }
+            } else if decline_zone == rest_destination {
+                misses.push(hit_card);
+            } else {
+                zones::move_to_zone(state, hit_card, decline_zone, events);
+            }
+            effects::reveal_until::move_rest(state, &misses, rest_destination, events);
+            // CR 701.20b: revealed cards have now moved zones — clear markers.
+            for &card_id in &misses {
+                state.revealed_cards.remove(&card_id);
+            }
+            state.revealed_cards.remove(&hit_card);
+            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+        }
+        // CR 107.1c + CR 608.2c: "you may repeat this process any number of
+        // times" — after one iteration resolved, the controller decides
+        // whether to run the process again.
+        (
+            WaitingFor::RepeatDecision { player, ability },
+            GameAction::DecideOptionalEffect { accept },
+        ) => {
+            if accept {
+                // Re-resolve one more process pass. `ability` retains
+                // `repeat_until: Some(ControllerChoice)`, so this hits the
+                // `repeat_until` dispatch, runs `resolve_chain_body` once, and
+                // re-sets `WaitingFor::RepeatDecision` (or, on an inner choice,
+                // pauses and stashes `pending_repeat_until`). depth = 1: each
+                // accept is a fresh top-level `apply()`, so depth never
+                // accumulates across prompts and the `depth > 20` guard never
+                // applies — CR 107.1c permits looping a whole library.
+                effects::resolve_ability_chain(state, &ability, events, 1)
+                    .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+                ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+            } else {
+                // CR 107.1c: declining ends the loop; drain any trailing chain.
+                ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            }
         }
         (
             WaitingFor::CascadeChoice {
@@ -921,8 +1020,25 @@ pub(super) fn handle_resolution_choice(
             set_priority(state, priority_player);
             if let Some(cont) = state.pending_continuation.as_mut() {
                 cont.chain.targets = chosen.iter().map(|&id| TargetRef::Object(id)).collect();
-                if let Some(ref mut next_sub) = cont.chain.sub_ability {
-                    next_sub.targets = unchosen.iter().map(|&id| TargetRef::Object(id)).collect();
+                // CR 700.2 + CR 608.2c: The "unchosen" partition is forwarded
+                // to the sub-ability ONLY for the zone-partition pattern
+                // (`ChooseFromZone`: chosen cards go one place, the rest go
+                // another). A counter-placement continuation (Bolster keyword
+                // action; Gluntch's "they put counters on a creature they
+                // control") is NOT a partition — its `sub_ability` is an
+                // independent trailing clause (e.g. the next `Choose`) and
+                // must not have the non-picked objects forced into its target
+                // list. Gate the forward on the continuation's own effect.
+                let is_partition = !matches!(
+                    cont.chain.effect,
+                    crate::types::ability::Effect::PutCounter { .. }
+                        | crate::types::ability::Effect::AddCounter { .. }
+                );
+                if is_partition {
+                    if let Some(ref mut next_sub) = cont.chain.sub_ability {
+                        next_sub.targets =
+                            unchosen.iter().map(|&id| TargetRef::Object(id)).collect();
+                    }
                 }
             }
             effects::drain_pending_continuation(state, events);
@@ -1103,6 +1219,7 @@ pub(super) fn handle_resolution_choice(
                 }
             }
 
+            let events_before_effect = events.len();
             for &card_id in &chosen {
                 if let effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) =
                     effects::discard::discard_as_cost_with_source(
@@ -1118,13 +1235,56 @@ pub(super) fn handle_resolution_choice(
                     return Ok(action_result_outcome(events, state.waiting_for.clone()));
                 }
             }
+            let events_after_move = events.len();
+
+            // CR 608.2e + CR 609.3: APNAP discard steps accumulate into one
+            // tracked set. The discard handler is the single authority for
+            // recording the cards it moved — `discard_as_cost_with_source`
+            // runs outside `resolve_effect`, so its non-interactive sibling's
+            // `next_sub_needs_tracked_set` publish never fires for it. Publish
+            // the cards that reached the graveyard here; `chain_tracked_set_id`
+            // is preserved across the per-opponent continuation pause, so each
+            // opponent's publish extends the same set and the "draw a card for
+            // each card discarded this way" tail reads the union.
+            // CR 701.9c: only graveyard-bound cards count — a replacement
+            // redirect (Madness) to another zone is excluded by the filter.
+            let discarded_to_graveyard: Vec<ObjectId> = events[events_before_effect..]
+                .iter()
+                .filter_map(|ev| match ev {
+                    GameEvent::ZoneChanged {
+                        object_id,
+                        to: Zone::Graveyard,
+                        ..
+                    } => Some(*object_id),
+                    _ => None,
+                })
+                .collect();
+            if !discarded_to_graveyard.is_empty() {
+                effects::publish_tracked_set(state, discarded_to_graveyard);
+            }
 
             state.last_effect_count = Some(chosen.len() as i32);
             events.push(GameEvent::EffectResolved {
                 kind: effect_kind,
                 source_id,
             });
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            let waiting_for = finish_with_continuation(state, player, events);
+
+            // CR 603.2c: each opponent's discard is a separate occurrence of a
+            // `Discarded`-mode trigger event. The resolution-choice dispatch
+            // path does not call `run_post_action_pipeline` for a non-settled
+            // action, so batch this discard's observer triggers (Waste Not,
+            // Megrim, Bone Miser) across the `DiscardChoice` pause — exactly
+            // as the `Sacrifice` branch does for dies-triggers.
+            if let Some(wf) = batch_or_drain_observer_triggers(
+                state,
+                events,
+                events_before_effect,
+                events_after_move,
+            ) {
+                return Ok(ResolutionChoiceOutcome::WaitingFor(wf));
+            }
+            ResolutionChoiceOutcome::WaitingFor(waiting_for)
         }
         (
             WaitingFor::EffectZoneChoice {
@@ -1183,6 +1343,9 @@ pub(super) fn handle_resolution_choice(
             }
 
             if chosen.is_empty() {
+                // Issue #423 audit: no cards chosen — this branch moves no
+                // objects and emits no battlefield-exit events, so no
+                // dies-trigger collection is needed.
                 state.last_effect_count = Some(0);
                 events.push(GameEvent::EffectResolved {
                     kind: effect_kind,
@@ -1295,13 +1458,52 @@ pub(super) fn handle_resolution_choice(
                     cont.chain.set_effect_context_object_recursive(snapshot);
                 }
             }
+            if matches!(
+                effect_kind,
+                EffectKind::ChangeZone | EffectKind::BounceAll | EffectKind::PutAtLibraryPosition
+            ) && state.pending_continuation.is_some()
+            {
+                let tracked_id = TrackedSetId(state.next_tracked_set_id);
+                state.next_tracked_set_id += 1;
+                state.tracked_object_sets.insert(tracked_id, chosen.clone());
+                state.chain_tracked_set_id = Some(tracked_id);
+            }
             state.last_effect_count = Some(chosen.len() as i32);
             events.push(GameEvent::EffectResolved {
                 kind: effect_kind,
                 source_id,
             });
+            // Mark the end of the battlefield-exit events produced by this
+            // handler (Sacrifice / ChangeZone / BounceAll) — the slice
+            // `events[events_before_effect..events_after_move]` is the exact
+            // set of dies-events whose triggers issue #423 must not lose.
+            let events_after_move = events.len();
+
+            // Step B: resolve the reflexive `WhenYouDo` continuation (Grist's
+            // `[-2]`). `waiting_for` is still `Priority` here, so
+            // `resume_with_error_propagation`'s guard passes and
+            // `drain_pending_continuation` runs.
             set_priority(state, player);
             resume_with_error_propagation(state, events)?;
+
+            // CR 603.2 + CR 603.3b: Issue #423 — dispatch the dies-triggers
+            // produced by this handler's permanent move (Undying CR 702.93a,
+            // Blood Artist-class observers). `PutAtLibraryPosition` moves cards
+            // within library/hand and emits no battlefield-exit events.
+            let moves_permanents = matches!(
+                effect_kind,
+                EffectKind::Sacrifice | EffectKind::ChangeZone | EffectKind::BounceAll
+            );
+            if moves_permanents {
+                if let Some(wf) = batch_or_drain_observer_triggers(
+                    state,
+                    events,
+                    events_before_effect,
+                    events_after_move,
+                ) {
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(wf));
+                }
+            }
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (
@@ -1329,6 +1531,9 @@ pub(super) fn handle_resolution_choice(
                 events,
             )
             .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+            // Issue #423 audit: `handle_topdeck_choice` moves cards between the
+            // hand and the top of the library — never off the battlefield — so
+            // it produces no dies-triggers and needs no collection here.
             state.last_effect_count = Some(chosen.len() as i32);
             set_priority(state, player);
             resume_with_error_propagation(state, events)?;
@@ -1372,22 +1577,20 @@ pub(super) fn handle_resolution_choice(
 
             state.last_named_choice = ChoiceValue::from_choice(&choice_type, &choice);
 
-            // CR 608.2c + CR 102.1: When the choice resolves to a player, bind
-            // that player to the continuation chain's `scoped_player` so
-            // subsequent untargeted "they"/"that player" subjects in the same
-            // resolution route to the chosen player, and append to the
-            // per-resolution ledger so the next Choose Player/Opponent filters
-            // this player out (Gluntch the Bestower 2022-06-10 ruling: "All
-            // three players must be different players"). Propagation stops at
-            // the next Choose-Player node in the chain — that node will rebind
-            // via its own NamedChoice continuation.
+            // CR 608.2c + CR 109.4: A `Choose(Player)`/`Choose(Opponent)`
+            // answer binds a resolution-scoped chosen player. Append it to the
+            // pending continuation chain's `chosen_players` so the dependent
+            // effect (`ControllerRef::ChosenPlayer { index }`) and any later
+            // `Choose(Player)` in the same resolution see this choice. The
+            // continuation chain carries the list because it is a
+            // `ResolvedAbility` — unlike `last_named_choice`, which is a
+            // single GameState slot cleared after every drain.
             if matches!(choice_type, ChoiceType::Player | ChoiceType::Opponent) {
-                if let Some(ChoiceValue::Player(chosen_pid)) = state.last_named_choice {
-                    state.chosen_players_this_resolution.push_back(chosen_pid);
-                    if let Some(ref mut pending) = state.pending_continuation {
-                        pending
-                            .chain
-                            .set_scoped_player_until_next_player_choose(chosen_pid);
+                if let Ok(pid) = choice.parse::<u8>() {
+                    if let Some(cont) = state.pending_continuation.as_mut() {
+                        let mut chosen = cont.chain.chosen_players.clone();
+                        chosen.push(crate::types::player::PlayerId(pid));
+                        cont.chain.set_chosen_players_recursive(&chosen);
                     }
                 }
             }
@@ -1599,40 +1802,73 @@ pub(super) fn handle_resolution_choice(
                 CategoryChooserScope::ControllerForAll
             };
 
+            // Issue #423 (Correction 1): `sacrifice_unchosen` moves permanents
+            // to the graveyard via `sacrifice_permanent`. Mark where those
+            // dies-events begin so the B2 branch below can batch their triggers.
+            let events_before_sacrifice = events.len();
+            // Clear `state.waiting_for` to a sentinel before advancing.
+            // `advance_to_next_player` / `sacrifice_unchosen` only WRITE
+            // `state.waiting_for` when they pause (a fresh `CategoryChoice` for
+            // the next chooser, or a replacement choice). When they auto-resolve
+            // and sacrifice, they leave `state.waiting_for` untouched — so
+            // without this reset the stale `CategoryChoice` of the chooser we
+            // just handled would still be present, and the `CategoryChoice`
+            // check below would wrongly treat a completed sacrifice as a pause.
+            set_priority(state, player);
             // Advance to next player or sacrifice.
             if remaining_players.is_empty() {
                 // All players have chosen — sacrifice everything not kept.
                 effects::choose_and_sacrifice_rest::sacrifice_unchosen_from_handler(
                     state, &all_kept, source_id, events,
                 );
-                set_priority(state, player);
-                resume_with_error_propagation(state, events)?;
+            } else if let Err(e) = effects::choose_and_sacrifice_rest::advance_to_next_player(
+                state,
+                &categories,
+                chooser_scope,
+                player, // controller for ControllerForAll
+                source_id,
+                &remaining_players,
+                all_kept,
+                events,
+            ) {
+                return Err(EngineError::InvalidAction(format!("{:?}", e)));
+            }
+            // If a sacrifice round set a fresh `CategoryChoice`, the run paused
+            // before any sacrifice — return directly.
+            if matches!(state.waiting_for, WaitingFor::CategoryChoice { .. }) {
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             } else {
-                match effects::choose_and_sacrifice_rest::advance_to_next_player(
-                    state,
-                    &categories,
-                    chooser_scope,
-                    player, // controller for ControllerForAll
-                    source_id,
-                    &remaining_players,
-                    all_kept,
-                    events,
-                ) {
-                    Ok(()) => {
-                        // If advance set a new WaitingFor, return it; otherwise priority.
-                        if matches!(state.waiting_for, WaitingFor::CategoryChoice { .. }) {
-                            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
-                        } else {
-                            set_priority(state, player);
-                            resume_with_error_propagation(state, events)?;
-                            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
-                        }
-                    }
-                    Err(e) => {
-                        return Err(EngineError::InvalidAction(format!("{:?}", e)));
-                    }
+                // The sacrifice (if any) is complete. Mark its event slice.
+                let events_after_sacrifice = events.len();
+                // Step B: if the sacrifice did not itself pause (no replacement
+                // choice was raised by `sacrifice_unchosen`), resolve any
+                // reflexive continuation. `state.waiting_for` is the `Priority`
+                // sentinel set before the advance unless a replacement choice
+                // was raised — in which case the continuation stays parked.
+                if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    resume_with_error_propagation(state, events)?;
                 }
+                // CR 603.2 + CR 603.3b: Issue #423 (Correction 1) — dispatch the
+                // dies-triggers from `sacrifice_unchosen` (Undying CR 702.93a,
+                // Blood Artist-class observers). Mirrors the `EffectZoneChoice`
+                // Sacrifice arm: B1 (`Priority`) lets `run_post_action_pipeline`
+                // scan this action's events and drains any prior parked queue;
+                // B2 (paused) batches this action's sacrifice events for a
+                // later drain.
+                if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    if let Some(wf) = super::triggers::drain_deferred_trigger_queue(state, events) {
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(wf));
+                    }
+                } else {
+                    let trigger_events: Vec<GameEvent> = events
+                        [events_before_sacrifice..events_after_sacrifice]
+                        .iter()
+                        .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+                        .cloned()
+                        .collect();
+                    super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+                }
+                ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             }
         }
         (waiting_for, action) => {

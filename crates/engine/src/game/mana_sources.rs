@@ -24,7 +24,6 @@ use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 use crate::types::TriggerMode;
 
-use super::combat;
 use super::mana_abilities;
 use super::mana_payment;
 use super::restrictions;
@@ -622,8 +621,9 @@ pub fn activatable_mana_options(
     if obj.zone != Zone::Battlefield || obj.controller != controller || obj.tapped {
         return Vec::new();
     }
-    // CR 602.5a + CR 302.6: Creatures with summoning sickness cannot activate tap abilities.
-    if combat::has_summoning_sickness(obj) {
+    // CR 602.5a + CR 302.6: Creatures with summoning sickness cannot activate tap abilities,
+    // unless a CanActivateAbilitiesAsThoughHaste static (Tyvar) lifts the gate.
+    if restrictions::summoning_sick_for_tap_ability(state, obj) {
         return Vec::new();
     }
     scan_mana_abilities(state, obj, object_id, controller, true)
@@ -640,10 +640,67 @@ pub(crate) fn auto_tap_mana_options(
     if obj.zone != Zone::Battlefield || obj.controller != controller || obj.tapped {
         return Vec::new();
     }
-    if combat::has_summoning_sickness(obj) {
+    if restrictions::summoning_sick_for_tap_ability(state, obj) {
         return Vec::new();
     }
     scan_mana_abilities(state, obj, object_id, controller, false)
+}
+
+/// CR 107.1b + CR 601.2f: Maximum *net* mana a single battlefield object can
+/// contribute to a cast — the largest net output of any one of its activatable
+/// `{T}` mana abilities (only one can be activated per tap), where net output
+/// is gross production minus the mana paid to activate.
+///
+/// Lets `max_x_value` count multi-mana producers (Sol Ring, Ravnica bounce
+/// lands, `{T}: Add {C} for each ~`) at their full output instead of a flat
+/// one-mana-per-producer, which capped the X chooser below what the caster
+/// could actually pay. Netting the activation cost keeps cost-bearing sources
+/// (filter lands' `{1}, {T}: Add two mana`) from overstating affordable X.
+pub fn max_mana_yield(state: &GameState, object_id: ObjectId, controller: PlayerId) -> u32 {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return 0;
+    };
+    if obj.zone != Zone::Battlefield || obj.controller != controller || obj.tapped {
+        return 0;
+    }
+    // CR 602.5a + CR 302.6: Summoning-sick mana-creatures cannot tap for mana,
+    // unless a CanActivateAbilitiesAsThoughHaste static (Tyvar) lifts the gate.
+    if restrictions::summoning_sick_for_tap_ability(state, obj) {
+        return 0;
+    }
+
+    let explicit_max = obj
+        .abilities
+        .iter()
+        .enumerate()
+        .filter(|(idx, ability)| {
+            is_active_tap_mana_ability(state, object_id, controller, *idx, ability, true)
+        })
+        .filter_map(|(_, ability)| match &*ability.effect {
+            Effect::Mana { produced, .. } => {
+                let resolved =
+                    super::ability_utils::build_resolved_from_def(ability, object_id, controller);
+                let gross = super::effects::mana::resolve_mana_types_for_ability(
+                    produced, state, &resolved,
+                )
+                .len() as u32;
+                // CR 605.3b: Net the mana paid to activate this ability —
+                // gross output overstates what a filter land actually adds.
+                let activation_cost = mana_abilities::mana_sub_cost_of(&ability.cost)
+                    .map_or(0, |cost| cost.mana_value());
+                Some(gross.saturating_sub(activation_cost))
+            }
+            _ => None,
+        })
+        .max();
+
+    match explicit_max {
+        Some(amount) => amount,
+        // CR 305.1: Subtype-only basic lands carry no explicit mana ability;
+        // `land_mana_options` synthesizes a single one-mana option for them.
+        None if !activatable_mana_options(state, object_id, controller).is_empty() => 1,
+        None => 0,
+    }
 }
 
 fn land_mana_options(
@@ -666,8 +723,9 @@ fn land_mana_options(
         return Vec::new();
     }
     // CR 602.5a + CR 302.6: Land-creatures (e.g., Dryad Arbor) have summoning sickness and
-    // cannot activate tap abilities the turn they enter the battlefield.
-    if require_untapped && combat::has_summoning_sickness(obj) {
+    // cannot activate tap abilities the turn they enter the battlefield, unless a
+    // CanActivateAbilitiesAsThoughHaste static (Tyvar) lifts the gate.
+    if require_untapped && restrictions::summoning_sick_for_tap_ability(state, obj) {
         return Vec::new();
     }
 
@@ -704,6 +762,39 @@ fn land_mana_options(
     options
 }
 
+/// CR 605.1a + CR 605.3a: Predicate for "this is an activated mana ability
+/// with a `{T}` component that `controller` could currently activate."
+/// Single authority shared by `scan_mana_abilities` (which builds per-color
+/// `ManaSourceOption` rows) and `max_mana_yield` (which sums total output) so
+/// the two never diverge on which abilities count as mana sources.
+fn is_active_tap_mana_ability(
+    state: &GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+    ability_index: usize,
+    ability: &AbilityDefinition,
+    require_current_payability: bool,
+) -> bool {
+    if ability.kind != AbilityKind::Activated || !mana_abilities::is_mana_ability(ability) {
+        return false;
+    }
+    if require_current_payability
+        && !mana_abilities::can_activate_mana_ability_now(
+            state,
+            controller,
+            object_id,
+            ability_index,
+            ability,
+        )
+    {
+        return false;
+    }
+    if !has_tap_component(&ability.cost) {
+        return false;
+    }
+    activation_condition_satisfied(state, controller, object_id, ability_index, ability)
+}
+
 /// Scan an object's abilities for activated mana abilities with a tap cost component.
 /// Type-agnostic — works for lands, creatures, artifacts, etc.
 fn scan_mana_abilities(
@@ -715,24 +806,14 @@ fn scan_mana_abilities(
 ) -> Vec<ManaSourceOption> {
     let mut options = Vec::new();
     for (ability_index, ability) in obj.abilities.iter().enumerate() {
-        if ability.kind != AbilityKind::Activated || !mana_abilities::is_mana_ability(ability) {
-            continue;
-        }
-        if require_current_payability
-            && !mana_abilities::can_activate_mana_ability_now(
-                state,
-                controller,
-                object_id,
-                ability_index,
-                ability,
-            )
-        {
-            continue;
-        }
-        if !has_tap_component(&ability.cost) {
-            continue;
-        }
-        if !activation_condition_satisfied(state, controller, object_id, ability_index, ability) {
+        if !is_active_tap_mana_ability(
+            state,
+            object_id,
+            controller,
+            ability_index,
+            ability,
+            require_current_payability,
+        ) {
             continue;
         }
 
@@ -1114,9 +1195,10 @@ pub(crate) fn opponent_land_color_options(
 /// tap-untap-tap exploit (Fertile Ground, Wild Growth, Utopia Sprawl, Trace
 /// of Abundance, Verdant Haven, Market Festival, Weirding Wood, Overgrowth).
 ///
-/// Reuses `match_taps_for_mana`'s `valid_card_matches` predicate — the same
-/// single-authority match used at trigger-firing time — so the refund and
-/// firing paths cannot drift.
+/// Reuses `taps_for_mana_card_matches` — the same single-authority card-identity
+/// predicate `match_taps_for_mana` uses at trigger-firing time — so the refund
+/// and firing paths cannot drift. No `GameEvent` is synthesized: the predicate
+/// is probed directly with the land as the mana source.
 pub(crate) fn aura_taps_for_mana_sources_for_land(
     state: &GameState,
     land_id: ObjectId,
@@ -1139,17 +1221,8 @@ pub(crate) fn aura_taps_for_mana_sources_for_land(
             // canonical aura-on-land shape; `SelfRef` covers the
             // self-tapping land case (already refunded by the land's own
             // `source_id`, but kept here for completeness).
-            let synthetic_event = crate::types::events::GameEvent::ManaAdded {
-                player_id: controller,
-                mana_type: ManaType::Colorless,
-                source_id: land_id,
-                tapped_for_mana: true,
-            };
-            if super::trigger_matchers::match_taps_for_mana(
-                &synthetic_event,
-                trigger,
-                object_id,
-                state,
+            if super::trigger_matchers::taps_for_mana_card_matches(
+                trigger, state, land_id, object_id,
             ) && object_id != land_id
                 && !sources.contains(&object_id)
             {
@@ -1359,6 +1432,158 @@ mod tests {
         .cost(AbilityCost::Tap);
         Arc::make_mut(&mut obj.abilities).push(ability);
         display_land_mana_pips(&state, id, PlayerId(0))
+    }
+
+    /// Build a single-ability `{T}`-cost producer with a given `ManaProduction`
+    /// and return its `max_mana_yield`.
+    fn yield_for_production(production: ManaProduction) -> u32 {
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Test Producer".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        let ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: production,
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        Arc::make_mut(&mut obj.abilities).push(ability);
+        max_mana_yield(&state, id, PlayerId(0))
+    }
+
+    /// CR 107.1b: `max_mana_yield` reports a producer's full mana output, not a
+    /// flat 1 — so the `max_x_value` X-chooser bound reflects multi-mana
+    /// sources (Sol Ring, bounce lands) instead of capping below affordability.
+    #[test]
+    fn max_mana_yield_counts_full_output_of_multi_mana_producers() {
+        // Basic-land shape: one colored mana.
+        assert_eq!(
+            yield_for_production(ManaProduction::Fixed {
+                colors: vec![ManaColor::Green],
+                contribution: ManaContribution::Base,
+            }),
+            1,
+        );
+        // Sol Ring shape: one activation yields two colorless.
+        assert_eq!(
+            yield_for_production(ManaProduction::Colorless {
+                count: QuantityExpr::Fixed { value: 2 },
+            }),
+            2,
+        );
+        // Multi-color fixed sequence (e.g. a {W}{U} bounce-land output).
+        assert_eq!(
+            yield_for_production(ManaProduction::Fixed {
+                colors: vec![ManaColor::White, ManaColor::Blue],
+                contribution: ManaContribution::Base,
+            }),
+            2,
+        );
+    }
+
+    /// CR 605.3a: A single `{T}` pays for only one mana ability — an object
+    /// with several mana abilities yields the largest, never their sum. A
+    /// tapped object can activate none of them.
+    #[test]
+    fn max_mana_yield_takes_best_ability_and_respects_tapped() {
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(0),
+            "Multi-Mode Rock".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            for count in [2, 3] {
+                Arc::make_mut(&mut obj.abilities).push(
+                    AbilityDefinition::new(
+                        AbilityKind::Activated,
+                        Effect::Mana {
+                            produced: ManaProduction::Colorless {
+                                count: QuantityExpr::Fixed { value: count },
+                            },
+                            restrictions: vec![],
+                            grants: vec![],
+                            expiry: None,
+                            target: None,
+                        },
+                    )
+                    .cost(AbilityCost::Tap),
+                );
+            }
+        }
+        // Best single ability is the count-3 mode — not 2 + 3 = 5.
+        assert_eq!(max_mana_yield(&state, id, PlayerId(0)), 3);
+
+        state.objects.get_mut(&id).unwrap().tapped = true;
+        assert_eq!(max_mana_yield(&state, id, PlayerId(0)), 0);
+    }
+
+    /// CR 605.3b: A filter land (`{1}, {T}: Add two mana`) nets one mana — its
+    /// gross output of two must not overstate the X a caster can afford.
+    #[test]
+    fn max_mana_yield_nets_out_activation_cost() {
+        use crate::types::mana::{ManaCost, ManaUnit};
+
+        let mut state = GameState::new_two_player(42);
+        // Prime the pool so the `{1}` activation cost is currently payable —
+        // otherwise `can_activate_mana_ability_now` rejects the ability.
+        state.players[0]
+            .mana_pool
+            .add(ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]));
+
+        let id = create_object(
+            &mut state,
+            CardId(902),
+            PlayerId(0),
+            "Filter Land".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Colorless {
+                            count: QuantityExpr::Fixed { value: 2 },
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::Cost {
+                                shards: vec![],
+                                generic: 1,
+                            },
+                        },
+                        AbilityCost::Tap,
+                    ],
+                }),
+            );
+        }
+        // Gross output 2, minus the `{1}` activation cost → net 1.
+        assert_eq!(max_mana_yield(&state, id, PlayerId(0)), 1);
     }
 
     /// Parametric coverage of every `ManaProduction` variant — each row asserts

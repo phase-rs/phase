@@ -12,6 +12,19 @@
 import type { WaitingFor } from "../adapter/types";
 
 /**
+ * CR 601.2g + CR 107.4f: WaitingFor variants resolved by the single
+ * `ManaPaymentUI` overlay. The generic `ManaPayment` prompt and the per-shard
+ * `PhyrexianPayment` prompt share one panel because both are caster-only cost
+ * decisions for the same spell — `ManaPaymentUI` discriminates internally.
+ *
+ * This set is the single source of truth: `GamePage` gates the overlay's
+ * mount on it, and `HANDLED_WAITING_FOR_TYPES` spreads it. Wiring the overlay
+ * and registering it as "handled" therefore cannot drift apart.
+ */
+export const MANA_PAYMENT_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
+  new Set<WaitingFor["type"]>(["ManaPayment", "PhyrexianPayment"]);
+
+/**
  * Discriminator strings the frontend has a user-facing UI handler for.
  * Every entry must correspond to a rendered modal, overlay, or in-line
  * affordance that resolves the prompt.
@@ -20,11 +33,10 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
   new Set<WaitingFor["type"]>([
     // Active priority — passes via PassButton / mana payment / cast.
     "Priority",
-    // Cast / activation chain
-    "ManaPayment",
+    // Cast / activation chain — ManaPayment + PhyrexianPayment share ManaPaymentUI.
+    ...MANA_PAYMENT_WAITING_FOR_TYPES,
     "ChooseXValue",
     "PayAmountChoice",
-    "PhyrexianPayment",
     "TargetSelection",
     "TriggerTargetSelection",
     "OptionalCostChoice",
@@ -82,6 +94,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "ClashCardPlacement",
     "TopOrBottomChoice",
     "ProliferateChoice",
+    "ChooseObjectsSelection",
     "CategoryChoice",
     "DistributeAmong",
     "RetargetChoice",
@@ -101,6 +114,8 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "WardSacrificeChoice",
     "UnlessBounceChoice",
     "DiscoverChoice",
+    "RevealUntilKeptChoice",
+    "RepeatDecision",
     "CascadeChoice",
     "VoteChoice",
     "ChooseRingBearer",

@@ -239,7 +239,13 @@ pub(crate) fn handle_select_targets(
             source_id: pending.object_id,
         });
         // CR 702.142b: Emit additional event when a boast ability is activated.
-        emit_boast_event_if_tagged(state, pending.object_id, ability_index, player, events);
+        emit_keyword_ability_event_if_tagged(
+            state,
+            pending.object_id,
+            ability_index,
+            player,
+            events,
+        );
         state.priority_passes.clear();
         state.priority_pass_count = 0;
         return Ok(WaitingFor::Priority { player });
@@ -289,7 +295,7 @@ pub(crate) fn handle_choose_target(
         }),
         TargetSelectionAdvance::Complete(selected_slots) => {
             let mut ability = pending.ability.clone();
-            assign_selected_slots_in_chain(&mut ability, &selected_slots)?;
+            assign_selected_slots_in_chain(state, &mut ability, &selected_slots)?;
 
             if let Some(ability_index) = pending.activation_ability_index {
                 if let Some(ref activation_cost) = pending.activation_cost {
@@ -329,7 +335,13 @@ pub(crate) fn handle_choose_target(
                     source_id: pending.object_id,
                 });
                 // CR 702.142b: Emit additional event when a boast ability is activated.
-                emit_boast_event_if_tagged(state, pending.object_id, ability_index, player, events);
+                emit_keyword_ability_event_if_tagged(
+                    state,
+                    pending.object_id,
+                    ability_index,
+                    player,
+                    events,
+                );
                 state.priority_passes.clear();
                 state.priority_pass_count = 0;
                 return Ok(WaitingFor::Priority { player });
@@ -422,25 +434,38 @@ pub(super) fn extract_fixed_distribution_total(effect: &Effect) -> Option<u32> {
     }
 }
 
-/// CR 702.142b: If the activated ability at `ability_index` on the source object
-/// has `ability_tag == Some(AbilityTag::Boast)`, emit a `BoastAbilityActivated` event.
-pub(crate) fn emit_boast_event_if_tagged(
+/// CR 702.142b + CR 702.177a: If the activated ability at `ability_index` on
+/// the source object has a keyword ability tag, emit the matching activation
+/// event so "whenever you activate a [keyword] ability" triggers can see it.
+pub(crate) fn emit_keyword_ability_event_if_tagged(
     state: &GameState,
     source_id: ObjectId,
     ability_index: usize,
     player: PlayerId,
     events: &mut Vec<GameEvent>,
 ) {
-    let is_boast = state
+    let Some(def) = state
         .objects
         .get(&source_id)
         .and_then(|obj| obj.abilities.get(ability_index))
-        .is_some_and(|def| def.ability_tag == Some(AbilityTag::Boast));
-    if is_boast {
-        events.push(GameEvent::BoastAbilityActivated {
-            player_id: player,
-            source_id,
-        });
+    else {
+        return;
+    };
+    match def.ability_tag {
+        Some(AbilityTag::Boast) => {
+            events.push(GameEvent::BoastAbilityActivated {
+                player_id: player,
+                source_id,
+            });
+        }
+        Some(AbilityTag::Exhaust) => {
+            events.push(GameEvent::ExhaustAbilityActivated {
+                player_id: player,
+                source_id,
+                is_mana_ability: super::mana_abilities::is_mana_ability(def),
+            });
+        }
+        None => {}
     }
 }
 

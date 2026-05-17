@@ -5,6 +5,7 @@
 
 use super::diagnostic::OracleDiagnostic;
 use crate::types::ability::{ControllerRef, QuantityRef, TargetFilter, TargetSelectionMode};
+use crate::types::zones::Zone;
 
 /// Unified parsing context — threaded through all parser branches for
 /// pronoun/reference resolution ("it", "that creature", "that many").
@@ -36,11 +37,45 @@ pub(crate) struct ParseContext {
     /// CR 109.4 + CR 115.1: Relative-player scope for "that player controls"
     /// resolution inside trigger effects. Replaces thread-local oracle_target_scope.
     pub relative_player_scope: Option<ControllerRef>,
+    /// CR 608.2c + CR 109.4: Count of `Effect::Choose { choice_type: Player }`
+    /// clauses emitted so far in the current effect chain. Each "choose a
+    /// player" / "choose a [second|third] player" clause increments this; the
+    /// 0-based index of the *next* chosen player is the current value. Used to
+    /// stamp `ControllerRef::ChosenPlayer { index }` so a dependent effect
+    /// ("they put counters on a creature they control") binds to the player
+    /// chosen by the immediately-preceding `Choose(Player)`.
+    pub chosen_player_count: u8,
     /// CR 115.1 + CR 701.9b: Target selection mode for the most recent target
     /// phrase parsed via `parse_target_with_ctx`. The chunk loop in
     /// `parse_effect_chain_ir` snapshots this into the produced `ClauseIr` and
     /// resets it to `Chosen` for the next chunk so the marker is per-clause.
     pub target_selection_mode: TargetSelectionMode,
+    /// CR 303.4 + CR 702.103: Typed self-reference for the enclosing card's
+    /// attachment host. Set to `Some(TargetFilter::AttachedTo)` only when the
+    /// card being parsed is an Aura or has the Bestow keyword (i.e. it can be
+    /// attached to a permanent). When set, a `"that creature"` anaphor that the
+    /// generic target parser resolves to `ParentTarget` is remapped to this
+    /// host filter — for an Aura/bestow card "that creature" is the enchanted
+    /// host (Springheart Nantuko's landfall copy-token). `None` for non-Aura
+    /// cards, so `ParentTarget` keeps its chosen-target semantics (Twinflame).
+    pub host_self_reference: Option<TargetFilter>,
+    /// CR 603.4: Transient relative-clause filter parsed from a
+    /// trigger subject ("an opponent **who controls F** draws a card"). Set by
+    /// `parse_single_subject` when it consumes a "who controls <filter>"
+    /// clause; consumed by `parse_trigger_condition`, which rewrites the
+    /// filter's controller to `ControllerRef::TriggeringPlayer` and ANDs an
+    /// `ObjectCount >= 1` intervening-if into the trigger's condition. Reset to
+    /// `None` at the entry of every `parse_trigger_condition` call so stale
+    /// clause state cannot leak across trigger lines.
+    pub pending_trigger_subject_clause: Option<TargetFilter>,
+    /// CR 608.2k: Source zone of the current ability's `AbilityCost::Exile`
+    /// component, if any. Set by `parse_activated_ability_definition` after the
+    /// cost is parsed and before the effect text is parsed, then restored after
+    /// the ability. Consumed by `parse_cost_paid_object_reference` to
+    /// disambiguate "the exiled card" — a cost-paid-object reference
+    /// (`TargetFilter::CostPaidObject`) when the ability has a non-self exile
+    /// cost, an effect-exiled tracked-set reference (`TrackedSet`) otherwise.
+    pub current_ability_exile_cost_zone: Option<Zone>,
 }
 
 impl ParseContext {

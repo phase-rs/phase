@@ -23,6 +23,7 @@ const mockEvents: GameEvent[] = [
 const mockState = {
   waiting_for: null,
   turn: { active_player: 0 },
+  stack: [],
 } as unknown as GameState;
 
 const mockAdapter = {
@@ -43,7 +44,7 @@ describe("useGameDispatch", () => {
     // Set up gameStore with a mock adapter and initial state
     useGameStore.setState({
       adapter: mockAdapter,
-      gameState: { waiting_for: null } as unknown as GameState,
+      gameState: { waiting_for: null, stack: [] } as unknown as GameState,
       events: [],
       eventHistory: [],
       stateHistory: [],

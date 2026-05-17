@@ -24,9 +24,9 @@
 use super::oracle::ParsedAbilities;
 use super::oracle_ir::diagnostic::{CascadeSlot, OracleDiagnostic};
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, ContinuousModification, Effect, FilterProp,
-    ModalSelectionConstraint, OpponentMayScope, PlayerFilter, QuantityExpr, ReplacementDefinition,
-    ReplacementMode, StaticDefinition, TargetFilter, TriggerDefinition,
+    AbilityCondition, AbilityDefinition, ContinuousModification, CopyRetargetPermission, Effect,
+    FilterProp, ModalSelectionConstraint, OpponentMayScope, PlayerFilter, QuantityExpr,
+    ReplacementDefinition, ReplacementMode, StaticDefinition, TargetFilter, TriggerDefinition,
 };
 use crate::types::statics::StaticMode;
 use crate::types::triggers::TriggerMode;
@@ -95,7 +95,7 @@ pub fn check_swallowed_clauses(
     detect_replacement_instead(&cleaned, oracle_text, parsed, diagnostics);
     detect_activate_only_during(&cleaned, oracle_text, parsed, diagnostics);
     detect_activate_limit(&cleaned, oracle_text, parsed, diagnostics);
-    detect_duration_until_eot(&cleaned, oracle_text, parsed, diagnostics);
+    detect_duration_until_eot(&cleaned, oracle_text, parsed, &ast_json, diagnostics);
     detect_optional_you_may(&cleaned, oracle_text, parsed, diagnostics);
     detect_dynamic_qty(&cleaned, oracle_text, &ast_json, diagnostics);
     detect_condition_if(&cleaned, oracle_text, &ast_json, parsed, diagnostics);
@@ -226,6 +226,7 @@ fn detect_duration_until_eot(
     cleaned: &str,
     original: &str,
     parsed: &ParsedAbilities,
+    ast_json: &str,
     diagnostics: &mut Vec<OracleDiagnostic>,
 ) {
     // allow-noncombinator: swallow detector marker scan on classified text
@@ -233,6 +234,21 @@ fn detect_duration_until_eot(
         return;
     }
     if any_ability_has_duration(parsed) {
+        return;
+    }
+    // CR 611.2a: an "until end of turn"/"until end of combat" duration nested
+    // inside a token-granted ability (Effect::Token.static_abilities ->
+    // GrantTrigger -> trigger.execute) is invisible to the structured
+    // `def_tree_has_duration` walk, which does not descend into Effect::Token.
+    // The serialized AST is complete, so a marker check catches the nested case.
+    // Mirrors detect_duration_this_turn / detect_duration_next_turn.
+    if json_has_any(
+        ast_json,
+        &[
+            "\"duration\":\"UntilEndOfTurn\"",
+            "\"duration\":\"UntilEndOfCombat\"",
+        ],
+    ) {
         return;
     }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
@@ -282,6 +298,15 @@ fn detect_optional_you_may(
 /// modal `ChoiceOfEffects`)?
 fn def_tree_has_optional(def: &AbilityDefinition) -> bool {
     if def.optional || def.optional_targeting {
+        return true;
+    }
+    // CR 107.1c: "you may repeat this process [any number of times]" is a
+    // controller decision captured on `repeat_until` — an optional player
+    // action, so the "you may" in the text is accounted for.
+    if matches!(
+        def.repeat_until,
+        Some(crate::types::ability::RepeatContinuation::ControllerChoice)
+    ) {
         return true;
     }
     if effect_has_internal_optionality(&def.effect) {
@@ -345,6 +370,22 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
         }
         | Effect::RevealFromHand {
             on_decline: Some(_),
+            ..
+        }
+        // CR 707.10c: CopySpell with MayChooseNewTargets encodes the "you may
+        // choose new targets for the copy" opt-in at the runtime resolution
+        // layer (WaitingFor::CopyRetarget). The def-level `optional` flag is
+        // therefore not needed — analogous to Dig { up_to: true }.
+        | Effect::CopySpell {
+            retarget: CopyRetargetPermission::MayChooseNewTargets,
+            ..
+        }
+        // CR 701.20a + CR 608.2c: RevealUntil with kept_optional_to encodes
+        // "you may put that card onto the battlefield" — the kept-card
+        // destination choice IS the "may" decision (mirrors RevealFromHand
+        // { on_decline }).
+        | Effect::RevealUntil {
+            kept_optional_to: Some(_),
             ..
         } => true,
         Effect::ChooseOneOf { branches, .. } => branches.iter().any(def_tree_has_optional),
@@ -1142,6 +1183,18 @@ fn detect_dynamic_qty(
     {
         return;
     }
+    // CR 608.2c: "<verb> twice instead" (Secrets of the Key, Increasing
+    // Vengeance, every Flashback "twice instead" card) is a count-replacement
+    // instruction whose doubled count is carried by `AbilityDefinition.repeat_for`
+    // — a QuantityExpr home the marker list above does not enumerate because
+    // `repeat_for` is a structural field, not a value-typed `"type":"Ref"` node.
+    // When "twice" is the SOLE dynamic marker and the AST carries a `repeat_for`,
+    // the quantity IS represented; the warning is a false positive.
+    if cleaned_twice_is_only_dynamic_marker(cleaned)
+        && json_has_any(ast_json, &["\"repeat_for\":{"])
+    {
+        return;
+    }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
         detector: "DynamicQty".into(),
         description: truncate(original, 140).into(),
@@ -1163,6 +1216,46 @@ fn cleaned_has_only_counter_multiplier_dynamic(cleaned: &str) -> bool {
         "for each ",
         " twice ",
         "where x is ",
+        "half your ",
+        "half their ",
+        "half its ",
+        "half the ",
+    ]
+    .iter()
+    // allow-noncombinator: swallow detector marker scan on classified text
+    .any(|marker| cleaned.contains(marker))
+}
+
+/// True when " twice " is the ONLY dynamic-quantity marker in `cleaned` (and
+/// is not the "twice each turn" activation-limit form). Used to keep the
+/// `repeat_for` suppression narrow: a card that ALSO carries another dynamic
+/// phrase ("for each", "equal to", "the number of", …) must still flag, since
+/// that second marker may be a genuinely-swallowed clause `repeat_for` does
+/// not account for.
+fn cleaned_twice_is_only_dynamic_marker(cleaned: &str) -> bool {
+    // allow-noncombinator: swallow detector marker scan on classified text
+    let twice_is_activation_limit = cleaned.contains("twice each turn")
+        // allow-noncombinator: swallow detector marker scan on classified text
+        && !cleaned.contains("twice that")
+        // allow-noncombinator: swallow detector marker scan on classified text
+        && !cleaned.contains("twice x");
+    // allow-noncombinator: swallow detector marker scan on classified text
+    let has_twice = cleaned.contains(" twice ") && !twice_is_activation_limit;
+    if !has_twice {
+        return false;
+    }
+    // "twice that many" / "twice x" are multiplier markers, not the plain
+    // repeat count `repeat_for` carries — they need a real QuantityExpr.
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if cleaned.contains("twice that") || cleaned.contains("twice x") {
+        return false;
+    }
+    // No OTHER dynamic marker may be present.
+    ![
+        " equal to ",
+        "for each ",
+        "where x is ",
+        "the number of ",
         "half your ",
         "half their ",
         "half its ",
@@ -1263,8 +1356,9 @@ fn detect_condition_if(
     }
     // Bare " if " — covers prefix conditional ("if X, do Y") and suffix
     // conditional ("do Y if X"). Excluded: "as if", "even if" — modifiers,
-    // not conditions. Also "if able" (CR 701.27) — must-attack/must-block
-    // riders, encoded as `MustAttack`/`MustBeBlocked` static modes.
+    // not conditions. Also "if able" (CR 508.1d / CR 509.1c) —
+    // must-attack/must-block riders, encoded as `MustAttack`/`MustBeBlocked`
+    // static modes.
     let has_marker = stripped.contains(" if ") // allow-noncombinator: swallow detector marker scan on classified text
         && !stripped.contains(" as if ") // allow-noncombinator: swallow detector marker scan on classified text
         && !stripped.contains(" even if "); // allow-noncombinator: swallow detector marker scan on classified text
@@ -1288,9 +1382,9 @@ fn detect_condition_if(
         // CR 614.1a: AddTargetReplacement encodes the "if [target] would die"
         // gate via the carried ReplacementDefinition's event/destination_zone.
         "AddTargetReplacement",
-        // CR 701.27 / CR 506.6: must-attack and must-block "if able" riders
-        // are encoded as static-mode constraints or as `ForceBlock`/`ForceAttack`
-        // effects, not conditional gates.
+        // CR 508.1d / CR 509.1c / CR 506.6: must-attack and must-block "if able"
+        // riders are encoded as static-mode constraints or as
+        // `ForceBlock`/`ForceAttack` effects, not conditional gates.
         "\"mode\":\"MustAttack\"",
         "\"mode\":\"MustBlock\"",
         "\"mode\":\"MustBeBlocked\"",
@@ -1302,6 +1396,10 @@ fn detect_condition_if(
         // Amphitheater) as an effect with an `on_decline` branch.
         "\"mode\":{\"type\":\"Optional\"",
         "\"on_decline\":{",
+        // CR 701.20a + CR 608.2c: RevealUntil's kept_optional_to encodes the
+        // "you may put that card onto the battlefield. If you don't, ..."
+        // decline branch — the "if" is the optional-destination gate.
+        "\"kept_optional_to\":",
         // CR 117.3a: TopOfLibraryCastPermission with `alt_cost` IS the "if
         // you cast a spell this way, pay X" gate (Bolas's Citadel etc.).
         "TopOfLibraryCastPermission",
@@ -1534,6 +1632,26 @@ fn detect_duration_this_turn(
     if total_this_turn > 0 && total_this_turn == case_solve_this_turn {
         return;
     }
+    // CR 603.4 / CR 307.5: "Activate only if ... this turn" routes the clause
+    // to an `ActivationRestriction::RequiresCondition`; "this turn" there
+    // scopes the activation condition, never an effect duration. Exempt ONLY
+    // when EVERY "this turn" occurrence lives on an "activate only" line
+    // (occurrence-balanced line scoping, mirroring the `case_solve_this_turn`
+    // block above) AND the AST confirms a `RequiresCondition` node. Line
+    // scoping is required so a card whose OTHER lines genuinely drop a
+    // duration is NOT exempted.
+    let activate_only_this_turn: usize = cleaned
+        .lines()
+        // allow-noncombinator: swallow detector marker scan on classified text
+        .filter(|line| line.contains("activate only"))
+        .map(|line| line.matches(" this turn").count())
+        .sum();
+    if total_this_turn > 0
+        && total_this_turn == activate_only_this_turn
+        && json_has_any(ast_json, &["RequiresCondition"])
+    {
+        return;
+    }
     // CR 700.4 + CR 700.5 (turn-history quantities and counters):
     // "this turn" is used pervasively as a SUFFIX on count/quantity
     // references rather than as a duration on an effect. The detector
@@ -1657,6 +1775,17 @@ fn detect_duration_this_turn(
         "CardsDrawnThisTurn",
         "PlayerActionsThisTurn",
         "OpponentLostLife",
+        // CR 611.3: a condition slot serialized as the typed `Unrecognized`
+        // marker means the parser routed the "as long as ... this turn" clause
+        // INTO a condition slot (and explicitly recorded that it could not
+        // parse it). "this turn" there is unambiguously consumed by a
+        // condition, not an effect duration. This is a specific node proving a
+        // *condition slot was populated* — same precision class as the
+        // `CreatureDiedThisTurn` / `AttackedThisTurn` markers — so it is not
+        // subject to the container over-breadth concern. The card itself
+        // remains visibly unsupported (`Unrecognized` is an explicit failure
+        // node + coverage `supported=false`), so no gap is hidden.
+        "\"condition\":{\"type\":\"Unrecognized\"",
     ];
     if json_has_any(ast_json, markers) {
         return;
@@ -1978,6 +2107,21 @@ mod tests {
     }
 
     #[test]
+    fn optional_you_may_accepts_repeat_this_process() {
+        // CR 107.1c: "You may repeat this process any number of times" is
+        // captured as `repeat_until: ControllerChoice` on the root ability —
+        // a controller decision, not a swallowed optional effect.
+        let parsed = parse(
+            "Reveal the top card of your library and put that card into your \
+             hand. You lose life equal to its mana value. You may repeat this \
+             process any number of times.",
+            &["Instant"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
     fn duration_this_turn_accepts_force_block_scope() {
         let parsed = parse(
             "Target creature blocks target creature this turn if able.",
@@ -2092,6 +2236,88 @@ mod tests {
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
     }
 
+    /// CR 611.2a: an "until end of turn" duration nested inside a token-granted
+    /// trigger (`Effect::Token` → `GrantTrigger` → `trigger.execute`) is
+    /// captured in the AST — `detect_duration_until_eot`'s structured walk
+    /// cannot see it, so the serialized-AST marker check exempts it.
+    #[test]
+    fn duration_until_eot_accepts_token_granted_trigger() {
+        let parsed = parse_named(
+            "Create a 2/2 green Bird creature token with \"Whenever a land you \
+             control enters, this token gets +1/+0 until end of turn.\"",
+            "Token Maker",
+            &["Sorcery"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Duration_UntilEndOfTurn"));
+    }
+
+    /// CR 603.4: "Activate only if ... this turn" scopes a turn-history
+    /// activation condition (`ActivationRestriction::RequiresCondition`), not
+    /// an effect duration — `detect_duration_this_turn` must not fire.
+    #[test]
+    fn duration_this_turn_accepts_activation_restriction_condition() {
+        let parsed = parse_named(
+            "{T}: Draw a card. Activate only if you attacked with two or more creatures this turn.",
+            "Test Keep",
+            &["Land"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Duration_ThisTurn"));
+    }
+
+    /// CR 611.3: an "as long as ... this turn" clause routed into an
+    /// `Unrecognized` condition slot means "this turn" was consumed by a
+    /// condition, not dropped as an effect duration (War Historian shape).
+    #[test]
+    fn duration_this_turn_accepts_unrecognized_as_long_as_condition() {
+        let parsed = parse_named(
+            "Reach\nThis creature has indestructible as long as it attacked a battle this turn.",
+            "War Historian",
+            &["Creature"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Duration_ThisTurn"));
+    }
+
+    /// Regression guard #1: a "this turn" clause OUTSIDE Step 2's exemption
+    /// scope — no "activate only" line, no `Unrecognized` condition slot, not a
+    /// quantity-suffix collocation — must STILL fire `Duration_ThisTurn`. A
+    /// genuine forward-looking effect-duration swallow must not be suppressed
+    /// by the exemptions, proving they do not blanket-suppress.
+    ///
+    /// (Bloodcrazed Goblin previously served as this guard's example, but Unit
+    /// 5d-D4 made its "an opponent has been dealt damage this turn" `unless`
+    /// clause parse into a typed `DamageDealtThisTurn` condition — it is no
+    /// longer a swallow, so the guard now uses a genuinely dropped duration.)
+    #[test]
+    fn duration_this_turn_still_fires_outside_exemption_scope() {
+        let parsed = parse_named(
+            "Creatures you control can't block this turn.",
+            "Test Block Lock",
+            &["Land"],
+        );
+
+        assert!(has_swallowed_detector(&parsed, "Duration_ThisTurn"));
+    }
+
+    /// Regression guard #2 (C2 over-suppression case): a card carrying BOTH a
+    /// `RequiresCondition` activation-restriction line AND a genuine dropped-
+    /// duration effect on a SEPARATE line must STILL fire `Duration_ThisTurn`
+    /// — the line-scoped count (`total_this_turn != activate_only_this_turn`)
+    /// keeps the exemption from over-reaching.
+    #[test]
+    fn duration_this_turn_fires_when_duration_and_activation_restriction_coexist() {
+        let parsed = parse_named(
+            "Creatures you control can't block this turn.\n\
+             {T}: Draw a card. Activate only if you attacked with two or more creatures this turn.",
+            "Test Hybrid",
+            &["Land"],
+        );
+
+        assert!(has_swallowed_detector(&parsed, "Duration_ThisTurn"));
+    }
+
     #[test]
     fn optional_you_may_accepts_activation_timing_permission_static() {
         let parsed = parse_named(
@@ -2100,6 +2326,77 @@ mod tests {
              [+1]: Put a +1/+1 counter on up to one target creature.",
             "The Wandering Emperor",
             &["Planeswalker"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    /// CR 701.20a + CR 608.2c: RevealUntil's "you may put that card onto the
+    /// battlefield" is represented as `kept_optional_to: Some(Battlefield)`, so
+    /// neither `Optional_YouMay` nor (for the explicit "if you don't" form)
+    /// `Condition_If` swallowed-clause warnings are emitted. Covers Genesis
+    /// Storm / Hei Bai / Songbirds' Blessing.
+    #[test]
+    fn optional_you_may_accepts_reveal_until_optional_kept() {
+        let hei_bai = parse(
+            "Reveal cards from the top of your library until you reveal a creature card. \
+             You may put that card onto the battlefield. Then shuffle your library.",
+            &["Sorcery"],
+        );
+        assert!(!has_swallowed_detector(&hei_bai, "Optional_YouMay"));
+
+        let songbirds = parse(
+            "Reveal cards from the top of your library until you reveal a creature card. \
+             You may put that card onto the battlefield. If you don't, put it into your hand. \
+             Put the rest on the bottom of your library in a random order.",
+            &["Sorcery"],
+        );
+        assert!(!has_swallowed_detector(&songbirds, "Optional_YouMay"));
+        assert!(!has_swallowed_detector(&songbirds, "Condition_If"));
+    }
+
+    /// CR 707.10c: Mirrorpool's "you may choose new targets for the copy" is
+    /// represented as `CopySpell { retarget: MayChooseNewTargets }`, so no
+    /// `Optional_YouMay` swallowed-clause warning is emitted.
+    #[test]
+    fn optional_you_may_accepts_copy_retarget_clause() {
+        let parsed = parse_named(
+            "{T}, Sacrifice this land: Copy target instant or sorcery spell you control. \
+             You may choose new targets for the copy.",
+            "Mirrorpool",
+            &["Land"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    /// CR 707.10c (B3): Galvanic Iteration nests its CopySpell inside a delayed
+    /// trigger; the retarget clause is absorbed onto the inner CopySpell and
+    /// `effect_has_internal_optionality` detects it via the existing
+    /// `CreateDelayedTrigger` recursion.
+    #[test]
+    fn optional_you_may_accepts_copy_retarget_clause_in_delayed_trigger() {
+        let parsed = parse_named(
+            "When you next cast an instant or sorcery spell this turn, copy that spell. \
+             You may choose new targets for the copy.",
+            "Galvanic Iteration",
+            &["Instant"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    /// CR 707.10c: Thousand-Year Storm exercises the triggered-ability context
+    /// — the plural "for the copies" clause is absorbed onto the trigger's
+    /// inner CopySpell.
+    #[test]
+    fn optional_you_may_accepts_copy_retarget_clause_in_triggered_ability() {
+        let parsed = parse_named(
+            "Whenever you cast an instant or sorcery spell, copy it for each other \
+             instant and sorcery spell you've cast this turn. \
+             You may choose new targets for the copies.",
+            "Thousand-Year Storm",
+            &["Enchantment"],
         );
 
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
@@ -2149,5 +2446,77 @@ mod tests {
         );
 
         assert!(has_swallowed_detector(&parsed, "DynamicQty"));
+    }
+
+    /// CR 608.2c: "investigate twice instead" — the doubled count is carried
+    /// by `AbilityDefinition.repeat_for`, a legitimate QuantityExpr home. The
+    /// "twice" word must not flag DynamicQty.
+    #[test]
+    fn dynamic_qty_accepts_repeat_for_carrier_secrets_of_the_key() {
+        let parsed = parse_named(
+            "Investigate. If this spell was cast from a graveyard, investigate twice instead. \
+             (Create a Clue token. It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")\n\
+             Flashback {3}{U}",
+            "Secrets of the Key",
+            &["Instant"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
+    }
+
+    /// CR 608.2c: Increasing Vengeance shares the "copy that spell twice
+    /// instead" shape — same `repeat_for` carrier, same suppression.
+    #[test]
+    fn dynamic_qty_accepts_repeat_for_carrier_increasing_vengeance() {
+        let parsed = parse_named(
+            "Copy target instant or sorcery spell you control. If this spell was cast from a \
+             graveyard, copy that spell twice instead. You may choose new targets for the copies.\n\
+             Flashback {3}{R}{R}",
+            "Increasing Vengeance",
+            &["Instant"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
+    }
+
+    /// Negative: the existing counter-multiplier card still flags `DynamicQty`
+    /// when it carries a second swallowed dynamic clause — proves the new
+    /// `repeat_for` suppression did not widen the exemption.
+    /// (See `dynamic_qty_keeps_warning_when_counter_multiplier_card_has_second_dynamic_clause`.)
+    ///
+    /// Helper-level narrowness gate for `cleaned_twice_is_only_dynamic_marker`:
+    /// the `repeat_for` suppression fires ONLY when " twice " is the sole
+    /// dynamic marker. Any second marker, or the "twice that" / "twice x"
+    /// multiplier forms (which need a real `QuantityExpr`, not a repeat count),
+    /// must keep the warning live even if a `repeat_for` is also present.
+    #[test]
+    fn twice_is_only_dynamic_marker_gate() {
+        // Plain "twice" with no other marker — the suppression-eligible case.
+        assert!(super::cleaned_twice_is_only_dynamic_marker(
+            "investigate. if this spell was cast from a graveyard, investigate twice instead."
+        ));
+        // "twice that" is a multiplier — needs a real QuantityExpr.
+        assert!(!super::cleaned_twice_is_only_dynamic_marker(
+            "they lose twice that much life instead."
+        ));
+        // "twice x" is a multiplier.
+        assert!(!super::cleaned_twice_is_only_dynamic_marker(
+            "deal damage equal to twice x to any target."
+        ));
+        // A second dynamic marker present — must not be suppression-eligible.
+        assert!(!super::cleaned_twice_is_only_dynamic_marker(
+            "investigate twice instead, then draw cards equal to your life total."
+        ));
+        assert!(!super::cleaned_twice_is_only_dynamic_marker(
+            "investigate twice instead and create a token for each creature you control."
+        ));
+        // "twice each turn" alone is the activation-limit form, not dynamic.
+        assert!(!super::cleaned_twice_is_only_dynamic_marker(
+            "activate this ability only twice each turn."
+        ));
+        // No "twice" at all.
+        assert!(!super::cleaned_twice_is_only_dynamic_marker(
+            "draw a card for each creature you control."
+        ));
     }
 }

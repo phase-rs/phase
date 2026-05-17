@@ -96,17 +96,27 @@ pub(crate) enum DamageResult {
 /// EffectResolved is NOT emitted — that remains the caller's responsibility.
 ///
 /// Returns `DamageResult::Applied(actual_amount)` or `DamageResult::NeedsChoice`.
-pub(crate) fn apply_damage_to_target(
-    state: &mut GameState,
+/// CR 120.2 + CR 120.8 + CR 702.16: Pre-replacement damage gate. Applies the
+/// "would deal 0", source-side `CantDealDamage`, target-side `CantBeDealtDamage`,
+/// object protection, and player protection-from-everything checks that run
+/// *before* the CR 614/615 replacement pipeline.
+///
+/// Returns `Some(ProposedEvent::Damage)` to proceed into the replacement
+/// pipeline, or `None` when the damage is fully gated (the gate has already
+/// pushed a `DamagePrevented` event where the rules require one). Shared by the
+/// single-source `apply_damage_to_target` path and the combat-damage batch path
+/// so both run identical pre-pipeline gating.
+pub(crate) fn pre_replacement_damage_gate(
+    state: &GameState,
     ctx: &DamageContext,
-    target: TargetRef,
+    target: &TargetRef,
     amount: u32,
     is_combat: bool,
     events: &mut Vec<GameEvent>,
-) -> Result<DamageResult, EffectError> {
+) -> Option<ProposedEvent> {
     // CR 120.8: If a source would deal 0 damage, it does not deal damage at all.
     if amount == 0 {
-        return Ok(DamageResult::Applied(0));
+        return None;
     }
 
     // CR 120.2: Source-side "can't deal damage" prohibition. The source deals
@@ -116,24 +126,24 @@ pub(crate) fn apply_damage_to_target(
         ctx.source_id,
         "CantDealDamage",
     ) {
-        return Ok(DamageResult::Applied(0));
+        return None;
     }
 
     // CR 120.1: Target-side "can't be dealt damage" prohibition (objects only;
     // `CantBeDealtDamage` in the static registry is object-scoped).
-    if let TargetRef::Object(target_obj_id) = &target {
+    if let TargetRef::Object(target_obj_id) = target {
         if crate::game::static_abilities::object_has_static_other(
             state,
             *target_obj_id,
             "CantBeDealtDamage",
         ) {
-            return Ok(DamageResult::Applied(0));
+            return None;
         }
     }
 
     // CR 702.16b + CR 702.16e: Protection prevents damage from sources with the matching quality.
     // Emits DamagePrevented so "when damage is prevented" triggers can fire.
-    if let TargetRef::Object(target_obj_id) = &target {
+    if let TargetRef::Object(target_obj_id) = target {
         if let (Some(target_obj), Some(source_obj)) = (
             state.objects.get(target_obj_id),
             state.objects.get(&ctx.source_id),
@@ -144,7 +154,7 @@ pub(crate) fn apply_damage_to_target(
                     target: target.clone(),
                     amount,
                 });
-                return Ok(DamageResult::Applied(0));
+                return None;
             }
         }
     }
@@ -153,23 +163,38 @@ pub(crate) fn apply_damage_to_target(
     // protection from everything] is prevented." Mirror the object-protection
     // gate above for player targets. Emits DamagePrevented so prevention-
     // triggered abilities still observe the event.
-    if let TargetRef::Player(player_id) = &target {
+    if let TargetRef::Player(player_id) = target {
         if crate::game::static_abilities::player_has_protection_from_everything(state, *player_id) {
             events.push(GameEvent::DamagePrevented {
                 source_id: ctx.source_id,
                 target: target.clone(),
                 amount,
             });
-            return Ok(DamageResult::Applied(0));
+            return None;
         }
     }
 
-    let proposed = ProposedEvent::Damage {
+    Some(ProposedEvent::Damage {
         source_id: ctx.source_id,
         target: target.clone(),
         amount,
         is_combat,
         applied: HashSet::new(),
+    })
+}
+
+pub(crate) fn apply_damage_to_target(
+    state: &mut GameState,
+    ctx: &DamageContext,
+    target: TargetRef,
+    amount: u32,
+    is_combat: bool,
+    events: &mut Vec<GameEvent>,
+) -> Result<DamageResult, EffectError> {
+    let Some(proposed) =
+        pre_replacement_damage_gate(state, ctx, &target, amount, is_combat, events)
+    else {
+        return Ok(DamageResult::Applied(0));
     };
 
     match replacement::replace_event(state, proposed, events) {
@@ -184,7 +209,13 @@ pub(crate) fn apply_damage_to_target(
             // takes place "immediately afterward" as the rule requires. The
             // applier already stamped `state.last_effect_count` with the
             // prevented amount so `EventContextAmount` resolves correctly.
-            if state.post_replacement_continuation.is_some() {
+            //
+            // CR 510.2 + CR 615.13: Combat damage is exempt from this inline
+            // path — combat damage resolves as a simultaneous batch, and its
+            // prevention riders fire once post-batch in `combat_damage.rs`
+            // against the aggregate prevented amount. Firing inline here would
+            // re-fire the rider once per attacker against a fragmented count.
+            if !is_combat && state.post_replacement_continuation.is_some() {
                 // CR 615.5 + CR 609.7: leave `post_replacement_event_source`
                 // populated for the call so `TargetFilter::PostReplacementSourceController`
                 // can resolve against the prevented event's damage source. Clear

@@ -1,5 +1,6 @@
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+    CopyRetargetPermission, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter,
+    TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{CopyTargetSlot, GameState, StackEntry, StackEntryKind, WaitingFor};
@@ -33,6 +34,11 @@ pub fn resolve(
         return Ok(());
     }
 
+    // CR 707.10: The player under whose control the copy is put on the stack.
+    // Twincast/Gogo: the effect's controller. Chain cycle ("that player may
+    // copy this spell"): the targeted player.
+    let copy_controller = copy_controller(ability);
+
     // Allocate a new stack ID for the copy.
     let copy_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
@@ -44,7 +50,7 @@ pub fn resolve(
     if let Some(source_obj) = state.objects.get(&top_entry.id) {
         let mut copy_obj = source_obj.clone();
         copy_obj.id = copy_id;
-        copy_obj.controller = ability.controller;
+        copy_obj.controller = copy_controller;
         copy_obj.zone = Zone::Stack;
         copy_obj.is_token = true;
         state.objects.insert(copy_id, copy_obj);
@@ -55,7 +61,11 @@ pub fn resolve(
     //   - Reset additional_cost_paid + kickers_paid so any "if its [additional]
     //     cost was paid" triggers (Offspring ETB, Casualty) do not fire for the
     //     copy — the copy is placed on the stack, not cast.
-    //   - Update internal source_id references on the Spell variant to copy_id.
+    //   - Update internal source_id references throughout the ability chain to
+    //     copy_id. A copy is a new object — every `SelfRef` in its chain
+    //     (including a nested `CopySpell` sub-ability, as in the Chain cycle)
+    //     must resolve to the copy, not the original spell, or a
+    //     second-generation copy would fail to find its source.
     //   - Re-controller the resolved ability chain so opponent-controlled copies
     //     (Twincast, Gogo) resolve under the copying player.
     let copy_kind = {
@@ -65,11 +75,11 @@ pub fn resolve(
             ..
         } = kind
         {
-            a.source_id = copy_id;
+            set_resolved_source_recursive(a, copy_id);
             a.context.additional_cost_paid = false;
             a.context.kickers_paid.clear();
         }
-        set_copied_kind_controller(&mut kind, ability.controller);
+        set_copied_kind_controller(&mut kind, copy_controller);
         kind
     };
 
@@ -77,7 +87,7 @@ pub fn resolve(
     let copy_entry = StackEntry {
         id: copy_id,
         source_id: copy_id,
-        controller: ability.controller,
+        controller: copy_controller,
         kind: copy_kind,
     };
 
@@ -90,7 +100,19 @@ pub fn resolve(
         .map(|a| a.targets.clone())
         .unwrap_or_default();
 
-    if !copy_targets.is_empty() {
+    // CR 707.10c / CR 115.1: arm retarget selection only when the copy effect
+    // explicitly granted "you may choose new targets". Otherwise the copy keeps
+    // the original spell's declared targets (already present on the cloned
+    // stack entry) and resolution proceeds without a player choice.
+    if !copy_targets.is_empty()
+        && matches!(
+            ability.effect,
+            Effect::CopySpell {
+                retarget: CopyRetargetPermission::MayChooseNewTargets,
+                ..
+            }
+        )
+    {
         // Compute legal alternatives for each slot so the UI can present valid
         // choices. If build_target_slots fails (no legal targets exist for the
         // copy), fall back to empty alternatives — the copy still goes on the
@@ -120,8 +142,10 @@ pub fn resolve(
             })
             .collect();
 
+        // CR 707.10c: "its controller may choose new targets for the copy" —
+        // the copy's controller makes the retarget choice.
         state.waiting_for = WaitingFor::CopyRetarget {
-            player: ability.controller,
+            player: copy_controller,
             copy_id,
             target_slots,
             current_slot: 0,
@@ -136,6 +160,31 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 707.10: "A copy of a spell is controlled by the player under whose
+/// control it was put on the stack." For most copy effects (Twincast, Gogo)
+/// that is the effect's controller — the player resolving the copy spell. But
+/// for "that player may copy this spell" effects (the Chain cycle — Chain of
+/// Acid / Plasma / Smog / Vapor), the copy is created by, and controlled by,
+/// the *targeted* player, not the original spell's caster.
+///
+/// The targeted player arrives as a `TargetRef::Player` in `ability.targets`:
+/// Chain of Smog's `CopySpell` sub-ability inherits the parent `Discard`'s
+/// `[TargetRef::Player]` target during chain resolution. A copy effect targets
+/// either a spell/ability to copy (`TargetRef::Object`) or — for the
+/// player-anchored Chain pattern — the copying player; the two are disjoint, so
+/// a `TargetRef::Player` in scope unambiguously identifies the copy's
+/// controller.
+fn copy_controller(ability: &ResolvedAbility) -> PlayerId {
+    ability
+        .targets
+        .iter()
+        .find_map(|target| match target {
+            TargetRef::Player(player) => Some(*player),
+            TargetRef::Object(_) => None,
+        })
+        .unwrap_or(ability.controller)
 }
 
 fn copy_source_entry(state: &GameState, ability: &ResolvedAbility) -> Option<StackEntry> {
@@ -157,11 +206,27 @@ fn copy_source_entry(state: &GameState, ability: &ResolvedAbility) -> Option<Sta
             ..
         }
     ) {
-        return state
+        // The source spell is normally still on the stack — Casualty's copy
+        // trigger resolves while the spell waits beneath it.
+        if let Some(entry) = state
             .stack
             .iter()
             .find(|entry| entry.id == ability.source_id)
-            .cloned();
+            .cloned()
+        {
+            return Some(entry);
+        }
+        // CR 707.10: When the `CopySpell` is the resolving spell's OWN effect
+        // (the Chain cycle — "you may copy this spell"), `resolve_top` has
+        // already popped that spell off the stack. Fall back to the resolving
+        // stack entry stashed by `resolve_top` so the spell can still copy
+        // itself.
+        if let Some(entry) = state.resolving_stack_entry.as_ref() {
+            if entry.id == ability.source_id {
+                return Some(entry.clone());
+            }
+        }
+        return None;
     }
     state.stack.last().cloned()
 }
@@ -210,11 +275,29 @@ fn set_resolved_controller_recursive(ability: &mut ResolvedAbility, controller: 
     }
 }
 
+/// CR 707.10b: A copy is a new object; rewrite `source_id` on every link of
+/// the resolved ability chain (the top-level effect plus its `sub_ability` /
+/// `else_ability` descendants) so a `SelfRef` anywhere in the chain resolves
+/// to the copy. Mirrors `set_resolved_controller_recursive`. Without this, the
+/// Chain cycle's nested optional `CopySpell` would keep the original spell's
+/// `source_id` and a second-generation copy could not find its source.
+fn set_resolved_source_recursive(ability: &mut ResolvedAbility, source_id: ObjectId) {
+    ability.source_id = source_id;
+    if let Some(sub_ability) = ability.sub_ability.as_mut() {
+        set_resolved_source_recursive(sub_ability, source_id);
+    }
+    if let Some(else_ability) = ability.else_ability.as_mut() {
+        set_resolved_source_recursive(else_ability, source_id);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::game::game_object::GameObject;
-    use crate::types::ability::{Effect, QuantityExpr, TargetFilter, TargetRef};
+    use crate::types::ability::{
+        CopyRetargetPermission, Effect, QuantityExpr, TargetFilter, TargetRef,
+    };
     use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -272,6 +355,7 @@ mod tests {
         let copy_ability = ResolvedAbility::new(
             Effect::CopySpell {
                 target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
             },
             vec![],
             ObjectId(20),
@@ -324,6 +408,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::CopySpell {
                 target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
             },
             vec![],
             ObjectId(20),
@@ -363,6 +448,7 @@ mod tests {
         let copy_ability = ResolvedAbility::new(
             Effect::CopySpell {
                 target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::MayChooseNewTargets,
             },
             vec![],
             ObjectId(20),
@@ -376,6 +462,64 @@ mod tests {
         assert!(matches!(state.waiting_for, WaitingFor::CopyRetarget { .. }));
         // Copy should still be on the stack
         assert_eq!(state.stack.len(), 2);
+    }
+
+    /// CR 115.1 / CR 707.10c: a copy effect WITHOUT the "you may choose new
+    /// targets" clause keeps the original spell's targets — even though the
+    /// copied spell has targets, no `CopyRetarget` choice is armed.
+    #[test]
+    fn test_copy_spell_keep_targets_skips_retarget_despite_targets() {
+        let mut state = GameState::new_two_player(42);
+
+        let original_ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Any,
+                damage_source: None,
+            },
+            vec![TargetRef::Object(ObjectId(50))],
+            ObjectId(10),
+            PlayerId(0),
+        );
+
+        push_spell(
+            &mut state,
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Lightning Bolt",
+            original_ability,
+            CastingVariant::Normal,
+        );
+
+        let copy_ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
+            },
+            vec![],
+            ObjectId(20),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &copy_ability, &mut events).unwrap();
+
+        // KeepOriginalTargets → no retarget choice, resolution completes.
+        assert!(!matches!(
+            state.waiting_for,
+            WaitingFor::CopyRetarget { .. }
+        ));
+        assert_eq!(state.stack.len(), 2);
+        // The copy retains the original's declared target.
+        let copy_entry = state.stack.back().unwrap();
+        assert_eq!(
+            copy_entry.ability().map(|a| a.targets.as_slice()),
+            Some([TargetRef::Object(ObjectId(50))].as_slice())
+        );
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, GameEvent::EffectResolved { .. })));
     }
 
     #[test]
@@ -405,6 +549,7 @@ mod tests {
         let copy_ability = ResolvedAbility::new(
             Effect::CopySpell {
                 target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
             },
             vec![],
             ObjectId(20),
@@ -525,6 +670,7 @@ mod tests {
         let casualty_ability = ResolvedAbility::new(
             Effect::CopySpell {
                 target: TargetFilter::SelfRef,
+                retarget: CopyRetargetPermission::MayChooseNewTargets,
             },
             vec![],
             ObjectId(10), // source_id = original spell
@@ -554,6 +700,122 @@ mod tests {
         );
     }
 
+    /// CR 707.10: "A copy of a spell is controlled by the player under whose
+    /// control it was put on the stack." When a `CopySpell` effect carries a
+    /// `TargetRef::Player` (the Chain cycle's "That player may copy this
+    /// spell"), the copy is controlled by that targeted player — not the
+    /// effect's own controller.
+    #[test]
+    fn copy_spell_with_player_target_is_controlled_by_targeted_player() {
+        let mut state = GameState::new_two_player(42);
+
+        // Original spell cast by P0.
+        let original_ability = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Player,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        push_spell(
+            &mut state,
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Chain of Smog",
+            original_ability,
+            CastingVariant::Normal,
+        );
+
+        // The `CopySpell` sub-ability: controller is the caster (P0), but the
+        // parent's `TargetRef::Player(P1)` has been propagated onto it.
+        let copy_ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::SelfRef,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &copy_ability, &mut events).unwrap();
+
+        // CR 707.10: the copy is controlled by the targeted player (P1).
+        assert_eq!(state.stack.len(), 2);
+        let copy_entry = state.stack.back().unwrap();
+        assert_eq!(
+            copy_entry.controller,
+            PlayerId(1),
+            "the copy must be controlled by the targeted player, not the caster"
+        );
+        let copy_obj = state
+            .objects
+            .get(&copy_entry.id)
+            .expect("the copy has a stack GameObject");
+        assert_eq!(copy_obj.controller, PlayerId(1));
+        // The cloned resolved ability chain is re-controllered to P1 too.
+        assert_eq!(
+            copy_entry.ability().map(|a| a.controller),
+            Some(PlayerId(1)),
+        );
+    }
+
+    /// CR 707.10: a `CopySpell` with an `Object` target (Twincast / Gogo —
+    /// "copy target spell") is controlled by the effect's own controller; no
+    /// `TargetRef::Player` is in scope, so the caster keeps control.
+    #[test]
+    fn copy_spell_with_object_target_is_controlled_by_effect_controller() {
+        let mut state = GameState::new_two_player(42);
+
+        let original_ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Any,
+                damage_source: None,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(1),
+        );
+        push_spell(
+            &mut state,
+            ObjectId(10),
+            CardId(1),
+            PlayerId(1),
+            "Lightning Bolt",
+            original_ability,
+            CastingVariant::Normal,
+        );
+
+        // Twincast cast by P0 targeting P1's Bolt on the stack.
+        let copy_ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
+            },
+            vec![TargetRef::Object(ObjectId(10))],
+            ObjectId(20),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &copy_ability, &mut events).unwrap();
+
+        let copy_entry = state.stack.back().unwrap();
+        assert_eq!(
+            copy_entry.controller,
+            PlayerId(0),
+            "a copy of a targeted spell is controlled by the copier (P0)"
+        );
+    }
+
     #[test]
     fn uncopyable_activated_ability_on_stack_is_not_copied_through_stack_resolution() {
         let mut state = GameState::new_two_player(42);
@@ -565,6 +827,7 @@ mod tests {
                 target: TargetFilter::StackAbility {
                     controller: Some(crate::types::ability::ControllerRef::You),
                 },
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
             },
             vec![],
             gogo_id,
@@ -587,6 +850,7 @@ mod tests {
                 target: TargetFilter::StackAbility {
                     controller: Some(crate::types::ability::ControllerRef::You),
                 },
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
             },
             vec![TargetRef::Object(ObjectId(40))],
             other_id,
@@ -707,6 +971,7 @@ mod tests {
         let mut gogo_copy = ResolvedAbility::new(
             Effect::CopySpell {
                 target: gogo_target_filter,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
             },
             vec![TargetRef::Object(hope_trigger_entry)],
             gogo_id,

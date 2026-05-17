@@ -8,7 +8,7 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    GameState, ManaChoice, ManaChoiceContext, ManaChoicePrompt, WaitingFor,
+    GameState, ManaChoice, ManaChoiceContext, ManaChoicePrompt, MayTriggerOrigin, WaitingFor,
 };
 use crate::types::mana::{ManaColor, ManaRestriction, ManaType};
 
@@ -77,11 +77,14 @@ pub fn resolve(
     let concrete_restrictions = resolve_restrictions(restrictions, state, ability.source_id);
 
     let recipient = match produced {
+        // CR 106.3 + CR 109.5: "add one mana of any type that land produced" —
+        // the bonus mana goes to the player who tapped the land (the
+        // `TappedForMana` event's `player_id`), not the trigger's controller.
         ManaProduction::TriggerEventManaType => state
             .current_trigger_event
             .as_ref()
             .and_then(|event| match event {
-                GameEvent::ManaAdded { player_id, .. } => Some(*player_id),
+                GameEvent::TappedForMana { player_id, .. } => Some(*player_id),
                 _ => None,
             })
             .unwrap_or(ability.controller),
@@ -90,6 +93,7 @@ pub fn resolve(
 
     // CR 106.4: When an effect instructs a player to add mana, that mana goes
     // into that player's mana pool.
+    let produced_mana = !mana_types.is_empty();
     for mana_type in mana_types {
         mana_payment::produce_mana_with_attributes_from_source_quality(
             state,
@@ -104,6 +108,7 @@ pub fn resolve(
             events,
         );
     }
+    record_firebending_if_marked(state, ability, produced_mana, events);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
@@ -145,6 +150,7 @@ pub fn handle_choose_mana_effect(
         );
     let concrete_restrictions = resolve_restrictions(restrictions, state, ability.source_id);
     let recipient = ability.controller;
+    let produced_mana = !mana_types.is_empty();
     for mana_type in mana_types {
         mana_payment::produce_mana_with_attributes_from_source_quality(
             state,
@@ -159,6 +165,7 @@ pub fn handle_choose_mana_effect(
             events,
         );
     }
+    record_firebending_if_marked(state, ability, produced_mana, events);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
@@ -169,6 +176,30 @@ pub fn handle_choose_mana_effect(
     state.priority_player = recipient;
     super::drain_pending_continuation(state, events);
     Ok(state.waiting_for.clone())
+}
+
+fn record_firebending_if_marked(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    produced_mana: bool,
+    events: &mut Vec<GameEvent>,
+) {
+    if !produced_mana {
+        return;
+    }
+    let Some(MayTriggerOrigin::Keyword {
+        keyword: crate::types::keywords::KeywordKind::Firebending,
+    }) = ability.may_trigger_origin
+    else {
+        return;
+    };
+    crate::game::bending::record_bending(
+        state,
+        events,
+        crate::types::events::BendingType::Fire,
+        ability.source_id,
+        ability.controller,
+    );
 }
 
 fn chosen_mana_types_for_prompt(
@@ -220,6 +251,7 @@ pub(crate) fn resolve_restrictions(
     templates
         .iter()
         .filter_map(|template| match template {
+            ManaSpendRestriction::SpellOnly => Some(ManaRestriction::OnlyForSpell),
             ManaSpendRestriction::SpellType(t) => {
                 Some(ManaRestriction::OnlyForSpellType(t.clone()))
             }
@@ -439,31 +471,34 @@ fn resolve_mana_types_impl(
                 .map(|c| mana_color_to_type(&c))
                 .collect()
         }
-        // CR 603.7c + CR 106.3 + CR 106.5: Vorinclex / Dictate of Karametra —
-        // "add one mana of any type that land produced." The mana type is read
-        // from the triggering `ManaAdded` event carried in
-        // `state.current_trigger_event` at resolution time. If the current
-        // event is absent (off-stack resolution) or not a `ManaAdded` event,
-        // this produces no mana (CR 106.5 — undefined mana type).
+        // CR 603.7c + CR 106.3 + CR 106.5 + CR 106.12a: Vorinclex / Dictate of
+        // Karametra — "add one mana of any type that land produced." The set of
+        // produced types is read from the triggering `TappedForMana` event
+        // carried in `state.current_trigger_event` at resolution time. The
+        // `TapsForMana` trigger fires once per mana-ability resolution
+        // (CR 106.12a), so this branch sees the full produced set, not a single
+        // unit. If the current event is absent (off-stack resolution) or not a
+        // `TappedForMana` event, this produces no mana (CR 106.5 — undefined
+        // mana type).
         //
-        // Per-event single-type model: a `ManaAdded` event carries exactly one
-        // `ManaType`, so this branch produces exactly one mana matching that
-        // type. The engine fires one trigger per `ManaAdded` event, so a land
-        // tapping for {C}{C} produces two triggers and two singletons here —
-        // not one trigger producing `vec![Colorless, Colorless]`. This matches
-        // Vorinclex / Mana Reflex / Dictate of Karametra's "any type that land
-        // produced" semantics where there is no choice to make.
+        // For every land the engine models, a single resolution produces mana
+        // of one uniform color (basics → one type; Nykthos → all green), so
+        // emitting one unit per *distinct* color yields exactly one mana — the
+        // CR-correct "any type that land produced" with no choice to make.
         //
         // If a future card requires the player to *choose* among multiple
         // produced types in a single resolution ("any one type that land
-        // produced"), the resolver must be extended to emit a player choice
-        // rather than reading the singular event type. Add a separate
-        // `ManaProduction::TriggerEventManaTypeChoice` variant before reusing
-        // this branch — silently expanding the vec here would skip the choice.
+        // produced"), the resolver must be extended to emit a player choice.
+        // Add a separate `ManaProduction::TriggerEventManaTypeChoice` variant
+        // before reusing this branch — silently expanding the vec here would
+        // skip the choice.
         ManaProduction::TriggerEventManaType => {
             use crate::types::events::GameEvent;
             match &state.current_trigger_event {
-                Some(GameEvent::ManaAdded { mana_type, .. }) => vec![*mana_type],
+                Some(GameEvent::TappedForMana { produced, .. }) => {
+                    let distinct: std::collections::HashSet<_> = produced.iter().copied().collect();
+                    distinct.into_iter().collect()
+                }
                 _ => Vec::new(),
             }
         }
@@ -631,6 +666,96 @@ mod tests {
 
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 1);
         assert_eq!(state.players[0].mana_pool.total(), 1);
+    }
+
+    #[test]
+    fn firebending_marker_records_firebend_when_mana_is_produced() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Firebender".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source).unwrap().power = Some(4);
+        let mut ability = ResolvedAbility::new(
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: crate::types::ability::ObjectScope::Source,
+                        },
+                    },
+                    color_options: vec![ManaColor::Red],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: Some(crate::types::mana::ManaExpiry::EndOfCombat),
+                target: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.may_trigger_origin = Some(MayTriggerOrigin::Keyword {
+            keyword: crate::types::keywords::KeywordKind::Firebending,
+        });
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 4);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::Firebend {
+                source_id,
+                controller: PlayerId(0)
+            } if *source_id == source
+        )));
+        assert!(state.players[0]
+            .bending_types_this_turn
+            .contains(&crate::types::events::BendingType::Fire));
+    }
+
+    #[test]
+    fn firebending_marker_does_not_record_firebend_for_zero_mana() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Firebender".to_string(),
+            Zone::Battlefield,
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 0 },
+                    color_options: vec![ManaColor::Red],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: Some(crate::types::mana::ManaExpiry::EndOfCombat),
+                target: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.may_trigger_origin = Some(MayTriggerOrigin::Keyword {
+            keyword: crate::types::keywords::KeywordKind::Firebending,
+        });
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.players[0].mana_pool.total(), 0);
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::Firebend { .. })));
     }
 
     #[test]
