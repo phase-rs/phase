@@ -5,7 +5,7 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until};
 use nom::character::complete::{alpha1, space0, space1};
-use nom::combinator::{all_consuming, eof, map, opt, rest, value};
+use nom::combinator::{all_consuming, eof, map, opt, recognize, rest, value};
 use nom::multi::{many0, separated_list1};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -4931,36 +4931,48 @@ fn try_parse_self_is_also_subtypes(tp: &TextPair<'_>) -> Option<Vec<ContinuousMo
         }
     }
 
-    // Reuses the same connective surface as `parse_subtype_or_list` for parity
-    // (Oxford comma, no comma, "and" / "or" / "and/or", with or without "a"/"an"
-    // articles between connective and subtype).
-    fn parse_sep(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
+    // Decomposes the separator into independent axes — connective phrase
+    // (`,` optionally followed by `and`/`or`/`and/or`, or space-led
+    // `and`/`or`/`and/or`) × mandatory trailing space × optional indefinite
+    // article (`a `/`an `). Each axis is one `alt()`; the ≤14-form cartesian
+    // product is composed, not enumerated, per the "compose combinators by
+    // dimension" rule.
+    fn parse_connective(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
+        // Order long-first within each branch so `, and/or` wins over the
+        // bare `,` prefix in nom's left-to-right `alt` evaluation.
         alt((
-            tag(", and/or a "),
-            tag(", and/or "),
-            tag(", and a "),
-            tag(", or a "),
-            tag(", and "),
-            tag(", or "),
-            tag(", a "),
-            tag(", "),
-            tag(" and/or a "),
-            tag(" and/or "),
-            tag(" and a "),
-            tag(" or a "),
-            tag(" and "),
-            tag(" or "),
+            recognize((
+                tag::<_, _, OracleError<'_>>(","),
+                opt(preceded(
+                    tag(" "),
+                    alt((tag("and/or"), tag("and"), tag("or"))),
+                )),
+            )),
+            recognize(preceded(
+                tag(" "),
+                alt((tag("and/or"), tag("and"), tag("or"))),
+            )),
         ))
         .parse(input)
     }
-
-    let (rest, names) = separated_list1(parse_sep, parse_one)
-        .parse(after_anchor)
-        .ok()?;
-    let (rest, _) = opt(tag::<_, _, VE>(".")).parse(rest).ok()?;
-    if !rest.trim().is_empty() {
-        return None;
+    fn parse_sep(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+        let (input, _) = parse_connective(input)?;
+        let (input, _) = tag(" ").parse(input)?;
+        let (input, _) = opt(alt((tag("a "), tag("an ")))).parse(input)?;
+        Ok((input, ()))
     }
+
+    // `all_consuming` + `terminated` asserts the entire `after_anchor` slice
+    // parses as `<subtype list><optional period><optional trailing space>` —
+    // replaces the prior manual `.trim().is_empty()` trailing-text check with
+    // an idiomatic nom assertion.
+    let (_, names) = all_consuming(terminated(
+        separated_list1(parse_sep, parse_one),
+        (opt(tag::<_, _, VE>(".")), space0),
+    ))
+    .parse(after_anchor)
+    .ok()?;
+
     if names.is_empty() {
         return None;
     }
