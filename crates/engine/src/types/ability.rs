@@ -844,6 +844,11 @@ pub enum ManaProduction {
             skip_serializing_if = "is_default_mana_contribution"
         )]
         contribution: ManaContribution,
+        /// CR 106.1: Optional fixed color the player may produce *instead of* the
+        /// chosen color (Cycle of Gates: "Add {G} or one mana of the chosen
+        /// color"). `None` = pure chosen-color production (Utopia Sprawl class).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fixed_alternative: Option<ManaColor>,
     },
     /// CR 106.7: Produce mana of any color that a land an opponent controls could produce.
     /// Colors are computed dynamically at resolution time by inspecting opponent lands.
@@ -979,6 +984,8 @@ impl<'de> serde::Deserialize<'de> for ManaProduction {
                         count: QuantityExpr,
                         #[serde(default = "default_mana_contribution")]
                         contribution: ManaContribution,
+                        #[serde(default)]
+                        fixed_alternative: Option<ManaColor>,
                     },
                     OpponentLandColors {
                         #[serde(default = "default_quantity_one")]
@@ -1044,9 +1051,11 @@ impl<'de> serde::Deserialize<'de> for ManaProduction {
                     ManaProductionHelper::ChosenColor {
                         count,
                         contribution,
+                        fixed_alternative,
                     } => ManaProduction::ChosenColor {
                         count,
                         contribution,
+                        fixed_alternative,
                     },
                     ManaProductionHelper::OpponentLandColors { count } => {
                         ManaProduction::OpponentLandColors { count }
@@ -2323,7 +2332,7 @@ pub enum TargetFilter {
 /// CR section. Aggregate scopes (`Opponent`, `AllPlayers`) compose
 /// `AggregateFunction` to express max/min/sum across a population — they do
 /// not introduce a new abstraction layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum PlayerScope {
     /// CR 109.5 / CR 113.6: The controller of the source ability or effect.
@@ -2343,7 +2352,16 @@ pub enum PlayerScope {
     /// aggregated by `aggregate`. Reserved for future cards that read
     /// "the highest life total among players" or similar cross-player
     /// extrema that include the controller.
-    AllPlayers { aggregate: AggregateFunction },
+    AllPlayers {
+        aggregate: AggregateFunction,
+        /// CR 102.1 + CR 608.2c: when `Some`, the named player is excluded
+        /// from the aggregated population ("each OTHER player"). The
+        /// excluded player is itself a `PlayerScope` — the type composes
+        /// with itself, generalizing "each other player" for any anchor.
+        /// `None` = all players.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exclude: Option<Box<PlayerScope>>,
+    },
     /// CR 303.4m + CR 613.4c: The controller of the object currently
     /// receiving a layer effect. Used for Aura/Equipment statics such as
     /// "enchanted creature gets +1/+1 for each card in its controller's
@@ -2355,6 +2373,12 @@ pub enum PlayerScope {
     /// intervening-if quantities such as "no opponent has more life than that
     /// player."
     DefendingPlayer,
+    /// CR 109.4 + CR 608.2c: The controller of the first object target of
+    /// the resolving ability ("that opponent" anaphoring the controller of
+    /// a bounced/destroyed creature). The player-scalar-axis analogue of
+    /// `ControllerRef::ParentTargetController`. Resolved via
+    /// `ability_utils::parent_target_controller`.
+    ParentObjectTargetController,
 }
 
 /// Scope selector for object-axis quantities (Round Π-5). Picks WHICH object
@@ -2640,8 +2664,13 @@ pub enum QuantityRef {
     /// targeted-player and cross-player aggregate variants per the same axis
     /// used by `LifeTotal`/`HandSize`.
     PartySize { player: PlayerScope },
-    /// CR 702.179f: The controller's current speed, treating no speed as 0.
-    Speed,
+    /// CR 702.179f: `player`'s current speed, treating no speed as 0.
+    /// `PlayerScope::Controller` is the default reading ("your speed");
+    /// `Target` / `Opponent { .. }` / `AllPlayers { .. }` /
+    /// `ParentObjectTargetController` cover targeted, aggregate, and
+    /// parent-object-target-controller variants per the same player axis
+    /// used by `LifeTotal` / `HandSize` / `PartySize`.
+    Speed { player: PlayerScope },
     /// CR 603.7c: Numeric value from the triggering event.
     /// Extracts amount/count from DamageDealt, LifeChanged, CardsDrawn, CounterAdded, etc.
     EventContextAmount,
@@ -2936,10 +2965,12 @@ pub enum PlayerRelation {
 }
 
 /// A filter matching players by game-state conditions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum PlayerFilter {
     /// The controller of the effect or quantity.
+    /// CR 700.2a: the default chooser for any modal/effect player reference.
+    #[default]
     Controller,
     /// All opponents of the controller.
     Opponent,
@@ -2995,6 +3026,13 @@ pub enum PlayerFilter {
         /// as `u8` — vote sessions never exceed 255 choices in practice.
         choice_index: u8,
     },
+    /// CR 109.4 + CR 608.2c: The controller of the first object target of
+    /// the resolving ability ("reduce that opponent's speed" anaphoring the
+    /// controller of a bounced creature). The `PlayerFilter`-axis analogue
+    /// of `PlayerScope::ParentObjectTargetController` and
+    /// `ControllerRef::ParentTargetController`. Resolved via
+    /// `ability_utils::parent_target_controller`.
+    ParentObjectTargetController,
 }
 
 /// An expression that produces an integer for quantity comparisons.
@@ -4331,6 +4369,17 @@ pub enum CopyManaValueLimit {
     AmountSpentToCastSource,
 }
 
+/// CR 702.179c-d: Direction of a speed change. Typed (not a bool) so the
+/// `Effect::ChangeSpeed` handler dispatches exhaustively.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum SpeedDelta {
+    /// CR 702.179c-d: increase speed (capped at 4 by the speed rules).
+    Increase,
+    /// CR 702.179f-consistent: decrease speed, treating no speed as 0.
+    Decrease,
+}
+
 /// The typed effect enum. Each variant corresponds to an effect handler.
 /// Zero HashMap<String, String> fields.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr)]
@@ -4340,11 +4389,19 @@ pub enum Effect {
     StartYourEngines {
         player_scope: PlayerFilter,
     },
-    /// CR 702.179c-d: Increase the selected players' speed by the given amount.
-    IncreaseSpeed {
+    /// CR 702.179c-d: Change the selected players' speed by the given amount
+    /// in `direction`. `direction = Increase` covers all former `IncreaseSpeed`
+    /// cards; `direction = Decrease` covers speed-reduction cards.
+    ChangeSpeed {
         player_scope: PlayerFilter,
         #[serde(default = "default_quantity_one")]
         amount: QuantityExpr,
+        direction: SpeedDelta,
+        /// Card-text-derived (NOT a CR rule): minimum speed a decrease may
+        /// produce, e.g. Spikeshell Harrier's "can't reduce their speed
+        /// below 1". `None` for increases and for unfloored decreases.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        floor: Option<u8>,
     },
     DealDamage {
         #[serde(default = "default_quantity_one")]
@@ -6489,7 +6546,7 @@ impl Effect {
             // These use filters, zone-level operations, or have no targeting at all.
             Effect::StartYourEngines { .. }
             | Effect::Myriad
-            | Effect::IncreaseSpeed { .. }
+            | Effect::ChangeSpeed { .. }
             | Effect::GainLife { .. }
             | Effect::PumpAll { .. }
             | Effect::DamageAll { .. }
@@ -6588,7 +6645,7 @@ impl Effect {
 pub fn effect_variant_name(effect: &Effect) -> &str {
     match effect {
         Effect::StartYourEngines { .. } => "StartYourEngines",
-        Effect::IncreaseSpeed { .. } => "IncreaseSpeed",
+        Effect::ChangeSpeed { .. } => "ChangeSpeed",
         Effect::DealDamage { .. } => "DealDamage",
         Effect::Draw { .. } => "Draw",
         Effect::Pump { .. } => "Pump",
@@ -6758,7 +6815,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EffectKind {
     StartYourEngines,
-    IncreaseSpeed,
+    ChangeSpeed,
     DealDamage,
     Draw,
     Pump,
@@ -6930,7 +6987,7 @@ impl From<&Effect> for EffectKind {
     fn from(effect: &Effect) -> Self {
         match effect {
             Effect::StartYourEngines { .. } => EffectKind::StartYourEngines,
-            Effect::IncreaseSpeed { .. } => EffectKind::IncreaseSpeed,
+            Effect::ChangeSpeed { .. } => EffectKind::ChangeSpeed,
             Effect::DealDamage { .. } => EffectKind::DealDamage,
             Effect::Draw { .. } => EffectKind::Draw,
             Effect::Pump { .. } => EffectKind::Pump,
@@ -7145,6 +7202,10 @@ pub struct ModalChoice {
     /// CR 702.42a: Entwine cost — when all modes are chosen, this additional cost is paid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entwine_cost: Option<ManaCost>,
+    /// CR 700.2e: The player who chooses the mode(s). Defaults to the
+    /// controller (CR 700.2a) for all standard modal spells/abilities.
+    #[serde(default = "default_player_filter_controller")]
+    pub chooser: PlayerFilter,
 }
 
 /// Selection constraints attached to a modal choice header.

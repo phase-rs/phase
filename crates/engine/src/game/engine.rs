@@ -7076,6 +7076,7 @@ mod tests {
                             produced: ManaProduction::ChosenColor {
                                 count: QuantityExpr::Fixed { value: 1 },
                                 contribution: ManaContribution::Additional,
+                                fixed_alternative: None,
                             },
                             restrictions: vec![],
                             grants: vec![],

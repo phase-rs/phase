@@ -645,13 +645,13 @@ fn resolve_ref(
     match qty {
         // CR 402: hand size for the scoped player(s).
         QuantityRef::HandSize { player: scope } => {
-            resolve_per_player_scalar(state, *scope, controller, ctx, targets, |p| {
+            resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| {
                 usize_to_i32_saturating(p.hand.len())
             })
         }
         // CR 119: life total for the scoped player(s).
         QuantityRef::LifeTotal { player: scope } => {
-            resolve_per_player_scalar(state, *scope, controller, ctx, targets, |p| p.life)
+            resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| p.life)
         }
         // CR 122.1: Counter-kind lookup summed across scope players. Controller
         // scope resolves to a single player; Opponents/All may span multiple.
@@ -665,7 +665,7 @@ fn resolve_ref(
         }
         // CR 404: cards in the scoped player(s)' graveyard.
         QuantityRef::GraveyardSize { player: scope } => {
-            resolve_per_player_scalar(state, *scope, controller, ctx, targets, |p| {
+            resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| {
                 usize_to_i32_saturating(p.graveyard.len())
             })
         }
@@ -676,7 +676,7 @@ fn resolve_ref(
         QuantityRef::StartingLifeTotal => state.format_config.starting_life,
         // CR 118.4 + CR 119.3: Life lost this turn, scoped via PlayerScope (Π-3).
         QuantityRef::LifeLostThisTurn { player } => {
-            resolve_per_player_scalar(state, *player, controller, ctx, targets, |p| {
+            resolve_per_player_scalar(state, player, controller, ctx, targets, ability, |p| {
                 u32_to_i32_saturating(p.life_lost_this_turn)
             })
         }
@@ -685,11 +685,16 @@ fn resolve_ref(
         // Warrior/Wizard) is computed per CR 700.8b for creatures with
         // multiple party-relevant types. Bounded to `0..=4`.
         QuantityRef::PartySize { player: scope } => {
-            resolve_per_player_scalar(state, *scope, controller, ctx, targets, |p| {
+            resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| {
                 compute_party_size(state, p.id)
             })
         }
-        QuantityRef::Speed => i32::from(effective_speed(state, controller)),
+        // CR 702.179f: `player`'s current speed, treating no speed as 0.
+        QuantityRef::Speed { player: scope } => {
+            resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| {
+                i32::from(effective_speed(state, p.id))
+            })
+        }
         QuantityRef::ObjectCount { filter } => {
             // CR 400.1: If the filter constrains to a specific zone via InZone,
             // count objects in that zone. Otherwise default to battlefield.
@@ -1340,8 +1345,14 @@ fn resolve_ref(
                 })
                 .count(),
         ),
-        QuantityRef::SacrificedThisTurn { player, ref filter } => {
-            resolve_per_player_scalar(state, *player, controller, ctx, targets, |scoped_player| {
+        QuantityRef::SacrificedThisTurn { player, ref filter } => resolve_per_player_scalar(
+            state,
+            player,
+            controller,
+            ctx,
+            targets,
+            ability,
+            |scoped_player| {
                 usize_to_i32_saturating(
                     state
                         .sacrificed_permanents_this_turn
@@ -1357,21 +1368,21 @@ fn resolve_ref(
                         })
                         .count(),
                 )
-            })
-        }
+            },
+        ),
         // CR 710.2: Crimes committed this turn — uses tracked counter on player.
         QuantityRef::CrimesCommittedThisTurn => {
             player.map_or(0, |p| u32_to_i32_saturating(p.crimes_committed_this_turn))
         }
         // CR 119.4: Life gained this turn, scoped via PlayerScope (Π-4).
         QuantityRef::LifeGainedThisTurn { player } => {
-            resolve_per_player_scalar(state, *player, controller, ctx, targets, |p| {
+            resolve_per_player_scalar(state, player, controller, ctx, targets, ability, |p| {
                 u32_to_i32_saturating(p.life_gained_this_turn)
             })
         }
         // CR 121.1: Cards drawn this turn, scoped via PlayerScope.
         QuantityRef::CardsDrawnThisTurn { player } => {
-            resolve_per_player_scalar(state, *player, controller, ctx, targets, |p| {
+            resolve_per_player_scalar(state, player, controller, ctx, targets, ability, |p| {
                 u32_to_i32_saturating(p.cards_drawn_this_turn)
             })
         }
@@ -1499,7 +1510,7 @@ fn resolve_ref(
         ),
         // CR 701.9 + CR 603.4: Cards discarded this turn, scoped via PlayerScope.
         QuantityRef::CardsDiscardedThisTurn { player } => {
-            resolve_per_player_scalar(state, *player, controller, ctx, targets, |p| {
+            resolve_per_player_scalar(state, player, controller, ctx, targets, ability, |p| {
                 u32_to_i32_saturating(
                     state
                         .cards_discarded_this_turn_by_player
@@ -1509,8 +1520,14 @@ fn resolve_ref(
                 )
             })
         }
-        QuantityRef::TokensCreatedThisTurn { player, ref filter } => {
-            resolve_per_player_scalar(state, *player, controller, ctx, targets, |scoped_player| {
+        QuantityRef::TokensCreatedThisTurn { player, ref filter } => resolve_per_player_scalar(
+            state,
+            player,
+            controller,
+            ctx,
+            targets,
+            ability,
+            |scoped_player| {
                 usize_to_i32_saturating(
                     state
                         .created_tokens_this_turn
@@ -1526,10 +1543,16 @@ fn resolve_ref(
                         })
                         .count(),
                 )
-            })
-        }
-        QuantityRef::PlayerActionsThisTurn { player, action } => {
-            resolve_per_player_scalar(state, *player, controller, ctx, targets, |scoped_player| {
+            },
+        ),
+        QuantityRef::PlayerActionsThisTurn { player, action } => resolve_per_player_scalar(
+            state,
+            player,
+            controller,
+            ctx,
+            targets,
+            ability,
+            |scoped_player| {
                 usize_to_i32_saturating(
                     state
                         .player_actions_this_turn
@@ -1539,8 +1562,8 @@ fn resolve_ref(
                         })
                         .count(),
                 )
-            })
-        }
+            },
+        ),
         // CR 309.7: Number of dungeons the controller has completed.
         QuantityRef::DungeonsCompleted => state
             .dungeon_progress
@@ -2260,6 +2283,47 @@ fn resolve_object_mana_value(
     }
 }
 
+/// CR 109.4 + CR 113.6: Resolve a single-player `PlayerScope` to a concrete
+/// `PlayerId`, when one exists. Aggregate scopes (`Opponent`, `AllPlayers`)
+/// have no single-player interpretation and yield `None`. Used to resolve the
+/// `exclude` anchor of `PlayerScope::AllPlayers { exclude }`.
+fn resolve_single_player_scope(
+    state: &GameState,
+    scope: &PlayerScope,
+    controller: PlayerId,
+    ctx: QuantityContext,
+    targets: &[TargetRef],
+    ability: Option<&ResolvedAbility>,
+) -> Option<PlayerId> {
+    match scope {
+        PlayerScope::Controller => Some(controller),
+        PlayerScope::ScopedPlayer => Some(ctx.scoped_player.unwrap_or(controller)),
+        PlayerScope::Target => targets.iter().find_map(|t| match t {
+            TargetRef::Player(pid) => Some(*pid),
+            _ => None,
+        }),
+        PlayerScope::RecipientController => {
+            let object_id = ctx.recipient.or_else(|| {
+                targets.iter().find_map(|target| match target {
+                    TargetRef::Object(id) => Some(*id),
+                    _ => None,
+                })
+            });
+            object_id
+                .or(Some(ctx.source))
+                .and_then(|id| state.objects.get(&id))
+                .map(|obj| obj.controller)
+        }
+        PlayerScope::DefendingPlayer => defending_player_for_quantity_context(state, ctx),
+        // CR 109.4: controller of the parent object target.
+        PlayerScope::ParentObjectTargetController => {
+            ability.and_then(|a| crate::game::ability_utils::parent_target_controller(a, state))
+        }
+        // Aggregate scopes have no single-player reading.
+        PlayerScope::Opponent { .. } | PlayerScope::AllPlayers { .. } => None,
+    }
+}
+
 /// CR 102 + CR 119 + CR 402: Resolve a per-player scalar through a `PlayerScope`.
 ///
 /// Single authority for all `LifeTotal { player }` / `HandSize { player }`-style
@@ -2273,13 +2337,16 @@ fn resolve_object_mana_value(
 ///   supplied by layer evaluation; outside layer scope it falls back to the
 ///   first object target, then the source object.
 /// - `Opponent { aggregate }`: aggregates over `p.id != controller` (CR 102.2).
-/// - `AllPlayers { aggregate }`: aggregates over every player (CR 102.1).
+/// - `AllPlayers { aggregate, exclude }`: aggregates over every player
+///   (CR 102.1), optionally excluding the `exclude` anchor ("each other
+///   player").
 fn resolve_per_player_scalar<F>(
     state: &GameState,
-    scope: PlayerScope,
+    scope: &PlayerScope,
     controller: PlayerId,
     ctx: QuantityContext,
     targets: &[TargetRef],
+    ability: Option<&ResolvedAbility>,
     mut extract: F,
 ) -> i32
 where
@@ -2321,13 +2388,27 @@ where
         PlayerScope::DefendingPlayer => defending_player_for_quantity_context(state, ctx)
             .and_then(|pid| state.players.iter().find(|p| p.id == pid))
             .map_or(0, &mut extract),
+        // CR 109.4 + CR 608.2c: controller of the parent object target.
+        PlayerScope::ParentObjectTargetController => ability
+            .and_then(|a| crate::game::ability_utils::parent_target_controller(a, state))
+            .and_then(|pid| state.players.iter().find(|p| p.id == pid))
+            .map_or(0, &mut extract),
         PlayerScope::Opponent { aggregate } => aggregate_over_players(
             state.players.iter().filter(|p| p.id != controller),
-            aggregate,
+            *aggregate,
             &mut extract,
         ),
-        PlayerScope::AllPlayers { aggregate } => {
-            aggregate_over_players(state.players.iter(), aggregate, &mut extract)
+        // CR 102.1: aggregate over all players, optionally excluding the
+        // `exclude` anchor ("each OTHER player").
+        PlayerScope::AllPlayers { aggregate, exclude } => {
+            let excluded_id = exclude.as_deref().and_then(|ex| {
+                resolve_single_player_scope(state, ex, controller, ctx, targets, ability)
+            });
+            aggregate_over_players(
+                state.players.iter().filter(|p| Some(p.id) != excluded_id),
+                *aggregate,
+                &mut extract,
+            )
         }
     }
 }
@@ -2572,6 +2653,10 @@ pub(crate) fn resolve_player_count(
                             .last_vote_ballots
                             .iter()
                             .any(|(voter, idx)| *voter == p.id && *idx == *choice_index),
+                        // CR 109.4: the parent-object-target anchor has no
+                        // single-player-count meaning here (no parent object
+                        // target is in scope for a player-count quantity).
+                        PlayerFilter::ParentObjectTargetController => false,
                     }
             })
             .count(),
@@ -4682,6 +4767,7 @@ mod tests {
             qty: QuantityRef::LifeLostThisTurn {
                 player: PlayerScope::AllPlayers {
                     aggregate: AggregateFunction::Max,
+                    exclude: None,
                 },
             },
         };
@@ -4701,6 +4787,7 @@ mod tests {
             qty: QuantityRef::LifeLostThisTurn {
                 player: PlayerScope::AllPlayers {
                     aggregate: AggregateFunction::Max,
+                    exclude: None,
                 },
             },
         };

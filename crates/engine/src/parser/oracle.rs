@@ -4208,6 +4208,7 @@ mod tests {
             qty: QuantityRef::HandSize {
                 player: PlayerScope::AllPlayers {
                     aggregate: AggregateFunction::Sum,
+                    exclude: None,
                 },
             },
         };
@@ -7324,7 +7325,7 @@ mod tests {
             *execute.effect,
             Effect::PutCounter {
                 count: QuantityExpr::Ref {
-                    qty: QuantityRef::Speed,
+                    qty: QuantityRef::Speed { .. },
                 },
                 ..
             }

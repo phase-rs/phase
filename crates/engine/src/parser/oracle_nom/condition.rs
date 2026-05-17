@@ -1284,7 +1284,7 @@ fn parse_property_keyword(input: &str) -> OracleResult<'_, ObjectProperty> {
 /// grammar (not a CR rule): GT/GE compare against the Max of the population
 /// (∃ object with greater property than each ⟺ subject > Max of others);
 /// LT/LE compare against Min.
-fn parse_superlative_comparator_phrase(
+pub(crate) fn parse_superlative_comparator_phrase(
     input: &str,
 ) -> OracleResult<'_, (Comparator, AggregateFunction)> {
     // Order matters: longer phrases ("greater than or equal to") must precede
@@ -2111,6 +2111,7 @@ fn parse_life_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
             LifeTotalScope::Controller => PlayerScope::Controller,
             LifeTotalScope::AllPlayers => PlayerScope::AllPlayers {
                 aggregate: existential_aggregate(comparator),
+                exclude: None,
             },
             LifeTotalScope::Opponent => PlayerScope::Opponent {
                 aggregate: existential_aggregate(comparator),
@@ -3141,6 +3142,7 @@ fn parse_player_lost_life_this_turn(input: &str) -> OracleResult<'_, StaticCondi
             QuantityRef::LifeLostThisTurn {
                 player: PlayerScope::AllPlayers {
                     aggregate: AggregateFunction::Max,
+                    exclude: None,
                 },
             },
             n,
@@ -4451,8 +4453,17 @@ pub(crate) fn parse_unless_condition(input: &str) -> OracleResult<'_, StaticCond
 /// trailing punctuation like ", " or "."). On `wasn't`/`was not` the negation
 /// is exposed via `negated`.
 pub fn parse_zone_changed_this_way_clause(input: &str) -> OracleResult<'_, (TargetFilter, bool)> {
-    // article: "a " | "an "
-    let (rest, _) = parse_article(input)?;
+    // CR 608.2c: A "this way" conditional may be quantified. "at least one" /
+    // "one or more" both mean "≥ 1", which the existential `.any()` semantics
+    // of `ZoneChangedThisWay` already encode — they value-discard to unit. The
+    // bare article "a"/"an" is the singular existential form. All collapse to
+    // the same existential condition.
+    let (rest, _) = alt((
+        value((), tag::<_, _, OracleError<'_>>("at least one ")),
+        value((), tag("one or more ")),
+        parse_article,
+    ))
+    .parse(input)?;
 
     // type phrase — handled by the shared helper which already covers
     // top-level types (creature, artifact, enchantment, …) and subtypes
@@ -4470,14 +4481,19 @@ pub fn parse_zone_changed_this_way_clause(input: &str) -> OracleResult<'_, (Targ
     // matches cleanly.
     let after_filter = after_filter.trim_start();
 
-    // tense: "is" | "was" | "wasn't" | "is not" | "was not" | "isn't"
+    // tense: singular "is"/"was" + plural "are"/"were". Verb number is
+    // grammatically inert here — "one or more cards are milled" and "an X was
+    // milled" produce the same existential condition. (Negations stay
+    // singular-only: no card prints "aren't"/"weren't ... this way".)
     let (rest, negated) = alt((
         value(true, tag::<_, _, OracleError<'_>>("wasn't ")),
         value(true, tag("isn't ")),
         value(true, tag("was not ")),
         value(true, tag("is not ")),
         value(false, tag("was ")),
+        value(false, tag("were ")),
         value(false, tag("is ")),
+        value(false, tag("are ")),
     ))
     .parse(after_filter)?;
 
@@ -6196,6 +6212,7 @@ mod tests {
                                 player:
                                     PlayerScope::AllPlayers {
                                         aggregate: AggregateFunction::Min,
+                                        exclude: None,
                                     },
                             },
                     },
@@ -6273,6 +6290,7 @@ mod tests {
                     qty: QuantityRef::LifeTotal {
                         player: PlayerScope::AllPlayers {
                             aggregate: AggregateFunction::Min,
+                            exclude: None,
                         },
                     },
                 },
@@ -8251,6 +8269,7 @@ mod tests {
                     qty: QuantityRef::LifeLostThisTurn {
                         player: PlayerScope::AllPlayers {
                             aggregate: AggregateFunction::Max,
+                            exclude: None,
                         },
                     },
                 },
@@ -8294,6 +8313,7 @@ mod tests {
                     qty: QuantityRef::LifeLostThisTurn {
                         player: PlayerScope::AllPlayers {
                             aggregate: AggregateFunction::Max,
+                            exclude: None,
                         },
                     },
                 },
@@ -8318,6 +8338,7 @@ mod tests {
                     qty: QuantityRef::LifeLostThisTurn {
                         player: PlayerScope::AllPlayers {
                             aggregate: AggregateFunction::Max,
+                            exclude: None,
                         },
                     },
                 },
@@ -8440,6 +8461,72 @@ mod tests {
     fn test_zone_changed_this_way_rejects_unrecognized_type() {
         // "a thing" — type_phrase returns Any → combinator must error.
         assert!(parse_zone_changed_this_way_clause("a thing was destroyed this way").is_err());
+    }
+
+    /// Issue #477 — Renegade Reaper: quantifier prefix "at least one" with a
+    /// subtype, "card" noun, and singular verb. The quantifier collapses to the
+    /// existential `ZoneChangedThisWay` (≥ 1).
+    #[test]
+    fn test_zone_changed_this_way_at_least_one_subtype() {
+        let (rest, (filter, negated)) = parse_zone_changed_this_way_clause(
+            "at least one angel card is milled this way, you gain 4 life",
+        )
+        .unwrap();
+        assert_eq!(rest, ", you gain 4 life");
+        assert!(!negated);
+        match filter {
+            TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
+                assert!(
+                    type_filters.iter().any(
+                        |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Angel"))
+                    ),
+                    "expected Subtype Angel, got {type_filters:?}"
+                );
+            }
+            other => panic!("expected Typed Angel, got {other:?}"),
+        }
+    }
+
+    /// Issue #477 — The Wise Mothman: quantifier "one or more" + bare `cards`
+    /// type + `nonland` negated-type prefix + **plural verb** "are".
+    #[test]
+    fn test_zone_changed_this_way_one_or_more_nonland_cards_plural() {
+        let (rest, (filter, negated)) = parse_zone_changed_this_way_clause(
+            "one or more nonland cards are exiled this way, you draw a card",
+        )
+        .unwrap();
+        assert_eq!(rest, ", you draw a card");
+        assert!(!negated);
+        match filter {
+            TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
+                assert!(
+                    type_filters.iter().any(|f| matches!(f, TypeFilter::Card)),
+                    "expected TypeFilter::Card, got {type_filters:?}"
+                );
+            }
+            other => panic!("expected Typed Card, got {other:?}"),
+        }
+    }
+
+    /// Issue #477 — Augusta: quantifier "one or more" + bare `cards` type +
+    /// **plural verb** "are milled".
+    #[test]
+    fn test_zone_changed_this_way_one_or_more_cards_plural_milled() {
+        let (rest, (filter, negated)) = parse_zone_changed_this_way_clause(
+            "one or more cards are milled this way, you gain 1 life",
+        )
+        .unwrap();
+        assert_eq!(rest, ", you gain 1 life");
+        assert!(!negated);
+        match filter {
+            TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
+                assert!(
+                    type_filters.iter().any(|f| matches!(f, TypeFilter::Card)),
+                    "expected TypeFilter::Card, got {type_filters:?}"
+                );
+            }
+            other => panic!("expected Typed Card, got {other:?}"),
+        }
     }
 
     // ---------------------------------------------------------------------

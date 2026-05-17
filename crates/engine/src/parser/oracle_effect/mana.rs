@@ -2,7 +2,7 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::char;
-use nom::combinator::{all_consuming, opt, rest as nom_rest, value};
+use nom::combinator::{all_consuming, map, opt, rest as nom_rest, value};
 use nom::multi::many1;
 use nom::sequence::{delimited, preceded, separated_pair, terminated};
 use nom::Parser;
@@ -330,6 +330,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
                 produced: ManaProduction::ChosenColor {
                     count,
                     contribution,
+                    fixed_alternative: None,
                 },
                 restrictions: vec![],
                 grants: vec![],
@@ -948,10 +949,27 @@ fn scan_mana_production_type(
                 },
                 tag("mana in any combination of colors"),
             ),
+            // CR 106.1: "{g} or one mana of the chosen color" — a fixed-color
+            // alternative to the chosen color (Cycle of Gates). Must precede the
+            // bare `ChosenColor` arm so it wins at the earlier `{g}` word
+            // boundary; the bare arm would otherwise skip the `{g}` and drop it.
+            map(
+                (
+                    parse_pure_color_symbol,
+                    alt((tag(" or one "), tag(" or "))),
+                    alt((tag("mana of the chosen color"), tag("mana of that color"))),
+                ),
+                |(fixed, _, _)| ManaProduction::ChosenColor {
+                    count: count.clone(),
+                    contribution,
+                    fixed_alternative: Some(fixed),
+                },
+            ),
             value(
                 ManaProduction::ChosenColor {
                     count: count.clone(),
                     contribution,
+                    fixed_alternative: None,
                 },
                 alt((tag("mana of the chosen color"), tag("mana of that color"))),
             ),
@@ -1350,6 +1368,7 @@ fn try_parse_amount_equal_to(clause: &str, contribution: ManaContribution) -> Op
             produced: ManaProduction::ChosenColor {
                 count,
                 contribution,
+                fixed_alternative: None,
             },
             restrictions: vec![],
             grants: vec![],

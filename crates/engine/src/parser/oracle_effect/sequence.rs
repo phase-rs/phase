@@ -2097,7 +2097,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         // via `ObjectScope::CostPaidObject`.
         Effect::Sacrifice { .. } => true,
         Effect::StartYourEngines { .. }
-        | Effect::IncreaseSpeed { .. }
+        | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
         | Effect::Draw { .. }
         | Effect::Pump { .. }

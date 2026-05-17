@@ -74,6 +74,39 @@ pub fn increase_speed(
     set_speed(state, player, Some(capped), events);
 }
 
+/// CR 702.179c-d: Decreasing speed subtracts `amount`, treating absent speed
+/// as 0 (CR 702.179f). `saturating_sub` floors the result at 0; an optional
+/// card-text-derived `floor` raises that minimum (e.g. Spikeshell Harrier's
+/// "can't reduce their speed below 1"). `None` floor adds no further guard —
+/// `saturating_sub` already floors at 0.
+pub fn decrease_speed(
+    state: &mut GameState,
+    player: PlayerId,
+    amount: u8,
+    floor: Option<u8>,
+    events: &mut Vec<GameEvent>,
+) {
+    let current = state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .and_then(|p| p.speed);
+    // CR 702.179f: a player with no speed is treated as having speed 0.
+    let decreased = current.unwrap_or(0).saturating_sub(amount);
+    let floored = match floor {
+        Some(f) => decreased.max(f),
+        None => decreased,
+    };
+    // CR 702.179f: a result of 0 from an already-no-speed player stays "no
+    // speed" — don't materialize `None → Some(0)`.
+    let new_speed = if current.is_none() && floored == 0 {
+        None
+    } else {
+        Some(floored)
+    };
+    set_speed(state, player, new_speed, events);
+}
+
 /// CR 702.179a: Start your engines checks whether a player controls a permanent with the keyword.
 pub fn controls_start_your_engines(state: &GameState, player: PlayerId) -> bool {
     state.battlefield.iter().any(|id| {

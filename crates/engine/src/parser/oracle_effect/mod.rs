@@ -2884,12 +2884,45 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         // Delegate to nom combinator (input already lowercase from tp.lower).
         if let Ok((remainder, amount)) = nom_primitives::parse_number.parse(amount_text) {
             if remainder.trim().is_empty() {
-                return parsed_clause(Effect::IncreaseSpeed {
+                return parsed_clause(Effect::ChangeSpeed {
                     player_scope: PlayerFilter::Controller,
                     amount: QuantityExpr::Fixed {
                         value: amount as i32,
                     },
+                    direction: crate::types::ability::SpeedDelta::Increase,
+                    floor: None,
                 });
+            }
+        }
+    }
+
+    // CR 702.179c-d: "reduce <player>'s speed by N" — directional speed
+    // decrease. The player anaphor selects the `PlayerFilter`; "that
+    // opponent" resolves to the parent object target's controller.
+    if let Ok((rest, player_scope)) = nom::sequence::preceded(
+        tag::<_, _, OracleError<'_>>("reduce "),
+        alt((
+            value(
+                PlayerFilter::ParentObjectTargetController,
+                alt((tag("that opponent's "), tag("that player's "))),
+            ),
+            value(PlayerFilter::Controller, tag("your ")),
+        )),
+    )
+    .parse(tp.lower)
+    {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("speed by ").parse(rest) {
+            if let Ok((remainder, amount)) = nom_primitives::parse_number.parse(rest) {
+                if remainder.trim().is_empty() {
+                    return parsed_clause(Effect::ChangeSpeed {
+                        player_scope,
+                        amount: QuantityExpr::Fixed {
+                            value: amount as i32,
+                        },
+                        direction: crate::types::ability::SpeedDelta::Decrease,
+                        floor: None,
+                    });
+                }
             }
         }
     }
@@ -9717,7 +9750,9 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
         return def;
     }
     let ir = parse_effect_chain_ir(text, kind, &mut ParseContext::default());
-    lower_effect_chain_ir(&ir)
+    let mut def = lower_effect_chain_ir(&ir);
+    fold_speed_floor_sentences(&mut def);
+    def
 }
 
 /// Parse a compound effect chain with subject context for pronoun resolution.
@@ -9732,7 +9767,75 @@ pub(crate) fn parse_effect_chain_with_context(
         return def;
     }
     let ir = parse_effect_chain_ir(text, kind, ctx);
-    lower_effect_chain_ir(&ir)
+    let mut def = lower_effect_chain_ir(&ir);
+    fold_speed_floor_sentences(&mut def);
+    def
+}
+
+/// CR 702.179c-d: Fold a trailing "This effect can't reduce their speed below
+/// N" sub-ability sentence into the preceding `ChangeSpeed` effect's `floor`
+/// field, then delete the now-redundant `Unimplemented` floor-sentence node.
+///
+/// The floor sentence parses as its own `Effect::Unimplemented { name: "this"
+/// }` sub-ability; leaving it would surface a spurious unimplemented gap. This
+/// pass walks the `sub_ability` chain and rewrites `ChangeSpeed →
+/// Unimplemented(floor sentence)` into a single floored `ChangeSpeed`.
+pub(crate) fn fold_speed_floor_sentences(def: &mut AbilityDefinition) {
+    /// Parse "this effect can't reduce <their|its> speed below N" → N.
+    fn parse_floor_sentence(text: &str) -> Option<u8> {
+        let lower = text.to_lowercase();
+        let lower = lower.trim_end_matches('.').trim();
+        let (rest, _) = tag::<_, _, OracleError<'_>>("this effect can't reduce ")
+            .parse(lower)
+            .ok()?;
+        let (rest, _) = alt((
+            tag::<_, _, OracleError<'_>>("their speed below "),
+            tag("its speed below "),
+        ))
+        .parse(rest)
+        .ok()?;
+        let (rest, n) = nom_primitives::parse_number.parse(rest).ok()?;
+        if !rest.trim().is_empty() {
+            return None;
+        }
+        u8::try_from(n).ok()
+    }
+
+    // Walk the sub_ability chain. When the current node is a `ChangeSpeed`
+    // decrease and its sub_ability is the floor sentence, fold and unlink.
+    let mut cursor: &mut AbilityDefinition = def;
+    loop {
+        let floor_value = match (&*cursor.effect, &cursor.sub_ability) {
+            (
+                Effect::ChangeSpeed {
+                    direction: crate::types::ability::SpeedDelta::Decrease,
+                    ..
+                },
+                Some(child),
+            ) => match &*child.effect {
+                Effect::Unimplemented { description, .. } => {
+                    description.as_deref().and_then(parse_floor_sentence)
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(n) = floor_value {
+            // Re-link past the floor sentence, then fold the value in.
+            let grandchild = cursor
+                .sub_ability
+                .take()
+                .and_then(|child| child.sub_ability);
+            cursor.sub_ability = grandchild;
+            if let Effect::ChangeSpeed { floor, .. } = &mut *cursor.effect {
+                *floor = Some(n);
+            }
+        }
+        match cursor.sub_ability.as_deref_mut() {
+            Some(next) => cursor = next,
+            None => break,
+        }
+    }
 }
 
 /// Produce an intermediate representation of an effect chain from Oracle text.
@@ -10371,6 +10474,21 @@ pub(crate) fn parse_effect_chain_ir(
         } else {
             (None, text)
         };
+        // CR 608.2c: player-property superlative-comparison conditional —
+        // "if that opponent's speed is greater than each other player's speed, ..."
+        let (player_property_cond, text) = if condition.is_none()
+            && if_you_do.is_none()
+            && counter_cond.is_none()
+            && mv_cond.is_none()
+            && target_supertype_cond.is_none()
+            && cast_from_zone.is_none()
+            && card_type_cond.is_none()
+            && property_cond.is_none()
+        {
+            strip_player_property_superlative_conditional(&text)
+        } else {
+            (None, text)
+        };
         // CR 608.2c: "If it's your turn" / "If it's not your turn" — game-state condition
         let (turn_cond, text) = if condition.is_none()
             && if_you_do.is_none()
@@ -10380,6 +10498,7 @@ pub(crate) fn parse_effect_chain_ir(
             && cast_from_zone.is_none()
             && card_type_cond.is_none()
             && property_cond.is_none()
+            && player_property_cond.is_none()
         {
             strip_turn_conditional(&text)
         } else {
@@ -10394,6 +10513,7 @@ pub(crate) fn parse_effect_chain_ir(
             && cast_from_zone.is_none()
             && card_type_cond.is_none()
             && property_cond.is_none()
+            && player_property_cond.is_none()
             && turn_cond.is_none()
         {
             strip_target_keyword_instead(&text)
@@ -10411,6 +10531,7 @@ pub(crate) fn parse_effect_chain_ir(
             && cast_from_zone.is_none()
             && card_type_cond.is_none()
             && property_cond.is_none()
+            && player_property_cond.is_none()
             && turn_cond.is_none()
             && keyword_instead_cond.is_none()
         {
@@ -10426,6 +10547,7 @@ pub(crate) fn parse_effect_chain_ir(
             .or(cast_from_zone)
             .or(card_type_cond)
             .or(property_cond)
+            .or(player_property_cond)
             .or(turn_cond)
             .or(keyword_instead_cond)
             .or(suffix_cond);
@@ -14462,7 +14584,7 @@ fn apply_where_x_effect_expression(effect: &mut Effect, where_x_expression: Opti
         | Effect::DamageEachPlayer { amount, .. }
         | Effect::GainLife { amount, .. }
         | Effect::LoseLife { amount, .. }
-        | Effect::IncreaseSpeed { amount, .. }
+        | Effect::ChangeSpeed { amount, .. }
         | Effect::Draw { count: amount, .. }
         | Effect::Mill { count: amount, .. }
         | Effect::PutCounter { count: amount, .. }
@@ -20560,7 +20682,7 @@ mod tests {
             *def.effect,
             Effect::PutCounter {
                 count: QuantityExpr::Ref {
-                    qty: QuantityRef::Speed,
+                    qty: QuantityRef::Speed { .. },
                 },
                 ..
             }
@@ -20770,6 +20892,7 @@ mod tests {
                 produced: ManaProduction::ChosenColor {
                     count: QuantityExpr::Fixed { value: 1 },
                     contribution: ManaContribution::Additional,
+                    ..
                 },
                 ..
             }
@@ -20786,10 +20909,32 @@ mod tests {
                 produced: ManaProduction::ChosenColor {
                     count: QuantityExpr::Fixed { value: 1 },
                     contribution: ManaContribution::Base,
+                    ..
                 },
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn effect_add_fixed_or_chosen_color_gate_land() {
+        // Issue #482 Defect B: Cycle of Gates' "Add {G} or one mana of the
+        // chosen color" must carry the fixed `{G}` alternative — it must not be
+        // dropped into a bare `ChosenColor`.
+        let e = parse_effect("add {g} or one mana of the chosen color");
+        assert!(
+            matches!(
+                &e,
+                Effect::Mana {
+                    produced: ManaProduction::ChosenColor {
+                        fixed_alternative: Some(crate::types::mana::ManaColor::Green),
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "expected ChosenColor with fixed_alternative Some(Green), got {e:?}"
+        );
     }
 
     #[test]
@@ -28034,10 +28179,12 @@ mod tests {
         );
     }
 
-    /// CR 109.5: "That player reveals cards from the top of their library until
+    /// CR 608.2c: "That player reveals cards from the top of their library until
     /// they reveal a creature card." (Curse of Unbinding, Mind Funeral form).
-    /// Subject "that player" extracts to TargetFilter::Player; the player
-    /// parameter is preserved through to the resolver.
+    /// The bare non-trigger "that player" subject extracts to
+    /// `TargetFilter::ParentTargetController` — the anaphor to the controller of
+    /// the player/object target referenced earlier in the same instruction; the
+    /// player parameter is preserved through to the resolver.
     #[test]
     fn reveal_until_that_player_third_person() {
         let def = parse_effect_chain(
@@ -28048,11 +28195,11 @@ mod tests {
             matches!(
                 &*def.effect,
                 Effect::RevealUntil {
-                    player: TargetFilter::Player,
+                    player: TargetFilter::ParentTargetController,
                     ..
                 }
             ),
-            "expected RevealUntil player=Player, got: {:?}",
+            "expected RevealUntil player=ParentTargetController, got: {:?}",
             def.effect
         );
     }

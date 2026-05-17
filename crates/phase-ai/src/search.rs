@@ -279,13 +279,16 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         // Priority is the only state where PassPriority is valid.
         WaitingFor::Priority { .. } => Some(GameAction::PassPriority),
 
-        // Combat declarations: empty declarations are always legal.
-        WaitingFor::DeclareAttackers { .. } => Some(GameAction::DeclareAttackers {
-            attacks: Vec::new(),
-        }),
-        WaitingFor::DeclareBlockers { .. } => Some(GameAction::DeclareBlockers {
-            assignments: Vec::new(),
-        }),
+        // Combat declarations: an empty declaration is NOT always legal —
+        // CR 508.1d / CR 701.15b require goaded / "attacks if able" creatures
+        // to be declared. Delegate to the engine's `legal_actions`, which runs
+        // the simulation filter and only emits engine-legal candidates.
+        WaitingFor::DeclareAttackers { .. } => engine::ai_support::legal_actions(state)
+            .into_iter()
+            .find(|a| matches!(a, GameAction::DeclareAttackers { .. })),
+        WaitingFor::DeclareBlockers { .. } => engine::ai_support::legal_actions(state)
+            .into_iter()
+            .find(|a| matches!(a, GameAction::DeclareBlockers { .. })),
         WaitingFor::UntapChoice { candidates, .. } => {
             candidates
                 .first()
