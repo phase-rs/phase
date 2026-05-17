@@ -1690,6 +1690,7 @@ mod tests {
                 qty: QuantityRef::HandSize {
                     player: PlayerScope::AllPlayers {
                         aggregate: AggregateFunction::Sum,
+                        exclude: None,
                     },
                 },
             }

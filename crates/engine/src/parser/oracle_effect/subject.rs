@@ -695,8 +695,9 @@ pub(super) fn parse_subject_application(
     // whether the trigger subject itself is SelfRef ("~ deals damage to a
     // player") or a typed object. Delegate to the single-authority
     // event-context combinator for the mapping.
-    // Outside trigger context, fall back to TargetFilter::Player (preserving
-    // pre-existing behavior for non-trigger phrasings).
+    // Outside trigger context, "that player" is the CR 608.2c anaphor to the
+    // controller of the object/player target referenced earlier in the same
+    // instruction — resolve to TargetFilter::ParentTargetController.
     //
     // Dispatch via the single-authority event-context combinator —
     // `parse_event_context_ref` already recognizes both "that player" and
@@ -725,7 +726,14 @@ pub(super) fn parse_subject_application(
             } else if ctx.subject.is_some() {
                 ctx_filter
             } else {
-                TargetFilter::Player
+                // CR 608.2c + CR 109.4: Outside trigger context, a bare "that player"
+                // subject is an anaphor to the controller of the object/player target
+                // referenced earlier in the same instruction (e.g. Volatile Fault's
+                // destroyed nonbasic land). Resolve to the parent target's controller,
+                // not a generic player. `parent_target_controller` matches
+                // TargetRef::Player and TargetRef::Object symmetrically, so
+                // player-target cards still resolve to the chosen player.
+                TargetFilter::ParentTargetController
             };
             return Some(SubjectApplication {
                 affected,
@@ -2687,11 +2695,14 @@ mod tests {
 
     #[test]
     fn parse_subject_the_player() {
+        // CR 608.2c: a bare non-trigger "the player" subject is the same anaphor
+        // class as "that player" — it resolves to the controller of the target
+        // referenced earlier in the same instruction.
         let mut ctx = ParseContext::default();
         let result = parse_subject_application("the player", &mut ctx);
         assert!(result.is_some());
         let app = result.unwrap();
-        assert_eq!(app.affected, TargetFilter::Player);
+        assert_eq!(app.affected, TargetFilter::ParentTargetController);
     }
 
     // CR 608.2c + CR 117.3a: "its/their controller [may]" anaphoric player subject.
@@ -2850,13 +2861,32 @@ mod tests {
     }
 
     #[test]
-    fn parse_subject_that_player_unchanged() {
-        // "that player" has its own handler at line 266 — ensure "that " prefix
-        // doesn't shadow it (it shouldn't, since it's checked earlier)
+    fn parse_subject_that_player_resolves_parent_target_controller() {
+        // CR 608.2c: outside trigger context, a bare "that player" subject is an
+        // anaphor to the controller of the target referenced earlier in the same
+        // instruction (e.g. Volatile Fault's destroyed nonbasic land). It resolves
+        // to ParentTargetController, not a generic Player.
         let mut ctx = ParseContext::default();
+        assert!(ctx.subject.is_none(), "non-trigger context");
         let result = parse_subject_application("that player", &mut ctx);
         assert!(result.is_some());
-        assert_eq!(result.unwrap().affected, TargetFilter::Player);
+        assert_eq!(
+            result.unwrap().affected,
+            TargetFilter::ParentTargetController
+        );
+    }
+
+    #[test]
+    fn parse_subject_that_player_trigger_context_is_triggering_player() {
+        // In trigger context (ctx.subject is Some), "that player" refers
+        // anaphorically to the player from the triggering event.
+        let mut ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            ..ParseContext::default()
+        };
+        let result = parse_subject_application("that player", &mut ctx);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().affected, TargetFilter::TriggeringPlayer);
     }
 
     // CR 115.1d: "any number of target" subject prefix tests

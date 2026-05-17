@@ -4013,11 +4013,20 @@ fn rewrite_parent_target_controller_to_post_replacement_source(def: &mut Ability
 /// CR 615.5: In a prevention follow-up attached to "damage would be dealt to a
 /// player", the surface subject "that player" refers to the prevented event's
 /// damage recipient. The ordinary effect parser has no active trigger event in
-/// this replacement context, so it lowers standalone "that player" subjects to
-/// `TargetFilter::Player`; rewrite that anaphoric recipient at the call site.
+/// this replacement context, so it lowers a standalone non-trigger "that player"
+/// subject to `TargetFilter::ParentTargetController` (the generic CR 608.2c
+/// anaphor) — or, inside a trigger context, to `TargetFilter::TriggeringPlayer`.
+/// Neither resolves correctly here (there is no parent target and no trigger
+/// event), so rewrite the anaphoric recipient to `PostReplacementDamageTarget`
+/// at the call site.
 fn rewrite_damage_recipient_to_post_replacement_target(def: &mut AbilityDefinition) {
     super::oracle_effect::each_target_filter_mut(&mut def.effect, &mut |f| {
-        if matches!(f, TargetFilter::Player | TargetFilter::TriggeringPlayer) {
+        if matches!(
+            f,
+            TargetFilter::Player
+                | TargetFilter::TriggeringPlayer
+                | TargetFilter::ParentTargetController
+        ) {
             *f = TargetFilter::PostReplacementDamageTarget;
         }
     });

@@ -1,6 +1,6 @@
 use crate::game::quantity::resolve_quantity_with_targets;
-use crate::game::speed::{increase_speed, set_speed};
-use crate::types::ability::{Effect, EffectError, PlayerFilter, ResolvedAbility};
+use crate::game::speed::{decrease_speed, increase_speed, set_speed};
+use crate::types::ability::{Effect, EffectError, PlayerFilter, ResolvedAbility, SpeedDelta};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::player::PlayerId;
@@ -8,9 +8,10 @@ use crate::types::player::PlayerId;
 fn players_for_filter(
     state: &GameState,
     filter: &PlayerFilter,
-    controller: PlayerId,
-    source_id: crate::types::identifiers::ObjectId,
+    ability: &ResolvedAbility,
 ) -> Vec<PlayerId> {
+    let controller = ability.controller;
+    let source_id = ability.source_id;
     match filter {
         PlayerFilter::Controller => vec![controller],
         PlayerFilter::Opponent => state
@@ -140,6 +141,20 @@ fn players_for_filter(
             })
             .map(|player| player.id)
             .collect(),
+        // CR 109.4 + CR 608.2c: the controller of the first object target of
+        // the resolving ability ("reduce that opponent's speed", anaphoring
+        // the controller of a bounced creature).
+        PlayerFilter::ParentObjectTargetController => {
+            crate::game::ability_utils::parent_target_controller(ability, state)
+                .filter(|pid| {
+                    state
+                        .players
+                        .iter()
+                        .any(|player| player.id == *pid && !player.is_eliminated)
+                })
+                .into_iter()
+                .collect()
+        }
     }
 }
 
@@ -156,8 +171,7 @@ pub fn resolve_start(
         ));
     };
 
-    for player_id in players_for_filter(state, player_scope, ability.controller, ability.source_id)
-    {
+    for player_id in players_for_filter(state, player_scope, ability) {
         let has_no_speed = state
             .players
             .iter()
@@ -171,19 +185,22 @@ pub fn resolve_start(
     Ok(())
 }
 
-/// CR 702.179c-d: Increase speed by the resolved amount for each selected player.
-pub fn resolve_increase(
+/// CR 702.179c-d: Change speed by the resolved amount in `direction` for each
+/// selected player. `Decrease` honors an optional card-text-derived `floor`.
+pub fn resolve_change_speed(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let Effect::IncreaseSpeed {
+    let Effect::ChangeSpeed {
         player_scope,
         amount,
+        direction,
+        floor,
     } = &ability.effect
     else {
         return Err(EffectError::InvalidParam(
-            "expected IncreaseSpeed".to_string(),
+            "expected ChangeSpeed".to_string(),
         ));
     };
 
@@ -193,9 +210,11 @@ pub fn resolve_increase(
         return Ok(());
     }
 
-    for player_id in players_for_filter(state, player_scope, ability.controller, ability.source_id)
-    {
-        increase_speed(state, player_id, amount, events);
+    for player_id in players_for_filter(state, player_scope, ability) {
+        match direction {
+            SpeedDelta::Increase => increase_speed(state, player_id, amount, events),
+            SpeedDelta::Decrease => decrease_speed(state, player_id, amount, *floor, events),
+        }
     }
 
     Ok(())

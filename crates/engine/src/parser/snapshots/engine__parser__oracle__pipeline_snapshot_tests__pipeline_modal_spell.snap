@@ -67,6 +67,9 @@ expression: result
       "Destroy target artifact.",
       "Destroy target enchantment."
     ],
-    "allow_repeat_modes": false
+    "allow_repeat_modes": false,
+    "chooser": {
+      "type": "Controller"
+    }
   }
 }

@@ -1383,9 +1383,11 @@ fn collect_pending_triggers(
                 && !has_max_speed(state, trigger_controller)
             {
                 let increase_ability = ResolvedAbility::new(
-                    Effect::IncreaseSpeed {
+                    Effect::ChangeSpeed {
                         player_scope: PlayerFilter::Controller,
                         amount: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                        direction: crate::types::ability::SpeedDelta::Increase,
+                        floor: None,
                     },
                     Vec::new(),
                     speed_key_source(),
@@ -2594,6 +2596,7 @@ pub(crate) fn check_trigger_condition(
             | PlayerFilter::PerformedActionThisWay { .. }
             | PlayerFilter::VotedFor { .. }
             | PlayerFilter::OwnersOfCardsExiledBySource
+            | PlayerFilter::ParentObjectTargetController
             | PlayerFilter::OpponentOtherThanTriggering => false,
         },
         // CR 603.4: "if you control N or more [type]" — generalized control count.
@@ -8427,6 +8430,7 @@ pub mod tests {
                             produced: ManaProduction::ChosenColor {
                                 count: QuantityExpr::Fixed { value: 1 },
                                 contribution: ManaContribution::Additional,
+                                fixed_alternative: None,
                             },
                             restrictions: vec![],
                             grants: vec![],

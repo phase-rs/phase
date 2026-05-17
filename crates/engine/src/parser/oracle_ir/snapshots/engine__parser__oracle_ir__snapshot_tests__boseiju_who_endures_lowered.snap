@@ -131,7 +131,7 @@ expression: "&lowered"
           },
           "reveal": false,
           "target_player": {
-            "type": "Player"
+            "type": "ParentTargetController"
           }
         },
         "cost": null,
@@ -156,7 +156,7 @@ expression: "&lowered"
             "effect": {
               "type": "Shuffle",
               "target": {
-                "type": "Player"
+                "type": "ParentTargetController"
               }
             },
             "cost": null,

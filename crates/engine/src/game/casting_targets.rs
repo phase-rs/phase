@@ -27,7 +27,11 @@ use super::stack;
 /// then proceeds to targeting or directly to payment.
 pub(crate) fn handle_select_modes(
     state: &mut GameState,
-    player: PlayerId,
+    // CR 700.2e: the mode *chooser* (controller for standard modals, the
+    // opponent for "an opponent chooses —"). Used only by the dispatch-layer
+    // authorization check in `engine.rs`; all spell control/cost/targeting
+    // here uses `controller` derived from the pending cast.
+    _mode_chooser: PlayerId,
     indices: Vec<usize>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
@@ -47,13 +51,22 @@ pub(crate) fn handle_select_modes(
     // Spells resolve once — no cross-resolution mode constraints apply.
     validate_modal_indices(&modal, &indices, &[])?;
 
+    // CR 700.2e + CR 115.1: The `player` parameter is the mode *chooser* (the
+    // controller for standard modals; the opponent for "an opponent chooses
+    // —"). Mode selection (CR 601.2b) routes to that player, but the spell is
+    // still controlled, targeted, and paid for by its controller (CR 115.1) —
+    // captured on the pending cast's ability. All downstream cost/target/
+    // resolution logic uses `controller`, never the mode-chooser.
+    let controller = pending.ability.controller;
+
     // CR 702.172a + CR 601.2f: Spree mode costs (and entwine, CR 702.42a) are additional
     // costs layered on top of the base cost. `restrictions::add_mana_cost` treats `NoCost`/
     // zero as identity, so a cast-without-paying path (`pending.cost == zero`) yields exactly
     // the additional costs — alternative-cost permissions never waive them.
     let total_cost = compute_modal_total_cost(&pending.cost, &modal, &indices);
     let mut pending = pending;
-    if let Some(cost) = escalate_cost_for_selected_modes(state, player, &pending, indices.len()) {
+    if let Some(cost) = escalate_cost_for_selected_modes(state, controller, &pending, indices.len())
+    {
         pending.additional_cost_flow = Some(AdditionalCost::Required(cost));
     }
 
@@ -65,7 +78,7 @@ pub(crate) fn handle_select_modes(
     let abilities = obj.abilities.clone();
 
     // Build a chain of ResolvedAbility from chosen modes (in order)
-    let mut resolved = build_chained_resolved(&abilities, &indices, pending.object_id, player)?;
+    let mut resolved = build_chained_resolved(&abilities, &indices, pending.object_id, controller)?;
     resolved.set_context_recursive(pending.ability.context.clone());
 
     // Check for targeting on the combined ability
@@ -90,7 +103,7 @@ pub(crate) fn handle_select_modes(
             let mut resolved = resolved;
             assign_targets_in_chain(state, &mut resolved, &targets)?;
             return finish_pending_cast_cost_or_pay(
-                state, player, pending, resolved, total_cost, events,
+                state, controller, pending, resolved, total_cost, events,
             );
         }
 
@@ -103,7 +116,7 @@ pub(crate) fn handle_select_modes(
             let mut resolved = resolved;
             assign_targets_in_chain(state, &mut resolved, &targets)?;
             return finish_pending_cast_cost_or_pay(
-                state, player, pending, resolved, total_cost, events,
+                state, controller, pending, resolved, total_cost, events,
             );
         }
 
@@ -124,7 +137,8 @@ pub(crate) fn handle_select_modes(
         pending_sel.declared_kickers_to_pay = pending.declared_kickers_to_pay;
         pending_sel.declined_kickers = pending.declined_kickers;
         return Ok(WaitingFor::TargetSelection {
-            player,
+            // CR 115.1: target selection belongs to the spell's controller.
+            player: controller,
             pending_cast: Box::new(pending_sel),
             target_slots,
             selection,
@@ -132,7 +146,7 @@ pub(crate) fn handle_select_modes(
     }
 
     // No targets needed -- check additional cost, then pay
-    finish_pending_cast_cost_or_pay(state, player, pending, resolved, total_cost, events)
+    finish_pending_cast_cost_or_pay(state, controller, pending, resolved, total_cost, events)
 }
 
 /// Handle target selection for a pending cast.

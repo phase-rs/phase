@@ -1188,6 +1188,79 @@ fn attack_target_matches_defended_scope(
     }
 }
 
+/// CR 508.1d / CR 701.15b: True if `obj_id` is a creature controlled by the
+/// *active player* that carries a must-attack requirement it can currently
+/// satisfy, and therefore must be declared as an attacker or the declaration
+/// is illegal.
+///
+/// This is the single authority for the must-attack requirement + exemption
+/// logic — both `declare_attackers` (validation) and the AI attacker selection
+/// call it. Returns `false` (no requirement to satisfy) when ANY of:
+///  - `obj.controller != state.active_player` (active-player guard)
+///  - the object is not a `CoreType::Creature`
+///  - it has neither a `StaticMode::MustAttack` static (CR 508.1d) nor a
+///    goading player from `goading_players_for_creature` (CR 701.15b)
+///  - `obj.tapped` (CR 508.1a: chosen attackers must be untapped)
+///  - it has `Keyword::Defender` and no `StaticMode::CanAttackWithDefender`
+///    override (CR 702.3b)
+///  - `has_summoning_sickness(obj)` (CR 302.6)
+pub fn creature_must_attack(state: &GameState, obj_id: ObjectId) -> bool {
+    let Some(obj) = state.objects.get(&obj_id) else {
+        return false;
+    };
+    // Active-player guard.
+    if obj.controller != state.active_player {
+        return false;
+    }
+    if !obj.card_types.core_types.contains(&CoreType::Creature) {
+        return false;
+    }
+    // CR 508.1d: MustAttack — either directly on this creature or from a
+    // cross-permanent static (e.g., "All creatures attack each combat if able").
+    let has_must_attack = super::functioning_abilities::active_static_definitions(state, obj)
+        .any(|sd| sd.mode == StaticMode::MustAttack)
+        || crate::game::static_abilities::check_static_ability(
+            state,
+            StaticMode::MustAttack,
+            &crate::game::static_abilities::StaticCheckContext {
+                target_id: Some(obj_id),
+                ..Default::default()
+            },
+        );
+    // CR 701.15b: Goaded creatures must attack each combat if able.
+    let is_goaded = !goading_players_for_creature(state, obj_id).is_empty();
+    if !has_must_attack && !is_goaded {
+        return false;
+    }
+    // Exemptions: tapped, defender (no override), summoning sick.
+    // CR 508.1a: chosen attackers must be untapped.
+    if obj.tapped {
+        return false;
+    }
+    // CR 702.3b: Defender — creature can't attack (unless overridden).
+    if obj.has_keyword(&Keyword::Defender) {
+        let can_attack_with_defender =
+            super::functioning_abilities::active_static_definitions(state, obj)
+                .any(|sd| sd.mode == StaticMode::CanAttackWithDefender)
+                || crate::game::static_abilities::check_static_ability(
+                    state,
+                    StaticMode::CanAttackWithDefender,
+                    &crate::game::static_abilities::StaticCheckContext {
+                        target_id: Some(obj_id),
+                        ..Default::default()
+                    },
+                );
+        if !can_attack_with_defender {
+            return false;
+        }
+    }
+    // CR 302.6: Summoning sickness — reuse existing helper.
+    if has_summoning_sickness(obj) {
+        return false;
+    }
+    true
+}
+
 /// Declare attackers: validate, tap (unless vigilance), populate CombatState, emit event.
 /// Accepts per-creature attack targets as (attacker_id, target) pairs.
 pub fn declare_attackers(
@@ -1198,70 +1271,21 @@ pub fn declare_attackers(
     let attacker_ids: Vec<ObjectId> = attacks.iter().map(|(id, _)| *id).collect();
     validate_attackers(state, &attacker_ids)?;
 
-    // CR 508.1d: Creatures that must attack each combat if able.
-    // If a creature has MustAttack, is untapped, has no summoning sickness,
-    // no defender, and is controlled by the active player, it must be in the
-    // attacker list.
-    let active = state.active_player;
+    // CR 508.1d / CR 701.15b: Creatures that must attack each combat if able.
+    // `creature_must_attack` is the single authority for the requirement +
+    // exemption logic; this loop only adds the "already declared?" check and
+    // the rejection error text.
     for &obj_id in &state.battlefield {
-        let Some(obj) = state.objects.get(&obj_id) else {
-            continue;
-        };
-        if obj.controller != active {
-            continue;
-        }
-        if !obj.card_types.core_types.contains(&CoreType::Creature) {
-            continue;
-        }
-        // CR 508.1d: Check for MustAttack — either directly on this creature
-        // or from a cross-permanent static (e.g., "All creatures attack each combat if able").
-        let has_must_attack = super::functioning_abilities::active_static_definitions(state, obj)
-            .any(|sd| sd.mode == StaticMode::MustAttack)
-            || crate::game::static_abilities::check_static_ability(
-                state,
-                StaticMode::MustAttack,
-                &crate::game::static_abilities::StaticCheckContext {
-                    target_id: Some(obj_id),
-                    ..Default::default()
-                },
-            );
-        // CR 701.15b: Goaded creatures must attack each combat if able.
-        let goading_players = goading_players_for_creature(state, obj_id);
-        let is_goaded = !goading_players.is_empty();
-        if !has_must_attack && !is_goaded {
+        if !creature_must_attack(state, obj_id) {
             continue;
         }
         // Already declared as attacker — constraint satisfied
         if attacker_ids.contains(&obj_id) {
             continue;
         }
-        // Exemptions: tapped, summoning sick, defender, can't attack statics
-        if obj.tapped {
-            continue;
-        }
-        // CR 702.3b: Defender — creature can't attack (unless overridden).
-        if obj.has_keyword(&Keyword::Defender) {
-            let can_attack_with_defender =
-                super::functioning_abilities::active_static_definitions(state, obj)
-                    .any(|sd| sd.mode == StaticMode::CanAttackWithDefender)
-                    || crate::game::static_abilities::check_static_ability(
-                        state,
-                        StaticMode::CanAttackWithDefender,
-                        &crate::game::static_abilities::StaticCheckContext {
-                            target_id: Some(obj_id),
-                            ..Default::default()
-                        },
-                    );
-            if !can_attack_with_defender {
-                continue;
-            }
-        }
-        // CR 302.6: Summoning sickness — reuse existing helper.
-        if has_summoning_sickness(obj) {
-            continue;
-        }
-        // Creature could legally attack but wasn't declared
-        if is_goaded {
+        // Creature could legally attack but wasn't declared.
+        // CR 701.15b: goad-specific error text; CR 508.1d otherwise.
+        if !goading_players_for_creature(state, obj_id).is_empty() {
             return Err(format!(
                 "{:?} is goaded and must attack this combat if able (CR 701.15b)",
                 obj_id
@@ -3969,6 +3993,58 @@ mod tests {
             .goaded_by
             .insert(goading_player);
         id
+    }
+
+    #[test]
+    fn creature_must_attack_true_for_untapped_goaded_creature() {
+        let mut state = setup_combat_phase();
+        let goaded = create_goaded_creature(&mut state, PlayerId(0), PlayerId(1));
+        assert!(creature_must_attack(&state, goaded));
+    }
+
+    #[test]
+    fn creature_must_attack_false_when_tapped() {
+        let mut state = setup_combat_phase();
+        let goaded = create_goaded_creature(&mut state, PlayerId(0), PlayerId(1));
+        state.objects.get_mut(&goaded).unwrap().tapped = true;
+        assert!(!creature_must_attack(&state, goaded));
+    }
+
+    #[test]
+    fn creature_must_attack_false_when_summoning_sick() {
+        let mut state = setup_combat_phase();
+        let goaded = create_goaded_creature(&mut state, PlayerId(0), PlayerId(1));
+        state.objects.get_mut(&goaded).unwrap().summoning_sick = true;
+        assert!(!creature_must_attack(&state, goaded));
+    }
+
+    #[test]
+    fn creature_must_attack_false_for_defender_without_override() {
+        let mut state = setup_combat_phase();
+        let goaded = create_goaded_creature(&mut state, PlayerId(0), PlayerId(1));
+        state
+            .objects
+            .get_mut(&goaded)
+            .unwrap()
+            .keywords
+            .push(Keyword::Defender);
+        assert!(!creature_must_attack(&state, goaded));
+    }
+
+    #[test]
+    fn creature_must_attack_false_when_no_requirement() {
+        let mut state = setup_combat_phase();
+        // Plain creature, not goaded and no MustAttack static.
+        let plain = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        assert!(!creature_must_attack(&state, plain));
+    }
+
+    #[test]
+    fn creature_must_attack_false_for_non_active_controller() {
+        let mut state = setup_combat_phase();
+        // Goaded creature controlled by the non-active player.
+        let goaded = create_goaded_creature(&mut state, PlayerId(1), PlayerId(0));
+        assert!(!creature_must_attack(&state, goaded));
     }
 
     #[test]

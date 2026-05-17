@@ -282,6 +282,7 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
                 qty: QuantityRef::LifeTotal {
                     player: PlayerScope::AllPlayers {
                         aggregate: AggregateFunction::Max,
+                        exclude: None,
                     },
                 },
             },

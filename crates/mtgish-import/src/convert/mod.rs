@@ -1320,6 +1320,8 @@ pub(crate) fn build_ability_from_actions(
                 constraints,
                 mode_costs: Vec::new(),
                 entwine_cost,
+                // CR 700.2a: mtgish modal blocks are controller-chosen.
+                chooser: engine::types::ability::PlayerFilter::Controller,
             };
             // Each mode body becomes its own `AbilityDefinition` chain.
             let mut mode_abilities = Vec::with_capacity(modes.len());

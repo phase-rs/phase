@@ -4,7 +4,8 @@ use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ActivationRestriction, CastingPermission, Duration,
     Effect, LibraryPosition, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint,
-    PaymentCost, PtValue, QuantityExpr, SearchSelectionConstraint, StaticDefinition, TargetFilter,
+    PaymentCost, PlayerFilter, PtValue, QuantityExpr, SearchSelectionConstraint, StaticDefinition,
+    TargetFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::DistributionUnit;
@@ -1107,6 +1108,9 @@ pub(crate) struct ModalHeaderAst {
     pub(crate) max_choices: usize,
     pub(crate) allow_repeat_modes: bool,
     pub(crate) constraints: Vec<ModalSelectionConstraint>,
+    /// CR 700.2e: The player who chooses the mode(s). `Controller` (CR 700.2a)
+    /// for standard `Choose one —` headers and the `you choose —` alias.
+    pub(crate) chooser: PlayerFilter,
 }
 
 // --- ActivatedConstraintAst (moved from oracle.rs) ---

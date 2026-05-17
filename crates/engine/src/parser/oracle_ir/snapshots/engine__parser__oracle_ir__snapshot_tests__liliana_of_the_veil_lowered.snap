@@ -101,7 +101,7 @@ expression: "&lowered"
             "type_filters": [
               "Permanent"
             ],
-            "controller": null,
+            "controller": "ParentTargetController",
             "properties": []
           },
           "count": {

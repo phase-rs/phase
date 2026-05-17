@@ -3896,8 +3896,13 @@ fn continue_with_prepared(
             pending_modal.distribute = ability_def.distribute.clone();
             pending_modal.target_constraints = target_constraints;
             pending_modal.origin_zone = prepared.origin_zone;
+            // CR 700.2e: the mode-choice prompt is routed to the modal's
+            // chooser (the controller for standard modals; the opponent for
+            // "an opponent chooses —"). Target selection still belongs to the
+            // controller (CR 115.1) — `pending_cast` keeps the caster.
+            let mode_chooser = resolve_modal_chooser(state, &capped, player, prepared.object_id);
             return Ok(WaitingFor::ModeChoice {
-                player,
+                player: mode_chooser,
                 modal: capped,
                 pending_cast: Box::new(pending_modal),
             });
@@ -4099,6 +4104,39 @@ fn continue_with_prepared(
         prepared.origin_zone,
         events,
     )
+}
+
+/// CR 700.2a / CR 700.2e: Resolve a modal's `chooser` to the single `PlayerId`
+/// that the `WaitingFor::ModeChoice` / `AbilityModeChoice` prompt names.
+///
+/// For `PlayerFilter::Controller` (every standard modal and the `you choose —`
+/// alias) this is the controller — byte-identical to the historic behavior.
+/// For `PlayerFilter::Opponent` (CR 700.2e — "an opponent chooses …") this is
+/// the single opponent, resolved via the canonical
+/// `effects::matches_player_scope` authority filtered over APNAP order. In the
+/// 2-player engine this is unambiguous. Falls back to the controller if no
+/// player matches (defensive — cannot happen in a live 2-player game).
+fn resolve_modal_chooser(
+    state: &GameState,
+    modal: &crate::types::ability::ModalChoice,
+    controller: PlayerId,
+    source_id: ObjectId,
+) -> PlayerId {
+    if modal.chooser == crate::types::ability::PlayerFilter::Controller {
+        return controller;
+    }
+    crate::game::players::apnap_order(state)
+        .into_iter()
+        .find(|&p| {
+            crate::game::effects::matches_player_scope(
+                state,
+                p,
+                &modal.chooser,
+                controller,
+                source_id,
+            )
+        })
+        .unwrap_or(controller)
 }
 
 fn modal_requires_additional_cost_declaration(modal: &crate::types::ability::ModalChoice) -> bool {
@@ -6018,6 +6056,17 @@ pub fn handle_activate_ability(
             }
         }
         let unavailable_modes = compute_unavailable_modes(state, source_id, &modal);
+        // CR 700.2a / CR 700.2e: `AbilityModeChoice.player` is threaded
+        // downstream as the activated ability's controller (cost payment,
+        // stack `controller`, target selection — see `engine_modes.rs`), so
+        // it stays the controller. An opponent-chooser ACTIVATED modal ability
+        // would need to route only the mode prompt to the opponent while
+        // control/cost/targets stay with the controller; a single-`PlayerId`
+        // `AbilityModeChoice` cannot carry both, and no such card exists in
+        // the corpus — opponent-chooser activated modals are deferred (the
+        // parser still records `ModalChoice.chooser` for data fidelity).
+        // Modal *spells* ARE routed at the `ModeChoice` constructor above,
+        // where `pending_cast` retains the controller.
         return Ok(WaitingFor::AbilityModeChoice {
             player,
             modal,
@@ -12782,6 +12831,91 @@ mod tests {
             });
         }
         obj_id
+    }
+
+    /// CR 700.2e: discriminating runtime test — an "An opponent chooses one —"
+    /// modal spell, parsed from Oracle text, must route the `WaitingFor::
+    /// ModeChoice` prompt to the OPPONENT, not the caster. Drives the full
+    /// parser → `ModalChoice.chooser` → `resolve_modal_chooser` path. On HEAD
+    /// the spell does not parse as modal at all (modes become Unimplemented),
+    /// so this fails on pristine HEAD.
+    #[test]
+    fn opponent_chooser_modal_spell_routes_mode_choice_to_opponent() {
+        use crate::parser::oracle::parse_oracle_text;
+
+        let mut state = setup_game_at_main_phase();
+        let caster = PlayerId(0);
+        let opponent = PlayerId(1);
+
+        let obj_id = create_object(
+            &mut state,
+            CardId(70),
+            caster,
+            "Test Opponent Charm".to_string(),
+            Zone::Hand,
+        );
+        let parsed = parse_oracle_text(
+            "An opponent chooses one —\n• You draw a card.\n• You gain 3 life.",
+            "Test Opponent Charm",
+            &[],
+            &[String::from("Instant")],
+            &[],
+        );
+        let modal = parsed
+            .modal
+            .clone()
+            .expect("opponent-chooser modal must parse");
+        assert_eq!(
+            modal.chooser,
+            crate::types::ability::PlayerFilter::Opponent,
+            "parsed modal must record the opponent as chooser"
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            Arc::make_mut(&mut obj.abilities).extend(parsed.abilities.clone());
+            obj.modal = Some(modal);
+            obj.mana_cost = ManaCost::zero();
+        }
+
+        let mut events = Vec::new();
+        let result =
+            handle_cast_spell(&mut state, caster, obj_id, CardId(70), &mut events).unwrap();
+
+        // CR 700.2e: the mode-choice prompt is routed to the opponent.
+        match result {
+            WaitingFor::ModeChoice {
+                player,
+                ref pending_cast,
+                ..
+            } => {
+                assert_eq!(
+                    player, opponent,
+                    "mode-choice prompt must be routed to the opponent"
+                );
+                // CR 115.1: the spell itself is still controlled by the caster.
+                assert_eq!(
+                    pending_cast.ability.controller, caster,
+                    "the spell's controller must remain the caster"
+                );
+            }
+            other => panic!("expected ModeChoice routed to opponent, got {other:?}"),
+        }
+        state.waiting_for = result;
+
+        // The opponent submits mode 0 ("You draw a card."). `handle_select_modes`
+        // resolves the spell with the caster as controller (CR 115.1).
+        let mut events = Vec::new();
+        handle_select_modes(&mut state, opponent, vec![0], &mut events)
+            .expect("opponent's mode submission must resolve");
+
+        // The chosen mode is on the stack, controlled by the caster.
+        assert_eq!(state.stack.len(), 1, "the modal spell must be on the stack");
+        let entry = &state.stack[0];
+        assert_eq!(
+            entry.controller, caster,
+            "the resolved modal spell must be controlled by the caster"
+        );
     }
 
     #[test]

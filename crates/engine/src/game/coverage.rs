@@ -13,7 +13,7 @@ use crate::types::ability::{
     Duration, Effect, FilterProp, GainLifePlayer, GameRestriction, ManaProduction, ObjectProperty,
     ObjectScope, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
     ReplacementCondition, ReplacementDefinition, ReplacementMode, SharedQuality,
-    SharedQualityRelation, SpellCastingOption, SpellCastingOptionKind, StaticCondition,
+    SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind, StaticCondition,
     StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card::CardFace;
@@ -688,11 +688,11 @@ fn fmt_duration(d: &Duration) -> String {
         Duration::UntilEndOfTurn => "until end of turn".to_string(),
         Duration::UntilEndOfCombat => "until end of combat".to_string(),
         Duration::UntilNextTurnOf { player } => {
-            format!("until next turn ({})", fmt_player_scope(*player))
+            format!("until next turn ({})", fmt_player_scope(player))
         }
         Duration::UntilHostLeavesPlay => "while on battlefield".to_string(),
         Duration::UntilNextUntapStepOf { player } => {
-            format!("until next untap step ({})", fmt_player_scope(*player))
+            format!("until next untap step ({})", fmt_player_scope(player))
         }
         Duration::ForAsLongAs { .. } => "for as long as condition".to_string(),
         Duration::Permanent => "permanent".to_string(),
@@ -737,36 +737,45 @@ fn fmt_aggregate_function(f: AggregateFunction) -> &'static str {
     }
 }
 
-fn fmt_player_scope(scope: PlayerScope) -> String {
+fn fmt_player_scope(scope: &PlayerScope) -> String {
     match scope {
         PlayerScope::Controller => "you".to_string(),
         PlayerScope::ScopedPlayer => "scoped player".to_string(),
         PlayerScope::Target => "target player".to_string(),
         PlayerScope::RecipientController => "recipient's controller".to_string(),
         PlayerScope::DefendingPlayer => "defending player".to_string(),
+        PlayerScope::ParentObjectTargetController => "parent target's controller".to_string(),
         PlayerScope::Opponent { aggregate } => {
-            format!("{} of opponents", fmt_aggregate_function(aggregate))
+            format!("{} of opponents", fmt_aggregate_function(*aggregate))
         }
-        PlayerScope::AllPlayers { aggregate } => {
-            format!("{} of all players", fmt_aggregate_function(aggregate))
-        }
+        PlayerScope::AllPlayers { aggregate, exclude } => match exclude {
+            Some(_) => {
+                format!(
+                    "{} of each other player",
+                    fmt_aggregate_function(*aggregate)
+                )
+            }
+            None => format!("{} of all players", fmt_aggregate_function(*aggregate)),
+        },
     }
 }
 
 fn fmt_quantity_ref(qty: &QuantityRef) -> String {
     match qty {
         QuantityRef::HandSize { player } => {
-            format!("cards in hand ({})", fmt_player_scope(*player))
+            format!("cards in hand ({})", fmt_player_scope(player))
         }
         QuantityRef::LifeTotal { player } => {
-            format!("life total ({})", fmt_player_scope(*player))
+            format!("life total ({})", fmt_player_scope(player))
         }
         QuantityRef::GraveyardSize { player } => {
-            format!("cards in graveyard ({})", fmt_player_scope(*player))
+            format!("cards in graveyard ({})", fmt_player_scope(player))
         }
         QuantityRef::LifeAboveStarting => "life above starting".into(),
         QuantityRef::StartingLifeTotal => "starting life total".into(),
-        QuantityRef::Speed => "speed".into(),
+        QuantityRef::Speed { player } => {
+            format!("speed ({})", fmt_player_scope(player))
+        }
         QuantityRef::ObjectCount { filter } => format!("# of {}", fmt_target(filter)),
         QuantityRef::ObjectCountDistinct { filter, qualities } => {
             let quality_str = if qualities.iter().all(|q| matches!(q, SharedQuality::Name)) {
@@ -923,7 +932,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::TrackedSetSize => "cards moved".into(),
         QuantityRef::ExiledFromHandThisResolution => "cards exiled from hand this way".into(),
         QuantityRef::LifeLostThisTurn { player } => {
-            format!("life lost this turn ({})", fmt_player_scope(*player))
+            format!("life lost this turn ({})", fmt_player_scope(player))
         }
         QuantityRef::EventContextAmount => "event amount".into(),
         QuantityRef::SpellsCastThisTurn { scope, filter } => match filter {
@@ -941,15 +950,15 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             format!(
                 "{} sacrificed this turn ({})",
                 fmt_target(filter),
-                fmt_player_scope(*player)
+                fmt_player_scope(player)
             )
         }
         QuantityRef::CrimesCommittedThisTurn => "crimes committed this turn".into(),
         QuantityRef::LifeGainedThisTurn { player } => {
-            format!("life gained this turn ({})", fmt_player_scope(*player))
+            format!("life gained this turn ({})", fmt_player_scope(player))
         }
         QuantityRef::CardsDrawnThisTurn { player } => {
-            format!("cards drawn this turn ({})", fmt_player_scope(*player))
+            format!("cards drawn this turn ({})", fmt_player_scope(player))
         }
         QuantityRef::ZoneChangeCountThisTurn { from, to, filter } => {
             format!(
@@ -1041,7 +1050,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             format!("# of {kind} counters {scope_s}")
         }
         QuantityRef::PartySize { player } => {
-            format!("party size ({})", fmt_player_scope(*player))
+            format!("party size ({})", fmt_player_scope(player))
         }
     }
 }
@@ -1061,6 +1070,7 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
         PlayerFilter::TriggeringPlayer => "the triggering player",
         PlayerFilter::OpponentOtherThanTriggering => "each other opponent",
         PlayerFilter::VotedFor { .. } => "each player who voted for this option",
+        PlayerFilter::ParentObjectTargetController => "the parent target's controller",
     }
     .into()
 }
@@ -1281,12 +1291,24 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::StartYourEngines { player_scope } => {
             d.push(("players".into(), fmt_player_filter(player_scope)));
         }
-        Effect::IncreaseSpeed {
+        Effect::ChangeSpeed {
             player_scope,
             amount,
+            direction,
+            floor,
         } => {
             d.push(("players".into(), fmt_player_filter(player_scope)));
             d.push(("amount".into(), fmt_quantity(amount)));
+            d.push((
+                "direction".into(),
+                match direction {
+                    SpeedDelta::Increase => "increase".into(),
+                    SpeedDelta::Decrease => "decrease".into(),
+                },
+            ));
+            if let Some(f) = floor {
+                d.push(("floor".into(), f.to_string()));
+            }
         }
         Effect::DealDamage { amount, target, .. } => {
             d.push(("amount".into(), fmt_quantity(amount)));
@@ -4734,7 +4756,7 @@ fn extract_effect_quantity_features(
         Effect::Mill { count, .. } => extract_quantity_features(count, features),
         Effect::GainLife { amount, .. } => extract_quantity_features(amount, features),
         Effect::LoseLife { amount, .. } => extract_quantity_features(amount, features),
-        Effect::IncreaseSpeed { amount, .. } => extract_quantity_features(amount, features),
+        Effect::ChangeSpeed { amount, .. } => extract_quantity_features(amount, features),
         Effect::PutCounter { count, .. } => extract_quantity_features(count, features),
         Effect::PutCounterAll { count, .. } => extract_quantity_features(count, features),
         Effect::Token { count, .. } => extract_quantity_features(count, features),
@@ -4840,7 +4862,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::GraveyardSize { .. } => ("GraveyardSize", Handled),
         QuantityRef::LifeAboveStarting => ("LifeAboveStarting", Handled),
         QuantityRef::StartingLifeTotal => ("StartingLifeTotal", Unhandled),
-        QuantityRef::Speed => ("Speed", Handled),
+        QuantityRef::Speed { .. } => ("Speed", Handled),
         QuantityRef::ObjectCount { .. } => ("ObjectCount", Handled),
         QuantityRef::ObjectCountDistinct { .. } => ("ObjectCountDistinct", Handled),
         QuantityRef::PlayerCount { .. } => ("PlayerCount", Handled),
@@ -4960,6 +4982,7 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         PlayerFilter::TriggeringPlayer => ("TriggeringPlayer", Handled),
         PlayerFilter::OpponentOtherThanTriggering => ("OpponentOtherThanTriggering", Handled),
         PlayerFilter::VotedFor { .. } => ("VotedFor", Handled),
+        PlayerFilter::ParentObjectTargetController => ("ParentObjectTargetController", Handled),
     }
 }
 
@@ -8402,7 +8425,9 @@ mod tests {
                 Effect::PutCounter {
                     counter_type: CounterType::Plus1Plus1,
                     count: QuantityExpr::Ref {
-                        qty: QuantityRef::Speed,
+                        qty: QuantityRef::Speed {
+                            player: PlayerScope::Controller,
+                        },
                     },
                     target: TargetFilter::SelfRef,
                 },

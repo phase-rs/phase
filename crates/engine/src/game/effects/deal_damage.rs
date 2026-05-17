@@ -836,6 +836,10 @@ fn collect_matching_players(
                         .last_vote_ballots
                         .iter()
                         .any(|(voter, idx)| *voter == p.id && *idx == choice_index),
+                    // CR 109.4: the parent-object-target anchor has no meaning
+                    // for a damage-each-player effect (no parent object target
+                    // is in scope); never matches.
+                    PlayerFilter::ParentObjectTargetController => false,
                 }
         })
         .map(|p| p.id)
@@ -939,6 +943,10 @@ pub fn resolve_each_player(
                         .last_vote_ballots
                         .iter()
                         .any(|(voter, idx)| *voter == p.id && *idx == *choice_index),
+                    // CR 109.4: the parent-object-target anchor has no meaning
+                    // for a damage-each-player effect (no parent object target
+                    // is in scope); never matches.
+                    PlayerFilter::ParentObjectTargetController => false,
                 }
         })
         .map(|p| p.id)
