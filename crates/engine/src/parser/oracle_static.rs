@@ -1291,9 +1291,8 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
 
     // CR 205.3 + CR 700.8: "~ is also a <subtype>(, <subtype>)*[, [and|or] <subtype>]"
     // Continuous self-static that adds creature subtypes to the source. Used by
-    // party-tribal cards (Burakos, Party Leader; Tajuru Paragon; Stonework
-    // Packbeast; Veteran Adventurer) so the source counts itself toward the
-    // controller's party (CR 700.8a) regardless of its printed subtypes.
+    // party-tribal cards so the source counts itself toward the controller's
+    // party (CR 700.8a) regardless of its printed subtypes.
     // Anchored on `~` so it cannot collide with attached-object grants
     // ("Enchanted land is a Mountain") which retain their dedicated path.
     if let Some(modifications) = try_parse_self_is_also_subtypes(&tp) {
@@ -14843,8 +14842,7 @@ mod tests {
         );
     }
 
-    /// CR 205.3 + CR 700.8: Self type-grant Oxford-comma list — Burakos /
-    /// Tajuru Paragon / Stonework Packbeast / Veteran Adventurer pattern.
+    /// CR 205.3 + CR 700.8: Self type-grant Oxford-comma party subtype list.
     /// Source acquires all four party subtypes so it counts itself toward the
     /// controller's party regardless of its printed subtypes.
     #[test]
