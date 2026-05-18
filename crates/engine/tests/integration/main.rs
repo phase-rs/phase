@@ -26,6 +26,7 @@ mod foretell_pipeline;
 mod gatta_and_luzzu_regression;
 mod gemstone_caverns_begin_game;
 mod giada_angel_counters;
+mod gimbal_gremlin_prodigy;
 mod gluntch_choose_player_chain;
 mod gran_gran_integration;
 mod harrow_regression;

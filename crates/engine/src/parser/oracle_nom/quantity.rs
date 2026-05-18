@@ -20,7 +20,7 @@ use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AggregateFunction, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, ControllerRef,
     CountScope, DevotionColors, FilterProp, ObjectProperty, ObjectScope, PlayerScope, QuantityExpr,
-    QuantityRef, RoundingMode, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+    QuantityRef, RoundingMode, SharedQuality, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::CounterMatch;
 use crate::types::player::PlayerCounterKind;
@@ -511,6 +511,13 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_distinct_card_types_exiled_with_source,
         parse_distinct_card_types_in_zone,
         parse_distinct_card_types_among_objects,
+        // CR 201.2 + CR 603.4: "differently named <type-phrase>" — distinct-by-
+        // name population count. Must precede `parse_number_of_controlled_type`
+        // so the adjective prefix is consumed before the generic typed-filter
+        // fallback. Class: Gimbal, Audience with Trostani, Awakened Amalgam,
+        // Sandsteppe War Riders, All-Fates Scroll, Fungal Colossus, Euroakus,
+        // Neriv, Emil, and other "differently named X" counters.
+        parse_distinct_named_objects,
         // CR 122.1: "[kind] counters <possessor>" must be tried BEFORE the
         // generic type-filter arm so the typed player-counter ref wins over a
         // "[typeword] you control" misread (no `TypeFilter` for counter kinds).
@@ -573,6 +580,46 @@ fn parse_number_of_distinct_colors_among_permanents_tail(
         )));
     }
     Ok(("", QuantityRef::DistinctColorsAmongPermanents { filter }))
+}
+
+/// CR 201.2 + CR 603.4: Parse "differently named <type-phrase>" after
+/// "the number of" → `QuantityRef::ObjectCountDistinct { filter, qualities: [Name] }`.
+///
+/// Composes by delegating the inner type phrase to the shared
+/// `oracle_target::parse_type_phrase` so any combination of supertype, color,
+/// negation, type words, "tokens" property suffix, and controller suffix
+/// ("you control", "an opponent controls", etc.) flows through one parser —
+/// no per-card phrasing arms. The remainder must be empty (or only trailing
+/// punctuation) and the filter must carry meaningful content; otherwise the
+/// combinator fails so a downstream alt() arm can re-try.
+///
+/// Examples:
+/// - "differently named artifact tokens you control" (Gimbal, Gremlin Prodigy;
+///   Sandsteppe War Riders) → `Typed(Artifact, You, [Token])` deduped by Name
+/// - "differently named lands you control" (Awakened Amalgam, All-Fates
+///   Scroll, Fungal Colossus, Euroakus, Emil) → `Typed(Land, You)` deduped by Name
+/// - "differently named creature tokens you control" (Audience with Trostani)
+///   → `Typed(Creature, You, [Token])` deduped by Name
+/// - "differently named tokens you control" (Neriv) → `Typed(Any, You, [Token])`
+///   deduped by Name
+fn parse_distinct_named_objects(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("differently named ").parse(input)?;
+    let type_text = rest.trim_end_matches('.').trim_end_matches(',');
+    let (filter, remainder) = parse_type_phrase(type_text);
+    if !remainder.trim().is_empty() || !quantity_filter_has_meaningful_content(&filter) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let consumed = remainder.as_ptr() as usize - input.as_ptr() as usize;
+    Ok((
+        &input[consumed..],
+        QuantityRef::ObjectCountDistinct {
+            filter,
+            qualities: vec![SharedQuality::Name],
+        },
+    ))
 }
 
 /// Parse "[type(s)] you control" after "the number of".
@@ -3627,6 +3674,84 @@ mod tests {
             }
             other => panic!("expected Treasure TokensCreatedThisTurn, got {other:?}"),
         }
+    }
+
+    /// Helper: pull the `(type_filters, controller, properties, qualities)` tuple
+    /// out of a `QuantityRef::ObjectCountDistinct` over a `TargetFilter::Typed`.
+    /// Panics on any other shape so tests fail loudly on misroutes.
+    fn assert_distinct_named_typed(
+        q: QuantityRef,
+    ) -> (
+        Vec<TypeFilter>,
+        Option<ControllerRef>,
+        Vec<FilterProp>,
+        Vec<SharedQuality>,
+    ) {
+        match q {
+            QuantityRef::ObjectCountDistinct {
+                filter:
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        controller,
+                        properties,
+                    }),
+                qualities,
+            } => (type_filters, controller, properties, qualities),
+            other => panic!("expected ObjectCountDistinct over Typed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_quantity_ref_differently_named_artifact_tokens_you_control() {
+        // Gimbal, Gremlin Prodigy / Sandsteppe War Riders shape.
+        let (rest, q) =
+            parse_quantity_ref("the number of differently named artifact tokens you control")
+                .unwrap();
+        assert_eq!(rest, "");
+        let (type_filters, controller, properties, qualities) = assert_distinct_named_typed(q);
+        assert!(type_filters.contains(&TypeFilter::Artifact));
+        assert_eq!(controller, Some(ControllerRef::You));
+        assert!(properties.contains(&FilterProp::Token));
+        assert_eq!(qualities, vec![SharedQuality::Name]);
+    }
+
+    #[test]
+    fn parse_quantity_ref_differently_named_lands_you_control() {
+        // Awakened Amalgam / All-Fates Scroll / Fungal Colossus shape.
+        let (rest, q) =
+            parse_quantity_ref("the number of differently named lands you control").unwrap();
+        assert_eq!(rest, "");
+        let (type_filters, controller, properties, qualities) = assert_distinct_named_typed(q);
+        assert!(type_filters.contains(&TypeFilter::Land));
+        assert_eq!(controller, Some(ControllerRef::You));
+        assert!(!properties.contains(&FilterProp::Token));
+        assert_eq!(qualities, vec![SharedQuality::Name]);
+    }
+
+    #[test]
+    fn parse_quantity_ref_differently_named_creature_tokens_you_control() {
+        // Audience with Trostani shape.
+        let (rest, q) =
+            parse_quantity_ref("the number of differently named creature tokens you control")
+                .unwrap();
+        assert_eq!(rest, "");
+        let (type_filters, controller, properties, qualities) = assert_distinct_named_typed(q);
+        assert!(type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(controller, Some(ControllerRef::You));
+        assert!(properties.contains(&FilterProp::Token));
+        assert_eq!(qualities, vec![SharedQuality::Name]);
+    }
+
+    #[test]
+    fn parse_quantity_ref_differently_named_tokens_you_control() {
+        // Neriv, Crackling Vanguard shape — bare "tokens" (any card type).
+        let (rest, q) =
+            parse_quantity_ref("the number of differently named tokens you control").unwrap();
+        assert_eq!(rest, "");
+        let (_type_filters, controller, properties, qualities) = assert_distinct_named_typed(q);
+        assert_eq!(controller, Some(ControllerRef::You));
+        assert!(properties.contains(&FilterProp::Token));
+        assert_eq!(qualities, vec![SharedQuality::Name]);
     }
 
     #[test]
