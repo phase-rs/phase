@@ -590,6 +590,9 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     if let Some(def) = parse_arcane_adaptation_chosen_type_static(&tp, &text) {
         return Some(def);
     }
+    if let Some(def) = parse_every_creature_type_static(&tp, &text) {
+        return Some(def);
+    }
     if let Some(def) = parse_collection_counter_play_permission_static(&tp, &text) {
         return Some(def);
     }
@@ -2199,6 +2202,37 @@ fn parse_chosen_creature_type_static_subject(input: &str) -> OracleResult<'_, &'
         value("its", tag("each creature you control is")),
     ))
     .parse(input)
+}
+
+// CR 613.1d + CR 205.3m: "<creatures you control are> every creature type" —
+// Layer 4 type-changing effect that adds every creature type (CR 205.3m) to each
+// creature the controller has on the battlefield. Maskwood Nexus is the
+// canonical printing; the static is the class of "<your creatures> are every
+// creature type" effects, paralleling `parse_arcane_adaptation_chosen_type_static`
+// for "the chosen type". Maskwood's "The same is true for creature spells you
+// control and creature cards you own that aren't on the battlefield" tail is
+// stripped upstream by `oracle.rs` (it's reported as `Unimplemented` because
+// continuous effects on non-battlefield zones aren't currently modeled).
+fn parse_every_creature_type_static(
+    tp: &TextPair<'_>,
+    description: &str,
+) -> Option<StaticDefinition> {
+    let ((), _) = nom_on_lower(tp.original, tp.lower, |input| {
+        let (input, _pronoun) = parse_chosen_creature_type_static_subject(input)?;
+        let (input, _) = tag(" every creature type").parse(input)?;
+        let (input, _) = opt(tag(".")).parse(input)?;
+        let (input, _) = eof.parse(input)?;
+        Ok((input, ()))
+    })?;
+
+    Some(
+        StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
+            .modifications(vec![ContinuousModification::AddAllCreatureTypes])
+            .description(description.to_string()),
+    )
 }
 
 fn parse_collection_counter_play_permission_static(
@@ -16661,6 +16695,50 @@ mod tests {
             }
             other => panic!("Expected Some(Typed filter), got {other:?}"),
         }
+    }
+
+    // CR 613.1d + CR 205.3m: Maskwood Nexus's battlefield static — "Creatures
+    // you control are every creature type." — must lower to a Layer 4
+    // type-changing effect that adds every creature type (CR 205.3m) to each
+    // creature the controller has on the battlefield. The non-battlefield
+    // "the same is true for ..." tail is stripped by the dispatcher in
+    // `oracle.rs`; this test pins the battlefield-only static directly.
+    #[test]
+    fn parser_shape_maskwood_nexus_every_creature_type_applies_to_creatures_you_control() {
+        let def = parse_static_line("Creatures you control are every creature type.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert!(def.modifications.iter().any(|modification| matches!(
+            modification,
+            ContinuousModification::AddAllCreatureTypes
+        )));
+        assert_eq!(
+            def.description.as_deref(),
+            Some("Creatures you control are every creature type."),
+        );
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf
+                    .type_filters
+                    .iter()
+                    .any(|filter| matches!(filter, TypeFilter::Creature)));
+            }
+            other => panic!("Expected Some(Typed filter), got {other:?}"),
+        }
+    }
+
+    // Symmetric "each creature you control is every creature type" variant.
+    // No known printing uses this exact phrasing, but the parser's subject
+    // combinator already accepts it (parallel to Arcane Adaptation /
+    // Xenograft), so we pin the variant to guard against regressions.
+    #[test]
+    fn parser_shape_every_creature_type_applies_to_each_creature_you_control() {
+        let def = parse_static_line("Each creature you control is every creature type.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert!(def.modifications.iter().any(|modification| matches!(
+            modification,
+            ContinuousModification::AddAllCreatureTypes
+        )));
     }
 
     #[test]

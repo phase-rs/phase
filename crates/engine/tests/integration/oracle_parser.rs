@@ -179,6 +179,58 @@ fn arcane_adaptation_full_oracle_splits_battlefield_static_and_unimplemented_tai
     );
 }
 
+// CR 613.1d + CR 205.3m: Maskwood Nexus's full Oracle text shares Arcane
+// Adaptation's two-sentence shape — a battlefield static plus the
+// "the same is true for creature spells / creature cards you own that aren't
+// on the battlefield" tail. The dispatcher in `oracle.rs` must split the
+// battlefield static (Layer 4 `AddAllCreatureTypes` on creatures you
+// control) from the non-battlefield tail, which is parked as
+// `Unimplemented` because layer-applied type changes outside the
+// battlefield aren't modeled.
+#[test]
+fn maskwood_nexus_full_oracle_splits_battlefield_static_and_unimplemented_tail() {
+    let result = parse(
+        "Creatures you control are every creature type. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.\n{3}, {T}: Create a 2/2 blue Shapeshifter creature token with changeling.",
+        "Maskwood Nexus",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+
+    assert_eq!(result.statics.len(), 1);
+    let static_def = &result.statics[0];
+    assert_eq!(static_def.mode, StaticMode::Continuous);
+    assert!(static_def
+        .modifications
+        .iter()
+        .any(|modification| matches!(modification, ContinuousModification::AddAllCreatureTypes)));
+    match &static_def.affected {
+        Some(TargetFilter::Typed(filter)) => {
+            assert_eq!(filter.controller, Some(ControllerRef::You));
+            assert!(filter.type_filters.contains(&TypeFilter::Creature));
+        }
+        other => panic!("expected battlefield creature filter, got {other:?}"),
+    }
+
+    let unimplemented: Vec<_> = result
+        .abilities
+        .iter()
+        .filter_map(|ability| match ability.effect.as_ref() {
+            Effect::Unimplemented {
+                description: Some(description),
+                ..
+            } => Some(description.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        unimplemented,
+        vec![
+            "The same is true for creature spells you control and creature cards you own that aren't on the battlefield."
+        ]
+    );
+}
+
 #[test]
 fn xenograft_full_oracle_applies_chosen_type_to_creatures_you_control() {
     let result = parse(

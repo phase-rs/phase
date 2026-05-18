@@ -1553,6 +1553,43 @@ pub(crate) fn parse_oracle_ir(
                 continue;
             }
         }
+        // CR 613.1d + CR 205.3m: Maskwood Nexus shape — battlefield static
+        // "Creatures you control are every creature type." plus the same
+        // "The same is true for creature spells you control and creature
+        // cards you own that aren't on the battlefield." tail used by
+        // Arcane Adaptation. The battlefield clause routes through
+        // `parse_static_line` (handled by `parse_every_creature_type_static`);
+        // the non-battlefield tail is reported as `Unimplemented` because
+        // continuous effects on objects in hand/library/stack aren't modeled.
+        let maskwood_battlefield_sentence = "creatures you control are every creature type.";
+        if let Some(((), unmodeled_tail)) =
+            nom_on_lower(&static_line, &static_line_lower, |input| {
+                let (input, _) = tag(maskwood_battlefield_sentence).parse(input)?;
+                Ok((input, ()))
+            })
+        {
+            let unmodeled_tail_lower = unmodeled_tail.to_lowercase();
+            if nom_on_lower(unmodeled_tail, &unmodeled_tail_lower, |input| {
+                let (input, _) = tag(" the same is true for ").parse(input)?;
+                let (input, _) = take_until::<_, _, OracleError<'_>>(".").parse(input)?;
+                let (input, _) = opt(tag(".")).parse(input)?;
+                let (input, _) = eof.parse(input)?;
+                Ok((input, ()))
+            })
+            .is_some()
+            {
+                result
+                    .statics
+                    .extend(parse_static_line_with_graveyard_keyword_continuation(
+                        maskwood_battlefield_sentence,
+                    ));
+                result
+                    .abilities
+                    .push(make_unimplemented(&unmodeled_tail[1..]));
+                i += 1;
+                continue;
+            }
+        }
         if let Some(next_raw_line) = lines.get(i + 1).map(|next| next.trim()) {
             if !next_raw_line.is_empty() {
                 let next_line = strip_x_cant_be_zero_suffix(&strip_reminder_text(next_raw_line));
