@@ -5,15 +5,97 @@
 //! (Time Warp), a known tutor (Demonic Tutor), and a clean card (Llanowar
 //! Elves).
 
-use std::path::PathBuf;
+use std::fs;
 use std::process::Command;
 
 #[test]
 fn oracle_gen_stamps_bracket_signals() {
     let tmp = tempfile::tempdir().expect("tmpdir");
+    let data_dir = tmp.path().join("data");
+    let mtgjson_dir = data_dir.join("mtgjson");
     let out = tmp.path().join("card-data.json");
+    fs::create_dir_all(&mtgjson_dir).expect("create mtgjson dir");
+    fs::write(
+        data_dir.join("bracket_lists.json"),
+        r#"{
+            "version": "test",
+            "source": "test fixture",
+            "mass_land_denial": ["Armageddon"],
+            "extra_turns": ["Time Warp"],
+            "efficient_tutors": ["Demonic Tutor"]
+        }"#,
+    )
+    .expect("write bracket lists");
+    fs::write(
+        mtgjson_dir.join("AtomicCards.json"),
+        r#"{
+            "data": {
+                "Armageddon": [{
+                    "name": "Armageddon",
+                    "manaCost": "{3}{W}",
+                    "colors": ["W"],
+                    "colorIdentity": ["W"],
+                    "layout": "normal",
+                    "manaValue": 4.0,
+                    "type": "Sorcery",
+                    "types": ["Sorcery"],
+                    "identifiers": { "scryfallOracleId": "00000000-0000-0000-0000-000000000001" }
+                }],
+                "Demonic Tutor": [{
+                    "name": "Demonic Tutor",
+                    "manaCost": "{1}{B}",
+                    "colors": ["B"],
+                    "colorIdentity": ["B"],
+                    "layout": "normal",
+                    "manaValue": 2.0,
+                    "type": "Sorcery",
+                    "types": ["Sorcery"],
+                    "isGameChanger": true,
+                    "identifiers": { "scryfallOracleId": "00000000-0000-0000-0000-000000000002" }
+                }],
+                "Llanowar Elves": [{
+                    "name": "Llanowar Elves",
+                    "manaCost": "{G}",
+                    "colors": ["G"],
+                    "colorIdentity": ["G"],
+                    "layout": "normal",
+                    "manaValue": 1.0,
+                    "type": "Creature",
+                    "types": ["Creature"],
+                    "subtypes": ["Elf", "Druid"],
+                    "power": "1",
+                    "toughness": "1",
+                    "identifiers": { "scryfallOracleId": "00000000-0000-0000-0000-000000000003" }
+                }],
+                "Smothering Tithe": [{
+                    "name": "Smothering Tithe",
+                    "manaCost": "{3}{W}",
+                    "colors": ["W"],
+                    "colorIdentity": ["W"],
+                    "layout": "normal",
+                    "manaValue": 4.0,
+                    "type": "Enchantment",
+                    "types": ["Enchantment"],
+                    "isGameChanger": true,
+                    "identifiers": { "scryfallOracleId": "00000000-0000-0000-0000-000000000004" }
+                }],
+                "Time Warp": [{
+                    "name": "Time Warp",
+                    "manaCost": "{3}{U}{U}",
+                    "colors": ["U"],
+                    "colorIdentity": ["U"],
+                    "layout": "normal",
+                    "manaValue": 5.0,
+                    "type": "Sorcery",
+                    "types": ["Sorcery"],
+                    "identifiers": { "scryfallOracleId": "00000000-0000-0000-0000-000000000005" }
+                }]
+            }
+        }"#,
+    )
+    .expect("write atomic cards");
 
-    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let status = Command::new("cargo")
         .args([
             "run",
@@ -23,7 +105,7 @@ fn oracle_gen_stamps_bracket_signals() {
             "--bin",
             "oracle-gen",
             "--",
-            "data",
+            data_dir.to_str().unwrap(),
             "--filter",
             "Smothering Tithe|Armageddon|Time Warp|Demonic Tutor|Llanowar Elves",
             "--output",
