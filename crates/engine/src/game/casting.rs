@@ -150,7 +150,7 @@ struct PreparedSpellCast {
     origin_zone: Zone,
 }
 
-fn combined_spell_ability_def(
+pub(crate) fn combined_spell_ability_def(
     obj: &crate::game::game_object::GameObject,
 ) -> Option<AbilityDefinition> {
     let mut spell_abilities = obj
@@ -3896,8 +3896,13 @@ fn continue_with_prepared(
             pending_modal.distribute = ability_def.distribute.clone();
             pending_modal.target_constraints = target_constraints;
             pending_modal.origin_zone = prepared.origin_zone;
+            // CR 700.2e: the mode-choice prompt is routed to the modal's
+            // chooser (the controller for standard modals; the opponent for
+            // "an opponent chooses —"). Target selection still belongs to the
+            // controller (CR 115.1) — `pending_cast` keeps the caster.
+            let mode_chooser = resolve_modal_chooser(state, &capped, player, prepared.object_id);
             return Ok(WaitingFor::ModeChoice {
-                player,
+                player: mode_chooser,
                 modal: capped,
                 pending_cast: Box::new(pending_modal),
             });
@@ -4099,6 +4104,39 @@ fn continue_with_prepared(
         prepared.origin_zone,
         events,
     )
+}
+
+/// CR 700.2a / CR 700.2e: Resolve a modal's `chooser` to the single `PlayerId`
+/// that the `WaitingFor::ModeChoice` / `AbilityModeChoice` prompt names.
+///
+/// For `PlayerFilter::Controller` (every standard modal and the `you choose —`
+/// alias) this is the controller — byte-identical to the historic behavior.
+/// For `PlayerFilter::Opponent` (CR 700.2e — "an opponent chooses …") this is
+/// the single opponent, resolved via the canonical
+/// `effects::matches_player_scope` authority filtered over APNAP order. In the
+/// 2-player engine this is unambiguous. Falls back to the controller if no
+/// player matches (defensive — cannot happen in a live 2-player game).
+fn resolve_modal_chooser(
+    state: &GameState,
+    modal: &crate::types::ability::ModalChoice,
+    controller: PlayerId,
+    source_id: ObjectId,
+) -> PlayerId {
+    if modal.chooser == crate::types::ability::PlayerFilter::Controller {
+        return controller;
+    }
+    crate::game::players::apnap_order(state)
+        .into_iter()
+        .find(|&p| {
+            crate::game::effects::matches_player_scope(
+                state,
+                p,
+                &modal.chooser,
+                controller,
+                source_id,
+            )
+        })
+        .unwrap_or(controller)
 }
 
 fn modal_requires_additional_cost_declaration(modal: &crate::types::ability::ModalChoice) -> bool {
@@ -4325,6 +4363,21 @@ pub fn can_cast_object_now(state: &GameState, player: PlayerId, object_id: Objec
     let Some(obj) = state.objects.get(&prepared.object_id) else {
         return false;
     };
+
+    // CR 601.3d: A cast authorized only by a target-dependent flash option is
+    // illegal unless a condition-satisfying target exists. Pre-target FEASIBILITY
+    // analogue of the finalize-time target_dependent_flash_permission_satisfied
+    // SATISFACTION gate. Also covers the Adventure recursion re-entry, since
+    // every CastSpell path flows through can_cast_object_now.
+    if prepared.cast_timing_permission == Some(CastTimingPermission::AsThoughHadFlash)
+        && !restrictions::target_dependent_flash_permission_feasible(
+            state,
+            player,
+            prepared.object_id,
+        )
+    {
+        return false;
+    }
 
     // CR 702.138: Escape requires enough other graveyard cards to exile.
     if prepared.casting_variant == CastingVariant::Escape
@@ -5337,7 +5390,7 @@ pub fn pay_ability_cost(
         // CR 701.43a: "To exert a permanent, its controller chooses to have it
         // not untap during its controller's next untap step." Modeled as a
         // transient continuous effect with `StaticMode::CantUntap` scoped to
-        // `Duration::UntilNextUntapStepOf { Controller }` on the source permanent,
+        // `Duration::UntilNextStepOf { step: Untap, player: Controller }` on the source permanent,
         // identical to the "doesn't untap during its controller's next untap
         // step" pattern already handled by the layer system (see
         // `layers::prune_controller_untap_step_effects`).
@@ -5363,7 +5416,8 @@ pub fn pay_ability_cost(
             state.add_transient_continuous_effect(
                 source_id,
                 controller,
-                crate::types::ability::Duration::UntilNextUntapStepOf {
+                crate::types::ability::Duration::UntilNextStepOf {
+                    step: crate::types::phase::Phase::Untap,
                     player: crate::types::ability::PlayerScope::Controller,
                 },
                 TargetFilter::SpecificObject { id: source_id },
@@ -5451,6 +5505,27 @@ fn find_non_self_discard(cost: &AbilityCost) -> Option<(&QuantityExpr, Option<&T
             ..
         } => Some((count, filter.as_ref())),
         AbilityCost::Composite { costs } => costs.iter().find_map(find_non_self_discard),
+        _ => None,
+    }
+}
+
+/// CR 118.3 + CR 602.2b: Detect a non-self "exile a card from hand/graveyard"
+/// activation cost requiring interactive card selection (Jhoira of the Ghitu).
+/// Self-ref exile (Scavenge) returns `None` — that shape is auto-paid by
+/// `pay_ability_cost`'s graveyard arm and never back-referenced as a cost-paid
+/// object. Recurses into `Composite`.
+fn find_non_self_exile(cost: &AbilityCost) -> Option<(u32, Zone, Option<&TargetFilter>)> {
+    match cost {
+        AbilityCost::Exile {
+            filter: Some(TargetFilter::SelfRef),
+            ..
+        } => None,
+        AbilityCost::Exile {
+            count,
+            zone: Some(z @ (Zone::Hand | Zone::Graveyard)),
+            filter,
+        } => Some((*count, *z, filter.as_ref())),
+        AbilityCost::Composite { costs } => costs.iter().find_map(find_non_self_exile),
         _ => None,
     }
 }
@@ -5982,6 +6057,17 @@ pub fn handle_activate_ability(
             }
         }
         let unavailable_modes = compute_unavailable_modes(state, source_id, &modal);
+        // CR 700.2a / CR 700.2e: `AbilityModeChoice.player` is threaded
+        // downstream as the activated ability's controller (cost payment,
+        // stack `controller`, target selection — see `engine_modes.rs`), so
+        // it stays the controller. An opponent-chooser ACTIVATED modal ability
+        // would need to route only the mode prompt to the opponent while
+        // control/cost/targets stay with the controller; a single-`PlayerId`
+        // `AbilityModeChoice` cannot carry both, and no such card exists in
+        // the corpus — opponent-chooser activated modals are deferred (the
+        // parser still records `ModalChoice.chooser` for data fidelity).
+        // Modal *spells* ARE routed at the `ModeChoice` constructor above,
+        // where `pending_cast` retains the controller.
         return Ok(WaitingFor::AbilityModeChoice {
             player,
             modal,
@@ -6044,6 +6130,35 @@ pub fn handle_activate_ability(
                 count,
                 cards: eligible,
                 pending_cast: Box::new(pending_discard),
+            });
+        }
+
+        // CR 118.3 + CR 602.2b: Pre-check for non-self exile-from-hand/graveyard
+        // costs — detour to `WaitingFor::ExileForCost` before any cost payment,
+        // mirroring the Sacrifice/Discard detours above. The full `Composite`
+        // cost (including the `Mana` sub-cost) stays in `activation_cost`; the
+        // mana is paid by `push_activated_ability_to_stack` after the card
+        // selection completes (CR 601.2h: remaining costs paid in any order).
+        if let Some((count, zone, filter)) = find_non_self_exile(cost) {
+            let narrow_zone = ExileCostSourceZone::try_from_zone(zone)
+                .expect("find_non_self_exile restricts zone to Hand or Graveyard");
+            let eligible =
+                find_eligible_exile_for_cost_targets(state, player, source_id, narrow_zone, filter);
+            if eligible.len() < count as usize {
+                return Err(EngineError::ActionNotAllowed(
+                    "Not enough eligible cards to exile".into(),
+                ));
+            }
+            let mut pending_exile =
+                PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+            pending_exile.activation_cost = Some(cost.clone());
+            pending_exile.activation_ability_index = Some(ability_index);
+            return Ok(WaitingFor::ExileForCost {
+                player,
+                zone: narrow_zone,
+                count: count as usize,
+                cards: eligible,
+                pending_cast: Box::new(pending_exile),
             });
         }
 
@@ -7356,6 +7471,152 @@ mod tests {
         );
     }
 
+    /// CR 601.3d + CR 702.8a: A spell whose only instant-speed permission is a
+    /// target-dependent flash option must not be offered as a `CastSpell`
+    /// candidate (AI or human) outside the sorcery-speed window unless a
+    /// condition-satisfying target exists. Drives the full
+    /// `can_cast_object_now` → `ai_support::legal_actions` pipeline.
+    #[test]
+    fn can_cast_object_now_rejects_target_dependent_flash_with_no_condition_target() {
+        use crate::types::ability::{ParsedCondition, SpellCastingOption};
+
+        // Build a Timely-Ward-style conditional-flash Enchantment in caster's
+        // hand, with one Spell-kind ability that targets a creature and a flash
+        // option gated on `SpellTargetsFilter { IsCommander }`. No printed Flash.
+        let build_spell = |state: &mut GameState| -> ObjectId {
+            let spell_id = create_object(
+                state,
+                CardId(50),
+                PlayerId(0),
+                "Timely Ward".to_string(),
+                Zone::Hand,
+            );
+            let obj = state.objects.get_mut(&spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.casting_options
+                .push(SpellCastingOption::as_though_had_flash().condition(
+                    ParsedCondition::SpellTargetsFilter {
+                        filter: TargetFilter::Typed(TypedFilter {
+                            properties: vec![FilterProp::IsCommander],
+                            ..Default::default()
+                        }),
+                    },
+                ));
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Destroy {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    cant_regenerate: false,
+                },
+            ));
+            spell_id
+        };
+
+        // Non-sorcery-speed window: PostCombatMain with a non-empty stack so the
+        // conditional flash option is the only instant-speed permission. Caster
+        // (PlayerId(0)) holds priority.
+        let non_sorcery_window = || -> GameState {
+            let mut state = GameState::new_two_player(42);
+            state.turn_number = 2;
+            state.phase = Phase::PostCombatMain;
+            state.active_player = PlayerId(0);
+            state.priority_player = PlayerId(0);
+            state.waiting_for = WaitingFor::Priority {
+                player: PlayerId(0),
+            };
+            // Dummy spell on the stack ⇒ not a sorcery-speed window.
+            let stack_id = create_object(
+                &mut state,
+                CardId(99),
+                PlayerId(1),
+                "Stack Filler".to_string(),
+                Zone::Stack,
+            );
+            state.stack.push_back(crate::types::game_state::StackEntry {
+                id: stack_id,
+                source_id: stack_id,
+                controller: PlayerId(1),
+                kind: crate::types::game_state::StackEntryKind::Spell {
+                    card_id: CardId(99),
+                    ability: None,
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            });
+            state
+        };
+
+        let add_creature = |state: &mut GameState, card: u64, commander: bool| {
+            let id = create_object(
+                state,
+                CardId(card),
+                PlayerId(1),
+                "Creature".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.is_commander = commander;
+        };
+
+        // Negative: only a non-commander creature ⇒ infeasible.
+        {
+            let mut state = non_sorcery_window();
+            let spell_id = build_spell(&mut state);
+            add_creature(&mut state, 60, false);
+            assert!(
+                !can_cast_object_now(&state, PlayerId(0), spell_id),
+                "conditional-flash spell with no commander target must be uncastable"
+            );
+            let actions = crate::ai_support::legal_actions(&state);
+            assert!(
+                !actions.iter().any(|a| matches!(
+                    a,
+                    GameAction::CastSpell { object_id, .. } if *object_id == spell_id
+                )),
+                "no CastSpell candidate should be generated for the infeasible flash spell"
+            );
+        }
+
+        // Positive: add a commander creature ⇒ feasible, candidate produced.
+        {
+            let mut state = non_sorcery_window();
+            let spell_id = build_spell(&mut state);
+            add_creature(&mut state, 60, false);
+            add_creature(&mut state, 61, true);
+            assert!(
+                can_cast_object_now(&state, PlayerId(0), spell_id),
+                "conditional-flash spell with a commander target must be castable"
+            );
+            let actions = crate::ai_support::legal_actions(&state);
+            assert!(
+                actions.iter().any(|a| matches!(
+                    a,
+                    GameAction::CastSpell { object_id, .. } if *object_id == spell_id
+                )),
+                "a CastSpell candidate should be generated when a commander target exists"
+            );
+        }
+
+        // Real-Flash bypass: printed Flash, only a non-commander target ⇒
+        // castable regardless (CR 702.8a).
+        {
+            let mut state = non_sorcery_window();
+            let spell_id = build_spell(&mut state);
+            state
+                .objects
+                .get_mut(&spell_id)
+                .unwrap()
+                .keywords
+                .push(Keyword::Flash);
+            add_creature(&mut state, 60, false);
+            assert!(
+                can_cast_object_now(&state, PlayerId(0), spell_id),
+                "printed Flash must bypass the conditional-flash feasibility gate"
+            );
+        }
+    }
+
     /// CR 702.61a: `can_cast_object_now` returns false while split second is active.
     /// CR 702.61b: `can_activate_ability_now` returns true for mana abilities.
     #[test]
@@ -8600,6 +8861,202 @@ mod tests {
             state.stack[0].kind,
             StackEntryKind::ActivatedAbility { source_id, .. } if source_id == blood
         ));
+    }
+
+    /// Issue #462: Jhoira of the Ghitu — "{2}, Exile a nonland card from your
+    /// hand: Put four time counters on the exiled card. If it doesn't have
+    /// suspend, it gains suspend." Drives the real activation pipeline:
+    /// ActivateAbility → WaitingFor::ExileForCost → SelectCards → resolution.
+    /// Asserts CR 608.2k (the exiled card is the cost-paid object), CR 122.1
+    /// (counters land on an exile-zone card), CR 702.62b (suspended).
+    #[test]
+    fn jhoira_exile_cost_activation_suspends_the_exiled_card() {
+        use super::super::engine::apply_as_current;
+        use crate::types::counter::CounterType;
+
+        let mut state = setup_game_at_main_phase();
+        let jhoira = create_object(
+            &mut state,
+            CardId(980),
+            PlayerId(0),
+            "Jhoira of the Ghitu".to_string(),
+            Zone::Battlefield,
+        );
+        // A nonland card in hand — the eligible exile-cost target.
+        let nonland = create_object(
+            &mut state,
+            CardId(981),
+            PlayerId(0),
+            "Eligible Sorcery".to_string(),
+            Zone::Hand,
+        );
+        // A land in hand — must NOT be offered (cost filter is Non:Land).
+        let land = create_object(
+            &mut state,
+            CardId(982),
+            PlayerId(0),
+            "Ineligible Land".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&jhoira).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            let parsed = crate::parser::oracle::parse_oracle_text(
+                "{2}, Exile a nonland card from your hand: Put four time \
+                 counters on the exiled card. If it doesn't have suspend, it \
+                 gains suspend.",
+                "Jhoira of the Ghitu",
+                &[],
+                &[String::from("Creature")],
+                &[],
+            );
+            Arc::make_mut(&mut obj.abilities).extend(parsed.abilities);
+        }
+        {
+            let nl = state.objects.get_mut(&nonland).unwrap();
+            nl.card_types.core_types.push(CoreType::Sorcery);
+            nl.base_card_types = nl.card_types.clone();
+        }
+        {
+            let l = state.objects.get_mut(&land).unwrap();
+            l.card_types.core_types.push(CoreType::Land);
+            l.base_card_types = l.card_types.clone();
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+
+        // Activate the exile-cost ability.
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: jhoira,
+                ability_index: 0,
+            },
+        )
+        .expect("Jhoira's exile-cost ability must enter the activation pipeline");
+
+        // CR 118.3 + CR 602.2b: the activation detours to ExileForCost, and
+        // only the nonland card is an eligible choice.
+        match &state.waiting_for {
+            WaitingFor::ExileForCost {
+                zone: ExileCostSourceZone::Hand,
+                count,
+                cards,
+                ..
+            } => {
+                assert_eq!(*count, 1, "Jhoira exiles exactly one card");
+                assert!(cards.contains(&nonland), "the nonland card is eligible");
+                assert!(
+                    !cards.contains(&land),
+                    "the land must be excluded by the Non:Land cost filter"
+                );
+            }
+            other => panic!("expected WaitingFor::ExileForCost, got {other:?}"),
+        }
+        assert_eq!(
+            state.objects[&nonland].zone,
+            Zone::Hand,
+            "the card must still be in hand before the selection completes"
+        );
+
+        // Pay the exile cost by selecting the nonland card.
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![nonland],
+            },
+        )
+        .expect("paying the exile-from-hand cost must succeed");
+
+        // CR 601.2h: the {2} mana sub-cost is paid after the card selection.
+        assert_eq!(
+            state.players[0].mana_pool.total(),
+            0,
+            "the {{2}} mana sub-cost must be deducted from the pool"
+        );
+        // The card left hand for exile.
+        assert_eq!(
+            state.objects[&nonland].zone,
+            Zone::Exile,
+            "the exile-cost card must be in the exile zone"
+        );
+        assert_eq!(state.stack.len(), 1, "the ability is on the stack");
+
+        // Resolve the ability.
+        let mut events = Vec::new();
+        stack::resolve_top(&mut state, &mut events);
+
+        // CR 122.1 + CR 608.2k: four time counters land on the exiled card.
+        assert_eq!(
+            state.objects[&nonland]
+                .counters
+                .get(&CounterType::Time)
+                .copied(),
+            Some(4),
+            "the exiled card must carry four time counters"
+        );
+        // CR 702.62b: the exiled card now has suspend (the sub-ability grant).
+        assert!(
+            crate::game::keywords::object_has_effective_keyword_kind(
+                &state,
+                nonland,
+                crate::types::keywords::KeywordKind::Suspend,
+            ),
+            "the exiled card must have suspend granted by Jhoira's sub-ability"
+        );
+    }
+
+    /// Building-block test for `TargetFilter::CostPaidObject` as an effect
+    /// target: a `PutCounter` whose target is `CostPaidObject` resolves the
+    /// counters onto `ability.cost_paid_object`, independent of any card.
+    #[test]
+    fn cost_paid_object_resolves_as_put_counter_effect_target() {
+        use crate::types::ability::{CostPaidObjectSnapshot, ResolvedAbility};
+        use crate::types::counter::CounterType;
+
+        let mut state = setup_game_at_main_phase();
+        let recipient = create_object(
+            &mut state,
+            CardId(990),
+            PlayerId(0),
+            "Counter Recipient".to_string(),
+            Zone::Exile,
+        );
+        let source = create_object(
+            &mut state,
+            CardId(991),
+            PlayerId(0),
+            "Counter Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        let snapshot = state.objects[&recipient].snapshot_for_mana_spent();
+        let mut ability = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Time,
+                count: QuantityExpr::Fixed { value: 4 },
+                target: TargetFilter::CostPaidObject,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        ability.cost_paid_object = Some(CostPaidObjectSnapshot {
+            object_id: recipient,
+            lki: snapshot,
+        });
+
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("PutCounter with CostPaidObject target must resolve");
+
+        assert_eq!(
+            state.objects[&recipient]
+                .counters
+                .get(&CounterType::Time)
+                .copied(),
+            Some(4),
+            "CostPaidObject effect target must resolve onto the stamped object"
+        );
     }
 
     /// Composite costs with Sacrifice + Pay {X}{G}: the fixed G contributes to
@@ -12375,6 +12832,91 @@ mod tests {
             });
         }
         obj_id
+    }
+
+    /// CR 700.2e: discriminating runtime test — an "An opponent chooses one —"
+    /// modal spell, parsed from Oracle text, must route the `WaitingFor::
+    /// ModeChoice` prompt to the OPPONENT, not the caster. Drives the full
+    /// parser → `ModalChoice.chooser` → `resolve_modal_chooser` path. On HEAD
+    /// the spell does not parse as modal at all (modes become Unimplemented),
+    /// so this fails on pristine HEAD.
+    #[test]
+    fn opponent_chooser_modal_spell_routes_mode_choice_to_opponent() {
+        use crate::parser::oracle::parse_oracle_text;
+
+        let mut state = setup_game_at_main_phase();
+        let caster = PlayerId(0);
+        let opponent = PlayerId(1);
+
+        let obj_id = create_object(
+            &mut state,
+            CardId(70),
+            caster,
+            "Test Opponent Charm".to_string(),
+            Zone::Hand,
+        );
+        let parsed = parse_oracle_text(
+            "An opponent chooses one —\n• You draw a card.\n• You gain 3 life.",
+            "Test Opponent Charm",
+            &[],
+            &[String::from("Instant")],
+            &[],
+        );
+        let modal = parsed
+            .modal
+            .clone()
+            .expect("opponent-chooser modal must parse");
+        assert_eq!(
+            modal.chooser,
+            crate::types::ability::PlayerFilter::Opponent,
+            "parsed modal must record the opponent as chooser"
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            Arc::make_mut(&mut obj.abilities).extend(parsed.abilities.clone());
+            obj.modal = Some(modal);
+            obj.mana_cost = ManaCost::zero();
+        }
+
+        let mut events = Vec::new();
+        let result =
+            handle_cast_spell(&mut state, caster, obj_id, CardId(70), &mut events).unwrap();
+
+        // CR 700.2e: the mode-choice prompt is routed to the opponent.
+        match result {
+            WaitingFor::ModeChoice {
+                player,
+                ref pending_cast,
+                ..
+            } => {
+                assert_eq!(
+                    player, opponent,
+                    "mode-choice prompt must be routed to the opponent"
+                );
+                // CR 115.1: the spell itself is still controlled by the caster.
+                assert_eq!(
+                    pending_cast.ability.controller, caster,
+                    "the spell's controller must remain the caster"
+                );
+            }
+            other => panic!("expected ModeChoice routed to opponent, got {other:?}"),
+        }
+        state.waiting_for = result;
+
+        // The opponent submits mode 0 ("You draw a card."). `handle_select_modes`
+        // resolves the spell with the caster as controller (CR 115.1).
+        let mut events = Vec::new();
+        handle_select_modes(&mut state, opponent, vec![0], &mut events)
+            .expect("opponent's mode submission must resolve");
+
+        // The chosen mode is on the stack, controlled by the caster.
+        assert_eq!(state.stack.len(), 1, "the modal spell must be on the stack");
+        let entry = &state.stack[0];
+        assert_eq!(
+            entry.controller, caster,
+            "the resolved modal spell must be controlled by the caster"
+        );
     }
 
     #[test]
@@ -18282,7 +18824,8 @@ mod tests {
             assert_eq!(effects.len(), 1);
             assert_eq!(
                 effects[0].duration,
-                crate::types::ability::Duration::UntilNextUntapStepOf {
+                crate::types::ability::Duration::UntilNextStepOf {
+                    step: crate::types::phase::Phase::Untap,
                     player: crate::types::ability::PlayerScope::Controller,
                 }
             );

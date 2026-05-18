@@ -227,6 +227,7 @@ pub fn resolve_all(
                 under_your_control: false,
                 enters_attacking: false,
                 owner_library: false,
+                track_exiled_by_source: false,
             };
             return Ok(());
         }

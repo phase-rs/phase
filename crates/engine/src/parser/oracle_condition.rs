@@ -305,6 +305,32 @@ fn parse_source_power_threshold(text: &str) -> Option<i32> {
     rest.trim().is_empty().then_some(power as i32)
 }
 
+/// CR 602.5b: Parse "[you / an opponent] control(s) a creature with [keyword]".
+/// The controller prefix is matched with a nom `alt` so both controller scopes
+/// flow through the single parameterized `ParsedCondition::ControlsCreatureWithKeyword`.
+fn parse_controls_creature_with_keyword(text: &str) -> Option<(ControllerRef, Keyword)> {
+    let (keyword_text, controller) = alt((
+        value(
+            ControllerRef::You,
+            alt((
+                tag::<_, _, OracleError<'_>>("you control a creature with "),
+                tag("you control a creature that has "),
+            )),
+        ),
+        value(
+            ControllerRef::Opponent,
+            alt((
+                tag("an opponent controls a creature with "),
+                tag("an opponent controls a creature that has "),
+            )),
+        ),
+    ))
+    .parse(text)
+    .ok()?;
+    let keyword: Keyword = keyword_text.trim().parse().ok()?;
+    (!matches!(keyword, Keyword::Unknown(_))).then_some((controller, keyword))
+}
+
 fn parse_you_control_condition(text: &str) -> Option<ParsedCondition> {
     // "you control a [subtype] or there is a [subtype] card in your graveyard"
     if text.contains(" or there is a ") && text.contains(" card in your graveyard") {
@@ -376,17 +402,12 @@ fn parse_you_control_condition(text: &str) -> Option<ParsedCondition> {
     if let Some((power, toughness)) = parse_creature_pt_condition(text) {
         return Some(ParsedCondition::YouControlCreatureWithPt { power, toughness });
     }
-    // "you control a creature with [keyword]"
-    if let Ok((keyword_text, _)) = alt((
-        tag::<_, _, OracleError<'_>>("you control a creature with "),
-        tag("you control a creature that has "),
-    ))
-    .parse(text)
-    {
-        let keyword: Keyword = keyword_text.trim().parse().unwrap();
-        if !matches!(keyword, Keyword::Unknown(_)) {
-            return Some(ParsedCondition::YouControlCreatureWithKeyword { keyword });
-        }
+    // CR 602.5b: "[you / an opponent] control(s) a creature with [keyword]"
+    if let Some((controller, keyword)) = parse_controls_creature_with_keyword(text) {
+        return Some(ParsedCondition::ControlsCreatureWithKeyword {
+            controller,
+            keyword,
+        });
     }
     // "you control a/another legendary creature"
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you control ").parse(text) {
@@ -1199,6 +1220,34 @@ mod tests {
             parse_restriction_condition("you control a legendary creature"),
             Some(ParsedCondition::YouControlLegendaryCreature)
         ));
+    }
+
+    #[test]
+    fn parses_controls_creature_with_keyword_both_scopes() {
+        // CR 602.5b: Groundling Pouncer — "an opponent controls a creature with flying".
+        assert_eq!(
+            parse_restriction_condition("an opponent controls a creature with flying"),
+            Some(ParsedCondition::ControlsCreatureWithKeyword {
+                controller: ControllerRef::Opponent,
+                keyword: Keyword::Flying,
+            }),
+        );
+        // Building-block proof: the same condition with controller = You still parses.
+        assert_eq!(
+            parse_restriction_condition("you control a creature with flying"),
+            Some(ParsedCondition::ControlsCreatureWithKeyword {
+                controller: ControllerRef::You,
+                keyword: Keyword::Flying,
+            }),
+        );
+        // "that has" phrasing flows through the same combinator.
+        assert_eq!(
+            parse_restriction_condition("an opponent controls a creature that has flying"),
+            Some(ParsedCondition::ControlsCreatureWithKeyword {
+                controller: ControllerRef::Opponent,
+                keyword: Keyword::Flying,
+            }),
+        );
     }
 
     #[test]

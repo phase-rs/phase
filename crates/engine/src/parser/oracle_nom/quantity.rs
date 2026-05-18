@@ -670,6 +670,7 @@ fn parse_number_of_cards_in_all_players_hands(input: &str) -> OracleResult<'_, Q
         QuantityRef::HandSize {
             player: PlayerScope::AllPlayers {
                 aggregate: AggregateFunction::Sum,
+                exclude: None,
             },
         },
     ))
@@ -1363,18 +1364,24 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
         value(QuantityRef::EventContextAmount, tag("that many")),
         value(QuantityRef::EventContextAmount, tag("that damage")),
         value(
-            QuantityRef::EventContextSourcePower,
+            QuantityRef::Power {
+                scope: ObjectScope::CostPaidObject,
+            },
             tag("that creature's power"),
         ),
         value(
-            QuantityRef::EventContextSourceToughness,
+            QuantityRef::Toughness {
+                scope: ObjectScope::CostPaidObject,
+            },
             tag("that creature's toughness"),
         ),
         // "Whenever you cast an enchantment spell, ... equal to that spell's
         // mana value" (Dusty Parlor) — the SpellCast event's source object is
         // the spell itself, so CMC reads cleanly off it.
         value(
-            QuantityRef::EventContextSourceManaValue,
+            QuantityRef::ObjectManaValue {
+                scope: ObjectScope::CostPaidObject,
+            },
             tag("that spell's mana value"),
         ),
     ))
@@ -2320,9 +2327,15 @@ fn assert_for_each_controlled_chosen_type(
     }
 }
 
-/// Parse "your speed".
+/// Parse "your speed" → the controller's speed (CR 702.179f).
 fn parse_speed_ref(input: &str) -> OracleResult<'_, QuantityRef> {
-    value(QuantityRef::Speed, tag("your speed")).parse(input)
+    value(
+        QuantityRef::Speed {
+            player: PlayerScope::Controller,
+        },
+        tag("your speed"),
+    )
+    .parse(input)
 }
 
 /// CR 122.1: Parse "[kind] counters <possessor>" → `QuantityRef::PlayerCounter`.
@@ -3118,6 +3131,7 @@ mod tests {
             QuantityRef::HandSize {
                 player: PlayerScope::AllPlayers {
                     aggregate: AggregateFunction::Sum,
+                    exclude: None,
                 },
             }
         );
@@ -3491,7 +3505,12 @@ mod tests {
         assert_eq!(rest, "");
 
         let (rest2, q2) = parse_quantity_ref("that creature's power").unwrap();
-        assert_eq!(q2, QuantityRef::EventContextSourcePower);
+        assert_eq!(
+            q2,
+            QuantityRef::Power {
+                scope: ObjectScope::CostPaidObject,
+            }
+        );
         assert_eq!(rest2, "");
     }
 

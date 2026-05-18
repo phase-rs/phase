@@ -154,11 +154,20 @@ fn resolve_counter_placement_target<'a>(
     );
     let on_offset = lower.len() - on_rest.len();
     let on_text = &text[on_offset..];
-    // CR 608.2c + CR 109.4: use the ctx-threaded target parser so a controller
-    // suffix like "they control" / "that player controls" resolves against the
-    // ambient `relative_player_scope` (e.g. the chosen player from a preceding
-    // `Choose(Player)` clause — Gluntch's "They put two +1/+1 counters on a
-    // creature they control") instead of defaulting to `ControllerRef::You`.
+    // CR 107.3i: Strip a trailing ", where X is …" binding clause from the
+    // target text before calling the target parser. The binding modifies the
+    // count expression (resolved upstream by the where-X handlers, e.g.
+    // `parse_where_x_quantity_expression`), not the target — leaving it in
+    // place feeds the comma + binding into `parse_target` and forces the
+    // fallback path on cards like Astarion's Thirst. ASCII-equal-length
+    // (asserted above) means the cut byte index found on the lower slice
+    // applies identically to the original.
+    let on_text = strip_where_x_tail_ascii(on_text, &lower[on_offset..]);
+    // CR 608.2c + CR 102.1: Use the ctx-aware variant so the
+    // `relative_player_scope` (set to `ScopedPlayer` by an earlier "Choose a
+    // player" clause in the same chain) reaches the "they control" suffix
+    // parser, routing the controller filter to `ControllerRef::ScopedPlayer`
+    // instead of the legacy `You` fallback.
     let (parsed_target, parsed_remainder) = parse_target_with_ctx(on_text, ctx);
     if matches!(parsed_target, TargetFilter::SelfRef) {
         return (TargetFilter::SelfRef, parsed_remainder, None);
@@ -197,8 +206,41 @@ fn resolve_counter_placement_target<'a>(
         let on_offset = lower.len() - on_rest.len();
         (&text[on_offset..], None)
     };
+    // CR 107.3i: Mirror the where-X strip above for the "up to N" branch.
+    let target_text =
+        strip_where_x_tail_ascii(target_text, &lower[lower.len() - target_text.len()..]);
     let (target, rem) = parse_target_with_ctx(target_text, ctx);
     (target, rem, multi)
+}
+
+/// CR 107.3i: Trim a trailing `, where X is …` or ` where X is …` binding
+/// from `text` using `text_lower` to locate the cut point. `text` and
+/// `text_lower` must be byte-for-byte length-equal (ASCII-only Oracle text,
+/// asserted by the caller). Returns `text` unchanged when no binding is
+/// present. Local helper so the where-X strip preserves the `'a` lifetime
+/// of the caller's `text`; `TextPair`-based variants unify lifetimes and
+/// would shorten the returned slice's lifetime to that of `text_lower`.
+///
+/// Located via a `take_until` combinator on each needle and the minimum
+/// consumed prefix wins — this is structural slicing on already-tokenized
+/// Oracle text, not a parser dispatch decision.
+fn strip_where_x_tail_ascii<'a>(text: &'a str, text_lower: &str) -> &'a str {
+    let mut best_pos: Option<usize> = None;
+    for needle in [", where x is ", " where x is "] {
+        if let Ok((_after, before)) = take_until::<_, _, OracleError<'_>>(needle).parse(text_lower)
+        {
+            let pos = before.len();
+            best_pos = Some(best_pos.map_or(pos, |p| p.min(pos)));
+        }
+    }
+    match best_pos {
+        Some(pos) => {
+            // allow-noncombinator: structural punctuation/whitespace cleanup
+            // on the already-cut prefix, not a parser dispatch decision.
+            text[..pos].trim_end_matches(',').trim_end()
+        }
+        None => text,
+    }
 }
 
 /// Consume a comma / "and" separator between items in a counter list —

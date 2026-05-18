@@ -320,6 +320,7 @@ mod tests {
             under_your_control: false,
             enters_attacking: false,
             owner_library: false,
+            track_exiled_by_source: false,
         };
 
         let filtered = filter_state_for_player(&state, PlayerId(1));

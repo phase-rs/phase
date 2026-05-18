@@ -483,6 +483,18 @@ fn resolve_defined_or_targets(
         }
     }
 
+    // CR 608.2k: "the exiled card" — an untargeted reference to the object
+    // referred to by this ability's cost (Jhoira of the Ghitu: "Put four time
+    // counters on the exiled card"). Resolved from the recursively-stamped
+    // `cost_paid_object`; mirrors the `resolved_targets` chokepoint arm.
+    if let Some(TargetFilter::CostPaidObject) = target_spec {
+        return ability
+            .cost_paid_object
+            .iter()
+            .map(|snap| snap.object_id)
+            .collect();
+    }
+
     if let Some(filter) = target_spec {
         let event_targets =
             crate::game::targeting::resolve_event_context_targets(state, filter, ability.source_id);

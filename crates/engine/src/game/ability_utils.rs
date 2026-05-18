@@ -58,16 +58,28 @@ pub fn build_resolved_from_def_with_targets(
     resolved.multi_target = def.multi_target.clone();
     resolved.target_choice_timing = def.target_choice_timing;
     resolved.repeat_for = def.repeat_for.clone();
+    // CR 608.2c + CR 107.1c: Carry the loop-continuation predicate through so the
+    // `repeat_until` dispatch in `resolve_ability_chain` can re-follow the chain.
+    resolved.repeat_until = def.repeat_until.clone();
     resolved.min_x_value = def.min_x_value;
     resolved.cant_be_copied = def.cant_be_copied;
     resolved.description = def.description.clone();
     resolved.forward_result = def.forward_result;
     resolved.unless_pay = def.unless_pay.clone();
     resolved.player_scope = def.player_scope;
+    // CR 101.4 + CR 800.4: Propagate the turn-order override for `player_scope`
+    // iteration. The iteration driver in `effects/mod.rs` reads this and calls
+    // `players::apnap_order_from(state, starting_with, controller)` so Join
+    // Forces ("Starting with you, each player may pay any amount of mana")
+    // prompts the controller first regardless of whose turn it is.
+    resolved.starting_with = def.starting_with.clone();
     // CR 115.1 + CR 701.9b: Carry the parser-stamped target selection mode
     // through to the resolved ability so target-selection sites can short-circuit
     // `WaitingFor::TargetSelection` for `Random` abilities.
     resolved.target_selection_mode = def.target_selection_mode;
+    // CR 608.2c: Carry the parent-link kind through so the decline classifier can
+    // distinguish a separate-sentence sibling from a within-clause continuation.
+    resolved.sub_link = def.sub_link;
     resolved
 }
 
@@ -116,6 +128,9 @@ pub(crate) fn apply_instead_swap(
     // CR 608.2 + CR 608.2c: Effect-shape fields belong to the swapped effect,
     // not the parent.
     overridden.player_scope = sub.player_scope;
+    // CR 101.4 + CR 800.4: The turn-order override is an effect-shape attribute
+    // (which iteration order the scoped effect uses), so it follows the swap.
+    overridden.starting_with = sub.starting_with.clone();
     overridden.optional = sub.optional;
     overridden.optional_for = sub.optional_for;
     overridden.optional_targeting = sub.optional_targeting;
@@ -804,6 +819,32 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
                 validated.controller,
                 validated.source_id,
             ),
+            // CR 608.2b: A context-ref filter (`ParentTarget`,
+            // `TriggeringSource`, etc.) carries a resolution-time *snapshot*,
+            // not a player-chosen target. `extract_target_filter_from_effect`
+            // returns `None` for it via the `is_context_ref` guard, but unlike
+            // a genuinely target-less effect its `targets` must NOT be fizzle-
+            // filtered: CR 608.2b's "no longer in the zone" check applies only
+            // to abilities that *specify targets* (use the word "target"). A
+            // delayed-return trigger (Flickerwisp) deliberately references an
+            // exiled card — filtering it to battlefield presence would wrongly
+            // fizzle the return.
+            //
+            // NOTE: CR 603.7c's resolution-time zone check ("if that object is
+            // no longer in the zone it's expected to be in ... the ability
+            // won't affect it") is NOT yet enforced for `origin: None` delayed
+            // returns. `change_zone::resolve`'s CR 400.7 guard only runs under
+            // `if let Some(expected_origin) = origin`, so a Flickerwisp victim
+            // that leaves Exile before the end step would still be moved.
+            // Tracked as a separate, broader follow-up issue (touches the
+            // parser + `change_zone.rs`) — out of scope here.
+            None if validated
+                .effect
+                .target_filter()
+                .is_some_and(|f| f.is_context_ref()) =>
+            {
+                validated.targets.clone()
+            }
             None => validated
                 .targets
                 .iter()
@@ -2783,6 +2824,64 @@ mod tests {
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
     use crate::types::{FormatConfig, GameAction};
+    /// Issue #478 regression: a delayed-trigger return effect
+    /// (`ChangeZone { target: ParentTarget }`) carries a resolution-time
+    /// *snapshot* in `targets`, not a player-chosen target. CR 608.2b's
+    /// re-validation/fizzle applies only to abilities that *specify targets*;
+    /// a `ParentTarget` snapshot referencing an exiled card (Flickerwisp's
+    /// "return that card") must survive `validate_targets_in_chain` verbatim so
+    /// the return is not wrongly fizzled before `change_zone::resolve` runs.
+    #[test]
+    fn validate_targets_in_chain_preserves_parent_target_snapshot_off_battlefield() {
+        let format = FormatConfig::duel_commander();
+        let mut state = GameState::new(format, 2, 2);
+        let victim = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Exile,
+        );
+
+        // A delayed-return ability: ChangeZone -> Battlefield with a
+        // `ParentTarget` snapshot, the snapshot being the exiled victim.
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Battlefield,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![TargetRef::Object(victim)],
+            ObjectId(99),
+            PlayerId(0),
+        );
+
+        let validated = validate_targets_in_chain(&state, &ability);
+        // The snapshot must pass through unchanged — not filtered to
+        // battlefield presence, which would empty it and fizzle the return.
+        assert_eq!(
+            validated.targets,
+            vec![TargetRef::Object(victim)],
+            "a ParentTarget snapshot of an exiled card must survive target \
+             re-validation (CR 603.7c) — not be fizzle-filtered (CR 608.2b)"
+        );
+        assert!(
+            !crate::game::targeting::check_fizzle(
+                &flatten_targets_in_chain(&ability),
+                &flatten_targets_in_chain(&validated),
+            ),
+            "a delayed-return ParentTarget ability must not fizzle when its \
+             snapshotted object is off the battlefield"
+        );
+    }
+
     //mazes end test for self bounce lands
     #[test]
     fn mazes_end_search_resolves_after_self_bounce_cost() {

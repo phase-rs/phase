@@ -84,6 +84,8 @@ pub fn resolve(
 
     let mut hit_id: Option<ObjectId> = None;
     let mut cumulative: i32 = 0;
+    let track_exiled_by_source =
+        crate::game::exile_links::should_track_exiled_by_source(state, ability.source_id, ability);
 
     for &obj_id in &library {
         // CR 701.13a: Exile the card through the shared zone-change pipeline so
@@ -100,6 +102,7 @@ pub fn resolve(
             false,
             None,
             &[],
+            track_exiled_by_source,
             events,
         ) {
             super::change_zone::ZoneMoveResult::Done => {}
@@ -242,11 +245,10 @@ mod tests {
     }
 
     /// CR 701.57a + CR 702.85a: When the iterator hits a nonland, it stops and
-    /// reports the hit. CR 400.7 + CR 406.6: every exiled card (lands + the
-    /// hit) is recorded with `ExileLinkKind::TrackedBySource` so
-    /// `TargetFilter::ExiledBySource` lookups see all of them.
+    /// reports the hit. This bare effect has no linked-exile consumer, so it
+    /// moves cards to exile without adding source display links.
     #[test]
-    fn exiles_lands_then_stops_at_nonland_and_links_all() {
+    fn exiles_lands_then_stops_at_nonland_without_links_without_consumer() {
         let mut state = GameState::new_two_player(42);
         let source = create_object(
             &mut state,
@@ -288,7 +290,6 @@ mod tests {
                 "exiled card should be in exile zone"
             );
         }
-        // CR 400.7 + CR 406.6: Each exiled card linked to source.
         let linked: Vec<ObjectId> = state
             .exile_links
             .iter()
@@ -297,13 +298,9 @@ mod tests {
             .collect();
         assert_eq!(
             linked.len(),
-            3,
-            "all three exiled cards should be linked to source"
+            0,
+            "bare exile-until effects should not create source display links"
         );
-        assert!(linked.contains(&land1));
-        assert!(linked.contains(&land2));
-        assert!(linked.contains(&hit));
-        assert!(!linked.contains(&unreached));
     }
 
     #[test]
@@ -669,8 +666,8 @@ mod tests {
         let mut events = Vec::new();
         super::super::resolve_ability_chain(&mut state, &wrapped, &mut events, 0).unwrap();
 
-        // All six cards (one land + one creature per player × 3 players)
-        // should be linked to the resolving source.
+        // No typed linked-exile consumer exists in this test ability, so the
+        // six cards move to exile without source display links.
         let linked: Vec<ObjectId> = state
             .exile_links
             .iter()
@@ -679,15 +676,10 @@ mod tests {
             .collect();
         assert_eq!(
             linked.len(),
-            6,
-            "all six exiled cards should be linked to source (one land + one nonland per player × 3 players)"
+            0,
+            "bare exile-until effects should not create source display links"
         );
         for id in &[p0_land, p0_hit, p1_land, p1_hit, p2_land, p2_hit] {
-            assert!(
-                linked.contains(id),
-                "expected exile link for {:?}",
-                state.objects.get(id).unwrap().name
-            );
             assert_eq!(
                 state.objects.get(id).unwrap().zone,
                 Zone::Exile,

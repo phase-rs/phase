@@ -4,13 +4,15 @@ use crate::types::ability::{
 };
 #[cfg(test)]
 use crate::types::counter::CounterType;
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     GameState, ManaAbilityResume, ManaChoice, ManaChoiceContext, ManaChoicePrompt,
     PendingManaAbility, ProductionOverride, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{ManaColor, ManaCost, ManaPool, ManaType, PaymentContext};
+#[cfg(test)]
+use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
@@ -63,16 +65,14 @@ pub fn is_mana_ability(ability_def: &AbilityDefinition) -> bool {
 /// card" must use the stack, not route inline. "Any link adds mana" is too
 /// permissive: it would skip priority on the draw.
 ///
-/// Criterion (b) accepts only `ManaAdded` today. CR 605.1b also admits
-/// "triggered from the activation/resolution of an activated mana ability" —
-/// but mana abilities bypass the stack and do not currently emit a
-/// distinguishable `AbilityActivated` event (see `resolve_mana_ability` — only
-/// `ManaAdded` events are produced). A pool-add-less mana ability (hypothetical
-/// conditional producer that yields zero mana) would not reach this classifier
-/// via `ManaAdded`; widening (b) to `AbilityActivated` requires first emitting
-/// an event specifically tied to mana-ability activation so the axis can be
-/// distinguished from ordinary activated abilities. No real card exercises the
-/// gap today.
+/// Criterion (b) accepts `TappedForMana` (CR 106.12a) — the per-resolution
+/// event emitted whenever a `{T}`-cost mana ability resolves and produces mana,
+/// which is exactly the event a `TapsForMana` triggered mana ability fires
+/// from. CR 605.1b also admits "triggered from the activation/resolution of an
+/// activated mana ability" in general, but mana abilities bypass the stack and
+/// do not emit a distinguishable `AbilityActivated` event; widening (b) to that
+/// axis requires first emitting such an event. No real card exercises the gap
+/// today.
 pub fn is_triggered_mana_ability(
     ability: &ResolvedAbility,
     trigger_event: Option<&GameEvent>,
@@ -90,9 +90,10 @@ pub fn is_triggered_mana_ability(
     if chain_has_any_targets(ability) {
         return false;
     }
-    // (b) Triggered by mana being added to a pool. See the doc comment above for
-    // the deliberately-not-yet-widened `AbilityActivated` axis.
-    matches!(trigger_event, Some(GameEvent::ManaAdded { .. }))
+    // (b) CR 106.12a: triggered by a `{T}`-cost mana ability resolving and
+    // producing mana. See the doc comment above for the deliberately-not-yet-
+    // widened `AbilityActivated` axis.
+    matches!(trigger_event, Some(GameEvent::TappedForMana { .. }))
 }
 
 /// True iff every reachable link (via `sub_ability` and `else_ability` per
@@ -271,8 +272,10 @@ fn produce_mana_from_ability(
             _ => (Vec::new(), Vec::new(), Vec::new(), None, false),
         };
 
+    // CR 106.12: a permanent is "tapped for mana" when the activated mana
+    // ability's cost includes the `{T}` symbol.
     let tapped = mana_sources::has_tap_component(&ability_def.cost);
-    for mana_type in produced_mana {
+    for &mana_type in &produced_mana {
         mana_payment::produce_mana_with_attributes_from_source_quality(
             state,
             source_id,
@@ -285,6 +288,20 @@ fn produce_mana_from_ability(
             expiry,
             events,
         );
+    }
+
+    // CR 106.12a: an "is tapped for mana" trigger fires once per resolution of
+    // a `{T}`-cost mana ability that produces mana — not once per mana unit.
+    // Emit a single `TappedForMana` here so the `TapsForMana` matcher fires
+    // exactly once (the per-unit `ManaAdded` events above remain pool
+    // accounting only).
+    if tapped && !produced_mana.is_empty() {
+        events.push(GameEvent::TappedForMana {
+            player_id: player,
+            source_id,
+            produced: produced_mana,
+            tap_state: ManaTapState::from_tap(tapped),
+        });
     }
 
     // CR 605.3b + CR 605.1a: A mana ability with a non-mana clause in its
@@ -445,13 +462,37 @@ pub(crate) fn mana_choice_prompt(
                     .collect(),
             })
         }
-        ManaProduction::ChosenColor { .. } => {
-            if super::effects::mana::chosen_color_for_mana(state, source_id).is_some() {
-                None
-            } else {
-                Some(ManaChoicePrompt::SingleColor {
+        ManaProduction::ChosenColor {
+            fixed_alternative, ..
+        } => {
+            let chosen = super::effects::mana::chosen_color_for_mana(state, source_id);
+            match (fixed_alternative, chosen) {
+                // CR 106.1: "Add {fixed} or one mana of the chosen color" — once
+                // a color is chosen, the player still picks between the fixed
+                // color and the chosen color. Dedupe defensively: identical
+                // options collapse to a 1-element set (no prompt).
+                (Some(fixed), Some(chosen)) => {
+                    let mut options = vec![mana_color_to_type(fixed)];
+                    let chosen_type = mana_color_to_type(&chosen);
+                    if !options.contains(&chosen_type) {
+                        options.push(chosen_type);
+                    }
+                    if options.len() > 1 {
+                        Some(ManaChoicePrompt::SingleColor { options })
+                    } else {
+                        None
+                    }
+                }
+                // CR 106.1: no color chosen yet (cannot occur for Gate lands —
+                // the as-enters Choose always fires first — but the field makes
+                // it representable). The fixed color is a subset of ALL, so a
+                // full five-color prompt loses nothing.
+                (Some(_), None) | (None, None) => Some(ManaChoicePrompt::SingleColor {
                     options: ManaColor::ALL.iter().map(mana_color_to_type).collect(),
-                })
+                }),
+                // CR 106.1: pure chosen-color production with a color already
+                // chosen — no prompt (Utopia Sprawl class).
+                (None, Some(_)) => None,
             }
         }
         // CR 106.7 + CR 106.1b: Reflecting Pool class — surface the union of
@@ -1070,8 +1111,10 @@ fn resolve_mana_ability_with_selected_choices(
         _ => (Vec::new(), Vec::new(), Vec::new(), None),
     };
 
+    // CR 106.12: a permanent is "tapped for mana" when the activated mana
+    // ability's cost includes the `{T}` symbol.
     let tapped = mana_sources::has_tap_component(&ability_def.cost);
-    for mana_type in produced_mana {
+    for &mana_type in &produced_mana {
         mana_payment::produce_mana_with_attributes(
             state,
             source_id,
@@ -1083,6 +1126,19 @@ fn resolve_mana_ability_with_selected_choices(
             expiry,
             events,
         );
+    }
+
+    // CR 106.12a: emit one `TappedForMana` per resolution of a `{T}`-cost mana
+    // ability that produces mana, so the `TapsForMana` matcher fires exactly
+    // once. Mirrors `produce_mana_from_ability`; this is the selected-choices /
+    // no-prompt resolution path.
+    if tapped && !produced_mana.is_empty() {
+        events.push(GameEvent::TappedForMana {
+            player_id: player,
+            source_id,
+            produced: produced_mana,
+            tap_state: ManaTapState::from_tap(tapped),
+        });
     }
 
     // CR 605.3b + CR 605.1a: Resolve the sub-ability chain inline (painlands'
@@ -2590,6 +2646,9 @@ mod tests {
     fn hand_self_exile_mana_ability_is_legal_and_exiles_source() {
         let mut state = GameState::new_two_player(42);
         let player = PlayerId(0);
+        state.turn_number = 2;
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        state.active_player = player;
         state.priority_player = player;
         state.waiting_for = WaitingFor::Priority { player };
         let source = create_object(
@@ -3390,30 +3449,29 @@ mod tests {
         )
     }
 
-    fn mana_added_event() -> GameEvent {
-        GameEvent::ManaAdded {
+    fn tapped_for_mana_event() -> GameEvent {
+        GameEvent::TappedForMana {
             player_id: PlayerId(0),
-            mana_type: ManaType::Green,
             source_id: ObjectId(1),
+            produced: vec![ManaType::Green],
             tap_state: crate::types::events::ManaTapState::FromTap,
         }
     }
 
     #[test]
-    fn classifier_accepts_head_effect_mana_on_mana_added() {
+    fn classifier_accepts_head_effect_mana_on_tapped_for_mana() {
         let ability = mana_producing_resolved();
         assert!(is_triggered_mana_ability(
             &ability,
-            Some(&mana_added_event())
+            Some(&tapped_for_mana_event())
         ));
     }
 
     #[test]
-    fn classifier_rejects_non_mana_added_event() {
-        // CR 605.1b criterion (b): mana abilities don't emit a mana-ability-
-        // specific activation event today, so only `ManaAdded` qualifies.
-        // An unrelated event (e.g. `AbilityActivated`) must not route through
-        // the inline resolver.
+    fn classifier_rejects_non_tapped_for_mana_event() {
+        // CR 605.1b criterion (b) + CR 106.12a: only a `TappedForMana` event
+        // (a `{T}`-cost mana ability resolving) qualifies. An unrelated event
+        // (e.g. `AbilityActivated`) must not route through the inline resolver.
         let ability = mana_producing_resolved();
         let ev = GameEvent::AbilityActivated {
             source_id: ObjectId(1),
@@ -3428,7 +3486,10 @@ mod tests {
         // inline-safe.
         let mut head = mana_producing_resolved();
         head.sub_ability = Some(Box::new(mana_producing_resolved()));
-        assert!(is_triggered_mana_ability(&head, Some(&mana_added_event())));
+        assert!(is_triggered_mana_ability(
+            &head,
+            Some(&tapped_for_mana_event())
+        ));
     }
 
     #[test]
@@ -3439,14 +3500,20 @@ mod tests {
         // non-mana effect without giving players priority.
         let mut head = mana_producing_resolved();
         head.sub_ability = Some(Box::new(draw_resolved()));
-        assert!(!is_triggered_mana_ability(&head, Some(&mana_added_event())));
+        assert!(!is_triggered_mana_ability(
+            &head,
+            Some(&tapped_for_mana_event())
+        ));
     }
 
     #[test]
     fn classifier_rejects_chain_without_any_mana_effect() {
         let mut head = draw_resolved();
         head.sub_ability = Some(Box::new(draw_resolved()));
-        assert!(!is_triggered_mana_ability(&head, Some(&mana_added_event())));
+        assert!(!is_triggered_mana_ability(
+            &head,
+            Some(&tapped_for_mana_event())
+        ));
     }
 
     #[test]
@@ -3457,7 +3524,10 @@ mod tests {
         sub.multi_target = Some(MultiTargetSpec::fixed(1, 1));
         let mut head = mana_producing_resolved();
         head.sub_ability = Some(Box::new(sub));
-        assert!(!is_triggered_mana_ability(&head, Some(&mana_added_event())));
+        assert!(!is_triggered_mana_ability(
+            &head,
+            Some(&tapped_for_mana_event())
+        ));
     }
 
     #[test]
@@ -3470,7 +3540,10 @@ mod tests {
         sub.targets = vec![crate::types::ability::TargetRef::Object(ObjectId(99))];
         let mut head = mana_producing_resolved();
         head.sub_ability = Some(Box::new(sub));
-        assert!(!is_triggered_mana_ability(&head, Some(&mana_added_event())));
+        assert!(!is_triggered_mana_ability(
+            &head,
+            Some(&tapped_for_mana_event())
+        ));
     }
 
     #[test]
@@ -3482,7 +3555,10 @@ mod tests {
         // on the draw.
         let mut head = mana_producing_resolved();
         head.else_ability = Some(Box::new(draw_resolved()));
-        assert!(!is_triggered_mana_ability(&head, Some(&mana_added_event())));
+        assert!(!is_triggered_mana_ability(
+            &head,
+            Some(&tapped_for_mana_event())
+        ));
     }
 
     #[test]
@@ -3493,7 +3569,10 @@ mod tests {
         else_branch.targets = vec![crate::types::ability::TargetRef::Object(ObjectId(7))];
         let mut head = mana_producing_resolved();
         head.else_ability = Some(Box::new(else_branch));
-        assert!(!is_triggered_mana_ability(&head, Some(&mana_added_event())));
+        assert!(!is_triggered_mana_ability(
+            &head,
+            Some(&tapped_for_mana_event())
+        ));
     }
 
     #[test]
@@ -3511,10 +3590,10 @@ mod tests {
             ObjectId(77),
             PlayerId(0),
         );
-        let event = GameEvent::ManaAdded {
+        let event = GameEvent::TappedForMana {
             player_id: PlayerId(0),
-            mana_type: ManaType::Red,
             source_id: ObjectId(1),
+            produced: vec![ManaType::Red],
             tap_state: crate::types::events::ManaTapState::FromTap,
         };
         let mut events = Vec::new();
@@ -3573,10 +3652,10 @@ mod tests {
 
         crate::game::triggers::process_triggers(
             &mut state,
-            &[GameEvent::ManaAdded {
+            &[GameEvent::TappedForMana {
                 player_id: PlayerId(1),
-                mana_type: ManaType::Red,
                 source_id: land,
+                produced: vec![ManaType::Red],
                 tap_state: crate::types::events::ManaTapState::FromTap,
             }],
         );
@@ -3611,7 +3690,8 @@ mod tests {
             "Vorinclex, Voice of Hunger".to_string(),
             Zone::Battlefield,
         );
-        let duration = Duration::UntilNextUntapStepOf {
+        let duration = Duration::UntilNextStepOf {
+            step: Phase::Untap,
             player: PlayerScope::Controller,
         };
         state
@@ -3645,10 +3725,10 @@ mod tests {
 
         crate::game::triggers::process_triggers(
             &mut state,
-            &[GameEvent::ManaAdded {
+            &[GameEvent::TappedForMana {
                 player_id: PlayerId(1),
-                mana_type: ManaType::Green,
                 source_id: land,
+                produced: vec![ManaType::Green],
                 tap_state: crate::types::events::ManaTapState::FromTap,
             }],
         );
@@ -4540,6 +4620,7 @@ mod tests {
                 },
             },
             contribution: ManaContribution::Base,
+            fixed_alternative: None,
         });
         Arc::make_mut(&mut state.objects.get_mut(&nykthos).unwrap().abilities)
             .push(ability.clone());
@@ -4560,6 +4641,459 @@ mod tests {
         .unwrap();
 
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 2);
+    }
+
+    /// Issue #460 + CR 106.12a: Vorinclex's `TapsForMana` trigger must fire
+    /// **once per mana-ability resolution**, not once per mana unit. Activating
+    /// Nykthos for 9 green (devotion = 9) plus a single Vorinclex fire = 10
+    /// green total. Pre-fix the per-`ManaAdded` trigger scan fired Vorinclex 9
+    /// times → 18. Drives the real action pipeline (ActivateAbility → pay {2}
+    /// from pool → ChooseManaColor → Green).
+    #[test]
+    fn nykthos_with_vorinclex_produces_exactly_ten_green() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        state.turn_number = 2;
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        state.active_player = player;
+        state.priority_player = player;
+        state.waiting_for = WaitingFor::Priority { player };
+
+        // Nykthos: {2}{T}, choose a color, add mana equal to devotion to it.
+        let nykthos = create_object(
+            &mut state,
+            CardId(8200),
+            player,
+            "Nykthos, Shrine to Nyx".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&nykthos)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let nykthos_ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::ChosenColor {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::Devotion {
+                            colors: DevotionColors::ChosenColor,
+                        },
+                    },
+                    contribution: ManaContribution::Base,
+                    fixed_alternative: None,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![],
+                        generic: 2,
+                    },
+                },
+                AbilityCost::Tap,
+            ],
+        });
+        Arc::make_mut(&mut state.objects.get_mut(&nykthos).unwrap().abilities)
+            .push(nykthos_ability);
+
+        // Vorinclex: whenever a land you control is tapped for mana, add one
+        // mana of any type that land produced. Two green pips ({G}{G}).
+        let vorinclex = create_object(
+            &mut state,
+            CardId(8201),
+            player,
+            "Vorinclex, Voice of Hunger".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&vorinclex).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Green, ManaCostShard::Green],
+                generic: 5,
+            };
+            obj.trigger_definitions.push(
+                crate::types::ability::TriggerDefinition::new(TriggerMode::TapsForMana)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Mana {
+                            produced: ManaProduction::TriggerEventManaType,
+                            restrictions: vec![],
+                            grants: vec![],
+                            expiry: None,
+                            target: None,
+                        },
+                    ))
+                    .valid_card(TargetFilter::Typed(
+                        TypedFilter::land().controller(ControllerRef::You),
+                    ))
+                    .valid_target(TargetFilter::Controller),
+            );
+        }
+
+        // Seven more single-green-pip permanents → devotion to green = 9.
+        for i in 0..7 {
+            let pip = create_object(
+                &mut state,
+                CardId(8300 + i),
+                player,
+                format!("Green Pip {i}"),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&pip).unwrap().mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 0,
+            };
+        }
+
+        // Seed the pool with {2} so Nykthos's generic cost is paid without
+        // tapping any other land (keeps the test focused on Nykthos's tap).
+        seed_pool_with(&mut state, player, ManaType::Colorless, 2);
+
+        let result = crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ActivateAbility {
+                source_id: nykthos,
+                ability_index: 0,
+            },
+        )
+        .expect("Nykthos's {2}{T} ability should activate");
+        assert!(
+            matches!(result.waiting_for, WaitingFor::ChooseManaColor { .. }),
+            "expected ChooseManaColor, got {:?}",
+            result.waiting_for
+        );
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ChooseManaColor {
+                choice: ManaChoice::SingleColor(ManaType::Green),
+            },
+        )
+        .expect("color choice should resolve");
+
+        // 9 green from Nykthos (devotion) + 1 from a single Vorinclex fire = 10.
+        // Pre-fix: Vorinclex fired once per `ManaAdded` (9×) → 18.
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Green),
+            10,
+            "Nykthos 9 + Vorinclex 1 = 10 green (NOT 18 from per-unit firing)"
+        );
+        assert_eq!(state.players[0].mana_pool.total(), 10);
+    }
+
+    /// Regression: a 1-mana `{T}` producer with Vorinclex out yields exactly
+    /// 2 — proving the `TapsForMana` trigger fires exactly once per resolution.
+    #[test]
+    fn one_mana_producer_with_vorinclex_yields_exactly_two() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        state.turn_number = 2;
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        state.active_player = player;
+        state.priority_player = player;
+        state.waiting_for = WaitingFor::Priority { player };
+
+        let forest = create_object(
+            &mut state,
+            CardId(8400),
+            player,
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&forest)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        Arc::make_mut(&mut state.objects.get_mut(&forest).unwrap().abilities).push(
+            make_mana_ability(ManaProduction::Fixed {
+                colors: vec![ManaColor::Green],
+                contribution: ManaContribution::Base,
+            }),
+        );
+
+        let vorinclex = create_object(
+            &mut state,
+            CardId(8401),
+            player,
+            "Vorinclex, Voice of Hunger".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&vorinclex)
+            .unwrap()
+            .trigger_definitions
+            .push(
+                crate::types::ability::TriggerDefinition::new(TriggerMode::TapsForMana)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Mana {
+                            produced: ManaProduction::TriggerEventManaType,
+                            restrictions: vec![],
+                            grants: vec![],
+                            expiry: None,
+                            target: None,
+                        },
+                    ))
+                    .valid_card(TargetFilter::Typed(
+                        TypedFilter::land().controller(ControllerRef::You),
+                    ))
+                    .valid_target(TargetFilter::Controller),
+            );
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ActivateAbility {
+                source_id: forest,
+                ability_index: 0,
+            },
+        )
+        .expect("Forest's {T} ability should activate");
+
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Green),
+            2,
+            "1 base + 1 Vorinclex = 2 (single fire on a 1-mana producer)"
+        );
+    }
+
+    /// Issue #465 — true pipeline regression for the `valid_card` controller
+    /// scope on "Whenever you tap a land for mana" triggers. Drives `apply` /
+    /// `apply_as_current` (`ActivateAbility` → mana resolution → trigger
+    /// matching), not hand-built state.
+    ///
+    /// CR 603.2 + CR 106.12a: the trigger event must match a land *you* tapped,
+    /// so the source filter (`valid_card`) carries `ControllerRef::You`.
+    ///
+    /// This test deliberately leaves `valid_target = None` so `valid_card` is
+    /// the *sole* gate — isolating the issue #465 fix. (The real card also
+    /// parses `valid_target = Controller`; that field independently gates
+    /// `valid_player_matches`, so including it would shadow `valid_card` and
+    /// the mutation-check below would not discriminate. `valid_target` does NOT
+    /// route the `TriggerEventManaType` mana — `effects/mana.rs` routes that to
+    /// the `TappedForMana` event's `player_id` directly — so omitting it does
+    /// not change the positive-case mana total.)
+    ///
+    /// Mutation-check: replacing `valid_card`'s `TypedFilter::land()
+    /// .controller(ControllerRef::You)` with the pre-fix unscoped
+    /// `TypedFilter::land()` makes the negative assertion FAIL — the opponent's
+    /// tap fires Vorinclex's triggered mana ability, adding a second green to
+    /// the opponent's pool (1 base + 1 Vorinclex = 2 instead of 1). Verified.
+    #[test]
+    fn vorinclex_you_tap_trigger_ignores_opponent_land_tap() {
+        let mut state = GameState::new_two_player(42);
+        let me = PlayerId(0);
+        let opp = PlayerId(1);
+        state.turn_number = 2;
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        state.active_player = me;
+        state.priority_player = me;
+        state.waiting_for = WaitingFor::Priority { player: me };
+
+        // Vorinclex under PlayerId(0)'s control, with the controller-scoped
+        // `valid_card` produced by the issue #465 parser fix. `valid_target` is
+        // intentionally omitted (see the test's doc comment) so `valid_card` is
+        // the sole gate.
+        let vorinclex = create_object(
+            &mut state,
+            CardId(8600),
+            me,
+            "Vorinclex, Voice of Hunger".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&vorinclex)
+            .unwrap()
+            .trigger_definitions
+            .push(
+                crate::types::ability::TriggerDefinition::new(TriggerMode::TapsForMana)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Mana {
+                            produced: ManaProduction::TriggerEventManaType,
+                            restrictions: vec![],
+                            grants: vec![],
+                            expiry: None,
+                            target: None,
+                        },
+                    ))
+                    .valid_card(TargetFilter::Typed(
+                        TypedFilter::land().controller(ControllerRef::You),
+                    )),
+            );
+
+        // A Forest controlled by the opponent.
+        let opp_forest = create_object(
+            &mut state,
+            CardId(8601),
+            opp,
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&opp_forest)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        Arc::make_mut(&mut state.objects.get_mut(&opp_forest).unwrap().abilities).push(
+            make_mana_ability(ManaProduction::Fixed {
+                colors: vec![ManaColor::Green],
+                contribution: ManaContribution::Base,
+            }),
+        );
+
+        // A Forest controlled by Vorinclex's controller.
+        let my_forest = create_object(
+            &mut state,
+            CardId(8602),
+            me,
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&my_forest)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        Arc::make_mut(&mut state.objects.get_mut(&my_forest).unwrap().abilities).push(
+            make_mana_ability(ManaProduction::Fixed {
+                colors: vec![ManaColor::Green],
+                contribution: ManaContribution::Base,
+            }),
+        );
+
+        // Negative case: opponent taps their Forest for mana. Vorinclex's
+        // "you tap" trigger must NOT fire. Vorinclex's trigger is a triggered
+        // mana ability (Effect::Mana) — when it fires, `TriggerEventManaType`
+        // mana is added to the `TappedForMana` event's `player_id`, i.e. the
+        // *tapping* player (CR 106.3 + CR 109.5). So the discriminating signal
+        // is the OPPONENT's green pool: pre-fix (unscoped `valid_card`) the
+        // opponent would receive 1 base + 1 from Vorinclex = 2; post-fix the
+        // trigger does not fire, so the opponent receives 1 base only.
+        // CR 605.3a: a mana ability may be activated whenever a player has
+        // priority; hand priority to the opponent so they may activate.
+        state.priority_player = opp;
+        state.waiting_for = WaitingFor::Priority { player: opp };
+        crate::game::engine::apply(
+            &mut state,
+            opp,
+            crate::types::actions::GameAction::ActivateAbility {
+                source_id: opp_forest,
+                ability_index: 0,
+            },
+        )
+        .expect("opponent's Forest {T} ability should activate");
+        assert_eq!(
+            state.players[1].mana_pool.count_color(ManaType::Green),
+            1,
+            "opponent tapping a land yields only its 1 base green — Vorinclex's \
+             'you tap' trigger must not fire on an opponent's land tap"
+        );
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Green),
+            0,
+            "Vorinclex's controller gains no mana from an opponent's land tap"
+        );
+
+        // Positive case: Vorinclex's controller taps their own Forest.
+        // 1 base green + 1 from Vorinclex's trigger = 2.
+        state.priority_player = me;
+        state.waiting_for = WaitingFor::Priority { player: me };
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ActivateAbility {
+                source_id: my_forest,
+                ability_index: 0,
+            },
+        )
+        .expect("controller's Forest {T} ability should activate");
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Green),
+            2,
+            "1 base + 1 Vorinclex = 2 when the controller taps their own land"
+        );
+    }
+
+    /// Regression: effect-produced (non-tap) mana does not fire Vorinclex.
+    /// CR 106.12a — only a `{T}`-cost mana ability is "tapped for mana"; an
+    /// `Effect::Mana` resolution from a spell/non-mana ability emits no
+    /// `TappedForMana` event.
+    #[test]
+    fn effect_produced_mana_does_not_fire_vorinclex() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+
+        let vorinclex = create_object(
+            &mut state,
+            CardId(8500),
+            player,
+            "Vorinclex, Voice of Hunger".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&vorinclex)
+            .unwrap()
+            .trigger_definitions
+            .push(
+                crate::types::ability::TriggerDefinition::new(TriggerMode::TapsForMana)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Mana {
+                            produced: ManaProduction::TriggerEventManaType,
+                            restrictions: vec![],
+                            grants: vec![],
+                            expiry: None,
+                            target: None,
+                        },
+                    ))
+                    .valid_card(TargetFilter::Any)
+                    .valid_target(TargetFilter::Controller),
+            );
+
+        // Effect-produced mana: `produce_mana` with `tapped_for_mana = false`.
+        let source = create_object(
+            &mut state,
+            CardId(8501),
+            player,
+            "Mana Spell".to_string(),
+            Zone::Battlefield,
+        );
+        let mut events = Vec::new();
+        mana_payment::produce_mana(
+            &mut state,
+            source,
+            ManaType::Green,
+            player,
+            false,
+            &mut events,
+        );
+        crate::game::triggers::process_triggers(&mut state, &events);
+
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Green),
+            1,
+            "effect-produced mana adds 1, Vorinclex does not fire (no TappedForMana)"
+        );
     }
 
     #[test]

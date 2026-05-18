@@ -417,7 +417,7 @@ fn rewrite_bound_x_in_ability_definition(
 #[allow(clippy::too_many_lines)]
 fn rewrite_bound_x_in_effect(effect: &mut Effect, binding: &QuantityExpr) -> usize {
     match effect {
-        Effect::IncreaseSpeed { amount, .. }
+        Effect::ChangeSpeed { amount, .. }
         | Effect::DealDamage { amount, .. }
         | Effect::Draw { count: amount, .. }
         | Effect::GainLife { amount, .. }
@@ -3473,7 +3473,8 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 }]);
             Effect::GenericEffect {
                 static_abilities: vec![static_def],
-                duration: Some(Duration::UntilNextUntapStepOf {
+                duration: Some(Duration::UntilNextStepOf {
+                    step: Phase::Untap,
                     player: PlayerScope::Controller,
                 }),
                 target: Some(affected),
@@ -3493,7 +3494,8 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 }]);
             Effect::GenericEffect {
                 static_abilities: vec![static_def],
-                duration: Some(Duration::UntilNextUntapStepOf {
+                duration: Some(Duration::UntilNextStepOf {
+                    step: Phase::Untap,
                     player: PlayerScope::Controller,
                 }),
                 target: Some(affected),

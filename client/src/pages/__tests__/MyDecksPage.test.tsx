@@ -17,6 +17,14 @@ vi.mock("../../services/deckCompatibility", () => ({
   evaluateDeckCompatibilityBatch: vi.fn().mockResolvedValue({}),
 }));
 
+vi.mock("../../hooks/useBracketEstimate", () => ({
+  useBracketEstimate: () => ({ estimate: null, loading: false, unsupported: false }),
+}));
+
+vi.mock("../../adapter/wasm-adapter", () => ({
+  getSharedAdapter: () => ({}),
+}));
+
 function LocationProbe() {
   const location = useLocation();
   return <div data-testid="location">{location.pathname}{location.search}</div>;

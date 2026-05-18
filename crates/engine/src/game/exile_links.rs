@@ -1,0 +1,214 @@
+use serde::Serialize;
+
+use crate::types::ability::ResolvedAbility;
+use crate::types::game_state::{ExileLink, ExileLinkKind, GameState};
+use crate::types::identifiers::ObjectId;
+
+const LINKED_EXILE_CONSUMER_TAGS: &[&str] = &[
+    "ExiledBySource",
+    "CardsExiledBySource",
+    "OwnersOfCardsExiledBySource",
+    "ChoiceAmongExiledColors",
+];
+
+/// CR 607.1 / CR 607.2a + CR 406.6: A source only needs ordinary
+/// `TrackedBySource` links when a typed ability on that source, or the
+/// remaining resolving chain, can later refer to cards exiled with that source.
+///
+/// This intentionally preserves the engine's current source-level link model:
+/// `ExileLink` is keyed by `source_id`, not by a printed ability identity.
+/// That is less precise than CR 607's pairwise ability links, but avoids
+/// displaying unrelated exile piles such as Bojuka Bog while preserving all
+/// currently typed linked-exile consumers.
+pub(crate) fn should_track_exiled_by_source(
+    state: &GameState,
+    source_id: ObjectId,
+    ability: &ResolvedAbility,
+) -> bool {
+    ability_contains_linked_exile_consumer(ability)
+        || state
+            .objects
+            .get(&source_id)
+            .is_some_and(source_contains_linked_exile_consumer)
+}
+
+pub(crate) fn push_tracked_by_source(
+    state: &mut GameState,
+    exiled_id: ObjectId,
+    source_id: ObjectId,
+) {
+    if state
+        .exile_links
+        .iter()
+        .any(|link| link.exiled_id == exiled_id && link.source_id == source_id)
+    {
+        return;
+    }
+    state.exile_links.push(ExileLink {
+        exiled_id,
+        source_id,
+        kind: ExileLinkKind::TrackedBySource,
+    });
+}
+
+pub(crate) fn ability_contains_linked_exile_consumer(ability: &ResolvedAbility) -> bool {
+    contains_linked_exile_consumer(ability)
+}
+
+fn source_contains_linked_exile_consumer(obj: &crate::game::GameObject) -> bool {
+    obj.abilities.iter().any(contains_linked_exile_consumer)
+        || obj
+            .trigger_definitions
+            .iter_all()
+            .any(contains_linked_exile_consumer)
+        || obj
+            .replacement_definitions
+            .iter_all()
+            .any(contains_linked_exile_consumer)
+        || obj
+            .static_definitions
+            .iter_all()
+            .any(contains_linked_exile_consumer)
+        || obj
+            .base_abilities
+            .iter()
+            .any(contains_linked_exile_consumer)
+        || obj
+            .base_trigger_definitions
+            .iter()
+            .any(contains_linked_exile_consumer)
+        || obj
+            .base_replacement_definitions
+            .iter()
+            .any(contains_linked_exile_consumer)
+        || obj
+            .base_static_definitions
+            .iter()
+            .any(contains_linked_exile_consumer)
+}
+
+fn contains_linked_exile_consumer<T: Serialize>(value: &T) -> bool {
+    serde_json::to_value(value)
+        .ok()
+        .is_some_and(|json| contains_linked_exile_consumer_value(&json))
+}
+
+fn contains_linked_exile_consumer_value(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(s) => LINKED_EXILE_CONSUMER_TAGS.contains(&s.as_str()),
+        serde_json::Value::Array(values) => values.iter().any(contains_linked_exile_consumer_value),
+        serde_json::Value::Object(map) => map.iter().any(|(key, value)| {
+            LINKED_EXILE_CONSUMER_TAGS.contains(&key.as_str())
+                || contains_linked_exile_consumer_value(value)
+        }),
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, ManaProduction, PlayerFilter, QuantityExpr,
+        QuantityRef, TargetFilter,
+    };
+    use crate::types::identifiers::ObjectId;
+    use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
+
+    #[test]
+    fn plain_exile_effect_has_no_linked_exile_consumer() {
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Exile,
+                target: TargetFilter::Player,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+
+        assert!(!contains_linked_exile_consumer(&ability));
+    }
+
+    #[test]
+    fn target_filter_or_branch_counts_as_linked_exile_consumer() {
+        let ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::Or {
+                    filters: vec![TargetFilter::ExiledBySource, TargetFilter::Any],
+                },
+                without_paying_mana_cost: true,
+                mode: crate::types::ability::CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+
+        assert!(contains_linked_exile_consumer(&ability));
+    }
+
+    #[test]
+    fn player_scope_counts_as_linked_exile_consumer() {
+        let mut ability = ResolvedAbility::new(
+            Effect::Token {
+                name: "Illusion".to_string(),
+                power: crate::types::ability::PtValue::Quantity(QuantityExpr::Ref {
+                    qty: QuantityRef::CardsExiledBySource,
+                }),
+                toughness: crate::types::ability::PtValue::Quantity(QuantityExpr::Fixed {
+                    value: 1,
+                }),
+                types: vec![],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::OwnersOfCardsExiledBySource);
+
+        assert!(contains_linked_exile_consumer(&ability));
+    }
+
+    #[test]
+    fn mana_production_counts_as_linked_exile_consumer() {
+        let ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::ChoiceAmongExiledColors {
+                    source: crate::types::ability::LinkedExileScope::ThisObject,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        );
+
+        assert!(contains_linked_exile_consumer(&ability));
+    }
+}

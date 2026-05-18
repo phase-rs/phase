@@ -63,6 +63,7 @@ pub(crate) fn deliver_replaced_zone_change(
     event: ProposedEvent,
     source_id: Option<ObjectId>,
     duration: Option<&Duration>,
+    track_exiled_by_source: bool,
     events: &mut Vec<GameEvent>,
 ) {
     if let ProposedEvent::ZoneChange {
@@ -162,7 +163,8 @@ pub(crate) fn deliver_replaced_zone_change(
                     Some(Duration::UntilHostLeavesPlay) => {
                         ExileLinkKind::UntilSourceLeaves { return_zone: from }
                     }
-                    _ => ExileLinkKind::TrackedBySource,
+                    _ if track_exiled_by_source => ExileLinkKind::TrackedBySource,
+                    _ => return,
                 };
                 state.exile_links.push(ExileLink {
                     exiled_id: object_id,
@@ -191,6 +193,7 @@ pub(crate) fn execute_zone_move(
     effect_enter_tapped: bool,
     controller_override: Option<PlayerId>,
     effect_enter_with_counters: &[(CounterType, u32)],
+    track_exiled_by_source: bool,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveResult {
     let mut proposed = ProposedEvent::zone_change(obj_id, from_zone, dest_zone, Some(source_id));
@@ -280,7 +283,14 @@ pub(crate) fn execute_zone_move(
 
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
-            deliver_replaced_zone_change(state, event, Some(source_id), duration, events);
+            deliver_replaced_zone_change(
+                state,
+                event,
+                Some(source_id),
+                duration,
+                track_exiled_by_source,
+                events,
+            );
             ZoneMoveResult::Done
         }
         ReplacementResult::Prevented => ZoneMoveResult::Done,
@@ -371,6 +381,8 @@ pub fn resolve(
     }
     let filter_controller =
         crate::game::effects::controller_for_relative_filter(ability, target_filter);
+    let track_exiled_by_source =
+        crate::game::exile_links::should_track_exiled_by_source(state, ability.source_id, ability);
 
     // CR 608.2c + 603.10a: Resolve the subject across self-ref → event-context →
     // chosen-targets, the unified 3-tier dispatch shared by zone-change-style
@@ -482,6 +494,7 @@ pub fn resolve(
                 effect_enter_tapped,
                 ctrl_override,
                 &effect_enter_with_counters,
+                track_exiled_by_source,
                 events,
             ) {
                 ZoneMoveResult::Done => {
@@ -531,6 +544,7 @@ pub fn resolve(
                 effect_enter_tapped,
                 ctrl_override,
                 &effect_enter_with_counters,
+                track_exiled_by_source,
                 events,
             ) {
                 ZoneMoveResult::Done => {
@@ -578,6 +592,7 @@ pub fn resolve(
             under_your_control,
             enters_attacking: effect_enters_attacking,
             owner_library,
+            track_exiled_by_source,
         };
         // EffectResolved is emitted by the EffectZoneChoice handler after the player chooses
         // (matching the DiscardChoice pattern — single authority for the event).
@@ -631,6 +646,7 @@ pub fn resolve(
             effect_enter_tapped,
             ctrl_override,
             &effect_enter_with_counters,
+            track_exiled_by_source,
             events,
         ) {
             ZoneMoveResult::Done => {
@@ -731,6 +747,8 @@ pub fn resolve_all(
 
     let filter_controller =
         crate::game::effects::controller_for_relative_filter(ability, &effective_filter);
+    let track_exiled_by_source =
+        crate::game::exile_links::should_track_exiled_by_source(state, ability.source_id, ability);
 
     // Collect matching object IDs from the origin zone.
     // Explicit filter-controller override (e.g., "creature that player controls")
@@ -814,6 +832,7 @@ pub fn resolve_all(
             enter_tapped,
             None,
             &[],
+            track_exiled_by_source,
             events,
         ) {
             ZoneMoveResult::Done => {
@@ -858,7 +877,10 @@ pub fn resolve_all(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TargetRef};
+    use crate::types::ability::{
+        ControllerRef, FilterProp, PlayerFilter, PtValue, QuantityExpr, QuantityRef, TargetFilter,
+        TargetRef,
+    };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::ZoneChangeRecord;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -1100,7 +1122,7 @@ mod tests {
     }
 
     #[test]
-    fn exile_without_until_host_leaves_tracks_by_source() {
+    fn exile_without_linked_exile_consumer_does_not_track_by_source() {
         let mut state = GameState::new_two_player(42);
         let target_id = create_object(
             &mut state,
@@ -1126,6 +1148,67 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.exile.contains(&target_id));
+        assert!(state.exile_links.is_empty());
+    }
+
+    #[test]
+    fn exile_with_linked_exile_consumer_tracks_by_source() {
+        let mut state = GameState::new_two_player(42);
+        let target_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Exiled Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![TargetRef::Object(target_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::Token {
+                name: "Illusion".to_string(),
+                power: PtValue::Quantity(QuantityExpr::Ref {
+                    qty: QuantityRef::CardsExiledBySource,
+                }),
+                toughness: PtValue::Quantity(QuantityExpr::Ref {
+                    qty: QuantityRef::CardsExiledBySource,
+                }),
+                types: vec!["Creature".to_string(), "Illusion".to_string()],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )));
+        ability.player_scope = Some(PlayerFilter::OwnersOfCardsExiledBySource);
         let mut events = Vec::new();
 
         resolve(&mut state, &ability, &mut events).unwrap();

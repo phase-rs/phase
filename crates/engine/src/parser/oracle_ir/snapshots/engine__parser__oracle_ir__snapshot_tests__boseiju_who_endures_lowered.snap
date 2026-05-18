@@ -1,5 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 349
 expression: "&lowered"
 ---
 {
@@ -130,7 +131,7 @@ expression: "&lowered"
           },
           "reveal": false,
           "target_player": {
-            "type": "Player"
+            "type": "ParentTargetController"
           }
         },
         "cost": null,
@@ -155,7 +156,7 @@ expression: "&lowered"
             "effect": {
               "type": "Shuffle",
               "target": {
-                "type": "Player"
+                "type": "ParentTargetController"
               }
             },
             "cost": null,
@@ -185,7 +186,8 @@ expression: "&lowered"
         "condition": null,
         "optional_targeting": false,
         "optional": true,
-        "forward_result": false
+        "forward_result": false,
+        "sub_link": "SequentialSibling"
       },
       "duration": null,
       "description": "Channel — {1}{G}, Discard this card: Destroy target artifact, enchantment, or nonbasic land an opponent controls. That player may search their library for a land card with a basic land type, put it onto the battlefield, then shuffle. This ability costs {1} less to activate for each legendary creature you control.",

@@ -644,6 +644,22 @@ pub struct PendingRepeatIteration {
     pub total_iterations: usize,
 }
 
+/// CR 608.2c + CR 107.1c: Resume state for a "repeat this process" loop
+/// (`RepeatContinuation`) paused when an iteration's process entered an
+/// interactive `WaitingFor` state.
+///
+/// The loop in `resolve_ability_chain` cannot set the repeat prompt while a
+/// player choice from the iteration is still unresolved. It stashes this
+/// struct and `drain_pending_continuation` re-checks it once the choice (and
+/// any chained continuation) drains.
+///
+/// - `ability` — the loop ability, retaining `repeat_until` so the drain knows
+///   which continuation mode to apply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingRepeatUntil {
+    pub ability: Box<crate::types::ability::ResolvedAbility>,
+}
+
 /// CR 701.55d: Remaining players queued to face the same resolution-time
 /// branch choice after the current chosen branch finishes resolving.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1458,6 +1474,8 @@ pub enum WaitingFor {
         enters_attacking: bool,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         owner_library: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        track_exiled_by_source: bool,
     },
     /// Player chooses which drawn-this-turn hand cards to put on top of their
     /// library. Each unchosen required card is kept by paying life.
@@ -1539,6 +1557,11 @@ pub enum WaitingFor {
     OptionalCostChoice {
         player: PlayerId,
         cost: AdditionalCost,
+        /// CR 702.33c/d: How many times this spell has already been kicked. Lets the
+        /// frontend present a kick-count-aware modal for repeatable multikicker re-prompts.
+        /// Zero for the first prompt and for non-kicker optional costs.
+        #[serde(default)]
+        times_kicked: u32,
         pending_cast: Box<PendingCast>,
     },
     /// CR 601.2b: Defiler cycle — player may pay life to reduce mana cost of a colored
@@ -1974,6 +1997,30 @@ pub enum WaitingFor {
         hit_card: ObjectId,
         /// Cards exiled as misses (go to bottom in random order).
         exiled_misses: Vec<ObjectId>,
+    },
+    /// CR 701.20a + CR 608.2c: "You may put that card onto the battlefield" — the
+    /// controller chooses the kept card's destination after `RevealUntil` finds a
+    /// hit. Accept → `accept_zone`; decline → `decline_zone`. The misses (and, on
+    /// decline, the hit card when its zone is the rest pile) are moved by the
+    /// choice handler so the random-order shuffle includes the declined card.
+    RevealUntilKeptChoice {
+        player: PlayerId,
+        hit_card: ObjectId,
+        accept_zone: Zone,
+        decline_zone: Zone,
+        enter_tapped: bool,
+        revealed_misses: Vec<ObjectId>,
+        rest_destination: Zone,
+    },
+    /// CR 107.1c + CR 608.2c: After one iteration of a "you may repeat this
+    /// process any number of times" effect resolves, the controller chooses
+    /// whether to run the process again. Answered by
+    /// `GameAction::DecideOptionalEffect { accept }`.
+    RepeatDecision {
+        player: PlayerId,
+        /// The ability chain to re-resolve on accept (one further iteration).
+        /// `repeat_until` is retained so the next iteration re-prompts.
+        ability: Box<crate::types::ability::ResolvedAbility>,
     },
     /// CR 702.85a: Player chooses to cast the cascaded card without paying its
     /// mana cost or decline. Unlike `DiscoverChoice`, the declined card goes to
@@ -2413,6 +2460,8 @@ impl WaitingFor {
             | WaitingFor::UnlessPayment { player, .. }
             | WaitingFor::UnlessPaymentChooseCost { player, .. }
             | WaitingFor::DiscoverChoice { player, .. }
+            | WaitingFor::RevealUntilKeptChoice { player, .. }
+            | WaitingFor::RepeatDecision { player, .. }
             | WaitingFor::CascadeChoice { player, .. }
             | WaitingFor::TopOrBottomChoice { player, .. }
             | WaitingFor::ParadigmCastOffer { player, .. }
@@ -3209,6 +3258,13 @@ pub struct GameState {
         with = "tuple_key_map"
     )]
     pub activated_abilities_this_game: HashMap<(ObjectId, usize), u32>,
+    /// CR 602.5b + CR 702.122: Vehicles whose crew ability has been activated this
+    /// turn. Populated on a successful crew announcement; read to enforce an
+    /// "Activate only once each turn" crew restriction. Crew is not an
+    /// `abilities[]` entry, so it cannot use `activated_abilities_this_turn`
+    /// (keyed by `(source_id, ability_index)`). Cleared at turn start.
+    #[serde(default)]
+    pub crew_activated_this_turn: HashSet<ObjectId>,
     /// CR 603.4: Per-ability per-turn resolution counter.
     /// Keyed by `(source_id, ability_index)` — identifies a specific printed
     /// ability on a specific source object. Incremented at the top of
@@ -3398,6 +3454,14 @@ pub struct GameState {
     /// iteration begins. See [`PendingRepeatIteration`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_repeat_iteration: Option<PendingRepeatIteration>,
+
+    /// CR 608.2c + CR 107.1c: Pending "repeat this process" loop paused because
+    /// an iteration's process entered an interactive `WaitingFor` state.
+    /// Drained by `drain_pending_continuation` after `pending_continuation`,
+    /// so the iteration's player choice fully resolves before the loop decides
+    /// whether to run another pass. See [`PendingRepeatUntil`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_repeat_until: Option<PendingRepeatUntil>,
 
     /// CR 701.55d: Pending continuation of a multi-player ChooseOneOf after a
     /// selected branch has finished resolving, including any nested choices.
@@ -3888,6 +3952,7 @@ impl GameState {
             triggers_fired_this_game: HashSet::new(),
             activated_abilities_this_turn: HashMap::new(),
             activated_abilities_this_game: HashMap::new(),
+            crew_activated_this_turn: HashSet::new(),
             ability_resolutions_this_turn: HashMap::new(),
             graveyard_cast_permissions_used: HashSet::new(),
             graveyard_cast_permissions_used_per_type: HashSet::new(),
@@ -3927,6 +3992,7 @@ impl GameState {
             revealed_cards: HashSet::new(),
             pending_continuation: None,
             pending_repeat_iteration: None,
+            pending_repeat_until: None,
             pending_choose_one_of: None,
             pending_optional_effect: None,
             pending_optional_trigger_event: None,
@@ -4153,6 +4219,7 @@ impl PartialEq for GameState {
             && self.triggers_fired_this_game == other.triggers_fired_this_game
             && self.activated_abilities_this_turn == other.activated_abilities_this_turn
             && self.activated_abilities_this_game == other.activated_abilities_this_game
+            && self.crew_activated_this_turn == other.crew_activated_this_turn
             && self.ability_resolutions_this_turn == other.ability_resolutions_this_turn
             && self.graveyard_cast_permissions_used == other.graveyard_cast_permissions_used
             && self.graveyard_cast_permissions_used_per_type
@@ -4194,6 +4261,7 @@ impl PartialEq for GameState {
             && self.modal_modes_chosen_this_game == other.modal_modes_chosen_this_game
             && self.pending_continuation == other.pending_continuation
             && self.pending_repeat_iteration == other.pending_repeat_iteration
+            && self.pending_repeat_until == other.pending_repeat_until
             && self.pending_choose_one_of == other.pending_choose_one_of
             && self.may_trigger_auto_choices == other.may_trigger_auto_choices
             && self.pending_begin_game_abilities == other.pending_begin_game_abilities
@@ -4477,6 +4545,7 @@ mod tests {
         variants.push(Box::new(WaitingFor::OptionalCostChoice {
             player: PlayerId(0),
             cost: AdditionalCost::Optional(crate::types::ability::AbilityCost::Blight { count: 1 }),
+            times_kicked: 0,
             pending_cast: dummy_pending(),
         }));
         variants.push(Box::new(WaitingFor::AbilityModeChoice {
@@ -4575,6 +4644,7 @@ mod tests {
             under_your_control: false,
             enters_attacking: false,
             owner_library: false,
+            track_exiled_by_source: false,
         }));
         variants.push(Box::new(WaitingFor::DefilerPayment {
             player: PlayerId(0),
@@ -4803,6 +4873,7 @@ mod tests {
             under_your_control: true,
             enters_attacking: false,
             owner_library: false,
+            track_exiled_by_source: false,
         };
         let json = serde_json::to_string(&wf).unwrap();
         let deserialized: WaitingFor = serde_json::from_str(&json).unwrap();

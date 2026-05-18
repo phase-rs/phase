@@ -1,6 +1,17 @@
+---
+name: bug-triage
+description: "Use when triaging Phase Discord bug reports, syncing reports into triage artifacts, creating or updating GitHub issues, tracking bug clusters, or applying the repository's bug-fix review workflow."
+---
+
 # Bug Triage System — Operator Reference
 
 ## Quick Commands
+
+**Working directory — run everything from the repo root** (`/Users/matt/dev/forge.rs`),
+NOT from this skill directory. The triage script lives at `./scripts/sync-bug-reports.ts`
+and every path it reads/writes (`triage/…`, `client/public/card-data.json`) is resolved
+relative to the current working directory. Running from `.claude/skills/bug-triage/`
+fails with `Module not found "scripts/sync-bug-reports.ts"`.
 
 ```bash
 # Full pipeline (fetch new Discord messages → extract → triage → render)
@@ -61,6 +72,23 @@ gh issue close <N> --repo phase-rs/phase --comment "Verified in gameplay. Closin
 gh issue edit <N> --repo phase-rs/phase --remove-label "status:needs-runtime-verify" --add-label "status:verified"
 ```
 
+### Mandatory Pre-Implementation Plan Review Gate — Two Independent Reviewers
+
+Before any code is written for a triage item, the implementation plan must pass **two independent plan-review agents** applying `.claude/commands/review-engine-plan.md`. This gate runs *before* the post-fix gate below — plan review catches design errors (wrong CR section, special-case instead of building-block, missing sibling coverage) when they cost a plan revision instead of a full re-implementation.
+
+How to apply:
+
+```
+# After engine-planner produces a plan:
+#   - Spawn TWO isolated reviewer agents (NOT the planner), in parallel.
+#   - Each applies the /review-engine-plan charter with fresh context.
+#   - A single reviewer is NOT sufficient — two independent reviewers catch
+#     disjoint classes of error (one finds CR mis-cites, the other finds
+#     architecture/parameterization smells).
+```
+
+If either reviewer returns REVISE: the planner revises, then a **targeted re-review** runs on the revised sections only. Repeat until both reviewers are APPROVE. Do NOT start implementation — do not spawn the `engine-implementer` — until the plan is clean. Plans should commit to a building-block fix, carry grep-verified CR cites, and (for runtime bugs) be discriminator-first where practical (write the failing test first; let the failing checkpoint localize the bug).
+
 ### Mandatory Post-Fix Review Gate — Isolated Reviewer Required
 
 Every code fix made during bug triage must pass an **isolated reviewer agent's** application of `.claude/commands/review-impl.md` before the fix is committed, marked fixed, or described as complete.
@@ -92,6 +120,8 @@ If the reviewer flags issues:
 - Send them back to the implementer via `SendMessage` (if still alive) for inline fix in a follow-up commit
 - Re-spawn isolated review on the fixup commit's diff
 - Repeat until the review is clean (typically 1-2 rounds in practice)
+
+**Trivial-fixup carve-out.** A follow-up commit that is provably **doc-comment-only** (or otherwise zero-behavior — e.g. a comment reword, a typo) does NOT need a fresh isolated review round. Verify it by inspection instead: `git show --stat <sha>` plus a grep confirming every changed line is a comment (`git show <sha> -- <file> | grep -E '^[+-]' | grep -vE '^[+-]{3}' | grep -cvE '^[+-]\s*(//|///|$)'` must print `0`). This carve-out applies ONLY to genuinely behavior-free changes; any change touching code, signatures, or tests takes the full review round.
 
 Do NOT transition GitHub issues to `fixed-unreleased`, `needs-runtime-verify`, `verified`, or closed until the isolated review is clean.
 
@@ -165,6 +195,13 @@ The decision rule:
 2. Install the synthesized definition on the relevant `CardFace` / `GameObject` BEFORE driving the engine.
 3. Drive the engine through the entry point — let it produce the observable state.
 4. Assert against state the engine produced. Do NOT manually mutate `obj.counters`, `obj.tapped`, `obj.controller`, etc. to satisfy preconditions the engine should have produced.
+
+**Every test must be proven discriminating (mutation-check).** A test that drives the pipeline can still pass for the wrong reason. Before a fix is considered complete, prove the test would FAIL without the fix: revert the fix (or the relevant arm), confirm the new test fails, then restore. The implementer's brief must require this and the reviewer must confirm it — phrase it as "reverted-fix-discriminating": with the fix reverted the test gets the *old wrong* result and the assertion fires. A test that passes both with and against the fix proves nothing. Run the mutation-check through Tilt's `test-engine` resource, never a direct `cargo test` (target-lock contention).
+
+**Every fix is verified two ways — AST and runtime.** A fix is not complete until it is proven at *both* levels:
+- **Parser AST** — `cargo run --bin oracle-gen -- data --filter "card name"` shows the reported clause lowering to the expected typed AST/IR (no `Unimplemented`, correct subject/controller/target/zone/condition). Required even for runtime bugs — it confirms the fix did not regress the parse.
+- **Runtime** — a discriminating test (above) drives the engine pipeline and observes correct state.
+Both proofs go in the implementer's report and are re-checked by the isolated reviewer.
 
 **Specific anti-patterns to reject in review**:
 
@@ -450,21 +487,28 @@ Before calling any bug fixed, run the mandatory post-fix review gate above. Regr
 
 ## Triage Data Files
 
-| File | Description | Gitignored |
-|------|-------------|------------|
-| `triage/raw/discord-messages.jsonl` | Raw Discord messages (775+) | yes |
-| `triage/report-items.jsonl` | Heuristic-extracted report items | yes |
-| `triage/triage-items.jsonl` | Heuristic triage classifications | yes |
-| `triage/llm-triage-items.jsonl` | LLM (Sonnet) triage — 333 items, best quality | yes |
-| `triage/triage-delta.jsonl` | Triage items from the latest fetch window ONLY — the slice to review each cycle | yes |
-| `triage/coverage-crossref.jsonl` | Cross-reference against parser coverage | yes |
-| `triage/coverage-crossref-summary.md` | Human-readable summary | yes |
-| `triage/p0-verification.md` | Manual spot-check of P0 likely-fixed bugs | yes |
-| `triage/unknown-card-mapping.json` | Card name corrections | yes |
-| `triage/no-card-bugs.md` | Engine/UI bugs not tied to cards | yes |
-| `triage/threads-compact.json` | Compact thread data for LLM agent input | yes |
-| `triage/sync-state.json` | Incremental fetch cursors | yes |
-| `triage/dashboard.md` | Generated dashboard | yes |
+All paths are relative to the **repo root** — the `triage/` directory is created
+on first `fetch` (it does not exist in a fresh clone). The `fetch`/`extract`/`triage`
+commands generate the `.jsonl` files; `triage/llm-triage-items.jsonl`,
+`triage/p0-verification.md`, `triage/unknown-card-mapping.json`, and
+`triage/no-card-bugs.md` are produced by LLM/manual passes, not the script.
+
+| File | Description | Produced by | Gitignored |
+|------|-------------|-------------|------------|
+| `triage/raw/discord-messages.jsonl` | Raw Discord messages (775+) | `fetch` | yes |
+| `triage/report-items.jsonl` | Heuristic-extracted report items | `extract` | yes |
+| `triage/triage-items.jsonl` | Heuristic triage classifications | `triage` | yes |
+| `triage/triage-delta.jsonl` | Triage items from the latest fetch window ONLY — the slice to review each cycle | `triage` / `delta` | yes |
+| `triage/llm-triage-items.jsonl` | LLM (Sonnet) triage — 333 items, best quality | LLM pass | yes |
+| `triage/coverage-crossref.jsonl` | Cross-reference against parser coverage | `crossref` | yes |
+| `triage/coverage-crossref-summary.md` | Human-readable summary | LLM pass | yes |
+| `triage/p0-verification.md` | Manual spot-check of P0 likely-fixed bugs | manual | yes |
+| `triage/unknown-card-mapping.json` | Card name corrections | manual | yes |
+| `triage/no-card-bugs.md` | Engine/UI bugs not tied to cards | manual | yes |
+| `triage/threads-compact.json` | Compact thread data for LLM agent input | `fetch` | yes |
+| `triage/sync-state.json` | Incremental fetch cursors + `published_threads` map | `fetch` / `publish` | yes |
+| `triage/dashboard.md` | Generated dashboard | `render` | yes |
+| `triage/triage-dashboard.md` | Triage-classified dashboard (only when triage data exists) | `render` | yes |
 
 ## Label Taxonomy
 

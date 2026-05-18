@@ -9,6 +9,7 @@ import type {
   SubmitResult,
 } from "./types";
 import { AdapterError, AdapterErrorCode } from "./types";
+import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 
 /**
  * Tauri IPC-backed implementation of EngineAdapter.
@@ -134,6 +135,18 @@ export class TauriAdapter implements EngineAdapter {
     throw new AdapterError(
       AdapterErrorCode.WASM_ERROR,
       "restoreState not supported in TauriAdapter",
+      false,
+    );
+  }
+
+  estimateBracket(_deck: BracketDeckRequest): Promise<BracketEstimate | null> {
+    // Bracket estimation runs locally against the WASM card database.
+    // The Tauri sidecar does not yet expose an `estimate_bracket_for_deck`
+    // command. When Tauri parity is needed, add a Tauri command in
+    // client/src-tauri/src/main.rs and invoke it here.
+    throw new AdapterError(
+      AdapterErrorCode.BRACKET_ESTIMATION_UNSUPPORTED,
+      "Bracket estimation is not yet available in the Tauri desktop build.",
       false,
     );
   }

@@ -310,6 +310,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         under_your_control,
         enters_attacking,
         owner_library,
+        track_exiled_by_source,
     } = state.waiting_for
     {
         if !can_view_private_for_player(player) && zone == Zone::Hand {
@@ -328,6 +329,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 under_your_control,
                 enters_attacking,
                 owner_library,
+                track_exiled_by_source,
             };
         }
     }

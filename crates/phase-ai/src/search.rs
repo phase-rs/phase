@@ -279,13 +279,16 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         // Priority is the only state where PassPriority is valid.
         WaitingFor::Priority { .. } => Some(GameAction::PassPriority),
 
-        // Combat declarations: empty declarations are always legal.
-        WaitingFor::DeclareAttackers { .. } => Some(GameAction::DeclareAttackers {
-            attacks: Vec::new(),
-        }),
-        WaitingFor::DeclareBlockers { .. } => Some(GameAction::DeclareBlockers {
-            assignments: Vec::new(),
-        }),
+        // Combat declarations: an empty declaration is NOT always legal —
+        // CR 508.1d / CR 701.15b require goaded / "attacks if able" creatures
+        // to be declared. Delegate to the engine's `legal_actions`, which runs
+        // the simulation filter and only emits engine-legal candidates.
+        WaitingFor::DeclareAttackers { .. } => engine::ai_support::legal_actions(state)
+            .into_iter()
+            .find(|a| matches!(a, GameAction::DeclareAttackers { .. })),
+        WaitingFor::DeclareBlockers { .. } => engine::ai_support::legal_actions(state)
+            .into_iter()
+            .find(|a| matches!(a, GameAction::DeclareBlockers { .. })),
         WaitingFor::UntapChoice { candidates, .. } => {
             candidates
                 .first()
@@ -438,9 +441,19 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::DiscoverChoice { .. } => Some(GameAction::DiscoverChoice {
             choice: engine::types::actions::CastChoice::Decline,
         }),
+        // CR 701.20a: RevealUntil kept choice — accept (put onto the battlefield)
+        // as the search default; the candidate generator still explores decline.
+        WaitingFor::RevealUntilKeptChoice { .. } => {
+            Some(GameAction::DecideOptionalEffect { accept: true })
+        }
         WaitingFor::CascadeChoice { .. } => Some(GameAction::CascadeChoice {
             choice: engine::types::actions::CastChoice::Decline,
         }),
+        // CR 107.1c: "repeat this process" — stop as the forced-action default;
+        // the candidate generator still explores repeating.
+        WaitingFor::RepeatDecision { .. } => {
+            Some(GameAction::DecideOptionalEffect { accept: false })
+        }
 
         // Learn: skip.
         WaitingFor::LearnChoice { .. } => Some(GameAction::LearnDecision {
@@ -1252,46 +1265,68 @@ pub(crate) fn deterministic_choice(
         player,
         cost: additional_cost,
         pending_cast,
+        ..
     } = &state.waiting_for
     {
+        // Affordability + over-commit guard for a pure mana additional cost:
+        // pay only if the combined cost is affordable after auto-tapping AND
+        // it leaves at least one land untapped (holding mana open for
+        // instant-speed interaction is valuable). Shared by the Optional(Mana)
+        // and single-mana Kicker branches so the AI does not over-commit on
+        // multikicker re-prompts (CR 702.33c — they arrive as real Kicker).
+        let affordable_mana_cost = |extra_mana: &engine::types::mana::ManaCost| -> bool {
+            let combined =
+                engine::game::restrictions::add_mana_cost(&pending_cast.cost, extra_mana);
+            let affordable = engine::game::casting::can_pay_cost_after_auto_tap(
+                state,
+                *player,
+                pending_cast.object_id,
+                &combined,
+            );
+            if !affordable {
+                return false;
+            }
+            // Count total untapped lands to gauge remaining resources.
+            let total_untapped = state
+                .objects
+                .values()
+                .filter(|o| {
+                    o.controller == *player
+                        && o.zone == engine::types::zones::Zone::Battlefield
+                        && !o.tapped
+                        && o.card_types
+                            .core_types
+                            .contains(&engine::types::card_type::CoreType::Land)
+                })
+                .count();
+            let combined_cmc = match &combined {
+                engine::types::mana::ManaCost::Cost { shards, generic } => {
+                    shards.len() + *generic as usize
+                }
+                _ => 0,
+            };
+            // Pay only if we'll have mana to spare afterward.
+            total_untapped > combined_cmc
+        };
+
         let pay = match additional_cost {
             engine::types::ability::AdditionalCost::Optional(
                 engine::types::ability::AbilityCost::Mana { cost: extra_mana },
-            ) => {
-                let combined =
-                    engine::game::restrictions::add_mana_cost(&pending_cast.cost, extra_mana);
-                let affordable = engine::game::casting::can_pay_cost_after_auto_tap(
-                    state,
-                    *player,
-                    pending_cast.object_id,
-                    &combined,
-                );
-                if !affordable {
-                    false
-                } else {
-                    // Pay kicker only if it doesn't tap us out completely.
-                    // Count total untapped mana sources to gauge remaining resources.
-                    let total_untapped = state
-                        .objects
-                        .values()
-                        .filter(|o| {
-                            o.controller == *player
-                                && o.zone == engine::types::zones::Zone::Battlefield
-                                && !o.tapped
-                                && o.card_types
-                                    .core_types
-                                    .contains(&engine::types::card_type::CoreType::Land)
-                        })
-                        .count();
-                    let combined_cmc = match &combined {
-                        engine::types::mana::ManaCost::Cost { shards, generic } => {
-                            shards.len() + *generic as usize
-                        }
-                        _ => 0,
-                    };
-                    // Pay kicker if we'll have mana to spare afterward
-                    total_untapped > combined_cmc
-                }
+            ) => affordable_mana_cost(extra_mana),
+            // CR 702.33c: a multikicker / kicker re-prompt presents exactly one
+            // live cost. When that cost is pure mana, apply the same
+            // affordability + over-commit guard as Optional(Mana).
+            engine::types::ability::AdditionalCost::Kicker { costs, .. }
+                if matches!(
+                    costs.as_slice(),
+                    [engine::types::ability::AbilityCost::Mana { .. }]
+                ) =>
+            {
+                let engine::types::ability::AbilityCost::Mana { cost: extra_mana } = &costs[0]
+                else {
+                    unreachable!("guarded by the matches! above")
+                };
+                affordable_mana_cost(extra_mana)
             }
             // Non-mana optional costs: sacrifice → usually worth it for the upgrade
             engine::types::ability::AdditionalCost::Optional(
@@ -2475,5 +2510,111 @@ mod tests {
         // the duplicate guard would reject a repeated object.
         engine::game::engine::apply(&mut state, PlayerId(0), action)
             .expect("engine must accept the distinct-object category choice");
+    }
+
+    // --- Multikicker mana-budget guard (issue #454) ---
+
+    /// Build an `OptionalCostChoice` for P0 carrying a repeatable {2}
+    /// multikicker (CR 702.33c) over a base-cost-{0} spell, plus `lands`
+    /// untapped Forests for P0. The pool is pre-filled with {2} colorless so
+    /// the combined cost is affordable; whether the AI pays then depends
+    /// solely on the over-commit guard (`untapped lands > combined CMC`).
+    fn multikicker_choice_state(lands: usize) -> GameState {
+        let mut state = make_state();
+
+        let spell_id = create_object(
+            &mut state,
+            CardId(700),
+            PlayerId(0),
+            "Everflowing Chalice".to_string(),
+            Zone::Stack,
+        );
+        state
+            .objects
+            .get_mut(&spell_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        for i in 0..lands {
+            let land_id = create_object(
+                &mut state,
+                CardId(710 + i as u64),
+                PlayerId(0),
+                "Forest".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&land_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.entered_battlefield_turn = Some(1);
+        }
+
+        // {2} colorless in pool covers the combined base-{0} + kicker-{2}
+        // cost, so `can_pay_cost_after_auto_tap` is satisfied on both boards.
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+
+        let pending = engine::types::game_state::PendingCast::new(
+            spell_id,
+            CardId(700),
+            engine::types::ability::ResolvedAbility::new(
+                engine::types::ability::Effect::Unimplemented {
+                    name: "Everflowing Chalice".to_string(),
+                    description: None,
+                },
+                Vec::new(),
+                spell_id,
+                PlayerId(0),
+            ),
+            engine::types::mana::ManaCost::NoCost,
+        );
+
+        state.waiting_for = WaitingFor::OptionalCostChoice {
+            player: PlayerId(0),
+            cost: engine::types::ability::AdditionalCost::Kicker {
+                costs: vec![engine::types::ability::AbilityCost::Mana {
+                    cost: engine::types::mana::ManaCost::Cost {
+                        shards: vec![],
+                        generic: 2,
+                    },
+                }],
+                repeatable: true,
+            },
+            times_kicked: 0,
+            pending_cast: Box::new(pending),
+        };
+        state
+    }
+
+    /// CR 702.33c: on a mana-tight board (untapped lands ≤ combined CMC of 2)
+    /// the AI must decline the multikick rather than over-commit. Regression
+    /// guard for the stale `Kicker { .. } => true` catch-all.
+    #[test]
+    fn ai_declines_multikicker_when_it_would_over_commit_mana() {
+        let state = multikicker_choice_state(2); // 2 untapped lands, combined CMC 2
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let action = deterministic_choice(&state, PlayerId(0), &config, &[], None)
+            .expect("deterministic_choice must decide the kicker prompt");
+        assert_eq!(
+            action,
+            GameAction::DecideOptionalCost { pay: false },
+            "AI must decline a multikick that over-commits its mana"
+        );
+    }
+
+    /// CR 702.33c: on a mana-rich board (untapped lands > combined CMC) the
+    /// AI pays the multikick — the affordability/over-commit guard still
+    /// approves a kick it can comfortably afford.
+    #[test]
+    fn ai_pays_multikicker_when_mana_is_plentiful() {
+        let state = multikicker_choice_state(6); // 6 untapped lands, combined CMC 2
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let action = deterministic_choice(&state, PlayerId(0), &config, &[], None)
+            .expect("deterministic_choice must decide the kicker prompt");
+        assert_eq!(
+            action,
+            GameAction::DecideOptionalCost { pay: true },
+            "AI must pay a multikick when it has mana to spare"
+        );
     }
 }

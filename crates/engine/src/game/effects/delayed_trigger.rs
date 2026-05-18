@@ -106,6 +106,10 @@ pub fn resolve(
     Ok(())
 }
 
+/// CR 603.7c: A delayed triggered ability that refers to a particular object
+/// snapshots that object at creation time. The parent ability's chosen targets
+/// (e.g. Flickerwisp's exiled victim) are the snapshot; only when the parent
+/// carried no targets do we fall back to the triggering source.
 fn parent_target_snapshot(state: &GameState, ability: &ResolvedAbility) -> Vec<TargetRef> {
     if !ability.targets.is_empty() {
         return ability.targets.clone();

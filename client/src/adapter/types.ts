@@ -1,3 +1,5 @@
+import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
+
 // ── Identifiers ──────────────────────────────────────────────────────────
 
 export type ObjectId = number;
@@ -386,6 +388,12 @@ export type CounterType =
   | "lore"
   | "stun"
   | (string & {});
+
+export type PlayerCounterKind =
+  | "Poison"
+  | "Experience"
+  | "Rad"
+  | "Ticket";
 
 // ── Keywords ─────────────────────────────────────────────────────────────
 
@@ -838,7 +846,7 @@ export type WaitingFor =
   | { type: "ModeChoice"; data: { player: PlayerId; modal: ModalChoice; pending_cast: PendingCast } }
   | { type: "AbilityModeChoice"; data: { player: PlayerId; modal: ModalChoice; source_id: ObjectId; mode_abilities: unknown[]; is_activated: boolean; ability_index?: number; ability_cost?: unknown; unavailable_modes?: number[] } }
   | { type: "DiscardToHandSize"; data: { player: PlayerId; count: number; cards: ObjectId[] } }
-  | { type: "OptionalCostChoice"; data: { player: PlayerId; cost: AdditionalCost; pending_cast: PendingCast } }
+  | { type: "OptionalCostChoice"; data: { player: PlayerId; cost: AdditionalCost; times_kicked: number; pending_cast: PendingCast } }
   | { type: "DefilerPayment"; data: { player: PlayerId; life_cost: number; mana_reduction: ManaCost; pending_cast: PendingCast } }
   | { type: "AdventureCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId } }
   | { type: "ModalFaceChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId } }
@@ -876,6 +884,8 @@ export type WaitingFor =
   | { type: "UnlessBounceChoice"; data: { player: PlayerId; permanents: ObjectId[]; pending_effect: unknown; remaining: number } }
   | { type: "ChooseRingBearer"; data: { player: PlayerId; candidates: ObjectId[] } }
   | { type: "DiscoverChoice"; data: { player: PlayerId; hit_card: ObjectId; exiled_misses: ObjectId[] } }
+  | { type: "RevealUntilKeptChoice"; data: { player: PlayerId; hit_card: ObjectId; accept_zone: string; decline_zone: string; enter_tapped: boolean; revealed_misses: ObjectId[]; rest_destination: string } }
+  | { type: "RepeatDecision"; data: { player: PlayerId; ability: unknown } }
   | { type: "CascadeChoice"; data: { player: PlayerId; hit_card: ObjectId; exiled_misses: ObjectId[]; source_mv: number } }
   | { type: "TopOrBottomChoice"; data: { player: PlayerId; object_id: ObjectId } }
   | { type: "ParadigmCastOffer"; data: { player: PlayerId; offers: ObjectId[] } }
@@ -906,6 +916,7 @@ export type WaitingFor =
       under_your_control?: boolean;
       enters_attacking?: boolean;
       owner_library?: boolean;
+      track_exiled_by_source?: boolean;
     } }
   | { type: "DrawnThisTurnTopdeckChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; min_count: number; life_payment: number; source_id: ObjectId } }
   | { type: "RetargetChoice"; data: { player: PlayerId; stack_entry_index: number; scope: RetargetScope; current_targets: TargetRef[]; legal_new_targets: TargetRef[] } }
@@ -1046,6 +1057,8 @@ export type DebugAction =
   | { type: "GrantKeyword"; data: { object_id: ObjectId; keyword: Keyword } }
   | { type: "RemoveKeyword"; data: { object_id: ObjectId; keyword: Keyword } }
   | { type: "SetLife"; data: { player_id: PlayerId; life: number } }
+  | { type: "ModifyPlayerCounters"; data: { player_id: PlayerId; counter_kind: PlayerCounterKind; delta: number } }
+  | { type: "ModifyEnergy"; data: { player_id: PlayerId; delta: number } }
   | { type: "AddMana"; data: { player_id: PlayerId; mana: ManaType[] } }
   | { type: "SetPhase"; data: { phase: Phase; active_player: PlayerId } }
   | { type: "RunStateBasedActions" }
@@ -1201,7 +1214,7 @@ export type GameEvent =
   | { type: "CardsDrawn"; data: { player_id: PlayerId; count: number } }
   | { type: "CardDrawn"; data: { player_id: PlayerId; object_id: ObjectId; nth_in_turn: number; nth_in_step: number } }
   | { type: "PermanentUntapped"; data: { object_id: ObjectId } }
-  | { type: "LandPlayed"; data: { object_id: ObjectId; player_id: PlayerId } }
+  | { type: "LandPlayed"; data: { object_id: ObjectId; player_id: PlayerId; from_zone: Zone } }
   | { type: "StackPushed"; data: { object_id: ObjectId } }
   | { type: "StackResolved"; data: { object_id: ObjectId } }
   | { type: "Discarded"; data: { player_id: PlayerId; object_id: ObjectId } }
@@ -1231,6 +1244,7 @@ export type GameEvent =
   | { type: "CompanionRevealed"; data: { player: PlayerId; card_name: string } }
   | { type: "CompanionMovedToHand"; data: { player: PlayerId; card_name: string } }
   | { type: "EnergyChanged"; data: { player: PlayerId; delta: number } }
+  | { type: "PlayerCounterChanged"; data: { player: PlayerId; counter_kind: PlayerCounterKind; delta: number } }
   | { type: "SpeedChanged"; data: { player: PlayerId; old_speed: number | null; new_speed: number | null } }
   | { type: "CreatureExploited"; data: { exploiter: ObjectId; sacrificed: ObjectId } }
   | { type: "PowerToughnessChanged"; data: { object_id: ObjectId; power: number; toughness: number; power_delta: number; toughness_delta: number } }
@@ -1299,6 +1313,14 @@ export interface GameState {
   combat: CombatState | null;
   waiting_for: WaitingFor;
   has_pending_cast: boolean;
+  /**
+   * CR 601.2f: The locked-in pending cast (cost, ability, object) while the
+   * caster is mid-cast. Present during ManaPayment / cost-choice WaitingFor
+   * states; the `cost` field is the engine-resolved total (base + Strive +
+   * RaiseCost statics + commander tax - reductions). Absent when no cast is
+   * in progress.
+   */
+  pending_cast?: PendingCast;
   lands_played_this_turn: number;
   max_lands_per_turn: number;
   priority_pass_count: number;
@@ -1506,6 +1528,7 @@ export const AdapterErrorCode = {
   ENGINE_PANIC: "ENGINE_PANIC",
   WASM_ERROR: "WASM_ERROR",
   INVALID_ACTION: "INVALID_ACTION",
+  BRACKET_ESTIMATION_UNSUPPORTED: "bracket-estimation/unsupported",
 } as const;
 
 /**
@@ -1592,4 +1615,14 @@ export interface EngineAdapter {
   ): Promise<BatchResolveResult>;
   restoreState(state: GameState): void | Promise<void>;
   dispose(): void;
+
+  /**
+   * Estimates a Commander deck's bracket from card contents. Returns null
+   * when the deck has no commander, is empty, or the adapter doesn't
+   * support local deck analysis (multiplayer adapters throw via
+   * `AdapterError` instead of silently returning null).
+   *
+   * Pure — no game state, no side effects. Safe to call on every deck edit.
+   */
+  estimateBracket(deck: BracketDeckRequest): Promise<BracketEstimate | null>;
 }

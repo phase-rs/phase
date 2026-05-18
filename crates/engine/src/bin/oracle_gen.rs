@@ -9,7 +9,7 @@ use engine::database::mtgjson::{load_atomic_cards, AtomicCard, Ruling};
 use engine::database::synthesis::{
     build_oracle_face, build_oracle_face_multi, layout_faces, map_layout, LayoutKind,
 };
-use engine::database::CardDatabase;
+use engine::database::{BracketLists, BracketSignals, CardDatabase};
 use engine::game::coverage::{
     audit_semantic, card_face_has_unimplemented_parts, format_semantic_audit_markdown,
 };
@@ -40,6 +40,24 @@ struct CardExportEntry {
     /// Populated by scanning per-set MTGJSON files in `data/mtgjson/sets/`.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     rarities: BTreeSet<Rarity>,
+    /// Bracket-axis signals stamped during export. Omitted when all four
+    /// flags are false to keep card-data.json compact.
+    #[serde(default, skip_serializing_if = "is_clean_signals")]
+    bracket_signals: BracketSignals,
+}
+
+fn is_clean_signals(sig: &BracketSignals) -> bool {
+    sig.is_clean()
+}
+
+fn bracket_signals_for_face(
+    lists: &BracketLists,
+    face: &CardFace,
+    source: &AtomicCard,
+) -> BracketSignals {
+    let mut signals = lists.signals_for(&face.name);
+    signals.game_changer = source.is_game_changer;
+    signals
 }
 
 /// Insert a card face under its short-name key, resolving collisions when
@@ -250,6 +268,7 @@ fn main() {
     let mut data_dir: Option<PathBuf> = None;
     let mut mtgjson_override: Option<PathBuf> = None;
     let mut names_out: Option<PathBuf> = None;
+    let mut output: Option<PathBuf> = None;
     let mut stats = false;
     let mut filter_names: Vec<String> = Vec::new();
     #[cfg(feature = "forge")]
@@ -273,6 +292,14 @@ fn main() {
                     process::exit(1);
                 }
                 names_out = Some(PathBuf::from(&args[i]));
+            }
+            "--output" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: --output requires a path argument");
+                    process::exit(1);
+                }
+                output = Some(PathBuf::from(&args[i]));
             }
             "--stats" => {
                 stats = true;
@@ -315,8 +342,11 @@ fn main() {
         None => match &data_dir {
             Some(d) => d.join("mtgjson/AtomicCards.json"),
             None => {
-                eprintln!("Usage: oracle-gen <data-dir> [--mtgjson <path>] [--stats]");
+                eprintln!(
+                    "Usage: oracle-gen <data-dir> [--mtgjson <path>] [--stats] [--output <path>]"
+                );
                 eprintln!("  Parses Oracle text from MTGJSON and outputs card-data export JSON");
+                eprintln!("  --output <path>  Write the export to a file instead of stdout");
                 process::exit(1);
             }
         },
@@ -346,6 +376,29 @@ fn main() {
     // Scan per-set MTGJSON files to build a card name → rarities map.
     let rarity_map = build_rarity_map(&mtgjson_path);
 
+    // Load non-MTGJSON bracket lists for signal stamping. Game Changers come
+    // directly from MTGJSON `isGameChanger`; this file covers policy axes that
+    // MTGJSON does not expose.
+    let bracket_lists_path = data_dir
+        .as_ref()
+        .map(|d| d.join("bracket_lists.json"))
+        .unwrap_or_else(|| PathBuf::from("data/bracket_lists.json"));
+    let bracket_lists = if bracket_lists_path.exists() {
+        BracketLists::from_json_path(&bracket_lists_path).unwrap_or_else(|e| {
+            eprintln!(
+                "warning: failed to load {}: {e}; non-MTGJSON bracket signals will be all-false",
+                bracket_lists_path.display()
+            );
+            BracketLists::default()
+        })
+    } else {
+        eprintln!(
+            "warning: {} not found; non-MTGJSON bracket signals will be all-false",
+            bracket_lists_path.display()
+        );
+        BracketLists::default()
+    };
+
     // Build Forge index: --forge flag > PHASE_FORGE_PATH env var > data/forge-cardsfolder/ default.
     #[cfg(feature = "forge")]
     let forge_index = {
@@ -364,7 +417,7 @@ fn main() {
             Some(idx)
         } else if explicit {
             // Only warn if the user explicitly requested a path that doesn't exist.
-            eprintln!("Warning: Forge path {} not found, skipping", path.display());
+            eprintln!("warning: Forge path {} not found, skipping", path.display());
             None
         } else {
             None
@@ -423,7 +476,11 @@ fn main() {
                 }
             }
 
-            for (face_idx, face_ref) in layout_faces(&layout).into_iter().enumerate() {
+            for (face_idx, (face_ref, source)) in layout_faces(&layout)
+                .into_iter()
+                .zip(faces.iter())
+                .enumerate()
+            {
                 let key = face_ref.name.to_lowercase();
                 let legalities = legalities_by_face.remove(&key).unwrap_or_default();
                 let face = face_ref.clone();
@@ -446,6 +503,7 @@ fn main() {
                     .get(&face.name.to_lowercase())
                     .cloned()
                     .unwrap_or_default();
+                let bracket_signals = bracket_signals_for_face(&bracket_lists, &face, source);
                 insert_face(
                     &mut face_index,
                     mtgjson_key.as_str(),
@@ -457,6 +515,7 @@ fn main() {
                         printings: faces[0].printings.clone(),
                         rulings,
                         rarities,
+                        bracket_signals,
                     },
                 );
             }
@@ -477,6 +536,7 @@ fn main() {
                 .get(&face.name.to_lowercase())
                 .cloned()
                 .unwrap_or_default();
+            let bracket_signals = bracket_signals_for_face(&bracket_lists, &face, &faces[0]);
             insert_face(
                 &mut face_index,
                 mtgjson_key.as_str(),
@@ -488,15 +548,32 @@ fn main() {
                     printings: faces[0].printings.clone(),
                     rulings: faces[0].rulings.clone(),
                     rarities,
+                    bracket_signals,
                 },
             );
         }
     }
 
-    println!(
-        "{}",
-        serde_json::to_string(&face_index).expect("Failed to serialize card data")
-    );
+    // Warn for any bracket list entry that didn't match any exported card.
+    let known_names: std::collections::HashSet<String> = face_index
+        .values()
+        .map(|e| e.face.name.to_lowercase())
+        .collect();
+    for list_entry in bracket_lists.all_names() {
+        if !known_names.contains(list_entry) {
+            eprintln!(
+                "warning: bracket_lists.json entry \"{list_entry}\" does not match any exported card"
+            );
+        }
+    }
+
+    let json = serde_json::to_string(&face_index).expect("Failed to serialize card data");
+    if let Some(ref out_path) = output {
+        std::fs::write(out_path, &json)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", out_path.display()));
+    } else {
+        println!("{json}");
+    }
 
     if let Some(names_path) = names_out {
         let mut names: Vec<&str> = face_index.values().map(|e| e.face.name.as_str()).collect();
@@ -1054,6 +1131,7 @@ mod tests {
             printings: printings.iter().map(|s| s.to_string()).collect(),
             rulings: Vec::new(),
             rarities: BTreeSet::new(),
+            bracket_signals: BracketSignals::default(),
         }
     }
 

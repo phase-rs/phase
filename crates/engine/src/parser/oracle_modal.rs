@@ -7,7 +7,7 @@ use nom::Parser;
 
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, Effect, ModalChoice, ModalSelectionCondition,
-    ModalSelectionConstraint,
+    ModalSelectionConstraint, PlayerFilter,
 };
 
 use super::oracle::{find_activated_colon, strip_activated_constraints};
@@ -62,7 +62,16 @@ pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(Oracle
         .parse(lower.as_str())
         .is_err()
         {
-            return Some((OracleBlockAst::Modal { header, modes }, next));
+            // CR 700.2e guard: an opponent-chooser modal that ALSO carries an
+            // additional cost would re-emit `ModeChoice` through
+            // `casting_costs.rs`, which threads `player` from the caster — the
+            // re-emitted prompt would be mis-routed to the controller. Until
+            // the casting-cost path threads the chooser, leave such a modal
+            // unhandled (`modal: None`) rather than emit a mis-routed choice.
+            // No in-scope corpus card hits this guard.
+            if !header_is_opponent_chooser_with_additional_cost(&header, &modes) {
+                return Some((OracleBlockAst::Modal { header, modes }, next));
+            }
         }
     }
 
@@ -90,6 +99,7 @@ pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(Oracle
             max_choices: modes.len(),
             allow_repeat_modes: false,
             constraints: vec![],
+            chooser: PlayerFilter::Controller,
         };
         return Some((OracleBlockAst::Modal { header, modes }, next));
     }
@@ -104,6 +114,7 @@ pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(Oracle
             max_choices: 1,
             allow_repeat_modes: false,
             constraints: vec![],
+            chooser: PlayerFilter::Controller,
         };
         return Some((OracleBlockAst::Modal { header, modes }, next));
     }
@@ -199,8 +210,50 @@ pub(super) fn split_short_label_prefix(text: &str, max_words: usize) -> Option<(
     None
 }
 
+/// CR 700.2e: Recognise a chooser-subject prefix that precedes the `choose`
+/// token of a modal header. The combinator consumes the subject **including**
+/// the trailing `choose `/`chooses ` verb token, so the remainder begins
+/// exactly where a bare `Choose one —` header's remainder begins.
+///
+/// Exactly two arms — `you choose ` (controller alias, CR 700.2a) and
+/// `an opponent chooses ` (CR 700.2e, the single non-controller opponent).
+/// `target opponent chooses ` and `each opponent chooses ` are deliberately
+/// NOT handled (deferred — see plan 03 Pattern Coverage).
+fn parse_modal_chooser_prefix(input: &str) -> nom::IResult<&str, PlayerFilter, OracleError<'_>> {
+    alt((
+        value(PlayerFilter::Controller, tag("you choose ")),
+        value(PlayerFilter::Opponent, tag("an opponent chooses ")),
+    ))
+    .parse(input)
+}
+
+/// Recognise the count portion of a modal header **after** the `choose ` (or
+/// chooser-prefix verb) token has been consumed. Returns the `(min, max)` pair
+/// when the remainder is a genuine modal count phrase (`one —`, `two —`,
+/// `up to two —`, `one or more —`, …), or `None` otherwise.
+///
+/// This is the single count authority shared by both the bare `Choose …`
+/// header path and the chooser-prefixed path — neither enumerates its own
+/// count vocabulary.
+fn parse_modal_count_remainder(remainder: &str) -> Option<(usize, usize)> {
+    let remainder = remainder.trim_start();
+    if let Some(count) = scan_modal_count_override(remainder) {
+        return Some(count);
+    }
+    nom_primitives::parse_number(remainder)
+        .ok()
+        .map(|(_, n)| (n as usize, n as usize))
+}
+
 fn is_modal_header_text(lower: &str) -> bool {
     let lower = lower.trim();
+    // Chooser-prefixed header (CR 700.2e): `you choose …` / `an opponent
+    // chooses …`. Accept only when the post-prefix remainder is a genuine
+    // count phrase — reuse `parse_modal_count_remainder`, never a second
+    // count `alt()`.
+    if let Ok((remainder, _)) = parse_modal_chooser_prefix(lower) {
+        return parse_modal_count_remainder(remainder).is_some();
+    }
     alt((
         tag::<_, _, OracleError<'_>>("choose "),
         tag("you may choose "),
@@ -223,7 +276,25 @@ pub(crate) fn parse_modal_header_ast(text: &str) -> Option<ModalHeaderAst> {
         return None;
     }
 
-    let (min_choices, max_choices) = parse_modal_choose_count(&header_lower);
+    // CR 700.2e: A chooser-subject prefix (`you choose …` / `an opponent
+    // chooses …`) precedes the count phrase. Strip it, record the chooser,
+    // and compute the count from the remainder so `an opponent chooses two —`
+    // still yields `(2, 2)`.
+    let (chooser, count_input) = match parse_modal_chooser_prefix(&header_lower) {
+        Ok((remainder, chooser)) => (chooser, remainder.to_string()),
+        Err(_) => (PlayerFilter::Controller, header_lower.clone()),
+    };
+
+    let (min_choices, max_choices) =
+        if chooser == PlayerFilter::Controller && count_input == header_lower {
+            // Bare `Choose …` header — unchanged path.
+            parse_modal_choose_count(&header_lower)
+        } else {
+            // Chooser-prefixed remainder ("one —", "two —", …) — reuse the
+            // shared count recognizer; `is_modal_header_text` already gated
+            // that the remainder is a genuine count phrase.
+            parse_modal_count_remainder(&count_input).unwrap_or((1, 1))
+        };
     let mut allow_repeat_modes = false;
     let mut constraints = Vec::new();
 
@@ -258,6 +329,7 @@ pub(crate) fn parse_modal_header_ast(text: &str) -> Option<ModalHeaderAst> {
         max_choices,
         allow_repeat_modes,
         constraints,
+        chooser,
     })
 }
 
@@ -534,6 +606,32 @@ fn modal_marker_effect(_header: &ModalHeaderAst) -> Effect {
     }
 }
 
+/// CR 700.2e guard: true when the header is an opponent-chooser modal that
+/// also carries an additional cost (per-mode Spree cost or an
+/// `AdditionalCostPaid` conditional-max constraint). Such a modal would
+/// re-emit `ModeChoice` through `casting_costs.rs` with the caster's `player`,
+/// mis-routing the re-prompt. The parser declines to handle it (`modal: None`)
+/// rather than ship a rules-incorrect routing.
+fn header_is_opponent_chooser_with_additional_cost(
+    header: &ModalHeaderAst,
+    modes: &[ModeAst],
+) -> bool {
+    if header.chooser == PlayerFilter::Controller {
+        return false;
+    }
+    let has_mode_cost = modes.iter().any(|m| m.mode_cost.is_some());
+    let has_additional_cost_constraint = header.constraints.iter().any(|constraint| {
+        matches!(
+            constraint,
+            ModalSelectionConstraint::ConditionalMaxChoices {
+                condition: ModalSelectionCondition::AdditionalCostPaid { .. },
+                ..
+            }
+        )
+    });
+    has_mode_cost || has_additional_cost_constraint
+}
+
 fn build_modal_choice(header: &ModalHeaderAst, modes: &[ModeAst]) -> ModalChoice {
     let mode_count = modes.len();
     ModalChoice {
@@ -545,6 +643,8 @@ fn build_modal_choice(header: &ModalHeaderAst, modes: &[ModeAst]) -> ModalChoice
         constraints: cap_modal_constraints(&header.constraints, mode_count),
         mode_costs: modes.iter().filter_map(|m| m.mode_cost.clone()).collect(),
         entwine_cost: None,
+        // CR 700.2e: the player who chooses the mode(s).
+        chooser: header.chooser,
     }
 }
 
@@ -1167,6 +1267,110 @@ mod tests {
             ),
             other => panic!("expected PutCounter, got {other:?}"),
         }
+    }
+
+    // ---- Chooser-prefixed modal headers (CR 700.2e) ----
+
+    #[test]
+    fn you_choose_one_modal_parses_as_controller_chooser() {
+        // CR 700.2a: "You choose one —" is the controller-chooser alias of a
+        // bare `Choose one —`. On HEAD this produces `modal: None`.
+        const ORACLE: &str = "You choose one —\n• Draw a card.\n• You gain 3 life.";
+        let parsed = parse_oracle_text(ORACLE, "Test You Choose", &[], &[], &[]);
+        let modal = parsed.modal.as_ref().expect("should parse as modal");
+        assert_eq!(modal.chooser, PlayerFilter::Controller);
+        assert_eq!((modal.min_choices, modal.max_choices), (1, 1));
+        assert_eq!(parsed.abilities.len(), 2);
+        for ability in &parsed.abilities {
+            assert!(
+                !matches!(*ability.effect, Effect::Unimplemented { .. }),
+                "mode should lower to a concrete effect: {:?}",
+                ability.effect
+            );
+        }
+    }
+
+    #[test]
+    fn an_opponent_chooses_one_modal() {
+        // CR 700.2e: "An opponent chooses one —" routes the mode choice to the
+        // opponent. On HEAD this produces `modal: None`.
+        const ORACLE: &str = "An opponent chooses one —\n• Draw a card.\n• You gain 3 life.";
+        let parsed = parse_oracle_text(ORACLE, "Test Opponent Choose", &[], &[], &[]);
+        let modal = parsed.modal.as_ref().expect("should parse as modal");
+        assert_eq!(modal.chooser, PlayerFilter::Opponent);
+        assert_eq!((modal.min_choices, modal.max_choices), (1, 1));
+        assert_eq!(modal.mode_count, 2);
+        assert_eq!(parsed.abilities.len(), 2);
+    }
+
+    #[test]
+    fn an_opponent_chooses_two_modal() {
+        // The shared count recognizer still resolves the count on the
+        // post-prefix remainder: "an opponent chooses two —" → (2, 2).
+        const ORACLE: &str = "An opponent chooses two —\n\
+• Draw a card.\n• You gain 3 life.\n• You lose 3 life.";
+        let parsed = parse_oracle_text(ORACLE, "Test Opponent Choose Two", &[], &[], &[]);
+        let modal = parsed.modal.as_ref().expect("should parse as modal");
+        assert_eq!(modal.chooser, PlayerFilter::Opponent);
+        assert_eq!((modal.min_choices, modal.max_choices), (2, 2));
+        assert_eq!(modal.mode_count, 3);
+    }
+
+    #[test]
+    fn target_opponent_chooses_stays_unhandled() {
+        // DEFERRED (plan 03): "Target opponent chooses one —" needs a real
+        // `TargetRef::Player` declared in the casting flow before the CR
+        // 601.2b mode choice. Plan 03 adds no `target opponent chooses` arm —
+        // the card keeps `modal: None`. Regression guard, not a HEAD-failing
+        // test.
+        const ORACLE: &str = "Target opponent chooses one —\n• Draw a card.\n• You gain 3 life.";
+        let parsed = parse_oracle_text(ORACLE, "Test Target Opponent", &[], &[], &[]);
+        assert!(
+            parsed.modal.is_none(),
+            "targeted-chooser modal is deferred and must stay unhandled"
+        );
+    }
+
+    #[test]
+    fn each_opponent_chooses_stays_unhandled() {
+        // DEFERRED (plan 03): "Each opponent chooses one —" has one
+        // independent chooser per opponent — a single-`PlayerId` chooser
+        // cannot represent it. Plan 03 adds no `each opponent chooses` arm.
+        const ORACLE: &str = "Each opponent chooses one —\n• Draw a card.\n• You gain 3 life.";
+        let parsed = parse_oracle_text(ORACLE, "Test Each Opponent", &[], &[], &[]);
+        assert!(
+            parsed.modal.is_none(),
+            "each-opponent-chooser modal is deferred and must stay unhandled"
+        );
+    }
+
+    #[test]
+    fn chooser_prefix_without_bullets_is_not_modal() {
+        // Biggest Risk mitigation: a non-bulleted sentence containing
+        // "you choose …" must NOT be misclassified as a modal block —
+        // `parse_oracle_block` gates on a non-empty bullet list.
+        const ORACLE: &str =
+            "When this creature enters, you choose a card in your hand and discard it.";
+        let parsed = parse_oracle_text(ORACLE, "Test No Bullets", &[], &[], &[]);
+        assert!(
+            parsed.modal.is_none(),
+            "a chooser clause with no bulleted modes must not parse as modal"
+        );
+    }
+
+    #[test]
+    fn parse_modal_chooser_prefix_recognizes_both_arms() {
+        assert_eq!(
+            parse_modal_chooser_prefix("you choose one —").map(|(_, c)| c),
+            Ok(PlayerFilter::Controller)
+        );
+        assert_eq!(
+            parse_modal_chooser_prefix("an opponent chooses two —").map(|(_, c)| c),
+            Ok(PlayerFilter::Opponent)
+        );
+        // Deferred forms are not recognized.
+        assert!(parse_modal_chooser_prefix("target opponent chooses one —").is_err());
+        assert!(parse_modal_chooser_prefix("each opponent chooses one —").is_err());
     }
 
     #[test]

@@ -205,7 +205,7 @@ fn redundancy_delta(
         // variant without extending this list is a compile error — that's
         // the coverage tracker at work.
         Effect::StartYourEngines { .. }
-        | Effect::IncreaseSpeed { .. }
+        | Effect::ChangeSpeed { .. }
         | Effect::Destroy { .. }
         | Effect::Regenerate { .. }
         | Effect::Counter { .. }

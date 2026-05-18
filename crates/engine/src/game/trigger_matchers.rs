@@ -1439,8 +1439,23 @@ pub(super) fn match_land_played(
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::LandPlayed { object_id, .. } = event {
-        valid_card_matches(trigger, state, *object_id, source_id)
+    if let GameEvent::LandPlayed {
+        object_id,
+        from_zone,
+        ..
+    } = event
+    {
+        match &trigger.valid_card {
+            None => true,
+            Some(filter) => state.objects.get(object_id).is_some_and(|obj| {
+                let record =
+                    obj.snapshot_for_zone_change(*object_id, Some(*from_zone), Zone::Battlefield);
+                let ctx = super::filter::FilterContext::from_source(state, source_id);
+                super::filter::matches_target_filter_on_zone_change_record(
+                    state, &record, filter, &ctx,
+                )
+            }),
+        }
     } else {
         false
     }
@@ -1654,35 +1669,44 @@ pub(super) fn match_revealed(
     )
 }
 
+/// Card-identity predicate for `TapsForMana` triggers: does the permanent that
+/// was tapped for mana (`mana_source`) match the trigger's `valid_card` filter
+/// (or, absent a filter, equal the trigger source itself)?
+///
+/// Extracted as a standalone authority so the aura mana-refund probe
+/// (`mana_sources::aura_taps_for_mana_sources_for_land`) can ask the same
+/// question without synthesizing a `GameEvent`.
+pub(super) fn taps_for_mana_card_matches(
+    trigger: &TriggerDefinition,
+    state: &GameState,
+    mana_source: ObjectId,
+    source_id: ObjectId,
+) -> bool {
+    if trigger.valid_card.is_some() {
+        valid_card_matches(trigger, state, mana_source, source_id)
+    } else {
+        mana_source == source_id
+    }
+}
+
 /// TapsForMana: fires when source taps and produces mana.
+///
+/// CR 106.12a: triggers once per resolution of a mana ability whose activation
+/// cost includes `{T}` — keyed off `GameEvent::TappedForMana`, which the engine
+/// emits exactly once per such resolution (not once per mana unit).
 pub(super) fn match_taps_for_mana(
     event: &GameEvent,
     trigger: &TriggerDefinition,
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::ManaAdded {
+    if let GameEvent::TappedForMana {
         player_id,
         source_id: mana_source,
-        tap_state,
         ..
     } = event
     {
-        // Only fire for actual mana ability activations (tap costs), not for mana
-        // produced by triggered abilities, effects, convoke, or doublers.
-        // This prevents infinite loops (e.g., Badgermole Cub's trigger producing
-        // mana that re-triggers itself). Fires for both `FromTap` and
-        // `FromTapTriggersResolved` — the post-action scan's double-resolution
-        // guard (CR 605.4a) handles already-resolved triggered mana abilities.
-        if !tap_state.tapped_for_mana() {
-            return false;
-        }
-
-        if trigger.valid_card.is_some() {
-            if !valid_card_matches(trigger, state, *mana_source, source_id) {
-                return false;
-            }
-        } else if *mana_source != source_id {
+        if !taps_for_mana_card_matches(trigger, state, *mana_source, source_id) {
             return false;
         }
 
@@ -2592,6 +2616,58 @@ mod tests {
     /// Helper to create a minimal TriggerDefinition with typed fields.
     fn make_trigger(mode: TriggerMode) -> TriggerDefinition {
         TriggerDefinition::new(mode)
+    }
+
+    #[test]
+    fn land_played_valid_card_matches_origin_zone() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Rocco, Street Chef".to_string(),
+            Zone::Battlefield,
+        );
+        let land = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Exiled Land".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let mut trigger = make_trigger(TriggerMode::LandPlayed);
+        trigger.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::land().properties(vec![FilterProp::InZone { zone: Zone::Exile }]),
+        ));
+
+        assert!(match_land_played(
+            &GameEvent::LandPlayed {
+                object_id: land,
+                player_id: PlayerId(1),
+                from_zone: Zone::Exile,
+            },
+            &trigger,
+            source,
+            &state,
+        ));
+        assert!(!match_land_played(
+            &GameEvent::LandPlayed {
+                object_id: land,
+                player_id: PlayerId(1),
+                from_zone: Zone::Hand,
+            },
+            &trigger,
+            source,
+            &state,
+        ));
     }
 
     #[test]
@@ -3888,13 +3964,13 @@ mod tests {
     }
 
     #[test]
-    fn taps_for_mana_matches_mana_added() {
+    fn taps_for_mana_matches_tapped_for_mana() {
         let state = setup();
         let source = ObjectId(5);
-        let event = GameEvent::ManaAdded {
+        let event = GameEvent::TappedForMana {
             player_id: PlayerId(0),
-            mana_type: crate::types::mana::ManaType::Green,
             source_id: source,
+            produced: vec![crate::types::mana::ManaType::Green],
             tap_state: ManaTapState::FromTap,
         };
         let trigger = make_trigger(TriggerMode::TapsForMana);
@@ -3920,10 +3996,10 @@ mod tests {
         );
         state.objects.get_mut(&aura).unwrap().attached_to = Some(enchanted_land.into());
 
-        let event = GameEvent::ManaAdded {
+        let event = GameEvent::TappedForMana {
             player_id: PlayerId(0),
-            mana_type: crate::types::mana::ManaType::Green,
             source_id: enchanted_land,
+            produced: vec![crate::types::mana::ManaType::Green],
             tap_state: ManaTapState::FromTap,
         };
 
@@ -3957,10 +4033,10 @@ mod tests {
             .core_types
             .push(CoreType::Land);
 
-        let event = GameEvent::ManaAdded {
+        let event = GameEvent::TappedForMana {
             player_id: PlayerId(1),
-            mana_type: crate::types::mana::ManaType::Green,
             source_id: tapped_land,
+            produced: vec![crate::types::mana::ManaType::Green],
             tap_state: ManaTapState::FromTap,
         };
 
@@ -3974,7 +4050,9 @@ mod tests {
     fn taps_for_mana_ignores_non_mana_ability_production() {
         let state = setup();
         let source = ObjectId(5);
-        // Mana produced by a triggered ability effect, not a mana ability activation
+        // Mana produced by a triggered ability effect, not a mana ability
+        // activation, emits `ManaAdded` (per-unit pool accounting) but never
+        // `TappedForMana` — so the matcher must not fire on it.
         let event = GameEvent::ManaAdded {
             player_id: PlayerId(0),
             mana_type: crate::types::mana::ManaType::Green,

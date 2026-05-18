@@ -35,6 +35,11 @@ pub(crate) struct EffectChainIr {
     pub(crate) chain_rounding: Option<RoundingMode>,
     /// CR 701.21a: Actor context threaded from ParseContext (per D-07).
     pub(crate) actor: Option<ControllerRef>,
+    /// CR 608.2c + CR 107.1c: chain-level "repeat this process" loop predicate.
+    /// Set when a trailing "you may repeat this process" / "if you do, repeat
+    /// this process" directive is recognized. Lowering applies it to the root
+    /// `AbilityDefinition` so the resolver re-follows the whole chain.
+    pub(crate) repeat_until: Option<crate::types::ability::RepeatContinuation>,
 }
 
 /// Special-case clause actions that modify or attach to adjacent clauses during lowering.
@@ -95,6 +100,12 @@ pub(crate) struct ClauseIr {
     pub(crate) repeat_for: Option<QuantityExpr>,
     /// Player scope iteration ("each opponent", "each player").
     pub(crate) player_scope: Option<PlayerFilter>,
+    /// CR 101.4 + CR 800.4: Turn-order override for `player_scope` iteration.
+    /// `None` (default) = use APNAP starting from the active player.
+    /// `Some(ControllerRef::You)` = start with the controller (Join Forces
+    /// "Starting with you, each player may pay any amount of mana").
+    /// Stamped onto the produced `AbilityDefinition` during lowering.
+    pub(crate) starting_with: Option<ControllerRef>,
     /// CR 603.7: Temporal suffix delayed trigger condition.
     pub(crate) delayed_condition: Option<DelayedTriggerCondition>,
     /// CR 603.7a: Temporal prefix delayed trigger condition.
@@ -139,6 +150,7 @@ mod tests {
             kind: AbilityKind::Spell,
             chain_rounding: None,
             actor: None,
+            repeat_until: None,
         };
         assert!(ir.clauses.is_empty());
     }
@@ -156,6 +168,7 @@ mod tests {
             opponent_may_scope: None,
             repeat_for: None,
             player_scope: None,
+            starting_with: None,
             delayed_condition: None,
             prefix_delayed_condition: None,
             intrinsic_continuation: None,
@@ -189,6 +202,7 @@ mod tests {
                 opponent_may_scope: None,
                 repeat_for: None,
                 player_scope: None,
+                starting_with: None,
                 delayed_condition: None,
                 prefix_delayed_condition: None,
                 intrinsic_continuation: None,
@@ -205,6 +219,7 @@ mod tests {
             kind: AbilityKind::Spell,
             chain_rounding: None,
             actor: None,
+            repeat_until: None,
         };
         assert_eq!(ir.clauses.len(), 1);
         assert_eq!(ir.kind, AbilityKind::Spell);

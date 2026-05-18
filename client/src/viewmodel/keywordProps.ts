@@ -38,7 +38,11 @@ export function getCrewPower(keywords: Keyword[]): number | null {
   for (const kw of keywords) {
     if (typeof kw === "object" && kw !== null && "Crew" in kw) {
       const value = (kw as Record<string, unknown>).Crew;
-      if (typeof value === "number") return value;
+      // CR 702.122: Crew carries `{ power, once_per_turn }`.
+      if (typeof value === "object" && value !== null && "power" in value) {
+        const power = (value as Record<string, unknown>).power;
+        if (typeof power === "number") return power;
+      }
     }
   }
   return null;
@@ -120,7 +124,7 @@ const MANA_COST_KEYWORDS = new Set([
 const U32_KEYWORDS = new Set([
   "Dredge", "Modular", "Renown", "Fabricate", "Annihilator", "Bushido",
   "Tribute", "Afterlife", "Fading", "Vanishing", "Rampage", "Absorb",
-  "Crew", "Hideaway", "Poisonous", "Bloodthirst", "Amplify", "Graft",
+  "Hideaway", "Poisonous", "Bloodthirst", "Amplify", "Graft",
   "Devour", "Toxic", "Saddle", "Soulshift", "Backup",
 ]);
 
@@ -143,6 +147,14 @@ export function getKeywordDetail(kw: Keyword): string | null {
   if (MANA_COST_KEYWORDS.has(key)) return formatKeywordManaCost(val);
   if (U32_KEYWORDS.has(key)) return String(val);
 
+  // CR 702.122: Crew carries `{ power, once_per_turn }` — show the power.
+  if (key === "Crew") {
+    if (val && typeof val === "object" && "power" in val) {
+      const power = (val as { power?: unknown }).power;
+      return typeof power === "number" ? String(power) : null;
+    }
+    return null;
+  }
   if (key === "Protection") return formatProtection(val);
   if (key === "Ward") return formatWard(val);
   if (key === "Typecycling") return formatKeywordManaCost(val?.cost);

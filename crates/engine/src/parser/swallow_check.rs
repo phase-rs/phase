@@ -300,6 +300,15 @@ fn def_tree_has_optional(def: &AbilityDefinition) -> bool {
     if def.optional || def.optional_targeting {
         return true;
     }
+    // CR 107.1c: "you may repeat this process [any number of times]" is a
+    // controller decision captured on `repeat_until` — an optional player
+    // action, so the "you may" in the text is accounted for.
+    if matches!(
+        def.repeat_until,
+        Some(crate::types::ability::RepeatContinuation::ControllerChoice)
+    ) {
+        return true;
+    }
     if effect_has_internal_optionality(&def.effect) {
         return true;
     }
@@ -369,6 +378,14 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
         // therefore not needed — analogous to Dig { up_to: true }.
         | Effect::CopySpell {
             retarget: CopyRetargetPermission::MayChooseNewTargets,
+            ..
+        }
+        // CR 701.20a + CR 608.2c: RevealUntil with kept_optional_to encodes
+        // "you may put that card onto the battlefield" — the kept-card
+        // destination choice IS the "may" decision (mirrors RevealFromHand
+        // { on_decline }).
+        | Effect::RevealUntil {
+            kept_optional_to: Some(_),
             ..
         } => true,
         Effect::ChooseOneOf { branches, .. } => branches.iter().any(def_tree_has_optional),
@@ -1339,8 +1356,9 @@ fn detect_condition_if(
     }
     // Bare " if " — covers prefix conditional ("if X, do Y") and suffix
     // conditional ("do Y if X"). Excluded: "as if", "even if" — modifiers,
-    // not conditions. Also "if able" (CR 701.27) — must-attack/must-block
-    // riders, encoded as `MustAttack`/`MustBeBlocked` static modes.
+    // not conditions. Also "if able" (CR 508.1d / CR 509.1c) —
+    // must-attack/must-block riders, encoded as `MustAttack`/`MustBeBlocked`
+    // static modes.
     let has_marker = stripped.contains(" if ") // allow-noncombinator: swallow detector marker scan on classified text
         && !stripped.contains(" as if ") // allow-noncombinator: swallow detector marker scan on classified text
         && !stripped.contains(" even if "); // allow-noncombinator: swallow detector marker scan on classified text
@@ -1364,9 +1382,9 @@ fn detect_condition_if(
         // CR 614.1a: AddTargetReplacement encodes the "if [target] would die"
         // gate via the carried ReplacementDefinition's event/destination_zone.
         "AddTargetReplacement",
-        // CR 701.27 / CR 506.6: must-attack and must-block "if able" riders
-        // are encoded as static-mode constraints or as `ForceBlock`/`ForceAttack`
-        // effects, not conditional gates.
+        // CR 508.1d / CR 509.1c / CR 506.6: must-attack and must-block "if able"
+        // riders are encoded as static-mode constraints or as
+        // `ForceBlock`/`ForceAttack` effects, not conditional gates.
         "\"mode\":\"MustAttack\"",
         "\"mode\":\"MustBlock\"",
         "\"mode\":\"MustBeBlocked\"",
@@ -1378,6 +1396,10 @@ fn detect_condition_if(
         // Amphitheater) as an effect with an `on_decline` branch.
         "\"mode\":{\"type\":\"Optional\"",
         "\"on_decline\":{",
+        // CR 701.20a + CR 608.2c: RevealUntil's kept_optional_to encodes the
+        // "you may put that card onto the battlefield. If you don't, ..."
+        // decline branch — the "if" is the optional-destination gate.
+        "\"kept_optional_to\":",
         // CR 117.3a: TopOfLibraryCastPermission with `alt_cost` IS the "if
         // you cast a spell this way, pay X" gate (Bolas's Citadel etc.).
         "TopOfLibraryCastPermission",
@@ -2085,6 +2107,21 @@ mod tests {
     }
 
     #[test]
+    fn optional_you_may_accepts_repeat_this_process() {
+        // CR 107.1c: "You may repeat this process any number of times" is
+        // captured as `repeat_until: ControllerChoice` on the root ability —
+        // a controller decision, not a swallowed optional effect.
+        let parsed = parse(
+            "Reveal the top card of your library and put that card into your \
+             hand. You lose life equal to its mana value. You may repeat this \
+             process any number of times.",
+            &["Instant"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
     fn duration_this_turn_accepts_force_block_scope() {
         let parsed = parse(
             "Target creature blocks target creature this turn if able.",
@@ -2292,6 +2329,30 @@ mod tests {
         );
 
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    /// CR 701.20a + CR 608.2c: RevealUntil's "you may put that card onto the
+    /// battlefield" is represented as `kept_optional_to: Some(Battlefield)`, so
+    /// neither `Optional_YouMay` nor (for the explicit "if you don't" form)
+    /// `Condition_If` swallowed-clause warnings are emitted. Covers Genesis
+    /// Storm / Hei Bai / Songbirds' Blessing.
+    #[test]
+    fn optional_you_may_accepts_reveal_until_optional_kept() {
+        let hei_bai = parse(
+            "Reveal cards from the top of your library until you reveal a creature card. \
+             You may put that card onto the battlefield. Then shuffle your library.",
+            &["Sorcery"],
+        );
+        assert!(!has_swallowed_detector(&hei_bai, "Optional_YouMay"));
+
+        let songbirds = parse(
+            "Reveal cards from the top of your library until you reveal a creature card. \
+             You may put that card onto the battlefield. If you don't, put it into your hand. \
+             Put the rest on the bottom of your library in a random order.",
+            &["Sorcery"],
+        );
+        assert!(!has_swallowed_detector(&songbirds, "Optional_YouMay"));
+        assert!(!has_swallowed_detector(&songbirds, "Condition_If"));
     }
 
     /// CR 707.10c: Mirrorpool's "you may choose new targets for the copy" is

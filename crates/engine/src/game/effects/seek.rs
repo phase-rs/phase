@@ -84,6 +84,11 @@ pub fn resolve(
                     enter_tapped,
                     None,
                     &[],
+                    crate::game::exile_links::should_track_exiled_by_source(
+                        state,
+                        ability.source_id,
+                        ability,
+                    ),
                     events,
                 );
             }

@@ -193,6 +193,7 @@ mod tests {
     use crate::types::ability::{CastingPermission, Duration, PlayerScope, TargetFilter};
     use crate::types::game_state::GameState;
     use crate::types::identifiers::CardId;
+    use crate::types::phase::Phase;
     use crate::types::zones::Zone;
 
     /// CR 611.2a default: grantee defaults to the ability controller.
@@ -420,5 +421,393 @@ mod tests {
             }
             _ => panic!("expected PlayFromExile"),
         }
+    }
+
+    // ----------------------------------------------------------------
+    // Rocco, Street Chef (issue #412): Duration::UntilNextStepOf { step: End } and
+    // its end-step prune lifecycle.
+    // ----------------------------------------------------------------
+
+    /// CR 513.1 + CR 611.2a: Granting `PlayFromExile { duration:
+    /// UntilNextStepOf { step: End, player: Controller } }` writes the permission with the
+    /// new variant onto each object owned by the iterated player. This
+    /// covers the parser-output → resolver path for Rocco's first trigger.
+    #[test]
+    fn rocco_end_step_grant_writes_until_next_end_step_permission() {
+        let mut state = GameState::new_two_player(1);
+        let p0_card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "MyCard".to_string(),
+            Zone::Exile,
+        );
+        let p1_card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "TheirCard".to_string(),
+            Zone::Exile,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    duration: Duration::UntilNextStepOf {
+                        step: Phase::End,
+                        player: PlayerScope::Controller,
+                    },
+                    granted_to: PlayerId(0),
+                    frequency: crate::types::statics::CastFrequency::Unlimited,
+                    source_id: None,
+                    exiled_by_ability_controller: None,
+                    mana_spend_permission: None,
+                },
+                target: TargetFilter::Any,
+                grantee: PermissionGrantee::ObjectOwner,
+            },
+            vec![TargetRef::Object(p0_card), TargetRef::Object(p1_card)],
+            crate::types::identifiers::ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        for (obj_id, expected_owner) in [(p0_card, PlayerId(0)), (p1_card, PlayerId(1))] {
+            let obj = &state.objects[&obj_id];
+            assert_eq!(obj.casting_permissions.len(), 1);
+            match &obj.casting_permissions[0] {
+                CastingPermission::PlayFromExile {
+                    duration,
+                    granted_to,
+                    exiled_by_ability_controller,
+                    ..
+                } => {
+                    assert_eq!(
+                        duration,
+                        &Duration::UntilNextStepOf {
+                            step: Phase::End,
+                            player: PlayerScope::Controller,
+                        },
+                    );
+                    assert_eq!(*granted_to, expected_owner);
+                    assert_eq!(*exiled_by_ability_controller, Some(PlayerId(0)));
+                }
+                _ => panic!("expected PlayFromExile"),
+            }
+        }
+    }
+
+    /// CR 513.1: `prune_end_step_casting_permissions` removes only the
+    /// `UntilNextStepOf { step: End }` permissions whose `granted_to == active_player`.
+    /// Permissions for other players survive (asymmetric multiplayer
+    /// prune), and non-end-step durations (Permanent, UntilEndOfTurn,
+    /// UntilNextTurnOf) all survive.
+    #[test]
+    fn end_step_prune_only_removes_matching_grantee_and_variant() {
+        use crate::game::layers::prune_end_step_casting_permissions;
+        use crate::types::statics::CastFrequency;
+
+        let mut state = GameState::new_two_player(1);
+        let card_a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "A".to_string(),
+            Zone::Exile,
+        );
+        let card_b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "B".to_string(),
+            Zone::Exile,
+        );
+        let card_c = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "C".to_string(),
+            Zone::Exile,
+        );
+
+        let mk_perm = |duration: Duration, granted_to: PlayerId| CastingPermission::PlayFromExile {
+            duration,
+            granted_to,
+            frequency: CastFrequency::Unlimited,
+            source_id: None,
+            exiled_by_ability_controller: None,
+            mana_spend_permission: None,
+        };
+
+        state.objects.get_mut(&card_a).unwrap().casting_permissions = vec![mk_perm(
+            Duration::UntilNextStepOf {
+                step: Phase::End,
+                player: PlayerScope::Controller,
+            },
+            PlayerId(0),
+        )];
+        state.objects.get_mut(&card_b).unwrap().casting_permissions = vec![mk_perm(
+            Duration::UntilNextStepOf {
+                step: Phase::End,
+                player: PlayerScope::Controller,
+            },
+            PlayerId(1),
+        )];
+        state.objects.get_mut(&card_c).unwrap().casting_permissions = vec![
+            mk_perm(Duration::UntilEndOfTurn, PlayerId(0)),
+            mk_perm(Duration::Permanent, PlayerId(0)),
+            mk_perm(
+                Duration::UntilNextTurnOf {
+                    player: PlayerScope::Controller,
+                },
+                PlayerId(0),
+            ),
+        ];
+
+        // Active player is 0 — only their UntilNextStepOf { step: End } permissions go.
+        prune_end_step_casting_permissions(&mut state, PlayerId(0));
+
+        assert!(
+            state.objects[&card_a].casting_permissions.is_empty(),
+            "P0's UntilNextStepOf {{ step: End }} grant should be pruned",
+        );
+        assert_eq!(
+            state.objects[&card_b].casting_permissions.len(),
+            1,
+            "P1's UntilNextStepOf {{ step: End }} grant survives P0's end step",
+        );
+        assert_eq!(
+            state.objects[&card_c].casting_permissions.len(),
+            3,
+            "non-end-step durations all survive the prune",
+        );
+    }
+
+    /// CR 513.1 + CR 611.2a/b: Rocco's duration text says "your next end
+    /// step", so the expiration anchor is the effect controller even when the
+    /// play permission is granted to each exiled card's owner.
+    #[test]
+    fn rocco_end_step_prune_uses_effect_controller_not_object_owner() {
+        use crate::game::layers::prune_end_step_casting_permissions;
+        use crate::types::statics::CastFrequency;
+
+        let mut state = GameState::new_two_player(1);
+        let opponents_card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "TheirCard".to_string(),
+            Zone::Exile,
+        );
+        let permission = CastingPermission::PlayFromExile {
+            duration: Duration::UntilNextStepOf {
+                step: Phase::End,
+                player: PlayerScope::Controller,
+            },
+            granted_to: PlayerId(1),
+            frequency: CastFrequency::Unlimited,
+            source_id: None,
+            exiled_by_ability_controller: Some(PlayerId(0)),
+            mana_spend_permission: None,
+        };
+        state
+            .objects
+            .get_mut(&opponents_card)
+            .unwrap()
+            .casting_permissions = vec![permission];
+
+        prune_end_step_casting_permissions(&mut state, PlayerId(1));
+        assert_eq!(
+            state.objects[&opponents_card].casting_permissions.len(),
+            1,
+            "permission must survive the card owner's end step",
+        );
+
+        prune_end_step_casting_permissions(&mut state, PlayerId(0));
+        assert!(
+            state.objects[&opponents_card]
+                .casting_permissions
+                .is_empty(),
+            "permission must expire at Rocco controller's next end step",
+        );
+    }
+
+    /// CR 513.2 ordering regression: a new `UntilNextStepOf { step: End }` permission
+    /// granted by an end-step trigger DURING this end step (after the
+    /// prune has already run) MUST survive — CR 513.2 prevents the end
+    /// step from "backing up" so the new trigger lands after the prune.
+    /// `turns.rs::auto_advance::Phase::End` runs the prune BEFORE
+    /// `process_phase_triggers`, so grants from those triggers are NOT
+    /// wiped by the same end step.
+    #[test]
+    fn end_step_prune_runs_before_triggers_so_new_grants_survive() {
+        use crate::game::layers::prune_end_step_casting_permissions;
+        use crate::types::statics::CastFrequency;
+
+        let mut state = GameState::new_two_player(1);
+        let exiled_pre_prune = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Old".to_string(),
+            Zone::Exile,
+        );
+        // Pre-existing grant from a PREVIOUS turn's end-step trigger.
+        state
+            .objects
+            .get_mut(&exiled_pre_prune)
+            .unwrap()
+            .casting_permissions = vec![CastingPermission::PlayFromExile {
+            duration: Duration::UntilNextStepOf {
+                step: Phase::End,
+                player: PlayerScope::Controller,
+            },
+            granted_to: PlayerId(0),
+            frequency: CastFrequency::Unlimited,
+            source_id: None,
+            exiled_by_ability_controller: None,
+            mana_spend_permission: None,
+        }];
+
+        // Simulate the ordering in `turns.rs`:
+        // 1. Prune runs first.
+        prune_end_step_casting_permissions(&mut state, PlayerId(0));
+        // After prune the previous grant is gone.
+        assert!(state.objects[&exiled_pre_prune]
+            .casting_permissions
+            .is_empty());
+
+        // 2. End-step trigger fires AFTER the prune (CR 513.2 — no back-up).
+        //    Simulate the trigger by resolving a fresh grant on a new exiled card.
+        let exiled_this_step = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "New".to_string(),
+            Zone::Exile,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    duration: Duration::UntilNextStepOf {
+                        step: Phase::End,
+                        player: PlayerScope::Controller,
+                    },
+                    granted_to: PlayerId(0),
+                    frequency: CastFrequency::Unlimited,
+                    source_id: None,
+                    exiled_by_ability_controller: None,
+                    mana_spend_permission: None,
+                },
+                target: TargetFilter::Any,
+                grantee: PermissionGrantee::ObjectOwner,
+            },
+            vec![TargetRef::Object(exiled_this_step)],
+            crate::types::identifiers::ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // The new grant survives the same end step's prune (CR 513.2).
+        assert_eq!(
+            state.objects[&exiled_this_step].casting_permissions.len(),
+            1,
+            "new same-step grant must survive (CR 513.2)",
+        );
+        match &state.objects[&exiled_this_step].casting_permissions[0] {
+            CastingPermission::PlayFromExile {
+                duration,
+                granted_to,
+                ..
+            } => {
+                assert_eq!(
+                    duration,
+                    &Duration::UntilNextStepOf {
+                        step: Phase::End,
+                        player: PlayerScope::Controller,
+                    },
+                );
+                assert_eq!(*granted_to, PlayerId(0));
+            }
+            _ => panic!("expected PlayFromExile"),
+        }
+    }
+
+    /// CR 514.2: `prune_end_of_turn_casting_permissions` at cleanup must
+    /// NOT touch `UntilNextStepOf { step: End }` permissions — that variant is
+    /// pruned at the next end step instead. Defensive arm in the
+    /// cleanup prune match.
+    #[test]
+    fn cleanup_prune_retains_until_next_end_step_permissions() {
+        use crate::game::layers::prune_end_of_turn_casting_permissions;
+        use crate::types::statics::CastFrequency;
+
+        let mut state = GameState::new_two_player(1);
+        let card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "X".to_string(),
+            Zone::Exile,
+        );
+        state.objects.get_mut(&card).unwrap().casting_permissions =
+            vec![CastingPermission::PlayFromExile {
+                duration: Duration::UntilNextStepOf {
+                    step: Phase::End,
+                    player: PlayerScope::Controller,
+                },
+                granted_to: PlayerId(0),
+                frequency: CastFrequency::Unlimited,
+                source_id: None,
+                exiled_by_ability_controller: None,
+                mana_spend_permission: None,
+            }];
+
+        prune_end_of_turn_casting_permissions(&mut state);
+
+        assert_eq!(
+            state.objects[&card].casting_permissions.len(),
+            1,
+            "UntilNextStepOf {{ step: End }} must survive the cleanup prune",
+        );
+    }
+
+    /// CR 502.3: `prune_until_next_turn_casting_permissions` at the
+    /// untap step must NOT touch `UntilNextStepOf { step: End }` permissions either.
+    #[test]
+    fn untap_prune_retains_until_next_end_step_permissions() {
+        use crate::game::layers::prune_until_next_turn_casting_permissions;
+        use crate::types::statics::CastFrequency;
+
+        let mut state = GameState::new_two_player(1);
+        let card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "X".to_string(),
+            Zone::Exile,
+        );
+        state.objects.get_mut(&card).unwrap().casting_permissions =
+            vec![CastingPermission::PlayFromExile {
+                duration: Duration::UntilNextStepOf {
+                    step: Phase::End,
+                    player: PlayerScope::Controller,
+                },
+                granted_to: PlayerId(0),
+                frequency: CastFrequency::Unlimited,
+                source_id: None,
+                exiled_by_ability_controller: None,
+                mana_spend_permission: None,
+            }];
+
+        prune_until_next_turn_casting_permissions(&mut state, PlayerId(0));
+
+        assert_eq!(
+            state.objects[&card].casting_permissions.len(),
+            1,
+            "UntilNextStepOf {{ step: End }} must survive the untap-step prune",
+        );
     }
 }

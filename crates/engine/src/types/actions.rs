@@ -8,7 +8,7 @@ use super::keywords::Keyword;
 use super::mana::ManaType;
 use super::match_config::DeckCardCount;
 use super::phase::Phase;
-use super::player::PlayerId;
+use super::player::{PlayerCounterKind, PlayerId};
 use super::zones::Zone;
 use crate::game::combat::AttackTarget;
 use crate::game::game_object::AttachTarget;
@@ -637,6 +637,14 @@ pub enum DebugAction {
     // ── Player State Manipulation ─────────────────────────────────────────
     /// Set a player's life total directly.
     SetLife { player_id: PlayerId, life: i32 },
+    /// Modify a non-energy player counter. Positive delta adds, negative removes.
+    ModifyPlayerCounters {
+        player_id: PlayerId,
+        counter_kind: PlayerCounterKind,
+        delta: i32,
+    },
+    /// Modify energy counters, which are stored separately from `PlayerCounterKind`.
+    ModifyEnergy { player_id: PlayerId, delta: i32 },
     /// Add mana to a player's pool (mixed types in one action).
     AddMana {
         player_id: PlayerId,
@@ -750,6 +758,21 @@ impl DebugAction {
                 delta,
                 counter_type,
                 obj(*object_id)
+            ),
+            DebugAction::ModifyPlayerCounters {
+                player_id,
+                counter_kind,
+                delta,
+            } => format!(
+                "ModifyPlayerCounters ({:+} {} counters on {})",
+                delta,
+                counter_kind,
+                player_label(*player_id)
+            ),
+            DebugAction::ModifyEnergy { player_id, delta } => format!(
+                "ModifyEnergy ({:+} energy on {})",
+                delta,
+                player_label(*player_id)
             ),
             DebugAction::SetTapped { object_id, tapped } => format!(
                 "SetTapped ({} → {})",

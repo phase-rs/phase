@@ -71,6 +71,7 @@ mod tests {
             target_choice_timing: crate::types::ability::TargetChoiceTiming::Stack,
             description: None,
             player_scope: None,
+            starting_with: None,
             chosen_x: None,
             cost_paid_object: None,
             effect_context_object: None,
@@ -84,6 +85,8 @@ mod tests {
             distribution: None,
             target_selection_mode: crate::types::ability::TargetSelectionMode::Chosen,
             chosen_players: Vec::new(),
+            repeat_until: None,
+            sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
         }
     }
 

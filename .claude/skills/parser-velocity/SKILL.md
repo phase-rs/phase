@@ -1,6 +1,6 @@
 ---
 name: parser-velocity
-description: Fast-iteration loop for quick parser wins — surface near-miss cards via parser-gap-analyzer's typed category classifier, edit in batches, compile once per batch (not per card), defer the full gate (fmt/clippy/test-all/coverage/semantic-audit) to session end. Companion to `unlock-set`; use this when the fix is "add a `tag()` arm to an existing `alt()`" rather than cluster-level infrastructure. Trigger phrases: "quick parser wins", "scan near-misses", "velocity pass on <format>", "parser velocity sprint", "low-hanging parser fruit".
+description: "Fast-iteration loop for quick parser wins — surface near-miss cards via parser-gap-analyzer's typed category classifier, edit in batches, compile once per batch (not per card), defer the full gate (fmt/clippy/test-all/coverage/semantic-audit) to session end. Companion to `unlock-set`; use this when the fix is \"add a `tag()` arm to an existing `alt()`\" rather than cluster-level infrastructure. Trigger phrases: \"quick parser wins\", \"scan near-misses\", \"velocity pass on <format>\", \"parser velocity sprint\", \"low-hanging parser fruit\"."
 ---
 
 # Parser Velocity — Quick-Win Iteration Loop

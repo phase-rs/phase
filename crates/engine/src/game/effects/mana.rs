@@ -77,11 +77,14 @@ pub fn resolve(
     let concrete_restrictions = resolve_restrictions(restrictions, state, ability.source_id);
 
     let recipient = match produced {
+        // CR 106.3 + CR 109.5: "add one mana of any type that land produced" —
+        // the bonus mana goes to the player who tapped the land (the
+        // `TappedForMana` event's `player_id`), not the trigger's controller.
         ManaProduction::TriggerEventManaType => state
             .current_trigger_event
             .as_ref()
             .and_then(|event| match event {
-                GameEvent::ManaAdded { player_id, .. } => Some(*player_id),
+                GameEvent::TappedForMana { player_id, .. } => Some(*player_id),
                 _ => None,
             })
             .unwrap_or(ability.controller),
@@ -373,11 +376,27 @@ fn resolve_mana_types_impl(
                 .map(|index| mana_color_to_type(&color_options[index % color_options.len()]))
                 .collect()
         }
-        ManaProduction::ChosenColor { count, .. } => {
+        ManaProduction::ChosenColor {
+            count,
+            fixed_alternative,
+            ..
+        } => {
             let amount = resolve_count(count, state, ability, controller, source_id);
-            chosen_color_for_mana(state, source_id)
-                .map(|color| vec![mana_color_to_type(&color); amount])
-                .unwrap_or_default()
+            match (chosen_color_for_mana(state, source_id), fixed_alternative) {
+                // A color was chosen — produce that color.
+                (Some(color), _) => vec![mana_color_to_type(&color); amount],
+                // CR 106.1: count derivation must be independent of color
+                // resolvability — the SingleColor choice supplies the actual
+                // color. When a fixed alternative exists, the no-prompt default
+                // path (auto-tap / AI direct activation) produces the fixed
+                // color deterministically; the count-derivation path
+                // (`chosen_mana_types_for_prompt`) overrides the color with the
+                // player's `SingleColor` choice, so the length is what matters.
+                (None, Some(fixed)) => vec![mana_color_to_type(fixed); amount],
+                // CR 106.5: pure chosen-color production with no color chosen
+                // produces no mana (undefined type).
+                (None, None) => Vec::new(),
+            }
         }
         // CR 106.7: Produce mana of any color that a land an opponent controls could produce.
         // Delegates to mana_sources::opponent_land_color_options for the shared computation.
@@ -468,31 +487,34 @@ fn resolve_mana_types_impl(
                 .map(|c| mana_color_to_type(&c))
                 .collect()
         }
-        // CR 603.7c + CR 106.3 + CR 106.5: Vorinclex / Dictate of Karametra —
-        // "add one mana of any type that land produced." The mana type is read
-        // from the triggering `ManaAdded` event carried in
-        // `state.current_trigger_event` at resolution time. If the current
-        // event is absent (off-stack resolution) or not a `ManaAdded` event,
-        // this produces no mana (CR 106.5 — undefined mana type).
+        // CR 603.7c + CR 106.3 + CR 106.5 + CR 106.12a: Vorinclex / Dictate of
+        // Karametra — "add one mana of any type that land produced." The set of
+        // produced types is read from the triggering `TappedForMana` event
+        // carried in `state.current_trigger_event` at resolution time. The
+        // `TapsForMana` trigger fires once per mana-ability resolution
+        // (CR 106.12a), so this branch sees the full produced set, not a single
+        // unit. If the current event is absent (off-stack resolution) or not a
+        // `TappedForMana` event, this produces no mana (CR 106.5 — undefined
+        // mana type).
         //
-        // Per-event single-type model: a `ManaAdded` event carries exactly one
-        // `ManaType`, so this branch produces exactly one mana matching that
-        // type. The engine fires one trigger per `ManaAdded` event, so a land
-        // tapping for {C}{C} produces two triggers and two singletons here —
-        // not one trigger producing `vec![Colorless, Colorless]`. This matches
-        // Vorinclex / Mana Reflex / Dictate of Karametra's "any type that land
-        // produced" semantics where there is no choice to make.
+        // For every land the engine models, a single resolution produces mana
+        // of one uniform color (basics → one type; Nykthos → all green), so
+        // emitting one unit per *distinct* color yields exactly one mana — the
+        // CR-correct "any type that land produced" with no choice to make.
         //
         // If a future card requires the player to *choose* among multiple
         // produced types in a single resolution ("any one type that land
-        // produced"), the resolver must be extended to emit a player choice
-        // rather than reading the singular event type. Add a separate
-        // `ManaProduction::TriggerEventManaTypeChoice` variant before reusing
-        // this branch — silently expanding the vec here would skip the choice.
+        // produced"), the resolver must be extended to emit a player choice.
+        // Add a separate `ManaProduction::TriggerEventManaTypeChoice` variant
+        // before reusing this branch — silently expanding the vec here would
+        // skip the choice.
         ManaProduction::TriggerEventManaType => {
             use crate::types::events::GameEvent;
             match &state.current_trigger_event {
-                Some(GameEvent::ManaAdded { mana_type, .. }) => vec![*mana_type],
+                Some(GameEvent::TappedForMana { produced, .. }) => {
+                    let distinct: std::collections::HashSet<_> = produced.iter().copied().collect();
+                    distinct.into_iter().collect()
+                }
                 _ => Vec::new(),
             }
         }
@@ -1083,6 +1105,7 @@ mod tests {
         let ability = make_mana_ability(ManaProduction::ChosenColor {
             count: QuantityExpr::Fixed { value: 1 },
             contribution: ManaContribution::Base,
+            fixed_alternative: None,
         });
         // Override source_id to match our object
         let ability = ResolvedAbility {
@@ -1134,6 +1157,7 @@ mod tests {
                     },
                 },
                 contribution: ManaContribution::Base,
+                fixed_alternative: None,
             })
         };
 
@@ -1152,12 +1176,106 @@ mod tests {
             &make_mana_ability(ManaProduction::ChosenColor {
                 count: QuantityExpr::Fixed { value: 1 },
                 contribution: ManaContribution::Base,
+                fixed_alternative: None,
             }),
             &mut events,
         )
         .unwrap();
 
         assert_eq!(state.players[0].mana_pool.total(), 0);
+    }
+
+    #[test]
+    fn chosen_color_count_derivation_independent_of_color() {
+        // Issue #482 Defect B: a `ChosenColor` with `fixed_alternative: Some(_)`
+        // and no chosen color must still derive `count == 1` — the count
+        // derivation cannot depend on a color being resolvable.
+        use crate::game::zones::create_object;
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Manor Gate".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility {
+            source_id,
+            ..make_mana_ability(ManaProduction::ChosenColor {
+                count: QuantityExpr::Fixed { value: 1 },
+                contribution: ManaContribution::Base,
+                fixed_alternative: Some(ManaColor::Green),
+            })
+        };
+        let produced = ManaProduction::ChosenColor {
+            count: QuantityExpr::Fixed { value: 1 },
+            contribution: ManaContribution::Base,
+            fixed_alternative: Some(ManaColor::Green),
+        };
+        let types = resolve_mana_types_for_ability(&produced, &state, &ability);
+        assert_eq!(
+            types.len(),
+            1,
+            "count must derive to 1 even with no chosen color"
+        );
+        // No-prompt default path produces the fixed color deterministically.
+        assert_eq!(types[0], ManaType::Green);
+    }
+
+    #[test]
+    fn gate_land_mana_ability_offers_fixed_or_chosen() {
+        // Issue #482 Defect B: Manor Gate's "{T}: Add {G} or one mana of the
+        // chosen color" — once a color (Red) is chosen, the resolver supplied a
+        // SingleColor choice must produce exactly the selected color, exactly
+        // once, for either option.
+        use crate::game::zones::create_object;
+        use crate::types::ability::ChosenAttribute;
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Manor Gate".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source_id)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::Color(ManaColor::Red));
+
+        let produced = ManaProduction::ChosenColor {
+            count: QuantityExpr::Fixed { value: 1 },
+            contribution: ManaContribution::Base,
+            fixed_alternative: Some(ManaColor::Green),
+        };
+        let ability = ResolvedAbility {
+            source_id,
+            ..make_mana_ability(produced.clone())
+        };
+
+        // Each choice in the SingleColor prompt yields exactly that color once.
+        for chosen in [ManaType::Green, ManaType::Red] {
+            let prompt = ManaChoicePrompt::SingleColor {
+                options: vec![ManaType::Green, ManaType::Red],
+            };
+            let types = chosen_mana_types_for_prompt(
+                &state,
+                &ability,
+                &produced,
+                &prompt,
+                ManaChoice::SingleColor(chosen),
+            )
+            .unwrap();
+            assert_eq!(types, vec![chosen], "chosen color produced exactly once");
+        }
     }
 
     #[test]

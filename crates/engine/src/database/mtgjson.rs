@@ -55,6 +55,8 @@ pub struct AtomicCard {
     pub printings: Vec<String>,
     #[serde(default)]
     pub rulings: Vec<Ruling>,
+    #[serde(default)]
+    pub is_game_changer: bool,
     pub identifiers: AtomicIdentifiers,
 }
 
@@ -217,6 +219,29 @@ mod tests {
         let first = &card.rulings[0];
         assert!(!first.date.is_empty(), "ruling date should be populated");
         assert!(!first.text.is_empty(), "ruling text should be populated");
+    }
+
+    #[test]
+    fn deserializes_is_game_changer() {
+        let data: AtomicCardsFile = serde_json::from_str(
+            r#"{
+                "data": {
+                    "Sol Ring": [{
+                        "name": "Sol Ring",
+                        "colors": [],
+                        "colorIdentity": [],
+                        "layout": "normal",
+                        "manaValue": 1.0,
+                        "isGameChanger": true,
+                        "identifiers": {}
+                    }]
+                }
+            }"#,
+        )
+        .expect("inline fixture should deserialize");
+
+        let card = find_card(&data, "Sol Ring").expect("Sol Ring should exist");
+        assert!(card.is_game_changer);
     }
 
     #[test]

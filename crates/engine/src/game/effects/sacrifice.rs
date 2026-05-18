@@ -255,6 +255,7 @@ pub fn resolve(
             under_your_control: false,
             enters_attacking: false,
             owner_library: false,
+            track_exiled_by_source: false,
         };
 
         // EffectResolved is emitted by the EffectZoneChoice handler after the player chooses
@@ -314,8 +315,9 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::effects::resolve_ability_chain;
     use crate::game::zones::create_object;
-    use crate::types::ability::{Effect, TargetFilter};
+    use crate::types::ability::{Effect, QuantityRef, TargetFilter};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
 
@@ -804,5 +806,454 @@ mod tests {
             }
             other => panic!("unexpected waiting_for: {other:?}"),
         }
+    }
+
+    /// Issue #458: Scapeshift end-to-end. Drives the real parser + engine
+    /// pipeline — parse the actual Oracle text, assert the AST, then resolve
+    /// the chain and verify the player may sacrifice 0..=all lands (not exactly
+    /// one) and search for "that many" land cards.
+    /// CR 107.1c (any number includes zero) + CR 608.2c (back-reference count).
+    fn scapeshift_ability() -> ResolvedAbility {
+        let parsed = crate::parser::parse_oracle_text(
+            "Sacrifice any number of lands. Search your library for up to that many \
+             land cards, put them onto the battlefield tapped, then shuffle.",
+            "Scapeshift",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        assert_eq!(
+            parsed.abilities.len(),
+            1,
+            "Scapeshift has one spell ability"
+        );
+        crate::game::ability_utils::build_resolved_from_def(
+            &parsed.abilities[0],
+            ObjectId(100),
+            PlayerId(0),
+        )
+    }
+
+    fn assert_scapeshift_ast(effect: &Effect) {
+        // Top-level: Sacrifice with UpTo(ObjectCount{Land}) and min_count 0.
+        let Effect::Sacrifice {
+            count, min_count, ..
+        } = effect
+        else {
+            panic!("expected Effect::Sacrifice, got {effect:?}");
+        };
+        assert_eq!(*min_count, 0, "\"any number\" includes zero (CR 107.1c)");
+        let QuantityExpr::UpTo { max } = count else {
+            panic!("expected UpTo sacrifice count, got {count:?}");
+        };
+        assert!(
+            matches!(
+                **max,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                }
+            ),
+            "expected ObjectCount ceiling, got {max:?}"
+        );
+    }
+
+    fn scapeshift_search_effect(chain: &ResolvedAbility) -> Effect {
+        let mut node = chain;
+        loop {
+            if matches!(node.effect, Effect::SearchLibrary { .. }) {
+                return node.effect.clone();
+            }
+            node = node
+                .sub_ability
+                .as_deref()
+                .expect("SearchLibrary must exist in the Scapeshift chain");
+        }
+    }
+
+    fn scapeshift_state(land_card_ids: &[u64]) -> (GameState, Vec<ObjectId>) {
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        // Five battlefield lands controlled by PlayerId(0).
+        let mut battlefield_lands = Vec::new();
+        for i in 0..5u64 {
+            let id = create_object(
+                &mut state,
+                CardId(10 + i),
+                PlayerId(0),
+                format!("BF Land {i}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Land);
+            battlefield_lands.push(id);
+        }
+
+        // Land cards in the library.
+        for &card_id in land_card_ids {
+            let id = create_object(
+                &mut state,
+                CardId(card_id),
+                PlayerId(0),
+                format!("Library Land {card_id}"),
+                Zone::Library,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Land);
+        }
+        // A non-land library card to prove the search filter is applied.
+        let spell = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Library Spell".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+
+        (state, battlefield_lands)
+    }
+
+    #[test]
+    fn scapeshift_sacrifice_three_lands_searches_for_three() {
+        use crate::game::engine::apply;
+        use crate::types::actions::GameAction;
+
+        let chain = scapeshift_ability();
+        assert_scapeshift_ast(&chain.effect);
+
+        // SearchLibrary count must carry the EventContextAmount back-reference,
+        // wrapped as UpTo so the searcher picks 0..=that-many.
+        match scapeshift_search_effect(&chain) {
+            Effect::SearchLibrary { count, .. } => {
+                let QuantityExpr::UpTo { max } = count else {
+                    panic!("expected UpTo search count, got {count:?}");
+                };
+                assert_eq!(
+                    *max,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount
+                    },
+                    "search count must back-reference the sacrificed count"
+                );
+            }
+            other => panic!("expected SearchLibrary, got {other:?}"),
+        }
+
+        let (mut state, battlefield_lands) = scapeshift_state(&[20, 21, 22, 23]);
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &chain, &mut events, 0).unwrap();
+
+        // Player may sacrifice 0..=5 lands — proves it is not a fixed 1.
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                player,
+                cards,
+                count,
+                min_count,
+                up_to,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(*count, 5, "all five battlefield lands are eligible");
+                assert_eq!(*min_count, 0, "may sacrifice zero (CR 107.1c)");
+                assert!(*up_to, "variable-count sacrifice");
+                assert_eq!(cards.len(), 5);
+            }
+            other => panic!("expected EffectZoneChoice, got {other:?}"),
+        }
+
+        // Sacrifice exactly 3 lands.
+        let chosen: Vec<ObjectId> = battlefield_lands[..3].to_vec();
+        let result = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectCards {
+                cards: chosen.clone(),
+            },
+        )
+        .unwrap();
+
+        for id in &chosen {
+            assert!(
+                state.players[0].graveyard.contains(id),
+                "sacrificed land should be in graveyard"
+            );
+        }
+        assert_eq!(state.last_effect_count, Some(3), "stamped sacrificed count");
+
+        // The SearchLibrary continuation: pick limit is the "that many" = 3
+        // (the sacrificed count). The eligible pool is all 4 library lands —
+        // the non-land library card is excluded by the Land filter.
+        let search_cards = match &result.waiting_for {
+            WaitingFor::SearchChoice {
+                player,
+                cards,
+                count,
+                up_to,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(*count, 3, "\"that many\" resolved to 3 sacrificed");
+                assert!(*up_to);
+                assert_eq!(
+                    cards.len(),
+                    4,
+                    "all 4 library lands match (non-land excluded)"
+                );
+                cards.clone()
+            }
+            other => panic!("expected SearchChoice, got {other:?}"),
+        };
+
+        // Select 3 land cards — they enter the battlefield tapped, then shuffle.
+        let found: Vec<ObjectId> = search_cards[..3].to_vec();
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectCards {
+                cards: found.clone(),
+            },
+        )
+        .unwrap();
+
+        let on_bf_tapped = found
+            .iter()
+            .filter(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| obj.zone == Zone::Battlefield && obj.tapped)
+            })
+            .count();
+        assert_eq!(
+            on_bf_tapped, 3,
+            "all 3 found lands enter the battlefield tapped"
+        );
+    }
+
+    #[test]
+    fn scapeshift_sacrifice_zero_lands_searches_for_zero() {
+        use crate::game::engine::apply;
+        use crate::types::actions::GameAction;
+
+        let chain = scapeshift_ability();
+        let (mut state, _battlefield_lands) = scapeshift_state(&[20, 21, 22, 23]);
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &chain, &mut events, 0).unwrap();
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::EffectZoneChoice { .. }
+        ));
+
+        // Sacrifice zero lands — must not panic. The "that many" back-reference
+        // resolves to 0, so the search may pick at most 0 cards.
+        let result = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectCards { cards: vec![] },
+        )
+        .unwrap();
+        assert_eq!(state.last_effect_count, Some(0));
+        assert!(
+            state.players[0].graveyard.is_empty(),
+            "no land should have been sacrificed, found {:?}",
+            state.players[0].graveyard
+        );
+        // If a SearchChoice is presented at all, its pick limit must be 0.
+        if let WaitingFor::SearchChoice { count, .. } = &result.waiting_for {
+            assert_eq!(*count, 0, "search for \"up to 0\" must allow 0 picks");
+        }
+    }
+
+    /// Issue #463 — Soul Shatter: "Each opponent sacrifices a creature or
+    /// planeswalker with the greatest mana value among creatures and
+    /// planeswalkers they control."
+    ///
+    /// CR 202.3 + CR 608.2h + CR 701.21a: each opponent's eligible pool must
+    /// be restricted to *that opponent's* permanents tied for the greatest
+    /// mana value among their own creatures/planeswalkers — never a global
+    /// battlefield maximum.
+    ///
+    /// The board is constructed so the two opponents have *different* maxima
+    /// and P2's max strictly exceeds P1's: P1 controls MV 2/3/5/5 (max 5),
+    /// P2 controls MV 1/6 (max 6). A global-aggregate bug would compute
+    /// max = 6 across both boards and offer P1 *nothing* (no MV-6 of P1's),
+    /// while offering P2 only their MV-6. Correct per-controller scoping
+    /// offers P1 exactly their two MV-5 permanents and P2 exactly their MV-6.
+    /// Each opponent's resolution is driven through `resolve_ability_chain`
+    /// with that opponent rebound as the acting controller — exactly what the
+    /// `player_scope` loop in `effects/mod.rs` does per opponent.
+    #[test]
+    fn soul_shatter_offers_only_per_opponent_greatest_mv_permanents() {
+        use crate::types::ability::{
+            AggregateFunction, Comparator, ControllerRef, FilterProp, ObjectProperty, QuantityExpr,
+            QuantityRef, TypeFilter, TypedFilter,
+        };
+        use crate::types::card_type::CoreType;
+        use crate::types::mana::ManaCost;
+
+        // 3-player game: caster P0, opponents P1 and P2.
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 99);
+
+        // Place a creature/planeswalker for `owner` with the given mana value
+        // and core type, returning its ObjectId.
+        let place = |state: &mut GameState, owner: PlayerId, mv: u32, ty: CoreType| {
+            let id = create_object(
+                state,
+                CardId(state.next_object_id),
+                owner,
+                format!("P{}-MV{mv}", owner.0),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).expect("object exists");
+            obj.card_types.core_types.push(ty);
+            obj.mana_cost = ManaCost::generic(mv);
+            id
+        };
+
+        // P1 controls MV 2, 3, 5, 5 — max is 5 (two permanents tied).
+        let p1_mv2 = place(&mut state, PlayerId(1), 2, CoreType::Creature);
+        let p1_mv3 = place(&mut state, PlayerId(1), 3, CoreType::Planeswalker);
+        let p1_mv5a = place(&mut state, PlayerId(1), 5, CoreType::Creature);
+        let p1_mv5b = place(&mut state, PlayerId(1), 5, CoreType::Planeswalker);
+        // P2 controls MV 1, 6 — max is 6, strictly greater than P1's max.
+        let p2_mv1 = place(&mut state, PlayerId(2), 1, CoreType::Creature);
+        let p2_mv6 = place(&mut state, PlayerId(2), 6, CoreType::Creature);
+
+        // The Soul Shatter target filter: Or[Typed(Creature, You, [Cmc]),
+        // Typed(Planeswalker, You, [Cmc])] where the Cmc prop carries the
+        // per-controller `Aggregate { Max, ManaValue, eligible-set }`.
+        let eligible_set = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                TargetFilter::Typed(
+                    TypedFilter::default()
+                        .with_type(TypeFilter::Planeswalker)
+                        .controller(ControllerRef::You),
+                ),
+            ],
+        };
+        let superlative = FilterProp::Cmc {
+            comparator: Comparator::EQ,
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::Aggregate {
+                    function: AggregateFunction::Max,
+                    property: ObjectProperty::ManaValue,
+                    filter: eligible_set,
+                },
+            },
+        };
+        let soul_shatter_target = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties(vec![superlative.clone()]),
+                ),
+                TargetFilter::Typed(
+                    TypedFilter::default()
+                        .with_type(TypeFilter::Planeswalker)
+                        .controller(ControllerRef::You)
+                        .properties(vec![superlative]),
+                ),
+            ],
+        };
+
+        // Build the per-opponent sacrifice resolution. The `player_scope`
+        // loop (`effects/mod.rs`) rebinds `controller` to each opponent before
+        // resolving the chain; we mirror that here by constructing the chain
+        // with the opponent already bound as `controller`.
+        let make_per_opponent = |opponent: PlayerId| {
+            ResolvedAbility::new(
+                Effect::Sacrifice {
+                    target: soul_shatter_target.clone(),
+                    count: QuantityExpr::Fixed { value: 1 },
+                    min_count: 0,
+                },
+                vec![],
+                ObjectId(500),
+                opponent,
+            )
+        };
+
+        // --- Opponent P1: max over P1's board is 5; pool = the two MV-5. ---
+        let mut state_p1 = state.clone();
+        let mut events = Vec::new();
+        resolve_ability_chain(
+            &mut state_p1,
+            &make_per_opponent(PlayerId(1)),
+            &mut events,
+            0,
+        )
+        .unwrap();
+        match &state_p1.waiting_for {
+            WaitingFor::EffectZoneChoice { player, cards, .. } => {
+                assert_eq!(*player, PlayerId(1), "P1 is the chooser");
+                let mut got = cards.clone();
+                got.sort_by_key(|id| id.0);
+                let mut want = vec![p1_mv5a, p1_mv5b];
+                want.sort_by_key(|id| id.0);
+                assert_eq!(
+                    got, want,
+                    "P1 must be offered exactly their two MV-5 permanents \
+                     (a global max=6 bug would leave P1 with an empty pool)"
+                );
+                assert!(!cards.contains(&p1_mv2) && !cards.contains(&p1_mv3));
+                assert!(!cards.contains(&p2_mv1) && !cards.contains(&p2_mv6));
+            }
+            other => panic!("expected EffectZoneChoice for P1, got {other:?}"),
+        }
+
+        // --- Opponent P2: max over P2's board is 6; pool = the single MV-6. ---
+        let mut state_p2 = state.clone();
+        let mut events = Vec::new();
+        resolve_ability_chain(
+            &mut state_p2,
+            &make_per_opponent(PlayerId(2)),
+            &mut events,
+            0,
+        )
+        .unwrap();
+        // P2 has exactly one permanent at their max (MV-6) and one other; the
+        // single-permanent fast path auto-sacrifices it, so assert it landed
+        // in P2's graveyard and the MV-1 stayed on the battlefield.
+        assert!(
+            state_p2.players[2].graveyard.contains(&p2_mv6),
+            "P2's MV-6 (their per-board max) must be the sacrificed permanent"
+        );
+        assert!(
+            state_p2.battlefield.contains(&p2_mv1),
+            "P2's MV-1 is below their per-board max and must not be sacrificed"
+        );
+        assert!(
+            state_p2.battlefield.contains(&p1_mv5a) && state_p2.battlefield.contains(&p1_mv5b),
+            "P1's permanents are untouched when P2 is the sacrificing opponent"
+        );
     }
 }

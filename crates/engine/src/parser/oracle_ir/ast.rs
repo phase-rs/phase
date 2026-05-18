@@ -4,7 +4,8 @@ use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ActivationRestriction, CastingPermission, Duration,
     Effect, LibraryPosition, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint,
-    PaymentCost, PtValue, QuantityExpr, SearchSelectionConstraint, StaticDefinition, TargetFilter,
+    PaymentCost, PlayerFilter, PtValue, QuantityExpr, SearchSelectionConstraint, StaticDefinition,
+    TargetFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::DistributionUnit;
@@ -287,6 +288,13 @@ pub(crate) enum ContinuationAst {
         destination: Zone,
         enter_tapped: bool,
         rest_destination: Option<Zone>,
+        /// CR 701.20a + CR 608.2c: `Some(decline_zone)` when the kept clause is
+        /// optional ("you may put that card onto the battlefield"). `destination`
+        /// is then the accept zone and `decline_zone` is where the kept card
+        /// goes if the controller declines (the explicit "if you don't, put it
+        /// into your hand" zone, or the bottom-of-library rest pile by default).
+        /// `None` → mandatory kept destination (absorbs into `kept_destination`).
+        optional_decline: Option<Zone>,
     },
     /// CR 701.20a: "puts those cards into [zone]" after RevealUntil — the entire
     /// revealed pile (the matching card AND everything revealed before it) goes
@@ -1100,6 +1108,9 @@ pub(crate) struct ModalHeaderAst {
     pub(crate) max_choices: usize,
     pub(crate) allow_repeat_modes: bool,
     pub(crate) constraints: Vec<ModalSelectionConstraint>,
+    /// CR 700.2e: The player who chooses the mode(s). `Controller` (CR 700.2a)
+    /// for standard `Choose one —` headers and the `you choose —` alias.
+    pub(crate) chooser: PlayerFilter,
 }
 
 // --- ActivatedConstraintAst (moved from oracle.rs) ---

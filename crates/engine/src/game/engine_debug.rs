@@ -5,7 +5,7 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{ActionResult, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
-use crate::types::player::PlayerId;
+use crate::types::player::{PlayerCounterKind, PlayerId};
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
@@ -169,7 +169,15 @@ pub fn apply_debug_action(
             controller,
         } => {
             validate_player(state, controller)?;
-            validate_object_mut(state, object_id)?.controller = controller;
+            let obj = validate_object_mut(state, object_id)?;
+            // CR 110.2 + CR 613.1b: A permanent's controller is a Layer-2
+            // derived property. `evaluate_layers` Step 1 resets `obj.controller`
+            // to `base_controller` on every pass, so a debug controller change
+            // must write the base — the Layer-2 input — exactly as
+            // `SetBasePowerToughness` writes base P/T and
+            // `apply_battlefield_entry_controller_override` writes both fields.
+            obj.base_controller = Some(controller);
+            obj.controller = controller;
             state.layers_dirty = true;
         }
 
@@ -244,6 +252,20 @@ pub fn apply_debug_action(
             if let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) {
                 player.life = life;
             }
+        }
+
+        DebugAction::ModifyPlayerCounters {
+            player_id,
+            counter_kind,
+            delta,
+        } => {
+            validate_player(state, player_id)?;
+            apply_player_counter_delta(state, player_id, counter_kind, delta, events);
+        }
+
+        DebugAction::ModifyEnergy { player_id, delta } => {
+            validate_player(state, player_id)?;
+            apply_energy_delta(state, player_id, delta, events);
         }
 
         DebugAction::AddMana { player_id, mana } => {
@@ -342,6 +364,58 @@ pub fn apply_debug_action(
     })
 }
 
+fn apply_player_counter_delta(
+    state: &mut GameState,
+    player_id: PlayerId,
+    counter_kind: PlayerCounterKind,
+    delta: i32,
+    events: &mut Vec<GameEvent>,
+) {
+    let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) else {
+        return;
+    };
+    let before = player.player_counter(&counter_kind);
+    if delta > 0 {
+        player.add_player_counters(&counter_kind, delta as u32);
+    } else if delta < 0 {
+        player.remove_player_counters(&counter_kind, delta.unsigned_abs());
+    }
+    let after = player.player_counter(&counter_kind);
+    let actual_delta = after as i32 - before as i32;
+    if actual_delta != 0 {
+        events.push(GameEvent::PlayerCounterChanged {
+            player: player_id,
+            counter_kind,
+            delta: actual_delta,
+        });
+    }
+}
+
+fn apply_energy_delta(
+    state: &mut GameState,
+    player_id: PlayerId,
+    delta: i32,
+    events: &mut Vec<GameEvent>,
+) {
+    let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) else {
+        return;
+    };
+    let before = player.energy;
+    if delta > 0 {
+        player.energy += delta as u32;
+    } else if delta < 0 {
+        player.energy = player.energy.saturating_sub(delta.unsigned_abs());
+    }
+    let after = player.energy;
+    let actual_delta = after as i32 - before as i32;
+    if actual_delta != 0 {
+        events.push(GameEvent::EnergyChanged {
+            player: player_id,
+            delta: actual_delta,
+        });
+    }
+}
+
 /// CR 400.7 + CR 614.1: Route a debug-created object through the standard
 /// battlefield-entry pipeline (replacements → move-to-zone → ETB triggers →
 /// SBAs). Caller must have already created the object in an off-battlefield
@@ -388,6 +462,7 @@ pub fn route_debug_create_to_battlefield(
                 event,
                 None,
                 None,
+                false,
                 &mut events,
             );
             super::triggers::process_triggers(state, &events); // CR 603: Process triggers
@@ -498,6 +573,222 @@ mod tests {
             Some(2),
             "token should carry the 2 +1/+1 counters supplied at create-time",
         );
+    }
+
+    /// Issue #464 — CR 110.2 + CR 613.1b: `DebugAction::SetController` must
+    /// change a permanent's effective controller AND survive re-evaluation of
+    /// the layer system. Controller is a Layer-2 derived property:
+    /// `evaluate_layers` resets `obj.controller` to `base_controller` on every
+    /// pass. Pre-fix the handler wrote only the derived field, so the next
+    /// layer pass reverted control to the owner. The discriminating assertion
+    /// is step (b): control must PERSIST across a second `evaluate_layers`.
+    #[test]
+    fn debug_set_controller_survives_layer_reevaluation() {
+        use crate::game::layers::evaluate_layers;
+        use crate::game::zones::create_object;
+        use crate::types::identifiers::CardId;
+
+        let mut state = sandbox_state();
+        let object_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        assert_eq!(state.objects[&object_id].controller, PlayerId(0));
+
+        // A→B: PlayerId(0) → PlayerId(1).
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::Debug(DebugAction::SetController {
+                object_id,
+                controller: PlayerId(1),
+            }),
+        )
+        .expect("debug SetController should succeed");
+        assert_eq!(
+            state.objects[&object_id].controller,
+            PlayerId(1),
+            "effective controller should be the new player immediately",
+        );
+
+        // Discriminating assertion: a second layer pass must NOT revert it.
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&object_id].controller,
+            PlayerId(1),
+            "control must persist across layer re-evaluation (issue #464)",
+        );
+        assert_eq!(
+            state.objects[&object_id].base_controller,
+            Some(PlayerId(1)),
+            "base_controller is the Layer-2 input that makes the change durable",
+        );
+
+        // B→C: transfer control back off the opponent — PlayerId(1) → PlayerId(0).
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::Debug(DebugAction::SetController {
+                object_id,
+                controller: PlayerId(0),
+            }),
+        )
+        .expect("second debug SetController should succeed");
+        evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&object_id].controller,
+            PlayerId(0),
+            "control must transfer back and persist across re-evaluation",
+        );
+    }
+
+    #[test]
+    fn debug_modify_player_counters_routes_poison_to_dedicated_field() {
+        let mut state = sandbox_state();
+
+        let result = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::Debug(DebugAction::ModifyPlayerCounters {
+                player_id: PlayerId(1),
+                counter_kind: PlayerCounterKind::Poison,
+                delta: 3,
+            }),
+        )
+        .expect("debug ModifyPlayerCounters should succeed");
+
+        assert_eq!(state.players[1].poison_counters, 3);
+        assert_eq!(
+            state.players[1]
+                .player_counters
+                .get(&PlayerCounterKind::Poison),
+            None
+        );
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerCounterChanged {
+                player: PlayerId(1),
+                counter_kind: PlayerCounterKind::Poison,
+                delta: 3,
+            }
+        )));
+    }
+
+    #[test]
+    fn debug_modify_player_counters_routes_generic_kinds_to_map() {
+        let mut state = sandbox_state();
+
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::Debug(DebugAction::ModifyPlayerCounters {
+                player_id: PlayerId(0),
+                counter_kind: PlayerCounterKind::Experience,
+                delta: 2,
+            }),
+        )
+        .expect("debug ModifyPlayerCounters should succeed");
+
+        assert_eq!(
+            state.players[0].player_counter(&PlayerCounterKind::Experience),
+            2
+        );
+    }
+
+    #[test]
+    fn debug_modify_player_counters_removal_reports_actual_delta() {
+        let mut state = sandbox_state();
+        state.players[0].add_player_counters(&PlayerCounterKind::Rad, 2);
+
+        let result = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::Debug(DebugAction::ModifyPlayerCounters {
+                player_id: PlayerId(0),
+                counter_kind: PlayerCounterKind::Rad,
+                delta: -5,
+            }),
+        )
+        .expect("debug ModifyPlayerCounters should succeed");
+
+        assert_eq!(state.players[0].player_counter(&PlayerCounterKind::Rad), 0);
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerCounterChanged {
+                player: PlayerId(0),
+                counter_kind: PlayerCounterKind::Rad,
+                delta: -2,
+            }
+        )));
+    }
+
+    #[test]
+    fn debug_modify_absent_player_counter_emits_no_event() {
+        let mut state = sandbox_state();
+
+        let result = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::Debug(DebugAction::ModifyPlayerCounters {
+                player_id: PlayerId(0),
+                counter_kind: PlayerCounterKind::Ticket,
+                delta: -1,
+            }),
+        )
+        .expect("debug ModifyPlayerCounters should succeed");
+
+        assert!(!result
+            .events
+            .iter()
+            .any(|event| matches!(event, GameEvent::PlayerCounterChanged { .. })));
+    }
+
+    #[test]
+    fn debug_modify_energy_reports_actual_delta() {
+        let mut state = sandbox_state();
+        state.players[0].energy = 2;
+
+        let result = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::Debug(DebugAction::ModifyEnergy {
+                player_id: PlayerId(0),
+                delta: -5,
+            }),
+        )
+        .expect("debug ModifyEnergy should succeed");
+
+        assert_eq!(state.players[0].energy, 0);
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            GameEvent::EnergyChanged {
+                player: PlayerId(0),
+                delta: -2,
+            }
+        )));
+    }
+
+    #[test]
+    fn debug_modify_absent_energy_emits_no_event() {
+        let mut state = sandbox_state();
+
+        let result = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::Debug(DebugAction::ModifyEnergy {
+                player_id: PlayerId(0),
+                delta: -1,
+            }),
+        )
+        .expect("debug ModifyEnergy should succeed");
+
+        assert!(!result
+            .events
+            .iter()
+            .any(|event| matches!(event, GameEvent::EnergyChanged { .. })));
     }
 
     /// CR 704.5f negative control: a debug-created 0/0 creature token

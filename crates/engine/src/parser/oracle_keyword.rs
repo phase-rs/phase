@@ -1017,7 +1017,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Vanishing(_) => "vanishing".to_string(),
         Keyword::Rampage(_) => "rampage".to_string(),
         Keyword::Absorb(_) => "absorb".to_string(),
-        Keyword::Crew(_) => "crew".to_string(),
+        Keyword::Crew { .. } => "crew".to_string(),
         Keyword::Poisonous(_) => "poisonous".to_string(),
         Keyword::Bloodthirst(_) => "bloodthirst".to_string(),
         Keyword::Amplify(_) => "amplify".to_string(),

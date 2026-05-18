@@ -1,15 +1,23 @@
 import { useState } from "react";
 
-import type { DebugAction, ManaType, PlayerId } from "../../adapter/types";
+import type { DebugAction, ManaType, PlayerCounterKind, PlayerId } from "../../adapter/types";
 import {
   AccordionItem,
   FieldRow,
   ManaTypeSelect,
   NumberInput,
   PlayerSelect,
+  SelectInput,
   SubmitButton,
   useAccordion,
 } from "./debugFields";
+
+const PLAYER_COUNTER_KINDS: readonly PlayerCounterKind[] = [
+  "Poison",
+  "Experience",
+  "Rad",
+  "Ticket",
+] as const;
 
 interface Props {
   onDispatch: (action: DebugAction) => void;
@@ -109,6 +117,57 @@ function AddManaForm({ onDispatch }: Props) {
   );
 }
 
+function ModifyPlayerCountersForm({ onDispatch }: Props) {
+  const [playerId, setPlayerId] = useState<PlayerId>(0);
+  const [counterKind, setCounterKind] = useState<PlayerCounterKind>("Poison");
+  const [delta, setDelta] = useState(1);
+
+  return (
+    <>
+      <FieldRow label="Player">
+        <PlayerSelect value={playerId} onChange={setPlayerId} />
+      </FieldRow>
+      <FieldRow label="Counter">
+        <SelectInput value={counterKind} onChange={setCounterKind} options={PLAYER_COUNTER_KINDS} />
+      </FieldRow>
+      <FieldRow label="Delta">
+        <NumberInput value={delta} onChange={setDelta} />
+      </FieldRow>
+      <SubmitButton
+        onClick={() =>
+          onDispatch({
+            type: "ModifyPlayerCounters",
+            data: { player_id: playerId, counter_kind: counterKind, delta },
+          })
+        }
+      >
+        Modify Counters
+      </SubmitButton>
+    </>
+  );
+}
+
+function ModifyEnergyForm({ onDispatch }: Props) {
+  const [playerId, setPlayerId] = useState<PlayerId>(0);
+  const [delta, setDelta] = useState(1);
+
+  return (
+    <>
+      <FieldRow label="Player">
+        <PlayerSelect value={playerId} onChange={setPlayerId} />
+      </FieldRow>
+      <FieldRow label="Delta">
+        <NumberInput value={delta} onChange={setDelta} />
+      </FieldRow>
+      <SubmitButton
+        onClick={() => onDispatch({ type: "ModifyEnergy", data: { player_id: playerId, delta } })}
+      >
+        Modify Energy
+      </SubmitButton>
+    </>
+  );
+}
+
 export function DebugPlayerActions({ onDispatch }: Props) {
   const { expanded, toggle } = useAccordion();
 
@@ -128,6 +187,12 @@ export function DebugPlayerActions({ onDispatch }: Props) {
       </AccordionItem>
       <AccordionItem label="Add Mana" expanded={expanded === "mana"} onToggle={() => toggle("mana")}>
         <AddManaForm onDispatch={onDispatch} />
+      </AccordionItem>
+      <AccordionItem label="Modify Counters" expanded={expanded === "counters"} onToggle={() => toggle("counters")}>
+        <ModifyPlayerCountersForm onDispatch={onDispatch} />
+      </AccordionItem>
+      <AccordionItem label="Modify Energy" expanded={expanded === "energy"} onToggle={() => toggle("energy")}>
+        <ModifyEnergyForm onDispatch={onDispatch} />
       </AccordionItem>
     </div>
   );

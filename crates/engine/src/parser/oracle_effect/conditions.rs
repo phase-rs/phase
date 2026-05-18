@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use crate::parser::oracle_nom::error::OracleError;
+use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::char;
@@ -19,7 +19,7 @@ use super::{parse_effect_chain, scan_contains_phrase, ParseContext};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CastVariantPaid, Comparator, ControllerRef,
-    CountScope, Duration, Effect, FilterProp, ObjectScope, QuantityExpr, QuantityRef,
+    CountScope, Duration, Effect, FilterProp, ObjectScope, PlayerScope, QuantityExpr, QuantityRef,
     StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
@@ -703,8 +703,18 @@ pub(super) fn strip_property_conditional(text: &str) -> (Option<AbilityCondition
     let tp = TextPair::new(text, &lower);
 
     for (property, qty_ref) in &[
-        ("power", QuantityRef::EventContextSourcePower),
-        ("toughness", QuantityRef::EventContextSourceToughness),
+        (
+            "power",
+            QuantityRef::Power {
+                scope: ObjectScope::CostPaidObject,
+            },
+        ),
+        (
+            "toughness",
+            QuantityRef::Toughness {
+                scope: ObjectScope::CostPaidObject,
+            },
+        ),
     ] {
         let pattern = format!(" if its {property} is ");
         if let Some((before, after)) = tp.rsplit_around(&pattern) {
@@ -747,6 +757,116 @@ pub(super) fn strip_property_conditional(text: &str) -> (Option<AbilityCondition
     }
 
     (None, text.to_string())
+}
+
+/// Parser-internal selector for which player-property a superlative-comparison
+/// condition reads. Selects which `QuantityRef` to build — not stored in the
+/// AST. Single arm today; future player-properties add `alt` arms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlayerProperty {
+    /// CR 702.179f: a player's speed.
+    Speed,
+}
+
+/// CR 702.179f: parse "speed" → `PlayerProperty::Speed`.
+fn parse_player_property_keyword(input: &str) -> OracleResult<'_, PlayerProperty> {
+    value(PlayerProperty::Speed, tag("speed")).parse(input)
+}
+
+/// Build the `QuantityRef` for a player-property of the given player scope.
+fn player_property_quantity(property: PlayerProperty, player: PlayerScope) -> QuantityRef {
+    match property {
+        PlayerProperty::Speed => QuantityRef::Speed { player },
+    }
+}
+
+/// CR 608.2c: Strip a player-property superlative-comparison conditional that
+/// gates a chained sub-ability — e.g. Spikeshell Harrier's
+/// "if that opponent's speed is greater than each other player's speed, ...".
+///
+/// Mirrors the #333 `parse_subject_property_superlative_comparison` grammar but
+/// emits an `AbilityCondition::QuantityCheck` for a chained sub-ability rather
+/// than a `StaticCondition`. The LHS reads the parent object target's
+/// controller's property; the RHS aggregates that property over every OTHER
+/// player (CR 102.1 + CR 608.2c).
+pub(super) fn strip_player_property_superlative_conditional(
+    text: &str,
+) -> (Option<AbilityCondition>, String) {
+    let lower = text.to_lowercase();
+
+    // Leading "if that opponent's " / "if that player's " — connective +
+    // player anaphor. The clause text arrives with the conditional as a
+    // sentence prefix (CR 608.2c: conditional second effect).
+    let Ok((rest, _)) = preceded(
+        tag::<_, _, OracleError<'_>>("if that "),
+        alt((tag("opponent's "), tag("player's "))),
+    )
+    .parse(lower.as_str()) else {
+        return (None, text.to_string());
+    };
+
+    // LHS: "<property> is <comparator phrase>each other player's <property>, "
+    let Ok((rest, lhs_property)) = parse_player_property_keyword(rest) else {
+        return (None, text.to_string());
+    };
+    let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" is ").parse(rest) else {
+        return (None, text.to_string());
+    };
+    let Ok((rest, (comparator, aggregate))) =
+        crate::parser::oracle_nom::condition::parse_superlative_comparator_phrase(rest)
+    else {
+        return (None, text.to_string());
+    };
+    let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("each other "),
+        tag("every other "),
+    ))
+    .parse(rest) else {
+        return (None, text.to_string());
+    };
+    let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("player's ").parse(rest) else {
+        return (None, text.to_string());
+    };
+    let Ok((rest, rhs_property)) = parse_player_property_keyword(rest) else {
+        return (None, text.to_string());
+    };
+    // RHS-property guard: the compared properties must match (mirrors the
+    // #333 inequality form's RHS guard).
+    if lhs_property != rhs_property {
+        return (None, text.to_string());
+    }
+    // Trailing connective ", " separates the condition from the gated effect.
+    let Ok((effect_text, _)) =
+        preceded(opt(char(',')), tag::<_, _, OracleError<'_>>(" ")).parse(rest)
+    else {
+        return (None, text.to_string());
+    };
+
+    // CR 109.4 + CR 608.2c: LHS = the bounced object's controller's property;
+    // RHS = the same property aggregated over every OTHER player.
+    let lhs = QuantityExpr::Ref {
+        qty: player_property_quantity(lhs_property, PlayerScope::ParentObjectTargetController),
+    };
+    let rhs = QuantityExpr::Ref {
+        qty: player_property_quantity(
+            lhs_property,
+            PlayerScope::AllPlayers {
+                aggregate,
+                exclude: Some(Box::new(PlayerScope::ParentObjectTargetController)),
+            },
+        ),
+    };
+
+    // The residual body is the gated effect, in original casing.
+    let effect_original = text[text.len() - effect_text.len()..].to_string();
+    (
+        Some(AbilityCondition::QuantityCheck {
+            lhs,
+            comparator,
+            rhs,
+        }),
+        effect_original,
+    )
 }
 
 pub(super) fn strip_target_keyword_instead(text: &str) -> (Option<AbilityCondition>, String) {
@@ -1938,6 +2058,9 @@ pub(crate) fn static_condition_to_ability_condition(
         // CR 702.166a: Bargain payment is a cost-determination predicate with no
         // effect-resolution (`AbilityCondition`) equivalent.
         | StaticCondition::AdditionalCostPaid
+        // CR 725.1: "there is no monarch" is a trigger-only intervening-if; no
+        // `AbilityCondition` monarch variant beyond `IsMonarch` exists.
+        | StaticCondition::NoMonarch
         | StaticCondition::None => None,
     }
 }
@@ -2103,6 +2226,26 @@ pub(super) fn try_nom_condition_as_ability_condition(
     {
         return Some(AbilityCondition::Not {
             condition: Box::new(AbilityCondition::IfYouDo),
+        });
+    }
+
+    // CR 608.2c: "if you can't, [effect]" — the preceding mandatory instruction
+    // could not be performed (no object changed zone this way). This is
+    // prior-instruction-referential (it reports whether the preceding chained
+    // instruction succeeded), so — like the "you don't" / "this spell was cast
+    // from" arms above — it legitimately lives outside `parse_inner_condition`,
+    // which only yields game-state-fact `StaticCondition`s. `last_zone_changed_ids`
+    // is repopulated per-effect, so after the preceding effect resolves it holds
+    // exactly that effect's zone changes; `Not { ZoneChangedThisWay { Any } }` is
+    // true iff that effect moved nothing — i.e. "you can't".
+    if alt((tag::<_, _, OracleError<'_>>("you can't"), tag("you cannot")))
+        .parse(lower.as_str())
+        .is_ok()
+    {
+        return Some(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::ZoneChangedThisWay {
+                filter: TargetFilter::Any,
+            }),
         });
     }
 
@@ -2864,6 +3007,51 @@ mod tests {
         );
         // Non-comparison conditions yield None.
         assert_eq!(difference_expr(&AbilityCondition::IsYourTurn), None);
+    }
+
+    #[test]
+    fn strip_if_you_do_conditional_renegade_reaper_at_least_one_angel() {
+        // Issue #477 — Renegade Reaper: the swallowed-clause splitter must
+        // recognize the quantified "if at least one Angel card is milled this
+        // way" gate and emit `ZoneChangedThisWay { Angel }` on the GainLife
+        // sub-ability — not drop it.
+        let (condition, body) = strip_if_you_do_conditional(
+            "if at least one angel card is milled this way, you gain 4 life",
+        );
+        assert_eq!(body, "you gain 4 life");
+        let Some(AbilityCondition::ZoneChangedThisWay { filter }) = condition else {
+            panic!("expected ZoneChangedThisWay condition, got {condition:?}");
+        };
+        match filter {
+            TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
+                assert!(
+                    type_filters.iter().any(
+                        |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Angel"))
+                    ),
+                    "expected Subtype Angel, got {type_filters:?}"
+                );
+            }
+            other => panic!("expected Typed Angel filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn if_you_cant_parses_as_not_zone_changed_this_way() {
+        // CR 608.2c: "if you can't, draw a card" — the gating condition on the
+        // already-parsed `Draw` must be `Not { ZoneChangedThisWay { Any } }` so
+        // the draw fires iff the preceding mandatory effect moved nothing.
+        for text in ["you can't", "you cannot"] {
+            let cond = try_nom_condition_as_ability_condition(text, &mut ParseContext::default());
+            assert_eq!(
+                cond,
+                Some(AbilityCondition::Not {
+                    condition: Box::new(AbilityCondition::ZoneChangedThisWay {
+                        filter: TargetFilter::Any,
+                    }),
+                }),
+                "expected Not {{ ZoneChangedThisWay {{ Any }} }} for {text:?}",
+            );
+        }
     }
 
     #[test]

@@ -63,7 +63,8 @@ expression: "&ir"
               "condition": null,
               "optional_targeting": false,
               "optional": false,
-              "forward_result": false
+              "forward_result": false,
+              "sub_link": "SequentialSibling"
             },
             "uses_tracked_set": true
           },

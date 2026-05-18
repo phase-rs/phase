@@ -108,7 +108,7 @@ pub fn resolve(
                         zone_event @ ProposedEvent::ZoneChange { object_id: oid, .. } => {
                             // Replacement redirected (e.g., Madness → exile instead of graveyard).
                             change_zone::deliver_replaced_zone_change(
-                                state, zone_event, None, None, events,
+                                state, zone_event, None, None, false, events,
                             );
                             // CR 702.35: The card was still discarded — record and emit event
                             // so "whenever you discard" triggers fire.
@@ -266,7 +266,9 @@ pub(crate) fn discard_as_cost_with_source(
                 // CR 614.1c: Replacement redirected destination (e.g., Madness → exile).
                 // CR 702.35: The card was still discarded — record and emit event
                 // so "whenever you discard" triggers fire.
-                change_zone::deliver_replaced_zone_change(state, zone_event, None, None, events);
+                change_zone::deliver_replaced_zone_change(
+                    state, zone_event, None, None, false, events,
+                );
                 crate::game::restrictions::record_discard(state, player);
                 events.push(GameEvent::Discarded {
                     player_id: player,

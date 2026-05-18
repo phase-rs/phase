@@ -441,6 +441,8 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.triggers_fired_this_turn.clear();
     state.trigger_fire_counts_this_turn.clear();
     state.activated_abilities_this_turn.clear();
+    // CR 602.5b: "Activate only once each turn" crew restriction resets each turn.
+    state.crew_activated_this_turn.clear();
     // CR 514 + CR 603.4: Per-ability per-turn resolution counter resets at turn
     // boundary alongside other "this turn" trackers (mirrors the cleanup of
     // `trigger_fire_counts_this_turn`).
@@ -948,10 +950,13 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
         }
     });
 
-    // CR 603.7b + CR 603.7c: Remove "this turn" delayed triggers at cleanup.
+    // CR 603.7b + CR 513.2: Remove "this turn" delayed triggers at cleanup.
     // WheneverEvent (multi-fire, one_shot=false) triggers persist until cleanup.
     // WhenNextEvent (one-shot) triggers that didn't fire also expire — their
     // "this turn" duration means they must not carry over to the next turn.
+    // Per CR 513.2 an unfired `AtNextPhase{End}` delayed trigger is NOT a
+    // "this turn" trigger: the end step "doesn't back up", so it legitimately
+    // persists to the next turn's end step — it must survive this retain.
     state.delayed_triggers.retain(|dt| {
         dt.one_shot
             && !matches!(
@@ -1451,6 +1456,19 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 // Continue to PostCombatMain
             }
             Phase::End => {
+                // CR 513.1 + CR 611.2a/b: Expire `PlayFromExile { duration:
+                // UntilNextStepOf { step: End, player: Controller } }` grants for the active
+                // player BEFORE end-step triggers fire. CR 513.2 prevents
+                // the end step from "backing up" — a new same-turn grant
+                // from an end-step trigger (e.g., Rocco, Street Chef) is
+                // created AFTER this prune runs, so it correctly survives.
+                super::layers::prune_end_step_casting_permissions(state, state.active_player);
+                // CR 513.1 + CR 611.2a: Mirror the casting-permission prune
+                // for transient continuous effects with the same duration —
+                // any future parser arm emitting `UntilNextStepOf { step: End }` onto a
+                // pump / control-change effect expires here rather than
+                // outliving its scheduled step.
+                super::layers::prune_until_next_end_step_effects(state, state.active_player);
                 // CR 513.1: End step — active player receives priority.
                 // CR 513.1a: "At the beginning of [your] end step" triggers fire here.
                 process_phase_triggers(state);

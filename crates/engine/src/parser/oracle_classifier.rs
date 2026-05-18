@@ -236,6 +236,16 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     "as though they had flash",
     "as though those creatures had haste",
     "as though that creature had haste",
+    // CR 205.3 + CR 700.8: "<source> is also a[n] <subtype>(, <subtype>)*" —
+    // self continuous type-grant (Burakos, Veteran Adventurer, and any future
+    // printing whose first subtype opens with a vowel: "is also an Elf, …").
+    // The phrase appears
+    // only in CR 205.3 additive subtype statics, so the contains-scan cannot
+    // false-positive into other pattern classes. Both articles must be
+    // listed because the trailing space anchors the match to the article
+    // boundary — "is also a " does not subsume "is also an X".
+    "is also a ",
+    "is also an ",
 ];
 
 const STATIC_PREFIX_PATTERNS: &[&str] = &[

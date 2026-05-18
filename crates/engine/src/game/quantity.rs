@@ -645,13 +645,13 @@ fn resolve_ref(
     match qty {
         // CR 402: hand size for the scoped player(s).
         QuantityRef::HandSize { player: scope } => {
-            resolve_per_player_scalar(state, *scope, controller, ctx, targets, |p| {
+            resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| {
                 usize_to_i32_saturating(p.hand.len())
             })
         }
         // CR 119: life total for the scoped player(s).
         QuantityRef::LifeTotal { player: scope } => {
-            resolve_per_player_scalar(state, *scope, controller, ctx, targets, |p| p.life)
+            resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| p.life)
         }
         // CR 122.1: Counter-kind lookup summed across scope players. Controller
         // scope resolves to a single player; Opponents/All may span multiple.
@@ -665,7 +665,7 @@ fn resolve_ref(
         }
         // CR 404: cards in the scoped player(s)' graveyard.
         QuantityRef::GraveyardSize { player: scope } => {
-            resolve_per_player_scalar(state, *scope, controller, ctx, targets, |p| {
+            resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| {
                 usize_to_i32_saturating(p.graveyard.len())
             })
         }
@@ -676,7 +676,7 @@ fn resolve_ref(
         QuantityRef::StartingLifeTotal => state.format_config.starting_life,
         // CR 118.4 + CR 119.3: Life lost this turn, scoped via PlayerScope (Π-3).
         QuantityRef::LifeLostThisTurn { player } => {
-            resolve_per_player_scalar(state, *player, controller, ctx, targets, |p| {
+            resolve_per_player_scalar(state, player, controller, ctx, targets, ability, |p| {
                 u32_to_i32_saturating(p.life_lost_this_turn)
             })
         }
@@ -685,11 +685,16 @@ fn resolve_ref(
         // Warrior/Wizard) is computed per CR 700.8b for creatures with
         // multiple party-relevant types. Bounded to `0..=4`.
         QuantityRef::PartySize { player: scope } => {
-            resolve_per_player_scalar(state, *scope, controller, ctx, targets, |p| {
+            resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| {
                 compute_party_size(state, p.id)
             })
         }
-        QuantityRef::Speed => i32::from(effective_speed(state, controller)),
+        // CR 702.179f: `player`'s current speed, treating no speed as 0.
+        QuantityRef::Speed { player: scope } => {
+            resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| {
+                i32::from(effective_speed(state, p.id))
+            })
+        }
         QuantityRef::ObjectCount { filter } => {
             // CR 400.1: If the filter constrains to a specific zone via InZone,
             // count objects in that zone. Otherwise default to battlefield.
@@ -1163,7 +1168,7 @@ fn resolve_ref(
         QuantityRef::ExiledFromHandThisResolution => {
             u32_to_i32_saturating(state.exiled_from_hand_this_resolution)
         }
-        // CR 603.7c: Numeric value from the triggering event.
+        // CR 608.2c: Numeric value from the triggering event.
         // Falls back to the preceding effect's count or amount for sub_ability
         // continuations where current_trigger_event has no amount (e.g.,
         // "discard up to N, then draw that many"; "dealt excess damage this
@@ -1186,87 +1191,11 @@ fn resolve_ref(
         // not the sacrificed object.
         //
         // CR 400.7: Falls back to LKI cache for objects that have left their zone.
-        // CR 400.7j: Other parts of the same effect can find an object that
-        // effect moved to a public zone. CR 608.2k separately covers activated
-        // abilities with a cost-paid object referent like Greater Good's "the
-        // sacrificed creature's power".
-        QuantityRef::EventContextSourcePower => ability
-            .and_then(|a| a.effect_context_object.as_ref())
-            .and_then(|snap| snap.lki.power)
-            .or_else(|| {
-                state
-                    .current_trigger_event
-                    .as_ref()
-                    .and_then(crate::game::targeting::extract_source_from_event)
-                    .and_then(|id| {
-                        state
-                            .objects
-                            .get(&id)
-                            .and_then(|obj| obj.power)
-                            .or_else(|| state.lki_cache.get(&id).and_then(|lki| lki.power))
-                    })
-            })
-            .or_else(|| {
-                ability
-                    .and_then(|a| a.cost_paid_object.as_ref())
-                    .and_then(|snap| snap.lki.power)
-            })
-            .unwrap_or(0),
-        // CR 400.7j / CR 608.2k: Toughness of the source object. See
-        // `EventContextSourcePower` above for the trigger → effect-context →
-        // cost-paid-object ordering.
-        QuantityRef::EventContextSourceToughness => ability
-            .and_then(|a| a.effect_context_object.as_ref())
-            .and_then(|snap| snap.lki.toughness)
-            .or_else(|| {
-                state
-                    .current_trigger_event
-                    .as_ref()
-                    .and_then(crate::game::targeting::extract_source_from_event)
-                    .and_then(|id| {
-                        state
-                            .objects
-                            .get(&id)
-                            .and_then(|obj| obj.toughness)
-                            .or_else(|| state.lki_cache.get(&id).and_then(|lki| lki.toughness))
-                    })
-            })
-            .or_else(|| {
-                ability
-                    .and_then(|a| a.cost_paid_object.as_ref())
-                    .and_then(|snap| snap.lki.toughness)
-            })
-            .unwrap_or(0),
-        // CR 400.7j / CR 608.2k: Mana value of the source object. See
-        // `EventContextSourcePower` above for the trigger → effect-context →
-        // cost-paid-object ordering.
-        QuantityRef::EventContextSourceManaValue => ability
-            .and_then(|a| a.effect_context_object.as_ref())
-            .map(|snap| u32_to_i32_saturating(snap.lki.mana_value))
-            .or_else(|| {
-                state
-                    .current_trigger_event
-                    .as_ref()
-                    .and_then(crate::game::targeting::extract_source_from_event)
-                    .and_then(|id| {
-                        state
-                            .objects
-                            .get(&id)
-                            .map(|obj| u32_to_i32_saturating(obj.mana_cost.mana_value()))
-                            .or_else(|| {
-                                state
-                                    .lki_cache
-                                    .get(&id)
-                                    .map(|lki| u32_to_i32_saturating(lki.mana_value))
-                            })
-                    })
-            })
-            .or_else(|| {
-                ability
-                    .and_then(|a| a.cost_paid_object.as_ref())
-                    .map(|snap| u32_to_i32_saturating(snap.lki.mana_value))
-            })
-            .unwrap_or(0),
+        // CR 608.2k cost-paid / trigger-condition referents are now resolved
+        // via `QuantityRef::Power/Toughness/ObjectManaValue { scope:
+        // ObjectScope::CostPaidObject }` (see `resolve_object_pt` /
+        // `resolve_object_mana_value`).
+        //
         // CR 107.3a + CR 601.2b + CR 603.7c: The announced value of X for the
         // triggering spell. Reads `GameObject::cost_x_paid` — populated during
         // cost determination and persisted through the stack → battlefield
@@ -1416,8 +1345,14 @@ fn resolve_ref(
                 })
                 .count(),
         ),
-        QuantityRef::SacrificedThisTurn { player, ref filter } => {
-            resolve_per_player_scalar(state, *player, controller, ctx, targets, |scoped_player| {
+        QuantityRef::SacrificedThisTurn { player, ref filter } => resolve_per_player_scalar(
+            state,
+            player,
+            controller,
+            ctx,
+            targets,
+            ability,
+            |scoped_player| {
                 usize_to_i32_saturating(
                     state
                         .sacrificed_permanents_this_turn
@@ -1433,21 +1368,21 @@ fn resolve_ref(
                         })
                         .count(),
                 )
-            })
-        }
+            },
+        ),
         // CR 710.2: Crimes committed this turn — uses tracked counter on player.
         QuantityRef::CrimesCommittedThisTurn => {
             player.map_or(0, |p| u32_to_i32_saturating(p.crimes_committed_this_turn))
         }
         // CR 119.4: Life gained this turn, scoped via PlayerScope (Π-4).
         QuantityRef::LifeGainedThisTurn { player } => {
-            resolve_per_player_scalar(state, *player, controller, ctx, targets, |p| {
+            resolve_per_player_scalar(state, player, controller, ctx, targets, ability, |p| {
                 u32_to_i32_saturating(p.life_gained_this_turn)
             })
         }
         // CR 121.1: Cards drawn this turn, scoped via PlayerScope.
         QuantityRef::CardsDrawnThisTurn { player } => {
-            resolve_per_player_scalar(state, *player, controller, ctx, targets, |p| {
+            resolve_per_player_scalar(state, player, controller, ctx, targets, ability, |p| {
                 u32_to_i32_saturating(p.cards_drawn_this_turn)
             })
         }
@@ -1575,7 +1510,7 @@ fn resolve_ref(
         ),
         // CR 701.9 + CR 603.4: Cards discarded this turn, scoped via PlayerScope.
         QuantityRef::CardsDiscardedThisTurn { player } => {
-            resolve_per_player_scalar(state, *player, controller, ctx, targets, |p| {
+            resolve_per_player_scalar(state, player, controller, ctx, targets, ability, |p| {
                 u32_to_i32_saturating(
                     state
                         .cards_discarded_this_turn_by_player
@@ -1585,8 +1520,14 @@ fn resolve_ref(
                 )
             })
         }
-        QuantityRef::TokensCreatedThisTurn { player, ref filter } => {
-            resolve_per_player_scalar(state, *player, controller, ctx, targets, |scoped_player| {
+        QuantityRef::TokensCreatedThisTurn { player, ref filter } => resolve_per_player_scalar(
+            state,
+            player,
+            controller,
+            ctx,
+            targets,
+            ability,
+            |scoped_player| {
                 usize_to_i32_saturating(
                     state
                         .created_tokens_this_turn
@@ -1602,10 +1543,16 @@ fn resolve_ref(
                         })
                         .count(),
                 )
-            })
-        }
-        QuantityRef::PlayerActionsThisTurn { player, action } => {
-            resolve_per_player_scalar(state, *player, controller, ctx, targets, |scoped_player| {
+            },
+        ),
+        QuantityRef::PlayerActionsThisTurn { player, action } => resolve_per_player_scalar(
+            state,
+            player,
+            controller,
+            ctx,
+            targets,
+            ability,
+            |scoped_player| {
                 usize_to_i32_saturating(
                     state
                         .player_actions_this_turn
@@ -1615,8 +1562,8 @@ fn resolve_ref(
                         })
                         .count(),
                 )
-            })
-        }
+            },
+        ),
         // CR 309.7: Number of dungeons the controller has completed.
         QuantityRef::DungeonsCompleted => state
             .dungeon_progress
@@ -2204,21 +2151,40 @@ where
                 .unwrap_or(0)
         }
         // CR 608.2k: An ability's effect referring to a specific untargeted
-        // object previously referred to by that ability's cost still affects
-        // it. The "cost-paid object" power/toughness reads `cost_paid_object`
-        // first — the canonical referent for activated/cast sacrifice costs
-        // (Greater Good) — then falls back to `effect_context_object` for
-        // effect-driven sacrifices captured mid-resolution (Fire Lord Ozai,
-        // The Meep, Venom, Broadside Bombardiers). Exact parity with the
-        // `resolve_object_mana_value` `CostPaidObject` arm.
+        // object previously referred to by that ability's cost OR trigger
+        // condition still affects it. Resolved (first match wins) via:
+        //   1. `cost_paid_object` — canonical activated/cast sacrifice-cost
+        //      referent (Greater Good).
+        //   2. trigger-event source — the object named by this ability's
+        //      trigger condition (Hamletback Goliath, Conclave Mentor), live
+        //      object then LKI for dies/leaves-battlefield triggers.
+        //   3. `effect_context_object` — effect-driven sacrifices captured
+        //      mid-resolution (Fire Lord Ozai, The Meep, Venom, Broadside
+        //      Bombardiers).
+        // Slots 1 and 3 are PINNED in this order by the
+        // `resolve_object_mana_value` regression guard; slot 2 is inserted
+        // strictly between them (insert-only — never reorders 1 vs 3). CR
+        // 608.2k names cost and trigger referents but does not adjudicate
+        // priority between them; the engine's pinned `cost_paid_object`-first
+        // choice stands. Exact parity with the `resolve_object_mana_value`
+        // `CostPaidObject` arm.
         ObjectScope::CostPaidObject => ability
-            .and_then(|ability| {
-                ability
-                    .cost_paid_object
-                    .as_ref()
-                    .or(ability.effect_context_object.as_ref())
-            })
+            .and_then(|a| a.cost_paid_object.as_ref())
             .and_then(|snapshot| lki_extract(&snapshot.lki))
+            .or_else(|| {
+                object_id_for_scope(state, ObjectScope::EventSource, ctx, targets).and_then(|id| {
+                    state
+                        .objects
+                        .get(&id)
+                        .and_then(&obj_extract)
+                        .or_else(|| state.lki_cache.get(&id).and_then(&lki_extract))
+                })
+            })
+            .or_else(|| {
+                ability
+                    .and_then(|a| a.effect_context_object.as_ref())
+                    .and_then(|snapshot| lki_extract(&snapshot.lki))
+            })
             .unwrap_or(0),
     }
 }
@@ -2275,27 +2241,86 @@ fn resolve_object_mana_value(
                 .unwrap_or(0)
         }
         // CR 608.2k + CR 400.7j + CR 701.21a: The "cost-paid object" mana
-        // value reads `cost_paid_object` first — the canonical referent for
-        // this scope (activated/cast costs: Food Chain, Burnt Offering) — then
-        // falls back to `effect_context_object`. When a `Sacrifice` *effect*
-        // (not a cost) appears mid-resolution — Birthing Ritual: "you may
-        // sacrifice a creature. If you do, you may put a creature card with
-        // mana value X or less ..., where X is 1 plus the sacrificed
-        // creature's mana value" — the sacrificed permanent is captured into
-        // `effect_context_object` (the `EffectZoneChoice` handler snapshots the
-        // `PermanentSacrificed` event into the stashed continuation chain).
-        // Both fields name the same CR 608.2k "specific untargeted object"
-        // referent; the `EventContextSource*` arms above include
-        // `effect_context_object` as a fallback for the same CR 608.2k reason.
+        // value resolves (first match wins) via:
+        //   1. `cost_paid_object` — canonical activated/cast-cost referent
+        //      (Food Chain, Burnt Offering, Dark Confidant).
+        //   2. trigger-event source — the object named by this ability's
+        //      trigger condition, live object then LKI.
+        //   3. `effect_context_object` — when a `Sacrifice` *effect* (not a
+        //      cost) appears mid-resolution (Birthing Ritual: "you may
+        //      sacrifice a creature. If you do, ..., where X is 1 plus the
+        //      sacrificed creature's mana value"), the sacrificed permanent is
+        //      captured into `effect_context_object` by the `EffectZoneChoice`
+        //      handler.
+        // Slots 1 and 3 are PINNED in this order by the
+        // `resolve_object_mana_value_cost_paid_object_takes_priority_over_effect_context`
+        // regression guard; slot 2 is inserted strictly between them
+        // (insert-only). Exact parity with the `resolve_object_pt`
+        // `CostPaidObject` arm.
         ObjectScope::CostPaidObject => ability
-            .and_then(|ability| {
-                ability
-                    .cost_paid_object
-                    .as_ref()
-                    .or(ability.effect_context_object.as_ref())
-            })
+            .and_then(|a| a.cost_paid_object.as_ref())
             .map(|snapshot| u32_to_i32_saturating(snapshot.lki.mana_value))
+            .or_else(|| {
+                object_id_for_scope(state, ObjectScope::EventSource, ctx, targets).and_then(|id| {
+                    state
+                        .objects
+                        .get(&id)
+                        .map(|obj| u32_to_i32_saturating(obj.mana_cost.mana_value()))
+                        .or_else(|| {
+                            state
+                                .lki_cache
+                                .get(&id)
+                                .map(|lki| u32_to_i32_saturating(lki.mana_value))
+                        })
+                })
+            })
+            .or_else(|| {
+                ability
+                    .and_then(|a| a.effect_context_object.as_ref())
+                    .map(|snapshot| u32_to_i32_saturating(snapshot.lki.mana_value))
+            })
             .unwrap_or(0),
+    }
+}
+
+/// CR 109.4 + CR 113.6: Resolve a single-player `PlayerScope` to a concrete
+/// `PlayerId`, when one exists. Aggregate scopes (`Opponent`, `AllPlayers`)
+/// have no single-player interpretation and yield `None`. Used to resolve the
+/// `exclude` anchor of `PlayerScope::AllPlayers { exclude }`.
+fn resolve_single_player_scope(
+    state: &GameState,
+    scope: &PlayerScope,
+    controller: PlayerId,
+    ctx: QuantityContext,
+    targets: &[TargetRef],
+    ability: Option<&ResolvedAbility>,
+) -> Option<PlayerId> {
+    match scope {
+        PlayerScope::Controller => Some(controller),
+        PlayerScope::ScopedPlayer => Some(ctx.scoped_player.unwrap_or(controller)),
+        PlayerScope::Target => targets.iter().find_map(|t| match t {
+            TargetRef::Player(pid) => Some(*pid),
+            _ => None,
+        }),
+        PlayerScope::RecipientController => {
+            let object_id = ctx.recipient.or_else(|| {
+                targets.iter().find_map(|target| match target {
+                    TargetRef::Object(id) => Some(*id),
+                    _ => None,
+                })
+            });
+            object_id
+                .or(Some(ctx.source))
+                .and_then(|id| state.objects.get(&id))
+                .map(|obj| obj.controller)
+        }
+        PlayerScope::DefendingPlayer => defending_player_for_quantity_context(state, ctx),
+        // CR 109.4: controller of the parent object target.
+        PlayerScope::ParentObjectTargetController => {
+            ability.and_then(|a| crate::game::ability_utils::parent_target_controller(a, state))
+        }
+        // Aggregate scopes have no single-player reading.
+        PlayerScope::Opponent { .. } | PlayerScope::AllPlayers { .. } => None,
     }
 }
 
@@ -2312,13 +2337,16 @@ fn resolve_object_mana_value(
 ///   supplied by layer evaluation; outside layer scope it falls back to the
 ///   first object target, then the source object.
 /// - `Opponent { aggregate }`: aggregates over `p.id != controller` (CR 102.2).
-/// - `AllPlayers { aggregate }`: aggregates over every player (CR 102.1).
+/// - `AllPlayers { aggregate, exclude }`: aggregates over every player
+///   (CR 102.1), optionally excluding the `exclude` anchor ("each other
+///   player").
 fn resolve_per_player_scalar<F>(
     state: &GameState,
-    scope: PlayerScope,
+    scope: &PlayerScope,
     controller: PlayerId,
     ctx: QuantityContext,
     targets: &[TargetRef],
+    ability: Option<&ResolvedAbility>,
     mut extract: F,
 ) -> i32
 where
@@ -2360,13 +2388,27 @@ where
         PlayerScope::DefendingPlayer => defending_player_for_quantity_context(state, ctx)
             .and_then(|pid| state.players.iter().find(|p| p.id == pid))
             .map_or(0, &mut extract),
+        // CR 109.4 + CR 608.2c: controller of the parent object target.
+        PlayerScope::ParentObjectTargetController => ability
+            .and_then(|a| crate::game::ability_utils::parent_target_controller(a, state))
+            .and_then(|pid| state.players.iter().find(|p| p.id == pid))
+            .map_or(0, &mut extract),
         PlayerScope::Opponent { aggregate } => aggregate_over_players(
             state.players.iter().filter(|p| p.id != controller),
-            aggregate,
+            *aggregate,
             &mut extract,
         ),
-        PlayerScope::AllPlayers { aggregate } => {
-            aggregate_over_players(state.players.iter(), aggregate, &mut extract)
+        // CR 102.1: aggregate over all players, optionally excluding the
+        // `exclude` anchor ("each OTHER player").
+        PlayerScope::AllPlayers { aggregate, exclude } => {
+            let excluded_id = exclude.as_deref().and_then(|ex| {
+                resolve_single_player_scope(state, ex, controller, ctx, targets, ability)
+            });
+            aggregate_over_players(
+                state.players.iter().filter(|p| Some(p.id) != excluded_id),
+                *aggregate,
+                &mut extract,
+            )
         }
     }
 }
@@ -2611,6 +2653,10 @@ pub(crate) fn resolve_player_count(
                             .last_vote_ballots
                             .iter()
                             .any(|(voter, idx)| *voter == p.id && *idx == *choice_index),
+                        // CR 109.4: the parent-object-target anchor has no
+                        // single-player-count meaning here (no parent object
+                        // target is in scope for a player-count quantity).
+                        PlayerFilter::ParentObjectTargetController => false,
                     }
             })
             .count(),
@@ -4721,6 +4767,7 @@ mod tests {
             qty: QuantityRef::LifeLostThisTurn {
                 player: PlayerScope::AllPlayers {
                     aggregate: AggregateFunction::Max,
+                    exclude: None,
                 },
             },
         };
@@ -4740,6 +4787,7 @@ mod tests {
             qty: QuantityRef::LifeLostThisTurn {
                 player: PlayerScope::AllPlayers {
                     aggregate: AggregateFunction::Max,
+                    exclude: None,
                 },
             },
         };
@@ -5883,7 +5931,9 @@ mod tests {
             excess: 0,
         });
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::EventContextSourcePower,
+            qty: QuantityRef::Power {
+                scope: ObjectScope::CostPaidObject,
+            },
         };
         assert_eq!(
             resolve_quantity(&state, &expr, PlayerId(0), ObjectId(99)),
@@ -5917,7 +5967,9 @@ mod tests {
         state.current_trigger_event =
             Some(crate::types::events::GameEvent::CreatureDestroyed { object_id: dead_id });
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::EventContextSourcePower,
+            qty: QuantityRef::Power {
+                scope: ObjectScope::CostPaidObject,
+            },
         };
         assert_eq!(
             resolve_quantity(&state, &expr, PlayerId(0), ObjectId(99)),
@@ -5928,9 +5980,10 @@ mod tests {
     /// CR 400.7j + CR 117.1 + CR 608.2k: Regression guard for Greater Good
     /// (issue #334). When an activated ability with a sacrifice cost
     /// references "the sacrificed creature's power", the parser emits
-    /// `EventContextSourcePower`. No trigger event is in scope for activated
-    /// abilities, so the resolver must fall back to the resolving ability's
-    /// `cost_paid_object` snapshot captured at cost-payment time.
+    /// `Power { scope: CostPaidObject }`. No trigger event is in scope for
+    /// activated abilities, so the resolver must fall back (slot 1) to the
+    /// resolving ability's `cost_paid_object` snapshot captured at
+    /// cost-payment time.
     #[test]
     fn resolve_event_context_source_power_cost_paid_object_fallback() {
         use crate::types::ability::{CostPaidObjectSnapshot, ResolvedAbility};
@@ -5941,7 +5994,9 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextSourcePower,
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::CostPaidObject,
+                    },
                 },
                 target: TargetFilter::Controller,
             },
@@ -5969,20 +6024,24 @@ mod tests {
         let power = resolve_quantity_with_targets(
             &state,
             &QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourcePower,
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject,
+                },
             },
             &ability,
         );
         assert_eq!(
             power, 5,
-            "EventContextSourcePower must fall back to cost-paid object's LKI power \
+            "Power {{ CostPaidObject }} must fall back to cost-paid object's LKI power \
              when no trigger event is in scope (Greater Good: sacrificed 5/5 → draw 5)"
         );
 
         let toughness = resolve_quantity_with_targets(
             &state,
             &QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourceToughness,
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::CostPaidObject,
+                },
             },
             &ability,
         );
@@ -5990,7 +6049,9 @@ mod tests {
         let cmc = resolve_quantity_with_targets(
             &state,
             &QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourceManaValue,
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject,
+                },
             },
             &ability,
         );
@@ -5998,7 +6059,7 @@ mod tests {
     }
 
     /// Regression guard: when neither a trigger event nor a cost-paid-object
-    /// snapshot is in scope, `EventContextSourcePower` must still return 0
+    /// snapshot is in scope, `Power { CostPaidObject }` must still return 0
     /// rather than panic or hit an unexpected fallback (e.g. the source
     /// object's own power).
     #[test]
@@ -6018,7 +6079,9 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextSourcePower,
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::CostPaidObject,
+                    },
                 },
                 target: TargetFilter::Controller,
             },
@@ -6029,23 +6092,26 @@ mod tests {
         let resolved = resolve_quantity_with_targets(
             &state,
             &QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourcePower,
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject,
+                },
             },
             &ability,
         );
         assert_eq!(
             resolved, 0,
-            "EventContextSourcePower with no trigger event and no cost-paid \
+            "Power {{ CostPaidObject }} with no trigger event and no cost-paid \
              snapshot must return 0 (not the source object's own power)"
         );
     }
 
-    /// CR 603.7c precedence: when both a trigger event and a cost-paid-object
-    /// snapshot are in scope (theoretical — triggered abilities don't carry
-    /// activation costs in practice), the trigger event wins. Guards the
-    /// fallback ordering contract.
+    /// CR 608.2k slot ordering: when both a cost-paid-object snapshot (slot 1)
+    /// and a trigger event (slot 2) are in scope (theoretical — triggered
+    /// abilities don't carry activation costs in practice), `cost_paid_object`
+    /// wins per the engine's pinned slot-1-first order. Guards the fallback
+    /// ordering contract.
     #[test]
-    fn resolve_event_context_source_power_trigger_event_takes_priority() {
+    fn resolve_power_cost_paid_object_takes_priority_over_trigger_event() {
         use crate::types::ability::{CostPaidObjectSnapshot, ResolvedAbility};
         use crate::types::game_state::LKISnapshot;
 
@@ -6069,7 +6135,9 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextSourcePower,
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::CostPaidObject,
+                    },
                 },
                 target: TargetFilter::Controller,
             },
@@ -6098,13 +6166,16 @@ mod tests {
         let resolved = resolve_quantity_with_targets(
             &state,
             &QuantityExpr::Ref {
-                qty: QuantityRef::EventContextSourcePower,
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject,
+                },
             },
             &ability,
         );
         assert_eq!(
-            resolved, 3,
-            "Trigger event must take priority over cost-paid-object fallback"
+            resolved, 99,
+            "CR 608.2k slot 1 (cost_paid_object) takes priority over slot 2 \
+             (trigger-event source) per the engine's pinned ordering"
         );
     }
 
@@ -6493,8 +6564,8 @@ mod tests {
     /// resolve. Two assertions discriminate the fix:
     ///
     /// 1. **Parser** — the draw quantity must parse to
-    ///    `Power { ObjectScope::CostPaidObject }`, NOT `EventContextSourcePower`.
-    ///    This assertion FAILS on pre-fix code, where the participle-possessive
+    ///    `Power { ObjectScope::CostPaidObject }`, NOT a trigger-event-context
+    ///    referent. This assertion FAILS on pre-fix code, where the participle-possessive
     ///    "the sacrificed creature's power" was mis-classified as an
     ///    event-context referent.
     /// 2. **Runtime** — driving the engine through `apply_as_current`, exactly
@@ -6535,8 +6606,8 @@ mod tests {
         let mut runner = scenario.build();
 
         // The draw quantity must have parsed through the cost-paid-object
-        // chain — NOT EventContextSourcePower. This is the discriminating
-        // assertion that fails on pre-fix code.
+        // chain — NOT a trigger-event-context referent. This is the
+        // discriminating assertion that fails on pre-fix code.
         let draw_count = {
             let gg = &runner.state().objects[&greater_good];
             let ability = gg
@@ -6557,8 +6628,8 @@ mod tests {
                 },
             },
             "Greater Good's draw quantity must route through \
-             parse_cost_paid_object_ref → Power{{CostPaidObject}}, not \
-             EventContextSourcePower (issue #338)"
+             parse_cost_paid_object_ref → Power{{CostPaidObject}}, not a \
+             trigger-event-context referent (issue #338)"
         );
 
         let hand_count = |runner: &crate::game::scenario::GameRunner| {
@@ -6617,8 +6688,8 @@ mod tests {
         }
 
         // The 4/4 was sacrificed → exactly 4 cards drawn (its power). On
-        // pre-fix code the quantity mis-classified to EventContextSourcePower;
-        // the parser assertion above is the primary discriminator, this
+        // pre-fix code the quantity mis-classified to a trigger-event-context
+        // referent; the parser assertion above is the primary discriminator, this
         // confirms the value resolves correctly end-to-end.
         let hand_after = hand_count(&runner);
         assert_eq!(

@@ -968,9 +968,14 @@ pub(crate) fn evaluate_condition(
                     && obj.name.contains(name.as_str())
             }) >= 1
         }
-        ParsedCondition::YouControlCreatureWithKeyword { keyword } => {
-            you_control_creature_with_keyword(state, player, keyword)
-        }
+        // CR 602.5b: honor the parameterized controller scope.
+        ParsedCondition::ControlsCreatureWithKeyword {
+            controller,
+            keyword,
+        } => match controller {
+            ControllerRef::You => you_control_creature_with_keyword(state, player, keyword),
+            _ => opponent_controls_creature_with_keyword(state, player, keyword),
+        },
         ParsedCondition::YouControlCreatureWithPowerAtLeast { minimum } => {
             controlled_objects_matching_count(state, player, |obj| {
                 obj.card_types.core_types.contains(&CoreType::Creature)
@@ -1265,6 +1270,112 @@ pub(crate) fn target_dependent_flash_permission_satisfied(
         })
 }
 
+/// CR 601.3d: For a spell whose only instant-speed permission is a
+/// target-dependent flash option, a cast can only legally proceed if at
+/// least one legal target for the spell ALSO satisfies the flash option's
+/// `SpellTargetsFilter`. This is the pre-target (candidate-generation)
+/// FEASIBILITY check — distinct from the post-target SATISFACTION gate
+/// `target_dependent_flash_permission_satisfied`, which tests the player's
+/// already-chosen targets. CR 702.8a: a real Flash keyword bypasses entirely.
+pub(crate) fn target_dependent_flash_permission_feasible(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    use crate::types::ability::{SpellCastingOptionKind, TargetRef};
+
+    // CR 702.8a: A real Flash keyword (printed or granted via continuous
+    // effect) authorizes instant-speed casting independent of any conditional
+    // flash option — short-circuit before any feasibility analysis.
+    let has_real_flash = super::casting::effective_spell_keyword_kinds(state, player, object_id)
+        .contains(&crate::types::keywords::KeywordKind::Flash);
+    if has_real_flash {
+        return true;
+    }
+
+    let Some(obj) = state.objects.get(&object_id) else {
+        return true;
+    };
+
+    // Collect every target-dependent flash gating filter. With none, there is
+    // no target-dependent flash permission to police (unconditional or
+    // non-target-dependent flash) — mirror the post-target gate's deferral.
+    let gating_filters: Vec<&crate::types::ability::TargetFilter> = obj
+        .casting_options
+        .iter()
+        .filter(|o| o.kind == SpellCastingOptionKind::AsThoughHadFlash)
+        .filter_map(|o| match o.condition.as_ref() {
+            Some(ParsedCondition::SpellTargetsFilter { filter }) => Some(filter),
+            _ => None,
+        })
+        .collect();
+    if gating_filters.is_empty() {
+        return true;
+    }
+
+    // CR 601.3d: Layers must be evaluated before computing legal targets so
+    // granted types/keywords are visible — mirror `spell_has_legal_targets`
+    // (casting.rs). `find_legal_targets` does not evaluate layers itself.
+    let mut simulated = state.clone();
+    if simulated.layers_dirty {
+        super::layers::evaluate_layers(&mut simulated);
+    }
+    let Some(obj) = simulated.objects.get(&object_id) else {
+        return true;
+    };
+
+    // Branch dispatch mirrors `spell_has_legal_targets`: Aura → modal → normal.
+    let base_legal_targets: Vec<TargetRef> = if obj.card_types.subtypes.iter().any(|s| s == "Aura")
+    {
+        // 4a. Aura: targets via the Enchant keyword filter.
+        let Some(enchant_filter) = obj.keywords.iter().find_map(|k| match k {
+            Keyword::Enchant(filter) => Some(filter.clone()),
+            _ => None,
+        }) else {
+            return false;
+        };
+        super::targeting::find_legal_targets(&simulated, &enchant_filter, player, obj.id)
+    } else if obj.modal.is_some() {
+        // 4b. Modal: targets are chosen after mode selection — defer to the
+        // finalize-time satisfaction gate.
+        return true;
+    } else {
+        // 4c. Normal: union of every Spell-ability target slot's legal targets.
+        let Some(def) = super::casting::combined_spell_ability_def(obj) else {
+            // Permanent with no spell ability needs no targets.
+            return true;
+        };
+        let resolved = super::ability_utils::build_resolved_from_def(&def, obj.id, player);
+        match super::ability_utils::build_target_slots(&simulated, &resolved) {
+            Ok(slots) => {
+                if slots.is_empty() {
+                    // A SpellTargetsFilter condition requires a target slot to
+                    // satisfy — an empty slot set cannot be feasible.
+                    return false;
+                }
+                slots
+                    .into_iter()
+                    .flat_map(|slot| slot.legal_targets)
+                    .collect()
+            }
+            Err(_) => return false,
+        }
+    };
+
+    // CR 601.3d: Feasibility = some base legal target ALSO matches a gating
+    // flash filter. The flash filter is object-scoped, so a `Player` target can
+    // never satisfy it — mirror `target_dependent_flash_permission_satisfied`.
+    let ctx = super::filter::FilterContext::from_source(&simulated, object_id);
+    gating_filters.iter().any(|flash_filter| {
+        base_legal_targets.iter().any(|target| match target {
+            TargetRef::Object(id) => {
+                super::filter::matches_target_filter(&simulated, *id, flash_filter, &ctx)
+            }
+            TargetRef::Player(_) => false,
+        })
+    })
+}
+
 /// CR 307.1: Sorcery-speed timing — main phase, stack empty, active player has priority.
 pub(crate) fn is_sorcery_speed_window(
     state: &crate::types::game_state::GameState,
@@ -1308,6 +1419,17 @@ fn you_control_creature_with_keyword(
     controlled_objects_matching_count(state, player, |obj| {
         obj.card_types.core_types.contains(&CoreType::Creature) && obj.has_keyword(keyword)
     }) >= 1
+}
+
+/// CR 602.5b: True when any opponent of `player` controls a creature with `keyword`.
+fn opponent_controls_creature_with_keyword(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    keyword: &Keyword,
+) -> bool {
+    crate::game::players::opponents(state, player)
+        .into_iter()
+        .any(|opponent| you_control_creature_with_keyword(state, opponent, keyword))
 }
 
 fn you_control_land_with_any_subtype(
@@ -1623,6 +1745,56 @@ mod tests {
             PlayerId(0),
             bird,
             "you control a creature with flying"
+        ));
+    }
+
+    #[test]
+    fn evaluates_opponent_controls_creature_with_flying_condition() {
+        // CR 602.5b: Groundling Pouncer — "an opponent controls a creature with flying".
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+
+        // No flyers anywhere → condition false.
+        assert!(!parse_and_evaluate_condition(
+            &state,
+            PlayerId(0),
+            ObjectId(1),
+            "an opponent controls a creature with flying"
+        ));
+
+        // YOU control a flyer → still false (the controller scope is honored).
+        let your_bird = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Your Bird".to_string(),
+            Zone::Battlefield,
+        );
+        let your_bird_obj = state.objects.get_mut(&your_bird).unwrap();
+        your_bird_obj.card_types.core_types.push(CoreType::Creature);
+        your_bird_obj.keywords.push(Keyword::Flying);
+        assert!(!parse_and_evaluate_condition(
+            &state,
+            PlayerId(0),
+            your_bird,
+            "an opponent controls a creature with flying"
+        ));
+
+        // An OPPONENT controls a flyer → condition true.
+        let opp_bird = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Bird".to_string(),
+            Zone::Battlefield,
+        );
+        let opp_bird_obj = state.objects.get_mut(&opp_bird).unwrap();
+        opp_bird_obj.card_types.core_types.push(CoreType::Creature);
+        opp_bird_obj.keywords.push(Keyword::Flying);
+        assert!(parse_and_evaluate_condition(
+            &state,
+            PlayerId(0),
+            your_bird,
+            "an opponent controls a creature with flying"
         ));
     }
 
@@ -2286,6 +2458,285 @@ mod tests {
         assert!(
             target_dependent_flash_permission_satisfied(&state, caster, ObjectId(10), &ability),
             "printed Flash keyword must short-circuit the target-dependent flash check"
+        );
+    }
+
+    /// CR 601.3d: The pre-target FEASIBILITY check for a target-dependent flash
+    /// permission. A conditional-flash Enchantment whose only instant-speed
+    /// permission is `SpellTargetsFilter { IsCommander }` is castable at instant
+    /// speed only if a commander target legally exists. With only a
+    /// non-commander creature present the cast is infeasible; adding a commander
+    /// makes it feasible.
+    #[test]
+    fn target_dependent_flash_permission_feasible_requires_a_commander_target() {
+        use crate::game::game_object::GameObject;
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, Effect, FilterProp, ParsedCondition,
+            SpellCastingOption, TargetFilter, TypedFilter,
+        };
+
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let caster = PlayerId(0);
+        let opponent = PlayerId(1);
+
+        // Conditional-flash Enchantment with a Spell-kind ability that targets
+        // a creature; the only flash permission is gated on IsCommander.
+        let mut spell = GameObject::new(
+            ObjectId(10),
+            CardId(10),
+            caster,
+            "Timely Ward".to_string(),
+            Zone::Hand,
+        );
+        spell.card_types.core_types.push(CoreType::Enchantment);
+        spell
+            .casting_options
+            .push(SpellCastingOption::as_though_had_flash().condition(
+                ParsedCondition::SpellTargetsFilter {
+                    filter: TargetFilter::Typed(TypedFilter {
+                        properties: vec![FilterProp::IsCommander],
+                        ..Default::default()
+                    }),
+                },
+            ));
+        std::sync::Arc::make_mut(&mut spell.abilities).push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Destroy {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                cant_regenerate: false,
+            },
+        ));
+        state.objects.insert(spell.id, spell);
+
+        // Non-commander creature only — no commander target exists.
+        let plain = create_object(
+            &mut state,
+            CardId(21),
+            opponent,
+            "Ordinary Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&plain)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        assert!(
+            !target_dependent_flash_permission_feasible(&state, caster, ObjectId(10)),
+            "no commander on the battlefield ⇒ the conditional flash cast is infeasible"
+        );
+
+        // Add a commander creature: a satisfying target now exists.
+        let commander = create_object(
+            &mut state,
+            CardId(20),
+            opponent,
+            "Some Commander".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&commander).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.is_commander = true;
+        }
+        assert!(
+            target_dependent_flash_permission_feasible(&state, caster, ObjectId(10)),
+            "a commander creature on the battlefield ⇒ the conditional flash cast is feasible"
+        );
+    }
+
+    /// CR 702.8a: A printed Flash keyword short-circuits the pre-target
+    /// feasibility check — even with no condition-satisfying target the cast is
+    /// feasible because real Flash authorizes instant-speed casting outright.
+    #[test]
+    fn target_dependent_flash_permission_feasible_real_flash_bypass() {
+        use crate::game::game_object::GameObject;
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, Effect, FilterProp, ParsedCondition,
+            SpellCastingOption, TargetFilter, TypedFilter,
+        };
+        use crate::types::keywords::Keyword;
+
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let caster = PlayerId(0);
+        let opponent = PlayerId(1);
+
+        let mut spell = GameObject::new(
+            ObjectId(10),
+            CardId(10),
+            caster,
+            "Has Both".to_string(),
+            Zone::Hand,
+        );
+        spell.card_types.core_types.push(CoreType::Enchantment);
+        spell.keywords.push(Keyword::Flash);
+        spell
+            .casting_options
+            .push(SpellCastingOption::as_though_had_flash().condition(
+                ParsedCondition::SpellTargetsFilter {
+                    filter: TargetFilter::Typed(TypedFilter {
+                        properties: vec![FilterProp::IsCommander],
+                        ..Default::default()
+                    }),
+                },
+            ));
+        std::sync::Arc::make_mut(&mut spell.abilities).push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Destroy {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                cant_regenerate: false,
+            },
+        ));
+        state.objects.insert(spell.id, spell);
+
+        // Only a non-commander target — would fail the conditional flash filter.
+        let plain = create_object(
+            &mut state,
+            CardId(21),
+            opponent,
+            "Ordinary Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&plain)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        assert!(
+            target_dependent_flash_permission_feasible(&state, caster, ObjectId(10)),
+            "printed Flash must bypass the pre-target feasibility check (CR 702.8a)"
+        );
+    }
+
+    /// CR 601.3d: Modal cards choose targets after mode selection, so the
+    /// pre-target feasibility check defers to the finalize-time satisfaction
+    /// gate — `obj.modal.is_some()` ⇒ feasible even with no satisfying target.
+    #[test]
+    fn target_dependent_flash_permission_feasible_modal_defers() {
+        use crate::game::game_object::GameObject;
+        use crate::types::ability::{
+            FilterProp, ModalChoice, ParsedCondition, SpellCastingOption, TargetFilter, TypedFilter,
+        };
+
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let caster = PlayerId(0);
+
+        let mut spell = GameObject::new(
+            ObjectId(10),
+            CardId(10),
+            caster,
+            "Modal Conditional Flash".to_string(),
+            Zone::Hand,
+        );
+        spell.card_types.core_types.push(CoreType::Instant);
+        spell.modal = Some(ModalChoice {
+            min_choices: 1,
+            max_choices: 1,
+            mode_count: 2,
+            ..Default::default()
+        });
+        spell
+            .casting_options
+            .push(SpellCastingOption::as_though_had_flash().condition(
+                ParsedCondition::SpellTargetsFilter {
+                    filter: TargetFilter::Typed(TypedFilter {
+                        properties: vec![FilterProp::IsCommander],
+                        ..Default::default()
+                    }),
+                },
+            ));
+        state.objects.insert(spell.id, spell);
+
+        // No commander, no targets at all — but the modal branch defers.
+        assert!(
+            target_dependent_flash_permission_feasible(&state, caster, ObjectId(10)),
+            "modal cards defer the feasibility verdict to the finalize-time gate"
+        );
+    }
+
+    /// CR 601.3d: Aura branch — a conditional-flash Aura targets via its
+    /// `Keyword::Enchant` filter. Feasibility requires a battlefield object that
+    /// matches BOTH the Enchant filter AND the flash `SpellTargetsFilter`.
+    #[test]
+    fn target_dependent_flash_permission_feasible_aura_branch() {
+        use crate::game::game_object::GameObject;
+        use crate::types::ability::{
+            FilterProp, ParsedCondition, SpellCastingOption, TargetFilter, TypedFilter,
+        };
+        use crate::types::keywords::Keyword;
+
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let caster = PlayerId(0);
+        let opponent = PlayerId(1);
+
+        // Conditional-flash Aura: Enchant creature, flash gated on IsCommander.
+        let mut aura = GameObject::new(
+            ObjectId(10),
+            CardId(10),
+            caster,
+            "Conditional Flash Aura".to_string(),
+            Zone::Hand,
+        );
+        aura.card_types.core_types.push(CoreType::Enchantment);
+        aura.card_types.subtypes.push("Aura".to_string());
+        aura.keywords.push(Keyword::Enchant(TargetFilter::Typed(
+            TypedFilter::creature(),
+        )));
+        aura.casting_options
+            .push(SpellCastingOption::as_though_had_flash().condition(
+                ParsedCondition::SpellTargetsFilter {
+                    filter: TargetFilter::Typed(TypedFilter {
+                        properties: vec![FilterProp::IsCommander],
+                        ..Default::default()
+                    }),
+                },
+            ));
+        state.objects.insert(aura.id, aura);
+
+        // Non-commander creature only: matches Enchant filter but not the flash
+        // filter ⇒ infeasible.
+        let plain = create_object(
+            &mut state,
+            CardId(21),
+            opponent,
+            "Ordinary Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&plain)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        assert!(
+            !target_dependent_flash_permission_feasible(&state, caster, ObjectId(10)),
+            "Aura with only a non-commander enchantable target ⇒ infeasible"
+        );
+
+        // Commander creature: matches both the Enchant filter and the flash
+        // filter ⇒ feasible.
+        let commander = create_object(
+            &mut state,
+            CardId(20),
+            opponent,
+            "Some Commander".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&commander).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.is_commander = true;
+        }
+        assert!(
+            target_dependent_flash_permission_feasible(&state, caster, ObjectId(10)),
+            "Aura with a commander enchantable target ⇒ feasible"
         );
     }
 

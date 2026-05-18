@@ -16,7 +16,7 @@ use super::{EffectError, ResolvedAbility};
 /// CR 107.1c + CR 107.14: Detect a "pay any amount of X" shape — the parser
 /// emits `QuantityExpr::Ref { QuantityRef::Variable { name: "X" } }` for
 /// these prompts (Galvanic Discharge, etc.). A fixed or dynamic reference
-/// (e.g., `Fixed { 2 }` or `EventContextSourcePower`) is paid unconditionally.
+/// (e.g., `Fixed { 2 }` or `Power { CostPaidObject }`) is paid unconditionally.
 fn is_pay_any_amount(amount: &QuantityExpr) -> bool {
     matches!(
         amount,
@@ -83,7 +83,8 @@ pub fn resolve(
             // IS a life-loss event, so the replacement pipeline fires and a
             // CantLoseLife lock blocks the payment (cost unpayable). The amount
             // is a `QuantityExpr` resolved here — dynamic refs like
-            // `EventContextSourcePower` resolve against the triggering event.
+            // `Power { CostPaidObject }` resolve against the cost-paid /
+            // trigger-referenced object per CR 608.2k.
             let amount = resolve_quantity_with_targets(state, amount, &payment_ability);
             let amount = u32::try_from(amount.max(0)).unwrap_or(0);
             match pay_life_as_cost(state, payer, amount, events) {
@@ -1568,6 +1569,345 @@ mod tests {
                 .any(|e| matches!(e, GameEvent::LifeChanged { .. })),
             "no LifeChanged event should be emitted"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Join Forces — CR 101.4 + CR 800.4 + CR 107.3i + CR 117.1 + CR 121.1
+    //
+    // Multi-player payment loop:
+    //   * Each player in turn order (starting with the controller) is prompted
+    //     to pay any amount of mana via `PayAmountChoice`.
+    //   * The accumulated total threads through as `chosen_x` on the chained
+    //     sub-effect so `Variable("X")` resolves to the total at resolution.
+    //   * `state.last_effect_count` matches the running total (read by
+    //     `QuantityRef::EventContextAmount` for "that much" patterns).
+    // -----------------------------------------------------------------------
+
+    /// Builds the join-forces resolution chain that the parser produces for
+    /// Minds Aglow: `PayCost { Mana { X } }` with `player_scope: All` and
+    /// `starting_with: Some(You)`, threading into `Draw { Variable("X") }`.
+    fn build_minds_aglow_chain(source_id: ObjectId, controller: PlayerId) -> ResolvedAbility {
+        use crate::types::ability::{ControllerRef, PlayerFilter};
+        use crate::types::mana::ManaCostShard;
+
+        let draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            controller,
+        );
+        let mut pay = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: PaymentCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::X],
+                        generic: 0,
+                    },
+                },
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            controller,
+        );
+        pay.player_scope = Some(PlayerFilter::All);
+        pay.starting_with = Some(ControllerRef::You);
+        // The sub_ability inherits player_scope: All from the parser; mirror
+        // that so each iteration's draw is scoped per-player.
+        let mut draw = draw;
+        draw.player_scope = Some(PlayerFilter::All);
+        pay.sub_ability = Some(Box::new(draw));
+        pay
+    }
+
+    /// Add `n` colorless mana to `player`'s mana pool.
+    fn add_colorless(state: &mut GameState, player: PlayerId, n: u32) {
+        for _ in 0..n {
+            state.players[player.0 as usize].mana_pool.add(ManaUnit {
+                color: ManaType::Colorless,
+                source_id: ObjectId(0),
+                snow: false,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+            });
+        }
+    }
+
+    /// Create `n` library cards owned by `player` so Draw has cards to draw.
+    fn seed_library(state: &mut GameState, player: PlayerId, n: u32) {
+        use crate::game::zones::create_object;
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+        // Use a per-player CardId base offset so libraries don't collide.
+        let base: u64 = 1000 + 100 * (player.0 as u64);
+        for i in 0..n {
+            create_object(
+                state,
+                CardId(base + i as u64),
+                player,
+                format!("P{} Card {i}", player.0),
+                Zone::Library,
+            );
+        }
+    }
+
+    /// 4-player Minds Aglow with P0=controller, varied payments per player.
+    /// P0 pays 3, P1 pays 2, P2 pays 1, P3 pays 0. The total X = 6 should
+    /// flow through to each player's Draw, so all four players draw 6 cards.
+    /// CR 107.3i: X has one value per resolution.
+    #[test]
+    fn minds_aglow_four_player_loop_each_draws_total() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine_resolution_choices::handle_resolution_choice;
+        use crate::game::zones::create_object;
+        use crate::types::actions::GameAction;
+        use crate::types::format::FormatConfig;
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new(FormatConfig::commander(), 4, 42);
+        let source_id = create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(0),
+            "Minds Aglow".to_string(),
+            Zone::Battlefield,
+        );
+        // 10 library cards per player so Draw 6 is safe.
+        for pid in 0..4 {
+            seed_library(&mut state, PlayerId(pid), 10);
+        }
+        // Mana budgets: P0=3, P1=2, P2=1, P3=0.
+        add_colorless(&mut state, PlayerId(0), 3);
+        add_colorless(&mut state, PlayerId(1), 2);
+        add_colorless(&mut state, PlayerId(2), 1);
+
+        let pay = build_minds_aglow_chain(source_id, PlayerId(0));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+
+        // First prompt: P0 (starting_with=You overrides APNAP).
+        let payments: &[(PlayerId, u32)] = &[
+            (PlayerId(0), 3),
+            (PlayerId(1), 2),
+            (PlayerId(2), 1),
+            (PlayerId(3), 0),
+        ];
+        for (expected_player, amount) in payments {
+            match &state.waiting_for {
+                WaitingFor::PayAmountChoice { player, .. } => {
+                    assert_eq!(*player, *expected_player, "wrong player prompted");
+                }
+                other => panic!("expected PayAmountChoice for {expected_player:?}, got {other:?}"),
+            }
+            let waiting_for = state.waiting_for.clone();
+            handle_resolution_choice(
+                &mut state,
+                waiting_for,
+                GameAction::SubmitPayAmount { amount: *amount },
+                &mut events,
+            )
+            .unwrap();
+        }
+
+        // All four players draw 6 cards each (= total X across the loop).
+        // CR 107.3i: every Variable("X") in the chain resolves to the same
+        // accumulated total.
+        for pid in 0..4 {
+            assert_eq!(
+                state.players[pid].hand.len(),
+                6,
+                "Player {} should have drawn 6 cards (total mana paid = 6)",
+                pid
+            );
+        }
+    }
+
+    /// CR 101.4 + CR 800.4: "Starting with you" must override APNAP. In this
+    /// test the active player is P2 but the spell is cast by P0; the prompt
+    /// order is P0 → P1 → P2 (controller first), NOT P2 → P0 → P1.
+    #[test]
+    fn minds_aglow_starting_with_you_overrides_apnap() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine_resolution_choices::handle_resolution_choice;
+        use crate::game::zones::create_object;
+        use crate::types::actions::GameAction;
+        use crate::types::format::FormatConfig;
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 7);
+        state.active_player = PlayerId(2);
+        let source_id = create_object(
+            &mut state,
+            CardId(700),
+            PlayerId(0),
+            "Minds Aglow".to_string(),
+            Zone::Battlefield,
+        );
+        for pid in 0..3 {
+            seed_library(&mut state, PlayerId(pid), 5);
+        }
+        // Everyone pays 0 for simplicity — we only care about prompt order.
+        // 0 mana available is enough since pay-any-amount allows min=0.
+
+        let pay = build_minds_aglow_chain(source_id, PlayerId(0));
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+
+        // Expected prompt sequence under "starting with you": P0, P1, P2.
+        // (Without the override the order would be P2, P0, P1.)
+        let expected_sequence: &[PlayerId] = &[PlayerId(0), PlayerId(1), PlayerId(2)];
+        for expected_player in expected_sequence {
+            match &state.waiting_for {
+                WaitingFor::PayAmountChoice { player, .. } => {
+                    assert_eq!(
+                        *player, *expected_player,
+                        "prompt order violated CR 101.4 + CR 800.4 (starting_with override)"
+                    );
+                }
+                other => panic!("expected PayAmountChoice for {expected_player:?}, got {other:?}"),
+            }
+            let waiting_for = state.waiting_for.clone();
+            handle_resolution_choice(
+                &mut state,
+                waiting_for,
+                GameAction::SubmitPayAmount { amount: 0 },
+                &mut events,
+            )
+            .unwrap();
+        }
+
+        // CR 121.1: Drawing 0 cards is a legal no-op. All players should
+        // have empty hands.
+        for pid in 0..3 {
+            assert_eq!(
+                state.players[pid].hand.len(),
+                0,
+                "Player {} should have drawn 0 cards (no mana paid)",
+                pid
+            );
+        }
+    }
+
+    /// CR 121.1: Drawing 0 cards (and `Variable("X") = 0`) is a legal no-op.
+    /// 4-player game where everyone pays 0 — no errors, all hands empty.
+    #[test]
+    fn minds_aglow_refusal_path_zero_total_zero_draws() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine_resolution_choices::handle_resolution_choice;
+        use crate::game::zones::create_object;
+        use crate::types::actions::GameAction;
+        use crate::types::format::FormatConfig;
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new(FormatConfig::commander(), 4, 11);
+        let source_id = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Minds Aglow".to_string(),
+            Zone::Battlefield,
+        );
+        for pid in 0..4 {
+            seed_library(&mut state, PlayerId(pid), 3);
+        }
+
+        let pay = build_minds_aglow_chain(source_id, PlayerId(0));
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+
+        for _ in 0..4 {
+            assert!(matches!(
+                state.waiting_for,
+                WaitingFor::PayAmountChoice { .. }
+            ));
+            let waiting_for = state.waiting_for.clone();
+            handle_resolution_choice(
+                &mut state,
+                waiting_for,
+                GameAction::SubmitPayAmount { amount: 0 },
+                &mut events,
+            )
+            .unwrap();
+        }
+
+        for pid in 0..4 {
+            assert_eq!(
+                state.players[pid].hand.len(),
+                0,
+                "Player {} should have drawn 0 cards on refusal path",
+                pid
+            );
+        }
+    }
+
+    /// 4-player game where only the caster (P0) has mana. P0 pays 5, the
+    /// other three pay 0. Total X = 5 → all four players draw 5 cards.
+    #[test]
+    fn minds_aglow_caster_alone_pays_all() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine_resolution_choices::handle_resolution_choice;
+        use crate::game::zones::create_object;
+        use crate::types::actions::GameAction;
+        use crate::types::format::FormatConfig;
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new(FormatConfig::commander(), 4, 13);
+        let source_id = create_object(
+            &mut state,
+            CardId(1100),
+            PlayerId(0),
+            "Minds Aglow".to_string(),
+            Zone::Battlefield,
+        );
+        for pid in 0..4 {
+            seed_library(&mut state, PlayerId(pid), 10);
+        }
+        // Only P0 has mana; P1/P2/P3 pay 0.
+        add_colorless(&mut state, PlayerId(0), 5);
+
+        let pay = build_minds_aglow_chain(source_id, PlayerId(0));
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+
+        // P0 pays 5, others pay 0.
+        let payments: &[u32] = &[5, 0, 0, 0];
+        for amount in payments {
+            assert!(matches!(
+                state.waiting_for,
+                WaitingFor::PayAmountChoice { .. }
+            ));
+            let waiting_for = state.waiting_for.clone();
+            handle_resolution_choice(
+                &mut state,
+                waiting_for,
+                GameAction::SubmitPayAmount { amount: *amount },
+                &mut events,
+            )
+            .unwrap();
+        }
+
+        for pid in 0..4 {
+            assert_eq!(
+                state.players[pid].hand.len(),
+                5,
+                "Player {} should have drawn 5 cards (total mana paid = 5)",
+                pid
+            );
+        }
     }
 
     // CR 118.1: ScaledMana base-cost multiplication — colored-pip and

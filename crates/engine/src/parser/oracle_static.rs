@@ -5,14 +5,15 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until};
 use nom::character::complete::{alpha1, space0, space1};
-use nom::combinator::{all_consuming, eof, map, opt, rest, value};
-use nom::multi::many0;
+use nom::combinator::{all_consuming, eof, map, opt, recognize, rest, value};
+use nom::multi::{many0, separated_list1};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::oracle_cost::parse_oracle_cost;
 use super::oracle_effect::subject::{parse_restriction_modes, static_mode_needs_grant_propagation};
 use super::oracle_effect::{parse_effect_chain, strip_trailing_duration};
+use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::static_ir::StaticIr;
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::condition as nom_condition;
@@ -20,7 +21,9 @@ use super::oracle_nom::error::OracleResult;
 use super::oracle_nom::filter as nom_filter;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::target as nom_target;
-use super::oracle_quantity::{parse_cda_quantity, parse_for_each_clause, parse_quantity_ref};
+use super::oracle_quantity::{
+    parse_cda_quantity, parse_event_context_quantity, parse_for_each_clause, parse_quantity_ref,
+};
 use super::oracle_target::{
     parse_combat_status_prefix, parse_counter_suffix, parse_mana_value_suffix, parse_target,
     parse_that_clause_suffix, parse_type_phrase,
@@ -1285,6 +1288,21 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
             StaticDefinition::continuous()
                 .affected(TargetFilter::SelfRef)
                 .modifications(vec![modification])
+                .description(text.to_string()),
+        );
+    }
+
+    // CR 205.3 + CR 700.8: "~ is also a <subtype>(, <subtype>)*[, [and|or] <subtype>]"
+    // Continuous self-static that adds creature subtypes to the source. Used by
+    // party-tribal cards so the source counts itself toward the controller's
+    // party (CR 700.8a) regardless of its printed subtypes.
+    // Anchored on `~` so it cannot collide with attached-object grants
+    // ("Enchanted land is a Mountain") which retain their dedicated path.
+    if let Some(modifications) = try_parse_self_is_also_subtypes(&tp) {
+        return Some(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(modifications)
                 .description(text.to_string()),
         );
     }
@@ -4560,20 +4578,22 @@ fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option<StaticDefi
         // (Imoti, Celebrant of Bounty: "Spells you cast with mana value 6 or
         // greater have cascade."). Variable-X thresholds may be bound by the
         // keyword clause's trailing "where X is …" quantity (Abaddon class).
-        let mv_filter = parse_mana_value_suffix(cursor).and_then(|(prop, consumed)| {
-            let FilterProp::Cmc { comparator, value } = prop else {
-                return None;
-            };
-            let value = match where_x.as_ref() {
-                Some(qty) => bind_where_x_in_quantity_expr(value, qty)?,
-                None => match value {
-                    QuantityExpr::Fixed { .. } => value,
-                    _ => return None,
-                },
-            };
-            cursor = cursor[consumed..].trim_start();
-            Some(FilterProp::Cmc { comparator, value })
-        });
+        let mv_filter = parse_mana_value_suffix(cursor, &mut ParseContext::default()).and_then(
+            |(prop, consumed)| {
+                let FilterProp::Cmc { comparator, value } = prop else {
+                    return None;
+                };
+                let value = match where_x.as_ref() {
+                    Some(qty) => bind_where_x_in_quantity_expr(value, qty)?,
+                    None => match value {
+                        QuantityExpr::Fixed { .. } => value,
+                        _ => return None,
+                    },
+                };
+                cursor = cursor[consumed..].trim_start();
+                Some(FilterProp::Cmc { comparator, value })
+            },
+        );
         let _ = cursor; // qualifiers are optional; remaining slice is unused
 
         let base_filter = if type_part.is_empty() {
@@ -4888,7 +4908,6 @@ fn parse_subtype_or_list(input: &str) -> Option<TargetFilter> {
         .parse(input)
     }
 
-    use nom::multi::separated_list1;
     let (rest, words): (&str, Vec<&str>) =
         separated_list1(parse_list_separator, parse_subtype_word)
             .parse(input)
@@ -4910,6 +4929,98 @@ fn parse_subtype_or_list(input: &str) -> Option<TargetFilter> {
     } else {
         Some(TargetFilter::Or { filters })
     }
+}
+
+/// CR 205.3 + CR 700.8: Parse a self-static of the form
+/// `~ is also a <subtype>(, <subtype>)*[, [and|or] <subtype>]` into a vec of
+/// `AddSubtype` modifications. The anchor `~` (set by `normalize_self_refs_for_static`)
+/// scopes the match to source-self type grants — attached-object additive grants
+/// ("Enchanted land is also a Plains") route through `parse_subject_additive_type_static`
+/// instead. Returns `None` if the anchor doesn't match or any trailing text
+/// remains after the subtype list, so other arms remain free to try the line.
+///
+/// CR 205.3d: An object can't gain a subtype that doesn't correspond to one of
+/// its types. The pithy "X is also a Y" phrasing is exclusively used by
+/// creature-subtype grants (party tribal: Cleric/Rogue/Warrior/Wizard, plus
+/// scattered self-typegrant creatures); land/artifact/enchantment subtype
+/// additions use the "in addition to its other types" phrasing handled by
+/// `parse_subject_additive_type_static`. We therefore reject any token whose
+/// canonical subtype maps to a non-creature core type so a stray Forest /
+/// Equipment / Aura is not silently added to a creature.
+fn try_parse_self_is_also_subtypes(tp: &TextPair<'_>) -> Option<Vec<ContinuousModification>> {
+    type VE<'a> = OracleError<'a>;
+
+    let (after_anchor, _): (&str, &str) = alt((
+        tag::<_, _, VE>("~ is also a "),
+        tag::<_, _, VE>("~ is also an "),
+    ))
+    .parse(tp.lower)
+    .ok()?;
+
+    fn parse_one(input: &str) -> nom::IResult<&str, String, OracleError<'_>> {
+        match parse_subtype(input) {
+            Some((canonical, len)) if infer_core_type_for_subtype(&canonical).is_none() => {
+                Ok((&input[len..], canonical))
+            }
+            _ => Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Fail,
+            ))),
+        }
+    }
+
+    // Decomposes the separator into independent axes — connective phrase
+    // (`,` optionally followed by `and`/`or`/`and/or`, or space-led
+    // `and`/`or`/`and/or`) × mandatory trailing space × optional indefinite
+    // article (`a `/`an `). Each axis is one `alt()`; the ≤14-form cartesian
+    // product is composed, not enumerated, per the "compose combinators by
+    // dimension" rule.
+    fn parse_connective(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
+        // Order long-first within each branch so `, and/or` wins over the
+        // bare `,` prefix in nom's left-to-right `alt` evaluation.
+        alt((
+            recognize((
+                tag::<_, _, OracleError<'_>>(","),
+                opt(preceded(
+                    tag(" "),
+                    alt((tag("and/or"), tag("and"), tag("or"))),
+                )),
+            )),
+            recognize(preceded(
+                tag(" "),
+                alt((tag("and/or"), tag("and"), tag("or"))),
+            )),
+        ))
+        .parse(input)
+    }
+    fn parse_sep(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+        let (input, _) = parse_connective(input)?;
+        let (input, _) = tag(" ").parse(input)?;
+        let (input, _) = opt(alt((tag("a "), tag("an ")))).parse(input)?;
+        Ok((input, ()))
+    }
+
+    // `all_consuming` + `terminated` asserts the entire `after_anchor` slice
+    // parses as `<subtype list><optional period><optional trailing space>` —
+    // replaces the prior manual `.trim().is_empty()` trailing-text check with
+    // an idiomatic nom assertion.
+    let (_, names) = all_consuming(terminated(
+        separated_list1(parse_sep, parse_one),
+        (opt(tag::<_, _, VE>(".")), space0),
+    ))
+    .parse(after_anchor)
+    .ok()?;
+
+    if names.is_empty() {
+        return None;
+    }
+
+    Some(
+        names
+            .into_iter()
+            .map(|subtype| ContinuousModification::AddSubtype { subtype })
+            .collect(),
+    )
 }
 
 /// Try to strip a leading "with [counter] counter(s) on it/them" clause from `text`,
@@ -6510,17 +6621,32 @@ fn parse_enchanted_is_type(tp: &TextPair, description: &str) -> Option<StaticDef
             (is_rest_lower, false)
         };
 
-    // Try to parse "base power and toughness N/N" suffix
-    let (type_part, base_pt) = if let Some((before_pt, pt_part)) =
+    // Try to parse "base power and toughness N/N" suffix.
+    //
+    // `pt_part` is everything after the " with base power and toughness "
+    // token, e.g. for Darksteel Mutation: "0/1 and has indestructible, and it
+    // loses all other abilities, card types, and creature types". `parse_pt_mod`
+    // consumes only the leading "N/N" — the unconsumed remainder (the
+    // "and has <kw> ... and it loses all ..." clause) is captured and fed to
+    // `parse_continuous_modifications` below so it is not silently dropped.
+    let (type_part, base_pt, trailing_clause) = if let Some((before_pt, pt_part)) =
         type_part.rsplit_once(" with base power and toughness ")
     {
         if let Some((p, t)) = parse_pt_mod(pt_part) {
-            (before_pt.trim(), Some((p, t)))
+            // Locate the end of the "N/N" token to capture the remainder.
+            let slash_pos = pt_part.find('/').unwrap_or(0);
+            let after_slash = &pt_part[slash_pos + 1..];
+            let t_end = after_slash
+                .find(|c: char| c.is_whitespace() || c == '.' || c == ',')
+                .unwrap_or(after_slash.len());
+            let remainder = after_slash[t_end..].trim();
+            let clause = (!remainder.is_empty()).then_some(remainder);
+            (before_pt.trim(), Some((p, t)), clause)
         } else {
-            (type_part, None)
+            (type_part, None, None)
         }
     } else {
-        (type_part, None)
+        (type_part, None, None)
     };
 
     // Parse "N/N [color] [type] [subtype]" patterns for Darksteel Mutation style
@@ -6583,23 +6709,34 @@ fn parse_enchanted_is_type(tp: &TextPair, description: &str) -> Option<StaticDef
         };
 
     if let Some(target_tf) = parsed_type {
-        // Map TypeFilter → CoreType for AddType modification
-        let core_type = match &target_tf {
-            TypeFilter::Creature => Some(CoreType::Creature),
-            TypeFilter::Artifact => Some(CoreType::Artifact),
-            TypeFilter::Enchantment => Some(CoreType::Enchantment),
-            TypeFilter::Land => Some(CoreType::Land),
-            TypeFilter::Planeswalker => Some(CoreType::Planeswalker),
-            _ => None,
-        };
+        // Collect the granted core types and subtypes separately so the
+        // trailing-clause loss modifications can be inserted in the correct
+        // written order: any `RemoveAllSubtypes` must precede `AddSubtype`
+        // (the new creature type must survive the subtype wipe — CR 205.1b).
+        let mut granted_core_types: Vec<CoreType> = Vec::new();
+        let mut granted_subtypes: Vec<String> = Vec::new();
 
-        if let Some(ct) = core_type {
-            modifications.push(ContinuousModification::AddType { core_type: ct });
-        }
+        // Route a parsed TypeFilter to the granted core-type list or the
+        // granted-subtype list. `TypeFilter::Subtype` (e.g. "Insect") must be
+        // emitted as `AddSubtype`, not dropped — CR 205.1b: a "[creature type]
+        // artifact creature" replaces the creature type with that subtype.
+        let classify_type =
+            |tf: &TypeFilter, cores: &mut Vec<CoreType>, subs: &mut Vec<String>| match tf {
+                TypeFilter::Creature => cores.push(CoreType::Creature),
+                TypeFilter::Artifact => cores.push(CoreType::Artifact),
+                TypeFilter::Enchantment => cores.push(CoreType::Enchantment),
+                TypeFilter::Land => cores.push(CoreType::Land),
+                TypeFilter::Planeswalker => cores.push(CoreType::Planeswalker),
+                TypeFilter::Subtype(sub) => subs.push(sub.clone()),
+                _ => {}
+            };
 
-        // Add subtype if parsed from "[Subtype] [type]" pattern
+        // Leading type word.
+        classify_type(&target_tf, &mut granted_core_types, &mut granted_subtypes);
+
+        // Subtype parsed from the "[Subtype] [type]" two-word branch.
         if let Some(sub) = subtype_word {
-            modifications.push(ContinuousModification::AddSubtype { subtype: sub });
+            granted_subtypes.push(sub);
         }
 
         // Parse any additional type words or subtypes from remainder
@@ -6607,39 +6744,77 @@ fn parse_enchanted_is_type(tp: &TextPair, description: &str) -> Option<StaticDef
         let mut extra = remainder;
         while !extra.is_empty() {
             if let Ok((rest, extra_tf)) = nom_target::parse_type_filter_word(extra) {
-                let extra_ct = match &extra_tf {
-                    TypeFilter::Creature => Some(CoreType::Creature),
-                    TypeFilter::Artifact => Some(CoreType::Artifact),
-                    TypeFilter::Enchantment => Some(CoreType::Enchantment),
-                    TypeFilter::Land => Some(CoreType::Land),
-                    TypeFilter::Planeswalker => Some(CoreType::Planeswalker),
-                    _ => None,
-                };
-                if let Some(ct) = extra_ct {
-                    modifications.push(ContinuousModification::AddType { core_type: ct });
-                }
+                classify_type(&extra_tf, &mut granted_core_types, &mut granted_subtypes);
                 extra = rest.trim();
             } else if is_capitalized_words(extra) {
-                modifications.push(ContinuousModification::AddSubtype {
-                    subtype: extra.to_string(),
-                });
+                granted_subtypes.push(extra.to_string());
                 break;
             } else {
                 break;
             }
         }
 
-        // Add color modification
+        // This branch handles type-*changing* auras that grant at least one
+        // core card type ("is an Insect artifact creature ..."). A bare
+        // "is a [land subtype]" ("Enchanted land is a Mountain") grants no
+        // core type and is a basic-land-type change — defer to the dedicated
+        // SetBasicLandType parser by returning None here.
+        if granted_core_types.is_empty() {
+            return None;
+        }
+
+        // Parse the trailing "and has <kw> ... and it loses all other ..."
+        // clause that the " with base power and toughness " split would
+        // otherwise discard. `parse_continuous_modifications` turns "and has
+        // <kw>" into `AddKeyword` and "loses all [other] abilities/creature
+        // types" into `RemoveAllAbilities` / `RemoveAllSubtypes`.
+        let mut clause_mods: Vec<ContinuousModification> = Vec::new();
+        let mut loss_replaces_card_types = false;
+        if let Some(clause) = trailing_clause {
+            clause_mods = parse_continuous_modifications(clause);
+            // CR 205.1b: an explicit "loses all other card types" makes the
+            // type-set replacement exact — emit a single `SetCardTypes`
+            // carrying the granted core types instead of additive `AddType`s.
+            loss_replaces_card_types = scan_loss_enumeration(&clause.to_lowercase())
+                .iter()
+                .any(|m| matches!(m, LossMember::CardTypes));
+        }
+
+        // --- Assemble modifications in written (mod_index) order ---
+        // 1. Core types: replacement (SetCardTypes) if the clause says "loses
+        //    all other card types", else additive AddType.
+        if loss_replaces_card_types {
+            modifications.push(ContinuousModification::SetCardTypes {
+                core_types: granted_core_types,
+            });
+        } else {
+            for ct in granted_core_types {
+                modifications.push(ContinuousModification::AddType { core_type: ct });
+            }
+        }
+
+        // 2. Color
         if let Some(color) = opt_color {
             modifications.push(ContinuousModification::AddColor { color });
         } else if is_colorless {
             modifications.push(ContinuousModification::SetColor { colors: vec![] });
         }
 
-        // Add base P/T from explicit "with base power and toughness" or inline "N/N"
+        // 3. Base P/T from explicit "with base power and toughness" or inline "N/N"
         if let Some((p, t)) = base_pt.or(inline_pt) {
             modifications.push(ContinuousModification::SetPower { value: p });
             modifications.push(ContinuousModification::SetToughness { value: t });
+        }
+
+        // 4. Trailing-clause mods (AddKeyword, RemoveAllAbilities,
+        //    RemoveAllSubtypes) — RemoveAllSubtypes here must precede the
+        //    AddSubtype emissions below so the granted creature type survives.
+        modifications.extend(clause_mods);
+
+        // 5. Granted subtypes (e.g. AddSubtype(Insect)) — after any
+        //    RemoveAllSubtypes wipe.
+        for sub in granted_subtypes {
+            modifications.push(ContinuousModification::AddSubtype { subtype: sub });
         }
 
         if modifications.is_empty() {
@@ -7167,6 +7342,60 @@ fn parse_dynamic_for_each_pt_modifications(text: &str) -> Option<Vec<ContinuousM
     (!modifications.is_empty()).then_some(modifications)
 }
 
+/// A member of a "loses all [other] abilities, card types, and creature types"
+/// enumeration. Parser-local — maps to one `ContinuousModification` each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LossMember {
+    Abilities,
+    CardTypes,
+    CreatureTypes,
+}
+
+/// CR 205.1a + CR 613.1d/f: Parse a "loses all [other] <list>" enumeration at
+/// the start of `input` (lowercase). The list is a comma-and enumeration of
+/// `abilities` / `card types` / `creature types` in any subset and order, so
+/// `separated_list1` over a three-way `alt` covers every combination — the
+/// literal substrings "loses all other card types" never appear contiguously
+/// in the Oxford-comma form, so whole-phrase `tag()` arms would be dead code.
+fn parse_loss_enumeration(input: &str) -> OracleResult<'_, Vec<LossMember>> {
+    preceded(
+        alt((
+            tag("loses all other "),
+            tag("lose all other "),
+            tag("loses all "),
+            tag("lose all "),
+        )),
+        separated_list1(
+            // Oxford-comma tolerant: longest separator first so ", and "
+            // is not pre-consumed by ", ".
+            alt((tag(", and "), tag(" and "), tag(", "))),
+            alt((
+                value(LossMember::Abilities, tag("abilities")),
+                value(LossMember::CardTypes, tag("card types")),
+                value(LossMember::CreatureTypes, tag("creature types")),
+            )),
+        ),
+    )
+    .parse(input)
+}
+
+/// Scan `lower` for a "loses all [other] ..." enumeration at any word boundary
+/// (the clause appears mid-string in "is a [type] ... and it loses all ...")
+/// and return the parsed loss members. The successful parse is the detector —
+/// no `contains()`.
+fn scan_loss_enumeration(lower: &str) -> Vec<LossMember> {
+    let mut remaining = lower;
+    loop {
+        if let Ok((_, members)) = parse_loss_enumeration(remaining) {
+            return members;
+        }
+        match remaining.find(' ') {
+            Some(i) => remaining = remaining[i + 1..].trim_start(),
+            None => return Vec::new(),
+        }
+    }
+}
+
 pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModification> {
     // Strip "where X is [quantity]" before parsing modifications,
     // but only if the text doesn't contain quoted abilities (which have their
@@ -7185,12 +7414,24 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     let unquoted_tp = TextPair::new(&unquoted_text, &unquoted_lower);
     let mut modifications = Vec::new();
 
-    if nom_primitives::scan_contains(unquoted_tp.lower, "lose all abilities")
-        || nom_primitives::scan_contains(unquoted_tp.lower, "loses all abilities")
-        || nom_primitives::scan_contains(unquoted_tp.lower, "lose all other abilities")
-        || nom_primitives::scan_contains(unquoted_tp.lower, "loses all other abilities")
-    {
-        modifications.push(ContinuousModification::RemoveAllAbilities);
+    // CR 205.1a + CR 613.1d/f: "loses all [other] abilities, card types, and
+    // creature types" — a comma-and enumeration parsed with nom. Each member
+    // maps to one modification. `CardTypes` requires the granted core-type
+    // list, which only the "is a [type]" caller (`parse_enchanted_is_type`)
+    // owns — in the standalone path it has no type set and is a no-op (such
+    // text does not occur outside the "is a [type]" frame).
+    for member in scan_loss_enumeration(unquoted_tp.lower) {
+        match member {
+            LossMember::Abilities => {
+                modifications.push(ContinuousModification::RemoveAllAbilities);
+            }
+            LossMember::CreatureTypes => {
+                modifications.push(ContinuousModification::RemoveAllSubtypes {
+                    set: crate::types::card_type::SubtypeSet::Creature,
+                });
+            }
+            LossMember::CardTypes => {}
+        }
     }
 
     if let Some(dynamic_mods) = parse_dynamic_for_each_pt_modifications(&unquoted_text) {
@@ -7428,7 +7669,12 @@ fn parse_dynamic_pt_in_text(
         return None; // No X variable — not a dynamic P/T pattern
     }
 
-    let quantity = parse_cda_quantity(where_x_expression?)?;
+    // CR 706.2 + CR 706.3b: "where X is the result" binds X to the preceding
+    // die roll's result. `parse_cda_quantity` has no "the result" arm; fall
+    // through to `parse_event_context_quantity`, which maps it to
+    // `EventContextAmount` (the same channel "that much"/"the result" use).
+    let wx = where_x_expression?;
+    let quantity = parse_cda_quantity(wx).or_else(|| parse_event_context_quantity(wx))?;
 
     let mut mods = Vec::new();
     if p_is_x {
@@ -10716,7 +10962,12 @@ mod tests {
             panic!("expected ReduceCost");
         };
         assert_eq!(amount, ManaCost::generic(1));
-        assert_eq!(dynamic_count, Some(QuantityRef::Speed));
+        assert_eq!(
+            dynamic_count,
+            Some(QuantityRef::Speed {
+                player: PlayerScope::Controller
+            })
+        );
     }
 
     #[test]
@@ -11567,6 +11818,7 @@ mod tests {
             qty: QuantityRef::HandSize {
                 player: PlayerScope::AllPlayers {
                     aggregate: AggregateFunction::Sum,
+                    exclude: None,
                 },
             },
         };
@@ -14628,6 +14880,178 @@ mod tests {
                 subtype: "Swamp".to_string(),
             }]
         );
+    }
+
+    /// CR 205.3 + CR 700.8: Self type-grant Oxford-comma party subtype list.
+    /// Source acquires all four party subtypes so it counts itself toward the
+    /// controller's party regardless of its printed subtypes.
+    #[test]
+    fn self_is_also_a_four_party_subtypes() {
+        let def = parse_static_line("~ is also a Cleric, Rogue, Warrior, and Wizard.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.modifications,
+            vec![
+                ContinuousModification::AddSubtype {
+                    subtype: "Cleric".to_string(),
+                },
+                ContinuousModification::AddSubtype {
+                    subtype: "Rogue".to_string(),
+                },
+                ContinuousModification::AddSubtype {
+                    subtype: "Warrior".to_string(),
+                },
+                ContinuousModification::AddSubtype {
+                    subtype: "Wizard".to_string(),
+                },
+            ]
+        );
+    }
+
+    /// CR 205.3: Single-subtype self type-grant (e.g. "Kentaro, the Smiling
+    /// Cat is also a Spirit.") — degenerate one-element list path.
+    #[test]
+    fn self_is_also_a_single_subtype() {
+        let def = parse_static_line("~ is also a Spirit.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::AddSubtype {
+                subtype: "Spirit".to_string(),
+            }]
+        );
+    }
+
+    /// CR 205.3: Vowel-opening subtype — exercises the `"~ is also an "`
+    /// arm so a future Elf/Angel/Eldrazi/Imp/Otter party-tribal printing
+    /// (or any other vowel-opening self-typegrant) reaches the parser via
+    /// the classifier's `"is also an "` contains pattern instead of being
+    /// dropped on the floor.
+    #[test]
+    fn self_is_also_an_vowel_opening_subtype_list() {
+        let def = parse_static_line("~ is also an Elf, Angel, and Eldrazi.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.modifications,
+            vec![
+                ContinuousModification::AddSubtype {
+                    subtype: "Elf".to_string(),
+                },
+                ContinuousModification::AddSubtype {
+                    subtype: "Angel".to_string(),
+                },
+                ContinuousModification::AddSubtype {
+                    subtype: "Eldrazi".to_string(),
+                },
+            ]
+        );
+    }
+
+    /// CR 205.3d: Non-creature subtypes ("X is also a Forest" / "is also an
+    /// Aura") must not be silently added to the source — the pithy
+    /// `is also a[n]` phrasing is exclusively creature-subtype grants, and
+    /// land/artifact/enchantment-subtype additions use the
+    /// `in addition to its other types` phrasing handled by
+    /// `parse_subject_additive_type_static`. The arm must return None so
+    /// other parser arms can claim the line.
+    #[test]
+    fn self_is_also_a_rejects_non_creature_subtype() {
+        assert!(parse_static_line("~ is also a Forest.").is_none());
+        assert!(parse_static_line("~ is also an Aura.").is_none());
+        assert!(parse_static_line("~ is also an Equipment.").is_none());
+    }
+
+    /// CR 205.3: Two-subtype list without Oxford comma — `<X> and <Y>`.
+    /// Exercises the bare " and " separator without intermediate comma.
+    #[test]
+    fn self_is_also_a_two_subtypes_no_comma() {
+        let def = parse_static_line("~ is also a Spirit and Wizard.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.modifications,
+            vec![
+                ContinuousModification::AddSubtype {
+                    subtype: "Spirit".to_string(),
+                },
+                ContinuousModification::AddSubtype {
+                    subtype: "Wizard".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn darksteel_mutation_full_modification_set() {
+        // CR 205.1a/b + CR 613.1d/f: the " with base power and toughness N/N "
+        // split must not discard the "and has indestructible, and it loses all
+        // other ..." clause.
+        let def = parse_static_line(
+            "Enchanted creature is an Insect artifact creature with base power and \
+             toughness 0/1 and has indestructible, and it loses all other abilities, \
+             card types, and creature types.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        let mods = &def.modifications;
+        assert!(
+            mods.contains(&ContinuousModification::SetCardTypes {
+                core_types: vec![CoreType::Artifact, CoreType::Creature],
+            }),
+            "expected SetCardTypes[Artifact,Creature], got {mods:?}"
+        );
+        assert!(mods.contains(&ContinuousModification::RemoveAllAbilities));
+        assert!(mods.contains(&ContinuousModification::RemoveAllSubtypes {
+            set: crate::types::card_type::SubtypeSet::Creature,
+        }));
+        assert!(mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Insect".to_string(),
+        }));
+        assert!(mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Indestructible,
+        }));
+        assert!(mods.contains(&ContinuousModification::SetPower { value: 0 }));
+        assert!(mods.contains(&ContinuousModification::SetToughness { value: 1 }));
+        // CR 613.7 written-order contract: RemoveAllSubtypes must precede the
+        // AddSubtype(Insect) so Insect survives the subtype wipe; and
+        // RemoveAllAbilities must precede AddKeyword so indestructible survives.
+        let pos = |m: &ContinuousModification| mods.iter().position(|x| x == m).unwrap();
+        assert!(
+            pos(&ContinuousModification::RemoveAllSubtypes {
+                set: crate::types::card_type::SubtypeSet::Creature,
+            }) < pos(&ContinuousModification::AddSubtype {
+                subtype: "Insect".to_string(),
+            }),
+            "RemoveAllSubtypes must precede AddSubtype(Insect): {mods:?}"
+        );
+        assert!(
+            pos(&ContinuousModification::RemoveAllAbilities)
+                < pos(&ContinuousModification::AddKeyword {
+                    keyword: Keyword::Indestructible,
+                }),
+            "RemoveAllAbilities must precede AddKeyword: {mods:?}"
+        );
+    }
+
+    #[test]
+    fn enchanted_is_type_with_base_pt_preserves_trailing_keyword_clause() {
+        // Building-block check: the trailing "and has <kw> ... loses all
+        // abilities" clause survives the base-P/T split.
+        let def = parse_static_line(
+            "Enchanted creature is a Bear artifact creature with base power and \
+             toughness 2/2 and has flying and it loses all other abilities.",
+        )
+        .unwrap();
+        let mods = &def.modifications;
+        assert!(mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Flying,
+        }));
+        assert!(mods.contains(&ContinuousModification::RemoveAllAbilities));
+        assert!(mods.contains(&ContinuousModification::SetPower { value: 2 }));
+        assert!(mods.contains(&ContinuousModification::SetToughness { value: 2 }));
     }
 
     // --- Land type-changing statics (CR 305.7) ---

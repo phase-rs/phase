@@ -9,9 +9,9 @@ use engine::ai_support::{auto_pass_recommended, legal_actions_for_viewer, legal_
 use engine::database::CardDatabase;
 use engine::game::engine::apply;
 use engine::game::{
-    evaluate_deck_compatibility, filter_state_for_viewer, finalize_public_state,
+    estimate_bracket, evaluate_deck_compatibility, filter_state_for_viewer, finalize_public_state,
     is_commander_eligible, load_and_hydrate_decks, rehydrate_game_from_card_db, resolve_deck_list,
-    start_game, start_game_with_starting_player, validate_name_deck_for_format,
+    start_game, start_game_with_starting_player, validate_name_deck_for_format, BracketEstimate,
     DeckCompatibilityRequest, DeckList, PlayerDeckList,
 };
 use engine::types::format::{FormatConfig, GameFormat};
@@ -392,6 +392,26 @@ pub fn evaluate_deck_compatibility_js(request: JsValue) -> Result<JsValue, JsVal
         };
         let result = evaluate_deck_compatibility(db, &request);
         Ok(to_js(&result))
+    })
+}
+
+/// Estimates a Commander deck's bracket without touching `GAME_STATE`.
+/// Reads `CARD_DB` for bracket signals. Returns `null` (via serde) when the
+/// deck has no commander or the card database is not loaded.
+#[wasm_bindgen]
+pub fn estimate_bracket_for_deck(deck_js: JsValue) -> Result<JsValue, JsError> {
+    let deck: PlayerDeckList = serde_wasm_bindgen::from_value(deck_js)
+        .map_err(|e| JsError::new(&format!("invalid deck: {e}")))?;
+    let result = estimate_bracket_inner(&deck);
+    Ok(to_js(&result))
+}
+
+/// Pure helper, exposed for native-side tests. Reads `CARD_DB` thread-local.
+fn estimate_bracket_inner(deck: &PlayerDeckList) -> Option<BracketEstimate> {
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let db = db.as_ref()?;
+        estimate_bracket(deck, db)
     })
 }
 
@@ -1231,6 +1251,69 @@ pub fn apply_seat_mutation(state_json: &str, mutation_json: &str) -> Result<JsVa
     match seat_reducer::apply(&mut state, mutation, &ctx) {
         Ok(delta) => Ok(to_js(&SeatMutationResult { state, delta })),
         Err(e) => Err(JsValue::from_str(&format!("{e:?}"))),
+    }
+}
+
+#[cfg(test)]
+mod bracket_estimate_tests {
+    use super::*;
+    use engine::database::{BracketLists, CardDatabase};
+    use engine::game::bracket_estimate::CommanderBracketTier;
+    use engine::game::deck_loading::PlayerDeckList;
+
+    #[test]
+    fn estimate_bracket_inner_returns_b3_for_one_game_changer() {
+        let db = CardDatabase::from_json_str(
+            r#"{
+                "smothering tithe": {
+                    "name": "Smothering Tithe",
+                    "mana_cost": { "type": "NoCost" },
+                    "card_type": { "supertypes": [], "core_types": ["Enchantment"], "subtypes": [] },
+                    "power": null,
+                    "toughness": null,
+                    "loyalty": null,
+                    "defense": null,
+                    "oracle_text": null,
+                    "abilities": [],
+                    "triggers": [],
+                    "static_abilities": [],
+                    "replacements": [],
+                    "keywords": [],
+                    "bracket_signals": {
+                        "game_changer": true,
+                        "mass_land_denial": false,
+                        "extra_turn": false,
+                        "efficient_tutor": false
+                    }
+                }
+            }"#,
+        )
+        .unwrap()
+        .with_bracket_lists(BracketLists::from_json_str(r#"{"version":"t"}"#).unwrap());
+        CARD_DB.with(|c| *c.borrow_mut() = Some(db));
+
+        let deck = PlayerDeckList {
+            commander: vec!["Atraxa, Praetors' Voice".into()],
+            main_deck: vec!["Smothering Tithe".into(), "Forest".into()],
+            sideboard: vec![],
+        };
+        let result = estimate_bracket_inner(&deck);
+        let est = result.expect("estimate present");
+        assert_eq!(est.tier, CommanderBracketTier::Upgraded);
+
+        // Reset to avoid leaking state to other tests in this module.
+        CARD_DB.with(|c| *c.borrow_mut() = None);
+    }
+
+    #[test]
+    fn estimate_bracket_inner_returns_none_with_no_db() {
+        CARD_DB.with(|c| *c.borrow_mut() = None);
+        let deck = PlayerDeckList {
+            commander: vec!["Cmdr".into()],
+            main_deck: vec!["Forest".into()],
+            sideboard: vec![],
+        };
+        assert!(estimate_bracket_inner(&deck).is_none());
     }
 }
 

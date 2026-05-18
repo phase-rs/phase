@@ -198,6 +198,9 @@ pub fn convert_produce(p: &ManaProduce) -> ConvResult<ManaProduction> {
             ManaProduction::ChosenColor {
                 count: QuantityExpr::Fixed { value: 1 },
                 contribution: ManaContribution::Base,
+                // CR 106.1: pure chosen-color production (Utopia Sprawl class) —
+                // no fixed-color alternative.
+                fixed_alternative: None,
             }
         }
         other => {
@@ -280,6 +283,9 @@ pub fn convert_repeated_produce(
             ManaProduction::ChosenColor {
                 count,
                 contribution: ManaContribution::Base,
+                // CR 106.1: pure chosen-color production (Utopia Sprawl class) —
+                // no fixed-color alternative.
+                fixed_alternative: None,
             }
         }
         other => {

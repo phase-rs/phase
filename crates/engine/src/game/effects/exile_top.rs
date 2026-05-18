@@ -2,7 +2,7 @@ use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::zones;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
-use crate::types::game_state::{ExileLink, ExileLinkKind, GameState};
+use crate::types::game_state::GameState;
 use crate::types::zones::Zone;
 
 pub fn resolve(
@@ -40,14 +40,14 @@ pub fn resolve(
         .take(count)
         .copied()
         .collect::<Vec<_>>();
+    let track_exiled_by_source =
+        crate::game::exile_links::should_track_exiled_by_source(state, ability.source_id, ability);
 
     for object_id in top_cards {
         zones::move_to_zone(state, object_id, Zone::Exile, events);
-        state.exile_links.push(ExileLink {
-            exiled_id: object_id,
-            source_id: ability.source_id,
-            kind: ExileLinkKind::TrackedBySource,
-        });
+        if track_exiled_by_source {
+            crate::game::exile_links::push_tracked_by_source(state, object_id, ability.source_id);
+        }
     }
 
     events.push(GameEvent::EffectResolved {
@@ -60,10 +60,13 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        CardTypeSetSource, ControllerRef, FilterProp, QuantityExpr, QuantityRef, TargetFilter,
-        TargetRef, TypeFilter, TypedFilter,
+        AbilityDefinition, AbilityKind, CardTypeSetSource, ControllerRef, FilterProp,
+        LinkedExileScope, ManaProduction, QuantityExpr, QuantityRef, TargetFilter, TargetRef,
+        TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -113,6 +116,54 @@ mod tests {
             state.objects.get(&bottom).map(|obj| obj.zone),
             Some(Zone::Library)
         );
+        assert!(state.exile_links.is_empty());
+    }
+
+    #[test]
+    fn exile_top_tracks_when_source_has_linked_exile_mana_consumer() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Pit Style Land".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source).unwrap().abilities = Arc::new(vec![AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::ChoiceAmongExiledColors {
+                    source: LinkedExileScope::ThisObject,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )]);
+        let top = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Top".to_string(),
+            Zone::Library,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::ExileTop {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.exile_links.len(), 1);
+        assert_eq!(state.exile_links[0].exiled_id, top);
+        assert_eq!(state.exile_links[0].source_id, source);
     }
 
     #[test]

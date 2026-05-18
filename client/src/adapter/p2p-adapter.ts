@@ -12,8 +12,9 @@ import type {
   PlayerId,
   SubmitResult,
 } from "./types";
+import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 
-import { AdapterError } from "./types";
+import { AdapterError, AdapterErrorCode } from "./types";
 import { WasmAdapter } from "./wasm-adapter";
 import { createPeerSession, type PeerSession } from "../network/peer";
 import type { P2PMessage } from "../network/protocol";
@@ -958,6 +959,14 @@ export class P2PHostAdapter implements EngineAdapter {
     throw new AdapterError("P2P_ERROR", "Undo not supported in P2P games", false);
   }
 
+  estimateBracket(_deck: BracketDeckRequest): Promise<BracketEstimate | null> {
+    throw new AdapterError(
+      AdapterErrorCode.BRACKET_ESTIMATION_UNSUPPORTED,
+      "Bracket estimation is a local feature; not available in P2P sessions.",
+      false,
+    );
+  }
+
   async sendConcede(): Promise<void> {
     await this.concedePlayer(0, "Host conceded", "conceded");
     for (const [, s] of this.guestSessions) {
@@ -1556,6 +1565,14 @@ export class P2PGuestAdapter implements EngineAdapter {
 
   restoreState(_state: GameState): void {
     throw new AdapterError("P2P_ERROR", "Undo not supported in P2P games", false);
+  }
+
+  estimateBracket(_deck: BracketDeckRequest): Promise<BracketEstimate | null> {
+    throw new AdapterError(
+      AdapterErrorCode.BRACKET_ESTIMATION_UNSUPPORTED,
+      "Bracket estimation is a local feature; not available in P2P sessions.",
+      false,
+    );
   }
 
   sendConcede(): void {

@@ -726,17 +726,22 @@ fn strip_sacrifice_count_suffix(target_text: &str) -> String {
     }
 }
 
-/// CR 701.21a + CR 107.1c: Parse "one or more [objects]" sacrifice choices.
-/// `UpTo(ObjectCount(filter))` provides the dynamic upper bound, while
-/// `min_count = 1` preserves the printed lower bound after the player accepts
-/// the surrounding optional action.
-fn parse_one_or_more_sacrifice(
+/// CR 701.21a + CR 107.1c: Parse "one or more [objects]" / "any number of
+/// [objects]" sacrifice choices. `UpTo(ObjectCount(filter))` provides the
+/// dynamic upper bound; `min_count` carries the printed lower bound — `1` for
+/// "one or more", and `0` for "any number of" (CR 107.1c: a player choosing
+/// "any number" may choose any positive number or zero).
+pub(super) fn parse_one_or_more_sacrifice(
     text: &str,
     ctx: &mut ParseContext,
 ) -> Option<(QuantityExpr, TargetFilter, usize)> {
     let lower = text.to_lowercase();
-    let (_, filter_text) = nom_on_lower(text, &lower, |input| {
-        value((), tag("one or more ")).parse(input)
+    let (min_count, filter_text) = nom_on_lower(text, &lower, |input| {
+        alt((
+            value(1usize, tag("one or more ")),
+            value(0usize, tag("any number of ")),
+        ))
+        .parse(input)
     })?;
     let target_text = strip_sacrifice_count_suffix(&strip_sacrifice_choice_marker(
         strip_article(filter_text.trim_start()).trim_end_matches('.'),
@@ -751,7 +756,7 @@ fn parse_one_or_more_sacrifice(
             filter: target.clone(),
         },
     });
-    Some((count, target, 1))
+    Some((count, target, min_count))
 }
 
 /// NOTE: Shares verb prefixes with `try_parse_verb_and_target` in `mod.rs`.
@@ -5933,8 +5938,6 @@ fn try_parse_adapt(lower: &str) -> Option<Effect> {
 ///
 /// Emits a `GenericEffect` with `StaticMode::MustAttack` and the appropriate duration.
 fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
-    use crate::types::statics::StaticMode;
-
     let trimmed = lower.trim_end_matches('.');
 
     // First try: bare forms without a player reference.
@@ -5962,7 +5965,7 @@ fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
 
     if let Ok((_, duration)) = result {
         return Some(ImperativeFamilyAst::GainKeyword(Effect::GenericEffect {
-            static_abilities: vec![StaticDefinition::new(StaticMode::MustAttack)],
+            static_abilities: vec![must_attack_static_definition()],
             duration: Some(duration),
             target: None,
         }));
@@ -5997,7 +6000,7 @@ fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
         ] {
             if rest.ends_with(suffix_tag) {
                 return Some(ImperativeFamilyAst::GainKeyword(Effect::GenericEffect {
-                    static_abilities: vec![StaticDefinition::new(StaticMode::MustAttack)],
+                    static_abilities: vec![must_attack_static_definition()],
                     duration: Some(dur),
                     target: None,
                 }));
@@ -6009,10 +6012,50 @@ fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
     let (_, duration) = duration_suffix.ok()?;
 
     Some(ImperativeFamilyAst::GainKeyword(Effect::GenericEffect {
-        static_abilities: vec![StaticDefinition::new(StaticMode::MustAttack)],
+        static_abilities: vec![must_attack_static_definition()],
         duration: Some(duration),
         target: None,
     }))
+}
+
+/// CR 508.1d: Build the `StaticDefinition` for a transient "attacks if able"
+/// requirement. `Effect::GenericEffect` resolution snapshots only
+/// `static_def.modifications` (the `mode` field is inert for a transient grant —
+/// `snapshot_transient_modifications` never reads it), so the `MustAttack` mode
+/// must be carried by an explicit `AddStaticMode` modification to actually reach
+/// the layer system and `combat.rs` enforcement. Mirrors the block path's
+/// `ImperativeFamilyAst::MustBeBlocked` lowering.
+fn must_attack_static_definition() -> StaticDefinition {
+    use crate::types::statics::StaticMode;
+    StaticDefinition::new(StaticMode::MustAttack).modifications(vec![
+        ContinuousModification::AddStaticMode {
+            mode: StaticMode::MustAttack,
+        },
+    ])
+}
+
+/// CR 508.1d / CR 509.1c: True iff `lower` (already lowercased, trimmed) is a
+/// recognized *standalone* combat requirement — "attack(s) [player] this
+/// turn/combat if able" or "must be blocked [this turn] [if able]". Used by
+/// `split_clause_sequence` to gate the trailing-conjunct split of
+/// "gains <keyword> until end of turn and <combat requirement>" so the
+/// requirement reaches its existing standalone parser. Composes the existing
+/// recognizers as Some/None classifiers; their produced AST is discarded.
+pub(crate) fn is_standalone_combat_requirement(lower: &str) -> bool {
+    let trimmed = lower.trim().trim_end_matches('.').trim();
+    if try_parse_attack_if_able(trimmed).is_some() {
+        return true;
+    }
+    // CR 509.1c: "must be blocked [this turn] [if able]" — mirrors the
+    // imperative `"must"` verb arm.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("must be blocked").parse(trimmed) {
+        let rest = rest.trim();
+        return rest.is_empty()
+            || rest == "this turn if able"
+            || rest == "if able"
+            || rest == "this turn";
+    }
+    false
 }
 
 /// Handles "can't be blocked [this turn]", "can't attack [this turn]", "can't block [this turn]",
@@ -6580,6 +6623,40 @@ mod tests {
         }
     }
 
+    // Issue #458: "sacrifice any number of <filter>" — Scapeshift class.
+    // CR 107.1c: "any number" includes zero, so `min_count` is 0 (vs. 1 for
+    // "one or more"). The dynamic `UpTo(ObjectCount)` ceiling is unchanged.
+    #[test]
+    fn parse_sacrifice_any_number_of_lands_uses_zero_min_count() {
+        let text = "sacrifice any number of lands";
+        let lower = text.to_lowercase();
+        let mut ctx = ParseContext {
+            actor: Some(ControllerRef::You),
+            ..Default::default()
+        };
+        let result =
+            parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
+        match lower_targeted_action_ast(result) {
+            Effect::Sacrifice {
+                target,
+                count,
+                min_count,
+            } => {
+                assert_eq!(min_count, 0, "\"any number\" includes zero (CR 107.1c)");
+                match count {
+                    QuantityExpr::UpTo { max } => match *max {
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount { filter },
+                        } => assert_eq!(filter, target),
+                        other => panic!("expected ObjectCount max, got {other:?}"),
+                    },
+                    other => panic!("expected UpTo count, got {other:?}"),
+                }
+            }
+            other => panic!("expected Effect::Sacrifice, got {other:?}"),
+        }
+    }
+
     // CR 701.21a: Symmetric handling — "an opponent (may) sacrifices [filter]"
     // routes ControllerRef::Opponent into the parsed Sacrifice target.
     #[test]
@@ -7086,10 +7163,12 @@ mod tests {
                     matches!(
                         amount,
                         QuantityExpr::Ref {
-                            qty: QuantityRef::EventContextSourceManaValue
+                            qty: QuantityRef::ObjectManaValue {
+                                scope: crate::types::ability::ObjectScope::CostPaidObject
+                            }
                         }
                     ),
-                    "Expected EventContextSourceManaValue, got {amount:?}"
+                    "Expected ObjectManaValue {{ CostPaidObject }}, got {amount:?}"
                 );
             }
             other => panic!("Expected LoseLife, got {other:?}"),
@@ -7131,10 +7210,12 @@ mod tests {
                     matches!(
                         amount,
                         QuantityExpr::Ref {
-                            qty: QuantityRef::EventContextSourcePower
+                            qty: QuantityRef::Power {
+                                scope: crate::types::ability::ObjectScope::CostPaidObject
+                            }
                         }
                     ),
-                    "Expected EventContextSourcePower, got {amount:?}"
+                    "Expected Power {{ CostPaidObject }}, got {amount:?}"
                 );
             }
             other => panic!("Expected GainLife, got {other:?}"),
@@ -8105,6 +8186,27 @@ mod tests {
             }
             other => panic!("Expected GenericEffect, got {other:?}"),
         }
+    }
+
+    /// CR 508.1d / CR 509.1c: the standalone-combat-requirement recognizer
+    /// used to gate the conjunction split. Recognizes both attack and
+    /// must-be-blocked forms, and rejects non-requirements.
+    #[test]
+    fn standalone_combat_requirement_recognizer() {
+        assert!(is_standalone_combat_requirement(
+            "attack this combat if able"
+        ));
+        assert!(is_standalone_combat_requirement(
+            "attacks this turn if able"
+        ));
+        assert!(is_standalone_combat_requirement(
+            "must be blocked this turn if able"
+        ));
+        assert!(is_standalone_combat_requirement("must be blocked if able"));
+        // Not combat requirements.
+        assert!(!is_standalone_combat_requirement("haste"));
+        assert!(!is_standalone_combat_requirement("gains flying"));
+        assert!(!is_standalone_combat_requirement("draw a card"));
     }
 
     /// CR 400.6 + CR 701.24a: "shuffle the cards from your hand into your

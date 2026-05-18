@@ -25,8 +25,8 @@ use super::oracle_util::{
     strip_reminder_text, TextPair,
 };
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, CombatDamageScope, Comparator,
-    ContinuousModification, ControllerRef, CopyManaValueLimit, DamageModification,
+    AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, CombatDamageScope,
+    Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit, DamageModification,
     DamageTargetFilter, DamageTargetPlayerScope, Duration, Effect, FilterProp, ManaModification,
     ManaReplacementScope, PreventionAmount, QuantityExpr, QuantityRef, ReplacementCondition,
     ReplacementDefinition, ReplacementMode, ReplacementPlayerScope, StaticCondition, TargetFilter,
@@ -1637,6 +1637,11 @@ fn parse_enters_with_counters(
         // CR 207.2c (Raid): "Raid — ~ enters with [counter] on it if you
         // attacked this turn." (Cruel Administrator, Goblin Boarders, etc.)
         def = def.condition(ReplacementCondition::YouAttackedThisTurn);
+    } else if extract_cast_using_web_slinging_suffix(work_text) {
+        // CR 702.188a: "If ~ was cast using web-slinging, ..." (Scarlet Spider).
+        def = def.condition(ReplacementCondition::CastVariantPaid {
+            variant: CastVariantPaid::WebSlinging,
+        });
     } else if let Some(condition) = extract_enters_with_only_if_suffix(work_text) {
         // CR 614.1c + CR 700.4: Generic suffix gates for ETB-counter
         // replacements, e.g. Morbid's "if a creature died this turn".
@@ -2060,6 +2065,21 @@ fn extract_you_attacked_this_turn_suffix(work_text: &str) -> bool {
         return false;
     };
     tag::<_, _, OracleError<'_>>("if you attacked this turn")
+        .parse(rest)
+        .is_ok()
+}
+
+/// CR 702.188a: Scan `work_text` for "was cast using web-slinging" — the
+/// intervening-if gate on Scarlet Spider's "Sensational Save" ETB replacement.
+fn extract_cast_using_web_slinging_suffix(work_text: &str) -> bool {
+    use crate::parser::oracle_nom::error::OracleError;
+    use nom::bytes::complete::tag;
+    let Ok((rest, _)) =
+        take_until::<_, _, OracleError<'_>>("was cast using web-slinging").parse(work_text)
+    else {
+        return false;
+    };
+    tag::<_, _, OracleError<'_>>("was cast using web-slinging")
         .parse(rest)
         .is_ok()
 }
@@ -3993,11 +4013,20 @@ fn rewrite_parent_target_controller_to_post_replacement_source(def: &mut Ability
 /// CR 615.5: In a prevention follow-up attached to "damage would be dealt to a
 /// player", the surface subject "that player" refers to the prevented event's
 /// damage recipient. The ordinary effect parser has no active trigger event in
-/// this replacement context, so it lowers standalone "that player" subjects to
-/// `TargetFilter::Player`; rewrite that anaphoric recipient at the call site.
+/// this replacement context, so it lowers a standalone non-trigger "that player"
+/// subject to `TargetFilter::ParentTargetController` (the generic CR 608.2c
+/// anaphor) — or, inside a trigger context, to `TargetFilter::TriggeringPlayer`.
+/// Neither resolves correctly here (there is no parent target and no trigger
+/// event), so rewrite the anaphoric recipient to `PostReplacementDamageTarget`
+/// at the call site.
 fn rewrite_damage_recipient_to_post_replacement_target(def: &mut AbilityDefinition) {
     super::oracle_effect::each_target_filter_mut(&mut def.effect, &mut |f| {
-        if matches!(f, TargetFilter::Player | TargetFilter::TriggeringPlayer) {
+        if matches!(
+            f,
+            TargetFilter::Player
+                | TargetFilter::TriggeringPlayer
+                | TargetFilter::ParentTargetController
+        ) {
             *f = TargetFilter::PostReplacementDamageTarget;
         }
     });
@@ -6061,6 +6090,32 @@ mod tests {
             } if *counter_type == CounterType::Plus1Plus1
         ));
         assert_eq!(def.condition, Some(ReplacementCondition::CastViaEscape));
+    }
+
+    #[test]
+    fn enters_with_counters_gated_on_web_slinging() {
+        // CR 702.188a: Scarlet Spider's "Sensational Save" — the enters-with-X
+        // replacement is gated by "If ~ was cast using web-slinging".
+        let def = parse_replacement_line(
+            "Sensational Save — If Scarlet Spider was cast using web-slinging, \
+             he enters with X +1/+1 counters on him, where X is the mana value \
+             of the returned creature.",
+            "Scarlet Spider, Ben Reilly",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::PutCounter { ref counter_type, .. }
+                if *counter_type == CounterType::Plus1Plus1
+        ));
+        assert_eq!(
+            def.condition,
+            Some(ReplacementCondition::CastVariantPaid {
+                variant: CastVariantPaid::WebSlinging,
+            }),
+        );
     }
 
     #[test]

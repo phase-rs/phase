@@ -2,7 +2,32 @@ use crate::types::ability::{EffectError, EffectKind, ResolvedAbility, TargetRef}
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
-use crate::types::player::PlayerId;
+use crate::types::player::{Player, PlayerCounterKind, PlayerId};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlayerCounterSource {
+    Kind(PlayerCounterKind),
+    Energy,
+}
+
+const PLAYER_COUNTER_KINDS: [PlayerCounterKind; 4] = [
+    PlayerCounterKind::Poison,
+    PlayerCounterKind::Experience,
+    PlayerCounterKind::Rad,
+    PlayerCounterKind::Ticket,
+];
+
+fn proliferatable_player_counters(player: &Player) -> Vec<PlayerCounterSource> {
+    let mut counters: Vec<_> = PLAYER_COUNTER_KINDS
+        .into_iter()
+        .filter(|kind| player.player_counter(kind) > 0)
+        .map(PlayerCounterSource::Kind)
+        .collect();
+    if player.energy > 0 {
+        counters.push(PlayerCounterSource::Energy);
+    }
+    counters
+}
 
 /// CR 701.34a: Proliferate — controller chooses any number of permanents and/or
 /// players that already have counters, then gives each another counter of a kind
@@ -26,10 +51,9 @@ pub fn resolve(
         .map(|id| TargetRef::Object(*id))
         .collect();
 
-    // CR 701.34a: Players with poison counters are also eligible.
-    // (Energy counters would also qualify once the energy system is implemented.)
+    // CR 701.34a + CR 107.14: players with any counter, including energy, are eligible.
     for player in &state.players {
-        if player.poison_counters > 0 {
+        if !proliferatable_player_counters(player).is_empty() {
             eligible.push(TargetRef::Player(player.id));
         }
     }
@@ -74,9 +98,32 @@ pub fn apply_proliferate(
                 }
             }
             TargetRef::Player(pid) => {
-                if let Some(player) = state.players.iter_mut().find(|p| p.id == *pid) {
-                    if player.poison_counters > 0 {
-                        player.poison_counters += 1;
+                let counters = state
+                    .players
+                    .iter()
+                    .find(|p| p.id == *pid)
+                    .map(proliferatable_player_counters)
+                    .unwrap_or_default();
+
+                for counter in counters {
+                    if let Some(player) = state.players.iter_mut().find(|p| p.id == *pid) {
+                        match counter {
+                            PlayerCounterSource::Kind(kind) => {
+                                player.add_player_counters(&kind, 1);
+                                events.push(GameEvent::PlayerCounterChanged {
+                                    player: *pid,
+                                    counter_kind: kind,
+                                    delta: 1,
+                                });
+                            }
+                            PlayerCounterSource::Energy => {
+                                player.energy += 1;
+                                events.push(GameEvent::EnergyChanged {
+                                    player: *pid,
+                                    delta: 1,
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -271,5 +318,99 @@ mod tests {
         } else {
             panic!("Expected ProliferateChoice");
         }
+    }
+
+    #[test]
+    fn proliferate_includes_players_with_generic_player_counters() {
+        let mut state = GameState::new_two_player(42);
+        state.players[1].add_player_counters(&PlayerCounterKind::Experience, 2);
+
+        let ability = make_proliferate_ability();
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        if let WaitingFor::ProliferateChoice { eligible, .. } = &state.waiting_for {
+            assert!(eligible
+                .iter()
+                .any(|t| matches!(t, TargetRef::Player(pid) if *pid == PlayerId(1))));
+        } else {
+            panic!("Expected ProliferateChoice");
+        }
+    }
+
+    #[test]
+    fn proliferate_includes_players_with_energy() {
+        let mut state = GameState::new_two_player(42);
+        state.players[1].energy = 2;
+
+        let ability = make_proliferate_ability();
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        if let WaitingFor::ProliferateChoice { eligible, .. } = &state.waiting_for {
+            assert!(eligible
+                .iter()
+                .any(|t| matches!(t, TargetRef::Player(pid) if *pid == PlayerId(1))));
+        } else {
+            panic!("Expected ProliferateChoice");
+        }
+    }
+
+    #[test]
+    fn apply_proliferate_adds_all_player_counter_kinds_and_energy() {
+        let mut state = GameState::new_two_player(42);
+        state.players[1].poison_counters = 1;
+        state.players[1].add_player_counters(&PlayerCounterKind::Experience, 2);
+        state.players[1].add_player_counters(&PlayerCounterKind::Rad, 3);
+        state.players[1].energy = 4;
+
+        let mut events = Vec::new();
+        apply_proliferate(
+            &mut state,
+            PlayerId(0),
+            &[TargetRef::Player(PlayerId(1))],
+            &mut events,
+        );
+
+        assert_eq!(state.players[1].poison_counters, 2);
+        assert_eq!(
+            state.players[1].player_counter(&PlayerCounterKind::Experience),
+            3
+        );
+        assert_eq!(state.players[1].player_counter(&PlayerCounterKind::Rad), 4);
+        assert_eq!(state.players[1].energy, 5);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerCounterChanged {
+                player: PlayerId(1),
+                counter_kind: PlayerCounterKind::Poison,
+                delta: 1,
+            }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerCounterChanged {
+                player: PlayerId(1),
+                counter_kind: PlayerCounterKind::Experience,
+                delta: 1,
+            }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerCounterChanged {
+                player: PlayerId(1),
+                counter_kind: PlayerCounterKind::Rad,
+                delta: 1,
+            }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::EnergyChanged {
+                player: PlayerId(1),
+                delta: 1,
+            }
+        )));
     }
 }

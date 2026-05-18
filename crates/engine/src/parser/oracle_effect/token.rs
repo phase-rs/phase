@@ -344,25 +344,35 @@ pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
     }
 
     if let Some(where_expression) = extract_token_where_x_expression(suffix) {
+        // CR 107.3i + CR 117.1: The Token-effect `where X is …` rebind shares
+        // the Join-Forces normalization path with non-Token effects via
+        // `super::parse_where_x_quantity_expression`. This makes phrases like
+        // "the total amount of mana paid this way" (Alliance of Arms) collapse
+        // to `QuantityRef::Variable("X")` so the upstream `PayCost { Mana { X } }`
+        // loop's accumulated total flows through. Falls back to the CDA path
+        // (and then the raw variable name) for phrases neither layer recognizes.
+        let resolve_count = || {
+            super::parse_where_x_quantity_expression(&where_expression)
+                .or_else(|| crate::parser::oracle_quantity::parse_cda_quantity(&where_expression))
+        };
         if matches!(&count, QuantityExpr::Ref { qty: QuantityRef::Variable { ref name } } if name == "X")
         {
-            count = crate::parser::oracle_quantity::parse_cda_quantity(&where_expression)
-                .unwrap_or_else(|| QuantityExpr::Ref {
-                    qty: QuantityRef::Variable {
-                        name: where_expression.clone(),
-                    },
-                });
+            count = resolve_count().unwrap_or_else(|| QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: where_expression.clone(),
+                },
+            });
         }
         if matches!(&power, Some(PtValue::Variable(alias)) if alias == "X") {
             power = Some(
-                crate::parser::oracle_quantity::parse_cda_quantity(&where_expression)
+                resolve_count()
                     .map(PtValue::Quantity)
                     .unwrap_or_else(|| PtValue::Variable(where_expression.clone())),
             );
         }
         if matches!(&toughness, Some(PtValue::Variable(alias)) if alias == "X") {
             toughness = Some(
-                crate::parser::oracle_quantity::parse_cda_quantity(&where_expression)
+                resolve_count()
                     .map(PtValue::Quantity)
                     .unwrap_or_else(|| PtValue::Variable(where_expression)),
             );

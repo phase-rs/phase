@@ -4,12 +4,14 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
+use super::bracket_lists::{BracketLists, BracketSignals};
 use super::legality::{normalize_legalities, CardLegalities, LegalityFormat, LegalityStatus};
 use super::mtgjson::Ruling;
 use crate::types::card::{CardFace, CardRules, LayoutKind, PrintedCardRef};
 
 use std::io::BufReader;
 
+#[derive(Default)]
 pub struct CardDatabase {
     pub(crate) cards: HashMap<String, CardRules>,
     pub(crate) face_index: HashMap<String, CardFace>,
@@ -30,6 +32,14 @@ pub struct CardDatabase {
     /// cards carry rulings; back-face lookups return the empty slice.
     pub(crate) rulings_index: HashMap<String, Vec<Ruling>>,
     pub(crate) errors: Vec<(PathBuf, String)>,
+    /// Non-MTGJSON bracket-axis name lists. Populated by `with_bracket_lists`
+    /// at export time for policy axes MTGJSON does not expose. WASM/server
+    /// consumers receive those signals in the already-built database.
+    pub(crate) bracket_lists: BracketLists,
+    /// Stamped during `from_export_entries` from each `CardExportEntry`'s
+    /// `bracket_signals` field. Keyed by lowercased card name. Read by
+    /// `bracket_signals_for` at runtime.
+    pub(crate) bracket_signals_by_name: HashMap<String, BracketSignals>,
 }
 
 impl CardDatabase {
@@ -61,6 +71,8 @@ impl CardDatabase {
         let mut legalities = HashMap::new();
         let mut printings_index: HashMap<String, Vec<String>> = HashMap::new();
         let mut rulings_index: HashMap<String, Vec<Ruling>> = HashMap::new();
+        let mut bracket_signals_by_name: HashMap<String, BracketSignals> =
+            HashMap::with_capacity(entries.len());
 
         for (_name, entry) in entries {
             let key = entry.face.name.to_lowercase();
@@ -74,6 +86,7 @@ impl CardDatabase {
                 }
             }
             face_index.insert(key.clone(), entry.face);
+            bracket_signals_by_name.insert(key.clone(), entry.bracket_signals);
 
             if !entry.printings.is_empty() {
                 printings_index.insert(key.clone(), entry.printings);
@@ -100,6 +113,8 @@ impl CardDatabase {
             printings_index,
             rulings_index,
             errors: Vec::new(),
+            bracket_lists: BracketLists::default(),
+            bracket_signals_by_name,
         }
     }
 
@@ -196,6 +211,51 @@ impl CardDatabase {
             .collect();
         names.sort();
         names
+    }
+
+    /// Attach loaded `BracketLists` to the database. Returns `Self` so it can
+    /// be chained off `from_export` / `from_json_str` builders.
+    pub fn with_bracket_lists(mut self, lists: BracketLists) -> Self {
+        self.bracket_lists = lists;
+        self
+    }
+
+    /// Case-insensitive bracket-signal lookup. Game Changers are card-level
+    /// MTGJSON facts stamped into `bracket_signals_by_name`; other axes may
+    /// come from either the export or `bracket_lists`. Returns all-false
+    /// `BracketSignals` when the name is unknown to both.
+    ///
+    /// Multi-face combined names (`"A // B"` — partner pairs, MDFCs, split,
+    /// etc.) are aggregated face-by-face with logical-OR *before* the
+    /// single-face fast path. `lookup_key` collapses combined names to their
+    /// front face, so without this pre-split a back-face signal would be
+    /// silently dropped whenever the front face is in the export map.
+    pub fn bracket_signals_for(&self, name: &str) -> BracketSignals {
+        if let Some((a, b)) = name.split_once(" // ") {
+            let sa = self.signals_for_single_face(a.trim());
+            let sb = self.signals_for_single_face(b.trim());
+            return BracketSignals {
+                game_changer: sa.game_changer || sb.game_changer,
+                mass_land_denial: sa.mass_land_denial || sb.mass_land_denial,
+                extra_turn: sa.extra_turn || sb.extra_turn,
+                efficient_tutor: sa.efficient_tutor || sb.efficient_tutor,
+            };
+        }
+        self.signals_for_single_face(name)
+    }
+
+    fn signals_for_single_face(&self, name: &str) -> BracketSignals {
+        let key = self.lookup_key(name);
+        let list_signals = self.bracket_lists.signals_for(name);
+        let Some(card_signals) = self.bracket_signals_by_name.get(&key) else {
+            return list_signals;
+        };
+        BracketSignals {
+            game_changer: card_signals.game_changer,
+            mass_land_denial: card_signals.mass_land_denial || list_signals.mass_land_denial,
+            extra_turn: card_signals.extra_turn || list_signals.extra_turn,
+            efficient_tutor: card_signals.efficient_tutor || list_signals.efficient_tutor,
+        }
     }
 
     fn lookup_key(&self, name: &str) -> String {
@@ -297,6 +357,10 @@ struct CardExportEntry {
     /// Official WotC rulings; populated on the front face only for multi-face cards.
     #[serde(default)]
     rulings: Vec<Ruling>,
+    /// Bracket-axis signals stamped by the export pipeline (Task 4). Cards
+    /// exported before Task 4 will deserialize to all-false `BracketSignals::default()`.
+    #[serde(default)]
+    bracket_signals: BracketSignals,
 }
 
 /// Convert MTGJSON layout string to runtime `LayoutKind`.
@@ -481,5 +545,158 @@ mod tests {
                 .map(|face| face.name.as_str()),
             Some("Séance Board")
         );
+    }
+
+    #[test]
+    fn bracket_signals_lookup_returns_default_when_no_lists_loaded() {
+        let db = CardDatabase::default();
+        let sig = db.bracket_signals_for("Demonic Tutor");
+        assert!(
+            sig.is_clean(),
+            "default DB has no bracket lists → all signals false"
+        );
+    }
+
+    #[test]
+    fn bracket_signals_lookup_uses_loaded_lists() {
+        use crate::database::bracket_lists::BracketLists;
+        let lists = BracketLists::from_json_str(
+            r#"{ "version":"t", "efficient_tutors":["Demonic Tutor"] }"#,
+        )
+        .unwrap();
+        let db = CardDatabase::default().with_bracket_lists(lists);
+        let sig = db.bracket_signals_for("Demonic Tutor");
+        assert!(sig.efficient_tutor);
+    }
+
+    #[test]
+    fn bracket_signals_for_partner_pair_aggregates_face_signals() {
+        use crate::database::bracket_lists::BracketLists;
+        // Build a database where only the front face is in the export map,
+        // marked as a game changer. The back face (Alena) has no signals.
+        let json = r#"{
+            "halana, kessig ranger": {
+                "name": "Halana, Kessig Ranger",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [], "keywords": [],
+                "bracket_signals": {
+                    "game_changer": true, "mass_land_denial": false,
+                    "extra_turn": false, "efficient_tutor": false
+                }
+            },
+            "alena, trapper founder": {
+                "name": "Alena, Trapper Founder",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [], "keywords": [],
+                "bracket_signals": {
+                    "game_changer": false, "mass_land_denial": false,
+                    "extra_turn": false, "efficient_tutor": false
+                }
+            }
+        }"#;
+        let db = CardDatabase::from_json_str(json)
+            .unwrap()
+            .with_bracket_lists(BracketLists::default());
+
+        // Single-face lookup still works.
+        assert!(db.bracket_signals_for("Halana, Kessig Ranger").game_changer);
+
+        // Partner-pair combined name must aggregate across both faces.
+        let sig = db.bracket_signals_for("Halana, Kessig Ranger // Alena, Trapper Founder");
+        assert!(
+            sig.game_changer,
+            "partner-pair name must resolve to either face's signals"
+        );
+    }
+
+    #[test]
+    fn bracket_signals_for_partner_pair_picks_up_back_face_only_signal() {
+        // Regression: lookup_key("A // B") collapses to the front face's key,
+        // so a back-face-only signal must be picked up by the pre-split
+        // aggregation, not the single-face fast path.
+        let json = r#"{
+            "halana, kessig ranger": {
+                "name": "Halana, Kessig Ranger",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [], "keywords": [],
+                "bracket_signals": {
+                    "game_changer": false, "mass_land_denial": false,
+                    "extra_turn": false, "efficient_tutor": false
+                }
+            },
+            "alena, trapper founder": {
+                "name": "Alena, Trapper Founder",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [], "keywords": [],
+                "bracket_signals": {
+                    "game_changer": true, "mass_land_denial": false,
+                    "extra_turn": false, "efficient_tutor": false
+                }
+            }
+        }"#;
+        let db = CardDatabase::from_json_str(json).unwrap();
+        let sig = db.bracket_signals_for("Halana, Kessig Ranger // Alena, Trapper Founder");
+        assert!(
+            sig.game_changer,
+            "back-face partner signal must survive lookup_key's front-face collapse"
+        );
+    }
+
+    #[test]
+    fn bracket_signals_for_partner_pair_falls_back_to_bracket_lists_when_not_in_export() {
+        use crate::database::bracket_lists::BracketLists;
+        // No export entries — bracket_lists is the source of truth.
+        let lists = BracketLists::from_json_str(
+            r#"{"version":"t","efficient_tutors":["Halana, Kessig Ranger"]}"#,
+        )
+        .unwrap();
+        let db = CardDatabase::default().with_bracket_lists(lists);
+        let sig = db.bracket_signals_for("Halana, Kessig Ranger // Alena, Trapper Founder");
+        assert!(
+            sig.efficient_tutor,
+            "falls back to bracket_lists for partner pair when export map is empty"
+        );
+    }
+
+    #[test]
+    fn from_json_merges_card_signals_with_list_signals() {
+        use crate::database::bracket_lists::BracketLists;
+
+        let json = r#"{
+            "demonic tutor": {
+                "name": "Demonic Tutor",
+                "mana_cost": { "type": "Cost", "shards": [], "generic": 1 },
+                "card_type": { "supertypes": [], "core_types": ["Sorcery"], "subtypes": [] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": "Search your library...",
+                "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+                "keywords": [],
+                "bracket_signals": {
+                    "game_changer": true, "mass_land_denial": false,
+                    "extra_turn": false, "efficient_tutor": false
+                }
+            }
+        }"#;
+        let lists =
+            BracketLists::from_json_str(r#"{"version":"t","efficient_tutors":["Demonic Tutor"]}"#)
+                .unwrap();
+        let db = CardDatabase::from_json_str(json)
+            .unwrap()
+            .with_bracket_lists(lists);
+        let sig = db.bracket_signals_for("demonic tutor");
+        assert!(sig.efficient_tutor);
+        assert!(sig.game_changer);
     }
 }

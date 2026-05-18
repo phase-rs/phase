@@ -1,6 +1,7 @@
 pub mod ability_utils;
 pub mod arithmetic;
 pub mod bending;
+pub mod bracket_estimate;
 pub mod casting;
 pub(crate) mod casting_costs;
 pub(crate) mod casting_targets;
@@ -29,6 +30,7 @@ pub(crate) mod engine_priority;
 pub(crate) mod engine_replacement;
 pub(crate) mod engine_resolution_choices;
 pub(crate) mod engine_stack;
+pub(crate) mod exile_links;
 pub mod filter;
 pub mod functioning_abilities;
 pub mod game_object;
@@ -75,6 +77,10 @@ pub mod zones;
 #[cfg(test)]
 pub(crate) mod test_fixtures;
 
+pub use bracket_estimate::{
+    estimate_bracket, BracketAxis, BracketAxisCounts, BracketContributingCards, BracketEstimate,
+    BracketViolation, CommanderBracketTier,
+};
 pub use deck_loading::{
     create_commander_from_card_face, load_and_hydrate_decks, load_deck_into_state,
     resolve_deck_list, resolve_player_deck_list, DeckEntry, DeckList, DeckPayload, PlayerDeckList,
