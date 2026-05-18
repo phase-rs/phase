@@ -5,6 +5,7 @@ mod armored_kincaller_or_condition;
 mod ashaya_nontoken_lands;
 mod aura_on_player;
 mod betor_lifelink_counters_repro;
+mod bracket_signals;
 mod brigid_mana_ability;
 mod chain_of_smog_copy;
 mod coalition_relic_integration;

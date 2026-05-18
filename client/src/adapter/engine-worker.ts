@@ -26,9 +26,11 @@ import init, {
   clear_game_state,
   set_multiplayer_mode,
   resolve_all,
+  estimate_bracket_for_deck,
 } from "@wasm/engine";
 
 import type { GameAction } from "./types";
+import type { BracketDeckRequest } from "../types/bracketEstimate";
 
 // ── Message Protocol ─────────────────────────────────────────────────────
 
@@ -76,7 +78,8 @@ type EngineRequest =
   | { type: "ping"; id: number }
   | { type: "takeLastPanic"; id: number }
   | { type: "applySeatMutation"; id: number; stateJson: string; mutationJson: string }
-  | { type: "resolveAll"; id: number; requester: number; aiSeatsJson: string; maxResolutions: number };
+  | { type: "resolveAll"; id: number; requester: number; aiSeatsJson: string; maxResolutions: number }
+  | { type: "estimateBracketForDeck"; id: number; deck: BracketDeckRequest };
 
 type EngineResponse =
   | { type: "ready" }
@@ -350,6 +353,15 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           break;
         }
         result(msg.id, r);
+        break;
+      }
+
+      case "estimateBracketForDeck": {
+        // Pure, stateless — does not require an active game state. Returns
+        // null when the deck has no commander or the card database is not
+        // loaded yet (engine returns Option::None in those cases).
+        const estimate = estimate_bracket_for_deck(msg.deck);
+        result(msg.id, estimate ?? null);
         break;
       }
 

@@ -12,6 +12,8 @@ import type {
   WaitingFor,
 } from "./types";
 import { AdapterError, AdapterErrorCode, isStateLostMessage } from "./types";
+import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
+import { isBracketEstimate } from "../types/bracketEstimate";
 import { EngineWorkerClient } from "./engine-worker-client";
 import { AiWorkerPool } from "./ai-worker-pool";
 /**
@@ -413,6 +415,14 @@ export class WasmAdapter implements EngineAdapter {
     }
   }
 
+  async estimateBracket(deck: BracketDeckRequest): Promise<BracketEstimate | null> {
+    this.assertInitialized();
+    if (this.engine) {
+      return this.engine.estimateBracketForDeck(deck);
+    }
+    return this.fallback!.estimateBracketForDeck(deck);
+  }
+
   dispose(): void {
     // Clear the singleton reference so getSharedAdapter() creates a fresh
     // instance if called after dispose (e.g., error recovery code paths).
@@ -508,6 +518,7 @@ interface MainThreadFallback {
     playerCount?: number,
     firstPlayer?: number,
   ): Promise<SubmitResult>;
+  estimateBracketForDeck(deck: BracketDeckRequest): Promise<BracketEstimate | null>;
 }
 
 async function createMainThreadFallback(): Promise<MainThreadFallback> {
@@ -620,6 +631,14 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
           throw new Error(`Deck validation failed: ${reasons.join("; ")}`);
         }
         return { events: r.events ?? [], log_entries: r.log_entries ?? [] };
+      }),
+
+    estimateBracketForDeck: (deck: BracketDeckRequest) =>
+      enqueue(() => {
+        const r = wasm.estimate_bracket_for_deck(deck);
+        if (r === null || r === undefined) return null;
+        if (isBracketEstimate(r)) return r;
+        throw new Error("estimate_bracket_for_deck returned an invalid bracket estimate");
       }),
   };
 }

@@ -1,0 +1,46 @@
+{
+  "version": "2025-09-24-wotc",
+  "source": "https://magic.wizards.com/en/news/announcements/introducing-commander-brackets-beta",
+  "mass_land_denial": [
+    "Armageddon",
+    "Cataclysm",
+    "Catastrophe",
+    "Decree of Annihilation",
+    "Jokulhaups",
+    "Obliterate",
+    "Ravages of War",
+    "Ruination",
+    "Wildfire"
+  ],
+  "extra_turns": [
+    "Aggravated Assault",
+    "Beacon of Tomorrows",
+    "Capture of Jingzhou",
+    "Final Fortune",
+    "Hellkite Charger",
+    "Karn's Temporal Sundering",
+    "Last Chance",
+    "Nexus of Fate",
+    "Notorious Throng",
+    "Savage Beating",
+    "Temporal Manipulation",
+    "Time Stretch",
+    "Time Warp",
+    "Walk the Aeons"
+  ],
+  "efficient_tutors": [
+    "Demonic Consultation",
+    "Demonic Tutor",
+    "Diabolic Intent",
+    "Enlightened Tutor",
+    "Grim Tutor",
+    "Imperial Seal",
+    "Mystical Tutor",
+    "Personal Tutor",
+    "Sylvan Tutor",
+    "Tainted Pact",
+    "Vampiric Tutor",
+    "Wishclaw Talisman",
+    "Worldly Tutor"
+  ]
+}

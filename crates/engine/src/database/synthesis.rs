@@ -8179,6 +8179,7 @@ mod bloodthirst_synthesis_tests {
             leadership_skills: None,
             printings: Vec::new(),
             rulings: Vec::new(),
+            is_game_changer: false,
             identifiers: crate::database::mtgjson::AtomicIdentifiers {
                 scryfall_oracle_id: None,
             },
