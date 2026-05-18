@@ -1,7 +1,7 @@
-use crate::parser::oracle_nom::error::OracleError;
+use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{all_consuming, eof, opt, value};
+use nom::combinator::{all_consuming, opt, value};
 use nom::Parser;
 use serde::{Deserialize, Serialize};
 
@@ -64,12 +64,14 @@ use super::oracle_special::{
     parse_harmonize_keyword, parse_solve_condition, try_parse_die_roll_table,
 };
 use super::oracle_static::{
-    lower_static_ir, parse_static_line_multi, try_parse_graveyard_keyword_grant_clause,
-    GraveyardGrantedKeywordKind,
+    lower_static_ir, parse_chosen_creature_type_static_prefix,
+    parse_every_creature_type_static_prefix, parse_static_line_multi,
+    try_parse_graveyard_keyword_grant_clause, GraveyardGrantedKeywordKind,
 };
 use super::oracle_trigger::{lower_trigger_ir, parse_trigger_lines_at_index};
 use super::oracle_util::{
-    normalize_card_name_refs, parse_mana_symbols, parse_number, strip_reminder_text, TextPair,
+    normalize_card_name_refs, parse_mana_symbols, parse_number, split_same_is_true_static_tail,
+    strip_reminder_text, TextPair,
 };
 
 /// Collected parsed abilities from Oracle text.
@@ -500,6 +502,30 @@ fn parse_static_line_with_graveyard_keyword_continuation(line: &str) -> Vec<Stat
         return vec![def];
     }
     parse_static_line_multi(line)
+}
+
+fn push_same_is_true_static_tail<F>(
+    result: &mut ParsedAbilities,
+    line: &str,
+    lower: &str,
+    parse_modeled_sentence: F,
+) -> bool
+where
+    F: for<'i> FnMut(&'i str) -> OracleResult<'i, ()>,
+{
+    if let Some((modeled_sentence, unmodeled_tail)) =
+        split_same_is_true_static_tail(line, lower, parse_modeled_sentence)
+    {
+        result
+            .statics
+            .extend(parse_static_line_with_graveyard_keyword_continuation(
+                modeled_sentence,
+            ));
+        result.abilities.push(make_unimplemented(unmodeled_tail));
+        return true;
+    }
+
+    false
 }
 
 use crate::parser::oracle_ir::ast::ActivatedConstraintAst;
@@ -1534,73 +1560,24 @@ pub(crate) fn parse_oracle_ir(
 
         // Normalize card self-references for static parsing (replace card name with ~)
         let static_line = normalize_self_refs_for_static(&line, card_name);
-        let arcane_adaptation_battlefield_sentence =
-            "creatures you control are the chosen type in addition to their other types.";
         let static_line_lower = static_line.to_lowercase();
-        if let Some(((), unmodeled_tail)) =
-            nom_on_lower(&static_line, &static_line_lower, |input| {
-                let (input, _) = tag(arcane_adaptation_battlefield_sentence).parse(input)?;
-                Ok((input, ()))
-            })
-        {
-            let unmodeled_tail_lower = unmodeled_tail.to_lowercase();
-            if nom_on_lower(unmodeled_tail, &unmodeled_tail_lower, |input| {
-                let (input, _) = tag(" the same is true for ").parse(input)?;
-                let (input, _) = take_until::<_, _, OracleError<'_>>(".").parse(input)?;
-                let (input, _) = opt(tag(".")).parse(input)?;
-                let (input, _) = eof.parse(input)?;
-                Ok((input, ()))
-            })
-            .is_some()
-            {
-                result
-                    .statics
-                    .extend(parse_static_line_with_graveyard_keyword_continuation(
-                        arcane_adaptation_battlefield_sentence,
-                    ));
-                result
-                    .abilities
-                    .push(make_unimplemented(&unmodeled_tail[1..]));
-                i += 1;
-                continue;
-            }
+        if push_same_is_true_static_tail(
+            &mut result,
+            &static_line,
+            &static_line_lower,
+            parse_chosen_creature_type_static_prefix,
+        ) {
+            i += 1;
+            continue;
         }
-        // CR 613.1d + CR 205.3m: Maskwood Nexus shape — battlefield static
-        // "Creatures you control are every creature type." plus the same
-        // "The same is true for creature spells you control and creature
-        // cards you own that aren't on the battlefield." tail used by
-        // Arcane Adaptation. The battlefield clause routes through
-        // `parse_static_line` (handled by `parse_every_creature_type_static`);
-        // the non-battlefield tail is reported as `Unimplemented` because
-        // continuous effects on objects in hand/library/stack aren't modeled.
-        let maskwood_battlefield_sentence = "creatures you control are every creature type.";
-        if let Some(((), unmodeled_tail)) =
-            nom_on_lower(&static_line, &static_line_lower, |input| {
-                let (input, _) = tag(maskwood_battlefield_sentence).parse(input)?;
-                Ok((input, ()))
-            })
-        {
-            let unmodeled_tail_lower = unmodeled_tail.to_lowercase();
-            if nom_on_lower(unmodeled_tail, &unmodeled_tail_lower, |input| {
-                let (input, _) = tag(" the same is true for ").parse(input)?;
-                let (input, _) = take_until::<_, _, OracleError<'_>>(".").parse(input)?;
-                let (input, _) = opt(tag(".")).parse(input)?;
-                let (input, _) = eof.parse(input)?;
-                Ok((input, ()))
-            })
-            .is_some()
-            {
-                result
-                    .statics
-                    .extend(parse_static_line_with_graveyard_keyword_continuation(
-                        maskwood_battlefield_sentence,
-                    ));
-                result
-                    .abilities
-                    .push(make_unimplemented(&unmodeled_tail[1..]));
-                i += 1;
-                continue;
-            }
+        if push_same_is_true_static_tail(
+            &mut result,
+            &static_line,
+            &static_line_lower,
+            parse_every_creature_type_static_prefix,
+        ) {
+            i += 1;
+            continue;
         }
         if let Some(next_raw_line) = lines.get(i + 1).map(|next| next.trim()) {
             if !next_raw_line.is_empty() {

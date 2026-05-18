@@ -1,10 +1,15 @@
 use nom::Parser;
 
+use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::error::OracleError;
+use super::oracle_nom::error::OracleResult;
 use super::oracle_nom::primitives as nom_primitives;
 use crate::types::ability::{Comparator, QuantityExpr, QuantityRef, TargetFilter};
 use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaColor, ManaCost};
+use nom::bytes::complete::{tag, take_until};
+use nom::character::complete::space1;
+use nom::combinator::{eof, opt};
 
 /// A borrowed pair of `(original, lowercase)` slices kept in lockstep.
 ///
@@ -201,6 +206,32 @@ pub fn strip_after<'a>(text: &'a str, needle: &str) -> Option<&'a str> {
 pub fn split_around<'a>(text: &'a str, needle: &str) -> Option<(&'a str, &'a str)> {
     text.find(needle)
         .map(|pos| (&text[..pos], &text[pos + needle.len()..]))
+}
+
+/// Split a modeled static sentence from a following "The same is true for ..."
+/// continuation, returning `(modeled_sentence, continuation_sentence)`.
+pub(crate) fn split_same_is_true_static_tail<'a, F>(
+    text: &'a str,
+    lower: &str,
+    mut parse_modeled_sentence: F,
+) -> Option<(&'a str, &'a str)>
+where
+    F: for<'i> FnMut(&'i str) -> OracleResult<'i, ()>,
+{
+    let ((modeled_len, tail_start), _) = nom_on_lower(text, lower, |input| {
+        let total_len = input.len();
+        let (input, _) = parse_modeled_sentence(input)?;
+        let modeled_len = total_len - input.len();
+        let (input, _) = space1.parse(input)?;
+        let tail_start = total_len - input.len();
+        let (input, _) = tag("the same is true for ").parse(input)?;
+        let (input, _) = take_until::<_, _, OracleError<'_>>(".").parse(input)?;
+        let (input, _) = opt(tag(".")).parse(input)?;
+        let (input, _) = eof.parse(input)?;
+        Ok((input, (modeled_len, tail_start)))
+    })?;
+
+    Some((&text[..modeled_len], text[tail_start..].trim()))
 }
 
 /// Strip reminder text (parenthesized) from a line.
@@ -1621,6 +1652,25 @@ pub(crate) fn parse_comparison_suffix(text: &str) -> Option<(Comparator, i32)> {
 mod tests {
     use super::*;
     use crate::types::mana::ManaCostShard;
+    use nom::Parser;
+
+    fn parse_every_creature_type_prefix(input: &str) -> OracleResult<'_, ()> {
+        let (input, _) = tag("creatures you control are").parse(input)?;
+        let (input, _) = tag(" every creature type.").parse(input)?;
+        Ok((input, ()))
+    }
+
+    #[test]
+    fn split_same_is_true_static_tail_trims_inter_sentence_whitespace() {
+        let text = "Creatures you control are every creature type.   The same is true for creature spells you control.";
+        let lower = text.to_lowercase();
+
+        let (modeled, tail) =
+            split_same_is_true_static_tail(text, &lower, parse_every_creature_type_prefix).unwrap();
+
+        assert_eq!(modeled, "Creatures you control are every creature type.");
+        assert_eq!(tail, "The same is true for creature spells you control.");
+    }
 
     // --- normalize_card_name_refs tests ---
 

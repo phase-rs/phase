@@ -2192,15 +2192,11 @@ fn parse_arcane_adaptation_chosen_type_static(
     tp: &TextPair<'_>,
     description: &str,
 ) -> Option<StaticDefinition> {
-    let ((), _) = nom_on_lower(tp.original, tp.lower, |input| {
-        let (input, pronoun) = parse_chosen_creature_type_static_subject(input)?;
-        let (input, _) = tag(" the chosen type in addition to ").parse(input)?;
-        let (input, _) = tag(pronoun).parse(input)?;
-        let (input, _) = tag(" other types").parse(input)?;
-        let (input, _) = opt(tag(".")).parse(input)?;
-        let (input, _) = eof.parse(input)?;
-        Ok((input, ()))
-    })?;
+    let ((), _) = nom_on_lower(
+        tp.original,
+        tp.lower,
+        parse_chosen_creature_type_static_sentence,
+    )?;
 
     Some(
         StaticDefinition::continuous()
@@ -2212,6 +2208,21 @@ fn parse_arcane_adaptation_chosen_type_static(
             }])
             .description(description.to_string()),
     )
+}
+
+pub(crate) fn parse_chosen_creature_type_static_sentence(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = parse_chosen_creature_type_static_prefix(input)?;
+    let (input, _) = eof.parse(input)?;
+    Ok((input, ()))
+}
+
+pub(crate) fn parse_chosen_creature_type_static_prefix(input: &str) -> OracleResult<'_, ()> {
+    let (input, pronoun) = parse_chosen_creature_type_static_subject(input)?;
+    let (input, _) = tag(" the chosen type in addition to ").parse(input)?;
+    let (input, _) = tag(pronoun).parse(input)?;
+    let (input, _) = tag(" other types").parse(input)?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    Ok((input, ()))
 }
 
 fn parse_chosen_creature_type_static_subject(input: &str) -> OracleResult<'_, &'static str> {
@@ -2235,13 +2246,11 @@ fn parse_every_creature_type_static(
     tp: &TextPair<'_>,
     description: &str,
 ) -> Option<StaticDefinition> {
-    let ((), _) = nom_on_lower(tp.original, tp.lower, |input| {
-        let (input, _pronoun) = parse_chosen_creature_type_static_subject(input)?;
-        let (input, _) = tag(" every creature type").parse(input)?;
-        let (input, _) = opt(tag(".")).parse(input)?;
-        let (input, _) = eof.parse(input)?;
-        Ok((input, ()))
-    })?;
+    let ((), _) = nom_on_lower(
+        tp.original,
+        tp.lower,
+        parse_every_creature_type_static_sentence,
+    )?;
 
     Some(
         StaticDefinition::continuous()
@@ -2251,6 +2260,19 @@ fn parse_every_creature_type_static(
             .modifications(vec![ContinuousModification::AddAllCreatureTypes])
             .description(description.to_string()),
     )
+}
+
+pub(crate) fn parse_every_creature_type_static_sentence(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = parse_every_creature_type_static_prefix(input)?;
+    let (input, _) = eof.parse(input)?;
+    Ok((input, ()))
+}
+
+pub(crate) fn parse_every_creature_type_static_prefix(input: &str) -> OracleResult<'_, ()> {
+    let (input, _pronoun) = parse_chosen_creature_type_static_subject(input)?;
+    let (input, _) = tag(" every creature type").parse(input)?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    Ok((input, ()))
 }
 
 fn parse_collection_counter_play_permission_static(
