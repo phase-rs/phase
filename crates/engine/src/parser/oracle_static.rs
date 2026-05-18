@@ -5,7 +5,7 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until};
 use nom::character::complete::{alpha1, space0, space1};
-use nom::combinator::{all_consuming, eof, map, opt, rest, value};
+use nom::combinator::{all_consuming, eof, map, opt, recognize, rest, value};
 use nom::multi::{many0, separated_list1};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -1285,6 +1285,21 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
             StaticDefinition::continuous()
                 .affected(TargetFilter::SelfRef)
                 .modifications(vec![modification])
+                .description(text.to_string()),
+        );
+    }
+
+    // CR 205.3 + CR 700.8: "~ is also a <subtype>(, <subtype>)*[, [and|or] <subtype>]"
+    // Continuous self-static that adds creature subtypes to the source. Used by
+    // party-tribal cards so the source counts itself toward the controller's
+    // party (CR 700.8a) regardless of its printed subtypes.
+    // Anchored on `~` so it cannot collide with attached-object grants
+    // ("Enchanted land is a Mountain") which retain their dedicated path.
+    if let Some(modifications) = try_parse_self_is_also_subtypes(&tp) {
+        return Some(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(modifications)
                 .description(text.to_string()),
         );
     }
@@ -4859,7 +4874,6 @@ fn parse_subtype_or_list(input: &str) -> Option<TargetFilter> {
         .parse(input)
     }
 
-    use nom::multi::separated_list1;
     let (rest, words): (&str, Vec<&str>) =
         separated_list1(parse_list_separator, parse_subtype_word)
             .parse(input)
@@ -4881,6 +4895,98 @@ fn parse_subtype_or_list(input: &str) -> Option<TargetFilter> {
     } else {
         Some(TargetFilter::Or { filters })
     }
+}
+
+/// CR 205.3 + CR 700.8: Parse a self-static of the form
+/// `~ is also a <subtype>(, <subtype>)*[, [and|or] <subtype>]` into a vec of
+/// `AddSubtype` modifications. The anchor `~` (set by `normalize_self_refs_for_static`)
+/// scopes the match to source-self type grants — attached-object additive grants
+/// ("Enchanted land is also a Plains") route through `parse_subject_additive_type_static`
+/// instead. Returns `None` if the anchor doesn't match or any trailing text
+/// remains after the subtype list, so other arms remain free to try the line.
+///
+/// CR 205.3d: An object can't gain a subtype that doesn't correspond to one of
+/// its types. The pithy "X is also a Y" phrasing is exclusively used by
+/// creature-subtype grants (party tribal: Cleric/Rogue/Warrior/Wizard, plus
+/// scattered self-typegrant creatures); land/artifact/enchantment subtype
+/// additions use the "in addition to its other types" phrasing handled by
+/// `parse_subject_additive_type_static`. We therefore reject any token whose
+/// canonical subtype maps to a non-creature core type so a stray Forest /
+/// Equipment / Aura is not silently added to a creature.
+fn try_parse_self_is_also_subtypes(tp: &TextPair<'_>) -> Option<Vec<ContinuousModification>> {
+    type VE<'a> = OracleError<'a>;
+
+    let (after_anchor, _): (&str, &str) = alt((
+        tag::<_, _, VE>("~ is also a "),
+        tag::<_, _, VE>("~ is also an "),
+    ))
+    .parse(tp.lower)
+    .ok()?;
+
+    fn parse_one(input: &str) -> nom::IResult<&str, String, OracleError<'_>> {
+        match parse_subtype(input) {
+            Some((canonical, len)) if infer_core_type_for_subtype(&canonical).is_none() => {
+                Ok((&input[len..], canonical))
+            }
+            _ => Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Fail,
+            ))),
+        }
+    }
+
+    // Decomposes the separator into independent axes — connective phrase
+    // (`,` optionally followed by `and`/`or`/`and/or`, or space-led
+    // `and`/`or`/`and/or`) × mandatory trailing space × optional indefinite
+    // article (`a `/`an `). Each axis is one `alt()`; the ≤14-form cartesian
+    // product is composed, not enumerated, per the "compose combinators by
+    // dimension" rule.
+    fn parse_connective(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
+        // Order long-first within each branch so `, and/or` wins over the
+        // bare `,` prefix in nom's left-to-right `alt` evaluation.
+        alt((
+            recognize((
+                tag::<_, _, OracleError<'_>>(","),
+                opt(preceded(
+                    tag(" "),
+                    alt((tag("and/or"), tag("and"), tag("or"))),
+                )),
+            )),
+            recognize(preceded(
+                tag(" "),
+                alt((tag("and/or"), tag("and"), tag("or"))),
+            )),
+        ))
+        .parse(input)
+    }
+    fn parse_sep(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+        let (input, _) = parse_connective(input)?;
+        let (input, _) = tag(" ").parse(input)?;
+        let (input, _) = opt(alt((tag("a "), tag("an ")))).parse(input)?;
+        Ok((input, ()))
+    }
+
+    // `all_consuming` + `terminated` asserts the entire `after_anchor` slice
+    // parses as `<subtype list><optional period><optional trailing space>` —
+    // replaces the prior manual `.trim().is_empty()` trailing-text check with
+    // an idiomatic nom assertion.
+    let (_, names) = all_consuming(terminated(
+        separated_list1(parse_sep, parse_one),
+        (opt(tag::<_, _, VE>(".")), space0),
+    ))
+    .parse(after_anchor)
+    .ok()?;
+
+    if names.is_empty() {
+        return None;
+    }
+
+    Some(
+        names
+            .into_iter()
+            .map(|subtype| ContinuousModification::AddSubtype { subtype })
+            .collect(),
+    )
 }
 
 /// Try to strip a leading "with [counter] counter(s) on it/them" clause from `text`,
@@ -14739,6 +14845,108 @@ mod tests {
             vec![ContinuousModification::AddSubtype {
                 subtype: "Swamp".to_string(),
             }]
+        );
+    }
+
+    /// CR 205.3 + CR 700.8: Self type-grant Oxford-comma party subtype list.
+    /// Source acquires all four party subtypes so it counts itself toward the
+    /// controller's party regardless of its printed subtypes.
+    #[test]
+    fn self_is_also_a_four_party_subtypes() {
+        let def = parse_static_line("~ is also a Cleric, Rogue, Warrior, and Wizard.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.modifications,
+            vec![
+                ContinuousModification::AddSubtype {
+                    subtype: "Cleric".to_string(),
+                },
+                ContinuousModification::AddSubtype {
+                    subtype: "Rogue".to_string(),
+                },
+                ContinuousModification::AddSubtype {
+                    subtype: "Warrior".to_string(),
+                },
+                ContinuousModification::AddSubtype {
+                    subtype: "Wizard".to_string(),
+                },
+            ]
+        );
+    }
+
+    /// CR 205.3: Single-subtype self type-grant (e.g. "Kentaro, the Smiling
+    /// Cat is also a Spirit.") — degenerate one-element list path.
+    #[test]
+    fn self_is_also_a_single_subtype() {
+        let def = parse_static_line("~ is also a Spirit.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::AddSubtype {
+                subtype: "Spirit".to_string(),
+            }]
+        );
+    }
+
+    /// CR 205.3: Vowel-opening subtype — exercises the `"~ is also an "`
+    /// arm so a future Elf/Angel/Eldrazi/Imp/Otter party-tribal printing
+    /// (or any other vowel-opening self-typegrant) reaches the parser via
+    /// the classifier's `"is also an "` contains pattern instead of being
+    /// dropped on the floor.
+    #[test]
+    fn self_is_also_an_vowel_opening_subtype_list() {
+        let def = parse_static_line("~ is also an Elf, Angel, and Eldrazi.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.modifications,
+            vec![
+                ContinuousModification::AddSubtype {
+                    subtype: "Elf".to_string(),
+                },
+                ContinuousModification::AddSubtype {
+                    subtype: "Angel".to_string(),
+                },
+                ContinuousModification::AddSubtype {
+                    subtype: "Eldrazi".to_string(),
+                },
+            ]
+        );
+    }
+
+    /// CR 205.3d: Non-creature subtypes ("X is also a Forest" / "is also an
+    /// Aura") must not be silently added to the source — the pithy
+    /// `is also a[n]` phrasing is exclusively creature-subtype grants, and
+    /// land/artifact/enchantment-subtype additions use the
+    /// `in addition to its other types` phrasing handled by
+    /// `parse_subject_additive_type_static`. The arm must return None so
+    /// other parser arms can claim the line.
+    #[test]
+    fn self_is_also_a_rejects_non_creature_subtype() {
+        assert!(parse_static_line("~ is also a Forest.").is_none());
+        assert!(parse_static_line("~ is also an Aura.").is_none());
+        assert!(parse_static_line("~ is also an Equipment.").is_none());
+    }
+
+    /// CR 205.3: Two-subtype list without Oxford comma — `<X> and <Y>`.
+    /// Exercises the bare " and " separator without intermediate comma.
+    #[test]
+    fn self_is_also_a_two_subtypes_no_comma() {
+        let def = parse_static_line("~ is also a Spirit and Wizard.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.modifications,
+            vec![
+                ContinuousModification::AddSubtype {
+                    subtype: "Spirit".to_string(),
+                },
+                ContinuousModification::AddSubtype {
+                    subtype: "Wizard".to_string(),
+                },
+            ]
         );
     }
 

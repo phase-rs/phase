@@ -1426,6 +1426,23 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
         return Ok((rest, cond));
     }
 
+    // CR 700.8c: "you have a full party" — controller's party size is 4 (the
+    // cap defined in CR 700.8a). Composes through `parse_inner_condition` so
+    // every consumer — static gates ("as long as you have a full party"),
+    // trigger intervening-ifs (Nalia, Linvala), and clause-level conditions
+    // ("if you have a full party, ... instead") — shares one parse path.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("a full party").parse(rest) {
+        return Ok((
+            rest,
+            make_quantity_ge(
+                QuantityRef::PartySize {
+                    player: PlayerScope::Controller,
+                },
+                4,
+            ),
+        ));
+    }
+
     // "you have exactly N life" → LifeTotal EQ N
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("exactly ").parse(rest) {
         let (rest, n) = parse_number(rest)?;
@@ -4872,6 +4889,46 @@ mod tests {
         let (rest, c) = parse_inner_condition("your speed is 2 or higher").unwrap();
         assert_eq!(rest, "");
         assert_eq!(c, StaticCondition::SpeedGE { threshold: 2 });
+    }
+
+    /// CR 700.8c: "you have a full party" — party size is 4 (the cap).
+    /// Exercises the shared `parse_inner_condition` entry point so every
+    /// downstream consumer (static gates, trigger intervening-ifs via
+    /// `static_condition_to_trigger_condition`, clause-level conditions)
+    /// inherits the parse.
+    #[test]
+    fn test_full_party_condition() {
+        let (rest, c) = parse_inner_condition("you have a full party").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::PartySize {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            }
+        );
+
+        // Composes with the "if " prefix path used by trigger and static
+        // condition extraction.
+        let (rest, c) = parse_condition("if you have a full party, ").unwrap();
+        assert_eq!(rest, ", ");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::PartySize {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            }
+        );
     }
 
     #[test]
