@@ -85,7 +85,7 @@ export function CardEntryRow({
       : `Move one ${entry.name} to main deck`;
 
   return (
-    <div>
+    <div data-card-name={entry.name.toLowerCase()}>
       <div
         className="group flex items-center justify-between py-0.5 text-sm"
         onMouseEnter={() => onCardHover?.(entry.name)}

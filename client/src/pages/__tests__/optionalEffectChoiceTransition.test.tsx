@@ -140,6 +140,7 @@ function scriptedAdapter(): {
     getLegalActions: vi.fn(async () => EMPTY_LEGAL),
     restoreState: vi.fn(),
     getAiAction: vi.fn().mockReturnValue(null),
+    estimateBracket: vi.fn().mockResolvedValue(null),
     dispose: vi.fn(),
   };
   return { adapter, delivered };

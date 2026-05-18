@@ -40,6 +40,7 @@ function createMockAdapter(state: GameState): EngineAdapter {
     restoreState: vi.fn(),
     getAiAction: vi.fn().mockReturnValue(null),
     dispose: vi.fn(),
+    estimateBracket: vi.fn().mockResolvedValue(null),
   };
 }
 

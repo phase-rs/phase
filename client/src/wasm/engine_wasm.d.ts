@@ -34,6 +34,13 @@ export function clear_game_state(): void;
 export function create_initial_state(): any;
 
 /**
+ * Estimates a Commander deck's bracket without touching `GAME_STATE`.
+ * Reads `CARD_DB` for bracket signals. Returns `null` (via serde) when the
+ * deck has no commander or the card database is not loaded.
+ */
+export function estimate_bracket_for_deck(deck_js: any): any;
+
+/**
  * Evaluate deck compatibility and format legality using the loaded card database.
  * Returns strict Standard/Commander checks, BO3 readiness, and selected-format compatibility.
  */
@@ -288,6 +295,7 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly apply_seat_mutation: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly classify_deck_js: (a: any) => [number, number, number];
+    readonly estimate_bracket_for_deck: (a: any) => [number, number, number];
     readonly evaluate_deck_compatibility_js: (a: any) => [number, number, number];
     readonly export_game_state_json: () => [number, number, number, number];
     readonly getFormatRegistry: () => any;

@@ -24,8 +24,11 @@ import { FORMAT_REGISTRY, formatMetadata } from "../../data/formatRegistry";
 import { FormatFilter } from "./FormatFilter";
 import { CommanderPanel } from "./CommanderPanel";
 import { BracketPicker } from "./BracketPicker";
+import { BracketAuditPanel } from "./BracketAuditPanel";
 import type { CommanderBracket } from "../../types/bracket";
 import { getPreconBracket } from "../../data/preconBrackets";
+import { getSharedAdapter } from "../../adapter/wasm-adapter";
+import { useBracketEstimate } from "../../hooks/useBracketEstimate";
 import {
   getColorIdentityViolations,
   getSingletonViolations,
@@ -152,6 +155,29 @@ export function DeckBuilder({
   const formatConfig = formatMetadata(format)?.default_config;
   const isCommander = formatConfig?.command_zone ?? false;
   const maxCopies = formatConfig?.singleton ? 1 : 4;
+
+  const { estimate, unsupported: bracketUnsupported } = useBracketEstimate({
+    deck,
+    commanders,
+    format,
+    adapter: getSharedAdapter(),
+  });
+
+  const auditEmptyReason: "not-commander" | "no-commander" | "unsupported" | undefined =
+    !isCommander
+      ? "not-commander"
+      : commanders.length === 0
+        ? "no-commander"
+        : bracketUnsupported
+          ? "unsupported"
+          : undefined;
+
+  const handleScrollToCard = useCallback((cardName: string) => {
+    const node = document.querySelector<HTMLElement>(
+      `[data-card-name="${cardName.toLowerCase()}"]`,
+    );
+    node?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, []);
 
   const handleSearchResults = useCallback(
     (cards: ScryfallCard[], total: number) => {
@@ -581,6 +607,14 @@ export function DeckBuilder({
                   onSetCommander={handleSetCommander}
                   onRemoveCommander={handleRemoveCommander}
                 />
+                <div className="mt-2">
+                  <BracketAuditPanel
+                    estimate={estimate}
+                    manualBracket={bracket}
+                    emptyReason={auditEmptyReason}
+                    onCardClick={handleScrollToCard}
+                  />
+                </div>
               </div>
             )}
             <DeckList

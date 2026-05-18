@@ -9,7 +9,8 @@ import type {
   PlayerId,
   SubmitResult,
 } from "./types";
-import { AdapterError } from "./types";
+import { AdapterError, AdapterErrorCode } from "./types";
+import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import {
   HandshakeError,
   openPhaseSocket,
@@ -198,6 +199,14 @@ export class ServerDraftAdapter implements EngineAdapter {
 
   restoreState(): void {
     throw new AdapterError("WASM_ERROR", "Undo not supported in server draft", false);
+  }
+
+  estimateBracket(_deck: BracketDeckRequest): Promise<BracketEstimate | null> {
+    throw new AdapterError(
+      AdapterErrorCode.BRACKET_ESTIMATION_UNSUPPORTED,
+      "Bracket estimation is a local feature; not available in server draft sessions.",
+      false,
+    );
   }
 
   // ── Draft lifecycle methods ────────────────────────────────────────

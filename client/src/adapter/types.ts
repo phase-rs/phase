@@ -1,3 +1,5 @@
+import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
+
 // ── Identifiers ──────────────────────────────────────────────────────────
 
 export type ObjectId = number;
@@ -1516,6 +1518,7 @@ export const AdapterErrorCode = {
   ENGINE_PANIC: "ENGINE_PANIC",
   WASM_ERROR: "WASM_ERROR",
   INVALID_ACTION: "INVALID_ACTION",
+  BRACKET_ESTIMATION_UNSUPPORTED: "bracket-estimation/unsupported",
 } as const;
 
 /**
@@ -1602,4 +1605,14 @@ export interface EngineAdapter {
   ): Promise<BatchResolveResult>;
   restoreState(state: GameState): void | Promise<void>;
   dispose(): void;
+
+  /**
+   * Estimates a Commander deck's bracket from card contents. Returns null
+   * when the deck has no commander, is empty, or the adapter doesn't
+   * support local deck analysis (multiplayer adapters throw via
+   * `AdapterError` instead of silently returning null).
+   *
+   * Pure — no game state, no side effects. Safe to call on every deck edit.
+   */
+  estimateBracket(deck: BracketDeckRequest): Promise<BracketEstimate | null>;
 }

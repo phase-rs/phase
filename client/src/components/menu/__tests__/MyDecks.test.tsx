@@ -12,6 +12,14 @@ vi.mock("../../../hooks/useCardImage", () => ({
   useCardImage: () => ({ src: null, isLoading: false }),
 }));
 
+vi.mock("../../../hooks/useBracketEstimate", () => ({
+  useBracketEstimate: () => ({ estimate: null, loading: false, unsupported: false }),
+}));
+
+vi.mock("../../../adapter/wasm-adapter", () => ({
+  getSharedAdapter: () => ({}),
+}));
+
 vi.mock("../../../hooks/useSetSymbols", () => ({
   useSetSymbol: (setCode: string | undefined) => setCode ? `https://img.example/${setCode}.svg` : null,
 }));

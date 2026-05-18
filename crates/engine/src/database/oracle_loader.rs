@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
+use crate::database::bracket_lists::BracketSignals;
 use crate::database::card_db::{build_name_alias_index, CardDatabase};
 use crate::database::legality::normalize_legalities;
 use crate::database::mtgjson::load_atomic_cards;
@@ -16,6 +17,7 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
 
     let mut cards: HashMap<String, CardRules> = HashMap::new();
     let mut face_index: HashMap<String, CardFace> = HashMap::new();
+    let mut bracket_signals_by_name: HashMap<String, BracketSignals> = HashMap::new();
     let mut legalities = HashMap::new();
     let errors: Vec<(PathBuf, String)> = Vec::new();
 
@@ -51,9 +53,18 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
                 LayoutKind::Prepare => CardLayout::Prepare(face_a, face_b),
                 LayoutKind::Single => CardLayout::Single(face_a),
             };
-            for face in layout_faces(&layout) {
+            for (face, source) in layout_faces(&layout).into_iter().zip(faces.iter()) {
                 let key = face.name.to_lowercase();
                 face_index.insert(key.clone(), face.clone());
+                if source.is_game_changer {
+                    bracket_signals_by_name.insert(
+                        key.clone(),
+                        BracketSignals {
+                            game_changer: true,
+                            ..Default::default()
+                        },
+                    );
+                }
                 if let Some(card_legalities) = legalities_by_name.get(&key).cloned() {
                     legalities.insert(key, card_legalities);
                 }
@@ -74,6 +85,15 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
             };
             cards.insert(key.clone(), rules);
             face_index.insert(key.clone(), face);
+            if faces[0].is_game_changer {
+                bracket_signals_by_name.insert(
+                    key.clone(),
+                    BracketSignals {
+                        game_changer: true,
+                        ..Default::default()
+                    },
+                );
+            }
             if !card_legalities.is_empty() {
                 legalities.insert(key, card_legalities);
             }
@@ -90,6 +110,8 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
         printings_index: HashMap::new(),
         rulings_index: HashMap::new(),
         errors,
+        bracket_lists: Default::default(),
+        bracket_signals_by_name,
     })
 }
 

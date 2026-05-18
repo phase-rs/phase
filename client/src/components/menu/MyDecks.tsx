@@ -40,6 +40,9 @@ import {
   isBundledDeck,
 } from "./deckHelpers";
 import { BASIC_LAND_NAMES } from "../../constants/game";
+import { BracketEstimateChip } from "../deck-builder/BracketEstimateChip";
+import { useBracketEstimate } from "../../hooks/useBracketEstimate";
+import { getSharedAdapter } from "../../adapter/wasm-adapter";
 const PRECON_PREFIX = "[Pre-built] ";
 const PRECON_PAGE_SIZE = 12;
 const DECK_SCAN_BATCH_SIZE = 1;
@@ -143,6 +146,18 @@ export function StatusBadge({ label, active }: { label: string; active: boolean 
   );
 }
 
+/** Inner component so the hook is always called unconditionally (Rules of Hooks).
+ * Returns null for non-Commander decks — the hook handles that check. */
+function BracketChipForDeck({ candidate }: { candidate: DeckCatalogCandidate }) {
+  const { estimate } = useBracketEstimate({
+    deck: candidate.deck,
+    commanders: candidate.deck.commander ?? [],
+    format: candidate.knownFormat,
+    adapter: getSharedAdapter(),
+  });
+  return <BracketEstimateChip tier={estimate?.tier ?? null} />;
+}
+
 interface DeckTileProps {
   deckName: string;
   isActive: boolean;
@@ -157,9 +172,12 @@ interface DeckTileProps {
   feedDeckOverride?: FeedDeck;
   /** Provide precon data directly for virtual precon tiles not yet saved locally. */
   preconDeckOverride?: PreconDeckEntry;
+  /** Catalog candidate — when provided and the deck is Commander format, renders
+   *  a BracketEstimateChip in the tile's footer. */
+  catalogCandidate?: DeckCatalogCandidate;
 }
 
-const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onClick, onEdit, onDelete, onAdopt, hideFeedBadge, feedDeckOverride, preconDeckOverride }: DeckTileProps) {
+const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onClick, onEdit, onDelete, onAdopt, hideFeedBadge, feedDeckOverride, preconDeckOverride, catalogCandidate }: DeckTileProps) {
   const [coverageHovered, setCoverageHovered] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
 
@@ -287,6 +305,8 @@ const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onC
           <span className="text-xs text-gray-300">{count} cards</span>
         </div>
         <div className="mt-2 flex flex-wrap gap-1">
+          {/* Bracket estimate chip (Commander decks only) */}
+          {catalogCandidate && <BracketChipForDeck candidate={catalogCandidate} />}
           {/* Feed format/archetype tags */}
           {feedDeckOverride?.tags?.map((tag) => (
             <StatusBadge key={tag} label={tag} active={FORMAT_TAGS.has(tag)} />
@@ -348,6 +368,8 @@ interface SavedDeckTileProps {
   onEditDeck?: (deckName: string) => void;
   onDeleteDeck: (deckName: string) => void;
   preconCandidate?: DeckCatalogCandidate;
+  /** Non-precon catalog candidate — provides deck + format data for bracket chip. */
+  catalogCandidate?: DeckCatalogCandidate;
 }
 
 const SavedDeckTile = memo(function SavedDeckTile({
@@ -359,6 +381,7 @@ const SavedDeckTile = memo(function SavedDeckTile({
   onEditDeck,
   onDeleteDeck,
   preconCandidate,
+  catalogCandidate,
 }: SavedDeckTileProps) {
   const handleClick = useCallback(() => onTileClick(deckName), [deckName, onTileClick]);
   const handleEdit = useMemo(
@@ -380,6 +403,7 @@ const SavedDeckTile = memo(function SavedDeckTile({
       isActive={isActive}
       compatibility={compatibility}
       preconDeckOverride={preconDeckOverride}
+      catalogCandidate={catalogCandidate ?? preconCandidate}
       onClick={handleClick}
       onEdit={handleEdit}
       onDelete={handleDelete}
@@ -1236,6 +1260,7 @@ export function MyDecks({
                   onEditDeck={onEditDeck}
                   onDeleteDeck={handleDeleteDeck}
                   preconCandidate={legalPreconByName.get(deckName)}
+                  catalogCandidate={deckCandidatesByName.get(deckName)}
                 />
               ))}
             </div>
@@ -1268,6 +1293,7 @@ export function MyDecks({
                     onEditDeck={onEditDeck}
                     onDeleteDeck={handleDeleteDeck}
                     preconCandidate={legalPreconByName.get(deckName)}
+                    catalogCandidate={deckCandidatesByName.get(deckName)}
                   />
                 ))}
               </div>

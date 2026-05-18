@@ -14,6 +14,7 @@ import type {
   SubmitResult,
   ViewerSnapshot,
 } from "./types";
+import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import { debugLog } from "../game/debugLog";
 
 type EngineResponse =
@@ -247,6 +248,10 @@ export class EngineWorkerClient {
    */
   async takeLastPanic(): Promise<string | null> {
     return this.request<string | null>({ type: "takeLastPanic" });
+  }
+
+  async estimateBracketForDeck(deck: BracketDeckRequest): Promise<BracketEstimate | null> {
+    return this.request<BracketEstimate | null>({ type: "estimateBracketForDeck", deck });
   }
 
   dispose(): void {

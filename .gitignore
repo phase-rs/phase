@@ -62,6 +62,7 @@ data/mtgjson/sets/
 !data/abilities/
 !data/precons/
 !data/learned-weights.json
+!data/bracket_lists.json
 
 # Tauri build output
 client/src-tauri/binaries/
