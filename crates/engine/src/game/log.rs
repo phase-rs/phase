@@ -332,6 +332,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::LandPlayed {
             object_id,
             player_id,
+            ..
         } => vec![
             player_seg(state, *player_id),
             text(" plays "),

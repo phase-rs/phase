@@ -1203,7 +1203,7 @@ export type GameEvent =
   | { type: "CardsDrawn"; data: { player_id: PlayerId; count: number } }
   | { type: "CardDrawn"; data: { player_id: PlayerId; object_id: ObjectId; nth_in_turn: number; nth_in_step: number } }
   | { type: "PermanentUntapped"; data: { object_id: ObjectId } }
-  | { type: "LandPlayed"; data: { object_id: ObjectId; player_id: PlayerId } }
+  | { type: "LandPlayed"; data: { object_id: ObjectId; player_id: PlayerId; from_zone: Zone } }
   | { type: "StackPushed"; data: { object_id: ObjectId } }
   | { type: "StackResolved"; data: { object_id: ObjectId } }
   | { type: "Discarded"; data: { player_id: PlayerId; object_id: ObjectId } }

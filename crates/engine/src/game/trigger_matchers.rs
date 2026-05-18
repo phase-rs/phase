@@ -1439,8 +1439,23 @@ pub(super) fn match_land_played(
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::LandPlayed { object_id, .. } = event {
-        valid_card_matches(trigger, state, *object_id, source_id)
+    if let GameEvent::LandPlayed {
+        object_id,
+        from_zone,
+        ..
+    } = event
+    {
+        match &trigger.valid_card {
+            None => true,
+            Some(filter) => state.objects.get(object_id).is_some_and(|obj| {
+                let record =
+                    obj.snapshot_for_zone_change(*object_id, Some(*from_zone), Zone::Battlefield);
+                let ctx = super::filter::FilterContext::from_source(state, source_id);
+                super::filter::matches_target_filter_on_zone_change_record(
+                    state, &record, filter, &ctx,
+                )
+            }),
+        }
     } else {
         false
     }
@@ -2601,6 +2616,58 @@ mod tests {
     /// Helper to create a minimal TriggerDefinition with typed fields.
     fn make_trigger(mode: TriggerMode) -> TriggerDefinition {
         TriggerDefinition::new(mode)
+    }
+
+    #[test]
+    fn land_played_valid_card_matches_origin_zone() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Rocco, Street Chef".to_string(),
+            Zone::Battlefield,
+        );
+        let land = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Exiled Land".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let mut trigger = make_trigger(TriggerMode::LandPlayed);
+        trigger.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::land().properties(vec![FilterProp::InZone { zone: Zone::Exile }]),
+        ));
+
+        assert!(match_land_played(
+            &GameEvent::LandPlayed {
+                object_id: land,
+                player_id: PlayerId(1),
+                from_zone: Zone::Exile,
+            },
+            &trigger,
+            source,
+            &state,
+        ));
+        assert!(!match_land_played(
+            &GameEvent::LandPlayed {
+                object_id: land,
+                player_id: PlayerId(1),
+                from_zone: Zone::Hand,
+            },
+            &trigger,
+            source,
+            &state,
+        ));
     }
 
     #[test]

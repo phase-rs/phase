@@ -480,6 +480,7 @@ mod tests {
                 CastingPermission::PlayFromExile {
                     duration,
                     granted_to,
+                    exiled_by_ability_controller,
                     ..
                 } => {
                     assert_eq!(
@@ -490,6 +491,7 @@ mod tests {
                         },
                     );
                     assert_eq!(*granted_to, expected_owner);
+                    assert_eq!(*exiled_by_ability_controller, Some(PlayerId(0)));
                 }
                 _ => panic!("expected PlayFromExile"),
             }
@@ -579,6 +581,55 @@ mod tests {
             state.objects[&card_c].casting_permissions.len(),
             3,
             "non-end-step durations all survive the prune",
+        );
+    }
+
+    /// CR 513.1 + CR 611.2a/b: Rocco's duration text says "your next end
+    /// step", so the expiration anchor is the effect controller even when the
+    /// play permission is granted to each exiled card's owner.
+    #[test]
+    fn rocco_end_step_prune_uses_effect_controller_not_object_owner() {
+        use crate::game::layers::prune_end_step_casting_permissions;
+        use crate::types::statics::CastFrequency;
+
+        let mut state = GameState::new_two_player(1);
+        let opponents_card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "TheirCard".to_string(),
+            Zone::Exile,
+        );
+        let permission = CastingPermission::PlayFromExile {
+            duration: Duration::UntilNextStepOf {
+                step: Phase::End,
+                player: PlayerScope::Controller,
+            },
+            granted_to: PlayerId(1),
+            frequency: CastFrequency::Unlimited,
+            source_id: None,
+            exiled_by_ability_controller: Some(PlayerId(0)),
+            mana_spend_permission: None,
+        };
+        state
+            .objects
+            .get_mut(&opponents_card)
+            .unwrap()
+            .casting_permissions = vec![permission];
+
+        prune_end_step_casting_permissions(&mut state, PlayerId(1));
+        assert_eq!(
+            state.objects[&opponents_card].casting_permissions.len(),
+            1,
+            "permission must survive the card owner's end step",
+        );
+
+        prune_end_step_casting_permissions(&mut state, PlayerId(0));
+        assert!(
+            state.objects[&opponents_card]
+                .casting_permissions
+                .is_empty(),
+            "permission must expire at Rocco controller's next end step",
         );
     }
 

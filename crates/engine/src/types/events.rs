@@ -251,6 +251,7 @@ pub enum GameEvent {
     LandPlayed {
         object_id: ObjectId,
         player_id: PlayerId,
+        from_zone: Zone,
     },
     StackPushed {
         object_id: ObjectId,

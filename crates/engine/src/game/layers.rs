@@ -197,8 +197,9 @@ pub fn prune_end_step_casting_permissions(state: &mut GameState, active_player: 
                         player: PlayerScope::Controller,
                     },
                 granted_to,
+                exiled_by_ability_controller,
                 ..
-            } => *granted_to != active_player,
+            } => exiled_by_ability_controller.unwrap_or(*granted_to) != active_player,
             CastingPermission::PlayFromExile { .. }
             | CastingPermission::AdventureCreature
             | CastingPermission::ExileWithAltCost { .. }
