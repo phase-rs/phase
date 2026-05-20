@@ -15156,6 +15156,285 @@ mod phase_trigger_regression_tests {
             result.waiting_for
         );
     }
+
+    // ---- CR 702.24a: Cumulative upkeep end-to-end (Mystic Remora) ----------
+    //
+    // These tests exercise the full pipeline from "upkeep trigger fires" to
+    // "controller pays or sacrifices":
+    //   1. Synthesized trigger (PayCumulativeUpkeep, Phase=Upkeep, valid_target
+    //      Controller) fires when the controller's upkeep step begins.
+    //   2. Outer `Effect::AddCounter { CounterType::Age }` ticks the counter
+    //      on the source before the sub-ability runs.
+    //   3. Sub-ability `Effect::Sacrifice` carries `unless_pay` =
+    //      `AbilityCost::PerCounter { Age, SelfRef, base }`, which expands at
+    //      resolution time to `Mana { N × base }`.
+    //   4. Player answers `PayUnlessCost { pay: bool }` — pay keeps the
+    //      permanent, decline sacrifices it.
+    //
+    // Closest precedent: `setup_esper_sentinel_unless_payment` (CR 118.12 tax
+    // trigger) — same `auto_advance` → `resolve_top` → `PayUnlessCost`
+    // scaffolding. The Mystic Remora flow differs only in how the trigger is
+    // sourced (synthesized by Keyword::CumulativeUpkeep, not parsed) and in
+    // the `PerCounter` expansion that lives in the sub-ability's unless-cost.
+
+    /// Build the synthesized cumulative-upkeep trigger for "Cumulative upkeep
+    /// {N}" (mana base cost) by delegating to the production synthesizer.
+    /// Binding the end-to-end tests to the real builder ensures any regression
+    /// in `build_cumulative_upkeep_trigger` (e.g., flipping AddCounter →
+    /// Sacrifice ordering, dropping `.phase(Upkeep)`, or changing the
+    /// PerCounter payer) breaks the Mystic Remora pipeline tests loudly
+    /// rather than silently passing against a stale inline mirror.
+    fn cumulative_upkeep_mana_trigger(generic: u32) -> TriggerDefinition {
+        crate::database::synthesis::build_cumulative_upkeep_trigger(AbilityCost::Mana {
+            cost: ManaCost::generic(generic),
+        })
+    }
+
+    /// Construct a solo state with Mystic Remora on the battlefield,
+    /// controller = PlayerId(0) = active player, at Phase::Untap so
+    /// `auto_advance` will fire the upkeep trigger.
+    fn setup_mystic_remora_upkeep_state() -> (GameState, ObjectId) {
+        let mut state = new_game(42);
+        state.turn_number = 2;
+        state.phase = Phase::Untap;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let remora = create_object(
+            &mut state,
+            CardId(7024),
+            PlayerId(0),
+            "Mystic Remora".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&remora).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.trigger_definitions
+                .push(cumulative_upkeep_mana_trigger(1));
+        }
+
+        (state, remora)
+    }
+
+    /// Advance from Untap through Upkeep, fire the cumulative-upkeep trigger,
+    /// and resolve it. Mirrors the Esper Sentinel pattern of `auto_advance`
+    /// (to populate the stack) then `resolve_top` (to walk the outer
+    /// AddCounter → sub-ability Sacrifice/PerCounter chain into
+    /// `WaitingFor::UnlessPayment`).
+    fn advance_to_unless_payment_prompt(state: &mut GameState) {
+        let mut events = Vec::new();
+        let _wf = crate::game::turns::auto_advance(state, &mut events);
+        // CR 503.1a: the trigger landed on the stack during Phase::Upkeep.
+        assert_eq!(state.phase, Phase::Upkeep);
+        assert!(
+            !state.stack.is_empty(),
+            "cumulative-upkeep trigger must be on the stack after auto_advance"
+        );
+        crate::game::stack::resolve_top(state, &mut events);
+    }
+
+    /// Give PlayerId(0) `generic` colorless mana units so they can satisfy a
+    /// `Mana { generic: N }` unless-cost. Mirrors the `mana_pool.add` idiom
+    /// used by `setup_esper_sentinel_unless_payment`.
+    fn give_p0_colorless_mana(state: &mut GameState, generic: u32) {
+        let p0 = state
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(0))
+            .expect("PlayerId(0)");
+        for _ in 0..generic {
+            p0.mana_pool.add(ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+        }
+    }
+
+    /// Reset `phase`, `active_player`, `priority_player`, `stack`,
+    /// `pending_trigger`, and `waiting_for` so the next `auto_advance`
+    /// re-enters PlayerId(0)'s upkeep and re-fires the cumulative-upkeep
+    /// trigger. The age counter on `remora` persists across this transition
+    /// (counters live on the object and outlive phase changes), which is
+    /// exactly the CR 702.24a "accumulates each upkeep" invariant under
+    /// test.
+    ///
+    /// Does NOT clear per-turn bookkeeping (`priority_passes`,
+    /// `spells_cast_this_turn`, `spells_cast_this_turn_by_player`,
+    /// `pending_trigger_event_batch`, etc.) — safe for cumulative-upkeep
+    /// tests that never pass priority or cast spells mid-test. Tasks 10-13
+    /// (Polar Kraken, Inner Sanctum, source-gone, multi-instance) must
+    /// re-evaluate this scope if their flow does either; expanding the
+    /// resets is preferable to silent state drift.
+    fn rewind_to_next_p0_upkeep(state: &mut GameState) {
+        state.turn_number += 2;
+        state.phase = Phase::Untap;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.stack.clear();
+        state.pending_trigger = None;
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+    }
+
+    /// CR 702.24a + CR 118.12: Paying the cumulative-upkeep cost keeps the
+    /// permanent on the battlefield. Verifies the age counter ticks first
+    /// (outer AddCounter resolves before the sub-ability), the prompt expands
+    /// to `Mana{1}` (1 counter × base {1}), and the post-pay state has the
+    /// permanent still on the battlefield with the age counter intact.
+    #[test]
+    fn mystic_remora_upkeep_pay_path_keeps_permanent_and_adds_age_counter() {
+        let (mut state, remora_id) = setup_mystic_remora_upkeep_state();
+
+        advance_to_unless_payment_prompt(&mut state);
+        // CR 500.5: mana pools empty between phases. Add the unless-cost
+        // payment AFTER `auto_advance` settles in Upkeep so the mana persists
+        // through to `PayUnlessCost` (mirrors what real play models: the
+        // controller would tap a land in response to the trigger).
+        give_p0_colorless_mana(&mut state, 1);
+
+        // CR 702.24a: outer AddCounter resolved first, so the counter exists
+        // before the per-counter unless-cost is computed.
+        assert_eq!(
+            state.objects[&remora_id]
+                .counters
+                .get(&crate::types::counter::CounterType::Age)
+                .copied(),
+            Some(1),
+            "age counter must be added before the unless-pay prompt"
+        );
+
+        // CR 118.12 + CR 702.24a: PerCounter expanded to {1} for 1 age counter.
+        match &state.waiting_for {
+            WaitingFor::UnlessPayment { player, cost, .. } => {
+                assert_eq!(*player, PlayerId(0), "controller is the unless-payer");
+                match cost {
+                    AbilityCost::Mana { cost: mana } => {
+                        assert_eq!(
+                            *mana,
+                            ManaCost::generic(1),
+                            "1 age counter × base {{1}} = {{1}}"
+                        );
+                    }
+                    other => panic!("expected Mana cost, got {other:?}"),
+                }
+            }
+            other => panic!("expected UnlessPayment prompt, got {other:?}"),
+        }
+
+        let _ = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
+
+        // CR 702.24a: paying the cost keeps the permanent on the battlefield.
+        assert_eq!(
+            state.objects[&remora_id].zone,
+            Zone::Battlefield,
+            "paying the cumulative-upkeep cost must NOT sacrifice the permanent"
+        );
+        assert!(
+            !state.players[0].graveyard.contains(&remora_id),
+            "permanent must not be in graveyard when paid"
+        );
+    }
+
+    /// CR 702.24a + CR 118.12: Declining the cumulative-upkeep cost sacrifices
+    /// the permanent. The sub-ability's `Effect::Sacrifice` runs because the
+    /// player chose not to pay; the source moves to its controller's
+    /// graveyard.
+    #[test]
+    fn mystic_remora_upkeep_decline_path_sacrifices() {
+        let (mut state, remora_id) = setup_mystic_remora_upkeep_state();
+
+        advance_to_unless_payment_prompt(&mut state);
+
+        let _ = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: false }).unwrap();
+
+        // CR 701.21a: To sacrifice a permanent, its controller moves it from
+        // the battlefield directly to its owner's graveyard.
+        assert!(
+            state.players[0].graveyard.contains(&remora_id),
+            "declining the unless-cost must sacrifice the permanent; graveyard={:?}",
+            state.players[0].graveyard
+        );
+        assert_ne!(
+            state.objects[&remora_id].zone,
+            Zone::Battlefield,
+            "permanent must leave the battlefield on decline"
+        );
+    }
+
+    /// CR 702.24a: "...put an age counter on it. Then sacrifice it unless you
+    /// pay its upkeep cost for each age counter on it." Three consecutive
+    /// upkeeps with payment must yield costs {1}, {2}, {3} (1, 2, 3 counters
+    /// respectively) and three age counters at the end. This is the
+    /// load-bearing test for the `PerCounter` expansion: it confirms that
+    /// each tick of the counter strictly precedes the cost computation, and
+    /// that counters accumulate across turns.
+    #[test]
+    fn mystic_remora_three_upkeeps_costs_one_two_three() {
+        let (mut state, remora_id) = setup_mystic_remora_upkeep_state();
+
+        for (turn_idx, expected_generic) in [1u32, 2, 3].iter().enumerate() {
+            advance_to_unless_payment_prompt(&mut state);
+            // CR 500.5: mana pools empty between phases. Provide the unless-
+            // cost payment AFTER `auto_advance` settles in Upkeep so the
+            // mana survives into `PayUnlessCost`.
+            give_p0_colorless_mana(&mut state, *expected_generic);
+
+            // The age counter for THIS upkeep is already in place when we
+            // reach the unless-pay prompt — counter total is turn_idx + 1.
+            let expected_counters = (turn_idx + 1) as u32;
+            assert_eq!(
+                state.objects[&remora_id]
+                    .counters
+                    .get(&crate::types::counter::CounterType::Age)
+                    .copied(),
+                Some(expected_counters),
+                "upkeep {turn_idx}: expected {expected_counters} age counter(s) before payment"
+            );
+
+            match &state.waiting_for {
+                WaitingFor::UnlessPayment {
+                    cost: AbilityCost::Mana { cost: mana },
+                    ..
+                } => {
+                    assert_eq!(
+                        *mana,
+                        ManaCost::generic(*expected_generic),
+                        "upkeep {turn_idx}: expected Mana({{{expected_generic}}}), got {mana:?}"
+                    );
+                }
+                other => {
+                    panic!("upkeep {turn_idx}: expected Mana unless-payment prompt, got {other:?}")
+                }
+            }
+
+            let _ = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
+            assert_eq!(
+                state.objects[&remora_id].zone,
+                Zone::Battlefield,
+                "upkeep {turn_idx}: paying keeps the permanent on the battlefield"
+            );
+
+            // Reset to next controller upkeep for the next iteration.
+            if turn_idx < 2 {
+                rewind_to_next_p0_upkeep(&mut state);
+            }
+        }
+
+        // CR 702.24a: counters strictly accumulate. After three paid upkeeps,
+        // the permanent carries three age counters.
+        assert_eq!(
+            state.objects[&remora_id]
+                .counters
+                .get(&crate::types::counter::CounterType::Age)
+                .copied(),
+            Some(3),
+            "three age counters must have accumulated across three upkeeps"
+        );
+    }
 }
 
 #[cfg(test)]

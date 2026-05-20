@@ -1923,7 +1923,14 @@ fn is_cumulative_upkeep_trigger(t: &TriggerDefinition) -> bool {
 /// The builder is generic over `base_cost: AbilityCost`: mana, life payment,
 /// sacrifice, and OneOf-disjunctive costs all compose with `PerCounter`
 /// uniformly (CLAUDE.md "build for the class").
-fn build_cumulative_upkeep_trigger(base_cost: AbilityCost) -> TriggerDefinition {
+///
+/// Exposed `pub(crate)` so the end-to-end Mystic Remora tests in
+/// `game::engine::phase_trigger_regression_tests` bind directly to the
+/// production synthesizer rather than a duplicated mirror — any regression
+/// in this builder's chained-ability shape (variant ordering, missing
+/// `.phase(Upkeep)`, swapped PerCounter payer, etc.) breaks the pipeline
+/// tests immediately.
+pub(crate) fn build_cumulative_upkeep_trigger(base_cost: AbilityCost) -> TriggerDefinition {
     // Inner sub-ability: "sacrifice ~ unless you pay [base × age counters]".
     // The `unless_pay` lives on the SUB-ability (not the outer trigger) so the
     // outer AddCounter resolves first and the per-counter cost reads the
