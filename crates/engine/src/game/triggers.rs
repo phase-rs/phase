@@ -1681,10 +1681,37 @@ fn begin_trigger_ordering(
         return TriggerOrderingDisposition::NoChoiceNeeded(pending);
     }
 
-    state.pending_trigger_order = Some(PendingTriggerOrder { groups });
+    state.pending_trigger_order = Some(PendingTriggerOrder {
+        groups,
+        resume_after_ordering: None,
+    });
     let wf = build_next_order_triggers_prompt(state)
         .expect("just-populated pending_trigger_order must yield a prompt");
     TriggerOrderingDisposition::PromptForChoice(Box::new(wf))
+}
+
+/// CR 603.3b + CR 605.4a: If a trigger-ordering choice interrupted a
+/// non-Priority resume path (for example ChooseManaColor returning to
+/// ManaPayment), carry that resume through the ordering pass. The ordering
+/// prompt itself remains the public WaitingFor; this state is restored only
+/// after all ordered triggers have been dispatched and no trigger-specific
+/// prompt is pending.
+pub(crate) fn preserve_order_triggers_resume(
+    state: &mut GameState,
+    resume: crate::types::game_state::WaitingFor,
+) -> Option<crate::types::game_state::WaitingFor> {
+    use crate::types::game_state::WaitingFor;
+
+    if !matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }) {
+        return None;
+    }
+
+    let order = state
+        .pending_trigger_order
+        .as_mut()
+        .expect("OrderTriggers waiting state must have pending_trigger_order");
+    order.resume_after_ordering = Some(Box::new(resume));
+    Some(state.waiting_for.clone())
 }
 
 /// CR 603.3b: Public wrapper around `build_next_order_triggers_prompt` for
@@ -1831,6 +1858,7 @@ pub(crate) fn handle_order_triggers(
         .pending_trigger_order
         .take()
         .expect("pending_trigger_order populated above");
+    let resume_after_ordering = order_state.resume_after_ordering.map(|wf| *wf);
     state.waiting_for = WaitingFor::Priority {
         player: state.active_player,
     };
@@ -1860,10 +1888,12 @@ pub(crate) fn handle_order_triggers(
         // (DistributeAmong, etc.) — surface it.
         return Ok(state.waiting_for.clone());
     }
-    // Fall through to Priority for the active player.
-    Ok(WaitingFor::Priority {
+    // No trigger-specific pause remains. Restore an interrupted casting/payment
+    // state if this ordering pass preempted one; otherwise fall through to
+    // Priority for the active player.
+    Ok(resume_after_ordering.unwrap_or(WaitingFor::Priority {
         player: state.active_player,
-    })
+    }))
 }
 
 /// CR 603.2 + CR 603.3b: Collect triggers matching `events` and enqueue them

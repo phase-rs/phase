@@ -9,7 +9,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { useNavigate } from "react-router";
+import { useNavigate, useSearchParams } from "react-router";
 
 import { CardPreview } from "../components/card/CardPreview";
 import type { CardHoverInfo } from "../components/card/CardPreview";
@@ -53,6 +53,16 @@ function PodSetup() {
   const joinPod = useDraftPodStore((s) => s.joinPod);
   const configError = useDraftPodStore((s) => s.configError);
   const loadingPool = useDraftPodStore((s) => s.loadingPool);
+  const kindDescription = config.kind === "Premier"
+    ? "Best-of-one tournament matches after deckbuilding. Faster rounds, no sideboarding between games."
+    : "Best-of-three tournament matches after deckbuilding, with sideboarding between games.";
+  const tournamentDescription = config.tournamentFormat === "Swiss"
+    ? "Everyone keeps playing through three rounds, even after a loss."
+    : "Players are eliminated after a match loss until one winner remains.";
+  const policyDescription = config.podPolicy === "Competitive"
+    ? "Timed picks, automatic picks on timeout, and automatic round advancement."
+    : "Untimed picks, manual round advancement, and host controls for resolving issues.";
+  const podSizeDescription = `${config.podSize} total seats. Empty seats can be filled with bots from the lobby before the draft starts.`;
 
   if (mode === "choose") {
     return (
@@ -135,27 +145,33 @@ function PodSetup() {
         </div>
 
         {/* Draft type */}
-        <div className="flex gap-4">
-          <label className="flex items-center gap-2 text-sm text-white/70">
-            <input
-              type="radio"
-              name="draftKind"
-              checked={config.kind === "Premier"}
-              onChange={() => setConfig({ kind: "Premier" })}
-              className="accent-emerald-400"
-            />
-            Premier (ranked)
+        <div className="flex flex-col gap-1">
+          <label className="text-sm font-medium text-white/60">
+            Draft Type
           </label>
-          <label className="flex items-center gap-2 text-sm text-white/70">
-            <input
-              type="radio"
-              name="draftKind"
-              checked={config.kind === "Traditional"}
-              onChange={() => setConfig({ kind: "Traditional" })}
-              className="accent-emerald-400"
-            />
-            Traditional (best-of-3)
-          </label>
+          <div className="flex gap-4">
+            <label className="flex items-center gap-2 text-sm text-white/70">
+              <input
+                type="radio"
+                name="draftKind"
+                checked={config.kind === "Premier"}
+                onChange={() => setConfig({ kind: "Premier" })}
+                className="accent-emerald-400"
+              />
+              Premier (best-of-1)
+            </label>
+            <label className="flex items-center gap-2 text-sm text-white/70">
+              <input
+                type="radio"
+                name="draftKind"
+                checked={config.kind === "Traditional"}
+                onChange={() => setConfig({ kind: "Traditional" })}
+                className="accent-emerald-400"
+              />
+              Traditional (best-of-3)
+            </label>
+          </div>
+          <p className="text-xs text-white/40">{kindDescription}</p>
         </div>
 
         {/* Tournament Format (D-04) */}
@@ -187,6 +203,7 @@ function PodSetup() {
               Single Elimination
             </label>
           </div>
+          <p className="text-xs text-white/40">{tournamentDescription}</p>
         </div>
 
         {/* Pod Policy (D-07) */}
@@ -216,11 +233,7 @@ function PodSetup() {
               Casual
             </label>
           </div>
-          <p className="text-xs text-white/40">
-            {config.podPolicy === "Competitive"
-              ? "Timed picks, auto-pick on timeout, auto-advance rounds"
-              : "Untimed picks, host controls round advancement"}
-          </p>
+          <p className="text-xs text-white/40">{policyDescription}</p>
         </div>
 
         {/* Pod size */}
@@ -237,9 +250,13 @@ function PodSetup() {
               </option>
             ))}
           </select>
+          <p className="text-xs text-white/40">{podSizeDescription}</p>
         </div>
 
         {/* Set selector — reuse the Quick Draft component */}
+        <div className="rounded-[16px] border border-white/8 bg-white/3 px-4 py-3 text-sm text-white/45">
+          Choose the draft set last. Selecting a set loads its card pool and creates the pod room.
+        </div>
         <SetSelector
           onStartDraft={(setCode) => {
             setConfig({ setCode });
@@ -512,6 +529,11 @@ function DraftingPhaseContent() {
   const [hoveredCard, setHoveredCard] = useState<CardHoverInfo | null>(null);
   const [introDismissed, setIntroDismissed] = useState(false);
   const podSize = useDraftPodStore((s) => s.config.podSize);
+  const view = useMultiplayerDraftStore((s) => s.view);
+  const selectedCard = useMultiplayerDraftStore((s) => s.selectedCard);
+  const selectCard = useMultiplayerDraftStore((s) => s.selectCard);
+  const confirmPick = useMultiplayerDraftStore((s) => s.confirmPick);
+  const autoPickCard = useMultiplayerDraftStore((s) => s.autoPickCard);
 
   if (!introDismissed) {
     return <DraftIntro mode="pod" podSize={podSize} onContinue={() => setIntroDismissed(true)} />;
@@ -523,13 +545,44 @@ function DraftingPhaseContent() {
         <div className="flex min-w-0 flex-1 flex-col">
           <SeatStatusRing />
           <PickTimer />
-          <DraftProgress />
-          <PackDisplay onCardHover={setHoveredCard} />
+          <DraftProgress view={view} />
+          <PackDisplay
+            view={view}
+            selectedCard={selectedCard}
+            onSelectCard={selectCard}
+            onConfirmPick={confirmPick}
+            showAutoPick
+            onAutoPick={autoPickCard}
+            onCardHover={setHoveredCard}
+          />
         </div>
-        <PoolPanel onCardHover={setHoveredCard} />
+        <PoolPanel view={view} onCardHover={setHoveredCard} />
       </div>
       <CardPreview cardName={hoveredCard?.name ?? null} sourcePrinting={hoveredCard?.sourcePrinting} />
     </>
+  );
+}
+
+function PodDeckBuilder() {
+  const view = useMultiplayerDraftStore((s) => s.view);
+  const mainDeck = useMultiplayerDraftStore((s) => s.mainDeck);
+  const landCounts = useMultiplayerDraftStore((s) => s.landCounts);
+  const addToDeck = useMultiplayerDraftStore((s) => s.addToDeck);
+  const removeFromDeck = useMultiplayerDraftStore((s) => s.removeFromDeck);
+  const setLandCount = useMultiplayerDraftStore((s) => s.setLandCount);
+  const submitDeck = useMultiplayerDraftStore((s) => s.submitDeck);
+
+  return (
+    <LimitedDeckBuilder
+      view={view}
+      mainDeck={mainDeck}
+      landCounts={landCounts}
+      onAddToDeck={addToDeck}
+      onRemoveFromDeck={removeFromDeck}
+      onSetLandCount={setLandCount}
+      onSubmitDeck={submitDeck}
+      showSuggestions={false}
+    />
   );
 }
 
@@ -548,7 +601,7 @@ function phaseContent(
     case "drafting":
       return <DraftingPhaseContent />;
     case "deckbuilding":
-      return <LimitedDeckBuilder />;
+      return <PodDeckBuilder />;
     case "betweenGames":
       return <BetweenGamesView />;
     case "pairing":
@@ -599,18 +652,25 @@ export function DraftPodPage() {
   const phase = useMultiplayerDraftStore((s) => s.phase);
   const leave = useMultiplayerDraftStore((s) => s.leave);
   const resetPod = useDraftPodStore((s) => s.reset);
+  const resumeHostedPod = useDraftPodStore((s) => s.resumeHostedPod);
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      void leave();
+      void leave(true);
       resetPod();
     };
   }, [leave, resetPod]);
 
+  useEffect(() => {
+    if (searchParams.get("resume") !== "1") return;
+    void resumeHostedPod();
+  }, [resumeHostedPod, searchParams]);
+
   const handleLeave = useCallback(async () => {
-    await leave();
+    await leave(true);
     resetPod();
     navigate("/");
   }, [leave, resetPod, navigate]);

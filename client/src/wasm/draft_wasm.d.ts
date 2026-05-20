@@ -42,7 +42,7 @@ export function auto_pick(): any;
  * draft at a time per WASM instance). Returns the initial DraftPlayerView
  * for seat 0.
  */
-export function create_multiplayer_draft(set_pool_json: string, seats_json: string, kind: number, seed: number, draft_code: string): any;
+export function create_multiplayer_draft(set_pool_json: string, seats_json: string, kind: number, seed: number, draft_code: string, tournament_format: string, pod_policy: string): any;
 
 /**
  * Serialize the full DraftSession to JSON for host persistence.
@@ -190,7 +190,7 @@ export interface InitOutput {
     readonly all_picks_submitted: () => [number, number, number];
     readonly apply_draft_action: (a: number, b: number) => [number, number, number];
     readonly auto_pick: () => [number, number, number];
-    readonly create_multiplayer_draft: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
+    readonly create_multiplayer_draft: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number];
     readonly export_draft_session: () => [number, number, number, number];
     readonly get_bot_deck: (a: number) => [number, number, number];
     readonly get_draft_status: () => [number, number, number];

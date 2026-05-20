@@ -135,7 +135,7 @@ export class DraftPodGuestAdapter {
       this.joinResult = joinResult;
 
       // 2. Check for existing draft token (reconnect case)
-      const persisted = await loadDraftGuestSession(joinResult.peer.id);
+      const persisted = await loadDraftGuestSession(joinResult.conn.peer);
       const existingToken = persisted?.draftToken;
 
       // 3. Create P2PDraftGuest

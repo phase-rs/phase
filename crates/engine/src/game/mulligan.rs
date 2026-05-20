@@ -3,8 +3,10 @@ use crate::game::effects::resolve_ability_chain;
 use crate::types::ability::AbilityKind;
 use crate::types::actions::MulliganChoice;
 use crate::types::events::GameEvent;
+use crate::types::format::GameFormat;
 use crate::types::game_state::{
-    GameState, MulliganBottomEntry, MulliganDecisionEntry, PendingBeginGameAbility, WaitingFor,
+    GameState, MulliganBottomEntry, MulliganDecisionEntry, OpeningHandBottomReason,
+    PendingBeginGameAbility, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -69,6 +71,7 @@ fn bottom_count_for(mulligan_count: u8, free_first: bool) -> u8 {
 /// engine has the format enum but no team/seating semantics yet.
 pub fn start_mulligan(state: &mut GameState, events: &mut Vec<GameEvent>) -> WaitingFor {
     events.push(GameEvent::MulliganStarted);
+    state.prepaid_mulligan_bottoms.clear();
 
     // Shuffle every player's library.
     let GameState { players, rng, .. } = &mut *state;
@@ -82,13 +85,28 @@ pub fn start_mulligan(state: &mut GameState, events: &mut Vec<GameEvent>) -> Wai
         draw_n(state, player_id, STARTING_HAND_SIZE, events);
     }
 
-    // Build the initial pending set: every player, mulligan_count = 0,
-    // in seat order so iteration is deterministic.
-    let pending = seat_order
+    let forced_pending = tiny_leaders_forced_mulligan_pending(state);
+    if !forced_pending.is_empty() {
+        return WaitingFor::OpeningHandBottomCards {
+            pending: forced_pending,
+            reason: OpeningHandBottomReason::TinyLeadersMultiCommander,
+        };
+    }
+
+    normal_mulligan_decision(state)
+}
+
+fn normal_mulligan_decision(state: &GameState) -> WaitingFor {
+    let pending = state
+        .seat_order
         .iter()
         .map(|&player| MulliganDecisionEntry {
             player,
-            mulligan_count: 0,
+            mulligan_count: state
+                .prepaid_mulligan_bottoms
+                .get(&player)
+                .copied()
+                .unwrap_or(0),
         })
         .collect();
 
@@ -96,6 +114,32 @@ pub fn start_mulligan(state: &mut GameState, events: &mut Vec<GameEvent>) -> Wai
         pending,
         free_first_mulligan: free_first_mulligan(state),
     }
+}
+
+fn tiny_leaders_forced_mulligan_pending(state: &GameState) -> Vec<MulliganBottomEntry> {
+    if state.format_config.format != GameFormat::TinyLeaders {
+        return Vec::new();
+    }
+
+    state
+        .seat_order
+        .iter()
+        .filter(|&&player| {
+            state
+                .deck_pools
+                .iter()
+                .find(|pool| pool.player == player)
+                .map(|pool| {
+                    pool.current_commander
+                        .iter()
+                        .map(|entry| entry.count)
+                        .sum::<u32>()
+                })
+                .unwrap_or(0)
+                > 1
+        })
+        .map(|&player| MulliganBottomEntry { player, count: 1 })
+        .collect()
 }
 
 /// CR 103.5 + 103.5b: Resolve one player's `MulliganDecision { choice }` action.
@@ -292,7 +336,12 @@ fn enter_bottom_phase(state: &mut GameState, events: &mut Vec<GameEvent>) -> Wai
                 .get(&player_id)
                 .copied()
                 .unwrap_or(0);
-            let bottom = bottom_count_for(count, free_first);
+            let prepaid = state
+                .prepaid_mulligan_bottoms
+                .get(&player_id)
+                .copied()
+                .unwrap_or(0);
+            let bottom = bottom_count_for(count, free_first).saturating_sub(prepaid);
             if bottom > 0 {
                 Some(MulliganBottomEntry {
                     player: player_id,
@@ -306,9 +355,52 @@ fn enter_bottom_phase(state: &mut GameState, events: &mut Vec<GameEvent>) -> Wai
 
     if pending.is_empty() {
         state.final_mulligan_counts.clear();
+        state.prepaid_mulligan_bottoms.clear();
         finish_mulligans(state, events)
     } else {
         WaitingFor::MulliganBottomCards { pending }
+    }
+}
+
+/// TL:R 906.6a/e: Resolve a forced opening-hand bottom before any normal
+/// mulligan decisions or Serum Powder-style actions are available.
+pub fn handle_opening_hand_bottom(
+    state: &mut GameState,
+    player: PlayerId,
+    cards: Vec<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, String> {
+    let WaitingFor::OpeningHandBottomCards { pending, .. } = &state.waiting_for else {
+        return Err("handle_opening_hand_bottom called outside OpeningHandBottomCards".to_string());
+    };
+    let mut pending = pending.clone();
+
+    let idx = pending
+        .iter()
+        .position(|e| e.player == player)
+        .ok_or_else(|| {
+            format!(
+                "Player {:?} is not in the opening-bottom pending set",
+                player
+            )
+        })?;
+    let expected_count = pending[idx].count;
+
+    validate_bottom_selection(state, player, &cards, expected_count)?;
+    for card_id in cards {
+        zones::move_to_library_position(state, card_id, false, events);
+    }
+
+    *state.prepaid_mulligan_bottoms.entry(player).or_insert(0) += expected_count;
+    pending.remove(idx);
+
+    if pending.is_empty() {
+        Ok(normal_mulligan_decision(state))
+    } else {
+        Ok(WaitingFor::OpeningHandBottomCards {
+            pending,
+            reason: OpeningHandBottomReason::TinyLeadersMultiCommander,
+        })
     }
 }
 
@@ -333,6 +425,29 @@ pub fn handle_mulligan_bottom(
         .ok_or_else(|| format!("Player {:?} is not in the bottoms pending set", player))?;
     let expected_count = pending[idx].count;
 
+    validate_bottom_selection(state, player, &cards, expected_count)?;
+
+    for card_id in cards {
+        zones::move_to_library_position(state, card_id, false, events);
+    }
+
+    pending.remove(idx);
+
+    if pending.is_empty() {
+        state.final_mulligan_counts.clear();
+        state.prepaid_mulligan_bottoms.clear();
+        Ok(finish_mulligans(state, events))
+    } else {
+        Ok(WaitingFor::MulliganBottomCards { pending })
+    }
+}
+
+fn validate_bottom_selection(
+    state: &GameState,
+    player: PlayerId,
+    cards: &[ObjectId],
+    expected_count: u8,
+) -> Result<(), String> {
     if cards.len() != expected_count as usize {
         return Err(format!(
             "Expected {} cards to bottom, got {}",
@@ -346,24 +461,12 @@ pub fn handle_mulligan_bottom(
         .iter()
         .find(|p| p.id == player)
         .expect("player exists");
-    for &card_id in &cards {
+    for &card_id in cards {
         if !player_data.hand.contains(&card_id) {
             return Err(format!("Card {:?} is not in player's hand", card_id));
         }
     }
-
-    for card_id in cards {
-        zones::move_to_library_position(state, card_id, false, events);
-    }
-
-    pending.remove(idx);
-
-    if pending.is_empty() {
-        state.final_mulligan_counts.clear();
-        Ok(finish_mulligans(state, events))
-    } else {
-        Ok(WaitingFor::MulliganBottomCards { pending })
-    }
+    Ok(())
 }
 
 /// Queue all BeginGame abilities for cards in each player's opening hand.
@@ -423,6 +526,11 @@ pub(crate) fn enter_bottom_phase_public(
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
     enter_bottom_phase(state, events)
+}
+
+/// TL:R 906.6a: Re-entry point after pruning an opening-hand bottom prompt.
+pub(crate) fn enter_normal_mulligan_public(state: &GameState) -> WaitingFor {
+    normal_mulligan_decision(state)
 }
 
 /// CR 103.5 + CR 800.4a: Re-entry point for elimination cleanup — drives the
@@ -490,9 +598,13 @@ fn draw_n(state: &mut GameState, player_id: PlayerId, count: usize, events: &mut
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::deck_loading::DeckEntry;
     use crate::game::zones::create_object;
     use crate::types::ability::{AbilityDefinition, Effect, TargetFilter};
     use crate::types::actions::GameAction;
+    use crate::types::card::CardFace;
+    use crate::types::format::FormatConfig;
+    use crate::types::game_state::PlayerDeckPool;
     use crate::types::identifiers::CardId;
 
     /// Test helper: decide for `player`, advancing `state.waiting_for` in place.
@@ -543,6 +655,17 @@ mod tests {
         Ok(wf)
     }
 
+    fn opening_bottom(
+        state: &mut GameState,
+        player: PlayerId,
+        cards: Vec<ObjectId>,
+        events: &mut Vec<GameEvent>,
+    ) -> Result<WaitingFor, String> {
+        let wf = handle_opening_hand_bottom(state, player, cards, events)?;
+        state.waiting_for = wf.clone();
+        Ok(wf)
+    }
+
     fn setup_with_libraries(cards_per_player: usize) -> GameState {
         setup_n_player_with_libraries(2, cards_per_player)
     }
@@ -573,6 +696,16 @@ mod tests {
         }
 
         state
+    }
+
+    fn deck_entry(name: &str, count: u32) -> DeckEntry {
+        DeckEntry {
+            card: CardFace {
+                name: name.to_string(),
+                ..Default::default()
+            },
+            count,
+        }
     }
 
     fn pending_decision_players(wf: &WaitingFor) -> Vec<PlayerId> {
@@ -631,6 +764,102 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::MulliganStarted)));
+    }
+
+    #[test]
+    fn tiny_leaders_multi_commander_bottoms_before_normal_mulligan() {
+        let mut state = GameState::new(FormatConfig::tiny_leaders(), 2, 42);
+        state.turn_number = 1;
+        state.phase = crate::types::phase::Phase::Untap;
+        for player_idx in 0..2u8 {
+            for i in 0..20 {
+                create_object(
+                    &mut state,
+                    CardId((player_idx as u64) * 100 + i as u64),
+                    PlayerId(player_idx),
+                    format!("Card {} P{}", i, player_idx),
+                    Zone::Library,
+                );
+            }
+        }
+        state.deck_pools = vec![
+            PlayerDeckPool {
+                player: PlayerId(0),
+                current_commander: std::sync::Arc::new(vec![
+                    deck_entry("Tiny Leader A", 1),
+                    deck_entry("Tiny Leader B", 1),
+                ]),
+                ..Default::default()
+            },
+            PlayerDeckPool {
+                player: PlayerId(1),
+                current_commander: std::sync::Arc::new(vec![deck_entry("Tiny Leader C", 1)]),
+                ..Default::default()
+            },
+        ];
+        let mut events = Vec::new();
+
+        let waiting = start_mulligan(&mut state, &mut events);
+
+        assert!(matches!(
+            waiting,
+            WaitingFor::OpeningHandBottomCards { ref pending, .. }
+                if pending == &vec![MulliganBottomEntry { player: PlayerId(0), count: 1 }]
+        ));
+    }
+
+    #[test]
+    fn tiny_leaders_opening_bottom_counts_as_first_mulligan_bottom() {
+        let mut state = GameState::new(FormatConfig::tiny_leaders(), 2, 42);
+        state.turn_number = 1;
+        state.phase = crate::types::phase::Phase::Untap;
+        for player_idx in 0..2u8 {
+            for i in 0..20 {
+                create_object(
+                    &mut state,
+                    CardId((player_idx as u64) * 100 + i as u64),
+                    PlayerId(player_idx),
+                    format!("Card {} P{}", i, player_idx),
+                    Zone::Library,
+                );
+            }
+        }
+        state.deck_pools = vec![
+            PlayerDeckPool {
+                player: PlayerId(0),
+                current_commander: std::sync::Arc::new(vec![
+                    deck_entry("Tiny Leader A", 1),
+                    deck_entry("Tiny Leader B", 1),
+                ]),
+                ..Default::default()
+            },
+            PlayerDeckPool {
+                player: PlayerId(1),
+                current_commander: std::sync::Arc::new(vec![deck_entry("Tiny Leader C", 1)]),
+                ..Default::default()
+            },
+        ];
+        let mut events = Vec::new();
+        state.waiting_for = start_mulligan(&mut state, &mut events);
+        let bottomed = state.players[0].hand[0];
+
+        let waiting = opening_bottom(&mut state, PlayerId(0), vec![bottomed], &mut events)
+            .expect("opening bottom");
+
+        assert_eq!(state.prepaid_mulligan_bottoms.get(&PlayerId(0)), Some(&1));
+        assert_eq!(
+            decision_count_for(&waiting, PlayerId(0)),
+            Some(1),
+            "forced opening bottom starts normal mulligans at one mulligan taken"
+        );
+
+        decide(&mut state, PlayerId(0), true, &mut events);
+        let waiting = decide(&mut state, PlayerId(1), true, &mut events);
+        assert!(
+            matches!(waiting, WaitingFor::Priority { .. }),
+            "keeping after the forced bottom should not owe another bottom, got {:?}",
+            waiting
+        );
     }
 
     #[test]

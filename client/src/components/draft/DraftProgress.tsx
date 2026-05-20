@@ -1,7 +1,9 @@
 import { useDraftStore } from "../../stores/draftStore";
+import type { DraftPlayerView } from "../../adapter/draft-adapter";
 
-export function DraftProgress() {
-  const view = useDraftStore((s) => s.view);
+export function DraftProgress({ view: viewOverride }: { view?: DraftPlayerView | null } = {}) {
+  const quickView = useDraftStore((s) => s.view);
+  const view = viewOverride !== undefined ? viewOverride : quickView;
 
   if (!view) return null;
 

@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from "framer-motion";
 
 import { menuButtonClass } from "./buttonStyles";
 import { STORAGE_KEY_PREFIX, listSavedDeckNames, stampDeckMeta } from "../../constants/storage";
-import { detectAndParseDeck, resolveCommander } from "../../services/deckParser";
+import { deriveImportedDeckName, detectAndParseDeck, resolveCommander } from "../../services/deckParser";
 
 type ImportTab = "paste" | "file";
 
@@ -14,6 +14,35 @@ interface ImportDeckModalProps {
   onImported: (name: string, deckNames: string[]) => void;
 }
 
+const GENERIC_IMPORTED_NAMES = new Set(["Imported Deck", "Untitled Deck"]);
+
+function uniqueDeckName(baseName: string, existingNames: string[]): string {
+  const existing = new Set(existingNames);
+  if (!existing.has(baseName)) return baseName;
+
+  for (let i = 2; ; i++) {
+    const candidate = `${baseName} ${i}`;
+    if (!existing.has(candidate)) return candidate;
+  }
+}
+
+function resolveImportDeckName(
+  manualName: string,
+  content: string,
+  deck: Awaited<ReturnType<typeof resolveCommander>>,
+  fallbackName?: string,
+): string {
+  const trimmedManual = manualName.trim();
+  if (trimmedManual) return uniqueDeckName(trimmedManual, listSavedDeckNames());
+
+  const derivedName = deriveImportedDeckName(content, deck);
+  const baseName =
+    fallbackName && GENERIC_IMPORTED_NAMES.has(derivedName)
+      ? fallbackName
+      : derivedName;
+  return uniqueDeckName(baseName, listSavedDeckNames());
+}
+
 export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalProps) {
   const [tab, setTab] = useState<ImportTab>("paste");
   const [pasteText, setPasteText] = useState("");
@@ -21,9 +50,9 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handlePasteImport = async () => {
-    const name = deckName.trim();
-    if (!name || !pasteText.trim()) return;
+    if (!pasteText.trim()) return;
     const deck = await resolveCommander(detectAndParseDeck(pasteText));
+    const name = resolveImportDeckName(deckName, pasteText, deck);
     localStorage.setItem(STORAGE_KEY_PREFIX + name, JSON.stringify(deck));
     stampDeckMeta(name);
     const names = listSavedDeckNames();
@@ -38,7 +67,8 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
     reader.onload = async () => {
       const content = reader.result as string;
       const deck = await resolveCommander(detectAndParseDeck(content));
-      const name = file.name.replace(/\.(dck|dec|txt)$/i, "");
+      const fallbackName = file.name.replace(/\.(dck|dec|txt)$/i, "");
+      const name = resolveImportDeckName("", content, deck, fallbackName);
       localStorage.setItem(STORAGE_KEY_PREFIX + name, JSON.stringify(deck));
       stampDeckMeta(name);
       const names = listSavedDeckNames();
@@ -113,11 +143,11 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
                 />
                 <button
                   onClick={handlePasteImport}
-                  disabled={!deckName.trim() || !pasteText.trim()}
+                  disabled={!pasteText.trim()}
                   className={menuButtonClass({
                     tone: "amber",
                     size: "md",
-                    disabled: !deckName.trim() || !pasteText.trim(),
+                    disabled: !pasteText.trim(),
                     className: "w-full font-bold",
                   })}
                 >

@@ -89,6 +89,10 @@ export interface DraftPlayerView {
   pairings: PairingView[];
 }
 
+export type MultiplayerSeatDescriptor =
+  | { type: "Human"; player_id: number; display_name: string }
+  | { type: "Bot"; name: string };
+
 export interface SuggestedDeck {
   main_deck: string[];
   lands: Record<string, number>;
@@ -214,6 +218,28 @@ export class DraftAdapter {
       kind,
       JSON.stringify(seatNames),
       seed,
+    ) as DraftPlayerView;
+  }
+
+  async createMultiplayerDraft(
+    setPoolJson: string,
+    seats: MultiplayerSeatDescriptor[],
+    kind: "Premier" | "Traditional",
+    seed: number,
+    draftCode: string,
+    tournamentFormat: TournamentFormat,
+    podPolicy: PodPolicy,
+  ): Promise<DraftPlayerView> {
+    const wasm = await ensureDraftWasm();
+    const kindId = kind === "Premier" ? 1 : 2;
+    return wasm.create_multiplayer_draft(
+      setPoolJson,
+      JSON.stringify(seats),
+      kindId,
+      seed,
+      draftCode,
+      tournamentFormat,
+      podPolicy,
     ) as DraftPlayerView;
   }
 

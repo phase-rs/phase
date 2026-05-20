@@ -538,7 +538,7 @@ pub fn auto_select_targets(
     target_slots: &[TargetSelectionSlot],
     constraints: &[TargetSelectionConstraint],
 ) -> Result<Option<Vec<TargetRef>>, EngineError> {
-    let assignments = generate_target_assignments(target_slots, constraints);
+    let assignments = generate_target_assignments_with_limit(target_slots, constraints, Some(2));
     match assignments.as_slice() {
         [] => Err(EngineError::ActionNotAllowed(
             "No legal target combinations available".to_string(),
@@ -554,8 +554,13 @@ pub fn auto_select_targets_for_ability(
     target_slots: &[TargetSelectionSlot],
     constraints: &[TargetSelectionConstraint],
 ) -> Result<Option<Vec<TargetRef>>, EngineError> {
-    let assignments =
-        build_target_assignments_for_ability(state, ability, target_slots, constraints);
+    let assignments = build_target_assignments_for_ability_with_limit(
+        state,
+        ability,
+        target_slots,
+        constraints,
+        Some(2),
+    );
     match assignments.as_slice() {
         [] => Err(EngineError::ActionNotAllowed(
             "No legal target combinations available".to_string(),
@@ -710,9 +715,17 @@ pub fn generate_target_assignments(
     target_slots: &[TargetSelectionSlot],
     constraints: &[TargetSelectionConstraint],
 ) -> Vec<Vec<TargetRef>> {
+    generate_target_assignments_with_limit(target_slots, constraints, None)
+}
+
+fn generate_target_assignments_with_limit(
+    target_slots: &[TargetSelectionSlot],
+    constraints: &[TargetSelectionConstraint],
+    limit: Option<usize>,
+) -> Vec<Vec<TargetRef>> {
     let mut current = Vec::with_capacity(target_slots.len());
     let mut out = Vec::new();
-    build_target_assignments(target_slots, constraints, 0, &mut current, &mut out);
+    build_target_assignments(target_slots, constraints, 0, &mut current, &mut out, limit);
     out
 }
 
@@ -1626,7 +1639,12 @@ fn build_target_assignments(
     index: usize,
     current: &mut Vec<TargetRef>,
     out: &mut Vec<Vec<TargetRef>>,
+    limit: Option<usize>,
 ) {
+    if limit.is_some_and(|limit| out.len() >= limit) {
+        return;
+    }
+
     if index == target_slots.len() {
         if validate_selected_targets(target_slots, current, constraints).is_ok() {
             out.push(current.clone());
@@ -1636,22 +1654,26 @@ fn build_target_assignments(
 
     let slot = &target_slots[index];
     if slot.optional {
-        build_target_assignments(target_slots, constraints, index + 1, current, out);
+        build_target_assignments(target_slots, constraints, index + 1, current, out, limit);
     }
     for target in &slot.legal_targets {
+        if limit.is_some_and(|limit| out.len() >= limit) {
+            return;
+        }
         current.push(target.clone());
         if validate_target_prefix(target_slots, current, constraints).is_ok() {
-            build_target_assignments(target_slots, constraints, index + 1, current, out);
+            build_target_assignments(target_slots, constraints, index + 1, current, out, limit);
         }
         current.pop();
     }
 }
 
-fn build_target_assignments_for_ability(
+fn build_target_assignments_for_ability_with_limit(
     state: &GameState,
     ability: &ResolvedAbility,
     target_slots: &[TargetSelectionSlot],
     constraints: &[TargetSelectionConstraint],
+    limit: Option<usize>,
 ) -> Vec<Vec<TargetRef>> {
     let specs = target_slot_specs(state, ability);
     let view = AbilityTargetingView {
@@ -1663,7 +1685,7 @@ fn build_target_assignments_for_ability(
     };
     let mut current = Vec::with_capacity(target_slots.len());
     let mut out = Vec::new();
-    build_target_assignments_with_specs(&view, 0, &mut current, &mut out);
+    build_target_assignments_with_specs(&view, 0, &mut current, &mut out, limit);
     out
 }
 
@@ -1672,7 +1694,12 @@ fn build_target_assignments_with_specs(
     index: usize,
     current: &mut Vec<TargetRef>,
     out: &mut Vec<Vec<TargetRef>>,
+    limit: Option<usize>,
 ) {
+    if limit.is_some_and(|limit| out.len() >= limit) {
+        return;
+    }
+
     if index == view.target_slots.len() {
         if validate_target_prefix_with_specs(
             view.state,
@@ -1691,7 +1718,7 @@ fn build_target_assignments_with_specs(
 
     let slot = &view.target_slots[index];
     if slot.optional {
-        build_target_assignments_with_specs(view, index + 1, current, out);
+        build_target_assignments_with_specs(view, index + 1, current, out, limit);
     }
 
     let selected_slots: Vec<Option<TargetRef>> = current.iter().cloned().map(Some).collect();
@@ -1704,6 +1731,9 @@ fn build_target_assignments_with_specs(
         &selected_slots,
     );
     for target in legal_targets {
+        if limit.is_some_and(|limit| out.len() >= limit) {
+            return;
+        }
         current.push(target);
         if validate_target_prefix_with_specs(
             view.state,
@@ -1715,7 +1745,7 @@ fn build_target_assignments_with_specs(
         )
         .is_ok()
         {
-            build_target_assignments_with_specs(view, index + 1, current, out);
+            build_target_assignments_with_specs(view, index + 1, current, out, limit);
         }
         current.pop();
     }
@@ -5053,6 +5083,44 @@ mod tests {
             &ability,
             &slots,
             &[]
+        ));
+    }
+
+    #[test]
+    fn auto_select_targets_for_ability_short_circuits_multi_target_ambiguity() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        for index in 0..32 {
+            let land = crate::game::zones::create_object(
+                &mut state,
+                crate::types::identifiers::CardId(index),
+                PlayerId(0),
+                format!("Land {index}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&land)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Land);
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Untap {
+                target: TargetFilter::Typed(TypedFilter::land()),
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        ability.multi_target = Some(crate::types::ability::MultiTargetSpec::fixed(0, 5));
+
+        let slots = build_target_slots(&state, &ability).expect("multi-target slots should build");
+
+        assert!(matches!(
+            auto_select_targets_for_ability(&state, &ability, &slots, &[]),
+            Ok(None)
         ));
     }
 

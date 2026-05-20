@@ -16,10 +16,13 @@ vi.mock("idb-keyval", () => ({
 }));
 
 import {
+  clearActiveDraftPod,
   clearDraftGuestSession,
   clearDraftHostSession,
+  loadActiveDraftPod,
   loadDraftGuestSession,
   loadDraftHostSession,
+  saveActiveDraftPod,
   saveDraftGuestSession,
   saveDraftHostSession,
 } from "../draftPersistence";
@@ -28,6 +31,7 @@ import type { PersistedDraftHostSession } from "../draftPersistence";
 describe("draftPersistence", () => {
   beforeEach(() => {
     mockStore.clear();
+    localStorage.clear();
   });
 
   describe("host session", () => {
@@ -37,6 +41,8 @@ describe("draftPersistence", () => {
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Alice",
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
       seatTokens: { 0: "host-token", 1: "guest-1-token" },
       seatNames: { 0: "Alice", 1: "Bob" },
       kickedTokens: [],
@@ -70,6 +76,46 @@ describe("draftPersistence", () => {
       await saveDraftHostSession("test-draft-1", updated);
       const loaded = await loadDraftHostSession("test-draft-1");
       expect(loaded!.draftStarted).toBe(false);
+    });
+
+    it("saves and loads active host resume metadata", () => {
+      saveActiveDraftPod({
+        id: "test-draft-1",
+        roomCode: "ABCDE",
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Alice",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+        phase: "drafting",
+        pickCount: 12,
+        updatedAt: Date.now(),
+      });
+
+      const loaded = loadActiveDraftPod();
+
+      expect(loaded?.roomCode).toBe("ABCDE");
+      expect(loaded?.phase).toBe("drafting");
+      expect(loaded?.pickCount).toBe(12);
+    });
+
+    it("clears active host resume metadata", () => {
+      saveActiveDraftPod({
+        id: "test-draft-1",
+        roomCode: "ABCDE",
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Alice",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+        phase: "lobby",
+        pickCount: 0,
+        updatedAt: Date.now(),
+      });
+
+      clearActiveDraftPod();
+
+      expect(loadActiveDraftPod()).toBeNull();
     });
   });
 

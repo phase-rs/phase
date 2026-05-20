@@ -283,6 +283,7 @@ fn resolve_choice(
     match &state.waiting_for {
         WaitingFor::MulliganDecision { .. }
         | WaitingFor::MulliganBottomCards { .. }
+        | WaitingFor::OpeningHandBottomCards { .. }
         | WaitingFor::BetweenGamesSideboard { .. }
         | WaitingFor::BetweenGamesChoosePlayDraw { .. } => {
             return Err(BailReason::MulliganOrSideboardEncountered);

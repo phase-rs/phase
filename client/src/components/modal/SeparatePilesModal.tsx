@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useState } from "react";
 import { motion } from "framer-motion";
 
 import { CardImage } from "../card/CardImage.tsx";
@@ -199,17 +199,6 @@ export function SeparatePilesChoiceModal({
     [objects, hoverProps],
   );
 
-  // Memoise to avoid re-rendering both pile bodies when only the dispatch
-  // identity changes.
-  const pileABody = useMemo(
-    () => renderPile(data.current.pile_a, "A", "emerald"),
-    [renderPile, data.current.pile_a],
-  );
-  const pileBBody = useMemo(
-    () => renderPile(data.current.pile_b, "B", "sky"),
-    [renderPile, data.current.pile_b],
-  );
-
   if (!objects) return null;
 
   return (
@@ -230,8 +219,8 @@ export function SeparatePilesChoiceModal({
       }
     >
       <div className="flex flex-col gap-4 sm:flex-row">
-        {pileABody}
-        {pileBBody}
+        {renderPile(data.current.pile_a, "A", "emerald")}
+        {renderPile(data.current.pile_b, "B", "sky")}
       </div>
     </ChoiceOverlay>
   );

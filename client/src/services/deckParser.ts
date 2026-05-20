@@ -15,6 +15,8 @@ export interface ParsedDeck {
   companion?: string;
 }
 
+const DECK_NAME_LINE_PATTERN = /^(?:deck\s+name|name|title)\s*:?\s+(.+)$/i;
+
 /**
  * Flat deck shape consumed by the engine (`PlayerDeckList` in Rust) and by
  * `evaluate_deck_compatibility_js`. The single authority for projecting a
@@ -55,6 +57,7 @@ export function expandParsedDeck(deck: ParsedDeck): ExpandedDeck {
 
 type DeckSection = "main" | "sideboard" | "commander" | "companion";
 const SIMPLE_DECK_LINE_PATTERN = /^\d+x?\s+.+$/;
+const COLON_SECTION_RE = /:$/;
 
 // Archidekt / Moxfield category annotations on an individual card line:
 //   "1 Zimone (SOC) 10 [Commander {top}]"  /  "1x Zimone *CMDR*"  /  "[Companion]"
@@ -67,7 +70,7 @@ const FOIL_INDICATOR_RE = /\s+(?:\*F\*|\*Foil\*|\[Foil\]|\(Foil\)|\(Etched\)|F)\
 
 // "Commanders" is the section label Archidekt uses when exporting with categories.
 function getNamedSection(line: string): DeckSection | null {
-  const normalized = line.trim().toLowerCase();
+  const normalized = line.trim().toLowerCase().replace(COLON_SECTION_RE, "");
   if (normalized === "deck" || normalized === "[main]" || normalized === "mainboard") return "main";
   if (normalized === "sideboard" || normalized === "[sideboard]") return "sideboard";
   if (
@@ -100,7 +103,7 @@ function parseDeckEntryLine(line: string): LineParseResult | null {
 
   remainder = remainder.replace(FOIL_INDICATOR_RE, "");
 
-  const mtgaMatch = remainder.match(/^(\d+)\s+(.+?)\s+\(([A-Z0-9]*)\)\s+(\S+)$/);
+  const mtgaMatch = remainder.match(/^(\d+)x?\s+(.+?)\s+\(([A-Z0-9]*)\)\s+(\S+)$/);
   if (mtgaMatch) {
     const setCode = mtgaMatch[3];
     const collectorNumber = mtgaMatch[4];
@@ -145,6 +148,40 @@ function normalizeEntries(entries: DeckEntry[]): DeckEntry[] {
 
 function totalCards(entries: DeckEntry[]): number {
   return entries.reduce((sum, entry) => sum + entry.count, 0);
+}
+
+function cleanDeckName(value: string): string {
+  return value
+    .trim()
+    .replace(/^["']|["']$/g, "")
+    .trim();
+}
+
+export function deriveImportedDeckName(content: string, deck: ParsedDeck): string {
+  for (const raw of content.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+
+    const match = line.match(DECK_NAME_LINE_PATTERN);
+    if (!match) continue;
+
+    const name = cleanDeckName(match[1]);
+    if (name) return name;
+  }
+
+  if (deck.commander?.length === 1) {
+    return `${deck.commander[0]} Deck`;
+  }
+
+  if (deck.commander?.length === 2) {
+    return `${deck.commander[0]} & ${deck.commander[1]} Deck`;
+  }
+
+  if (totalCards(deck.main) > 0 || totalCards(deck.sideboard) > 0) {
+    return "Imported Deck";
+  }
+
+  return "Untitled Deck";
 }
 
 function looksCommanderSingleton(entries: DeckEntry[]): boolean {
@@ -255,23 +292,33 @@ export function parseDeckFile(content: string): ParsedDeck {
   let currentSection: DeckSection = "main";
   let explicitCommander = false;
   let explicitSideboard = false;
+  let mtgoSideboardBlock = false;
+  let sideboardSeparated = false;
 
   for (const raw of lines) {
     const line = raw.trim();
-    if (!line || line.startsWith("#")) continue;
+    if (!line) {
+      if (mtgoSideboardBlock && deck.sideboard.length > 0) {
+        sideboardSeparated = true;
+      }
+      continue;
+    }
+    if (line.startsWith("#")) continue;
 
     const namedSection = getNamedSection(line);
     if (namedSection) {
       currentSection = namedSection;
       if (namedSection === "commander") explicitCommander = true;
       if (namedSection === "sideboard") explicitSideboard = true;
+      mtgoSideboardBlock = namedSection === "sideboard" && COLON_SECTION_RE.test(line);
+      sideboardSeparated = false;
       continue;
     }
 
     const parsed = parseDeckEntryLine(line);
     if (parsed) {
       const { entry, annotation } = parsed;
-      if (annotation === "commander" || currentSection === "commander") {
+      if (annotation === "commander" || currentSection === "commander" || sideboardSeparated) {
         commanderEntries.push(entry);
         if (annotation === "commander") explicitCommander = true;
       } else if (annotation === "companion" || currentSection === "companion") {
@@ -297,7 +344,7 @@ export function parseDeckFile(content: string): ParsedDeck {
 
 // MTGA format detection: count + name + (set) + collector#, with optional
 // trailing Archidekt category annotation (e.g. "[Commander {top}]").
-const MTGA_LINE_PATTERN = /^\d+\s+.+\s+\([A-Z0-9]*\)\s+\S+(\s+\S.*)?$/;
+const MTGA_LINE_PATTERN = /^\d+x?\s+.+\s+\([A-Z0-9]*\)\s+\S+(\s+\S.*)?$/;
 
 /**
  * Parse an MTGA text format deck.
@@ -314,6 +361,8 @@ export function parseMtgaDeck(content: string): ParsedDeck {
   let seenCards = false;
   let explicitCommander = false;
   let explicitSideboard = false;
+  let mtgoSideboardBlock = false;
+  let sideboardSeparated = false;
 
   for (const raw of lines) {
     const line = raw.trim();
@@ -325,6 +374,8 @@ export function parseMtgaDeck(content: string): ParsedDeck {
       currentSection = namedSection;
       if (namedSection === "commander") explicitCommander = true;
       if (namedSection === "sideboard") explicitSideboard = true;
+      mtgoSideboardBlock = namedSection === "sideboard" && COLON_SECTION_RE.test(line);
+      sideboardSeparated = false;
       continue;
     }
 
@@ -334,6 +385,10 @@ export function parseMtgaDeck(content: string): ParsedDeck {
     }
 
     if (!line) {
+      if (mtgoSideboardBlock && deck.sideboard.length > 0) {
+        sideboardSeparated = true;
+        continue;
+      }
       if (seenCards) {
         currentSection = "sideboard";
       }
@@ -343,7 +398,7 @@ export function parseMtgaDeck(content: string): ParsedDeck {
     const parsed = parseDeckEntryLine(line);
     if (parsed) {
       const { entry, annotation } = parsed;
-      if (annotation === "commander" || currentSection === "commander") {
+      if (annotation === "commander" || currentSection === "commander" || sideboardSeparated) {
         commanderEntries.push(entry);
         if (annotation === "commander") explicitCommander = true;
       } else if (annotation === "companion" || currentSection === "companion") {

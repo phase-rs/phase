@@ -19,6 +19,11 @@ import { create } from "zustand";
 import type { TournamentFormat, PodPolicy } from "../adapter/draft-adapter";
 import type { DraftPodHostConfig } from "../adapter/draftPodHostAdapter";
 import type { DraftPodGuestConfig } from "../adapter/draftPodGuestAdapter";
+import {
+  clearActiveDraftPod,
+  loadActiveDraftPod,
+  loadDraftHostSession,
+} from "../services/draftPersistence";
 import { useMultiplayerDraftStore } from "./multiplayerDraftStore";
 
 // ── Types ──────────────────────────────────────────────────────────────
@@ -68,6 +73,8 @@ interface DraftPodActions {
   createPod: () => Promise<void>;
   /** Join an existing pod as guest. */
   joinPod: () => Promise<void>;
+  /** Resume the active hosted pod from local persistence. */
+  resumeHostedPod: () => Promise<void>;
   /** Host: start the draft (delegates to multiplayerDraftStore). */
   startDraft: () => Promise<void>;
   /** Reset pod store state. */
@@ -155,6 +162,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
         set({ setPoolJson: poolJson, loadingPool: false });
 
         // Create the pod via multiplayerDraftStore
+        const persistenceId = crypto.randomUUID();
         const hostConfig: DraftPodHostConfig = {
           setPoolJson: poolJson,
           kind: config.kind,
@@ -162,6 +170,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
           hostDisplayName: hostDisplayName.trim(),
           tournamentFormat: config.tournamentFormat,
           podPolicy: config.podPolicy,
+          persistenceId,
         };
 
         await useMultiplayerDraftStore.getState().hostDraft(hostConfig);
@@ -169,6 +178,49 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
         const message = err instanceof Error ? err.message : String(err);
         set({ configError: message, loadingPool: false });
       }
+    },
+
+    resumeHostedPod: async () => {
+      const meta = loadActiveDraftPod();
+      if (!meta) {
+        set({ configError: "No draft pod to resume" });
+        return;
+      }
+
+      const persisted = await loadDraftHostSession(meta.id);
+      if (!persisted) {
+        clearActiveDraftPod();
+        set({ configError: "Saved draft pod was not found" });
+        return;
+      }
+
+      set({
+        config: {
+          setCode: "",
+          setName: "Draft Pod",
+          kind: persisted.kind,
+          podSize: persisted.podSize,
+          tournamentFormat: persisted.tournamentFormat,
+          podPolicy: persisted.podPolicy,
+        },
+        hostDisplayName: persisted.hostDisplayName,
+        setPoolJson: persisted.setPoolJson,
+        loadingPool: false,
+        configError: null,
+      });
+
+      const hostConfig: DraftPodHostConfig = {
+        setPoolJson: persisted.setPoolJson,
+        kind: persisted.kind,
+        podSize: persisted.podSize,
+        hostDisplayName: persisted.hostDisplayName,
+        tournamentFormat: persisted.tournamentFormat,
+        podPolicy: persisted.podPolicy,
+        persistenceId: persisted.persistenceId,
+        preferredRoomCode: persisted.roomCode || undefined,
+      };
+
+      await useMultiplayerDraftStore.getState().hostDraft(hostConfig);
     },
 
     joinPod: async () => {
@@ -199,7 +251,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
     },
 
     startDraft: async () => {
-      await useMultiplayerDraftStore.getState().startDraft();
+      await useMultiplayerDraftStore.getState().startDraft(get().botFillEnabled);
     },
 
     reset: () => {

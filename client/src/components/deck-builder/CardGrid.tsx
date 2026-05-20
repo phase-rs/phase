@@ -1,5 +1,5 @@
 import { motion, AnimatePresence } from "framer-motion";
-import type { ScryfallCard } from "../../services/scryfall";
+import { scryfallLegalityKey, type ScryfallCard } from "../../services/scryfall";
 import type { BrowserLegalityFilter } from "./CardSearch";
 import { LegalityBadge } from "./LegalityBadge";
 
@@ -21,7 +21,9 @@ function getArtCropUrl(card: ScryfallCard): string {
 
 function isFormatLegal(card: ScryfallCard, format: BrowserLegalityFilter): boolean {
   if (format === "all") return true;
-  return card.legalities?.[format] === "legal";
+  const legalityKey = scryfallLegalityKey(format);
+  if (!legalityKey) return true;
+  return card.legalities?.[legalityKey] === "legal";
 }
 
 export function CardGrid({

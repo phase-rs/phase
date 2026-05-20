@@ -4,7 +4,7 @@ use crate::game::deck_loading::DeckEntry;
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-use crate::types::format::SideboardPolicy;
+use crate::types::format::{GameFormat, SideboardPolicy};
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::keywords::{CompanionCondition, Keyword};
 use crate::types::mana::ManaCostShard;
@@ -205,7 +205,10 @@ pub fn check_companion_reveal(state: &GameState, player: PlayerId) -> Option<Wai
     }
 
     let pool = state.deck_pools.iter().find(|p| p.player == player)?;
-    let eligible = find_eligible_companions(&pool.current_sideboard, &pool.current_main);
+    let mut eligible = find_eligible_companions(&pool.current_sideboard, &pool.current_main);
+    if state.format_config.format == GameFormat::TinyLeaders {
+        eligible.retain(|(name, _)| !super::deck_validation::tiny_leaders_companion_banned(name));
+    }
 
     if eligible.is_empty() {
         None

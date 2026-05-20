@@ -388,7 +388,7 @@ export function GameSetupPage() {
                     </div>
                   </label>
 
-                  {formatConfig.command_zone && (
+                  {formatConfig.commander_damage_threshold != null && (
                     <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
                       Commander: 100-card singleton, commander damage at{" "}
                       {formatConfig.commander_damage_threshold}

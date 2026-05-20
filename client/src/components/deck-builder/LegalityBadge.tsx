@@ -1,6 +1,9 @@
+import type { GameFormat } from "../../adapter/types";
+import { scryfallLegalityKey } from "../../services/scryfall";
+
 interface LegalityBadgeProps {
   legalities: Record<string, string>;
-  format: string;
+  format: GameFormat;
 }
 
 const STATUS_STYLES: Record<string, string> = {
@@ -18,7 +21,10 @@ const STATUS_LABELS: Record<string, string> = {
 };
 
 export function LegalityBadge({ legalities, format }: LegalityBadgeProps) {
-  const status = (legalities[format] ?? "not_legal").toLowerCase();
+  const legalityKey = scryfallLegalityKey(format);
+  if (!legalityKey) return null;
+
+  const status = (legalities[legalityKey] ?? "not_legal").toLowerCase();
   const style = STATUS_STYLES[status] ?? STATUS_STYLES.not_legal;
   const label = STATUS_LABELS[status] ?? "Not Legal";
 

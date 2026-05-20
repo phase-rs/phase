@@ -147,6 +147,15 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // CR 609.4b: "You may spend mana as though it were mana of any color."
     // Runtime enforcement is in mana_payment.rs via player_can_spend_as_any_color().
     registry.insert(StaticMode::SpendManaAsAnyColor, handle_rule_mod);
+    // CR 107.4f: PayLifeAsColoredMana — "For each {C} in a cost, you may pay
+    // 2 life rather than pay that mana" (K'rrik, Son of Yawgmoth). Data-carrying
+    // (ManaColor); registered per concrete instance via
+    // `register_data_carrying_static_handler` style — but the static-ability
+    // scan in `player_life_payment_colors` reads `static_definitions` directly,
+    // so this loop-style registration is the right shape for parser support.
+    for color in crate::types::mana::ManaColor::ALL {
+        registry.insert(StaticMode::PayLifeAsColoredMana { color }, handle_rule_mod);
+    }
     // CR 702.3b: CanAttackWithDefender — allows creatures with defender to attack.
     // Runtime enforcement is in combat.rs::validate_attack().
     registry.insert(StaticMode::CanAttackWithDefender, handle_rule_mod);
@@ -575,6 +584,59 @@ pub fn player_can_spend_as_any_color(state: &GameState, player_id: PlayerId) -> 
             ..Default::default()
         },
     )
+}
+
+/// CR 107.4f + CR 118.1: Colors for which `player` may pay 2 life rather than
+/// 1 colored mana, aggregated across all active `PayLifeAsColoredMana` sources
+/// (K'rrik-class statics). Single authority for the K'rrik payment grant.
+///
+/// Scans active battlefield/command-zone statics for `PayLifeAsColoredMana`
+/// whose `affected` filter resolves to the given player (player-scope; mirrors
+/// the `player_can_spend_as_any_color` scan), and unions each granted
+/// `ManaColor` into the returned bitmask.
+pub fn player_life_payment_colors(
+    state: &GameState,
+    player_id: PlayerId,
+) -> crate::types::mana::LifePaymentColors {
+    use crate::types::mana::LifePaymentColors;
+    let context = StaticCheckContext {
+        player_id: Some(player_id),
+        ..Default::default()
+    };
+    let mut colors = LifePaymentColors::EMPTY;
+    // CR 604.1 + CR 702.26b: `battlefield_active_statics` owns the
+    // phased-out / command-zone / condition gate.
+    for (obj, def) in battlefield_active_statics(state) {
+        let StaticMode::PayLifeAsColoredMana { color } = def.mode else {
+            continue;
+        };
+        if let Some(ref affected) = def.affected {
+            if !static_filter_matches(state, &context, affected, obj.id) {
+                continue;
+            }
+        }
+        colors.insert(color);
+    }
+    colors
+}
+
+/// CR 118.1: Assemble the per-payment permission bundle for `player` —
+/// the single authority for constructing a `CostPermissionContext` at every
+/// cost-payment entry point (spell cast, activation, alt-cost effect).
+///
+/// `any_color_for_source` is the `any_color` decision for the specific cost
+/// being paid (cast vs effect vs activation may compute this differently);
+/// callers pass it in so this helper stays cost-site-agnostic.
+pub fn build_cost_permission_context(
+    state: &GameState,
+    player_id: PlayerId,
+    any_color_for_source: bool,
+) -> crate::types::mana::CostPermissionContext {
+    crate::types::mana::CostPermissionContext {
+        any_color: any_color_for_source,
+        max_life: super::life_costs::max_phyrexian_life_payments(state, player_id),
+        life_colors: player_life_payment_colors(state, player_id),
+    }
 }
 
 /// CR 104.2b: Check if a player has active `CantWinTheGame` protection.

@@ -4,7 +4,6 @@ import {
   getCombinedColorIdentity,
   getColorIdentityViolations,
   getSingletonViolations,
-  canBeCommander,
 } from "./commanderUtils";
 
 const WUBRG_COLORS = ["W", "U", "B", "R", "G"] as const;
@@ -21,6 +20,8 @@ interface CommanderPanelProps {
   commanders: string[];
   deck: DeckEntry[];
   cardDataCache: Map<string, ScryfallCard>;
+  expectedDeckSize: number;
+  isCommanderEligible: (name: string) => boolean;
   onSetCommander: (cardName: string) => void;
   onRemoveCommander: (cardName: string) => void;
 }
@@ -30,6 +31,8 @@ export function CommanderPanel({
   commanders,
   deck,
   cardDataCache,
+  expectedDeckSize,
+  isCommanderEligible,
   onSetCommander,
   onRemoveCommander,
 }: CommanderPanelProps) {
@@ -42,8 +45,7 @@ export function CommanderPanel({
   // clicking adds (free slot or partner pair) or swaps (replaces existing).
   const eligibleCommanders = deck
     .filter((entry) => {
-      const card = cardDataCache.get(entry.name);
-      if (!card || !canBeCommander(card)) return false;
+      if (!isCommanderEligible(entry.name)) return false;
       return !commanders.includes(entry.name);
     })
     .map((e) => e.name);
@@ -119,9 +121,9 @@ export function CommanderPanel({
       {/* Validation summary */}
       <div className="space-y-1">
         <div
-          className={`text-xs ${totalCards === 100 ? "text-green-400" : "text-yellow-400"}`}
+          className={`text-xs ${totalCards === expectedDeckSize ? "text-green-400" : "text-yellow-400"}`}
         >
-          {totalCards}/100 cards
+          {totalCards}/{expectedDeckSize} cards
         </div>
         {singletonViolations.length > 0 && (
           <div className="text-xs text-red-400">

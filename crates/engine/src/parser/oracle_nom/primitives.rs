@@ -175,6 +175,16 @@ fn parse_mana_symbol_inner(input: &str) -> OracleResult<'_, ManaCostShard> {
         value(ManaCostShard::White, tag("W")),
     ))
     .or(alt((
+        // CR 107.4e: Colorless-hybrid symbols. `{C/X}` may be paid with
+        // one colorless mana or one mana of color X. The only printed
+        // exemplar to date is Ulalek, Fused Atrocity (Foundations) whose
+        // cost `{C/W}{C/U}{C/B}{C/R}{C/G}` parsed as empty without these
+        // arms, making it freely castable (issue #493).
+        value(ManaCostShard::ColorlessWhite, tag("C/W")),
+        value(ManaCostShard::ColorlessBlue, tag("C/U")),
+        value(ManaCostShard::ColorlessBlack, tag("C/B")),
+        value(ManaCostShard::ColorlessRed, tag("C/R")),
+        value(ManaCostShard::ColorlessGreen, tag("C/G")),
         value(ManaCostShard::Blue, tag("U")),
         value(ManaCostShard::Black, tag("B")),
         value(ManaCostShard::Red, tag("R")),
@@ -1042,6 +1052,49 @@ mod tests {
         let (rest, shard) = parse_mana_symbol("{R/P}").unwrap();
         assert_eq!(shard, ManaCostShard::PhyrexianRed);
         assert_eq!(rest, "");
+    }
+
+    /// CR 107.4e: Eldrazi colorless-hybrid `{C/X}` symbols (BFZ/OGW).
+    /// Regression guard for #493 — without these arms, Ulalek Fused
+    /// Atrocity's `{C/W}{C/U}{C/B}{C/R}{C/G}` cost parsed as empty.
+    #[test]
+    fn test_parse_mana_symbol_colorless_hybrid() {
+        for (input, expected) in [
+            ("{C/W}", ManaCostShard::ColorlessWhite),
+            ("{C/U}", ManaCostShard::ColorlessBlue),
+            ("{C/B}", ManaCostShard::ColorlessBlack),
+            ("{C/R}", ManaCostShard::ColorlessRed),
+            ("{C/G}", ManaCostShard::ColorlessGreen),
+        ] {
+            let (rest, shard) = parse_mana_symbol(input).expect(input);
+            assert_eq!(shard, expected, "{input}");
+            assert_eq!(rest, "", "{input}");
+        }
+    }
+
+    /// CR 107.4e: Ulalek Fused Atrocity full cost regression — five
+    /// colorless-hybrid shards must accumulate as five distinct shards
+    /// with zero generic, not collapse to empty.
+    #[test]
+    fn test_parse_mana_cost_ulalek_full() {
+        let (rest, cost) = parse_mana_cost("{C/W}{C/U}{C/B}{C/R}{C/G}").unwrap();
+        assert_eq!(rest, "");
+        match cost {
+            ManaCost::Cost { shards, generic } => {
+                assert_eq!(generic, 0, "Ulalek has no generic mana in cost");
+                assert_eq!(
+                    shards,
+                    vec![
+                        ManaCostShard::ColorlessWhite,
+                        ManaCostShard::ColorlessBlue,
+                        ManaCostShard::ColorlessBlack,
+                        ManaCostShard::ColorlessRed,
+                        ManaCostShard::ColorlessGreen,
+                    ]
+                );
+            }
+            _ => panic!("expected ManaCost::Cost variant, got {cost:?}"),
+        }
     }
 
     #[test]

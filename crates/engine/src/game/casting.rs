@@ -1920,16 +1920,23 @@ fn prepare_spell_cast_with_variant_override_inner(
     } else {
         None
     };
-    // CR 702.74a: When the caller explicitly opted into Evoke (via
-    // `variant_override = Some(CastingVariant::Evoke)`), substitute the evoke
-    // mana cost taken from the hand object's `Keyword::Evoke(cost)` payload.
-    let evoke_cost = if casting_variant == CastingVariant::Evoke {
-        obj.keywords.iter().find_map(|k| match k {
-            crate::types::keywords::Keyword::Evoke(cost) => Some(cost.clone()),
+    // CR 702.74a + CR 601.2f-h: When the caller explicitly opted into Evoke
+    // (via `variant_override = Some(CastingVariant::Evoke)`), substitute the
+    // evoke mana sub-cost taken from the hand object's `Keyword::Evoke(cost)`
+    // payload. Non-mana evoke (Solitude et al.) has no mana sub-cost — the
+    // mana component substitutes to `ManaCost::zero()` and the residual
+    // non-mana cost is paid via the additional-cost path (CR 601.2h).
+    let (evoke_cost, evoke_non_mana_cost) = if casting_variant == CastingVariant::Evoke {
+        let split = obj.keywords.iter().find_map(|k| match k {
+            crate::types::keywords::Keyword::Evoke(cost) => Some(split_evoke_cost_components(cost)),
             _ => None,
-        })
+        });
+        match split {
+            Some((mana, non_mana)) => (mana, non_mana),
+            None => (None, None),
+        }
     } else {
-        None
+        (None, None)
     };
     // CR 702.103a: When the caller explicitly opted into Bestow (via
     // `variant_override = Some(CastingVariant::Bestow)`), substitute the bestow
@@ -2006,6 +2013,14 @@ fn prepare_spell_cast_with_variant_override_inner(
     let pure_non_mana_flashback = casting_variant == CastingVariant::Flashback
         && flashback_non_mana_cost.is_some()
         && flashback_mana_cost.is_none();
+    // CR 702.74a + CR 601.2f-h: Mirror of `pure_non_mana_flashback` for
+    // Evoke. The MH2 Incarnations (Solitude et al.) have pure non-mana evoke
+    // costs ("Exile a white card from your hand"); zero the mana cost so the
+    // mana-payment phase pays nothing and the residual is routed through the
+    // additional-cost path below.
+    let pure_non_mana_evoke = casting_variant == CastingVariant::Evoke
+        && evoke_non_mana_cost.is_some()
+        && evoke_cost.is_none();
     // CR 702.170d: Plot casts are always free — the Plotted permission encodes
     // "without paying its mana cost". Zero the mana cost at preparation time,
     // mirroring the hand-free / flashback-non-mana paths above.
@@ -2033,6 +2048,7 @@ fn prepare_spell_cast_with_variant_override_inner(
         || hand_cast_free
         || is_hand_permission_variant
         || pure_non_mana_flashback
+        || pure_non_mana_evoke
         || casting_variant == CastingVariant::Plot
     {
         crate::types::mana::ManaCost::NoCost
@@ -4151,7 +4167,8 @@ pub fn handle_cast_spell_with_payment_mode(
                         payment_mode,
                         keyword: crate::types::game_state::AlternativeCastKeyword::Warp,
                         normal_cost,
-                        alternative_cost: warp_cost_eff,
+                        alternative_cost: Some(warp_cost_eff),
+                        alternative_additional_cost: None,
                     });
                 }
                 // If only normal is affordable, skip warp — prepare_spell_cast will
@@ -4175,30 +4192,52 @@ pub fn handle_cast_spell_with_payment_mode(
         }
     }
 
-    // CR 702.74a: Evoke — when a hand card has Keyword::Evoke and both costs
-    // are affordable, present a choice. Auto-skip when only one cost is viable.
-    // Unlike Warp, Evoke is opt-in via variant_override (the printed mana cost
-    // remains the default), so the only routing needed is when the player picks
-    // the evoke cost.
+    // CR 702.74a + CR 118.9: Evoke — when a hand card has Keyword::Evoke and
+    // both costs are affordable, present a choice. Auto-skip when only one
+    // cost is viable. Unlike Warp, Evoke is opt-in via variant_override (the
+    // printed mana cost remains the default), so the only routing needed is
+    // when the player picks the evoke cost.
+    //
+    // EvokeCost::Mana — original Lorwyn behavior (pure-mana alt cost).
+    // EvokeCost::NonMana — MH2 Incarnations (Solitude et al.). The non-mana
+    // portion is split out via `split_evoke_cost_components` so the mana
+    // sub-cost (if any) flows through the normal mana-payment phase
+    // (CR 601.2g) and the non-mana residual is paid via `pay_additional_cost`
+    // (CR 601.2h). Affordability requires BOTH halves to be payable.
     if let Some(obj) = state.objects.get(&object_id) {
         if obj.zone == Zone::Hand {
             if let Some(evoke_cost) = obj.keywords.iter().find_map(|k| match k {
                 crate::types::keywords::Keyword::Evoke(cost) => Some(cost.clone()),
                 _ => None,
             }) {
+                let (evoke_mana_part, evoke_non_mana_part) =
+                    split_evoke_cost_components(&evoke_cost);
                 // CR 601.2f + CR 118.9d: affordability and the displayed costs
                 // must reflect active cost modifiers — applied to BOTH the printed
-                // cost and the evoke alternative cost (CR 118.9d).
+                // cost and the evoke mana sub-cost (CR 118.9d).
                 let normal_cost =
                     apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
                         .unwrap_or_else(|| obj.mana_cost.clone());
-                let evoke_cost_eff =
-                    apply_cost_modifiers_to_base(state, player, object_id, evoke_cost.clone())
-                        .unwrap_or_else(|| evoke_cost.clone());
+                let evoke_mana_eff = evoke_mana_part.as_ref().map(|m| {
+                    apply_cost_modifiers_to_base(state, player, object_id, m.clone())
+                        .unwrap_or_else(|| m.clone())
+                });
                 let normal_affordable =
                     can_pay_cost_after_auto_tap(state, player, object_id, &normal_cost);
-                let evoke_affordable =
-                    can_pay_cost_after_auto_tap(state, player, object_id, &evoke_cost_eff);
+                let evoke_mana_affordable = match &evoke_mana_eff {
+                    Some(m) => can_pay_cost_after_auto_tap(state, player, object_id, m),
+                    // CR 118.3: a zero mana cost is always payable.
+                    None => true,
+                };
+                // CR 118.3 + CR 601.2h: non-mana sub-costs must be independently
+                // payable for the evoke option to surface. `AbilityCost::is_payable`
+                // walks the cost tree (Composite/Exile/Sacrifice/Discard/PayLife/...)
+                // and validates each leaf against current game state.
+                let evoke_non_mana_affordable = match &evoke_non_mana_part {
+                    Some(ab_cost) => ab_cost.is_payable(state, player, object_id),
+                    None => true,
+                };
+                let evoke_affordable = evoke_mana_affordable && evoke_non_mana_affordable;
                 if normal_affordable && evoke_affordable {
                     return Ok(WaitingFor::AlternativeCastChoice {
                         player,
@@ -4207,7 +4246,8 @@ pub fn handle_cast_spell_with_payment_mode(
                         payment_mode,
                         keyword: crate::types::game_state::AlternativeCastKeyword::Evoke,
                         normal_cost,
-                        alternative_cost: evoke_cost_eff,
+                        alternative_cost: evoke_mana_eff,
+                        alternative_additional_cost: evoke_non_mana_part,
                     });
                 }
                 if !normal_affordable && evoke_affordable {
@@ -4259,7 +4299,8 @@ pub fn handle_cast_spell_with_payment_mode(
                         payment_mode,
                         keyword: crate::types::game_state::AlternativeCastKeyword::Overload,
                         normal_cost,
-                        alternative_cost: overload_cost_eff,
+                        alternative_cost: Some(overload_cost_eff),
+                        alternative_additional_cost: None,
                     });
                 }
                 if !normal_affordable && overload_affordable {
@@ -4326,7 +4367,8 @@ pub fn handle_cast_spell_with_payment_mode(
                         payment_mode,
                         keyword: crate::types::game_state::AlternativeCastKeyword::Bestow,
                         normal_cost,
-                        alternative_cost: bestow_cost_eff,
+                        alternative_cost: Some(bestow_cost_eff),
+                        alternative_additional_cost: None,
                     });
                 }
                 if has_legal_creature_target && !normal_affordable && bestow_affordable {
@@ -5172,16 +5214,17 @@ fn can_pay_mana_cost_after_auto_tap_with_context(
     super::triggers::resolve_tap_mana_triggers_inline(&mut simulated, &mut tap_events, 0);
 
     let any_color = player_can_spend_as_any_color_for_spell(&simulated, player, source_id);
-    // CR 107.4f + CR 118.3 + CR 119.8: Include the payer's Phyrexian life
-    // budget so a cost containing {C/P} shards is only reported payable when
-    // either mana or sufficient life (respecting CantLoseLife) is available.
-    let max_life = super::life_costs::max_phyrexian_life_payments(&simulated, player);
+    // CR 107.4f + CR 118.1 + CR 118.3 + CR 119.8: Bundle the payer's
+    // payment-time permissions (`any_color`, `max_life`, `life_colors`) so
+    // K'rrik-style life-for-{B} grants are visible to the affordability check.
+    let permissions =
+        super::static_abilities::build_cost_permission_context(&simulated, player, any_color);
     simulated
         .players
         .iter()
         .find(|p| p.id == player)
         .is_some_and(|player_data| {
-            mana_payment::can_pay_for_spell(&player_data.mana_pool, cost, ctx, any_color, max_life)
+            mana_payment::can_pay_for_spell(&player_data.mana_pool, cost, ctx, permissions)
         })
 }
 
@@ -5285,7 +5328,10 @@ pub(super) fn can_pay_effect_mana_cost_after_auto_tap(
     super::triggers::resolve_tap_mana_triggers_inline(&mut simulated, &mut tap_events, 0);
 
     let any_color = player_can_spend_as_any_color_for_optional_spell(&simulated, player, None);
-    let max_life = super::life_costs::max_phyrexian_life_payments(&simulated, player);
+    // CR 107.4f + CR 118.1 + CR 118.3 + CR 119.8: Effect-time resolution
+    // mana payments share the same payment-permission bundle as cast/activation.
+    let permissions =
+        super::static_abilities::build_cost_permission_context(&simulated, player, any_color);
     simulated
         .players
         .iter()
@@ -5295,8 +5341,7 @@ pub(super) fn can_pay_effect_mana_cost_after_auto_tap(
                 &player_data.mana_pool,
                 cost,
                 Some(&effect_ctx),
-                any_color,
-                max_life,
+                permissions,
             )
         })
 }
@@ -5557,20 +5602,21 @@ pub(super) fn pay_effect_mana_cost(
     // so their bonus mana is in the pool before the affordability check.
     super::triggers::resolve_tap_mana_triggers_inline(state, events, events_before);
 
+    let permissions = {
+        let any_color = player_can_spend_as_any_color_for_optional_spell(state, player, None);
+        super::static_abilities::build_cost_permission_context(state, player, any_color)
+    };
     {
         let player_data = state
             .players
             .iter()
             .find(|p| p.id == player)
             .expect("player exists");
-        let any_color = player_can_spend_as_any_color_for_optional_spell(state, player, None);
-        let max_life = super::life_costs::max_phyrexian_life_payments(state, player);
         if !mana_payment::can_pay_for_spell(
             &player_data.mana_pool,
             cost,
             Some(&effect_ctx),
-            any_color,
-            max_life,
+            permissions,
         ) {
             return Err(EngineError::ActionNotAllowed(
                 "Cannot pay mana cost".to_string(),
@@ -5578,7 +5624,6 @@ pub(super) fn pay_effect_mana_cost(
         }
     }
 
-    let any_color = player_can_spend_as_any_color_for_optional_spell(state, player, None);
     let player_data = state
         .players
         .iter_mut()
@@ -5589,8 +5634,9 @@ pub(super) fn pay_effect_mana_cost(
         cost,
         None,
         Some(&effect_ctx),
-        any_color,
+        permissions.any_color,
         None,
+        permissions.life_colors,
     )
     .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
 
@@ -5662,25 +5708,26 @@ fn auto_tap_and_pay_cost_excluding(
     // here via the `FromTapTriggersResolved` marker — no double-fire.
     super::triggers::resolve_tap_mana_triggers_inline(state, events, events_before);
 
+    // CR 107.4f + CR 118.1 + CR 118.3 + CR 119.8: Bundle payment-time permissions
+    // (`any_color`, `max_life`, `life_colors`) once for the cast — K'rrik-style
+    // life-for-{B} grants flow through the same dry-run + execution helpers.
+    let permissions = {
+        let any_color = player_can_spend_as_any_color_for_spell(state, player, source_id);
+        super::static_abilities::build_cost_permission_context(state, player, any_color)
+    };
     {
         let player_data = state
             .players
             .iter()
             .find(|p| p.id == player)
             .expect("player exists");
-        let any_color = player_can_spend_as_any_color_for_spell(state, player, source_id);
-        // CR 107.4f + CR 118.3 + CR 119.8: Life budget for Phyrexian shards —
-        // respects CantLoseLife (budget 0 under lock) and current life total.
-        let max_life = super::life_costs::max_phyrexian_life_payments(state, player);
-        if !mana_payment::can_pay_for_spell(&player_data.mana_pool, cost, ctx, any_color, max_life)
-        {
+        if !mana_payment::can_pay_for_spell(&player_data.mana_pool, cost, ctx, permissions) {
             return Err(EngineError::ActionNotAllowed(
                 "Cannot pay mana cost".to_string(),
             ));
         }
     }
 
-    let any_color = player_can_spend_as_any_color_for_spell(state, player, source_id);
     let hand_demand = mana_payment::compute_hand_color_demand(state, player, source_id);
     let player_data = state
         .players
@@ -5692,8 +5739,9 @@ fn auto_tap_and_pay_cost_excluding(
         cost,
         Some(&hand_demand),
         ctx,
-        any_color,
+        permissions.any_color,
         phyrexian_choices,
+        permissions.life_colors,
     )
     .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
 
@@ -6398,8 +6446,36 @@ pub(super) fn split_flashback_cost_components(
     };
     match fb {
         FlashbackCost::Mana(mana) => (Some(mana.clone()), None),
-        FlashbackCost::NonMana(AbilityCost::Mana { cost }) => (Some(cost.clone()), None),
-        FlashbackCost::NonMana(AbilityCost::Composite { costs }) => {
+        FlashbackCost::NonMana(ab) => split_alt_cost_components(ab),
+    }
+}
+
+/// CR 702.74a + CR 601.2f-h: Evoke twin of `split_flashback_cost_components`.
+/// `EvokeCost::Mana` mirrors `FlashbackCost::Mana`; `EvokeCost::NonMana(...)`
+/// delegates to the shared `split_alt_cost_components` walker.
+pub(super) fn split_evoke_cost_components(
+    evoke: &crate::types::keywords::EvokeCost,
+) -> (Option<crate::types::mana::ManaCost>, Option<AbilityCost>) {
+    use crate::types::keywords::EvokeCost;
+    match evoke {
+        EvokeCost::Mana(mana) => (Some(mana.clone()), None),
+        EvokeCost::NonMana(ab) => split_alt_cost_components(ab),
+    }
+}
+
+/// CR 601.2f-h: Partition an arbitrary `AbilityCost` into its mana sub-cost
+/// (paid through the normal mana-payment phase per CR 601.2g) and the
+/// non-mana residual (paid via `pay_additional_cost` per CR 601.2h). Returns
+/// `(Some(mana), None)` for a single mana cost, `(None, Some(cost))` for
+/// pure non-mana, or `(Some(mana), Some(residual))` for compound costs like
+/// "Flashback—{1}{U}, Pay 3 life". Lifted out of
+/// `split_flashback_cost_components` so flashback/evoke share one walker.
+pub(super) fn split_alt_cost_components(
+    cost: &AbilityCost,
+) -> (Option<crate::types::mana::ManaCost>, Option<AbilityCost>) {
+    match cost {
+        AbilityCost::Mana { cost } => (Some(cost.clone()), None),
+        AbilityCost::Composite { costs } => {
             // Find the (single) Mana sub-cost and partition the rest.
             let mana_idx = costs
                 .iter()
@@ -6425,7 +6501,7 @@ pub(super) fn split_flashback_cost_components(
                 }
             }
         }
-        FlashbackCost::NonMana(other) => (None, Some(other.clone())),
+        other => (None, Some(other.clone())),
     }
 }
 
@@ -19493,14 +19569,17 @@ mod tests {
         let spell_meta = build_spell_meta(&state, PlayerId(0), spell);
         let any_color =
             crate::game::static_abilities::player_can_spend_as_any_color(&state, PlayerId(0));
-        let max_life = crate::game::life_costs::max_phyrexian_life_payments(&state, PlayerId(0));
+        let permissions = crate::game::static_abilities::build_cost_permission_context(
+            &state,
+            PlayerId(0),
+            any_color,
+        );
         let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
         let current_shards = crate::game::mana_payment::compute_phyrexian_shards(
             &state.players[0].mana_pool,
             &state.objects.get(&spell).unwrap().mana_cost,
             spell_ctx.as_ref(),
-            any_color,
-            max_life,
+            permissions,
         );
         assert_eq!(current_shards.len(), 1);
         assert!(
@@ -19952,6 +20031,271 @@ mod tests {
                 result.is_err(),
                 "CR 702.190a: Sneak cast from {bad_zone:?} must be rejected \
                  (source zone must be Hand)"
+            );
+        }
+    }
+
+    // === CR 107.4f: K'rrik life-for-{B} payment substitution (GH #595) ===
+    //
+    // K'rrik, Son of Yawgmoth's middle ability: "For each {B} in a cost, you
+    // may pay 2 life rather than pay that mana." Engine wires the static
+    // through `PayLifeAsColoredMana { color: Black }` → `LifePaymentColors` →
+    // `effective_shard_requirement` promotion → existing Phyrexian pause/
+    // payment infrastructure. These tests cover the spell-cast side only.
+    // Activated-ability mana costs are deferred to GH #600 (require
+    // `pending_activation` pause/resume primitive not yet built).
+    mod krrik_life_for_color {
+        use super::*;
+
+        /// Attach a `PayLifeAsColoredMana { color: Black }` static (K'rrik's
+        /// middle ability) to a fresh permanent on the battlefield. Returns
+        /// the permanent's `ObjectId`. Mirrors `add_cant_lose_life_permanent`.
+        fn add_krrik_static(state: &mut GameState, owner: PlayerId) -> ObjectId {
+            use crate::types::mana::ManaColor;
+            use crate::types::statics::StaticMode;
+            let id = create_object(
+                state,
+                CardId(0x6911),
+                owner,
+                "K'rrik, Son of Yawgmoth".to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&id).unwrap().static_definitions.push(
+                StaticDefinition::new(StaticMode::PayLifeAsColoredMana {
+                    color: ManaColor::Black,
+                })
+                .affected(TargetFilter::Player),
+            );
+            id
+        }
+
+        /// Build a black instant in `player`'s hand with the requested cost.
+        fn create_instant_with_cost(
+            state: &mut GameState,
+            player: PlayerId,
+            shards: Vec<ManaCostShard>,
+            generic: u32,
+        ) -> ObjectId {
+            let obj_id = create_object(
+                state,
+                CardId(0x9595),
+                player,
+                "Krrik Test Spell".to_string(),
+                Zone::Hand,
+            );
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+            obj.mana_cost = ManaCost::Cost { shards, generic };
+            obj_id
+        }
+
+        /// CR 107.4f + CR 118.3b: Baseline K'rrik — a {B} spell with no black
+        /// mana but ample life is castable, with the engine auto-deciding the
+        /// life-payment route (no `ManaOrLife` choice, so no pause). After
+        /// announcement, life must drop by 2 and the spell is on the stack.
+        ///
+        /// Reverted-fix discriminator: without the parser/promotion plumbing,
+        /// `can_cast_object_now` rejects this cast and `handle_cast_spell`
+        /// errors with `ActionNotAllowed("Cannot pay mana cost")`.
+        #[test]
+        fn krrik_offers_life_payment_for_black_shard() {
+            let mut state = setup_game_at_main_phase();
+            add_krrik_static(&mut state, PlayerId(0));
+            state.players[0].life = 20;
+            let spell =
+                create_instant_with_cost(&mut state, PlayerId(0), vec![ManaCostShard::Black], 0);
+            assert!(
+                can_cast_object_now(&state, PlayerId(0), spell),
+                "CR 107.4f: K'rrik must enable {{B}} cast with 0 black mana + 20 life"
+            );
+
+            let mut events = Vec::new();
+            let life_before = state.players[0].life;
+            let _waiting =
+                handle_cast_spell(&mut state, PlayerId(0), spell, CardId(0x9595), &mut events)
+                    .expect("CR 107.4f: K'rrik {B} cast must succeed via auto life payment");
+
+            assert_eq!(
+                state.players[0].life,
+                life_before - 2,
+                "CR 118.3b: auto-decided K'rrik life payment must deduct exactly 2 life"
+            );
+            assert!(
+                state.stack.iter().any(|s| s.source_id == spell),
+                "CR 601.2a: successful cast must push the spell onto the stack"
+            );
+        }
+
+        /// CR 107.4f + CR 601.2f: When both mana and life routes are viable
+        /// (1 black mana available + life budget), the engine pauses at
+        /// `PhyrexianPayment` with `ManaOrLife` so the player can choose.
+        #[test]
+        fn krrik_pauses_when_mana_and_life_both_viable() {
+            let mut state = setup_game_at_main_phase();
+            add_krrik_static(&mut state, PlayerId(0));
+            state.players[0].life = 20;
+            // 1 black mana → can pay mana OR life; engine must surface the choice.
+            add_mana(&mut state, PlayerId(0), ManaType::Black, 1);
+            let spell =
+                create_instant_with_cost(&mut state, PlayerId(0), vec![ManaCostShard::Black], 0);
+
+            let mut events = Vec::new();
+            let waiting =
+                handle_cast_spell(&mut state, PlayerId(0), spell, CardId(0x9595), &mut events)
+                    .expect("CR 107.4f: cast must be legal");
+            match waiting {
+                crate::types::game_state::WaitingFor::PhyrexianPayment { shards, .. } => {
+                    assert_eq!(shards.len(), 1);
+                    assert!(
+                        matches!(
+                            shards[0].options,
+                            crate::types::game_state::ShardOptions::ManaOrLife
+                        ),
+                        "CR 107.4f: with both mana and life viable, surface ManaOrLife"
+                    );
+                }
+                other => panic!("expected PhyrexianPayment ManaOrLife, got {other:?}"),
+            }
+            let life_before = state.players[0].life;
+            let choices = vec![crate::types::game_state::ShardChoice::PayLife];
+            super::super::casting_costs::finalize_mana_payment_with_phyrexian_choices(
+                &mut state,
+                PlayerId(0),
+                &choices,
+                &mut events,
+            )
+            .expect("CR 107.4f: PayLife resume must succeed");
+            assert_eq!(
+                state.players[0].life,
+                life_before - 2,
+                "CR 118.3b: explicit PayLife must deduct 2 life"
+            );
+        }
+
+        /// CR 107.4f + 2019-08-23 K'rrik ruling: the substitution applies to
+        /// `{B}` shards only — never to `{2}` generic. With K'rrik in play and
+        /// a {1}{B} spell, having 0 mana and 20 life is NOT enough: the {1}
+        /// shard requires generic mana, which life cannot replace.
+        ///
+        /// Reverted-fix discriminator: if K'rrik incorrectly promoted generic
+        /// shards, this test would observe a successful pause/cast.
+        #[test]
+        fn krrik_does_not_substitute_for_generic_mana() {
+            let mut state = setup_game_at_main_phase();
+            add_krrik_static(&mut state, PlayerId(0));
+            state.players[0].life = 20;
+            let spell =
+                create_instant_with_cost(&mut state, PlayerId(0), vec![ManaCostShard::Black], 1);
+
+            assert!(
+                !can_cast_object_now(&state, PlayerId(0), spell),
+                "CR 107.4f: K'rrik cannot pay the {{1}} generic part with life"
+            );
+
+            let mut events = Vec::new();
+            let result =
+                handle_cast_spell(&mut state, PlayerId(0), spell, CardId(0x9595), &mut events);
+            assert!(
+                result.is_err(),
+                "CR 107.4f: cast of {{1}}{{B}} with empty pool + K'rrik + 20 life must be rejected"
+            );
+        }
+
+        /// CR 107.4f hybrid Phyrexian promotion: a `{B/R}` hybrid shard under
+        /// K'rrik gains the life option via `Hybrid(Black, Red)` →
+        /// `HybridPhyrexian(Black, Red)`. With only red mana available, the
+        /// player can pay the red half OR 2 life — `ShardOptions::ManaOrLife`.
+        #[test]
+        fn krrik_promotes_hybrid_black_shard() {
+            let mut state = setup_game_at_main_phase();
+            add_krrik_static(&mut state, PlayerId(0));
+            state.players[0].life = 20;
+            // 1 red mana in pool — red half of {B/R} payable; black half
+            // promoted to life via K'rrik.
+            add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+            let spell =
+                create_instant_with_cost(&mut state, PlayerId(0), vec![ManaCostShard::BlackRed], 0);
+
+            let mut events = Vec::new();
+            let waiting =
+                handle_cast_spell(&mut state, PlayerId(0), spell, CardId(0x9595), &mut events)
+                    .expect("CR 107.4f: hybrid B/R promotion must enable castability");
+            match waiting {
+                crate::types::game_state::WaitingFor::PhyrexianPayment { shards, .. } => {
+                    assert_eq!(shards.len(), 1);
+                    assert!(
+                        matches!(
+                            shards[0].options,
+                            crate::types::game_state::ShardOptions::ManaOrLife
+                        ),
+                        "CR 107.4f: with red mana + life available, hybrid Phyrexian shard must offer both"
+                    );
+                }
+                other => panic!("expected PhyrexianPayment for promoted hybrid, got {other:?}"),
+            }
+        }
+
+        /// CR 107.4f + CR 107.4e: K'rrik promotes `{2/B}` to
+        /// `TwoGenericHybridPhyrexian(Black)` — the synthetic fusion arm.
+        /// With 0 mana and ample life, only the 2-life route is viable so the
+        /// engine auto-decides: cast succeeds, life drops 2, spell on stack.
+        /// (No pause — single option, no `ManaOrLife` choice.)
+        ///
+        /// Reverted-fix discriminator: without the new
+        /// `TwoGenericHybridPhyrexian` variant + promotion table, the {2/B}
+        /// shard stays `TwoGenericHybrid(Black)` and the cast is rejected
+        /// (no black mana, no generic mana).
+        #[test]
+        fn krrik_promotes_two_generic_hybrid_black_shard() {
+            let mut state = setup_game_at_main_phase();
+            add_krrik_static(&mut state, PlayerId(0));
+            state.players[0].life = 20;
+            let spell =
+                create_instant_with_cost(&mut state, PlayerId(0), vec![ManaCostShard::TwoBlack], 0);
+            assert!(
+                can_cast_object_now(&state, PlayerId(0), spell),
+                "CR 107.4f: TwoGenericHybridPhyrexian promotion must enable cast"
+            );
+
+            let mut events = Vec::new();
+            let life_before = state.players[0].life;
+            let _waiting =
+                handle_cast_spell(&mut state, PlayerId(0), spell, CardId(0x9595), &mut events)
+                    .expect("CR 107.4f: {2/B} promoted under K'rrik must cast via life");
+            assert_eq!(
+                state.players[0].life,
+                life_before - 2,
+                "CR 118.3b: auto-paid life for {{2/B/P}} shard must deduct 2 life"
+            );
+            assert!(
+                state.stack.iter().any(|s| s.source_id == spell),
+                "CR 601.2a: successful cast must push the spell onto the stack"
+            );
+        }
+
+        /// CR 119.8: K'rrik substitution must be gated by `CantLoseLife` — if
+        /// the payer cannot lose life, the life-option budget collapses to 0,
+        /// so a {B} spell with no black mana is unpayable even with 20 life.
+        #[test]
+        fn krrik_respects_cant_lose_life_gate() {
+            let mut state = setup_game_at_main_phase();
+            add_krrik_static(&mut state, PlayerId(0));
+            // Add a CantLoseLife static — Phyrexian life budget drops to 0.
+            add_cant_lose_life_permanent(&mut state, PlayerId(0));
+            state.players[0].life = 20;
+            let spell =
+                create_instant_with_cost(&mut state, PlayerId(0), vec![ManaCostShard::Black], 0);
+
+            assert!(
+                !can_cast_object_now(&state, PlayerId(0), spell),
+                "CR 119.8: CantLoseLife must forbid the K'rrik life-substitution branch"
             );
         }
     }
@@ -20551,7 +20895,45 @@ mod tests {
             obj.base_power = Some(1);
             obj.base_toughness = Some(1);
             obj.base_characteristics_initialized = true;
-            obj.keywords.push(Keyword::Evoke(evoke));
+            obj.keywords
+                .push(Keyword::Evoke(crate::types::keywords::EvokeCost::Mana(
+                    evoke,
+                )));
+            obj_id
+        }
+
+        /// An Evoke creature in hand with a non-mana evoke cost (MH2 Solitude /
+        /// Endurance / Grief / Subtlety / Fury class). The evoke cost is an
+        /// `AbilityCost` (typically `Exile { count: 1, zone: Hand, filter: <color
+        /// card> }`); the printed mana cost remains normal.
+        fn create_evoke_spell_non_mana(
+            state: &mut GameState,
+            player: PlayerId,
+            card_id: u64,
+            printed: ManaCost,
+            evoke_non_mana: AbilityCost,
+        ) -> ObjectId {
+            let obj_id = create_object(
+                state,
+                CardId(card_id),
+                player,
+                "Non-mana Evoke Creature".to_string(),
+                Zone::Hand,
+            );
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = printed.clone();
+            obj.base_mana_cost = printed;
+            obj.power = Some(3);
+            obj.toughness = Some(3);
+            obj.base_power = Some(3);
+            obj.base_toughness = Some(3);
+            obj.base_characteristics_initialized = true;
+            obj.keywords
+                .push(Keyword::Evoke(crate::types::keywords::EvokeCost::NonMana(
+                    evoke_non_mana,
+                )));
             obj_id
         }
 
@@ -20634,7 +21016,7 @@ mod tests {
                     );
                     assert_eq!(
                         alternative_cost,
-                        ManaCost::generic(2),
+                        Some(ManaCost::generic(2)),
                         "CR 118.9d: displayed alternative_cost must reflect the \
                          reduction applied to the warp cost"
                     );
@@ -20745,12 +21127,172 @@ mod tests {
                         "no modifiers ⇒ displayed normal_cost equals printed cost"
                     );
                     assert_eq!(
-                        alternative_cost, warp,
+                        alternative_cost,
+                        Some(warp),
                         "no modifiers ⇒ displayed alternative_cost equals warp cost"
                     );
                 }
                 other => panic!("expected AlternativeCastChoice(Warp), got {:?}", other),
             }
+        }
+
+        /// CR 702.74a + CR 118.9 + CR 601.2h — Issue #580 discriminator.
+        ///
+        /// Solitude-class non-mana Evoke ("Evoke—Exile a white card from your
+        /// hand.") must surface `WaitingFor::AlternativeCastChoice` with
+        /// `keyword: Evoke`, `alternative_cost: None` (no mana sub-cost) and
+        /// the typed exile cost in `alternative_additional_cost`.
+        ///
+        /// REVERTED-FIX DISCRIMINATOR (each fix layer is load-bearing):
+        ///  - Pre-fix `Keyword::Evoke(ManaCost)` cannot represent a non-mana
+        ///    evoke, so the test fixture itself fails to compile under a
+        ///    reverted type definition.
+        ///  - Pre-fix Evoke routing block reads `Keyword::Evoke(cost)` as a
+        ///    `ManaCost` directly — affordability becomes `can_pay({0}) ⇒ true`
+        ///    and the prompt surfaces but with no non-mana sub-cost displayed.
+        ///    Asserting `alternative_additional_cost == Some(Exile{..})`
+        ///    discriminates this regression.
+        ///  - Pre-fix `WaitingFor::AlternativeCastChoice` lacks
+        ///    `alternative_additional_cost` entirely, so the destructure fails
+        ///    at compile time.
+        #[test]
+        fn evoke_non_mana_cost_surfaces_alt_cast_choice_with_typed_exile() {
+            use crate::types::ability::{FilterProp, TypedFilter};
+            use crate::types::mana::ManaColor;
+
+            let mut state = setup_game_at_main_phase();
+            // 5 white mana — enough for {3}{W}{W} Solitude printed cost.
+            add_mana(&mut state, PlayerId(0), ManaType::White, 5);
+
+            // Build the "white card" exile filter — the parse_oracle_cost output
+            // shape for "exile a white card from your hand".
+            let white_card_filter = TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Card],
+                controller: Some(ControllerRef::You),
+                properties: vec![FilterProp::HasColor {
+                    color: ManaColor::White,
+                }],
+            });
+            let exile_cost = AbilityCost::Exile {
+                count: 1,
+                zone: Some(Zone::Hand),
+                filter: Some(white_card_filter),
+            };
+
+            // Solitude-shaped fixture — printed {3}{W}{W}, non-mana evoke.
+            let solitude = create_evoke_spell_non_mana(
+                &mut state,
+                PlayerId(0),
+                600,
+                ManaCost::Cost {
+                    generic: 3,
+                    shards: vec![ManaCostShard::White, ManaCostShard::White],
+                },
+                exile_cost.clone(),
+            );
+
+            // Put a second white card in hand so the exile sub-cost is payable.
+            let _white_card_in_hand = {
+                let id = create_object(
+                    &mut state,
+                    CardId(601),
+                    PlayerId(0),
+                    "White Card In Hand".to_string(),
+                    Zone::Hand,
+                );
+                let obj = state.objects.get_mut(&id).unwrap();
+                obj.card_types.core_types.push(CoreType::Creature);
+                obj.color.push(ManaColor::White);
+                id
+            };
+
+            let mut events = Vec::new();
+            let wf = handle_cast_spell(&mut state, PlayerId(0), solitude, CardId(600), &mut events)
+                .expect("Solitude cast must route to AlternativeCastChoice(Evoke)");
+
+            match wf {
+                WaitingFor::AlternativeCastChoice {
+                    keyword: AlternativeCastKeyword::Evoke,
+                    alternative_cost,
+                    alternative_additional_cost,
+                    ..
+                } => {
+                    assert!(
+                        alternative_cost.is_none(),
+                        "non-mana evoke has no mana sub-cost; got {:?}",
+                        alternative_cost
+                    );
+                    assert!(
+                        matches!(
+                            alternative_additional_cost,
+                            Some(AbilityCost::Exile { ref zone, .. }) if *zone == Some(Zone::Hand)
+                        ),
+                        "non-mana evoke must surface the exile sub-cost in \
+                         alternative_additional_cost; got {:?}",
+                        alternative_additional_cost
+                    );
+                }
+                other => panic!("expected AlternativeCastChoice(Evoke), got {:?}", other),
+            }
+        }
+
+        /// CR 118.3: With no other white card in hand, the non-mana evoke cost
+        /// is unpayable and the Evoke option MUST NOT be offered. The cast
+        /// proceeds normally (or returns a Priority/normal-cast state).
+        ///
+        /// REVERTED-FIX DISCRIMINATOR: without the
+        /// `evoke_non_mana_affordable` pre-check, the Evoke prompt would
+        /// still surface and the player could pick a path they cannot finish.
+        #[test]
+        fn evoke_non_mana_cost_suppressed_when_unpayable() {
+            use crate::types::ability::{FilterProp, TypedFilter};
+            use crate::types::mana::ManaColor;
+
+            let mut state = setup_game_at_main_phase();
+            add_mana(&mut state, PlayerId(0), ManaType::White, 5);
+
+            let white_card_filter = TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Card],
+                controller: Some(ControllerRef::You),
+                properties: vec![FilterProp::HasColor {
+                    color: ManaColor::White,
+                }],
+            });
+            let exile_cost = AbilityCost::Exile {
+                count: 1,
+                zone: Some(Zone::Hand),
+                filter: Some(white_card_filter),
+            };
+
+            let solitude = create_evoke_spell_non_mana(
+                &mut state,
+                PlayerId(0),
+                602,
+                ManaCost::Cost {
+                    generic: 3,
+                    shards: vec![ManaCostShard::White, ManaCostShard::White],
+                },
+                exile_cost,
+            );
+            // NOTE: deliberately no second white card in hand — the only white
+            // card is Solitude itself, and `AbilityCost::Exile` semantics on
+            // hand demand a card distinct from the spell being cast.
+
+            let mut events = Vec::new();
+            let wf = handle_cast_spell(&mut state, PlayerId(0), solitude, CardId(602), &mut events)
+                .expect("Solitude must remain castable for its printed mana cost");
+
+            assert!(
+                !matches!(
+                    wf,
+                    WaitingFor::AlternativeCastChoice {
+                        keyword: AlternativeCastKeyword::Evoke,
+                        ..
+                    }
+                ),
+                "evoke must not surface when its non-mana cost is unpayable; got {:?}",
+                wf
+            );
         }
 
         /// Test 6 — Evoke mirror of test 1. Printed cost unaffordable at face
@@ -22568,10 +23110,11 @@ mod tests {
                 shards: vec![ManaCostShard::Green],
                 generic: 1,
             },
-            alternative_cost: ManaCost::Cost {
+            alternative_cost: Some(ManaCost::Cost {
                 shards: vec![ManaCostShard::Green],
                 generic: 3,
-            },
+            }),
+            alternative_additional_cost: None,
             payment_mode: CastPaymentMode::Auto,
         };
         let cands = candidate_actions_broad(&state);

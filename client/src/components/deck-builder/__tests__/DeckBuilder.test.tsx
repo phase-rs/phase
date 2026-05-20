@@ -6,6 +6,7 @@ import userEvent from "@testing-library/user-event";
 import { DeckBuilder } from "../DeckBuilder";
 import { loadPreconDeckMap } from "../../../hooks/useDecks";
 import { resolveCommander } from "../../../services/deckParser";
+import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX } from "../../../constants/storage";
 
 const cacheCardsMock = vi.fn();
 
@@ -141,6 +142,42 @@ describe("DeckBuilder", () => {
       );
       expect(persisted.commander).toEqual(["Card 1"]);
     });
+  });
+
+  it("renames an existing saved deck instead of duplicating it", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + "Old Deck",
+      JSON.stringify({
+        main: [{ name: "Lightning Bolt", count: 4 }],
+        sideboard: [],
+        format: "Standard",
+      }),
+    );
+    localStorage.setItem(ACTIVE_DECK_KEY, "Old Deck");
+
+    render(
+      <DeckBuilder
+        format="Standard"
+        onFormatChange={vi.fn()}
+        initialDeckName="Old Deck"
+        searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}
+        onSearchFiltersChange={vi.fn()}
+        onResetSearch={vi.fn()}
+      />,
+    );
+
+    const nameInput = await screen.findByPlaceholderText("Deck name...");
+    await waitFor(() => expect(nameInput).toHaveValue("Old Deck"));
+    await user.clear(nameInput);
+    await user.type(nameInput, "Renamed Deck");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Old Deck")).toBeNull();
+      expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Renamed Deck")).not.toBeNull();
+    });
+    expect(localStorage.getItem(ACTIVE_DECK_KEY)).toBe("Renamed Deck");
   });
 
   it("does not reactively auto-resolve a commander mid-edit", async () => {

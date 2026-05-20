@@ -117,4 +117,34 @@ describe("PlayerArea", () => {
       container.querySelector('button[title="Commander: Opponent Commander"]'),
     ).toBeInTheDocument();
   });
+
+  it("renders command-zone commanders without commander damage", () => {
+    useGameStore.setState({
+      gameState: createGameState({
+        format_config: {
+          format: "TinyLeaders",
+          starting_life: 20,
+          min_players: 2,
+          max_players: 2,
+          deck_size: 50,
+          singleton: true,
+          command_zone: true,
+          commander_damage_threshold: null,
+          range_of_influence: null,
+          team_based: false,
+          uses_commander: false,
+          allow_debug_actions: false,
+        },
+      }),
+      legalActions: [],
+      spellCosts: {},
+    });
+
+    const { container } = render(<PlayerArea playerId={1} mode="focused" />);
+
+    expect(
+      container.querySelector('button[title="Commander: Opponent Commander"]'),
+    ).toBeInTheDocument();
+    expect(container.querySelector('[data-testid="commander-damage-1"]')).toBeNull();
+  });
 });

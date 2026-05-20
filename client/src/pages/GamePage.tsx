@@ -1326,7 +1326,8 @@ function GamePageContent({
           </div>
         )}
 
-      {waitingFor?.type === "MulliganBottomCards" &&
+      {(waitingFor?.type === "MulliganBottomCards" ||
+        waitingFor?.type === "OpeningHandBottomCards") &&
         (() => {
           const entry = waitingFor.data.pending.find(
             (e) => e.player === playerId,
@@ -1336,6 +1337,7 @@ function GamePageContent({
             <MulliganBottomCardsPrompt
               playerId={entry.player}
               count={entry.count}
+              openingHandBottom={waitingFor.type === "OpeningHandBottomCards"}
               onChoose={handleBottomCards}
             />
           );
@@ -1434,6 +1436,7 @@ function GamePageContent({
 interface MulliganBottomCardsPromptProps {
   playerId: number;
   count: number;
+  openingHandBottom?: boolean;
   onChoose: (id: string) => void;
 }
 
@@ -1760,6 +1763,7 @@ function CompanionRevealPrompt({
 function MulliganBottomCardsPrompt({
   playerId,
   count,
+  openingHandBottom = false,
   onChoose,
 }: MulliganBottomCardsPromptProps) {
   const player = useGameStore((s) => s.gameState?.players[playerId]);
@@ -1779,9 +1783,13 @@ function MulliganBottomCardsPrompt({
 
   return (
     <MulliganPanel
-      eyebrow="London Mulligan"
+      eyebrow={openingHandBottom ? "Tiny Leaders" : "London Mulligan"}
       title={`Put ${count} card${count > 1 ? "s" : ""} on the bottom`}
-      subtitle={`Select ${count} card${count > 1 ? "s" : ""} from your hand. They will be returned to the bottom of your library in the order you choose here.`}
+      subtitle={
+        openingHandBottom
+          ? `Select ${count} card${count > 1 ? "s" : ""} from your opening hand before mulligans begin.`
+          : `Select ${count} card${count > 1 ? "s" : ""} from your hand. They will be returned to the bottom of your library in the order you choose here.`
+      }
       footer={
         <motion.div
           className="flex w-full flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"

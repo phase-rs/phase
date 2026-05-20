@@ -1,3 +1,5 @@
+import type { GameFormat } from "../adapter/types";
+
 interface ScryfallDataEntry {
   oracle_id: string;
   /** Lowercased face names in Scryfall's `card_faces` order; one entry for
@@ -141,6 +143,22 @@ export interface ScryfallCard {
     name: string;
     image_uris?: Record<string, string>;
   }>;
+}
+
+const SCRYFALL_LEGALITY_KEY_OVERRIDES: Partial<Record<GameFormat, string | null>> = {
+  Brawl: "standardbrawl",
+  DuelCommander: "duel",
+  FreeForAll: null,
+  HistoricBrawl: "brawl",
+  Limited: null,
+  TinyLeaders: null,
+  TwoHeadedGiant: null,
+};
+
+export function scryfallLegalityKey(format: GameFormat): string | undefined {
+  const override = SCRYFALL_LEGALITY_KEY_OVERRIDES[format];
+  if (override === null) return undefined;
+  return override ?? format.toLowerCase();
 }
 
 interface ScryfallSearchResponse {

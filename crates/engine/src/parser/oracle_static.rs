@@ -533,6 +533,72 @@ fn parse_cost_payment_prohibition_statics(
     ])
 }
 
+/// CR 107.4f: Parse the K'rrik-class payment-substitution static:
+/// "For each {C} in a cost, you may pay 2 life rather than pay that mana."
+///
+/// The mana symbol `{C}` is a single colored mana symbol (W/U/B/R/G). The
+/// life amount must be exactly 2 — no printed exemplar uses any other value,
+/// and the Phyrexian-shape infrastructure assumes 2.
+///
+/// Composed from nom combinators end-to-end; no string matching for dispatch.
+fn parse_pay_life_as_colored_mana(text: &str) -> Option<StaticDefinition> {
+    let trimmed = text.trim().trim_end_matches('.');
+    // Mana symbols are case-preserved in Oracle text — parse against original
+    // case, not lowercase. The phrase tail is normalized so case-insensitive
+    // matching there is safe; we apply a lowercase shadow only for tail tags.
+    let lower_trimmed = trimmed.to_lowercase();
+
+    // Combinator: "for each " + parse_colored_mana_symbol + " in a cost, you may pay " + parse_number(=2) + " life rather than pay that mana"
+    // Run nom on a lowercase-prefix view to handle "For each"/"for each" uniformly,
+    // but the brace section is case-stable.
+    let parser_result: OracleResult<'_, crate::types::mana::ManaColor> = (|| {
+        let i = lower_trimmed.as_str();
+        let (i, _) = tag::<_, _, OracleError<'_>>("for each ").parse(i)?;
+        // The next chars (`{B}`, etc.) are also `{b}` in the lowercased form —
+        // accept the lowercase form by mapping each tag.
+        let (i, color) = alt((
+            value(
+                crate::types::mana::ManaColor::White,
+                tag::<_, _, OracleError<'_>>("{w}"),
+            ),
+            value(
+                crate::types::mana::ManaColor::Blue,
+                tag::<_, _, OracleError<'_>>("{u}"),
+            ),
+            value(
+                crate::types::mana::ManaColor::Black,
+                tag::<_, _, OracleError<'_>>("{b}"),
+            ),
+            value(
+                crate::types::mana::ManaColor::Red,
+                tag::<_, _, OracleError<'_>>("{r}"),
+            ),
+            value(
+                crate::types::mana::ManaColor::Green,
+                tag::<_, _, OracleError<'_>>("{g}"),
+            ),
+        ))
+        .parse(i)?;
+        let (i, _) = tag::<_, _, OracleError<'_>>(" in a cost, you may pay ").parse(i)?;
+        let (i, n) = nom_primitives::parse_number(i)?;
+        if n != 2 {
+            // CR 107.4f: only the 2-life Phyrexian shape exists today; any other
+            // life value falls through to Unimplemented for hand verification.
+            return Err(super::oracle_nom::error::oracle_err(i));
+        }
+        let (i, _) = tag::<_, _, OracleError<'_>>(" life rather than pay that mana").parse(i)?;
+        let (i, _) = all_consuming(opt(tag::<_, _, OracleError<'_>>("."))).parse(i)?;
+        Ok((i, color))
+    })();
+
+    let (_, color) = parser_result.ok()?;
+    Some(
+        StaticDefinition::new(StaticMode::PayLifeAsColoredMana { color })
+            .affected(TargetFilter::Player)
+            .description(text.to_string()),
+    )
+}
+
 /// Parse a static/continuous ability line into a StaticDefinition.
 /// Handles: "Enchanted creature gets +N/+M", "has {keyword}",
 /// "Creatures you control get +N/+M", etc.
@@ -759,6 +825,15 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
                 .affected(TargetFilter::Player)
                 .description(text.to_string()),
         );
+    }
+
+    // CR 107.4f: K'rrik-class life-for-color payment substitution —
+    // "For each {C} in a cost, you may pay 2 life rather than pay that mana."
+    // Combinator parses `{C}` directly from the original text (mana symbols are
+    // case-preserved in Oracle text); lowercase tail matching on the rest of
+    // the sentence is fine because Oracle text outside the braces is normalized.
+    if let Some(def) = parse_pay_life_as_colored_mana(&text) {
+        return Some(def);
     }
 
     if nom_tag_tp(&tp, "you may choose not to untap ").is_some()
@@ -9395,7 +9470,17 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
         } else {
             prefix
         };
-        let type_desc = without_from
+        // CR 201.3 / CR 113.6: Strip the trailing "with the chosen name" qualifier
+        // (Disruptor Flute: "Spells with the chosen name cost {3} more to cast.")
+        // before the standard suffix-trim chain runs. Track it so the spell filter is
+        // composed with `HasChosenName` after type parsing — same convention used by
+        // `parse_continuous_subject_filter` for object-class chosen-name phrases.
+        let (without_chosen, has_chosen_name) =
+            match nom_primitives::split_once_on(without_from, " with the chosen name") {
+                Ok((_, (before, _))) => (before, true),
+                Err(_) => (without_from, false),
+            };
+        let type_desc = without_chosen
             .trim_end_matches(" you cast")
             .trim_end_matches(" your opponents cast")
             .trim_end_matches(" opponents cast")
@@ -9403,7 +9488,8 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
             .trim_end_matches(" spell")
             .trim();
         // "spells" alone means no type restriction (bare "Spells you cast cost...")
-        if type_desc.is_empty() || type_desc == "spells" || type_desc == "spell" {
+        let typed_filter = if type_desc.is_empty() || type_desc == "spells" || type_desc == "spell"
+        {
             None
         } else {
             // First try parse_type_phrase for standard type patterns
@@ -9426,6 +9512,16 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
                     })
                 }
             }
+        };
+        // Compose chosen-name constraint with the typed prefix (if any). Bare
+        // "Spells with the chosen name" → `HasChosenName` alone; typed
+        // "<Type> spells with the chosen name" → `And{Typed, HasChosenName}`.
+        match (typed_filter, has_chosen_name) {
+            (Some(tf), true) => Some(TargetFilter::And {
+                filters: vec![tf, TargetFilter::HasChosenName],
+            }),
+            (None, true) => Some(TargetFilter::HasChosenName),
+            (tf, false) => tf,
         }
     } else {
         None
@@ -11022,6 +11118,33 @@ mod tests {
                 _ => panic!("Expected Typed filter"),
             }
         }
+    }
+
+    /// CR 201.3 / CR 113.6 + CR 601.2f: Disruptor Flute — "Spells with the
+    /// chosen name cost {3} more to cast." Bare "spells" (no type adjective)
+    /// composes with the `HasChosenName` filter so the cost bump applies only
+    /// to spells matching the source's bound `ChosenAttribute::CardName`, not
+    /// every spell on every player's stack. Regression discriminator for #603:
+    /// previously the chosen-name suffix was swallowed and the parser emitted
+    /// a bare `Typed(Card)` filter, taxing every spell in hand.
+    #[test]
+    fn static_spells_with_chosen_name_cost_more_disruptor_flute() {
+        let def = parse_static_line("Spells with the chosen name cost {3} more to cast.").unwrap();
+        let StaticMode::RaiseCost {
+            amount,
+            spell_filter,
+            dynamic_count,
+        } = def.mode
+        else {
+            panic!("expected RaiseCost, got {:?}", def.mode);
+        };
+        assert!(matches!(amount, ManaCost::Cost { generic: 3, .. }));
+        assert!(dynamic_count.is_none());
+        assert_eq!(
+            spell_filter,
+            Some(TargetFilter::HasChosenName),
+            "bare 'Spells with the chosen name' must lower to HasChosenName, not Typed(Card)"
+        );
     }
 
     /// CR 601.2f: Trinisphere — the cost-floor static. The line begins with
@@ -20255,6 +20378,60 @@ mod snapshot_tests {
         assert!(
             def.condition.is_some(),
             "expected the devotion condition attached"
+        );
+    }
+
+    /// CR 107.4f (Phyrexian shape) + K'rrik 2024-06-07 ruling: K'rrik's
+    /// granted permission "For each {B} in a cost, you may pay 2 life
+    /// rather than pay that mana" must lower to `PayLifeAsColoredMana`
+    /// targeting the correct color. Guards the parser regression that the
+    /// runtime tests in `casting.rs` cannot catch (they synthesize the
+    /// `StaticDefinition` directly, bypassing this combinator).
+    #[test]
+    fn parse_pay_life_as_colored_mana_for_krrik() {
+        let def = parse_static_line(
+            "For each {B} in a cost, you may pay 2 life rather than pay that mana.",
+        )
+        .expect("K'rrik line must parse to a StaticDefinition");
+        assert_eq!(
+            def.mode,
+            StaticMode::PayLifeAsColoredMana {
+                color: crate::types::mana::ManaColor::Black,
+            },
+        );
+        assert!(matches!(def.affected, Some(TargetFilter::Player)));
+    }
+
+    /// The combinator must reject other colors only by routing the wrong
+    /// `ManaColor`, not by silently dropping. Verifies the {R} variant
+    /// lowers symmetrically — guards against the `alt(...)` branch order
+    /// regressing color identification.
+    #[test]
+    fn parse_pay_life_as_colored_mana_red_variant() {
+        let def = parse_static_line(
+            "For each {R} in a cost, you may pay 2 life rather than pay that mana.",
+        )
+        .expect("Red-variant line must parse to a StaticDefinition");
+        assert_eq!(
+            def.mode,
+            StaticMode::PayLifeAsColoredMana {
+                color: crate::types::mana::ManaColor::Red,
+            },
+        );
+    }
+
+    /// CR 107.4f: only the 2-life Phyrexian shape exists in print today.
+    /// Other life values must fall through to `Unimplemented` (return
+    /// `None`) so coverage surfaces the gap rather than silently casting
+    /// the substitution at a wrong rate.
+    #[test]
+    fn parse_pay_life_as_colored_mana_rejects_non_two_life() {
+        assert!(
+            parse_static_line(
+                "For each {B} in a cost, you may pay 3 life rather than pay that mana."
+            )
+            .is_none(),
+            "non-2-life variants must not bind to PayLifeAsColoredMana"
         );
     }
 }

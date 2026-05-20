@@ -137,6 +137,12 @@ function currentPromptSummary({
       : "Waiting for another player to finish their mulligan.";
   }
 
+  if (waitingFor.type === "OpeningHandBottomCards") {
+    return waitingFor.data.pending.some((entry) => entry.player === playerId)
+      ? "Choose a card to put on the bottom before normal mulligans begin."
+      : "Waiting for another player to resolve their opening hand.";
+  }
+
   if (!canActForWaitingState) {
     return "Waiting for another player to act.";
   }

@@ -7960,20 +7960,32 @@ fn wrap_target_subject_damage(
     subject: &SubjectPhraseAst,
 ) -> Option<ParsedEffectClause> {
     let subject_target = subject.target.as_ref()?;
-    let Effect::DealDamage {
-        amount,
-        damage_source,
-        ..
-    } = &mut clause.effect
-    else {
-        return None;
-    };
-
     // CR 608.2c + CR 120.3: "target creature deals damage equal to its
     // power..." makes the chosen source object, not the spell card, deal the
     // damage. "Its power" is therefore the first target's current power.
-    rewrite_event_source_power_to_object_power(amount, ObjectScope::Target);
-    *damage_source = Some(DamageSource::Target);
+    // Both `DealDamage` (single recipient) and `DamageAll` (multi-recipient
+    // batch) carry this shape; only the source-attribution differs.
+    //
+    // NOTE: `Effect::DamageAll` has no `damage_source` field yet, so wrapping
+    // it produces the correct source-target picker and anaphoric power binding
+    // but the spell remains the damage source at resolution. That matters for
+    // protection-from-{color} rulings (CR 702.16 / CR 120.3 — Chandra's
+    // Ignition rulings 2015-06-22 mark the chosen creature as the source).
+    // Tracked as a follow-up; the present wrap unblocks the targeting flow.
+    match &mut clause.effect {
+        Effect::DealDamage {
+            amount,
+            damage_source,
+            ..
+        } => {
+            rewrite_event_source_power_to_object_power(amount, ObjectScope::Target);
+            *damage_source = Some(DamageSource::Target);
+        }
+        Effect::DamageAll { amount, .. } => {
+            rewrite_event_source_power_to_object_power(amount, ObjectScope::Target);
+        }
+        _ => return None,
+    }
 
     let mut damage_ability = AbilityDefinition::new(AbilityKind::Spell, clause.effect);
     damage_ability.sub_ability = clause.sub_ability;
@@ -14515,13 +14527,28 @@ fn try_parse_damage_with_remainder<'a>(
             ));
         }
         let (target, rem) = parse_target_with_ctx(after_to_for_classification, ctx);
+        let (target, rem) = refine_damage_target_remainder(target, rem);
+        // CR 119.5 + CR 700.4 + CR 120.3: Composite "each <object> and each <player>"
+        // (Chandra's Ignition: "to each other creature and each opponent"). The
+        // object filter is captured above; if the remainder begins with
+        // "and <player-scope>", lift it into `player_filter` so DamageAll covers
+        // both audiences uniformly instead of silently dropping the player half.
+        // Mirrors the lift in the simpler "deals N damage to each X and each Y"
+        // dispatch upstream (Pompeii, Goblin Chainwhirler, Hurricane class).
+        let trimmed = rem.trim_start_matches([',', ' ']);
+        let trimmed_lower = trimmed.to_lowercase();
+        let player_filter = tag::<_, _, OracleError<'_>>("and ")
+            .parse(trimmed_lower.as_str())
+            .ok()
+            .and_then(|(after_and, _)| parse_damage_each_player_scope(after_and));
+        let rem_out = if player_filter.is_some() { "" } else { rem };
         return Some((
             Effect::DamageAll {
                 amount,
                 target,
-                player_filter: None,
+                player_filter,
             },
-            rem,
+            rem_out,
         ));
     }
 
@@ -17378,6 +17405,89 @@ mod tests {
             ),
             "expected target-source-power damage, got {:?}",
             sub.effect
+        );
+    }
+
+    /// Issue #607 — Chandra's Ignition. "Target creature you control deals
+    /// damage equal to its power to each other creature and each opponent"
+    /// must lower to:
+    ///   - top-level `TargetOnly { target: Typed(Creature, You) }` (the
+    ///     source-target picker),
+    ///   - sub-ability `DamageAll { amount: Power(Target), target:
+    ///     Typed(Creature, Another), player_filter: Some(Opponent) }`.
+    ///
+    /// Previously the source wrapper was skipped (no picker shown) and the
+    /// "and each opponent" tail was silently dropped (opponents took no damage).
+    ///
+    /// NOTE: damage_source on DamageAll is tracked as a follow-up — until that
+    /// field exists, the spell stays the damage source at resolution, which
+    /// differs from CR 120.3 / Chandra's Ignition rulings (the chosen creature
+    /// should be the source). The targeting flow is unblocked regardless.
+    #[test]
+    fn target_subject_damage_compound_each_creature_and_each_opponent() {
+        let clause = parse_effect_clause(
+            "target creature you control deals damage equal to its power to each other creature and each opponent",
+            &mut ParseContext::default(),
+        );
+        let Effect::TargetOnly { target } = &clause.effect else {
+            panic!(
+                "expected TargetOnly source wrapper, got {:?}",
+                clause.effect
+            );
+        };
+        match target {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf
+                    .type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Creature)));
+            }
+            other => panic!("expected Typed{{Creature, You}} source, got {other:?}"),
+        }
+        let sub = clause
+            .sub_ability
+            .as_ref()
+            .expect("damage must be wrapped as sub-ability of TargetOnly source picker");
+        let Effect::DamageAll {
+            amount,
+            target,
+            player_filter,
+        } = sub.effect.as_ref()
+        else {
+            panic!("expected DamageAll sub-effect, got {:?}", sub.effect);
+        };
+        assert!(
+            matches!(
+                amount,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Target,
+                    },
+                }
+            ),
+            "expected Power(Target) amount (rebound from Anaphoric), got {amount:?}"
+        );
+        match target {
+            TargetFilter::Typed(tf) => {
+                assert!(tf
+                    .type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Creature)));
+                assert!(
+                    tf.properties
+                        .iter()
+                        .any(|p| matches!(p, FilterProp::Another)),
+                    "expected 'each other creature' to carry Another, got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("expected Typed{{Creature, Another}}, got {other:?}"),
+        }
+        assert_eq!(
+            *player_filter,
+            Some(PlayerFilter::Opponent),
+            "compound 'and each opponent' must lift into player_filter",
         );
     }
 

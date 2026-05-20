@@ -10,8 +10,9 @@ use engine::database::CardDatabase;
 use engine::game::engine::apply;
 use engine::game::{
     estimate_bracket, evaluate_deck_compatibility, filter_state_for_viewer, finalize_public_state,
-    is_commander_eligible, load_and_hydrate_decks, rehydrate_game_from_card_db, resolve_deck_list,
-    start_game, start_game_with_starting_player, validate_name_deck_for_format, BracketEstimate,
+    is_brawl_commander_eligible, is_commander_eligible, is_tiny_leader_eligible,
+    load_and_hydrate_decks, rehydrate_game_from_card_db, resolve_deck_list, start_game,
+    start_game_with_starting_player, validate_name_deck_for_format, BracketEstimate,
     DeckCompatibilityRequest, DeckList, PlayerDeckList,
 };
 use engine::types::format::{FormatConfig, GameFormat};
@@ -261,6 +262,32 @@ pub fn is_card_commander_eligible(name: &str) -> bool {
             return false;
         };
         db.get_face_by_name(name).is_some_and(is_commander_eligible)
+    })
+}
+
+/// Whether the named card can serve as this format's command-zone leader.
+/// Reads the engine's MTGJSON-derived `CardFace` leadership fields and
+/// format-specific deck-validation predicates.
+#[wasm_bindgen(js_name = isCardCommanderEligibleForFormat)]
+pub fn is_card_commander_eligible_for_format(name: &str, format: JsValue) -> bool {
+    let Ok(format) = serde_wasm_bindgen::from_value::<GameFormat>(format) else {
+        return false;
+    };
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return false;
+        };
+        let Some(face) = db.get_face_by_name(name) else {
+            return false;
+        };
+        match format {
+            GameFormat::Commander | GameFormat::DuelCommander => is_commander_eligible(face),
+            GameFormat::PauperCommander => is_commander_eligible(face),
+            GameFormat::TinyLeaders => is_tiny_leader_eligible(face),
+            GameFormat::Brawl | GameFormat::HistoricBrawl => is_brawl_commander_eligible(face),
+            _ => false,
+        }
     })
 }
 
