@@ -14178,21 +14178,42 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                         true
                     }
                     SpecialClause::InsteadClause(instead_def) => {
-                        if let Some(mut last_def) = defs.pop() {
+                        // CR 614.1a + CR 608.2c: assemble a multi-clause base + an
+                        // "instead" override so the runtime can produce both
+                        // branches. Clause 1 becomes the root and is the Cow-swap
+                        // target — when the override's `ConditionInstead` fires,
+                        // `effects/mod.rs` swaps the root's effect with the
+                        // override's at parent resolution, and the override branch
+                        // returns terminally (see the `ConditionInstead` arm at
+                        // ~line 2713 in `effects/mod.rs`). To make the tail clauses
+                        // (2..N) conditional on the override NOT firing, we stash
+                        // them in the override's `else_ability`: the runtime only
+                        // walks `else_ability` when the swap did not happen. Net:
+                        // condition true → only the override's effect runs (clause
+                        // 1 swapped away, tail bypassed); condition false → clause
+                        // 1 runs as printed, then the tail runs from
+                        // `else_ability`. Single-clause bases collapse to the
+                        // prior shape (empty tail → no `else_ability`).
+                        if !defs.is_empty() {
+                            let mut chain_defs = std::mem::take(&mut defs);
+                            let mut root = chain_defs.remove(0);
+                            for next in chain_defs {
+                                append_to_deepest_sub_ability(&mut root, Some(Box::new(next)));
+                            }
                             let mut instead = *instead_def.clone();
-                            // CR 702.33d + CR 707.10: Resolve "create N of those tokens" anaphor
-                            rewrite_those_tokens_from_antecedent(
-                                &mut instead.effect,
-                                &last_def.effect,
-                            );
+                            // CR 702.33d + CR 707.10: Resolve "create N of those
+                            // tokens" anaphor against the root (the antecedent
+                            // for a multi-clause base is the first printed clause).
+                            rewrite_those_tokens_from_antecedent(&mut instead.effect, &root.effect);
                             if rewrite_counter_instead_target_from_antecedent(
                                 &mut instead.effect,
-                                &last_def.effect,
+                                &root.effect,
                             ) {
-                                instead.target_choice_timing = last_def.target_choice_timing;
+                                instead.target_choice_timing = root.target_choice_timing;
                             }
-                            last_def.sub_ability = Some(Box::new(instead));
-                            defs.push(last_def);
+                            instead.else_ability = root.sub_ability.take();
+                            root.sub_ability = Some(Box::new(instead));
+                            defs.push(root);
                         }
                         true
                     }
@@ -19459,6 +19480,108 @@ mod tests {
             other => panic!("expected sub PutCounterAll, got {other:?}"),
         }
         assert!(!matches!(*sub.effect, Effect::Unimplemented { .. }));
+    }
+
+    /// CR 608.2c + CR 611.2a + CR 613.1f: Nalia de'Arnise's full-party trigger
+    /// body. The "and those creatures gain deathtouch until end of turn"
+    /// conjunct must split at the chain level so the anaphoric back-reference
+    /// subject reaches `try_parse_subject_continuous_clause` and lowers to a
+    /// `GenericEffect` carrying `AddKeyword(Deathtouch)` (a layer-6
+    /// ability-adding effect, CR 613.1f) with a CR 611.2a "until end of turn"
+    /// continuous-effect duration.
+    /// Because `PutCounterAll` publishes a tracked set at resolution time
+    /// (`publishes_tracked_set_from_resolution`), the chain assembler then
+    /// rewrites the static's `ParentTarget` filter to `TrackedSet(0)` so the
+    /// runtime resolver binds the deathtouch grant to the exact set of
+    /// creatures the counters were placed on. Before the splitter recognized
+    /// "those creatures gain ..." as a clause start, the conjunct degraded to
+    /// `Effect::Unimplemented { name: "those", ... }` and Nalia did nothing
+    /// past the counter placement.
+    #[test]
+    fn nalia_de_arnise_counters_then_deathtouch_lowers_correctly() {
+        let def = parse_effect_chain(
+            "put a +1/+1 counter on each creature you control and those creatures gain deathtouch until end of turn",
+            AbilityKind::Spell,
+        );
+
+        // Primary clause: +1/+1 counter on each creature you control. Counters
+        // are permanent (CR 122.1), so no duration must leak onto this leg.
+        match &*def.effect {
+            Effect::PutCounterAll {
+                counter_type,
+                target,
+                ..
+            } => {
+                assert_eq!(*counter_type, CounterType::Plus1Plus1);
+                match target {
+                    TargetFilter::Typed(tf) => {
+                        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                        assert_eq!(tf.controller, Some(ControllerRef::You));
+                    }
+                    other => {
+                        panic!("primary target should be Typed creature you control, got {other:?}")
+                    }
+                }
+            }
+            other => panic!("expected primary PutCounterAll, got {other:?}"),
+        }
+        assert!(
+            def.duration.is_none(),
+            "primary PutCounterAll must not carry a duration — counters persist (CR 122.1), got {:?}",
+            def.duration
+        );
+
+        // Sub-clause: continuous deathtouch grant on the same creature set.
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("'and those creatures gain deathtouch ...' must attach as sub_ability");
+        assert!(
+            !matches!(*sub.effect, Effect::Unimplemented { .. }),
+            "deathtouch conjunct must not degrade to Unimplemented, got {:?}",
+            sub.effect
+        );
+        match &*sub.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                ..
+            } => {
+                assert_eq!(
+                    *duration,
+                    Some(Duration::UntilEndOfTurn),
+                    "deathtouch grant must be UntilEndOfTurn"
+                );
+                // CR 603.7: "those creatures" lowers to `ParentTarget` in the
+                // subject-predicate parser, then the chain assembler rewrites
+                // it to `TrackedSet(0)` because the prior clause
+                // (`PutCounterAll`) publishes a tracked set at resolution.
+                let static_def = static_abilities
+                    .first()
+                    .expect("deathtouch grant must produce a continuous StaticDefinition");
+                assert!(
+                    matches!(
+                        static_def.affected,
+                        Some(TargetFilter::TrackedSet {
+                            id: TrackedSetId(0)
+                        })
+                    ),
+                    "static `affected` must be TrackedSet(0) (anaphor to the counter set published by PutCounterAll), got {:?}",
+                    static_def.affected
+                );
+                assert!(
+                    static_def.modifications.iter().any(|m| matches!(
+                        m,
+                        ContinuousModification::AddKeyword {
+                            keyword: Keyword::Deathtouch
+                        }
+                    )),
+                    "modifications must include AddKeyword(Deathtouch), got {:?}",
+                    static_def.modifications
+                );
+            }
+            other => panic!("expected GenericEffect for deathtouch grant, got {other:?}"),
+        }
     }
 
     /// Scoping regression for issue #445: a TARGETED primary counter clause must
@@ -27863,6 +27986,92 @@ mod tests {
             ),
             "override should be 3 damage to parent target, got {:?}",
             sub.effect
+        );
+    }
+
+    /// CR 614.1a + CR 608.2c: Multi-clause base + ConditionInstead. When the
+    /// override is preceded by 2+ clauses, the chain assembler collapses the
+    /// base into a single root (clause 1) with the tail (clauses 2..N) stored
+    /// in the override's `else_ability`. At runtime, the parent Cow-swap
+    /// replaces clause 1 with the override when the condition fires; the
+    /// `ConditionInstead` arm in `effects/mod.rs` then runs the
+    /// `else_ability` chain only when the condition is false. This test pins
+    /// the structural shape so regressions in the multi-clause lowering path
+    /// are caught — the prior single-clause tests above do not exercise the
+    /// `else_ability` stash.
+    #[test]
+    fn instead_condition_multi_clause_base_stashes_tail_in_else_ability() {
+        let ability = parse_effect_chain(
+            "~ deals 2 damage to any target. You gain 1 life. If you're the monarch, it deals 4 damage instead.",
+            AbilityKind::Spell,
+        );
+
+        // Clause 1 is the root — runs (or gets swapped) on every resolution.
+        assert!(
+            matches!(
+                &*ability.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    ..
+                }
+            ),
+            "root effect should be DealDamage(2), got {:?}",
+            ability.effect
+        );
+
+        let sub = ability
+            .sub_ability
+            .as_ref()
+            .expect("multi-clause base must attach instead as sub_ability of the root");
+        let cond = sub
+            .condition
+            .as_ref()
+            .expect("instead sub_ability must carry a condition");
+        match cond {
+            AbilityCondition::ConditionInstead { inner } => {
+                assert!(
+                    matches!(inner.as_ref(), AbilityCondition::IsMonarch),
+                    "expected ConditionInstead(IsMonarch), got {:?}",
+                    inner
+                );
+            }
+            other => panic!("expected ConditionInstead wrapper, got {:?}", other),
+        }
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 4 },
+                    ..
+                }
+            ),
+            "override effect should be DealDamage(4), got {:?}",
+            sub.effect
+        );
+
+        // The base chain's tail — "You gain 1 life" — must be stashed in
+        // `else_ability` so it runs after the parent on the not-swapped branch
+        // and is bypassed on the swapped branch (CR 614.1a: replacement is
+        // terminal for the action it replaces).
+        let else_branch = sub
+            .else_ability
+            .as_ref()
+            .expect("multi-clause base must stash the tail clause in else_ability");
+        assert!(
+            matches!(
+                &*else_branch.effect,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    ..
+                }
+            ),
+            "else_ability should carry the GainLife(1) tail clause, got {:?}",
+            else_branch.effect
+        );
+        assert!(
+            else_branch.condition.is_none(),
+            "tail clause is unconditional — no condition should be attached, got {:?}",
+            else_branch.condition
         );
     }
 
