@@ -2594,12 +2594,24 @@ fn resolve_chain_body(
                             .get(&ability.source_id)
                             .map(|obj| obj.counters.get(counter).copied().unwrap_or(0))
                             .unwrap_or(0),
-                        other => panic!(
-                            "PerCounter against non-SelfRef target {other:?} \
-                             is not currently produced by any cumulative-upkeep \
-                             card; extend the target resolution branch when a \
-                             second mechanic uses PerCounter."
-                        ),
+                        other => {
+                            // CR 702.24a: No current mechanic constructs a
+                            // non-SelfRef `PerCounter`. If one ever does,
+                            // returning 0 routes through the CR 118.5 zero-
+                            // cost short-circuit (the unless-effect proceeds
+                            // without prompting), which is the least-
+                            // surprising default until the target-resolution
+                            // branch is implemented.
+                            // CR 113.6b: TargetFilter resolution against game
+                            // state belongs in `game/filter.rs`; wire it here
+                            // when the second mechanic lands.
+                            tracing::warn!(
+                                "PerCounter resolution against non-SelfRef target {:?} \
+                                 not yet implemented; defaulting to n=0",
+                                other
+                            );
+                            0
+                        }
                     };
                     expand_per_counter(base, n)
                 }
