@@ -3703,6 +3703,72 @@ fn resolve_unless_payers(
     }
 }
 
+/// CR 702.24a: Multiply a `QuantityExpr` by a runtime count. Today only
+/// `Fixed` is exercised by cumulative-upkeep cards in scope; dynamic
+/// quantity bases for the four supported cards do not exist in MTG.
+/// Adding support for additional variants is a single-arm extension.
+// Wired into the unless-payment resolution path in the next step; allow
+// dead_code so this lands cleanly as a pure-function helper unit.
+#[allow(dead_code)]
+fn multiply_quantity_expr(q: &QuantityExpr, n: u32) -> QuantityExpr {
+    match q {
+        QuantityExpr::Fixed { value } => QuantityExpr::Fixed {
+            value: value.saturating_mul(n as i32),
+        },
+        other => unreachable!(
+            "multiply_quantity_expr: unsupported variant {other:?}; \
+             extend when a new cumulative-upkeep card with a dynamic base \
+             cost ships"
+        ),
+    }
+}
+
+/// CR 702.24a: Expand `pay [base] for each counter on it` into the
+/// concrete N-fold cost the player actually pays. N=0 short-circuits to
+/// a zero mana cost (CR 118.5 — players can always pay 0). `OneOf`
+/// unfolds into a `Composite` of N independent disjunctive choices
+/// (CR 702.24a: each choice is made separately).
+// Wired into the unless-payment resolution path in the next step; allow
+// dead_code so this lands cleanly as a pure-function helper unit.
+#[allow(dead_code)]
+fn expand_per_counter(base: &AbilityCost, n: u32) -> AbilityCost {
+    if n == 0 {
+        return AbilityCost::Mana {
+            cost: ManaCost::zero(),
+        };
+    }
+    match base {
+        AbilityCost::Mana { cost } => AbilityCost::Mana {
+            cost: cost.scaled(n),
+        },
+        AbilityCost::PayLife { amount } => AbilityCost::PayLife {
+            amount: multiply_quantity_expr(amount, n),
+        },
+        AbilityCost::Sacrifice { target, count } => AbilityCost::Sacrifice {
+            target: target.clone(),
+            count: count * n,
+        },
+        AbilityCost::OneOf { costs } => AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::OneOf {
+                    costs: costs.clone()
+                };
+                n as usize
+            ],
+        },
+        AbilityCost::Composite { costs } => AbilityCost::Composite {
+            costs: costs.iter().map(|c| expand_per_counter(c, n)).collect(),
+        },
+        // YAGNI fallback: no current cumulative-upkeep card uses these
+        // base variants. If a future mechanic does, the
+        // Composite-of-N-copies expansion is semantically correct for
+        // most cost shapes; refactor per-variant if needed.
+        other => AbilityCost::Composite {
+            costs: vec![other.clone(); n as usize],
+        },
+    }
+}
+
 /// CR 601.2f: "The next spell you cast this turn costs {N} less to cast."
 /// Pushes a one-shot cost reduction entry consumed when the player casts their next spell.
 fn resolve_reduce_next_spell_cost(
@@ -4529,6 +4595,106 @@ mod tests {
             resolve_unless_payer(&state, &ability, &TargetFilter::ParentTargetController),
             Some(PlayerId(1))
         );
+    }
+
+    #[test]
+    fn expand_per_counter_zero_returns_zero_mana() {
+        let base = AbilityCost::Mana {
+            cost: ManaCost::generic(5),
+        };
+        let expanded = expand_per_counter(&base, 0);
+        assert!(matches!(expanded, AbilityCost::Mana { cost } if cost == ManaCost::zero()));
+    }
+
+    #[test]
+    fn expand_per_counter_mana_scales() {
+        let base = AbilityCost::Mana {
+            cost: ManaCost::generic(2),
+        };
+        let expanded = expand_per_counter(&base, 3);
+        let AbilityCost::Mana {
+            cost: ManaCost::Cost { generic, .. },
+        } = expanded
+        else {
+            panic!("expected Mana");
+        };
+        assert_eq!(generic, 6);
+    }
+
+    #[test]
+    fn expand_per_counter_pay_life_multiplies() {
+        let base = AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: 2 },
+        };
+        let expanded = expand_per_counter(&base, 3);
+        let AbilityCost::PayLife { amount } = expanded else {
+            panic!("expected PayLife");
+        };
+        assert_eq!(amount, QuantityExpr::Fixed { value: 6 });
+    }
+
+    #[test]
+    fn expand_per_counter_sacrifice_multiplies_count() {
+        let base = AbilityCost::Sacrifice {
+            target: TargetFilter::SelfRef,
+            count: 1,
+        };
+        let expanded = expand_per_counter(&base, 3);
+        let AbilityCost::Sacrifice { count, .. } = expanded else {
+            panic!("expected Sacrifice");
+        };
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn expand_per_counter_one_of_unfolds_to_composite_of_one_ofs() {
+        let base = AbilityCost::OneOf {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+            ],
+        };
+        let expanded = expand_per_counter(&base, 3);
+        let AbilityCost::Composite { costs } = expanded else {
+            panic!("expected Composite");
+        };
+        assert_eq!(costs.len(), 3);
+        assert!(costs.iter().all(|c| matches!(c, AbilityCost::OneOf { .. })));
+    }
+
+    #[test]
+    fn expand_per_counter_composite_recurses() {
+        let base = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                },
+            ],
+        };
+        let expanded = expand_per_counter(&base, 2);
+        let AbilityCost::Composite { costs } = expanded else {
+            panic!("expected Composite");
+        };
+        assert_eq!(costs.len(), 2);
+        assert!(matches!(
+            costs[0],
+            AbilityCost::Mana {
+                cost: ManaCost::Cost { generic: 2, .. }
+            }
+        ));
+        assert!(matches!(
+            costs[1],
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 }
+            }
+        ));
     }
 
     /// CR 107.3a: a bare `{X}` unless-cost (`ManaDynamic` with `Variable("X")`)
