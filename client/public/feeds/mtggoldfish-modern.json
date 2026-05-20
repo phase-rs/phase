@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-06-03T00:00:00Z",
+  "updated": "2026-06-04T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -578,150 +578,6 @@
       ]
     },
     {
-      "name": "Jeskai Blink",
-      "author": "MTGGoldfish",
-      "colors": [
-        "W",
-        "U",
-        "R"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 2,
-          "name": "Arena of Glory"
-        },
-        {
-          "count": 4,
-          "name": "Arid Mesa"
-        },
-        {
-          "count": 4,
-          "name": "Consign to Memory"
-        },
-        {
-          "count": 1,
-          "name": "Elegant Parlor"
-        },
-        {
-          "count": 2,
-          "name": "Ephemerate"
-        },
-        {
-          "count": 3,
-          "name": "Flooded Strand"
-        },
-        {
-          "count": 3,
-          "name": "Galvanic Discharge"
-        },
-        {
-          "count": 1,
-          "name": "Hallowed Fountain"
-        },
-        {
-          "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 1,
-          "name": "Meticulous Archive"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 1,
-          "name": "Mystic Gate"
-        },
-        {
-          "count": 4,
-          "name": "Phelia, Exuberant Shepherd"
-        },
-        {
-          "count": 4,
-          "name": "Phlage, Titan of Fire's Fury"
-        },
-        {
-          "count": 2,
-          "name": "Plains"
-        },
-        {
-          "count": 3,
-          "name": "Prismatic Ending"
-        },
-        {
-          "count": 4,
-          "name": "Quantum Riddler"
-        },
-        {
-          "count": 4,
-          "name": "Ragavan, Nimble Pilferer"
-        },
-        {
-          "count": 1,
-          "name": "Sacred Foundry"
-        },
-        {
-          "count": 3,
-          "name": "Scalding Tarn"
-        },
-        {
-          "count": 4,
-          "name": "Solitude"
-        },
-        {
-          "count": 1,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 2,
-          "name": "Strix Serenade"
-        },
-        {
-          "count": 3,
-          "name": "Teferi, Time Raveler"
-        },
-        {
-          "count": 1,
-          "name": "Thundering Falls"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Ashiok, Dream Render"
-        },
-        {
-          "count": 2,
-          "name": "Damping Sphere"
-        },
-        {
-          "count": 2,
-          "name": "High Noon"
-        },
-        {
-          "count": 2,
-          "name": "Mystical Dispute"
-        },
-        {
-          "count": 2,
-          "name": "Wear // Tear"
-        },
-        {
-          "count": 2,
-          "name": "White Orchid Phantom"
-        },
-        {
-          "count": 3,
-          "name": "Wrath of the Skies"
-        }
-      ]
-    },
-    {
       "name": "Goryo's Vengeance",
       "author": "MTGGoldfish",
       "colors": [
@@ -882,6 +738,150 @@
       ]
     },
     {
+      "name": "Jeskai Blink",
+      "author": "MTGGoldfish",
+      "colors": [
+        "W",
+        "U",
+        "R"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 2,
+          "name": "Arena of Glory"
+        },
+        {
+          "count": 4,
+          "name": "Arid Mesa"
+        },
+        {
+          "count": 4,
+          "name": "Consign to Memory"
+        },
+        {
+          "count": 1,
+          "name": "Elegant Parlor"
+        },
+        {
+          "count": 2,
+          "name": "Ephemerate"
+        },
+        {
+          "count": 3,
+          "name": "Flooded Strand"
+        },
+        {
+          "count": 3,
+          "name": "Galvanic Discharge"
+        },
+        {
+          "count": 1,
+          "name": "Hallowed Fountain"
+        },
+        {
+          "count": 1,
+          "name": "Island"
+        },
+        {
+          "count": 1,
+          "name": "Meticulous Archive"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 1,
+          "name": "Mystic Gate"
+        },
+        {
+          "count": 4,
+          "name": "Phelia, Exuberant Shepherd"
+        },
+        {
+          "count": 4,
+          "name": "Phlage, Titan of Fire's Fury"
+        },
+        {
+          "count": 2,
+          "name": "Plains"
+        },
+        {
+          "count": 3,
+          "name": "Prismatic Ending"
+        },
+        {
+          "count": 4,
+          "name": "Quantum Riddler"
+        },
+        {
+          "count": 4,
+          "name": "Ragavan, Nimble Pilferer"
+        },
+        {
+          "count": 1,
+          "name": "Sacred Foundry"
+        },
+        {
+          "count": 3,
+          "name": "Scalding Tarn"
+        },
+        {
+          "count": 4,
+          "name": "Solitude"
+        },
+        {
+          "count": 1,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 2,
+          "name": "Strix Serenade"
+        },
+        {
+          "count": 3,
+          "name": "Teferi, Time Raveler"
+        },
+        {
+          "count": 1,
+          "name": "Thundering Falls"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Ashiok, Dream Render"
+        },
+        {
+          "count": 2,
+          "name": "Damping Sphere"
+        },
+        {
+          "count": 2,
+          "name": "High Noon"
+        },
+        {
+          "count": 2,
+          "name": "Mystical Dispute"
+        },
+        {
+          "count": 2,
+          "name": "Wear // Tear"
+        },
+        {
+          "count": 2,
+          "name": "White Orchid Phantom"
+        },
+        {
+          "count": 3,
+          "name": "Wrath of the Skies"
+        }
+      ]
+    },
+    {
       "name": "Belcher",
       "author": "MTGGoldfish",
       "colors": [],
@@ -890,7 +890,7 @@
       ],
       "main": [
         {
-          "count": 1,
+          "count": 3,
           "name": "Beyeen Veil"
         },
         {
@@ -898,7 +898,7 @@
           "name": "Disrupting Shoal"
         },
         {
-          "count": 2,
+          "count": 4,
           "name": "Fallaji Archaeologist"
         },
         {
@@ -942,12 +942,8 @@
           "name": "Spell Snare"
         },
         {
-          "count": 1,
+          "count": 2,
           "name": "Stern Scolding"
-        },
-        {
-          "count": 1,
-          "name": "Strix Serenade"
         },
         {
           "count": 4,
@@ -958,15 +954,11 @@
           "name": "Tameshi, Reality Architect"
         },
         {
-          "count": 2,
-          "name": "Tamiyo, Inquisitive Student"
-        },
-        {
           "count": 4,
           "name": "Thundertrap Trainer"
         },
         {
-          "count": 3,
+          "count": 1,
           "name": "Waterlogged Teachings"
         },
         {
@@ -981,35 +973,39 @@
         },
         {
           "count": 2,
-          "name": "Engineered Explosives"
+          "name": "Flusterstorm"
         },
         {
           "count": 1,
-          "name": "Grafdigger's Cage"
+          "name": "Force of Negation"
         },
         {
-          "count": 1,
+          "count": 2,
           "name": "Harbinger of the Seas"
         },
         {
           "count": 2,
+          "name": "Hurkyl's Recall"
+        },
+        {
+          "count": 1,
           "name": "Into the Flood Maw"
         },
         {
           "count": 1,
-          "name": "Island"
+          "name": "Mountain"
         },
         {
-          "count": 2,
-          "name": "Mystical Dispute"
-        },
-        {
-          "count": 2,
+          "count": 1,
           "name": "Subtlety"
         },
         {
           "count": 1,
           "name": "Tezzeret the Seeker"
+        },
+        {
+          "count": 1,
+          "name": "Unable to Scream"
         }
       ]
     },
