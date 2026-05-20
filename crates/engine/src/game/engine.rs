@@ -16159,6 +16159,238 @@ mod phase_trigger_regression_tests {
             ),
         }
     }
+
+    /// Build the synthesized cumulative-upkeep trigger for "Cumulative upkeep
+    /// {W} or {U}" (Jötun Owl Keeper's disjunctive cost variant) by delegating
+    /// to the production synthesizer. Mirrors `cumulative_upkeep_mana_trigger`,
+    /// `cumulative_upkeep_sacrifice_land_trigger`, and
+    /// `cumulative_upkeep_pay_life_trigger`; this helper exercises the `OneOf`
+    /// arm of `expand_per_counter` plus the Composite-of-OneOfs routing path in
+    /// `handle_unless_payment_choose_cost` (CR 702.24a: "If [cost] has choices
+    /// associated with it, each choice is made separately for each age counter,
+    /// then either the entire set of costs is paid, or none of them is paid").
+    ///
+    /// CR 702.24a: a `OneOf { Mana(W), Mana(U) }` base cost is the canonical
+    /// disjunctive cumulative-upkeep shape (Jötun Owl Keeper, Arctic Nishoba,
+    /// Earthen Goo).
+    fn cumulative_upkeep_one_of_w_or_u_trigger() -> TriggerDefinition {
+        let mana_w = AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                shards: vec![crate::types::mana::ManaCostShard::White],
+                generic: 0,
+            },
+        };
+        let mana_u = AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                shards: vec![crate::types::mana::ManaCostShard::Blue],
+                generic: 0,
+            },
+        };
+        crate::database::synthesis::build_cumulative_upkeep_trigger(AbilityCost::OneOf {
+            costs: vec![mana_w, mana_u],
+        })
+    }
+
+    /// Construct a solo state with Jötun Owl Keeper on the battlefield
+    /// (controller = PlayerId(0) = active player) at Phase::Untap so
+    /// `auto_advance` will fire the upkeep trigger. **One age counter is
+    /// pre-loaded** on the Owl Keeper so the first upkeep that
+    /// `auto_advance` resolves ticks the counter from 1 → 2 — exercising the
+    /// multiplicative step of the `OneOf` arm of `expand_per_counter`, which
+    /// expands `OneOf{[W,U]}` × 2 → `Composite { [OneOf{[W,U]}, OneOf{[W,U]}] }`.
+    /// This is the load-bearing setup for CR 702.24a's "each choice is made
+    /// separately for each age counter" clause — counter=1 would collapse to a
+    /// trivial single-prompt case, and we specifically want the multi-prompt
+    /// disjunctive flow.
+    fn setup_jotun_owl_keeper_second_upkeep_state() -> (GameState, ObjectId) {
+        let mut state = new_game(42);
+        state.turn_number = 2;
+        state.phase = Phase::Untap;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let owl = create_object(
+            &mut state,
+            CardId(7400),
+            PlayerId(0),
+            "Jötun Owl Keeper".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&owl).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Giant".to_string());
+            obj.trigger_definitions
+                .push(cumulative_upkeep_one_of_w_or_u_trigger());
+            // CR 702.24a: pre-load one age counter so the next upkeep tick
+            // produces counter=2, yielding the per-counter expansion
+            // `OneOf{[W,U]}` × 2 → `Composite { [OneOf{[W,U]}, OneOf{[W,U]}] }`.
+            obj.counters
+                .insert(crate::types::counter::CounterType::Age, 1);
+        }
+
+        (state, owl)
+    }
+
+    /// CR 702.24a + CR 118.12: End-to-end OneOf × N flow — Jötun Owl Keeper's
+    /// "{W} or {U}" cumulative-upkeep cost at counter=2 expands to a
+    /// `Composite` of two `OneOf` sub-costs. The engine surfaces one
+    /// `UnlessPaymentChooseCost` prompt per disjunctive sub-cost; each pick
+    /// accumulates into `chosen`. After the last prompt, the accumulated picks
+    /// collapse into `Composite { [Mana(W), Mana(U)] }` which the single-cost
+    /// `handle_unless_payment` folds into a combined `{W}{U}` mana payment.
+    /// Paying the combined cost keeps the Owl Keeper on the battlefield and
+    /// drains the controller's mana pool of the two colored units.
+    ///
+    /// This is the capstone test for the OneOf × N pipeline: it exercises the
+    /// synthesizer (Task 7) producing the trigger, the PerCounter resolution
+    /// (Task 6) expanding `OneOf × 2` → `Composite[OneOf, OneOf]`, the
+    /// multi-choice routing (Task 14) walking each disjunctive choice, and the
+    /// Composite-of-Mana payment (Task 14) folding the picks into a combined
+    /// mana payment. CR 702.24a: "each choice is made separately for each age
+    /// counter, then either the entire set of costs is paid, or none of them
+    /// is paid."
+    #[test]
+    fn jotun_owl_keeper_one_of_x_n_pays_combined_mana() {
+        use crate::types::actions::UnlessCostBranch;
+        let (mut state, owl_id) = setup_jotun_owl_keeper_second_upkeep_state();
+        advance_to_unless_payment_prompt(&mut state);
+
+        // CR 702.24a: outer AddCounter resolved first; the pre-loaded counter
+        // ticked from 1 → 2 before the per-counter unless-cost is computed.
+        assert_eq!(
+            state.objects[&owl_id]
+                .counters
+                .get(&crate::types::counter::CounterType::Age)
+                .copied(),
+            Some(2),
+            "age counter should tick from 1 (pre-loaded) to 2 on this upkeep"
+        );
+
+        // CR 702.24a + CR 118.12a: PerCounter expanded `OneOf{[W,U]}` × 2 to
+        // `Composite { [OneOf{[W,U]}, OneOf{[W,U]}] }`. The engine surfaces
+        // the FIRST disjunctive choice with one entry remaining in
+        // `remaining_choices`.
+        match &state.waiting_for {
+            WaitingFor::UnlessPaymentChooseCost {
+                player,
+                costs,
+                remaining_choices,
+                chosen,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0), "controller is the unless-payer");
+                assert_eq!(costs.len(), 2, "first choice exposes both alternatives");
+                assert_eq!(
+                    remaining_choices.len(),
+                    1,
+                    "one more disjunctive choice queued (counter=2 → 2 prompts)"
+                );
+                assert!(
+                    chosen.is_empty(),
+                    "no choices made yet before the first prompt"
+                );
+            }
+            other => panic!("expected first UnlessPaymentChooseCost, got {other:?}"),
+        }
+
+        // Pick {W} (index 0). The first pick accumulates into `chosen`; the
+        // queue is drained; the second OneOf prompt surfaces.
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseUnlessCostBranch {
+                choice: UnlessCostBranch::Pay { index: 0 },
+            },
+        )
+        .expect("first ChooseUnlessCostBranch should surface the next prompt");
+
+        // CR 702.24a + CR 118.12a: SECOND disjunctive choice prompt.
+        // `remaining_choices` is now empty; `chosen` carries [Mana(W)].
+        match &state.waiting_for {
+            WaitingFor::UnlessPaymentChooseCost {
+                costs,
+                remaining_choices,
+                chosen,
+                ..
+            } => {
+                assert_eq!(costs.len(), 2, "second choice exposes both alternatives");
+                assert!(
+                    remaining_choices.is_empty(),
+                    "no more disjunctive choices queued"
+                );
+                assert_eq!(chosen.len(), 1, "first pick accumulated into `chosen`");
+                assert!(
+                    matches!(
+                        &chosen[0],
+                        AbilityCost::Mana { cost: ManaCost::Cost { shards, generic: 0 } }
+                            if shards.as_slice() == [crate::types::mana::ManaCostShard::White]
+                    ),
+                    "first pick is Mana({{W}}) as selected by index 0; got {:?}",
+                    &chosen[0]
+                );
+            }
+            other => panic!("expected second UnlessPaymentChooseCost, got {other:?}"),
+        }
+
+        // CR 500.5 + CR 118.12: Provision {W}{U} in P0's mana pool BEFORE the
+        // final pick. The second ChooseUnlessCostBranch routes through
+        // `handle_unless_payment_choose_cost` → builds
+        // `Composite { [Mana(W), Mana(U)] }` → re-enters
+        // `handle_unless_payment(state, .., pay=true)` → folds the Composite
+        // into a combined `{W}{U}` ManaCost → calls `pay_unless_cost`. So the
+        // mana must already be in the pool by the time the second action is
+        // dispatched. Real play would tap a Plains and an Island in response
+        // to the trigger before answering the second prompt; we shortcut by
+        // dropping the mana directly into the pool.
+        let p0 = state
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(0))
+            .expect("PlayerId(0)");
+        p0.mana_pool
+            .add(ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]));
+        p0.mana_pool
+            .add(ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]));
+
+        // Pick {U} (index 1). The second pick accumulates, the queue is
+        // empty, so `handle_unless_payment_choose_cost` collapses
+        // `chosen = [Mana(W), Mana(U)]` into `Composite { ... }` and routes
+        // straight into `handle_unless_payment` with `pay = true`. That
+        // handler's all-Mana-Composite arm folds the inner costs via
+        // `ManaCost::plus` and pays the combined `{W}{U}` cost — there is no
+        // intermediate `UnlessPayment` prompt visible to the test, the
+        // payment happens inline. (See `engine_payment_choices::handle_unless_payment`
+        // L592-599 for the fold + pay logic.)
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseUnlessCostBranch {
+                choice: UnlessCostBranch::Pay { index: 1 },
+            },
+        )
+        .expect("second ChooseUnlessCostBranch should fold + pay the combined Composite-of-Mana");
+
+        // CR 702.24a: paying the cost keeps the permanent on the battlefield.
+        assert_eq!(
+            state.objects[&owl_id].zone,
+            Zone::Battlefield,
+            "paying the cumulative-upkeep cost must NOT sacrifice the Owl Keeper"
+        );
+        assert!(
+            !state.players[0].graveyard.contains(&owl_id),
+            "permanent must not be in graveyard when paid"
+        );
+
+        // CR 118.12 + CR 202.3: The combined `{W}{U}` payment drained the
+        // White + Blue units from the mana pool. This is the load-bearing
+        // assertion that the Composite-of-Mana fold path actually paid the
+        // colored cost (and not, e.g., zero generic via a buggy unwrap).
+        let p0_after = state.players.iter().find(|p| p.id == PlayerId(0)).unwrap();
+        assert_eq!(
+            p0_after.mana_pool.total(),
+            0,
+            "combined {{W}}{{U}} cost drains both colored mana units from the pool"
+        );
+    }
 }
 
 #[cfg(test)]
