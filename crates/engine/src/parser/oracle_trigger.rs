@@ -6178,10 +6178,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     // combinator rather than 6 sibling `tag` arms.
     if nom_primitives::scan_at_word_boundaries(lower, |i| {
         preceded(
-            alt((
-                tag::<_, _, OracleError<'_>>("when "),
-                tag("whenever "),
-            )),
+            alt((tag::<_, _, OracleError<'_>>("when "), tag("whenever "))),
             alt((
                 tag("you cast this spell"),
                 tag("you cast ~"),
