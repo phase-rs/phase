@@ -51,7 +51,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::Destroyed => match_destroyed,
         TriggerMode::TokenCreated | TriggerMode::TokenCreatedOnce => match_token_created,
         TriggerMode::TurnBegin => match_turn_begin,
-        TriggerMode::Phase | TriggerMode::PayEcho => match_phase,
+        TriggerMode::Phase | TriggerMode::PayEcho | TriggerMode::PayCumulativeUpkeep => match_phase,
         TriggerMode::BecomesTarget | TriggerMode::BecomesTargetOnce => match_becomes_target,
         TriggerMode::LandPlayed => match_land_played,
         TriggerMode::ManaAdded => match_mana_added,
@@ -130,7 +130,6 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::CounterPlayerAddedAll
         | TriggerMode::CounterTypeAddedAll
         | TriggerMode::PayLife
-        | TriggerMode::PayCumulativeUpkeep
         | TriggerMode::PhaseIn
         | TriggerMode::PhaseOut
         | TriggerMode::PhaseOutAll
@@ -226,6 +225,8 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     r.insert(TriggerMode::TurnBegin, match_turn_begin);
     r.insert(TriggerMode::Phase, match_phase);
     r.insert(TriggerMode::PayEcho, match_phase);
+    // CR 702.24a: Cumulative upkeep — at-upkeep tax trigger; same matcher shape as Echo.
+    r.insert(TriggerMode::PayCumulativeUpkeep, match_phase);
     r.insert(TriggerMode::BecomesTarget, match_becomes_target);
     r.insert(TriggerMode::BecomesTargetOnce, match_becomes_target);
     r.insert(TriggerMode::LandPlayed, match_land_played);
@@ -350,7 +351,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::CounterPlayerAddedAll,
         TriggerMode::CounterTypeAddedAll,
         TriggerMode::PayLife,
-        TriggerMode::PayCumulativeUpkeep,
         TriggerMode::PhaseIn,
         TriggerMode::PhaseOut,
         TriggerMode::PhaseOutAll,
@@ -4362,6 +4362,13 @@ mod tests {
         let registry = build_trigger_registry();
         assert!(trigger_matcher(TriggerMode::PayEcho).is_some());
         assert!(registry.contains_key(&TriggerMode::PayEcho));
+    }
+
+    #[test]
+    fn pay_cumulative_upkeep_matcher_registered() {
+        let registry = build_trigger_registry();
+        assert!(trigger_matcher(TriggerMode::PayCumulativeUpkeep).is_some());
+        assert!(registry.contains_key(&TriggerMode::PayCumulativeUpkeep));
     }
 
     #[test]
