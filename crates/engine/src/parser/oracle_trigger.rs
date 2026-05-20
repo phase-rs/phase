@@ -6163,12 +6163,36 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some((TriggerMode::SpellCopy, def));
     }
 
-    // "when you cast this spell" — self-cast trigger (fires from stack)
-    if scan_contains(lower, "when you cast this spell") || scan_contains(lower, "when ~ is cast") {
+    // CR 601.2i + CR 603.2: Self-cast trigger — "When you cast this spell",
+    // "When ~ is cast", or "When you cast ~" all describe the same trigger
+    // event (this spell being cast). The triggered ability fires as the spell
+    // is put onto the stack; per CR 117.2a and CR 113.6, the trigger's source
+    // is the stack object, so `trigger_zones = [Stack]`.
+    //
+    // Equivalent phrasings (Oracle-text variants seen across printings):
+    //   - "When you cast this spell"        (modern self-reference)
+    //   - "When ~ is cast"                  (passive form; older templating)
+    //   - "When you cast ~"                 (direct name reference after
+    //                                        `normalize_card_name_refs` ⇒ "~";
+    //                                        e.g. Taught by Surrak)
+    //
+    // The word-boundary `scan_contains` admits leading qualifiers (e.g.
+    // intervening-if prefixes) without anchoring the trigger to start-of-line.
+    let self_cast_phrases = [
+        "when you cast this spell",
+        "whenever you cast this spell",
+        "when ~ is cast",
+        "when you cast ~",
+        "whenever you cast ~",
+    ];
+    if self_cast_phrases
+        .iter()
+        .any(|phrase| scan_contains(lower, phrase))
+    {
         let mut def = make_base();
         def.mode = TriggerMode::SpellCast;
         def.valid_card = Some(TargetFilter::SelfRef);
-        // Cast triggers fire while the spell is on the stack
+        // CR 117.2a + CR 113.6: cast triggers fire while the spell is on the stack
         def.trigger_zones = vec![Zone::Stack];
         return Some((TriggerMode::SpellCast, def));
     }
@@ -10204,6 +10228,35 @@ mod tests {
             "When you cast this spell, draw cards equal to the greatest power among creatures you control.",
             "Hydroid Krasis",
         );
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(def.trigger_zones.contains(&Zone::Stack));
+    }
+
+    /// CR 601.2i + CR 603.2: A self-cast trigger phrased as
+    /// "When you cast <CARDNAME>" must produce the same `TriggerMode::SpellCast`
+    /// shape (with `valid_card = SelfRef`) as the canonical "When you cast this
+    /// spell" templating. After `normalize_card_name_refs` (CR 201.5), the card
+    /// name becomes `~`, so the parser sees "when you cast ~" — a class-level
+    /// pattern covering every aura/permanent whose cast trigger references
+    /// itself by name.
+    #[test]
+    fn trigger_you_cast_self_by_name() {
+        let def = parse_trigger_line(
+            "When you cast Taught by Surrak, draw a card.",
+            "Taught by Surrak",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(def.trigger_zones.contains(&Zone::Stack));
+    }
+
+    /// CR 601.2i + CR 603.2: Mirror of `trigger_you_cast_self_by_name` for the
+    /// "Whenever" prefix. Both keywords are valid cast-time trigger phrasings
+    /// (CR 603.1) and must produce identical SpellCast definitions.
+    #[test]
+    fn trigger_whenever_you_cast_self_by_name() {
+        let def = parse_trigger_line("Whenever you cast Test Card, draw a card.", "Test Card");
         assert_eq!(def.mode, TriggerMode::SpellCast);
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
         assert!(def.trigger_zones.contains(&Zone::Stack));
