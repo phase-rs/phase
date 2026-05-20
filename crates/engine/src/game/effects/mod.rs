@@ -2654,7 +2654,42 @@ fn resolve_chain_body(
                         pending_effect: Box::new(pending),
                         trigger_event: state.current_trigger_event.clone(),
                         effect_description: ability.description.clone(),
+                        remaining_choices: vec![],
+                        chosen: vec![],
                     },
+                    // CR 702.24a + CR 118.12: A `Composite` of `OneOf`s is
+                    // what `expand_per_counter` produces from a `OneOf` base
+                    // cost at N ≥ 2 (e.g., Jötun Owl Keeper's "{W} or {U}"
+                    // cumulative-upkeep cost with 2 age counters → 2
+                    // independent disjunctive choices). Drive each choice
+                    // sequentially via `UnlessPaymentChooseCost`, accumulate
+                    // picks, and re-enter `UnlessPayment` with the resulting
+                    // `Composite` of chosen sub-costs as a single payment.
+                    // "Each choice is made separately for each age counter,
+                    // then either the entire set of costs is paid, or none
+                    // of them is paid."
+                    AbilityCost::Composite { costs }
+                        if !costs.is_empty()
+                            && costs.iter().all(|c| matches!(c, AbilityCost::OneOf { .. })) =>
+                    {
+                        let mut queue: Vec<Vec<AbilityCost>> = costs
+                            .into_iter()
+                            .map(|c| match c {
+                                AbilityCost::OneOf { costs } => costs,
+                                _ => unreachable!("matched all-OneOf guard above"),
+                            })
+                            .collect();
+                        let first = queue.remove(0);
+                        WaitingFor::UnlessPaymentChooseCost {
+                            player: payer,
+                            costs: first,
+                            pending_effect: Box::new(pending),
+                            trigger_event: state.current_trigger_event.clone(),
+                            effect_description: ability.description.clone(),
+                            remaining_choices: queue,
+                            chosen: vec![],
+                        }
+                    }
                     cost => WaitingFor::UnlessPayment {
                         player: payer,
                         cost,
