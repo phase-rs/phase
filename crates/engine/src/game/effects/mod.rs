@@ -10276,4 +10276,101 @@ mod tests {
             "controller draws one card per card discarded this way (3 total)"
         );
     }
+
+    /// GH #582 — CR 104.2b + CR 107.3i + CR 608.2c + CR 700.5: Thassa's Oracle
+    /// runtime discriminator. The synthesized AST gates `Effect::WinTheGame`
+    /// with `AbilityCondition::QuantityCheck { lhs: Devotion{[Blue]}, comparator: GE, rhs:
+    /// ZoneCardCount{Library, Controller} }`. This test drives that condition
+    /// through the production `evaluate_condition` against two library/devotion
+    /// fixtures (WIN: library=1, devotion=2; NO-WIN: library=50, devotion=2)
+    /// and asserts the boolean outcome.
+    ///
+    /// **Three-way reversion discriminator (plan Step 6):**
+    /// 1. Revert Step 1 (drop `parse_quantity_quantity_comparison`): the
+    ///    parser cannot lower the trailing "if X >= number of cards" clause,
+    ///    so the WinTheGame sub_ability ships with `condition = None` and
+    ///    fires unconditionally — the NO-WIN scenario regresses (spurious
+    ///    win at library=50).
+    /// 2. Revert Step 1b (drop the forward-fill pass in
+    ///    `compute_sentence_where_x`): sentence 3 receives `None` binding so
+    ///    LHS stays `Variable("X")`; `resolve_quantity` returns 0; `0 >= 1`
+    ///    is false — the WIN scenario regresses (no win at library=1).
+    /// 3. Revert Step 3 (drop `apply_where_x_ability_condition` and the
+    ///    `def.condition` walker block): forward-fill produced the binding,
+    ///    but the condition walker never substitutes; LHS stays
+    ///    `Variable("X")` → identical failure mode to (2). WIN regresses.
+    ///
+    /// The synthesis test in `parser::oracle::tests` already proves the AST
+    /// shape; this test proves the runtime evaluator agrees with the AST.
+    #[test]
+    fn thassas_oracle_win_condition_runtime_discriminator() {
+        use crate::types::ability::{
+            Comparator, DevotionColors, Effect, QuantityExpr, QuantityRef, ResolvedAbility, ZoneRef,
+        };
+        use crate::types::mana::ManaCostShard;
+
+        // Two-permanent {U}{U} fixture: devotion-to-blue = 2.
+        // Mirrors `devotion_counts_matching_shards` in game/devotion.rs.
+        let build_state = |library_size: usize| -> GameState {
+            let mut state = GameState::new_two_player(42);
+            let id = create_object(
+                &mut state,
+                CardId(7000),
+                PlayerId(0),
+                "Devotion Source".to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&id).unwrap().mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+                generic: 0,
+            };
+            // Reset library to the exact size we want.
+            state.players[0].library.clear();
+            for i in 0..library_size {
+                let lib_id = create_object(
+                    &mut state,
+                    CardId(8000 + i as u64),
+                    PlayerId(0),
+                    format!("Library Card {i}"),
+                    Zone::Library,
+                );
+                let _ = lib_id;
+            }
+            state
+        };
+
+        let condition = AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::Devotion {
+                    colors: DevotionColors::Fixed(vec![ManaColor::Blue]),
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Library,
+                    card_types: Vec::new(),
+                    scope: crate::types::ability::CountScope::Controller,
+                },
+            },
+        };
+
+        // WIN scenario: library = 1, devotion = 2 → 2 >= 1 → true.
+        let state_win = build_state(1);
+        let ability_win =
+            ResolvedAbility::new(Effect::WinTheGame, vec![], ObjectId(9001), PlayerId(0));
+        assert!(
+            evaluate_condition(&condition, &state_win, &ability_win),
+            "WIN scenario: devotion=2, library=1 should satisfy GE",
+        );
+
+        // NO-WIN scenario: library = 50, devotion = 2 → 2 >= 50 → false.
+        let state_no_win = build_state(50);
+        let ability_no_win =
+            ResolvedAbility::new(Effect::WinTheGame, vec![], ObjectId(9002), PlayerId(0));
+        assert!(
+            !evaluate_condition(&condition, &state_no_win, &ability_no_win),
+            "NO-WIN scenario: devotion=2, library=50 must NOT satisfy GE",
+        );
+    }
 }

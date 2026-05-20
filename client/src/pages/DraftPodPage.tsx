@@ -53,6 +53,16 @@ function PodSetup() {
   const joinPod = useDraftPodStore((s) => s.joinPod);
   const configError = useDraftPodStore((s) => s.configError);
   const loadingPool = useDraftPodStore((s) => s.loadingPool);
+  const kindDescription = config.kind === "Premier"
+    ? "Best-of-one tournament matches after deckbuilding. Faster rounds, no sideboarding between games."
+    : "Best-of-three tournament matches after deckbuilding, with sideboarding between games.";
+  const tournamentDescription = config.tournamentFormat === "Swiss"
+    ? "Everyone keeps playing through three rounds, even after a loss."
+    : "Players are eliminated after a match loss until one winner remains.";
+  const policyDescription = config.podPolicy === "Competitive"
+    ? "Timed picks, automatic picks on timeout, and automatic round advancement."
+    : "Untimed picks, manual round advancement, and host controls for resolving issues.";
+  const podSizeDescription = `${config.podSize} total seats. Empty seats can be filled with bots from the lobby before the draft starts.`;
 
   if (mode === "choose") {
     return (
@@ -135,27 +145,33 @@ function PodSetup() {
         </div>
 
         {/* Draft type */}
-        <div className="flex gap-4">
-          <label className="flex items-center gap-2 text-sm text-white/70">
-            <input
-              type="radio"
-              name="draftKind"
-              checked={config.kind === "Premier"}
-              onChange={() => setConfig({ kind: "Premier" })}
-              className="accent-emerald-400"
-            />
-            Premier (ranked)
+        <div className="flex flex-col gap-1">
+          <label className="text-sm font-medium text-white/60">
+            Draft Type
           </label>
-          <label className="flex items-center gap-2 text-sm text-white/70">
-            <input
-              type="radio"
-              name="draftKind"
-              checked={config.kind === "Traditional"}
-              onChange={() => setConfig({ kind: "Traditional" })}
-              className="accent-emerald-400"
-            />
-            Traditional (best-of-3)
-          </label>
+          <div className="flex gap-4">
+            <label className="flex items-center gap-2 text-sm text-white/70">
+              <input
+                type="radio"
+                name="draftKind"
+                checked={config.kind === "Premier"}
+                onChange={() => setConfig({ kind: "Premier" })}
+                className="accent-emerald-400"
+              />
+              Premier (best-of-1)
+            </label>
+            <label className="flex items-center gap-2 text-sm text-white/70">
+              <input
+                type="radio"
+                name="draftKind"
+                checked={config.kind === "Traditional"}
+                onChange={() => setConfig({ kind: "Traditional" })}
+                className="accent-emerald-400"
+              />
+              Traditional (best-of-3)
+            </label>
+          </div>
+          <p className="text-xs text-white/40">{kindDescription}</p>
         </div>
 
         {/* Tournament Format (D-04) */}
@@ -187,6 +203,7 @@ function PodSetup() {
               Single Elimination
             </label>
           </div>
+          <p className="text-xs text-white/40">{tournamentDescription}</p>
         </div>
 
         {/* Pod Policy (D-07) */}
@@ -216,11 +233,7 @@ function PodSetup() {
               Casual
             </label>
           </div>
-          <p className="text-xs text-white/40">
-            {config.podPolicy === "Competitive"
-              ? "Timed picks, auto-pick on timeout, auto-advance rounds"
-              : "Untimed picks, host controls round advancement"}
-          </p>
+          <p className="text-xs text-white/40">{policyDescription}</p>
         </div>
 
         {/* Pod size */}
@@ -237,9 +250,13 @@ function PodSetup() {
               </option>
             ))}
           </select>
+          <p className="text-xs text-white/40">{podSizeDescription}</p>
         </div>
 
         {/* Set selector — reuse the Quick Draft component */}
+        <div className="rounded-[16px] border border-white/8 bg-white/3 px-4 py-3 text-sm text-white/45">
+          Choose the draft set last. Selecting a set loads its card pool and creates the pod room.
+        </div>
         <SetSelector
           onStartDraft={(setCode) => {
             setConfig({ setCode });

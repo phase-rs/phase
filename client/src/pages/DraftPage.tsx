@@ -17,6 +17,7 @@ import { menuButtonClass } from "../components/menu/buttonStyles";
 import { runLimits } from "../services/quickDraftPersistence";
 import type { DraftRunFormat, DraftRunState } from "../services/quickDraftPersistence";
 import type { CubeDraftSettings } from "../adapter/draft-adapter";
+import { usePreferencesStore } from "../stores/preferencesStore";
 
 // ── Format Picker ─────────────────────────────────────────────────────
 
@@ -472,12 +473,16 @@ function MatchHistory({ results }: { results: DraftRunState["results"] }) {
 export function DraftPage() {
   const phase = useDraftStore((s) => s.phase);
   const reset = useDraftStore((s) => s.reset);
+  const experimentalFeatures = usePreferencesStore((s) => s.experimentalFeatures);
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+  const requestedSetupMode = searchParams.get("mode");
   const [hoveredCard, setHoveredCard] = useState<CardHoverInfo | null>(null);
   const [introDismissed, setIntroDismissed] = useState(false);
   const [resumeLoading, setResumeLoading] = useState(false);
-  const [setupMode, setSetupMode] = useState<DraftSetupMode>("set");
+  const [setupMode, setSetupMode] = useState<DraftSetupMode>(() =>
+    requestedSetupMode === "cube" && experimentalFeatures ? "cube" : "set",
+  );
 
   useEffect(() => {
     if (searchParams.get("resume") !== "1") return;
@@ -497,6 +502,16 @@ export function DraftPage() {
     doResume();
     return () => { cancelled = true; };
   }, [searchParams]);
+
+  useEffect(() => {
+    if (requestedSetupMode === "cube") {
+      setSetupMode(experimentalFeatures ? "cube" : "set");
+    }
+  }, [requestedSetupMode, experimentalFeatures]);
+
+  useEffect(() => {
+    if (!experimentalFeatures) setSetupMode("set");
+  }, [experimentalFeatures]);
 
   useEffect(() => {
     return () => {
@@ -552,23 +567,27 @@ export function DraftPage() {
 
         {!resumeLoading && phase === "setup" && (
           <div className="mx-auto w-full max-w-4xl">
-            <h1 className="mb-8 menu-display text-3xl text-white">Quick Draft</h1>
-            <div className="mb-5 inline-flex rounded-lg border border-white/10 bg-black/25 p-1">
-              {(["set", "cube"] as const).map((mode) => (
-                <button
-                  key={mode}
-                  type="button"
-                  onClick={() => setSetupMode(mode)}
-                  className={`rounded-md px-4 py-2 text-sm font-medium transition-colors ${
-                    setupMode === mode
-                      ? "bg-emerald-400/18 text-emerald-100"
-                      : "text-white/50 hover:bg-white/6 hover:text-white/75"
-                  }`}
-                >
-                  {mode === "set" ? "Set Draft" : "Cube"}
-                </button>
-              ))}
-            </div>
+            <h1 className="mb-8 menu-display text-3xl text-white">
+              {setupMode === "cube" ? "Cube Draft" : "Quick Draft"}
+            </h1>
+            {experimentalFeatures && (
+              <div className="mb-5 inline-flex rounded-lg border border-white/10 bg-black/25 p-1">
+                {(["set", "cube"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setSetupMode(mode)}
+                    className={`rounded-md px-4 py-2 text-sm font-medium transition-colors ${
+                      setupMode === mode
+                        ? "bg-emerald-400/18 text-emerald-100"
+                        : "text-white/50 hover:bg-white/6 hover:text-white/75"
+                    }`}
+                  >
+                    {mode === "set" ? "Set Draft" : "Cube"}
+                  </button>
+                ))}
+              </div>
+            )}
             {setupMode === "set" ? (
               <SetSelector onStartDraft={handleStartDraft} />
             ) : (

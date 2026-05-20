@@ -1605,6 +1605,31 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         }
     }
 
+    // CR 702.74a + CR 118.9 + CR 601.2h: Evoke twin of the flashback branch
+    // above. Non-mana evoke (Solitude — "Exile a white card from your hand.")
+    // and any future compound mana+non-mana evoke route the residual non-mana
+    // sub-cost through `pay_additional_cost` so it is paid alongside the
+    // (potentially zero) mana sub-cost.
+    if casting_variant == CastingVariant::Evoke {
+        let evoke_split = state.objects.get(&object_id).and_then(|obj| {
+            obj.keywords.iter().find_map(|k| match k {
+                crate::types::keywords::Keyword::Evoke(ec) => {
+                    Some(super::casting::split_evoke_cost_components(ec))
+                }
+                _ => None,
+            })
+        });
+        if let Some((_mana, Some(non_mana_cost))) = evoke_split {
+            let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+            pending.casting_variant = casting_variant;
+            pending.cast_timing_permission = cast_timing_permission;
+            pending.distribute = distribute;
+            pending.origin_zone = origin_zone;
+            pending.payment_mode = payment_mode;
+            return pay_additional_cost(state, player, non_mana_cost, pending, events);
+        }
+    }
+
     // CR 601.2b: Check for Defiler cost reduction — optional life payment for colored mana
     // reduction on matching-color permanent spells.
     if let Some((life_cost, mana_reduction)) = find_defiler_reduction(state, player, object_id) {

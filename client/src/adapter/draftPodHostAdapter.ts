@@ -220,7 +220,7 @@ export class DraftPodHostAdapter {
       case "lobbyUpdate":
         this.emit({
           type: "lobbyUpdate",
-          seats: [],
+          seats: event.seats,
           joined: event.joined,
           total: event.total,
         });

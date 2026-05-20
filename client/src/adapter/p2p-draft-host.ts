@@ -46,7 +46,7 @@ export type DraftHostEvent =
   | { type: "seatReconnected"; seatIndex: number }
   | { type: "seatDisconnected"; seatIndex: number }
   | { type: "seatKicked"; seatIndex: number; reason: string }
-  | { type: "lobbyUpdate"; joined: number; total: number }
+  | { type: "lobbyUpdate"; seats: SeatPublicView[]; joined: number; total: number }
   | { type: "lobbyFull" }
   | { type: "draftStarted"; view: DraftPlayerView }
   | { type: "pickReceived"; seatIndex: number; cardInstanceId: string }
@@ -532,7 +532,7 @@ export class P2PDraftHost {
       });
     }
 
-    this.emit({ type: "lobbyUpdate", joined, total });
+    this.emit({ type: "lobbyUpdate", seats, joined, total });
   }
 
   // ── Disconnect / Reconnect ─────────────────────────────────────────

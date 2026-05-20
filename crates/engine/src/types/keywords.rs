@@ -44,6 +44,20 @@ pub enum BuybackCost {
     NonMana(AbilityCost),
 }
 
+/// CR 702.74a + CR 118.9: Evoke cost — the alternative cost a player may pay
+/// in place of the spell's mana cost. Original Lorwyn Evoke used pure mana
+/// costs (e.g., Mulldrifter "Evoke {3}{U}"); the Modern Horizons 2 elemental
+/// cycle (Solitude, Endurance, Grief, Subtlety, Fury) introduced non-mana
+/// evoke ("Evoke—Exile a [color] card from your hand."). Mirrors
+/// `FlashbackCost`/`BuybackCost`/`CyclingCost` so non-mana costs compose
+/// through the existing `AbilityCost` pipeline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum EvokeCost {
+    Mana(ManaCost),
+    NonMana(AbilityCost),
+}
+
 /// Discriminant-level keyword identity used when the Oracle text refers to a keyword class
 /// without caring about its parameter payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -522,7 +536,10 @@ pub enum Keyword {
     /// CR 702.180: Harmonize {cost} — cast from graveyard for harmonize cost,
     /// tap up to one creature to reduce cost by its power, exile on resolution.
     Harmonize(ManaCost),
-    Evoke(ManaCost),
+    /// CR 702.74a + CR 118.9: see `EvokeCost` for the mana / non-mana split.
+    /// Pure-mana evoke (Lorwyn cycle) is `EvokeCost::Mana`; MH2 Incarnations
+    /// (Solitude et al.) carry `EvokeCost::NonMana(AbilityCost::Exile { .. })`.
+    Evoke(EvokeCost),
     Foretell(ManaCost),
     Mutate(ManaCost),
     Disturb(ManaCost),
@@ -1404,7 +1421,7 @@ impl FromStr for Keyword {
                         exile_count: 0,
                     })
                 }
-                "evoke" => return Ok(Keyword::Evoke(parse_keyword_mana_cost(p))),
+                "evoke" => return Ok(Keyword::Evoke(EvokeCost::Mana(parse_keyword_mana_cost(p)))),
                 "foretell" => return Ok(Keyword::Foretell(parse_keyword_mana_cost(p))),
                 "mutate" => return Ok(Keyword::Mutate(parse_keyword_mana_cost(p))),
                 "disturb" => return Ok(Keyword::Disturb(parse_keyword_mana_cost(p))),
@@ -1943,7 +1960,14 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
             cost: ManaCost::default(),
             exile_count: 0,
         }),
-        "Evoke" => Ok(Keyword::Evoke(mana(data)?)),
+        "Evoke" => {
+            // Accept both legacy ManaCost format and new EvokeCost tagged format.
+            if let Ok(ev_cost) = serde_json::from_value::<EvokeCost>(data.clone()) {
+                Ok(Keyword::Evoke(ev_cost))
+            } else {
+                Ok(Keyword::Evoke(EvokeCost::Mana(mana(data)?)))
+            }
+        }
         "Foretell" => Ok(Keyword::Foretell(mana(data)?)),
         "Mutate" => Ok(Keyword::Mutate(mana(data)?)),
         "Disturb" => Ok(Keyword::Disturb(mana(data)?)),

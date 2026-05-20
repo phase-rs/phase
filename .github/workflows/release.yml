@@ -3,13 +3,65 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: CalVer tag to recover, e.g. v2026.5.20
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 jobs:
+  resolve-release-ref:
+    name: Resolve Release Ref
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+      release_sha: ${{ steps.resolve.outputs.release_sha }}
+      is_calver: ${{ steps.resolve.outputs.is_calver }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve tag and commit
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_TAG: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="$INPUT_TAG"
+            if ! [[ "$TAG" =~ ^v[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}$ ]]; then
+              echo "::error::workflow_dispatch tag must be a CalVer tag like v2026.5.20"
+              exit 1
+            fi
+          else
+            TAG="$PUSH_TAG"
+          fi
+
+          git fetch --force --tags origin "refs/tags/$TAG:refs/tags/$TAG"
+          SHA=$(git rev-list -n 1 "$TAG")
+
+          if [[ "$TAG" =~ ^v[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}$ ]]; then
+            IS_CALVER=true
+          else
+            IS_CALVER=false
+          fi
+
+          echo "release_tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "release_sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "is_calver=$IS_CALVER" >> "$GITHUB_OUTPUT"
+
   tauri-preflight:
     name: Tauri Preflight
+    needs: [resolve-release-ref]
     # Fast-fail sanity check before paying for the full release matrix. Catches
     # the structural class of failures that historically only surfaced 30-45
     # minutes into the build-tauri job: malformed JSON, version drift between
@@ -21,13 +73,18 @@ jobs:
     # generic Rust mistakes, not from platform-specific Tauri internals.
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      RELEASE_TAG: ${{ needs.resolve-release-ref.outputs.release_tag }}
+      RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_SHA }}
 
       - name: Verify tag matches workspace + Tauri + package versions
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="$RELEASE_TAG"
           EXPECTED="${TAG#v}"
 
           WORKSPACE_VERSION=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
@@ -92,11 +149,15 @@ jobs:
 
   build-wasm:
     name: Build WASM + Frontend
-    needs: [tauri-preflight]
+    needs: [resolve-release-ref, tauri-preflight]
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_SHA }}
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -319,7 +380,7 @@ jobs:
 
   deploy-production:
     name: Deploy Production (Cloudflare Pages)
-    needs: [build-wasm]
+    needs: [build-wasm, release]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -338,9 +399,12 @@ jobs:
 
   build-server:
     name: Build Server (${{ matrix.os }})
-    needs: [tauri-preflight, build-wasm]
+    needs: [resolve-release-ref, tauri-preflight, build-wasm]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
+    env:
+      RELEASE_TAG: ${{ needs.resolve-release-ref.outputs.release_tag }}
+      RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
     strategy:
       fail-fast: false
       matrix:
@@ -362,6 +426,8 @@ jobs:
             archive_ext: zip
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_SHA }}
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -386,7 +452,7 @@ jobs:
       - name: Package server archive (Unix)
         if: matrix.os != 'windows'
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="$RELEASE_TAG"
           mkdir -p staging
           cp "target/${{ matrix.triple }}/server-release/phase-server" staging/
           chmod +x staging/phase-server
@@ -397,7 +463,7 @@ jobs:
       - name: Package server archive (Windows)
         if: matrix.os == 'windows'
         run: |
-          $Tag = $env:GITHUB_REF -replace 'refs/tags/',''
+          $Tag = $env:RELEASE_TAG
           Copy-Item "target/${{ matrix.triple }}/server-release/phase-server.exe" "staging/"
           Compress-Archive -Path "staging/phase-server.exe","staging/data/card-data.json" -DestinationPath "${{ matrix.artifact }}.zip"
         shell: pwsh
@@ -424,8 +490,10 @@ jobs:
 
   build-tauri:
     name: Build Tauri (${{ matrix.os }})
-    needs: [tauri-preflight, build-wasm]
+    needs: [resolve-release-ref, tauri-preflight, build-wasm]
     runs-on: ${{ matrix.runner }}
+    env:
+      RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
     strategy:
       fail-fast: false
       matrix:
@@ -444,6 +512,8 @@ jobs:
             sidecar_triple: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_SHA }}
 
       - name: Check macOS signing secrets
         id: macos-signing
@@ -613,12 +683,17 @@ jobs:
 
   deploy-server:
     name: Deploy Server (beebs)
-    needs: [build-server]
+    needs: [resolve-release-ref, build-server, release]
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    if: ${{ always() && needs.build-server.result == 'success' && needs.release.result == 'success' }}
+    env:
+      RELEASE_TAG: ${{ needs.resolve-release-ref.outputs.release_tag }}
+      RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_SHA }}
 
       - name: Download server artifact
         uses: actions/download-artifact@v4
@@ -657,7 +732,7 @@ jobs:
             && sudo systemctl start phase-server \
             && rm -f /tmp/phase-server /tmp/card-data.json /tmp/phase-server.service"
 
-          echo "Deployed phase-server ${GITHUB_REF#refs/tags/} to beebs"
+          echo "Deployed phase-server $RELEASE_TAG to beebs"
 
       - name: Verify deployment
         run: |
@@ -667,22 +742,28 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [build-wasm, build-server, build-tauri]
-    # Proceed if wasm + server succeeded. build-tauri may have skipped
-    # matrix entries (e.g. macOS when signing secrets are absent) — the
-    # release still ships with whatever platforms built successfully.
-    # The updater manifest and artifact globs gracefully handle missing
-    # platform artifacts (fail_on_unmatched_files: false).
+    needs: [resolve-release-ref, build-wasm, build-server, build-tauri]
+    # CalVer production releases require full Tauri updater output so the
+    # stable desktop updater never points at a partial nightly. Legacy v0.*
+    # releases keep the older permissive behavior.
     if: >-
       always() &&
       needs.build-wasm.result == 'success' &&
       needs.build-server.result == 'success' &&
-      (needs.build-tauri.result == 'success' || needs.build-tauri.result == 'failure')
+      (
+        needs.build-tauri.result == 'success' ||
+        (needs.resolve-release-ref.outputs.is_calver != 'true' && needs.build-tauri.result == 'failure')
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      RELEASE_TAG: ${{ needs.resolve-release-ref.outputs.release_tag }}
+      RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
+      IS_CALVER: ${{ needs.resolve-release-ref.outputs.is_calver }}
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ env.RELEASE_SHA }}
           fetch-depth: 0
 
       - name: Download all artifacts
@@ -694,30 +775,64 @@ jobs:
         run: |
           set -euo pipefail
 
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="$RELEASE_TAG"
           REPO="${GITHUB_REPOSITORY}"
+          shopt -s nullglob
+
+          first_match() {
+            local pattern="$1"
+            local match
+            match=$(compgen -G "$pattern" | sort | head -1 || true)
+            printf '%s' "$match"
+          }
+
+          artifact_url() {
+            local path="$1"
+            local name
+            name=$(basename "$path")
+            printf 'https://github.com/%s/releases/download/%s/%s' \
+              "$REPO" "$TAG" "$(jq -rn --arg value "$name" '$value | @uri')"
+          }
 
           # Read signatures for available platforms (skip missing ones).
           # Tauri v2 v3-compatible updater format: the raw installer is the
           # updater payload (`.AppImage`, `-setup.exe`, `.app.tar.gz`); each
           # has a sibling `.sig`. Set in tauri.conf.json: createUpdaterArtifacts: true.
-          LINUX_SIG=$(cat artifacts/phase-tauri-linux/*.AppImage.sig 2>/dev/null || echo "")
-          MACOS_SIG=$(cat artifacts/phase-tauri-macos/*.app.tar.gz.sig 2>/dev/null || echo "")
-          WINDOWS_SIG=$(cat artifacts/phase-tauri-windows/*-setup.exe.sig 2>/dev/null || echo "")
+          LINUX_PAYLOAD=$(first_match "artifacts/phase-tauri-linux/*.AppImage")
+          MACOS_PAYLOAD=$(first_match "artifacts/phase-tauri-macos/*.app.tar.gz")
+          WINDOWS_PAYLOAD=$(first_match "artifacts/phase-tauri-windows/*-setup.exe")
+
+          LINUX_SIG=""
+          MACOS_SIG=""
+          WINDOWS_SIG=""
+          if [ -n "$LINUX_PAYLOAD" ] && [ -f "$LINUX_PAYLOAD.sig" ]; then LINUX_SIG=$(cat "$LINUX_PAYLOAD.sig"); fi
+          if [ -n "$MACOS_PAYLOAD" ] && [ -f "$MACOS_PAYLOAD.sig" ]; then MACOS_SIG=$(cat "$MACOS_PAYLOAD.sig"); fi
+          if [ -n "$WINDOWS_PAYLOAD" ] && [ -f "$WINDOWS_PAYLOAD.sig" ]; then WINDOWS_SIG=$(cat "$WINDOWS_PAYLOAD.sig"); fi
+
+          if [ "$IS_CALVER" = "true" ]; then
+            missing=0
+            if [ -z "$LINUX_PAYLOAD" ] || [ -z "$LINUX_SIG" ]; then echo "::error::Missing Linux updater payload/signature for CalVer release"; missing=1; fi
+            if [ -z "$MACOS_PAYLOAD" ] || [ -z "$MACOS_SIG" ]; then echo "::error::Missing macOS updater payload/signature for CalVer release"; missing=1; fi
+            if [ -z "$WINDOWS_PAYLOAD" ] || [ -z "$WINDOWS_SIG" ]; then echo "::error::Missing Windows updater payload/signature for CalVer release"; missing=1; fi
+            [ "$missing" = "0" ]
+          fi
 
           # Build platforms object with only available platforms
           PLATFORMS="{"
           SEP=""
-          if [ -n "$LINUX_SIG" ]; then
-            PLATFORMS="${PLATFORMS}${SEP}\"linux-x86_64\":{\"signature\":\"${LINUX_SIG}\",\"url\":\"https://github.com/${REPO}/releases/download/${TAG}/Phase_${TAG#v}_amd64.AppImage\"}"
+          if [ -n "$LINUX_PAYLOAD" ] && [ -n "$LINUX_SIG" ]; then
+            LINUX_URL=$(artifact_url "$LINUX_PAYLOAD")
+            PLATFORMS="${PLATFORMS}${SEP}\"linux-x86_64\":{\"signature\":\"${LINUX_SIG}\",\"url\":\"${LINUX_URL}\"}"
             SEP=","
           fi
-          if [ -n "$MACOS_SIG" ]; then
-            PLATFORMS="${PLATFORMS}${SEP}\"darwin-aarch64\":{\"signature\":\"${MACOS_SIG}\",\"url\":\"https://github.com/${REPO}/releases/download/${TAG}/Phase.app.tar.gz\"}"
+          if [ -n "$MACOS_PAYLOAD" ] && [ -n "$MACOS_SIG" ]; then
+            MACOS_URL=$(artifact_url "$MACOS_PAYLOAD")
+            PLATFORMS="${PLATFORMS}${SEP}\"darwin-aarch64\":{\"signature\":\"${MACOS_SIG}\",\"url\":\"${MACOS_URL}\"}"
             SEP=","
           fi
-          if [ -n "$WINDOWS_SIG" ]; then
-            PLATFORMS="${PLATFORMS}${SEP}\"windows-x86_64\":{\"signature\":\"${WINDOWS_SIG}\",\"url\":\"https://github.com/${REPO}/releases/download/${TAG}/Phase_${TAG#v}_x64-setup.exe\"}"
+          if [ -n "$WINDOWS_PAYLOAD" ] && [ -n "$WINDOWS_SIG" ]; then
+            WINDOWS_URL=$(artifact_url "$WINDOWS_PAYLOAD")
+            PLATFORMS="${PLATFORMS}${SEP}\"windows-x86_64\":{\"signature\":\"${WINDOWS_SIG}\",\"url\":\"${WINDOWS_URL}\"}"
           fi
           PLATFORMS="${PLATFORMS}}"
 
@@ -732,9 +847,13 @@ jobs:
               | jq . > artifacts/update.json
           fi
 
+          if [ "$IS_CALVER" = "true" ]; then
+            test -s artifacts/update.json
+          fi
+
       - name: Generate changelog
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="$RELEASE_TAG"
           PREV_TAG=$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || echo "")
           if [ -n "$PREV_TAG" ]; then
             RANGE="${PREV_TAG}..${TAG}"
@@ -765,8 +884,9 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           body_path: changelog.md
-          fail_on_unmatched_files: false
+          fail_on_unmatched_files: ${{ env.IS_CALVER == 'true' }}
           files: |
             artifacts/phase-server-linux-x86_64/*.tar.gz
             artifacts/phase-server-linux-x86_64/*.sha256

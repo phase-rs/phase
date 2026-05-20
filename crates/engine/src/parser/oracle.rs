@@ -5451,6 +5451,91 @@ mod tests {
     }
 
     #[test]
+    fn thassas_oracle_win_condition_gated_by_devotion_vs_library() {
+        // GH #582 — CR 104.2b + CR 107.3i + CR 608.2c + CR 700.5: Thassa's
+        // Oracle's chained WinTheGame sub_ability must be gated by a typed
+        // `AbilityCondition::QuantityCheck` comparing devotion-to-blue
+        // against the controller's library size. The X binding from sentence
+        // 1 ("where X is your devotion to blue") must forward-fill across
+        // the sentence boundary into sentence 3's "If X is greater than or
+        // equal to ...", and the X-substitution post-pass must recurse into
+        // the chained sub_ability's `condition` slot.
+        let r = parse(
+            "When this creature enters, look at the top X cards of your library, where X is your devotion to blue. Put up to one of them on top of your library and the rest on the bottom of your library in a random order. If X is greater than or equal to the number of cards in your library, you win the game.",
+            "Thassa's Oracle",
+            &[],
+            &["Creature"],
+            &["Merfolk", "Wizard"],
+        );
+        assert_eq!(r.triggers.len(), 1, "expected single ETB trigger");
+        let exec = r.triggers[0]
+            .execute
+            .as_ref()
+            .expect("trigger should have execute body");
+        // Walk to the innermost SequentialSibling chain — the WinTheGame node.
+        let mut node = exec;
+        while let Some(sub) = node.sub_ability.as_ref() {
+            if matches!(*sub.effect, crate::types::ability::Effect::WinTheGame) {
+                node = sub;
+                break;
+            }
+            node = sub;
+        }
+        assert!(
+            matches!(*node.effect, crate::types::ability::Effect::WinTheGame),
+            "expected to find WinTheGame in the SequentialSibling chain, got {:?}",
+            node.effect
+        );
+        let cond = node
+            .condition
+            .as_ref()
+            .expect("WinTheGame must be gated by a condition, not unconditional");
+        match cond {
+            crate::types::ability::AbilityCondition::QuantityCheck {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert_eq!(*comparator, crate::types::ability::Comparator::GE);
+                // LHS must be Devotion (NOT Variable("X")) — proves Step 1b
+                // forward-fill AND Step 3 condition recursion both fired.
+                match lhs {
+                    crate::types::ability::QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::Devotion { .. },
+                    } => {}
+                    other => panic!(
+                        "lhs must be Devotion (forward-fill + condition X-subst applied); got {other:?}"
+                    ),
+                }
+                // RHS: cards in your library.
+                match rhs {
+                    crate::types::ability::QuantityExpr::Ref {
+                        qty:
+                            crate::types::ability::QuantityRef::ZoneCardCount {
+                                zone: crate::types::ability::ZoneRef::Library,
+                                scope: crate::types::ability::CountScope::Controller,
+                                ..
+                            },
+                    } => {}
+                    other => {
+                        panic!("rhs must be ZoneCardCount{{Library, Controller}}; got {other:?}")
+                    }
+                }
+            }
+            other => panic!("expected AbilityCondition::QuantityCheck, got {other:?}"),
+        }
+        // CR L4: no Condition_If SwallowedClause remains for this trigger body.
+        assert!(
+            r.parse_warnings.iter().all(|w| !matches!(
+                w,
+                OracleDiagnostic::SwallowedClause { detector, .. } if detector == "Condition_If"
+            )),
+            "unexpected Condition_If SwallowedClause: {:?}",
+            r.parse_warnings
+        );
+    }
+
+    #[test]
     fn incubate_parses_as_effect() {
         let r = parse(
             "When this creature enters, incubate 3.",

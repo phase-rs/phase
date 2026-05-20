@@ -183,7 +183,11 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
         Rule::Emerge(c) => Keyword::Emerge(pure_mana(c, "Rule::Emerge", path)?),
         Rule::Encore(c) => Keyword::Encore(pure_mana(c, "Rule::Encore", path)?),
         Rule::Eternalize(c) => Keyword::Eternalize(pure_mana(c, "Rule::Eternalize", path)?),
-        Rule::Evoke(c) => Keyword::Evoke(pure_mana(c, "Rule::Evoke", path)?),
+        Rule::Evoke(c) => Keyword::Evoke(engine::types::keywords::EvokeCost::Mana(pure_mana(
+            c,
+            "Rule::Evoke",
+            path,
+        )?)),
         Rule::Fortify(c) => Keyword::Fortify(pure_mana(c, "Rule::Fortify", path)?),
         Rule::Foretell(c) => Keyword::Foretell(pure_mana(c, "Rule::Foretell", path)?),
         Rule::Harmonize(c) => Keyword::Harmonize(pure_mana(c, "Rule::Harmonize", path)?),
