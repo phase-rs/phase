@@ -38,6 +38,7 @@ pub enum GameFormat {
     Commander,
     Pioneer,
     Modern,
+    Premodern,
     Legacy,
     Vintage,
     Historic,
@@ -45,6 +46,7 @@ pub enum GameFormat {
     Pauper,
     PauperCommander,
     DuelCommander,
+    TinyLeaders,
     Brawl,
     HistoricBrawl,
     FreeForAll,
@@ -105,6 +107,7 @@ impl GameFormat {
             GameFormat::Commander => Some(LegalityFormat::Commander),
             GameFormat::Pioneer => Some(LegalityFormat::Pioneer),
             GameFormat::Modern => Some(LegalityFormat::Modern),
+            GameFormat::Premodern => Some(LegalityFormat::Premodern),
             GameFormat::Legacy => Some(LegalityFormat::Legacy),
             GameFormat::Vintage => Some(LegalityFormat::Vintage),
             GameFormat::Historic => Some(LegalityFormat::Historic),
@@ -114,7 +117,10 @@ impl GameFormat {
             GameFormat::DuelCommander => Some(LegalityFormat::DuelCommander),
             GameFormat::Brawl => Some(LegalityFormat::StandardBrawl),
             GameFormat::HistoricBrawl => Some(LegalityFormat::Brawl),
-            GameFormat::FreeForAll | GameFormat::TwoHeadedGiant | GameFormat::Limited => None,
+            GameFormat::TinyLeaders
+            | GameFormat::FreeForAll
+            | GameFormat::TwoHeadedGiant
+            | GameFormat::Limited => None,
         }
     }
 
@@ -128,6 +134,7 @@ impl GameFormat {
             GameFormat::Standard
             | GameFormat::Pioneer
             | GameFormat::Modern
+            | GameFormat::Premodern
             | GameFormat::Legacy
             | GameFormat::Vintage
             | GameFormat::Historic
@@ -138,6 +145,7 @@ impl GameFormat {
             | GameFormat::DuelCommander
             | GameFormat::Brawl
             | GameFormat::HistoricBrawl => SideboardPolicy::Forbidden,
+            GameFormat::TinyLeaders => SideboardPolicy::Limited(10),
             GameFormat::FreeForAll | GameFormat::TwoHeadedGiant | GameFormat::Limited => {
                 SideboardPolicy::Unlimited
             }
@@ -188,6 +196,7 @@ impl GameFormat {
             GameFormat::Commander => "Commander",
             GameFormat::Pioneer => "Pioneer",
             GameFormat::Modern => "Modern",
+            GameFormat::Premodern => "Premodern",
             GameFormat::Legacy => "Legacy",
             GameFormat::Vintage => "Vintage",
             GameFormat::Historic => "Historic",
@@ -195,6 +204,7 @@ impl GameFormat {
             GameFormat::Pauper => "Pauper",
             GameFormat::PauperCommander => "Pauper Commander",
             GameFormat::DuelCommander => "Duel Commander",
+            GameFormat::TinyLeaders => "Tiny Leaders: Reborn",
             GameFormat::Brawl => "Brawl",
             GameFormat::HistoricBrawl => "Historic Brawl",
             GameFormat::FreeForAll => "Free-for-All",
@@ -232,6 +242,14 @@ impl GameFormat {
                 description: "Non-rotating from Mirrodin onward",
                 group: FormatGroup::Constructed,
                 default_config: FormatConfig::modern(),
+            },
+            FormatMetadata {
+                format: GameFormat::Premodern,
+                label: "Premodern",
+                short_label: "PRE",
+                description: "Old-frame constructed through Scourge",
+                group: FormatGroup::Constructed,
+                default_config: FormatConfig::premodern(),
             },
             FormatMetadata {
                 format: GameFormat::Legacy,
@@ -296,6 +314,14 @@ impl GameFormat {
                 description: "Commons-only singleton Commander",
                 group: FormatGroup::Commander,
                 default_config: FormatConfig::pauper_commander(),
+            },
+            FormatMetadata {
+                format: GameFormat::TinyLeaders,
+                label: "Tiny Leaders: Reborn",
+                short_label: "TLR",
+                description: "50-card Tiny singleton",
+                group: FormatGroup::Commander,
+                default_config: FormatConfig::tiny_leaders(),
             },
             FormatMetadata {
                 format: GameFormat::Brawl,
@@ -383,6 +409,14 @@ impl FormatConfig {
         }
     }
 
+    /// Premodern: community-maintained old-frame constructed through Scourge.
+    pub fn premodern() -> Self {
+        FormatConfig {
+            format: GameFormat::Premodern,
+            ..Self::standard()
+        }
+    }
+
     /// Legacy: non-rotating constructed spanning the full Magic card pool,
     /// minus the Legacy banned list.
     pub fn legacy() -> Self {
@@ -427,6 +461,25 @@ impl FormatConfig {
             starting_life: 30,
             max_players: 2,
             ..Self::commander()
+        }
+    }
+
+    /// Tiny Leaders: Reborn: 50-card singleton command-zone format, 20 life,
+    /// no commander-damage loss threshold, and up to 10 sideboard cards.
+    pub fn tiny_leaders() -> Self {
+        FormatConfig {
+            format: GameFormat::TinyLeaders,
+            starting_life: 20,
+            min_players: 2,
+            max_players: 2,
+            deck_size: 50,
+            singleton: true,
+            command_zone: true,
+            commander_damage_threshold: None,
+            range_of_influence: None,
+            team_based: false,
+            uses_commander: false,
+            allow_debug_actions: false,
         }
     }
 
@@ -547,6 +600,7 @@ impl FormatConfig {
             GameFormat::Commander => Self::commander(),
             GameFormat::Pioneer => Self::pioneer(),
             GameFormat::Modern => Self::modern(),
+            GameFormat::Premodern => Self::premodern(),
             GameFormat::Legacy => Self::legacy(),
             GameFormat::Vintage => Self::vintage(),
             GameFormat::Historic => Self::historic(),
@@ -554,6 +608,7 @@ impl FormatConfig {
             GameFormat::Pauper => Self::pauper(),
             GameFormat::PauperCommander => Self::pauper_commander(),
             GameFormat::DuelCommander => Self::duel_commander(),
+            GameFormat::TinyLeaders => Self::tiny_leaders(),
             GameFormat::Brawl => Self::brawl(),
             GameFormat::HistoricBrawl => Self::historic_brawl(),
             GameFormat::FreeForAll => Self::free_for_all(),
@@ -593,6 +648,36 @@ mod tests {
     }
 
     #[test]
+    fn format_config_tiny_leaders() {
+        let config = FormatConfig::tiny_leaders();
+        assert_eq!(config.format, GameFormat::TinyLeaders);
+        assert_eq!(config.starting_life, 20);
+        assert_eq!(config.min_players, 2);
+        assert_eq!(config.max_players, 2);
+        assert_eq!(config.deck_size, 50);
+        assert!(config.singleton);
+        assert!(config.command_zone);
+        assert_eq!(config.commander_damage_threshold, None);
+        assert!(!config.uses_commander);
+        assert!(!config.team_based);
+    }
+
+    #[test]
+    fn format_config_premodern() {
+        let config = FormatConfig::premodern();
+        assert_eq!(config.format, GameFormat::Premodern);
+        assert_eq!(config.starting_life, 20);
+        assert_eq!(config.min_players, 2);
+        assert_eq!(config.max_players, 2);
+        assert_eq!(config.deck_size, 60);
+        assert!(!config.singleton);
+        assert!(!config.command_zone);
+        assert_eq!(config.commander_damage_threshold, None);
+        assert!(!config.uses_commander);
+        assert!(!config.team_based);
+    }
+
+    #[test]
     fn format_config_free_for_all() {
         let config = FormatConfig::free_for_all();
         assert_eq!(config.starting_life, 20);
@@ -623,6 +708,10 @@ mod tests {
             SideboardPolicy::Limited(15)
         );
         assert_eq!(
+            GameFormat::Premodern.sideboard_policy(),
+            SideboardPolicy::Limited(15)
+        );
+        assert_eq!(
             GameFormat::Commander.sideboard_policy(),
             SideboardPolicy::Forbidden
         );
@@ -633,6 +722,10 @@ mod tests {
         assert_eq!(
             GameFormat::HistoricBrawl.sideboard_policy(),
             SideboardPolicy::Forbidden
+        );
+        assert_eq!(
+            GameFormat::TinyLeaders.sideboard_policy(),
+            SideboardPolicy::Limited(10)
         );
         assert_eq!(
             GameFormat::FreeForAll.sideboard_policy(),
@@ -666,8 +759,10 @@ mod tests {
             FormatConfig::standard(),
             FormatConfig::commander(),
             FormatConfig::pioneer(),
+            FormatConfig::premodern(),
             FormatConfig::historic(),
             FormatConfig::pauper(),
+            FormatConfig::tiny_leaders(),
             FormatConfig::brawl(),
             FormatConfig::historic_brawl(),
             FormatConfig::free_for_all(),
@@ -714,6 +809,21 @@ mod tests {
     }
 
     #[test]
+    fn premodern_uses_normal_constructed_mulligan() {
+        assert!(!GameFormat::Modern.grants_free_first_mulligan());
+        assert!(!GameFormat::Premodern.grants_free_first_mulligan());
+        assert!(!GameFormat::Legacy.grants_free_first_mulligan());
+    }
+
+    #[test]
+    fn premodern_legality_format() {
+        assert_eq!(
+            GameFormat::Premodern.legality_format(),
+            Some(LegalityFormat::Premodern)
+        );
+    }
+
+    #[test]
     fn limited_label() {
         assert_eq!(GameFormat::Limited.label(), "Limited");
     }
@@ -723,6 +833,14 @@ mod tests {
         assert_eq!(
             FormatConfig::for_format(GameFormat::Limited),
             FormatConfig::limited()
+        );
+    }
+
+    #[test]
+    fn premodern_for_format_roundtrip() {
+        assert_eq!(
+            FormatConfig::for_format(GameFormat::Premodern),
+            FormatConfig::premodern()
         );
     }
 
@@ -761,5 +879,41 @@ mod tests {
             .expect("Limited must be in registry");
         assert_eq!(entry.group, FormatGroup::Limited);
         assert_eq!(entry.short_label, "LIM");
+    }
+
+    #[test]
+    fn premodern_registry_entry_is_ordered_with_constructed_formats() {
+        let registry = GameFormat::registry();
+        let modern_index = registry
+            .iter()
+            .position(|m| m.format == GameFormat::Modern)
+            .expect("Modern must be in registry");
+        let premodern_index = registry
+            .iter()
+            .position(|m| m.format == GameFormat::Premodern)
+            .expect("Premodern must be in registry");
+        let legacy_index = registry
+            .iter()
+            .position(|m| m.format == GameFormat::Legacy)
+            .expect("Legacy must be in registry");
+
+        assert_eq!(premodern_index, modern_index + 1);
+        assert_eq!(legacy_index, premodern_index + 1);
+        assert_eq!(registry[premodern_index].short_label, "PRE");
+        assert_eq!(registry[premodern_index].group, FormatGroup::Constructed);
+    }
+
+    #[test]
+    fn registry_constructed_formats_have_legality_mapping() {
+        for meta in GameFormat::registry()
+            .into_iter()
+            .filter(|meta| meta.group == FormatGroup::Constructed)
+        {
+            assert!(
+                meta.format.legality_format().is_some(),
+                "{:?} is constructed but has no legality mapping",
+                meta.format
+            );
+        }
     }
 }

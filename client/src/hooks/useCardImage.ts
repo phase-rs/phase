@@ -36,9 +36,10 @@ interface UseCardImageOptions {
    * picker to preview a specific printing's art. Requires `oracleId` to
    * look up the printings list. */
   scryfallId?: string;
-  /** Source printing context from a draft pack or imported deck list. When
-   * the art chain contains a `source_printing` entry, this set+collector
-   * pair is matched against the printings list. Falls through when absent. */
+  /** Source printing context from a draft pack or imported deck list. When no
+   * explicit art rule applies, this set+collector pair is matched against the
+   * printings list before falling back to default Scryfall art. If the art
+   * chain contains a `source_printing` entry, the chain controls priority. */
   sourcePrinting?: SourcePrinting;
 }
 
@@ -117,6 +118,21 @@ function resolveStrategyInBackground(oracleId: string, chain: ArtChainEntry[]): 
   });
 }
 
+function loadPrintingsInBackground(oracleId: string): void {
+  if (strategyInflight.has(oracleId)) return;
+  strategyInflight.add(oracleId);
+
+  getCardPrintings(oracleId).then((printings) => {
+    if (printings.length > 0) {
+      printingsCacheMap.set(oracleId, printings);
+    }
+    strategyInflight.delete(oracleId);
+    artCacheEvents.dispatchEvent(new Event("update"));
+  }).catch(() => {
+    strategyInflight.delete(oracleId);
+  });
+}
+
 function resolveOverrideUrl(
   oracleId: string,
   scryfallId: string,
@@ -136,6 +152,23 @@ function resolveOverrideUrl(
     }
   }).catch(() => {});
 
+  return null;
+}
+
+function resolveSourcePrintingUrl(
+  oracleId: string,
+  source: SourcePrinting,
+  faceIndex: number,
+  size: ImageSize,
+): string | null {
+  const cached = printingsCacheMap.get(oracleId);
+  if (cached) {
+    const setLower = source.setCode.toLowerCase();
+    const entry = cached.find((p) => p.set === setLower && p.collector_number === source.collectorNumber);
+    return entry ? resolvePrintingImageUrl(entry, faceIndex, size) : null;
+  }
+
+  loadPrintingsInBackground(oracleId);
   return null;
 }
 
@@ -289,6 +322,8 @@ export function useCardImage(
           resolveStrategyInBackground(resolvedOracleId, artChain);
         }
       }
+    } else if (sourcePrinting) {
+      overrideUrl = resolveSourcePrintingUrl(resolvedOracleId, sourcePrinting, faceIndex, size);
     }
   }
 

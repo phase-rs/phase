@@ -470,6 +470,10 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
             .iter()
             .flat_map(|entry| bottom_card_actions(state, entry.player, entry.count))
             .collect(),
+        WaitingFor::OpeningHandBottomCards { pending, .. } => pending
+            .iter()
+            .flat_map(|entry| bottom_card_actions(state, entry.player, entry.count))
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -1950,7 +1954,8 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
         | WaitingFor::BetweenGamesChoosePlayDraw { .. }
         | WaitingFor::OrderTriggers { .. }
         | WaitingFor::MulliganDecision { .. }
-        | WaitingFor::MulliganBottomCards { .. } => Vec::new(),
+        | WaitingFor::MulliganBottomCards { .. }
+        | WaitingFor::OpeningHandBottomCards { .. } => Vec::new(),
         // CR 702.xxx: Paradigm (Strixhaven) — enumerate each exiled paradigm
         // source as a cast candidate plus a pass option. Assign when WotC
         // publishes SOS CR update.

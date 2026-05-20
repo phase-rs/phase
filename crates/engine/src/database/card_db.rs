@@ -461,6 +461,7 @@ mod tests {
                 "scryfall_oracle_id": null,
                 "legalities": {
                     "standard": "Legal",
+                    "premodern": "Banned",
                     "commander": "not_legal"
                 }
             }),
@@ -476,6 +477,77 @@ mod tests {
         assert_eq!(
             db.legality_status("Test Card", LegalityFormat::Commander),
             Some(LegalityStatus::NotLegal)
+        );
+        assert_eq!(
+            db.legality_status("Test Card", LegalityFormat::Premodern),
+            Some(LegalityStatus::Banned)
+        );
+    }
+
+    #[test]
+    fn from_json_str_roundtrips_premodern_legalities_without_set_inference() {
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "lightning bolt".to_string(),
+            serde_json::json!({
+                "name": "Lightning Bolt",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": [], "subtypes": [] },
+                "power": null,
+                "toughness": null,
+                "loyalty": null,
+                "defense": null,
+                "oracle_text": null,
+                "non_ability_text": null,
+                "flavor_name": null,
+                "keywords": [],
+                "abilities": [],
+                "triggers": [],
+                "static_abilities": [],
+                "replacements": [],
+                "color_override": null,
+                "scryfall_oracle_id": null,
+                "legalities": {
+                    "premodern": "Legal"
+                }
+            }),
+        );
+        map.insert(
+            "channel".to_string(),
+            serde_json::json!({
+                "name": "Channel",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": [], "subtypes": [] },
+                "power": null,
+                "toughness": null,
+                "loyalty": null,
+                "defense": null,
+                "oracle_text": null,
+                "non_ability_text": null,
+                "flavor_name": null,
+                "keywords": [],
+                "abilities": [],
+                "triggers": [],
+                "static_abilities": [],
+                "replacements": [],
+                "color_override": null,
+                "scryfall_oracle_id": null,
+                "legalities": {
+                    "premodern": "Banned"
+                }
+            }),
+        );
+
+        let json = serde_json::Value::Object(map).to_string();
+        let db = CardDatabase::from_json_str(&json).unwrap();
+
+        assert_eq!(
+            db.legality_status("Lightning Bolt", LegalityFormat::Premodern),
+            Some(LegalityStatus::Legal)
+        );
+        assert_eq!(
+            db.legality_status("Channel", LegalityFormat::Premodern),
+            Some(LegalityStatus::Banned)
         );
     }
 

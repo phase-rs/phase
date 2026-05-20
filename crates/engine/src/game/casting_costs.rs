@@ -3193,7 +3193,12 @@ fn auto_tap_mana_sources_inner(
                 let acceptable = if any_color { Vec::new() } else { vec![a, b] };
                 needs.push((acceptable, false, false));
             }
-            ShardRequirement::TwoGenericHybrid(color) => {
+            ShardRequirement::TwoGenericHybrid(color)
+            // CR 107.4f: K'rrik promotion never reaches the auto-tap
+            // planner (`shard_to_mana_type` never emits this variant),
+            // but the arm is required for exhaustiveness. Same
+            // tap-planning shape as the unpromoted `TwoGenericHybrid`.
+            | ShardRequirement::TwoGenericHybridPhyrexian(color) => {
                 let acceptable = if any_color { Vec::new() } else { vec![color] };
                 needs.push((acceptable, true, false));
             }
@@ -4004,16 +4009,38 @@ pub(super) fn maybe_pause_for_phyrexian_choice(
     cost: &crate::types::mana::ManaCost,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
-    // Fast reject: no Phyrexian shards → no pause.
+    // CR 107.4f: Fast reject — pause only when cost has intrinsic Phyrexian
+    // shards OR the player has a K'rrik-style grant whose color appears in the
+    // cost. The grant scan is cheap (single battlefield scan).
+    let life_colors = super::static_abilities::player_life_payment_colors(state, player);
     match cost {
         crate::types::mana::ManaCost::Cost { shards, .. } => {
-            if !shards.iter().any(|s| {
+            let any_intrinsic_phyrexian = shards.iter().any(|s| {
                 matches!(
                     mana_payment::shard_to_mana_type(*s),
                     mana_payment::ShardRequirement::Phyrexian(..)
                         | mana_payment::ShardRequirement::HybridPhyrexian(..)
                 )
-            }) {
+            });
+            let any_promoted = !life_colors.is_empty()
+                && shards.iter().any(|s| {
+                    // After promotion, a Phyrexian-shape shard appears iff
+                    // the grant covers one of the shard's colors.
+                    !matches!(
+                        mana_payment::effective_shard_requirement(
+                            mana_payment::shard_to_mana_type(*s),
+                            life_colors,
+                        ),
+                        mana_payment::ShardRequirement::Single(..)
+                            | mana_payment::ShardRequirement::Hybrid(..)
+                            | mana_payment::ShardRequirement::TwoGenericHybrid(..)
+                            | mana_payment::ShardRequirement::ColorlessHybrid(..)
+                            | mana_payment::ShardRequirement::Snow
+                            | mana_payment::ShardRequirement::X
+                            | mana_payment::ShardRequirement::TwoOrMoreColorSource
+                    )
+                });
+            if !any_intrinsic_phyrexian && !any_promoted {
                 return None;
             }
         }
@@ -4032,7 +4059,11 @@ pub(super) fn maybe_pause_for_phyrexian_choice(
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
     let any_color =
         super::casting::player_can_spend_as_any_color_for_spell(state, player, source_id);
-    let max_life = super::life_costs::max_phyrexian_life_payments(state, player);
+    // CR 107.4f + CR 118.1: Single-authority permission bundle — passes
+    // `life_colors` through to `compute_phyrexian_shards` so K'rrik-promoted
+    // shards surface in the pause UI.
+    let permissions =
+        super::static_abilities::build_cost_permission_context(state, player, any_color);
 
     let shards = {
         let player_data = state.players.iter().find(|p| p.id == player)?;
@@ -4040,8 +4071,7 @@ pub(super) fn maybe_pause_for_phyrexian_choice(
             &player_data.mana_pool,
             cost,
             spell_ctx.as_ref(),
-            any_color,
-            max_life,
+            permissions,
         )
     };
 

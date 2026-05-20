@@ -33,6 +33,7 @@ const FORMAT_DISPLAY: { key: string; label: string }[] = [
   { key: "standard", label: "Standard" },
   { key: "commander", label: "Commander" },
   { key: "modern", label: "Modern" },
+  { key: "premodern", label: "Premodern" },
   { key: "pioneer", label: "Pioneer" },
   { key: "legacy", label: "Legacy" },
   { key: "vintage", label: "Vintage" },

@@ -289,6 +289,39 @@ describe("multiplayerDraftStore", () => {
       expect(useMultiplayerDraftStore.getState().selectedCard).toBeNull();
     });
 
+    it("autoPickCard submits from the visible pack without manual selection", async () => {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        setPoolJson: "{}",
+        kind: "Premier",
+        podSize: 8,
+        hostDisplayName: "Host",
+        tournamentFormat: "Swiss",
+        podPolicy: "Competitive",
+      });
+
+      useMultiplayerDraftStore.setState({
+        view: {
+          ...mockView("Drafting"),
+          current_pack: [
+            {
+              instance_id: "card-123",
+              name: "Lightning Bolt",
+              set_code: "tst",
+              collector_number: "1",
+              rarity: "common",
+              colors: ["R"],
+              cmc: 1,
+              type_line: "Instant",
+            },
+          ],
+        },
+      });
+
+      await useMultiplayerDraftStore.getState().autoPickCard();
+
+      expect(mockHostAdapter.submitPick).toHaveBeenCalledWith("card-123");
+    });
+
     it("addToDeck and removeFromDeck manage mainDeck", () => {
       const { addToDeck, removeFromDeck } = useMultiplayerDraftStore.getState();
 

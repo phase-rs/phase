@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 import { useCardImage } from "../../hooks/useCardImage";
 import { useDraftStore } from "../../stores/draftStore";
-import type { DraftCardInstance } from "../../adapter/draft-adapter";
+import type { DraftCardInstance, DraftPlayerView } from "../../adapter/draft-adapter";
 import type { CardHoverInfo } from "../card/CardPreview";
 
 // ── Card tile ───────────────────────────────────────────────────────────
@@ -111,17 +111,38 @@ function groupByRarity(cards: DraftCardInstance[]) {
 
 interface PackDisplayProps {
   onCardHover: (info: CardHoverInfo | null) => void;
-  /** Show the "Auto-pick" button — Quick Draft only (no-op for P2P pods). */
+  /** Show the "Auto-pick" button when the active draft mode supports it. */
   showAutoPick?: boolean;
+  view?: DraftPlayerView | null;
+  selectedCard?: string | null;
+  onSelectCard?: (instanceId: string | null) => void;
+  onConfirmPick?: () => Promise<void> | void;
+  onAutoPick?: () => Promise<void> | void;
 }
 
-export function PackDisplay({ onCardHover, showAutoPick = false }: PackDisplayProps) {
-  const view = useDraftStore((s) => s.view);
-  const selectedCard = useDraftStore((s) => s.selectedCard);
-  const selectCard = useDraftStore((s) => s.selectCard);
-  const confirmPick = useDraftStore((s) => s.confirmPick);
-  const autoPickCard = useDraftStore((s) => s.autoPickCard);
+export function PackDisplay({
+  onCardHover,
+  showAutoPick = false,
+  view: viewOverride,
+  selectedCard: selectedCardOverride,
+  onSelectCard,
+  onConfirmPick,
+  onAutoPick,
+}: PackDisplayProps) {
+  const quickView = useDraftStore((s) => s.view);
+  const quickSelectedCard = useDraftStore((s) => s.selectedCard);
+  const quickSelectCard = useDraftStore((s) => s.selectCard);
+  const quickConfirmPick = useDraftStore((s) => s.confirmPick);
+  const quickAutoPickCard = useDraftStore((s) => s.autoPickCard);
   const [autoPicking, setAutoPicking] = useState(false);
+
+  const view = viewOverride !== undefined ? viewOverride : quickView;
+  const selectedCard = selectedCardOverride !== undefined
+    ? selectedCardOverride
+    : quickSelectedCard;
+  const selectCard = onSelectCard ?? quickSelectCard;
+  const confirmPick = onConfirmPick ?? quickConfirmPick;
+  const autoPickCard = onAutoPick ?? quickAutoPickCard;
 
   useEffect(() => {
     if (view?.current_pack?.length === 1 && !selectedCard) {

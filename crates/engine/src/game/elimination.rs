@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::player::PlayerId;
@@ -76,14 +78,18 @@ fn prune_mulligan_pending(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 800.4a: Drop any final-mulligan-count entries for players who have
     // been eliminated. Symmetric with the pending-list pruning below so
     // enter_bottom_phase never sees stale entries for dead players.
-    let alive: std::collections::HashSet<PlayerId> = state
+    let alive: HashSet<PlayerId> = state
         .final_mulligan_counts
         .keys()
+        .chain(state.prepaid_mulligan_bottoms.keys())
         .copied()
         .filter(|pid| players::is_alive(state, *pid))
         .collect();
     state
         .final_mulligan_counts
+        .retain(|pid, _| alive.contains(pid));
+    state
+        .prepaid_mulligan_bottoms
         .retain(|pid, _| alive.contains(pid));
 
     match state.waiting_for.clone() {
@@ -111,9 +117,24 @@ fn prune_mulligan_pending(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 .collect();
             if alive.is_empty() {
                 state.final_mulligan_counts.clear();
+                state.prepaid_mulligan_bottoms.clear();
                 state.waiting_for = super::mulligan::finish_mulligans_public(state, events);
             } else {
                 state.waiting_for = WaitingFor::MulliganBottomCards { pending: alive };
+            }
+        }
+        WaitingFor::OpeningHandBottomCards { pending, reason } => {
+            let alive: Vec<_> = pending
+                .into_iter()
+                .filter(|e| players::is_alive(state, e.player))
+                .collect();
+            if alive.is_empty() {
+                state.waiting_for = super::mulligan::enter_normal_mulligan_public(state);
+            } else {
+                state.waiting_for = WaitingFor::OpeningHandBottomCards {
+                    pending: alive,
+                    reason,
+                };
             }
         }
         _ => {}

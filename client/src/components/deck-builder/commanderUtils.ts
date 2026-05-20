@@ -4,11 +4,6 @@ import { BASIC_LAND_NAMES, hasUnlimitedCopies } from "../../constants/game";
 
 const WUBRG_COLORS = ["W", "U", "B", "R", "G"] as const;
 
-function isLegendaryCreature(card: ScryfallCard): boolean {
-  const typeLine = card.type_line.toLowerCase();
-  return typeLine.includes("legendary") && typeLine.includes("creature");
-}
-
 /** CR 702.124: All partner-family keywords that allow co-commander pairing. */
 const PARTNER_KEYWORDS = new Set([
   "Partner", "Partner with", "Friends forever",
@@ -69,11 +64,6 @@ export function getSingletonViolations(
   return deck
     .filter((e) => e.count > 1 && !BASIC_LAND_NAMES.has(e.name) && !hasUnlimitedCopies(cardDataCache.get(e.name)?.oracle_text))
     .map((e) => e.name);
-}
-
-export function canBeCommander(card: ScryfallCard): boolean {
-  return isLegendaryCreature(card) ||
-    card.type_line.toLowerCase().includes("can be your commander");
 }
 
 export function canAddPartner(

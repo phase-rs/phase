@@ -9,7 +9,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { useNavigate } from "react-router";
+import { useNavigate, useSearchParams } from "react-router";
 
 import { CardPreview } from "../components/card/CardPreview";
 import type { CardHoverInfo } from "../components/card/CardPreview";
@@ -529,6 +529,11 @@ function DraftingPhaseContent() {
   const [hoveredCard, setHoveredCard] = useState<CardHoverInfo | null>(null);
   const [introDismissed, setIntroDismissed] = useState(false);
   const podSize = useDraftPodStore((s) => s.config.podSize);
+  const view = useMultiplayerDraftStore((s) => s.view);
+  const selectedCard = useMultiplayerDraftStore((s) => s.selectedCard);
+  const selectCard = useMultiplayerDraftStore((s) => s.selectCard);
+  const confirmPick = useMultiplayerDraftStore((s) => s.confirmPick);
+  const autoPickCard = useMultiplayerDraftStore((s) => s.autoPickCard);
 
   if (!introDismissed) {
     return <DraftIntro mode="pod" podSize={podSize} onContinue={() => setIntroDismissed(true)} />;
@@ -540,13 +545,44 @@ function DraftingPhaseContent() {
         <div className="flex min-w-0 flex-1 flex-col">
           <SeatStatusRing />
           <PickTimer />
-          <DraftProgress />
-          <PackDisplay onCardHover={setHoveredCard} />
+          <DraftProgress view={view} />
+          <PackDisplay
+            view={view}
+            selectedCard={selectedCard}
+            onSelectCard={selectCard}
+            onConfirmPick={confirmPick}
+            showAutoPick
+            onAutoPick={autoPickCard}
+            onCardHover={setHoveredCard}
+          />
         </div>
-        <PoolPanel onCardHover={setHoveredCard} />
+        <PoolPanel view={view} onCardHover={setHoveredCard} />
       </div>
       <CardPreview cardName={hoveredCard?.name ?? null} sourcePrinting={hoveredCard?.sourcePrinting} />
     </>
+  );
+}
+
+function PodDeckBuilder() {
+  const view = useMultiplayerDraftStore((s) => s.view);
+  const mainDeck = useMultiplayerDraftStore((s) => s.mainDeck);
+  const landCounts = useMultiplayerDraftStore((s) => s.landCounts);
+  const addToDeck = useMultiplayerDraftStore((s) => s.addToDeck);
+  const removeFromDeck = useMultiplayerDraftStore((s) => s.removeFromDeck);
+  const setLandCount = useMultiplayerDraftStore((s) => s.setLandCount);
+  const submitDeck = useMultiplayerDraftStore((s) => s.submitDeck);
+
+  return (
+    <LimitedDeckBuilder
+      view={view}
+      mainDeck={mainDeck}
+      landCounts={landCounts}
+      onAddToDeck={addToDeck}
+      onRemoveFromDeck={removeFromDeck}
+      onSetLandCount={setLandCount}
+      onSubmitDeck={submitDeck}
+      showSuggestions={false}
+    />
   );
 }
 
@@ -565,7 +601,7 @@ function phaseContent(
     case "drafting":
       return <DraftingPhaseContent />;
     case "deckbuilding":
-      return <LimitedDeckBuilder />;
+      return <PodDeckBuilder />;
     case "betweenGames":
       return <BetweenGamesView />;
     case "pairing":
@@ -616,18 +652,25 @@ export function DraftPodPage() {
   const phase = useMultiplayerDraftStore((s) => s.phase);
   const leave = useMultiplayerDraftStore((s) => s.leave);
   const resetPod = useDraftPodStore((s) => s.reset);
+  const resumeHostedPod = useDraftPodStore((s) => s.resumeHostedPod);
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      void leave();
+      void leave(true);
       resetPod();
     };
   }, [leave, resetPod]);
 
+  useEffect(() => {
+    if (searchParams.get("resume") !== "1") return;
+    void resumeHostedPod();
+  }, [resumeHostedPod, searchParams]);
+
   const handleLeave = useCallback(async () => {
-    await leave();
+    await leave(true);
     resetPod();
     navigate("/");
   }, [leave, resetPod, navigate]);

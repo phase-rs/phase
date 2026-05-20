@@ -59,7 +59,8 @@ export function createAIController(config: AIControllerConfig): AIController {
   /**
    * Stable identity key for a WaitingFor — type + player so Priority{0} ≠ Priority{1}.
    *
-   * For simultaneous-mulligan states (`MulliganDecision`, `MulliganBottomCards`)
+   * For simultaneous-mulligan states (`MulliganDecision`, `MulliganBottomCards`,
+   * `OpeningHandBottomCards`)
    * `data.player` is undefined, so falling back to -1 would collapse every
    * pending seat to the same key. We instead key by the AI seat that the
    * controller is currently driving, so failure counters reset between seats
@@ -82,7 +83,8 @@ export function createAIController(config: AIControllerConfig): AIController {
   }): number | null {
     if (
       wf.type !== "MulliganDecision" &&
-      wf.type !== "MulliganBottomCards"
+      wf.type !== "MulliganBottomCards" &&
+      wf.type !== "OpeningHandBottomCards"
     ) {
       return null;
     }
@@ -117,7 +119,8 @@ export function createAIController(config: AIControllerConfig): AIController {
       waitingPlayerId = mulliganPid;
     } else if (
       waitingFor.type === "MulliganDecision" ||
-      waitingFor.type === "MulliganBottomCards"
+      waitingFor.type === "MulliganBottomCards" ||
+      waitingFor.type === "OpeningHandBottomCards"
     ) {
       // Local human is pending (or no AI players left in pending) — do nothing.
       return;
@@ -241,7 +244,9 @@ export function createAIController(config: AIControllerConfig): AIController {
     // humanize — skip the artificial delay so the decision resolves as soon as the
     // engine returns (computation is near-instant after our optimizations).
     const isMulligan =
-      waitingForType === "MulliganDecision" || waitingForType === "MulliganBottomCards";
+      waitingForType === "MulliganDecision" ||
+      waitingForType === "MulliganBottomCards" ||
+      waitingForType === "OpeningHandBottomCards";
     const delay = isMulligan ? 0 : AI_BASE_DELAY_MS + Math.random() * AI_DELAY_VARIANCE_MS;
     timeoutId = setTimeout(async () => {
       timeoutId = null;

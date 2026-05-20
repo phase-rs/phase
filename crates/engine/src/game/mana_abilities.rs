@@ -1666,8 +1666,20 @@ fn debit_cost_with_plan(
     };
     // CR 106.6: Route through the restriction-aware payment path so the
     // player's context (activation or spell) gates eligible mana units.
-    mana_payment::pay_cost_with_demand_and_choices(pool, &scratch_cost, None, ctx, false, None)
-        .map(|_| ())
+    // CR 107.4f: Mana-ability sub-cost payment doesn't surface a player-side
+    // ShardChoice and is paid implicitly during ability resolution; pass an
+    // empty `LifePaymentColors` since K'rrik substitution does not apply to
+    // mana abilities' own activation costs in any printed exemplar today.
+    mana_payment::pay_cost_with_demand_and_choices(
+        pool,
+        &scratch_cost,
+        None,
+        ctx,
+        false,
+        None,
+        crate::types::mana::LifePaymentColors::EMPTY,
+    )
+    .map(|_| ())
 }
 
 /// Map a `ManaType` to the printed-shard variant that requires exactly that
@@ -1736,6 +1748,8 @@ fn pay_mana_sub_cost(
             Some(&ctx),
             false,
             None,
+            // CR 107.4f: same K'rrik-not-applicable rationale as above.
+            crate::types::mana::LifePaymentColors::EMPTY,
         )
         .map_err(|_| {
             EngineError::ActionNotAllowed("Mana pool cannot cover mana ability cost".to_string())

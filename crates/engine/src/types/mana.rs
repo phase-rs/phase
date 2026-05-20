@@ -63,6 +63,63 @@ impl From<ManaColor> for ManaType {
     }
 }
 
+/// CR 107.4f + CR 118.3a + CR 118.3b: Set of mana colors for which a player
+/// may substitute 2 life rather than 1 colored mana at payment time, granted
+/// by static abilities like K'rrik, Son of Yawgmoth ("For each {B} in a cost,
+/// you may pay 2 life rather than pay that mana"). Bitmask over `ManaColor`.
+///
+/// This is a payment-time *permission*, not a cost rewrite: shards become
+/// Phyrexian-shaped only when the paying player has the grant; the printed
+/// cost on the spell is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct LifePaymentColors(u8);
+
+impl LifePaymentColors {
+    pub const EMPTY: Self = Self(0);
+
+    pub const fn contains(self, c: ManaColor) -> bool {
+        self.0 & (1 << c as u8) != 0
+    }
+
+    pub fn insert(&mut self, c: ManaColor) {
+        self.0 |= 1 << c as u8;
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl FromIterator<ManaColor> for LifePaymentColors {
+    fn from_iter<I: IntoIterator<Item = ManaColor>>(it: I) -> Self {
+        let mut s = Self::EMPTY;
+        for c in it {
+            s.insert(c);
+        }
+        s
+    }
+}
+
+/// CR 118.1: Payment-time permission bundle for the player paying a cost.
+///
+/// Computed once per cost-payment entry (cast or activate) and threaded
+/// through the dry-run, pause-decision, and execution helpers. All three
+/// permissions are derived projections of player state at payment time and
+/// share the same abstraction layer, so they are bundled to avoid an
+/// ever-growing positional-argument list across `can_pay_for_spell`,
+/// `compute_phyrexian_shards`, `maybe_pause_for_phyrexian_choice`, etc.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CostPermissionContext {
+    /// CR 609.4b: `SpendManaAsAnyColor` grants (Chromatic Lantern etc.).
+    pub any_color: bool,
+    /// CR 119.8 budget: maximum life this player can spend on Phyrexian-shape
+    /// shards in this payment (respects CantLoseLife → 0).
+    pub max_life: u32,
+    /// CR 107.4f + CR 118.3b: colors for which the player may pay 2 life
+    /// rather than 1 colored mana (K'rrik-style grants).
+    pub life_colors: LifePaymentColors,
+}
+
 /// CR 614.1a + CR 703.4q: What happens to an affected unspent-mana unit at the
 /// CR 703.4q "any unspent mana left in a player's mana pool empties" event.
 ///

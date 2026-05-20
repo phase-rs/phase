@@ -4750,6 +4750,96 @@ mod tests {
         assert_eq!(r.triggers.len(), 1);
     }
 
+    /// CR 303.4 + CR 601.2i + CR 201.5: Taught by Surrak — a {4}{G} Aura with
+    /// a self-cast "draw a card" trigger and an `+2/+2 / haste` static grant on
+    /// the enchanted creature. The "Commander enchantment" line is a playtest
+    /// mechanic (Unknown Event set, 2023+) and remains intentionally
+    /// `Effect::Unimplemented` — implementing zone-following Aura attachment is
+    /// non-trivial new infrastructure that is out of scope for this card. The
+    /// remaining two abilities (cast trigger + aura static) MUST parse via the
+    /// existing class-level patterns.
+    #[test]
+    fn taught_by_surrak_class_patterns_parse() {
+        let oracle = "Commander enchantment (This aura enchants a commander creature, and remains attached to the creature as it moves between any face-up zones. You can cast it on a Commander in your command zone.)\nWhen you cast Taught by Surrak, draw a card.\nEnchanted creature gets +2/+2 and gains haste.";
+        let r = parse(oracle, "Taught by Surrak", &[], &["Enchantment"], &["Aura"]);
+
+        // CR 601.2i + CR 603.2: the cast trigger parses with TargetFilter::SelfRef
+        // on the source spell and Stack as the active zone (CR 117.2a + CR 113.6).
+        assert_eq!(r.triggers.len(), 1, "expected exactly one trigger");
+        let trigger = &r.triggers[0];
+        assert_eq!(trigger.mode, TriggerMode::SpellCast);
+        assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+        assert!(trigger.trigger_zones.contains(&Zone::Stack));
+
+        // CR 121.1 + CR 603.2: the trigger's effect body is `Effect::Draw` for
+        // the controller (TargetFilter::Controller), count = 1.
+        let execute = trigger
+            .execute
+            .as_ref()
+            .expect("trigger should have execute body");
+        assert!(
+            !has_unimplemented(execute),
+            "trigger effect should be fully implemented, got {:?}",
+            execute.effect
+        );
+        let Effect::Draw { count, target, .. } = &*execute.effect else {
+            panic!(
+                "expected Effect::Draw in trigger body, got {:?}",
+                execute.effect
+            );
+        };
+        assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+        assert!(
+            matches!(target, TargetFilter::Controller),
+            "expected TargetFilter::Controller for 'draw a card' \
+             (the trigger's controller draws); got {target:?}",
+        );
+
+        // CR 303.4 + CR 613.1f + CR 613.4c: the aura's static grant — Haste
+        // (layer 6, ability-adding) and +2/+2 (layer 7c, P/T modification)
+        // applied to the enchanted creature (TypedFilter::creature() with the
+        // EnchantedBy property).
+        assert_eq!(r.statics.len(), 1, "expected exactly one static");
+        let static_def = &r.statics[0];
+        assert_eq!(static_def.mode, StaticMode::Continuous);
+        assert_eq!(
+            static_def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+            ))
+        );
+        assert!(static_def
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 2 }));
+        assert!(static_def
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 2 }));
+        assert!(static_def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste,
+            }));
+
+        // CR n/a (playtest, Unknown Event): the "Commander enchantment" line is
+        // not implemented — it lands as Effect::Unimplemented carrying the
+        // original phrase. Verify the diagnostic is preserved (no silent drop)
+        // and that no spurious trigger/static was synthesized from it.
+        let unimplemented_count = r
+            .abilities
+            .iter()
+            .filter(|ab| matches!(&*ab.effect, Effect::Unimplemented { .. }))
+            .count();
+        assert_eq!(
+            unimplemented_count,
+            1,
+            "expected exactly one Unimplemented ability (the Commander \
+             enchantment playtest keyword line); got {} unimplemented \
+             out of {} total abilities",
+            unimplemented_count,
+            r.abilities.len()
+        );
+    }
+
     #[test]
     fn commander_permission_line_is_deck_construction_text() {
         let r = parse(

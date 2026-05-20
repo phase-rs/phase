@@ -7,6 +7,10 @@ import {
   loadActiveQuickDraft,
   type ActiveQuickDraftMeta,
 } from "../services/quickDraftPersistence";
+import {
+  loadActiveDraftPod,
+  type ActiveDraftPodMeta,
+} from "../services/draftPersistence";
 import { loadGame } from "../services/gamePersistence";
 import { usePreferencesStore } from "../stores/preferencesStore";
 
@@ -52,10 +56,12 @@ function formatRelativeTime(timestamp: number): string {
 export function DraftLandingPage() {
   const navigate = useNavigate();
   const [activeDraft, setActiveDraft] = useState<ActiveQuickDraftMeta | null>(null);
+  const [activePod, setActivePod] = useState<ActiveDraftPodMeta | null>(null);
   const experimentalFeatures = usePreferencesStore((s) => s.experimentalFeatures);
 
   useEffect(() => {
     setActiveDraft(loadActiveQuickDraft());
+    setActivePod(loadActiveDraftPod());
   }, []);
 
   return (
@@ -68,6 +74,7 @@ export function DraftLandingPage() {
         <h1 className="menu-display mb-10 text-4xl text-white">Draft</h1>
 
         {activeDraft && <ActiveDraftCard meta={activeDraft} />}
+        {activePod && <ActivePodCard meta={activePod} />}
 
         <div className="flex flex-col gap-3">
           <h2 className="text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
@@ -102,6 +109,61 @@ export function DraftLandingPage() {
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+function ActivePodCard({ meta }: { meta: ActiveDraftPodMeta }) {
+  const navigate = useNavigate();
+
+  function getPhaseLabel(): string {
+    switch (meta.phase) {
+      case "lobby": return "Lobby";
+      case "drafting": return "Drafting";
+      case "deckbuilding": return "Deck Building";
+      case "pairing": return "Pairing";
+      case "matchInProgress": return "Match In Progress";
+      case "complete": return "Complete";
+    }
+  }
+
+  return (
+    <div className="mb-8">
+      <h2 className="mb-3 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
+        Pod Draft in Progress
+      </h2>
+      <button
+        type="button"
+        onClick={() => navigate("/draft-pod?resume=1")}
+        className="group flex w-full cursor-pointer items-center gap-5 rounded-[20px] border border-cyan-300/20 bg-cyan-400/[0.06] p-5 text-left transition-colors hover:border-cyan-300/35 hover:bg-cyan-400/[0.10]"
+      >
+        <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl border border-white/8 bg-black/24">
+          <PodIcon />
+        </div>
+
+        <div className="min-w-0 flex-1">
+          <div className="text-lg font-semibold text-white">
+            {meta.kind} Pod
+          </div>
+          <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-white/45">
+            <span className="rounded-md border border-cyan-300/20 bg-cyan-400/10 px-2 py-0.5 text-xs font-medium text-cyan-100">
+              {getPhaseLabel()}
+            </span>
+            <span>{meta.podSize} seats</span>
+            {meta.roomCode && <span>Room {meta.roomCode}</span>}
+            {meta.phase === "drafting" && meta.pickCount > 0 && (
+              <span>{meta.pickCount} cards picked</span>
+            )}
+            <span>{formatRelativeTime(meta.updatedAt)}</span>
+          </div>
+        </div>
+
+        <div className="flex items-center self-stretch pl-2">
+          <div className="rounded-full border border-cyan-300/15 bg-cyan-400/10 px-4 py-2 text-sm font-medium text-cyan-100 transition-colors group-hover:border-cyan-300/30 group-hover:bg-cyan-400/18">
+            Resume
+          </div>
+        </div>
+      </button>
     </div>
   );
 }

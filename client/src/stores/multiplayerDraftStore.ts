@@ -14,7 +14,13 @@
 
 import { create } from "zustand";
 
-import type { DraftPlayerView, PairingView, SeatPublicView, StandingEntry } from "../adapter/draft-adapter";
+import type {
+  DraftCardInstance,
+  DraftPlayerView,
+  PairingView,
+  SeatPublicView,
+  StandingEntry,
+} from "../adapter/draft-adapter";
 import type { MatchScore } from "../adapter/types";
 import {
   DraftPodHostAdapter,
@@ -28,6 +34,13 @@ import {
   type DraftPodGuestEvent,
   type DraftPodGuestStatus,
 } from "../adapter/draftPodGuestAdapter";
+import {
+  clearActiveDraftPod,
+  loadActiveDraftPod,
+  saveActiveDraftPod,
+  type ActiveDraftPodMeta,
+  type ActiveDraftPodPhase,
+} from "../services/draftPersistence";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -112,13 +125,15 @@ interface MultiplayerDraftActions {
   /** Guest: join an existing draft pod by room code. */
   joinDraft: (config: DraftPodGuestConfig) => Promise<void>;
   /** Host: start the draft once the pod is ready. */
-  startDraft: () => Promise<void>;
+  startDraft: (botFillEmptySeats?: boolean) => Promise<void>;
   /** Both: submit a pick. */
   submitPick: (cardInstanceId: string) => Promise<void>;
   /** Both: select a card (UI highlight before confirming pick). */
   selectCard: (cardInstanceId: string | null) => void;
   /** Both: confirm the currently selected card as pick. */
   confirmPick: () => Promise<void>;
+  /** Both: pick a card from the current pack using a deterministic draft heuristic. */
+  autoPickCard: () => Promise<void>;
   /** Both: add a card to the deck during deckbuilding. */
   addToDeck: (cardName: string) => void;
   /** Both: remove a card from the deck during deckbuilding. */
@@ -134,7 +149,7 @@ interface MultiplayerDraftActions {
   /** Host: resume the draft. */
   requestResume: () => void;
   /** Both: tear down the connection and reset state. */
-  leave: () => Promise<void>;
+  leave: (preserveSession?: boolean) => Promise<void>;
   /** Reset store to initial state (without network cleanup). */
   reset: () => void;
   /** Both: start the match for the current pairing. */
@@ -159,6 +174,107 @@ interface MultiplayerDraftActions {
 
 let activeHostAdapter: DraftPodHostAdapter | null = null;
 let activeGuestAdapter: DraftPodGuestAdapter | null = null;
+
+const RARITY_SCORE: Record<string, number> = {
+  mythic: 4,
+  rare: 3,
+  uncommon: 2,
+  common: 1,
+};
+
+function preferredColors(pool: DraftCardInstance[]): Set<string> {
+  const counts = new Map<string, number>();
+  for (const card of pool) {
+    for (const color of card.colors) {
+      counts.set(color, (counts.get(color) ?? 0) + 1);
+    }
+  }
+
+  return new Set(
+    [...counts.entries()]
+      .sort(([, a], [, b]) => b - a)
+      .slice(0, 2)
+      .map(([color]) => color),
+  );
+}
+
+function curveScore(cmc: number, poolSize: number): number {
+  if (poolSize < 5) {
+    if (cmc <= 2) return 1;
+    if (cmc >= 6) return -1;
+    return 0;
+  }
+
+  if (cmc >= 2 && cmc <= 4) return 2;
+  if (cmc >= 6) return -1;
+  return 0;
+}
+
+function scoreDraftCard(card: DraftCardInstance, colors: Set<string>, poolSize: number): number {
+  const rarityScore = (RARITY_SCORE[card.rarity.toLowerCase()] ?? 0) * 2;
+  let colorScore = 0;
+  if (card.colors.length === 0) {
+    colorScore = 1;
+  } else if (colors.size > 0) {
+    colorScore = card.colors.some((color) => colors.has(color)) ? 3 : -1;
+  }
+
+  return rarityScore + colorScore + curveScore(card.cmc, poolSize);
+}
+
+function chooseAutoPickCard(view: DraftPlayerView | null): string | null {
+  const pack = view?.current_pack;
+  if (!pack || pack.length === 0) return null;
+
+  const colors = preferredColors(view.pool);
+  let bestCard = pack[0];
+  let bestScore = scoreDraftCard(bestCard, colors, view.pool.length);
+
+  for (const card of pack.slice(1)) {
+    const score = scoreDraftCard(card, colors, view.pool.length);
+    if (score > bestScore) {
+      bestCard = card;
+      bestScore = score;
+    }
+  }
+
+  return bestCard.instance_id;
+}
+
+function saveDraftPodProgress(phase: ActiveDraftPodPhase, view?: DraftPlayerView | null): void {
+  const meta = loadActiveDraftPod();
+  if (!meta) return;
+  saveActiveDraftPod({
+    ...meta,
+    phase,
+    pickCount: view?.pool.length ?? meta.pickCount,
+    updatedAt: Date.now(),
+  });
+}
+
+function updateActiveDraftPod(patch: Partial<ActiveDraftPodMeta>): void {
+  const meta = loadActiveDraftPod();
+  if (!meta) return;
+  saveActiveDraftPod({ ...meta, ...patch, updatedAt: Date.now() });
+}
+
+function activePhaseForHostStatus(status: DraftPodHostStatus): ActiveDraftPodPhase | null {
+  switch (status) {
+    case "lobby":
+    case "drafting":
+    case "deckbuilding":
+    case "pairing":
+    case "matchInProgress":
+    case "complete":
+      return status;
+    case "roundComplete":
+      return "pairing";
+    case "idle":
+    case "connecting":
+    case "error":
+      return null;
+  }
+}
 
 /** Dispose the active match adapter (P2PHostAdapter or P2PGuestAdapter). */
 function disposeMatchAdapter(set: SetFn): void {
@@ -223,6 +339,26 @@ export const useMultiplayerDraftStore = create<
 
     try {
       await adapter.initialize(config);
+      if (config.persistenceId) {
+        const view = get().view;
+        const phase: ActiveDraftPodPhase = view?.status === "Deckbuilding"
+          ? "deckbuilding"
+          : view?.status === "Drafting"
+            ? "drafting"
+            : "lobby";
+        saveActiveDraftPod({
+          id: config.persistenceId,
+          roomCode: adapter.roomCode ?? config.preferredRoomCode ?? "",
+          kind: config.kind,
+          podSize: config.podSize,
+          hostDisplayName: config.hostDisplayName,
+          tournamentFormat: config.tournamentFormat,
+          podPolicy: config.podPolicy,
+          phase,
+          pickCount: view?.pool.length ?? 0,
+          updatedAt: Date.now(),
+        });
+      }
     } catch {
       // Error already emitted via adapter event
     }
@@ -247,9 +383,9 @@ export const useMultiplayerDraftStore = create<
     }
   },
 
-  startDraft: async () => {
+  startDraft: async (botFillEmptySeats = true) => {
     if (!activeHostAdapter) return;
-    await activeHostAdapter.startDraft();
+    await activeHostAdapter.startDraft(botFillEmptySeats);
   },
 
   submitPick: async (cardInstanceId) => {
@@ -271,6 +407,13 @@ export const useMultiplayerDraftStore = create<
     const { selectedCard, submitPick } = get();
     if (!selectedCard) return;
     await submitPick(selectedCard);
+  },
+
+  autoPickCard: async () => {
+    const { view, submitPick } = get();
+    const cardInstanceId = chooseAutoPickCard(view);
+    if (!cardInstanceId) return;
+    await submitPick(cardInstanceId);
   },
 
   addToDeck: (cardName) => {
@@ -516,7 +659,7 @@ export const useMultiplayerDraftStore = create<
     });
   },
 
-  leave: async () => {
+  leave: async (preserveSession = false) => {
     // Dispose match adapter first (game P2P connection)
     const { matchAdapter } = get();
     if (matchAdapter) {
@@ -525,8 +668,11 @@ export const useMultiplayerDraftStore = create<
     }
 
     if (activeHostAdapter) {
-      await activeHostAdapter.dispose();
+      await activeHostAdapter.dispose({ preserveSession });
       activeHostAdapter = null;
+      if (!preserveSession) {
+        clearActiveDraftPod();
+      }
     }
     if (activeGuestAdapter) {
       await activeGuestAdapter.dispose();
@@ -602,9 +748,14 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
   switch (event.type) {
     case "statusChanged":
       set({ phase: hostStatusToPhase(event.status) });
+      {
+        const activePhase = activePhaseForHostStatus(event.status);
+        if (activePhase) saveDraftPodProgress(activePhase);
+      }
       break;
     case "roomCreated":
       set({ roomCode: event.roomCode });
+      updateActiveDraftPod({ roomCode: event.roomCode });
       break;
     case "viewUpdated":
       set({
@@ -614,6 +765,10 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
         currentRound: event.view.current_round ?? 0,
         pairings: event.view.pairings ?? [],
       });
+      saveDraftPodProgress(
+        event.view.status === "Deckbuilding" ? "deckbuilding" : "drafting",
+        event.view,
+      );
       break;
     case "lobbyUpdate":
       set({ joined: event.joined, total: event.total, seats: event.seats });
@@ -622,19 +777,24 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
       break;
     case "draftStarted":
       set({ view: event.view, phase: "drafting" });
+      saveDraftPodProgress("drafting", event.view);
       break;
     case "draftComplete":
       set({ phase: "deckbuilding" });
+      saveDraftPodProgress("deckbuilding");
       break;
     case "allDecksSubmitted":
       set({ phase: "pairing" });
+      saveDraftPodProgress("pairing");
       break;
     case "pairingsGenerated":
       set({ phase: "matchInProgress", currentRound: event.round, pairings: event.pairings });
+      saveDraftPodProgress("matchInProgress");
       break;
     case "roundAdvanced":
       disposeMatchAdapter(set);
       set({ phase: "pairing", currentRound: event.newRound });
+      saveDraftPodProgress("pairing");
       break;
     case "roundComplete":
       disposeMatchAdapter(set);
@@ -663,6 +823,7 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
       break;
     case "bo3GameStarted":
       set({ phase: "matchInProgress", sideboardPrompt: null, playDrawPrompt: null, sideboardSubmitted: false });
+      saveDraftPodProgress("matchInProgress");
       break;
   }
 }

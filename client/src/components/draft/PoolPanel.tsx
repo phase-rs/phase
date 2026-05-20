@@ -2,7 +2,7 @@ import { useMemo } from "react";
 
 import { useDraftStore } from "../../stores/draftStore";
 import type { PoolSortMode } from "../../stores/draftStore";
-import type { DraftCardInstance } from "../../adapter/draft-adapter";
+import type { DraftCardInstance, DraftPlayerView } from "../../adapter/draft-adapter";
 import type { CardHoverInfo } from "../card/CardPreview";
 
 // ── Sorting helpers ─────────────────────────────────────────────────────
@@ -177,14 +177,16 @@ const SORT_MODES: Array<{ mode: PoolSortMode; label: string }> = [
 
 interface PoolPanelProps {
   onCardHover?: (info: CardHoverInfo | null) => void;
+  view?: DraftPlayerView | null;
 }
 
-export function PoolPanel({ onCardHover }: PoolPanelProps = {}) {
-  const view = useDraftStore((s) => s.view);
+export function PoolPanel({ onCardHover, view: viewOverride }: PoolPanelProps = {}) {
+  const quickView = useDraftStore((s) => s.view);
   const poolSortMode = useDraftStore((s) => s.poolSortMode);
   const poolPanelOpen = useDraftStore((s) => s.poolPanelOpen);
   const setPoolSortMode = useDraftStore((s) => s.setPoolSortMode);
   const togglePoolPanel = useDraftStore((s) => s.togglePoolPanel);
+  const view = viewOverride !== undefined ? viewOverride : quickView;
 
   const pool = useMemo(() => view?.pool ?? [], [view?.pool]);
 

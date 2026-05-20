@@ -751,6 +751,20 @@ pub enum StaticMode {
     /// CR 609.4b: "You may spend mana as though it were mana of any color."
     /// Allows the controller to pay colored mana costs with mana of any color.
     SpendManaAsAnyColor,
+    /// CR 107.4f: "For each {C} in a cost, you may pay 2 life rather than pay
+    /// that mana." Player-scope payment substitution; the indicated color may
+    /// be paid as 2 life instead of 1 colored mana, with the same 1-color-or-2-life
+    /// shape Phyrexian mana symbols define. Canonical card: K'rrik, Son of
+    /// Yawgmoth (color = Black). `ManaColor` parameterization admits future
+    /// printings for any other single color without enum proliferation.
+    ///
+    /// **Scope note**: this static currently affects spell-cast mana costs only.
+    /// Activated-ability mana costs are covered by the same 2024-06-07 K'rrik
+    /// ruling but require a `pending_activation` pause/resume primitive not yet
+    /// built. Deferred to GH issue #600.
+    PayLifeAsColoredMana {
+        color: ManaColor,
+    },
     /// CR 106.4 + CR 500.5 + CR 703.4q + CR 614.1a: How the affected player's
     /// unspent mana is handled as steps and phases end. `filter` selects which
     /// mana the rule applies to (`None` = every color including colorless;
@@ -849,6 +863,9 @@ impl Hash for StaticMode {
             }
             StaticMode::SkipStep { step } => step.hash(state),
             StaticMode::DoubleTriggers { cause } => cause.hash(state),
+            // CR 107.4f: Parameterized by ManaColor — hash the color so distinct
+            // grants (Black vs Red) don't collide.
+            StaticMode::PayLifeAsColoredMana { color } => color.hash(state),
             // Data-carrying variants with non-Hash fields: discriminant only.
             // These are never used as HashMap keys (handled by is_data_carrying_static).
             StaticMode::ReduceCost { .. }
@@ -1032,6 +1049,10 @@ impl fmt::Display for StaticMode {
             }
             StaticMode::SkipStep { step } => write!(f, "SkipStep({step:?})"),
             StaticMode::SpendManaAsAnyColor => write!(f, "SpendManaAsAnyColor"),
+            // CR 107.4f: K'rrik-class life-for-color payment substitution.
+            StaticMode::PayLifeAsColoredMana { color } => {
+                write!(f, "PayLifeAsColoredMana({color:?})")
+            }
             StaticMode::StepEndUnspentMana { filter, action } => {
                 write!(f, "StepEndUnspentMana({filter:?},{action})")
             }

@@ -1,9 +1,18 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 
 import { HostSetup } from "../HostSetup";
+import { useMultiplayerStore } from "../../../stores/multiplayerStore";
 
 describe("HostSetup", () => {
+  beforeEach(() => {
+    useMultiplayerStore.setState({
+      displayName: "",
+      formatConfig: null,
+    });
+  });
+
   afterEach(() => {
     cleanup();
   });
@@ -35,5 +44,31 @@ describe("HostSetup", () => {
     expect(screen.getByRole("heading", { name: "Host Match" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Host Game" })).toBeInTheDocument();
     expect(screen.getByText("List in lobby")).toBeInTheDocument();
+  });
+
+  it("allows Free-for-All hosts to choose 40-card deck size", async () => {
+    const user = userEvent.setup();
+    const onHost = vi.fn();
+
+    render(
+      <HostSetup
+        onHost={onHost}
+        onBack={vi.fn()}
+        connectionMode="server"
+      />,
+    );
+
+    await user.selectOptions(screen.getByLabelText("Format"), "FreeForAll");
+    await user.click(screen.getByRole("button", { name: "40" }));
+    await user.click(screen.getByRole("button", { name: "Host Game" }));
+
+    expect(onHost).toHaveBeenCalledWith(
+      expect.objectContaining({
+        formatConfig: expect.objectContaining({
+          format: "FreeForAll",
+          deck_size: 40,
+        }),
+      }),
+    );
   });
 });

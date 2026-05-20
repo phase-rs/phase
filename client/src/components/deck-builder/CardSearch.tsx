@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import {
   searchScryfall,
   buildScryfallQuery,
+  scryfallLegalityKey,
   type ScryfallCard,
 } from "../../services/scryfall";
 import type { GameFormat } from "../../adapter/types";
@@ -33,14 +34,6 @@ const CARD_TYPES = [
   "Land",
   "Planeswalker",
 ];
-
-const SCRYFALL_FORMAT_OVERRIDES: Partial<Record<GameFormat, string>> = {
-  DuelCommander: "duel",
-};
-
-function scryfallFormatSlug(format: GameFormat): string {
-  return SCRYFALL_FORMAT_OVERRIDES[format] ?? format.toLowerCase();
-}
 
 const BROWSER_FORMATS: { value: BrowserLegalityFilter; label: string }[] = [
   { value: "all", label: "All cards" },
@@ -140,7 +133,7 @@ export function CardSearch({
         type: type || undefined,
         cmcMax: cmc,
         sets,
-        format: browseFormat === "all" ? undefined : scryfallFormatSlug(browseFormat),
+        format: browseFormat === "all" ? undefined : scryfallLegalityKey(browseFormat),
       });
 
       if (!query) {

@@ -166,6 +166,13 @@ export function init_panic_hook(): void;
 export function initialize_game(deck_data: any, seed: number | null | undefined, format_config_js: any, match_config_js: any, player_count?: number | null, first_player?: number | null): any;
 
 /**
+ * Whether the named card can serve as this format's command-zone leader.
+ * Reads the engine's MTGJSON-derived `CardFace` leadership fields and
+ * format-specific deck-validation predicates.
+ */
+export function isCardCommanderEligibleForFormat(name: string, format: any): boolean;
+
+/**
  * CR 903.3: Whether the named card can serve as a commander
  * (legendary creature, legendary background, or "can be your commander").
  * Returns false if the card database isn't loaded or the card isn't found.
@@ -308,6 +315,7 @@ export interface InitOutput {
     readonly get_legal_actions_for_viewer_js: (a: number) => any;
     readonly get_viewer_snapshot_js: (a: number) => any;
     readonly initialize_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number) => any;
+    readonly isCardCommanderEligibleForFormat: (a: number, b: number, c: any) => number;
     readonly is_card_commander_eligible: (a: number, b: number) => number;
     readonly is_multiplayer_mode: () => number;
     readonly load_card_database: (a: number, b: number) => [number, number, number];

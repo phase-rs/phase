@@ -4,7 +4,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useCardImage } from "../../hooks/useCardImage";
 import { useDraftStore } from "../../stores/draftStore";
 import { menuButtonClass } from "../menu/buttonStyles";
-import type { DraftCardInstance } from "../../adapter/draft-adapter";
+import type { DraftCardInstance, DraftPlayerView } from "../../adapter/draft-adapter";
 import { ManaCurve } from "./ManaCurve";
 
 // Shared enter/exit for cards moving between the pool and the deck.
@@ -167,16 +167,44 @@ function computeRemainingPool(
 
 // ── Main component ──────────────────────────────────────────────────────
 
-export function LimitedDeckBuilder() {
-  const view = useDraftStore((s) => s.view);
-  const mainDeck = useDraftStore((s) => s.mainDeck);
-  const landCounts = useDraftStore((s) => s.landCounts);
-  const addToDeck = useDraftStore((s) => s.addToDeck);
-  const removeFromDeck = useDraftStore((s) => s.removeFromDeck);
-  const setLandCount = useDraftStore((s) => s.setLandCount);
+interface LimitedDeckBuilderProps {
+  view?: DraftPlayerView | null;
+  mainDeck?: string[];
+  landCounts?: Record<string, number>;
+  onAddToDeck?: (cardName: string) => void;
+  onRemoveFromDeck?: (cardName: string) => void;
+  onSetLandCount?: (landName: string, count: number) => void;
+  onSubmitDeck?: () => Promise<void> | void;
+  showSuggestions?: boolean;
+}
+
+export function LimitedDeckBuilder({
+  view: viewOverride,
+  mainDeck: mainDeckOverride,
+  landCounts: landCountsOverride,
+  onAddToDeck,
+  onRemoveFromDeck,
+  onSetLandCount,
+  onSubmitDeck,
+  showSuggestions = true,
+}: LimitedDeckBuilderProps = {}) {
+  const quickView = useDraftStore((s) => s.view);
+  const quickMainDeck = useDraftStore((s) => s.mainDeck);
+  const quickLandCounts = useDraftStore((s) => s.landCounts);
+  const quickAddToDeck = useDraftStore((s) => s.addToDeck);
+  const quickRemoveFromDeck = useDraftStore((s) => s.removeFromDeck);
+  const quickSetLandCount = useDraftStore((s) => s.setLandCount);
   const autoSuggestDeck = useDraftStore((s) => s.autoSuggestDeck);
   const autoSuggestLands = useDraftStore((s) => s.autoSuggestLands);
-  const submitDeck = useDraftStore((s) => s.submitDeck);
+  const quickSubmitDeck = useDraftStore((s) => s.submitDeck);
+
+  const view = viewOverride !== undefined ? viewOverride : quickView;
+  const mainDeck = mainDeckOverride ?? quickMainDeck;
+  const landCounts = landCountsOverride ?? quickLandCounts;
+  const addToDeck = onAddToDeck ?? quickAddToDeck;
+  const removeFromDeck = onRemoveFromDeck ?? quickRemoveFromDeck;
+  const setLandCount = onSetLandCount ?? quickSetLandCount;
+  const submitDeck = onSubmitDeck ?? quickSubmitDeck;
 
   const pool = useMemo(() => view?.pool ?? [], [view?.pool]);
 
@@ -260,13 +288,15 @@ export function LimitedDeckBuilder() {
               <h3 className="text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
                 Addable Cards
               </h3>
-              <button
-                type="button"
-                onClick={autoSuggestLands}
-                className={menuButtonClass({ tone: "neutral", size: "xs", ghost: true })}
-              >
-                Auto Lands
-              </button>
+              {showSuggestions && (
+                <button
+                  type="button"
+                  onClick={autoSuggestLands}
+                  className={menuButtonClass({ tone: "neutral", size: "xs", ghost: true })}
+                >
+                  Auto Lands
+                </button>
+              )}
             </div>
             <div className="flex flex-col gap-2">
               {addableCards.map((name) => (
@@ -289,13 +319,15 @@ export function LimitedDeckBuilder() {
 
           {/* Actions */}
           <section className="flex flex-col gap-3">
-            <button
-              type="button"
-              onClick={autoSuggestDeck}
-              className={menuButtonClass({ tone: "neutral", size: "sm", className: "w-full" })}
-            >
-              Suggest Deck
-            </button>
+            {showSuggestions && (
+              <button
+                type="button"
+                onClick={autoSuggestDeck}
+                className={menuButtonClass({ tone: "neutral", size: "sm", className: "w-full" })}
+              >
+                Suggest Deck
+              </button>
+            )}
 
             <button
               type="button"

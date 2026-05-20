@@ -43,6 +43,7 @@ const GROUP_ORDER: Record<FormatGroup, number> = {
 };
 
 const DIFFICULTY_OPTIONS = ["VeryEasy", "Easy", "Medium", "Hard", "VeryHard"];
+const FFA_DECK_SIZE_OPTIONS = [60, 40] as const;
 
 /** P2P's WebRTC mesh supports 2-4 peers (see `p2p-adapter.ts:165`). The
  * HostSetup UI clamps format player counts to this ceiling so multi-seat
@@ -123,6 +124,10 @@ export function HostSetup({
     }
     // Remove AI seats that exceed the new count (seat 0 is always the host)
     setAiSeats((prev) => prev.filter((s) => s.seatIndex < count));
+  };
+
+  const handleDeckSizeChange = (deckSize: number) => {
+    setLocalFormatConfig((prev) => ({ ...prev, deck_size: deckSize }));
   };
 
   const toggleAiSeat = (seatIndex: number) => {
@@ -290,6 +295,28 @@ export function HostSetup({
               />
             </div>
 
+            {selectedFormat === "FreeForAll" && (
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-gray-400">Deck Size</span>
+                <div className="flex rounded-[14px] bg-black/18 p-0.5 ring-1 ring-white/10">
+                  {FFA_DECK_SIZE_OPTIONS.map((deckSize) => (
+                    <button
+                      type="button"
+                      key={deckSize}
+                      onClick={() => handleDeckSizeChange(deckSize)}
+                      className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
+                        formatConfig.deck_size === deckSize
+                          ? "bg-white/10 text-white"
+                          : "text-gray-400 hover:text-gray-200"
+                      }`}
+                    >
+                      {deckSize}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Player count — hidden for fixed-seat formats like Standard
                 (min==max==2). Shown in both server and P2P modes when the
                 format supports a range; `maxPlayers` already clamps to the
@@ -353,7 +380,7 @@ export function HostSetup({
             )}
 
             {/* Commander damage threshold (Commander only) */}
-            {formatConfig.command_zone && (
+            {formatConfig.commander_damage_threshold != null && (
               <div className="flex items-center justify-between">
                 <span className="text-xs text-gray-400">Commander Damage</span>
                 <input

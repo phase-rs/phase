@@ -723,6 +723,8 @@ pub fn create_multiplayer_draft(
     kind: u8,
     seed: u32,
     draft_code: &str,
+    tournament_format: &str,
+    pod_policy: &str,
 ) -> Result<JsValue, JsValue> {
     let set_pool: LimitedSetPool = serde_json::from_str(set_pool_json)
         .map_err(|e| JsValue::from_str(&format!("Failed to parse set pool: {}", e)))?;
@@ -737,6 +739,26 @@ pub fn create_multiplayer_draft(
         _ => {
             return Err(JsValue::from_str(
                 "kind must be 0 (Quick), 1 (Premier), or 2 (Traditional)",
+            ))
+        }
+    };
+
+    let tournament_format = match tournament_format {
+        "Swiss" => TournamentFormat::Swiss,
+        "SingleElimination" => TournamentFormat::SingleElimination,
+        _ => {
+            return Err(JsValue::from_str(
+                "tournament_format must be Swiss or SingleElimination",
+            ))
+        }
+    };
+
+    let pod_policy = match pod_policy {
+        "Competitive" => PodPolicy::Competitive,
+        "Casual" => PodPolicy::Casual,
+        _ => {
+            return Err(JsValue::from_str(
+                "pod_policy must be Competitive or Casual",
             ))
         }
     };
@@ -770,8 +792,8 @@ pub fn create_multiplayer_draft(
         min_deck_size: 40,
         addable_cards: DeckAddableCards::standard_basics(),
         rng_seed: seed as u64,
-        tournament_format: TournamentFormat::default(),
-        pod_policy: PodPolicy::default(),
+        tournament_format,
+        pod_policy,
         spectator_visibility: SpectatorVisibility::default(),
     };
 

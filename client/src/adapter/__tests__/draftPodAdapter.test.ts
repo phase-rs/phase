@@ -39,6 +39,7 @@ const mockHostGetHostView = vi.fn(async () => mockView("Lobby"));
 const mockHostKickPlayer = vi.fn();
 const mockHostRequestPause = vi.fn();
 const mockHostRequestResume = vi.fn();
+const mockHostDispose = vi.fn();
 const mockHostTerminateDraft = vi.fn(async () => {});
 const mockHostRestoreFromPersisted = vi.fn(async () => null);
 
@@ -53,6 +54,7 @@ vi.mock("../p2p-draft-host", () => ({
     kickPlayer: mockHostKickPlayer,
     requestPause: mockHostRequestPause,
     requestResume: mockHostRequestResume,
+    dispose: mockHostDispose,
     terminateDraft: mockHostTerminateDraft,
     restoreFromPersisted: mockHostRestoreFromPersisted,
     isFull: false,
@@ -167,6 +169,22 @@ describe("DraftPodHostAdapter", () => {
     expect(statusEvents).toContainEqual({ type: "statusChanged", status: "connecting" });
     expect(statusEvents).toContainEqual({ type: "statusChanged", status: "lobby" });
     expect(events).toContainEqual({ type: "roomCreated", roomCode: "ABCDE" });
+  });
+
+  it("can suspend without terminating the persisted host draft", async () => {
+    await adapter.initialize({
+      setPoolJson: "{}",
+      kind: "Premier",
+      podSize: 8,
+      hostDisplayName: "Host",
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
+    });
+
+    await adapter.dispose({ preserveSession: true });
+
+    expect(mockHostDispose).toHaveBeenCalledTimes(1);
+    expect(mockHostTerminateDraft).not.toHaveBeenCalled();
   });
 
   it("emits error on connection failure", async () => {
@@ -371,6 +389,17 @@ describe("DraftPodGuestAdapter", () => {
     const statusEvents = events.filter((e) => e.type === "statusChanged");
     expect(statusEvents).toContainEqual({ type: "statusChanged", status: "connecting" });
     expect(statusEvents).toContainEqual({ type: "statusChanged", status: "lobby" });
+  });
+
+  it("looks up reconnect tokens by host peer id", async () => {
+    const { loadDraftGuestSession } = await import("../../services/draftPersistence");
+
+    await adapter.initialize({
+      roomCode: "ABCDE",
+      displayName: "Alice",
+    });
+
+    expect(loadDraftGuestSession).toHaveBeenCalledWith("phase2-ABCDE");
   });
 
   it("emits error on connection failure", async () => {

@@ -5214,16 +5214,17 @@ fn can_pay_mana_cost_after_auto_tap_with_context(
     super::triggers::resolve_tap_mana_triggers_inline(&mut simulated, &mut tap_events, 0);
 
     let any_color = player_can_spend_as_any_color_for_spell(&simulated, player, source_id);
-    // CR 107.4f + CR 118.3 + CR 119.8: Include the payer's Phyrexian life
-    // budget so a cost containing {C/P} shards is only reported payable when
-    // either mana or sufficient life (respecting CantLoseLife) is available.
-    let max_life = super::life_costs::max_phyrexian_life_payments(&simulated, player);
+    // CR 107.4f + CR 118.1 + CR 118.3 + CR 119.8: Bundle the payer's
+    // payment-time permissions (`any_color`, `max_life`, `life_colors`) so
+    // K'rrik-style life-for-{B} grants are visible to the affordability check.
+    let permissions =
+        super::static_abilities::build_cost_permission_context(&simulated, player, any_color);
     simulated
         .players
         .iter()
         .find(|p| p.id == player)
         .is_some_and(|player_data| {
-            mana_payment::can_pay_for_spell(&player_data.mana_pool, cost, ctx, any_color, max_life)
+            mana_payment::can_pay_for_spell(&player_data.mana_pool, cost, ctx, permissions)
         })
 }
 
@@ -5327,7 +5328,10 @@ pub(super) fn can_pay_effect_mana_cost_after_auto_tap(
     super::triggers::resolve_tap_mana_triggers_inline(&mut simulated, &mut tap_events, 0);
 
     let any_color = player_can_spend_as_any_color_for_optional_spell(&simulated, player, None);
-    let max_life = super::life_costs::max_phyrexian_life_payments(&simulated, player);
+    // CR 107.4f + CR 118.1 + CR 118.3 + CR 119.8: Effect-time resolution
+    // mana payments share the same payment-permission bundle as cast/activation.
+    let permissions =
+        super::static_abilities::build_cost_permission_context(&simulated, player, any_color);
     simulated
         .players
         .iter()
@@ -5337,8 +5341,7 @@ pub(super) fn can_pay_effect_mana_cost_after_auto_tap(
                 &player_data.mana_pool,
                 cost,
                 Some(&effect_ctx),
-                any_color,
-                max_life,
+                permissions,
             )
         })
 }
@@ -5599,20 +5602,21 @@ pub(super) fn pay_effect_mana_cost(
     // so their bonus mana is in the pool before the affordability check.
     super::triggers::resolve_tap_mana_triggers_inline(state, events, events_before);
 
+    let permissions = {
+        let any_color = player_can_spend_as_any_color_for_optional_spell(state, player, None);
+        super::static_abilities::build_cost_permission_context(state, player, any_color)
+    };
     {
         let player_data = state
             .players
             .iter()
             .find(|p| p.id == player)
             .expect("player exists");
-        let any_color = player_can_spend_as_any_color_for_optional_spell(state, player, None);
-        let max_life = super::life_costs::max_phyrexian_life_payments(state, player);
         if !mana_payment::can_pay_for_spell(
             &player_data.mana_pool,
             cost,
             Some(&effect_ctx),
-            any_color,
-            max_life,
+            permissions,
         ) {
             return Err(EngineError::ActionNotAllowed(
                 "Cannot pay mana cost".to_string(),
@@ -5620,7 +5624,6 @@ pub(super) fn pay_effect_mana_cost(
         }
     }
 
-    let any_color = player_can_spend_as_any_color_for_optional_spell(state, player, None);
     let player_data = state
         .players
         .iter_mut()
@@ -5631,8 +5634,9 @@ pub(super) fn pay_effect_mana_cost(
         cost,
         None,
         Some(&effect_ctx),
-        any_color,
+        permissions.any_color,
         None,
+        permissions.life_colors,
     )
     .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
 
@@ -5704,25 +5708,26 @@ fn auto_tap_and_pay_cost_excluding(
     // here via the `FromTapTriggersResolved` marker — no double-fire.
     super::triggers::resolve_tap_mana_triggers_inline(state, events, events_before);
 
+    // CR 107.4f + CR 118.1 + CR 118.3 + CR 119.8: Bundle payment-time permissions
+    // (`any_color`, `max_life`, `life_colors`) once for the cast — K'rrik-style
+    // life-for-{B} grants flow through the same dry-run + execution helpers.
+    let permissions = {
+        let any_color = player_can_spend_as_any_color_for_spell(state, player, source_id);
+        super::static_abilities::build_cost_permission_context(state, player, any_color)
+    };
     {
         let player_data = state
             .players
             .iter()
             .find(|p| p.id == player)
             .expect("player exists");
-        let any_color = player_can_spend_as_any_color_for_spell(state, player, source_id);
-        // CR 107.4f + CR 118.3 + CR 119.8: Life budget for Phyrexian shards —
-        // respects CantLoseLife (budget 0 under lock) and current life total.
-        let max_life = super::life_costs::max_phyrexian_life_payments(state, player);
-        if !mana_payment::can_pay_for_spell(&player_data.mana_pool, cost, ctx, any_color, max_life)
-        {
+        if !mana_payment::can_pay_for_spell(&player_data.mana_pool, cost, ctx, permissions) {
             return Err(EngineError::ActionNotAllowed(
                 "Cannot pay mana cost".to_string(),
             ));
         }
     }
 
-    let any_color = player_can_spend_as_any_color_for_spell(state, player, source_id);
     let hand_demand = mana_payment::compute_hand_color_demand(state, player, source_id);
     let player_data = state
         .players
@@ -5734,8 +5739,9 @@ fn auto_tap_and_pay_cost_excluding(
         cost,
         Some(&hand_demand),
         ctx,
-        any_color,
+        permissions.any_color,
         phyrexian_choices,
+        permissions.life_colors,
     )
     .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
 
@@ -19552,14 +19558,17 @@ mod tests {
         let spell_meta = build_spell_meta(&state, PlayerId(0), spell);
         let any_color =
             crate::game::static_abilities::player_can_spend_as_any_color(&state, PlayerId(0));
-        let max_life = crate::game::life_costs::max_phyrexian_life_payments(&state, PlayerId(0));
+        let permissions = crate::game::static_abilities::build_cost_permission_context(
+            &state,
+            PlayerId(0),
+            any_color,
+        );
         let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
         let current_shards = crate::game::mana_payment::compute_phyrexian_shards(
             &state.players[0].mana_pool,
             &state.objects.get(&spell).unwrap().mana_cost,
             spell_ctx.as_ref(),
-            any_color,
-            max_life,
+            permissions,
         );
         assert_eq!(current_shards.len(), 1);
         assert!(
@@ -20011,6 +20020,271 @@ mod tests {
                 result.is_err(),
                 "CR 702.190a: Sneak cast from {bad_zone:?} must be rejected \
                  (source zone must be Hand)"
+            );
+        }
+    }
+
+    // === CR 107.4f: K'rrik life-for-{B} payment substitution (GH #595) ===
+    //
+    // K'rrik, Son of Yawgmoth's middle ability: "For each {B} in a cost, you
+    // may pay 2 life rather than pay that mana." Engine wires the static
+    // through `PayLifeAsColoredMana { color: Black }` → `LifePaymentColors` →
+    // `effective_shard_requirement` promotion → existing Phyrexian pause/
+    // payment infrastructure. These tests cover the spell-cast side only.
+    // Activated-ability mana costs are deferred to GH #600 (require
+    // `pending_activation` pause/resume primitive not yet built).
+    mod krrik_life_for_color {
+        use super::*;
+
+        /// Attach a `PayLifeAsColoredMana { color: Black }` static (K'rrik's
+        /// middle ability) to a fresh permanent on the battlefield. Returns
+        /// the permanent's `ObjectId`. Mirrors `add_cant_lose_life_permanent`.
+        fn add_krrik_static(state: &mut GameState, owner: PlayerId) -> ObjectId {
+            use crate::types::mana::ManaColor;
+            use crate::types::statics::StaticMode;
+            let id = create_object(
+                state,
+                CardId(0x6911),
+                owner,
+                "K'rrik, Son of Yawgmoth".to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&id).unwrap().static_definitions.push(
+                StaticDefinition::new(StaticMode::PayLifeAsColoredMana {
+                    color: ManaColor::Black,
+                })
+                .affected(TargetFilter::Player),
+            );
+            id
+        }
+
+        /// Build a black instant in `player`'s hand with the requested cost.
+        fn create_instant_with_cost(
+            state: &mut GameState,
+            player: PlayerId,
+            shards: Vec<ManaCostShard>,
+            generic: u32,
+        ) -> ObjectId {
+            let obj_id = create_object(
+                state,
+                CardId(0x9595),
+                player,
+                "Krrik Test Spell".to_string(),
+                Zone::Hand,
+            );
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+            obj.mana_cost = ManaCost::Cost { shards, generic };
+            obj_id
+        }
+
+        /// CR 107.4f + CR 118.3b: Baseline K'rrik — a {B} spell with no black
+        /// mana but ample life is castable, with the engine auto-deciding the
+        /// life-payment route (no `ManaOrLife` choice, so no pause). After
+        /// announcement, life must drop by 2 and the spell is on the stack.
+        ///
+        /// Reverted-fix discriminator: without the parser/promotion plumbing,
+        /// `can_cast_object_now` rejects this cast and `handle_cast_spell`
+        /// errors with `ActionNotAllowed("Cannot pay mana cost")`.
+        #[test]
+        fn krrik_offers_life_payment_for_black_shard() {
+            let mut state = setup_game_at_main_phase();
+            add_krrik_static(&mut state, PlayerId(0));
+            state.players[0].life = 20;
+            let spell =
+                create_instant_with_cost(&mut state, PlayerId(0), vec![ManaCostShard::Black], 0);
+            assert!(
+                can_cast_object_now(&state, PlayerId(0), spell),
+                "CR 107.4f: K'rrik must enable {{B}} cast with 0 black mana + 20 life"
+            );
+
+            let mut events = Vec::new();
+            let life_before = state.players[0].life;
+            let _waiting =
+                handle_cast_spell(&mut state, PlayerId(0), spell, CardId(0x9595), &mut events)
+                    .expect("CR 107.4f: K'rrik {B} cast must succeed via auto life payment");
+
+            assert_eq!(
+                state.players[0].life,
+                life_before - 2,
+                "CR 118.3b: auto-decided K'rrik life payment must deduct exactly 2 life"
+            );
+            assert!(
+                state.stack.iter().any(|s| s.source_id == spell),
+                "CR 601.2a: successful cast must push the spell onto the stack"
+            );
+        }
+
+        /// CR 107.4f + CR 601.2f: When both mana and life routes are viable
+        /// (1 black mana available + life budget), the engine pauses at
+        /// `PhyrexianPayment` with `ManaOrLife` so the player can choose.
+        #[test]
+        fn krrik_pauses_when_mana_and_life_both_viable() {
+            let mut state = setup_game_at_main_phase();
+            add_krrik_static(&mut state, PlayerId(0));
+            state.players[0].life = 20;
+            // 1 black mana → can pay mana OR life; engine must surface the choice.
+            add_mana(&mut state, PlayerId(0), ManaType::Black, 1);
+            let spell =
+                create_instant_with_cost(&mut state, PlayerId(0), vec![ManaCostShard::Black], 0);
+
+            let mut events = Vec::new();
+            let waiting =
+                handle_cast_spell(&mut state, PlayerId(0), spell, CardId(0x9595), &mut events)
+                    .expect("CR 107.4f: cast must be legal");
+            match waiting {
+                crate::types::game_state::WaitingFor::PhyrexianPayment { shards, .. } => {
+                    assert_eq!(shards.len(), 1);
+                    assert!(
+                        matches!(
+                            shards[0].options,
+                            crate::types::game_state::ShardOptions::ManaOrLife
+                        ),
+                        "CR 107.4f: with both mana and life viable, surface ManaOrLife"
+                    );
+                }
+                other => panic!("expected PhyrexianPayment ManaOrLife, got {other:?}"),
+            }
+            let life_before = state.players[0].life;
+            let choices = vec![crate::types::game_state::ShardChoice::PayLife];
+            super::super::casting_costs::finalize_mana_payment_with_phyrexian_choices(
+                &mut state,
+                PlayerId(0),
+                &choices,
+                &mut events,
+            )
+            .expect("CR 107.4f: PayLife resume must succeed");
+            assert_eq!(
+                state.players[0].life,
+                life_before - 2,
+                "CR 118.3b: explicit PayLife must deduct 2 life"
+            );
+        }
+
+        /// CR 107.4f + 2019-08-23 K'rrik ruling: the substitution applies to
+        /// `{B}` shards only — never to `{2}` generic. With K'rrik in play and
+        /// a {1}{B} spell, having 0 mana and 20 life is NOT enough: the {1}
+        /// shard requires generic mana, which life cannot replace.
+        ///
+        /// Reverted-fix discriminator: if K'rrik incorrectly promoted generic
+        /// shards, this test would observe a successful pause/cast.
+        #[test]
+        fn krrik_does_not_substitute_for_generic_mana() {
+            let mut state = setup_game_at_main_phase();
+            add_krrik_static(&mut state, PlayerId(0));
+            state.players[0].life = 20;
+            let spell =
+                create_instant_with_cost(&mut state, PlayerId(0), vec![ManaCostShard::Black], 1);
+
+            assert!(
+                !can_cast_object_now(&state, PlayerId(0), spell),
+                "CR 107.4f: K'rrik cannot pay the {{1}} generic part with life"
+            );
+
+            let mut events = Vec::new();
+            let result =
+                handle_cast_spell(&mut state, PlayerId(0), spell, CardId(0x9595), &mut events);
+            assert!(
+                result.is_err(),
+                "CR 107.4f: cast of {{1}}{{B}} with empty pool + K'rrik + 20 life must be rejected"
+            );
+        }
+
+        /// CR 107.4f hybrid Phyrexian promotion: a `{B/R}` hybrid shard under
+        /// K'rrik gains the life option via `Hybrid(Black, Red)` →
+        /// `HybridPhyrexian(Black, Red)`. With only red mana available, the
+        /// player can pay the red half OR 2 life — `ShardOptions::ManaOrLife`.
+        #[test]
+        fn krrik_promotes_hybrid_black_shard() {
+            let mut state = setup_game_at_main_phase();
+            add_krrik_static(&mut state, PlayerId(0));
+            state.players[0].life = 20;
+            // 1 red mana in pool — red half of {B/R} payable; black half
+            // promoted to life via K'rrik.
+            add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+            let spell =
+                create_instant_with_cost(&mut state, PlayerId(0), vec![ManaCostShard::BlackRed], 0);
+
+            let mut events = Vec::new();
+            let waiting =
+                handle_cast_spell(&mut state, PlayerId(0), spell, CardId(0x9595), &mut events)
+                    .expect("CR 107.4f: hybrid B/R promotion must enable castability");
+            match waiting {
+                crate::types::game_state::WaitingFor::PhyrexianPayment { shards, .. } => {
+                    assert_eq!(shards.len(), 1);
+                    assert!(
+                        matches!(
+                            shards[0].options,
+                            crate::types::game_state::ShardOptions::ManaOrLife
+                        ),
+                        "CR 107.4f: with red mana + life available, hybrid Phyrexian shard must offer both"
+                    );
+                }
+                other => panic!("expected PhyrexianPayment for promoted hybrid, got {other:?}"),
+            }
+        }
+
+        /// CR 107.4f + CR 107.4e: K'rrik promotes `{2/B}` to
+        /// `TwoGenericHybridPhyrexian(Black)` — the synthetic fusion arm.
+        /// With 0 mana and ample life, only the 2-life route is viable so the
+        /// engine auto-decides: cast succeeds, life drops 2, spell on stack.
+        /// (No pause — single option, no `ManaOrLife` choice.)
+        ///
+        /// Reverted-fix discriminator: without the new
+        /// `TwoGenericHybridPhyrexian` variant + promotion table, the {2/B}
+        /// shard stays `TwoGenericHybrid(Black)` and the cast is rejected
+        /// (no black mana, no generic mana).
+        #[test]
+        fn krrik_promotes_two_generic_hybrid_black_shard() {
+            let mut state = setup_game_at_main_phase();
+            add_krrik_static(&mut state, PlayerId(0));
+            state.players[0].life = 20;
+            let spell =
+                create_instant_with_cost(&mut state, PlayerId(0), vec![ManaCostShard::TwoBlack], 0);
+            assert!(
+                can_cast_object_now(&state, PlayerId(0), spell),
+                "CR 107.4f: TwoGenericHybridPhyrexian promotion must enable cast"
+            );
+
+            let mut events = Vec::new();
+            let life_before = state.players[0].life;
+            let _waiting =
+                handle_cast_spell(&mut state, PlayerId(0), spell, CardId(0x9595), &mut events)
+                    .expect("CR 107.4f: {2/B} promoted under K'rrik must cast via life");
+            assert_eq!(
+                state.players[0].life,
+                life_before - 2,
+                "CR 118.3b: auto-paid life for {{2/B/P}} shard must deduct 2 life"
+            );
+            assert!(
+                state.stack.iter().any(|s| s.source_id == spell),
+                "CR 601.2a: successful cast must push the spell onto the stack"
+            );
+        }
+
+        /// CR 119.8: K'rrik substitution must be gated by `CantLoseLife` — if
+        /// the payer cannot lose life, the life-option budget collapses to 0,
+        /// so a {B} spell with no black mana is unpayable even with 20 life.
+        #[test]
+        fn krrik_respects_cant_lose_life_gate() {
+            let mut state = setup_game_at_main_phase();
+            add_krrik_static(&mut state, PlayerId(0));
+            // Add a CantLoseLife static — Phyrexian life budget drops to 0.
+            add_cant_lose_life_permanent(&mut state, PlayerId(0));
+            state.players[0].life = 20;
+            let spell =
+                create_instant_with_cost(&mut state, PlayerId(0), vec![ManaCostShard::Black], 0);
+
+            assert!(
+                !can_cast_object_now(&state, PlayerId(0), spell),
+                "CR 119.8: CantLoseLife must forbid the K'rrik life-substitution branch"
             );
         }
     }

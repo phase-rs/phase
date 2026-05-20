@@ -3,6 +3,8 @@ import { AnimatePresence, motion } from "framer-motion";
 
 import { useCardImage } from "../../hooks/useCardImage";
 import { useSetList, type SetMeta } from "../../hooks/useSetList";
+import { FORMAT_REGISTRY } from "../../data/formatRegistry";
+import { scryfallLegalityKey } from "../../services/scryfall";
 
 // Supported handlers are now derived from the coverage export, not a hardcoded list.
 // See `extractHandlerUsage` below — a handler is listed iff the parser produces it
@@ -95,18 +97,34 @@ type MainView = "card-coverage" | "by-set" | "gap-analysis" | "supported-handler
 type HandlerTab = "effects" | "triggers" | "keywords" | "statics" | "replacements";
 type StatusFilter = "all" | "supported" | "unsupported";
 type SortMode = "name" | "gaps-desc" | "gaps-asc";
-type FormatFilter = "all" | "standard" | "modern" | "pioneer" | "pauper" | "commander" | "legacy" | "vintage";
+type FormatFilter = string;
 
-const FORMAT_LABELS: Record<FormatFilter, string> = {
-  all: "All Formats",
-  standard: "Standard",
-  modern: "Modern",
-  pioneer: "Pioneer",
-  pauper: "Pauper",
-  commander: "Commander",
-  legacy: "Legacy",
-  vintage: "Vintage",
-};
+const FORMAT_METADATA_BY_LEGALITY_KEY = new Map(
+  FORMAT_REGISTRY.flatMap((metadata) => {
+    const key = scryfallLegalityKey(metadata.format);
+    return key ? [[key, metadata] as const] : [];
+  }),
+);
+
+function formatDisplayName(format: string): string {
+  return FORMAT_METADATA_BY_LEGALITY_KEY.get(format)?.label ?? format;
+}
+
+function formatShortLabel(format: string): string {
+  return FORMAT_METADATA_BY_LEGALITY_KEY.get(format)?.short_label ?? format.slice(0, 3).toUpperCase();
+}
+
+function formatFilterOptions(coverage: CoverageSummary): Array<{ key: FormatFilter; label: string }> {
+  const keys = Object.entries(coverage.coverage_by_format ?? {})
+    .filter(([, summary]) => summary.total_cards > 0)
+    .map(([format]) => format);
+  return [
+    { key: "all", label: "All Formats" },
+    ...keys
+      .sort((a, b) => formatDisplayName(a).localeCompare(formatDisplayName(b)))
+      .map((key) => ({ key, label: formatDisplayName(key) })),
+  ];
+}
 
 export function CardCoverageDashboard() {
   const [mainView, setMainView] = useState<MainView>("card-coverage");
@@ -418,19 +436,6 @@ function CardCoverageView() {
   );
 }
 
-const FORMAT_DISPLAY_NAMES: Record<string, string> = {
-  standard: "Standard",
-  standardbrawl: "Std Brawl",
-  pioneer: "Pioneer",
-  modern: "Modern",
-  legacy: "Legacy",
-  vintage: "Vintage",
-  commander: "Commander",
-  brawl: "Brawl",
-  historic: "Historic",
-  pauper: "Pauper",
-};
-
 /** Summary view shown in the detail panel when no card is selected. */
 function DetailEmptyState({ coverage }: { coverage: CoverageSummary }) {
   const formatCoverage = Object.entries(coverage.coverage_by_format ?? {}).filter(
@@ -465,7 +470,7 @@ function DetailEmptyState({ coverage }: { coverage: CoverageSummary }) {
                 return (
                   <div key={format} className="flex items-center gap-2">
                     <span className="w-[5.5rem] shrink-0 text-right text-[11px] text-slate-500">
-                      {FORMAT_DISPLAY_NAMES[format] ?? format}
+                      {formatDisplayName(format)}
                     </span>
                     <div className="relative h-4 min-w-0 flex-1 overflow-hidden rounded bg-black/30">
                       <div
@@ -791,6 +796,7 @@ function GapAnalysisView() {
   const bundles = coverage.gap_bundles ?? [];
   const twoBundles = bundles.filter((b) => b.handlers.length === 2);
   const threeBundles = bundles.filter((b) => b.handlers.length === 3);
+  const filterOptions = formatFilterOptions(coverage);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
@@ -802,7 +808,7 @@ function GapAnalysisView() {
           onChange={(e) => setFormatFilter(e.target.value as FormatFilter)}
           className="rounded-[12px] border border-white/10 bg-black/18 px-3 py-1.5 text-xs text-white outline-none focus:border-sky-400/40"
         >
-          {Object.entries(FORMAT_LABELS).map(([key, label]) => (
+          {filterOptions.map(({ key, label }) => (
             <option key={key} value={key}>{label}</option>
           ))}
         </select>
@@ -962,7 +968,7 @@ function GapRow({
                     key={fmt}
                     className="rounded-[6px] border border-white/6 bg-black/20 px-2 py-0.5 text-[11px] text-slate-400"
                   >
-                    <span className="uppercase">{fmt.slice(0, 3)}</span>:{count}
+                    <span className="uppercase">{formatShortLabel(fmt)}</span>:{count}
                   </span>
                 ))}
               </div>

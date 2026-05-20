@@ -33,6 +33,8 @@ describe("CommanderPanel", () => {
         cardDataCache={
           new Map(names.map((name) => [name, makeLegendaryCreature(name)]))
         }
+        expectedDeckSize={100}
+        isCommanderEligible={() => true}
         onSetCommander={vi.fn()}
         onRemoveCommander={vi.fn()}
       />,

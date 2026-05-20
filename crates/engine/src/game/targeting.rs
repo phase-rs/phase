@@ -661,6 +661,17 @@ pub(crate) fn extract_player_from_event(
         // creature") would have no player anchor and the sacrifice filter
         // would match across all players.
         GameEvent::PhaseChanged { .. } => Some(state.active_player),
+        // CR 603.6 + CR 109.4: For zone-change triggers ("whenever a creature
+        // enters", "whenever an opponent's creature enters", "whenever a card
+        // is put into a graveyard from anywhere"), the `TriggeringPlayer` /
+        // "that player" referent is the moving object's controller as
+        // recorded by the `ZoneChangeRecord` snapshot — preserved per CR
+        // 603.10a so leaves-the-battlefield triggers still see the correct
+        // controller after the object has transferred or left play. Without
+        // this arm, ETB and dies-trigger sub-effects with `target:
+        // TriggeringPlayer` fell back to the ability controller, hitting the
+        // wrong player (Suture Priest #560, Bloodchief Ascension #546).
+        GameEvent::ZoneChanged { record, .. } => Some(record.controller),
         _ => None,
     }
 }
@@ -2174,6 +2185,131 @@ mod tests {
         };
         let result = extract_player_from_event(&event, &state);
         assert_eq!(result, Some(PlayerId(1)));
+    }
+
+    /// CR 603.7a + CR 109.4 + CR 603.10a: For `ZoneChanged` events
+    /// (ETB, dies, discard, return-to-hand), `TriggeringPlayer` must
+    /// resolve to the moving object's controller as captured in the
+    /// `ZoneChangeRecord` snapshot — NOT the ability controller and
+    /// NOT `None`. Regression discriminator for #546 (Bloodchief
+    /// Ascension) and #560 (Suture Priest), where the wildcard arm's
+    /// `None` fallback caused `LoseLife { target: TriggeringPlayer }`
+    /// to revert to the Suture Priest / Bloodchief controller via
+    /// `resolve_player_for_context_ref`'s ability-controller fallback,
+    /// damaging the wrong player.
+    ///
+    /// Table-driven across ETB (None→Battlefield), dies
+    /// (Battlefield→Graveyard), and discard (Hand→Graveyard) so a
+    /// future arm that accidentally discriminates by `from_zone` would
+    /// be caught.
+    #[test]
+    fn extract_player_from_zone_change_returns_moving_objects_controller() {
+        use crate::types::events::GameEvent;
+        use crate::types::game_state::ZoneChangeRecord;
+        use crate::types::zones::Zone;
+
+        let state = GameState::new_two_player(42);
+
+        for (label, from, to) in [
+            (
+                "ETB (Suture Priest #560 opponent creature enters)",
+                None,
+                Zone::Battlefield,
+            ),
+            (
+                "Dies (Bloodchief Ascension #546 battlefield→graveyard)",
+                Some(Zone::Battlefield),
+                Zone::Graveyard,
+            ),
+            (
+                "Discard (Bloodchief Ascension #546 hand→graveyard)",
+                Some(Zone::Hand),
+                Zone::Graveyard,
+            ),
+        ] {
+            let record = ZoneChangeRecord {
+                controller: PlayerId(1),
+                ..ZoneChangeRecord::test_minimal(ObjectId(7), from, to)
+            };
+            let event = GameEvent::ZoneChanged {
+                object_id: ObjectId(7),
+                from,
+                to,
+                record: Box::new(record),
+            };
+            let result = extract_player_from_event(&event, &state);
+            assert_eq!(
+                result,
+                Some(PlayerId(1)),
+                "{label}: ZoneChanged must surface the moving object's controller (was: {result:?})",
+            );
+        }
+    }
+
+    /// End-to-end integration discriminator through the resolver chain
+    /// `resolve_player_for_context_ref → resolve_event_context_target →
+    /// extract_player_from_event` — the actual code path the bug report
+    /// hit. Pre-fix the inner helper returned `None` for `ZoneChanged`,
+    /// the outer resolver fell back through to `ability.controller`,
+    /// and Suture Priest's "its controller loses 1 life" deducted from
+    /// the Priest's owner (P0) rather than the entering creature's
+    /// controller (P1). Post-fix the chain surfaces P1.
+    ///
+    /// This is the SUTURE-PRIEST scenario from #560 in miniature: a
+    /// `LoseLife` ability owned by P0, triggered by a ZoneChanged event
+    /// whose record's controller is P1. The assertion proves the
+    /// resolver routes the life loss to P1, not P0. Reverting the
+    /// new `ZoneChanged` arm in `extract_player_from_event` makes this
+    /// test return `PlayerId(0)` and the assertion fires.
+    #[test]
+    fn resolve_player_for_context_ref_uses_zone_change_controller_not_ability_controller() {
+        use crate::game::effects::resolve_player_for_context_ref;
+        use crate::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
+        use crate::types::events::GameEvent;
+        use crate::types::game_state::ZoneChangeRecord;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        // Suture Priest is controlled by P0; its trigger says "opponent's
+        // creature entered, its controller loses 1 life." The entering
+        // creature is controlled by P1. The trigger event must carry the
+        // entering controller (P1) in the record.
+        let suture_priest_id = ObjectId(100);
+        let entering_creature_id = ObjectId(200);
+        let record = ZoneChangeRecord {
+            controller: PlayerId(1),
+            ..ZoneChangeRecord::test_minimal(entering_creature_id, None, Zone::Battlefield)
+        };
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: entering_creature_id,
+            from: None,
+            to: Zone::Battlefield,
+            record: Box::new(record),
+        });
+
+        // The LoseLife effect with `target: TriggeringPlayer` is the
+        // shape that Suture Priest's second trigger lowers to. Build a
+        // ResolvedAbility for it whose `controller` is P0 (the Priest's
+        // owner) — the asymmetry between ability.controller (P0) and
+        // the record's controller (P1) is what discriminates the fix.
+        let ability = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: Some(TargetFilter::TriggeringPlayer),
+            },
+            Vec::new(),
+            suture_priest_id,
+            PlayerId(0),
+        );
+
+        let resolved =
+            resolve_player_for_context_ref(&state, &ability, &TargetFilter::TriggeringPlayer);
+        assert_eq!(
+            resolved,
+            PlayerId(1),
+            "TriggeringPlayer on a ZoneChanged event must resolve to the entering \
+             creature's controller (P1), not the Suture Priest controller (P0)",
+        );
     }
 
     #[test]

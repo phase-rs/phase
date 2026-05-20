@@ -148,6 +148,17 @@ pub fn parse_mtgjson_mana_cost(s: &str) -> ManaCost {
             "B/P" => shards.push(ManaCostShard::PhyrexianBlack),
             "R/P" => shards.push(ManaCostShard::PhyrexianRed),
             "G/P" => shards.push(ManaCostShard::PhyrexianGreen),
+            // CR 107.4e: Colorless-hybrid symbols. Only printed exemplar
+            // is Ulalek, Fused Atrocity (Foundations) with cost
+            // `{C/W}{C/U}{C/B}{C/R}{C/G}`. Without these arms the cost
+            // silently fell through to the `other =>` ignore branch and
+            // parsed as empty (issue #493), letting the AI cast Ulalek
+            // for free on turn 1.
+            "C/W" => shards.push(ManaCostShard::ColorlessWhite),
+            "C/U" => shards.push(ManaCostShard::ColorlessBlue),
+            "C/B" => shards.push(ManaCostShard::ColorlessBlack),
+            "C/R" => shards.push(ManaCostShard::ColorlessRed),
+            "C/G" => shards.push(ManaCostShard::ColorlessGreen),
             other => {
                 // Try to parse as a number (generic mana)
                 if let Ok(n) = other.parse::<u32>() {
@@ -347,6 +358,28 @@ mod tests {
             ManaCost::Cost {
                 generic: 0,
                 shards: vec![ManaCostShard::WhiteBlue],
+            }
+        );
+    }
+
+    /// CR 107.4e regression for #493 — Eldrazi colorless-hybrid `{C/X}`
+    /// symbols (Ulalek Fused Atrocity, BFZ/OGW) must populate the cost
+    /// shards rather than fall through to the silent "ignore unrecognized
+    /// symbols" branch that left mana_cost empty and the AI casting for
+    /// free.
+    #[test]
+    fn parse_mana_cost_colorless_hybrid_ulalek() {
+        assert_eq!(
+            parse_mtgjson_mana_cost("{C/W}{C/U}{C/B}{C/R}{C/G}"),
+            ManaCost::Cost {
+                generic: 0,
+                shards: vec![
+                    ManaCostShard::ColorlessWhite,
+                    ManaCostShard::ColorlessBlue,
+                    ManaCostShard::ColorlessBlack,
+                    ManaCostShard::ColorlessRed,
+                    ManaCostShard::ColorlessGreen,
+                ],
             }
         );
     }

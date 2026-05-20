@@ -1165,6 +1165,14 @@ pub struct MulliganBottomEntry {
     pub count: u8,
 }
 
+/// CR 103.5 / TL:R 906.6a: Why a player is bottoming cards from an opening
+/// hand before the normal mulligan-decision step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum OpeningHandBottomReason {
+    TinyLeadersMultiCommander,
+}
+
 /// CR 603.3b: Display payload for one collected-but-not-yet-stacked trigger
 /// awaiting its controller's ordering choice. Engine-derived so the filtered
 /// state snapshot (multiplayer) and the frontend overlay never re-derive
@@ -1196,6 +1204,12 @@ pub struct TriggerOrderGroup {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingTriggerOrder {
     pub groups: Vec<TriggerOrderGroup>,
+    /// CR 603.3b + CR 605.4a: Waiting state interrupted by the ordering pass.
+    /// Used when triggered mana abilities pause a casting/payment chain for
+    /// APNAP ordering; after all ordered triggers are dispatched, the engine
+    /// resumes the suspended state instead of falling back to bare Priority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_after_ordering: Option<Box<WaitingFor>>,
 }
 
 /// CR 101.4 + CR 608.2 (Battlebond friend-or-foe keyword action — no explicit
@@ -1329,6 +1343,13 @@ pub enum WaitingFor {
     /// simultaneously and submit `SelectCards { cards }` in any order.
     MulliganBottomCards {
         pending: Vec<MulliganBottomEntry>,
+    },
+    /// TL:R 906.6a/e: A player with more than one Tiny Leader performs a
+    /// forced first mulligan before any player may make a normal mulligan
+    /// decision or use "any time you could mulligan" actions.
+    OpeningHandBottomCards {
+        pending: Vec<MulliganBottomEntry>,
+        reason: OpeningHandBottomReason,
     },
     ManaPayment {
         player: PlayerId,
@@ -2613,7 +2634,7 @@ impl WaitingFor {
     /// Extract the player who must act, if any.
     ///
     /// CR 103.5: For simultaneous-decision states (`MulliganDecision`,
-    /// `MulliganBottomCards`) this returns `Some(p)` only when exactly one
+    /// `MulliganBottomCards`, `OpeningHandBottomCards`) this returns `Some(p)` only when exactly one
     /// player is pending, and `None` when multiple are pending — callers
     /// that need set semantics must use [`Self::acting_players`] instead.
     pub fn acting_player(&self) -> Option<PlayerId> {
@@ -2626,6 +2647,13 @@ impl WaitingFor {
                 }
             }
             WaitingFor::MulliganBottomCards { pending } => {
+                if pending.len() == 1 {
+                    Some(pending[0].player)
+                } else {
+                    None
+                }
+            }
+            WaitingFor::OpeningHandBottomCards { pending, .. } => {
                 if pending.len() == 1 {
                     Some(pending[0].player)
                 } else {
@@ -2755,6 +2783,9 @@ impl WaitingFor {
                 pending.iter().map(|e| e.player).collect()
             }
             WaitingFor::MulliganBottomCards { pending } => {
+                pending.iter().map(|e| e.player).collect()
+            }
+            WaitingFor::OpeningHandBottomCards { pending, .. } => {
                 pending.iter().map(|e| e.player).collect()
             }
             _ => self.acting_player().into_iter().collect(),
@@ -3452,6 +3483,13 @@ pub struct GameState {
     /// on the bottom of their library. Cleared when the mulligan flow finishes.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub final_mulligan_counts: HashMap<PlayerId, u8>,
+
+    /// TL:R 906.6a: Per-player bottoms already paid by a forced opening-hand
+    /// mulligan before the normal mulligan-decision step. Subtracted from the
+    /// later London bottom count so the forced bottom is not charged twice.
+    /// Cleared with `final_mulligan_counts` when the mulligan flow finishes.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub prepaid_mulligan_bottoms: HashMap<PlayerId, u8>,
 
     /// When true, `GameAction::Debug(...)` actions are accepted.
     /// Set at game initialization, immutable after creation.
@@ -4202,6 +4240,7 @@ impl GameState {
             phase_stops: HashMap::new(),
             lands_tapped_for_mana: HashMap::new(),
             final_mulligan_counts: HashMap::new(),
+            prepaid_mulligan_bottoms: HashMap::new(),
             match_config: MatchConfig::default(),
             match_phase: MatchPhase::InGame,
             match_score: MatchScore::default(),
@@ -4700,6 +4739,13 @@ mod tests {
                 count: 2,
             }],
         }));
+        variants.push(Box::new(WaitingFor::OpeningHandBottomCards {
+            pending: vec![MulliganBottomEntry {
+                player: PlayerId(0),
+                count: 1,
+            }],
+            reason: OpeningHandBottomReason::TinyLeadersMultiCommander,
+        }));
         variants.push(Box::new(WaitingFor::ManaPayment {
             player: PlayerId(0),
             convoke_mode: None,
@@ -4921,7 +4967,7 @@ mod tests {
             mana_reduction: ManaCost::zero(),
             pending_cast: dummy_pending(),
         }));
-        assert_eq!(variants.len(), 32);
+        assert_eq!(variants.len(), 33);
     }
 
     #[test]

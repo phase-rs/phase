@@ -83,6 +83,11 @@ pub fn choose_action(
         {
             return None;
         }
+        WaitingFor::OpeningHandBottomCards { pending, .. }
+            if !pending.iter().any(|e| e.player == ai_player) =>
+        {
+            return None;
+        }
         _ => {}
     }
 
@@ -418,7 +423,7 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
                 },
             })
         }
-        WaitingFor::MulliganBottomCards { .. } => {
+        WaitingFor::MulliganBottomCards { .. } | WaitingFor::OpeningHandBottomCards { .. } => {
             Some(GameAction::SelectCards { cards: Vec::new() })
         }
 

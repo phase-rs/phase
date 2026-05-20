@@ -30,6 +30,7 @@ export type GameFormat =
   | "Commander"
   | "Pioneer"
   | "Modern"
+  | "Premodern"
   | "Legacy"
   | "Vintage"
   | "Historic"
@@ -37,6 +38,7 @@ export type GameFormat =
   | "Pauper"
   | "PauperCommander"
   | "DuelCommander"
+  | "TinyLeaders"
   | "Brawl"
   | "HistoricBrawl"
   | "FreeForAll"
@@ -868,6 +870,8 @@ export interface PendingTriggerSummary {
 
 // ── WaitingFor (discriminated union with tag="type", content="data") ─────
 
+export type OpeningHandBottomReason = { type: "TinyLeadersMultiCommander" };
+
 export type WaitingFor =
   | { type: "Priority"; data: { player: PlayerId } }
   | {
@@ -880,6 +884,13 @@ export type WaitingFor =
   | {
       type: "MulliganBottomCards";
       data: { pending: { player: PlayerId; count: number }[] };
+    }
+  | {
+      type: "OpeningHandBottomCards";
+      data: {
+        pending: { player: PlayerId; count: number }[];
+        reason: OpeningHandBottomReason;
+      };
     }
   | { type: "ManaPayment"; data: { player: PlayerId; convoke_mode?: ConvokeMode } }
   | {

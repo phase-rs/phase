@@ -32,6 +32,9 @@ export const FEEDS_INITIALIZED_KEY = "phase-feeds-initialized";
 /** Key for active quick-draft metadata in localStorage (synchronous resume detection) */
 export const ACTIVE_QUICK_DRAFT_KEY = "phase-active-quick-draft";
 
+/** Key for active draft-pod metadata in localStorage (synchronous resume detection) */
+export const ACTIVE_DRAFT_POD_KEY = "phase-active-draft-pod";
+
 /** Prefix for quick-draft session blobs in IndexedDB. Full key: `${QUICK_DRAFT_KEY_PREFIX}${draftId}` */
 export const QUICK_DRAFT_KEY_PREFIX = "phase-quick-draft:";
 

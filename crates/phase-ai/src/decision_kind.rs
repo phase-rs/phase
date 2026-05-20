@@ -15,9 +15,9 @@ use crate::policies::registry::DecisionKind;
 /// Classify a decision into the bucket the policy registry uses for routing.
 pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
     match waiting_for {
-        WaitingFor::MulliganDecision { .. } | WaitingFor::MulliganBottomCards { .. } => {
-            DecisionKind::Mulligan
-        }
+        WaitingFor::MulliganDecision { .. }
+        | WaitingFor::MulliganBottomCards { .. }
+        | WaitingFor::OpeningHandBottomCards { .. } => DecisionKind::Mulligan,
         WaitingFor::ManaPayment { .. } | WaitingFor::PhyrexianPayment { .. } => {
             DecisionKind::ManaPayment
         }

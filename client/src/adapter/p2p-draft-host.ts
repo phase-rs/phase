@@ -13,8 +13,8 @@ import type Peer from "peerjs";
 import type { DataConnection } from "peerjs";
 
 import { DraftAdapter } from "./draft-adapter";
-import type { DraftPlayerView, PairingView, SeatPublicView } from "./draft-adapter";
-import type { PodPolicy } from "./draft-adapter";
+import type { DraftPlayerView, MultiplayerSeatDescriptor, PairingView, SeatPublicView } from "./draft-adapter";
+import type { PodPolicy, TournamentFormat } from "./draft-adapter";
 import {
   createDraftPeerSession,
   type DraftPeerSession,
@@ -98,13 +98,13 @@ export class P2PDraftHost {
 
   private draftStarted = false;
   private draftCode = "";
+  private activePodSize: number;
   private hostConnectionUnsub: (() => void) | null = null;
   private paused = false;
   private timerInterval: ReturnType<typeof setInterval> | null = null;
   private timerRemainingMs = 0;
   private timerEndAt = 0;
   private timerContext: "pick" | "sideboard" | "playdraw" | null = null;
-  private podPolicy: PodPolicy = "Competitive";
   private bo3State = new Map<string, Bo3MatchState>();
 
   // Server backup upload state (D-08)
@@ -121,6 +121,8 @@ export class P2PDraftHost {
     private readonly kind: "Premier" | "Traditional",
     private readonly podSize: number,
     private readonly hostDisplayName: string,
+    private readonly tournamentFormat: TournamentFormat,
+    private readonly podPolicy: PodPolicy,
     private readonly gracePeriodMs: number = DRAFT_GRACE_PERIOD_MS,
     private readonly persistenceId?: string,
     private readonly roomCode?: string,
@@ -128,6 +130,7 @@ export class P2PDraftHost {
   ) {
     // Host is always seat 0
     this.seatNames.set(0, hostDisplayName);
+    this.activePodSize = podSize;
     this.backupEndpoint = backupEndpoint ?? null;
   }
 
@@ -153,6 +156,7 @@ export class P2PDraftHost {
       this.handleNewConnection(conn);
     });
     this.syncLobbyToGuests();
+    this.persistSession();
   }
 
   // ── Connection handling ────────────────────────────────────────────
@@ -363,26 +367,42 @@ export class P2PDraftHost {
    * Start the draft. Called by the host UI once the pod is full
    * (or the host decides to start with fewer players).
    */
-  async startDraft(): Promise<void> {
+  async startDraft(botFillEmptySeats = true): Promise<void> {
     if (this.draftStarted) return;
 
-    const seatNames: string[] = [];
+    const seats: MultiplayerSeatDescriptor[] = [];
     for (let i = 0; i < this.podSize; i++) {
-      seatNames.push(this.seatNames.get(i) ?? `Player ${i + 1}`);
+      const displayName = this.seatNames.get(i);
+      if (displayName) {
+        seats.push({
+          type: "Human",
+          player_id: i,
+          display_name: displayName,
+        });
+      } else if (botFillEmptySeats) {
+        seats.push({ type: "Bot", name: this.botNameForSeat(i) });
+      }
+    }
+    if (seats.length < 2) {
+      throw new Error("Need at least two seats to start a pod draft");
     }
 
     const seed = Math.floor(Math.random() * 0xffffffff);
-    const hostView = await this.adapter.startMultiplayerDraft(
+    const draftCode = `draft-${seed.toString(16).padStart(8, "0")}`;
+    const hostView = await this.adapter.createMultiplayerDraft(
       this.setPoolJson,
+      seats,
       this.kind,
-      seatNames,
       seed,
+      draftCode,
+      this.tournamentFormat,
+      this.podPolicy,
     );
 
     this.draftStarted = true;
-    this.draftCode = `draft-${seed.toString(16).padStart(8, "0")}`;
+    this.draftCode = draftCode;
+    this.activePodSize = seats.length;
     this.picksThisRound.clear();
-    this.podPolicy = hostView.pod_policy;
 
     // Send each guest their filtered view
     for (const [seat, session] of this.guestSessions) {
@@ -413,7 +433,11 @@ export class P2PDraftHost {
     return this.handleDeckSubmission(0, mainDeck);
   }
 
-  private async handlePick(seat: number, cardInstanceId: string): Promise<DraftPlayerView> {
+  private async handlePick(
+    seat: number,
+    cardInstanceId: string,
+    resolveBots = true,
+  ): Promise<DraftPlayerView> {
     try {
       const view = await this.adapter.submitPickForSeat(seat, cardInstanceId);
       this.picksThisRound.add(seat);
@@ -426,6 +450,10 @@ export class P2PDraftHost {
 
       this.emit({ type: "pickReceived", seatIndex: seat, cardInstanceId });
       this.persistSession();
+
+      if (resolveBots && !this.isBotSeat(seat)) {
+        await this.resolveBotPicks();
+      }
 
       // Check if all picks for this round are in
       const allPicked = await this.adapter.allPicksSubmitted();
@@ -449,7 +477,7 @@ export class P2PDraftHost {
 
       // Return the host's updated view if this was the host's pick
       if (seat === 0) {
-        return view;
+        return await this.adapter.getViewForSeat(0);
       }
       return await this.adapter.getViewForSeat(0);
     } catch (err) {
@@ -638,7 +666,7 @@ export class P2PDraftHost {
 
   private async autoPickAllPending(): Promise<void> {
     // For each seat that still has a current_pack (hasn't picked), auto-pick a random card (D-02)
-    for (let seat = 0; seat < this.podSize; seat++) {
+    for (let seat = 0; seat < this.activePodSize; seat++) {
       try {
         const view = await this.adapter.getViewForSeat(seat);
         if (view.current_pack && view.current_pack.length > 0) {
@@ -652,6 +680,33 @@ export class P2PDraftHost {
     }
   }
 
+  private async resolveBotPicks(): Promise<void> {
+    const hostView = await this.adapter.getViewForSeat(0);
+    if (hostView.status !== "Drafting") return;
+
+    for (const seat of hostView.seats) {
+      if (!seat.is_bot) continue;
+      const view = await this.adapter.getViewForSeat(seat.seat_index);
+      const pack = view.current_pack;
+      if (!pack || pack.length === 0) continue;
+
+      const randomIndex = Math.floor(Math.random() * pack.length);
+      await this.handlePick(
+        seat.seat_index,
+        pack[randomIndex].instance_id,
+        false,
+      );
+    }
+  }
+
+  private isBotSeat(seat: number): boolean {
+    return this.seatNames.get(seat) === undefined && !this.guestSessions.has(seat);
+  }
+
+  private botNameForSeat(seat: number): string {
+    return `AI player ${seat + 1}`;
+  }
+
   // ── Match coordination ────────────────────────────────────────────────
 
   /**
@@ -661,7 +716,6 @@ export class P2PDraftHost {
   async generatePairings(round: number): Promise<void> {
     try {
       const view = await this.adapter.generatePairings(round);
-      this.podPolicy = view.pod_policy;
 
       // Send draft_match_start to each guest with their opponent info
       for (const pairing of view.pairings) {
@@ -982,6 +1036,8 @@ export class P2PDraftHost {
           kind: this.kind,
           podSize: this.podSize,
           hostDisplayName: this.hostDisplayName,
+          tournamentFormat: this.tournamentFormat,
+          podPolicy: this.podPolicy,
           seatTokens: Object.fromEntries(this.seatTokens),
           seatNames: Object.fromEntries(this.seatNames),
           kickedTokens: [...this.kickedTokens],

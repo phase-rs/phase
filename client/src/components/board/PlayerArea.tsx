@@ -81,7 +81,8 @@ export function PlayerArea({
   }
 
   const player = gameState.players[playerId];
-  const isCommander = gameState.format_config?.uses_commander === true;
+  const hasCommandZoneCards = gameState.format_config?.command_zone === true;
+  const hasCommanderDamage = gameState.format_config?.commander_damage_threshold != null;
   const isEliminated = player?.is_eliminated ?? false;
   // CR 702.26-style player phasing: while phased out, dim the player area
   // to mirror the engine-side exclusion (targeting/damage/attack/SBA). Use
@@ -103,13 +104,13 @@ export function PlayerArea({
   // lands at LAND_BASE_SCALE (0.78), which squeezes the creatures row via
   // flex-1. Stacked CommanderDamage entries compound the warp.
   const commanderScale = isCompactHeight ? LAND_BASE_SCALE_COMPACT : LAND_BASE_SCALE;
-  const commanderSection = isCommander ? (
+  const commanderSection = hasCommandZoneCards ? (
     <div
       className="flex min-w-0 flex-col items-end gap-1"
       style={zoneStyle(commanderScale)}
     >
       <CommanderCardZone playerId={playerId} />
-      <CommanderDamage playerId={playerId} />
+      {hasCommanderDamage && <CommanderDamage playerId={playerId} />}
     </div>
   ) : null;
   const supportExtras = (

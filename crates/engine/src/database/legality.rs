@@ -10,6 +10,7 @@ pub enum LegalityFormat {
     Standard,
     Commander,
     Modern,
+    Premodern,
     Pioneer,
     Legacy,
     Vintage,
@@ -23,10 +24,11 @@ pub enum LegalityFormat {
 }
 
 impl LegalityFormat {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Standard,
         Self::Commander,
         Self::Modern,
+        Self::Premodern,
         Self::Pioneer,
         Self::Legacy,
         Self::Vintage,
@@ -44,6 +46,7 @@ impl LegalityFormat {
             Self::Standard => "standard",
             Self::Commander => "commander",
             Self::Modern => "modern",
+            Self::Premodern => "premodern",
             Self::Pioneer => "pioneer",
             Self::Legacy => "legacy",
             Self::Vintage => "vintage",
@@ -62,6 +65,7 @@ impl LegalityFormat {
             "standard" => Some(Self::Standard),
             "commander" => Some(Self::Commander),
             "modern" => Some(Self::Modern),
+            "premodern" => Some(Self::Premodern),
             "pioneer" => Some(Self::Pioneer),
             "legacy" => Some(Self::Legacy),
             "vintage" => Some(Self::Vintage),
@@ -175,9 +179,10 @@ mod tests {
         let mut raw = HashMap::new();
         raw.insert("standard".to_string(), "Legal".to_string());
         raw.insert("commander".to_string(), "Banned".to_string());
+        raw.insert("premodern".to_string(), "Legal".to_string());
         // Deliberately nonsense keys so this test remains meaningful even if
         // we later add support for any real-but-currently-unsupported format
-        // like `oldschool` or `premodern`. The contract being tested is
+        // like `oldschool` or `futurecasual`. The contract being tested is
         // "unknown keys are dropped", not "any specific format is unknown".
         raw.insert("nonexistent_fmt_a".to_string(), "Legal".to_string());
         raw.insert("nonexistent_fmt_b".to_string(), "Legal".to_string());
@@ -191,17 +196,23 @@ mod tests {
             result.get(&LegalityFormat::Commander),
             Some(&LegalityStatus::Banned)
         );
-        assert_eq!(result.len(), 2);
+        assert_eq!(
+            result.get(&LegalityFormat::Premodern),
+            Some(&LegalityStatus::Legal)
+        );
+        assert_eq!(result.len(), 3);
     }
 
     #[test]
     fn export_map_uses_stable_lowercase_strings() {
         let mut legalities = HashMap::new();
         legalities.insert(LegalityFormat::Standard, LegalityStatus::Legal);
+        legalities.insert(LegalityFormat::Premodern, LegalityStatus::Banned);
         legalities.insert(LegalityFormat::Commander, LegalityStatus::NotLegal);
 
         let out = legalities_to_export_map(&legalities);
         assert_eq!(out.get("standard"), Some(&"legal".to_string()));
+        assert_eq!(out.get("premodern"), Some(&"banned".to_string()));
         assert_eq!(out.get("commander"), Some(&"not_legal".to_string()));
     }
 }

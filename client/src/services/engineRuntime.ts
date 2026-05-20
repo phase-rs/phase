@@ -95,6 +95,15 @@ export async function isCardCommanderEligible(name: string): Promise<boolean> {
   return engine.is_card_commander_eligible(name);
 }
 
+export async function isCardCommanderEligibleForFormat(
+  name: string,
+  format: GameFormat,
+): Promise<boolean> {
+  await ensureCardDatabase();
+  const engine = await loadEngineModule();
+  return engine.isCardCommanderEligibleForFormat(name, format);
+}
+
 /**
  * CR 100.4a: Per-format sideboard policy as a discriminated union.
  *

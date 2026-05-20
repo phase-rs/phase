@@ -108,6 +108,31 @@ describe("buildScryfallQuery", () => {
   });
 });
 
+describe("scryfallLegalityKey", () => {
+  it("uses Scryfall legality keys for constructed formats", async () => {
+    const { scryfallLegalityKey } = await loadScryfallModule();
+
+    expect(scryfallLegalityKey("Modern")).toBe("modern");
+    expect(scryfallLegalityKey("Premodern")).toBe("premodern");
+  });
+
+  it("maps commander variants to Scryfall legality keys", async () => {
+    const { scryfallLegalityKey } = await loadScryfallModule();
+
+    expect(scryfallLegalityKey("Brawl")).toBe("standardbrawl");
+    expect(scryfallLegalityKey("HistoricBrawl")).toBe("brawl");
+    expect(scryfallLegalityKey("DuelCommander")).toBe("duel");
+    expect(scryfallLegalityKey("PauperCommander")).toBe("paupercommander");
+  });
+
+  it("returns undefined for formats without a Scryfall legality key", async () => {
+    const { scryfallLegalityKey } = await loadScryfallModule();
+
+    expect(scryfallLegalityKey("TinyLeaders")).toBeUndefined();
+    expect(scryfallLegalityKey("FreeForAll")).toBeUndefined();
+  });
+});
+
 describe("fetchCardData", () => {
   beforeEach(() => {
     vi.restoreAllMocks();

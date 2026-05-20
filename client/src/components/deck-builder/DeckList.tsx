@@ -7,6 +7,7 @@ import {
   sideboardPolicyForFormat,
   type SideboardPolicy,
 } from "../../services/engineRuntime";
+import { scryfallLegalityKey } from "../../services/scryfall";
 import type { GameFormat } from "../../adapter/types";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 
@@ -71,23 +72,40 @@ function totalCards(entries: DeckEntry[]): number {
 }
 
 
-const FORMAT_DISPLAY_ORDER = ["standard", "pioneer", "modern", "legacy", "vintage", "pauper", "commander"] as const;
-
-const FORMAT_LABELS: Record<string, string> = {
-  standard: "STD",
-  pioneer: "PIO",
-  modern: "MOD",
-  legacy: "LEG",
-  vintage: "VIN",
-  pauper: "PAU",
-  commander: "CMD",
-};
-
 const LEGALITY_STYLES: Record<string, string> = {
   legal: "bg-emerald-600/70 text-emerald-100",
   banned: "bg-red-600/70 text-red-100",
+  restricted: "bg-yellow-600/70 text-yellow-100",
   not_legal: "bg-gray-600/40 text-gray-500",
 };
+
+const FORMAT_BADGE_METADATA = FORMAT_REGISTRY
+  .map((metadata) => {
+    const legalityKey = scryfallLegalityKey(metadata.format);
+    return legalityKey
+      ? {
+          key: legalityKey,
+          label: metadata.short_label,
+          title: metadata.label,
+        }
+      : null;
+  })
+  .filter((entry): entry is { key: string; label: string; title: string } => entry !== null);
+
+function formatLegalityBadges(formatLegality: Record<string, string>) {
+  const knownKeys = new Set(FORMAT_BADGE_METADATA.map((entry) => entry.key));
+  return [
+    ...FORMAT_BADGE_METADATA.filter((entry) => entry.key in formatLegality),
+    ...Object.keys(formatLegality)
+      .filter((key) => !knownKeys.has(key))
+      .sort()
+      .map((key) => ({
+        key,
+        label: key.slice(0, 3).toUpperCase(),
+        title: key,
+      })),
+  ];
+}
 
 export function DeckList({
   deck,
@@ -294,15 +312,15 @@ export function DeckList({
             <div>
               <div className="mb-1 text-[10px] uppercase tracking-wider text-gray-500">Format Legality</div>
               <div className="flex flex-wrap gap-1">
-                {FORMAT_DISPLAY_ORDER.map((fmt) => {
-                  const status = compatibility.format_legality?.[fmt] ?? "not_legal";
+                {formatLegalityBadges(compatibility.format_legality).map((fmt) => {
+                  const status = compatibility.format_legality?.[fmt.key] ?? "not_legal";
                   return (
                     <span
-                      key={fmt}
+                      key={fmt.key}
                       className={`rounded px-1.5 py-0.5 text-[9px] font-semibold leading-tight ${LEGALITY_STYLES[status] ?? LEGALITY_STYLES.not_legal}`}
-                      title={`${fmt}: ${status.replace("_", " ")}`}
+                      title={`${fmt.title}: ${status.replace("_", " ")}`}
                     >
-                      {FORMAT_LABELS[fmt] ?? fmt}
+                      {fmt.label}
                     </span>
                   );
                 })}
