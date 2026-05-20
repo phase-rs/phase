@@ -15736,6 +15736,120 @@ mod phase_trigger_regression_tests {
             "permanent must not be in graveyard when paid"
         );
     }
+
+    /// CR 702.24a + CR 603.4 + CR 400.7: "if this permanent is on the
+    /// battlefield" is an intervening-if condition re-checked at trigger
+    /// resolution. If the source permanent has left the battlefield between
+    /// trigger fire and resolution (bounced, exiled, etc.), the entire
+    /// chained ability no-ops: no age counter is placed, no unless-pay prompt
+    /// is emitted, and no sacrifice occurs.
+    ///
+    /// This is the regression test for the cumulative-upkeep
+    /// `TriggerCondition::SourceInZone { Battlefield }` guard wired in
+    /// `build_cumulative_upkeep_trigger`. Without that guard, the trigger
+    /// would resolve against the (now-hand-zone) source object: the outer
+    /// `Effect::AddCounter` would still write an age counter onto the object
+    /// in hand, and the sub-ability would still prompt the controller with a
+    /// `Mana{1}` unless-payment — a spurious prompt fundamentally inconsistent
+    /// with CR 702.24a.
+    ///
+    /// The flow exercises the resolution-time re-evaluation specifically:
+    ///   1. `auto_advance` from Untap into Upkeep, firing the trigger onto the
+    ///      stack (source is still on the battlefield at fire-time, so the
+    ///      intervening-if passes).
+    ///   2. Move the source to hand (simulates a bounce spell resolving on
+    ///      top of the upkeep trigger).
+    ///   3. `resolve_top` should see the condition fail at resolution time
+    ///      (per `stack::resolve_top`'s CR 603.4 re-check) and walk away
+    ///      without invoking the AddCounter → sub-ability chain.
+    #[test]
+    fn cumulative_upkeep_source_gone_before_resolution_is_noop() {
+        let (mut state, remora_id) = setup_mystic_remora_upkeep_state();
+
+        // Step 1: fire the trigger onto the stack but DO NOT resolve it.
+        // `auto_advance` settles in Phase::Upkeep with the trigger queued.
+        let mut events = Vec::new();
+        let _wf = crate::game::turns::auto_advance(&mut state, &mut events);
+        assert_eq!(
+            state.phase,
+            Phase::Upkeep,
+            "auto_advance must pause in Upkeep with the trigger queued"
+        );
+        assert!(
+            !state.stack.is_empty(),
+            "cumulative-upkeep trigger must be on the stack pre-bounce"
+        );
+        // Source is still on the battlefield at fire-time and has no age
+        // counter yet (outer AddCounter resolves at stack resolution).
+        assert_eq!(state.objects[&remora_id].zone, Zone::Battlefield);
+        assert_eq!(
+            state.objects[&remora_id]
+                .counters
+                .get(&crate::types::counter::CounterType::Age)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "no age counter before stack resolution"
+        );
+
+        // Step 2: bounce the source to its owner's hand. In real play this
+        // would be a Boomerang or Unsummon resolving on top of the upkeep
+        // trigger. We move it directly to keep the test focused on the
+        // intervening-if re-check at resolution time.
+        // CR 400.7: this conceptually creates a new object in the hand zone;
+        // here ObjectId is preserved (engine maintains object identity in the
+        // `objects` map across zone changes), which is the harder case for
+        // the no-op semantics — the same id remains addressable.
+        crate::game::zones::move_to_zone(&mut state, remora_id, Zone::Hand, &mut events);
+        assert_eq!(
+            state.objects[&remora_id].zone,
+            Zone::Hand,
+            "source must be in hand after bounce"
+        );
+
+        // Step 3: resolve the top of the stack. The
+        // `TriggerCondition::SourceInZone { Battlefield }` re-check should
+        // fail (source is in Hand now), so `stack::resolve_top` emits
+        // `StackResolved` without invoking the outer AddCounter or the
+        // sub-ability chain.
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        // No unless-payment prompt — the chain never reached the sub-ability.
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::UnlessPayment { .. }),
+            "no unless-pay prompt when source has left the battlefield; got: {:?}",
+            state.waiting_for
+        );
+
+        // No age counter — outer AddCounter never ran.
+        assert_eq!(
+            state.objects[&remora_id]
+                .counters
+                .get(&crate::types::counter::CounterType::Age)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "no age counter should be placed when the intervening-if no-ops"
+        );
+
+        // Source stays in hand. Not sacrificed, not returned to battlefield.
+        assert_eq!(
+            state.objects[&remora_id].zone,
+            Zone::Hand,
+            "source must remain in hand; no Effect::Sacrifice ran"
+        );
+        assert!(
+            !state.players[0].graveyard.contains(&remora_id),
+            "source must not be sacrificed to graveyard when the chain no-ops"
+        );
+
+        // The trigger left the stack via the CR 603.4 no-op exit, not via
+        // normal resolution — stack is now empty.
+        assert!(
+            state.stack.is_empty(),
+            "stack must be cleared after the no-op resolution"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -1878,6 +1878,15 @@ fn is_cumulative_upkeep_trigger(t: &TriggerDefinition) -> bool {
     matches!(t.mode, TriggerMode::PayCumulativeUpkeep)
         && t.phase == Some(Phase::Upkeep)
         && matches!(t.valid_target, Some(TargetFilter::Controller))
+        // CR 702.24a: "if this permanent is on the battlefield" — the
+        // intervening-if must be wired or a bounced source would still
+        // resolve its sub-ability chain. See `build_cumulative_upkeep_trigger`.
+        && matches!(
+            t.condition,
+            Some(TriggerCondition::SourceInZone {
+                zone: Zone::Battlefield
+            })
+        )
         && t.execute.as_deref().is_some_and(|outer| {
             matches!(
                 outer.effect.as_ref(),
@@ -1968,11 +1977,21 @@ pub(crate) fn build_cumulative_upkeep_trigger(base_cost: AbilityCost) -> Trigger
     TriggerDefinition::new(TriggerMode::PayCumulativeUpkeep)
         .phase(Phase::Upkeep)
         .valid_target(TargetFilter::Controller)
+        // CR 603.4 + CR 702.24a: "if this permanent is on the battlefield" —
+        // re-checked at resolution time so a bounced/exiled source no-ops the
+        // entire chain (no age counter is placed, no unless-pay prompt is
+        // emitted, no sacrifice). Without this guard the AddCounter outer
+        // effect would write to the post-move object's counter map and the
+        // sub-ability would still prompt the controller.
+        .condition(TriggerCondition::SourceInZone {
+            zone: Zone::Battlefield,
+        })
         .execute(execute)
         .description(
-            "CR 702.24a: At the beginning of your upkeep, put an age \
-             counter on this permanent, then sacrifice it unless you pay \
-             its upkeep cost for each age counter on it."
+            "CR 702.24a: At the beginning of your upkeep, if this permanent \
+             is on the battlefield, put an age counter on this permanent, \
+             then sacrifice it unless you pay its upkeep cost for each age \
+             counter on it."
                 .to_string(),
         )
 }
