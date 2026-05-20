@@ -4383,6 +4383,7 @@ fn try_parse_event(
         TappedForMana,
         BecomesUntapped,
         TurnFaceUp,
+        BecomesMonstrous,
         Mutates,
         ExploitsCreature,
         Exploits,
@@ -4421,6 +4422,8 @@ fn try_parse_event(
             value(SimpleEvent::BecomesUntapped, tag("becomes untapped")),
             value(SimpleEvent::BecomesUntapped, tag("untaps")),
             value(SimpleEvent::TurnFaceUp, tag("is turned face up")),
+            // CR 701.37a: "When ~ becomes monstrous" trigger event.
+            value(SimpleEvent::BecomesMonstrous, tag("becomes monstrous")),
             value(SimpleEvent::Mutates, tag("mutates")),
             // CR 702.110b: "exploits a creature" — exploit trigger
             value(SimpleEvent::ExploitsCreature, tag("exploits a creature")),
@@ -4482,6 +4485,10 @@ fn try_parse_event(
             }
             SimpleEvent::TurnFaceUp => {
                 def.mode = TriggerMode::TurnFaceUp;
+                def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::BecomesMonstrous => {
+                def.mode = TriggerMode::BecomeMonstrous;
                 def.valid_card = Some(subject.clone());
             }
             SimpleEvent::Mutates => {
@@ -12409,6 +12416,16 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::BecomesTarget);
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
         assert_eq!(def.valid_source, Some(TargetFilter::StackSpell));
+    }
+
+    #[test]
+    fn trigger_becomes_monstrous_mode() {
+        let def = parse_trigger_line(
+            "When this creature becomes monstrous, creatures without flying your opponents control can't block this turn.",
+            "Stoneshock Giant",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomeMonstrous);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
     }
 
     #[test]
