@@ -4055,6 +4055,24 @@ pub enum AbilityCost {
     EffectCost {
         effect: Box<Effect>,
     },
+    /// CR 702.24a: A cost that multiplies a base cost by the number of
+    /// counters of `counter` type on `target`. The runtime resolves the
+    /// multiplier at the unless-payment entry point and expands `base`
+    /// into the effective payment: mana scales via `ManaCost::scaled(n)`,
+    /// life/sacrifice counts multiply directly, and `OneOf` unfolds into
+    /// a `Composite` of `n` independent disjunctive choices (each made
+    /// separately per CR 702.24a).
+    ///
+    /// Building block, not a special case: this is the typed shape of
+    /// "pay [cost] for each counter on it". Cumulative upkeep is the
+    /// only mechanic using it today, but the variant is composable with
+    /// every existing base cost (Mana, PayLife, Sacrifice, OneOf,
+    /// Composite).
+    PerCounter {
+        counter: CounterType,
+        target: TargetFilter,
+        base: Box<AbilityCost>,
+    },
     Unimplemented {
         description: String,
     },
@@ -4160,6 +4178,9 @@ impl AbilityCost {
                 }
                 _ => Vec::new(),
             },
+            // CR 702.24a: The multiplier doesn't change *what kind* of cost
+            // this is, only *how much* — delegate classification to the base.
+            AbilityCost::PerCounter { base, .. } => base.categories(),
             AbilityCost::Unimplemented { .. } => Vec::new(),
         }
     }
@@ -4185,6 +4206,9 @@ impl AbilityCost {
             AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
                 costs.iter().any(AbilityCost::consumes_source)
             }
+            // CR 702.24a: The PerCounter wrapper multiplies its base; whether
+            // the source is consumed is determined entirely by the base cost.
+            AbilityCost::PerCounter { base, .. } => base.consumes_source(),
             // Every other variant: pays mana / life / loyalty / counters /
             // taps / sacrifices-or-exiles-other — none destroys the source.
             AbilityCost::Mana { .. }
@@ -10565,6 +10589,19 @@ mod tests {
         assert_eq!(cycling_json["consumes_source"], serde_json::json!(true));
         let benign_json = serde_json::to_value(&tap_only).unwrap();
         assert!(benign_json.get("consumes_source").is_none());
+    }
+
+    #[test]
+    fn per_counter_cost_delegates_categories_to_base() {
+        let base = AbilityCost::Mana {
+            cost: ManaCost::generic(1),
+        };
+        let wrapped = AbilityCost::PerCounter {
+            counter: CounterType::Age,
+            target: TargetFilter::SelfRef,
+            base: Box::new(base.clone()),
+        };
+        assert_eq!(wrapped.categories(), base.categories());
     }
 
     #[test]

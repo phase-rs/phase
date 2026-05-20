@@ -340,6 +340,11 @@ fn rewrite_bound_x_in_ability_cost(cost: &mut AbilityCost, binding: &QuantityExp
             .iter_mut()
             .map(|cost| rewrite_bound_x_in_ability_cost(cost, binding))
             .sum(),
+        // CR 702.24a: The wrapper itself carries no quantity, but its base
+        // cost may carry an X-bound `QuantityExpr` (e.g. mana / life / discard
+        // amounts). Recurse into the base so the bound-X rewrite walks the
+        // full cost tree.
+        AbilityCost::PerCounter { base, .. } => rewrite_bound_x_in_ability_cost(base, binding),
         AbilityCost::Mana { .. }
         | AbilityCost::Tap
         | AbilityCost::Untap

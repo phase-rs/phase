@@ -6142,6 +6142,17 @@ pub fn pay_ability_cost(
                     .into(),
             ));
         }
+        // CR 702.24a: `PerCounter` is expanded into a concrete cost at the
+        // unless-payment entry point (Task 6 wires resolution). It must never
+        // reach an auto-payment site as-is — the multiplier has to be resolved
+        // against the live game state first.
+        AbilityCost::PerCounter { .. } => {
+            return Err(EngineError::ActionNotAllowed(
+                "PerCounter cost must be expanded against game state before \
+                 reaching pay_ability_cost"
+                    .into(),
+            ));
+        }
     }
     Ok(())
 }

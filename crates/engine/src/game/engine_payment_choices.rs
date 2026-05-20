@@ -532,6 +532,12 @@ pub(super) fn handle_unless_payment(
                      reaching handle_unless_payment"
                 );
             }
+            // CR 702.24a: `PerCounter` is expanded against game state at the
+            // unless-payment entry point (Task 6 wires resolution). The
+            // expanded base — not the wrapper — should reach this match.
+            AbilityCost::PerCounter { .. } => {
+                todo!("Task 6 wires PerCounter resolution at the unless-payment entry point");
+            }
             AbilityCost::Tap
             | AbilityCost::Untap
             | AbilityCost::Unattach

@@ -156,6 +156,12 @@ fn replacement_cost_description(cost: &AbilityCost) -> String {
             }
         }
         AbilityCost::Discard { .. } => "Discard a card".to_string(),
+        // CR 702.24a: Delegate the label to the base cost so a "for each
+        // counter" wrapper inherits its base's prompt phrasing (e.g.,
+        // "Pay 1 life" → "Pay 1 life" for the per-counter scaling). The
+        // multiplier itself doesn't change the *kind* of cost the prompt
+        // describes; the resolved scaled amount is decided in Task 6.
+        AbilityCost::PerCounter { base, .. } => replacement_cost_description(base),
         AbilityCost::ManaDynamic { .. }
         | AbilityCost::Tap
         | AbilityCost::Untap

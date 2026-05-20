@@ -341,6 +341,13 @@ impl AbilityCost {
             // mana — same as `AbilityCost::Mana { .. }` (whose mana
             // affordability is delegated to CR 601.2g per the comment above).
             AbilityCost::ManaDynamic { .. } => true,
+            // CR 702.24a: `PerCounter` is used today only in unless-payment
+            // flows (cumulative upkeep), where Task 6's runtime expansion
+            // resolves the multiplier against game state and re-runs payability
+            // on the expanded base. Treat as conservatively payable here so
+            // the activation-time 601.2b gate doesn't reject the wrapper
+            // unseen — actual payability is decided post-expansion.
+            AbilityCost::PerCounter { .. } => true,
         }
     }
 }
