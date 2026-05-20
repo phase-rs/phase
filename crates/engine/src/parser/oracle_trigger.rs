@@ -6163,31 +6163,34 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some((TriggerMode::SpellCopy, def));
     }
 
-    // CR 601.2i + CR 603.2: Self-cast trigger — "When you cast this spell",
-    // "When ~ is cast", or "When you cast ~" all describe the same trigger
-    // event (this spell being cast). The triggered ability fires as the spell
-    // is put onto the stack; per CR 117.2a and CR 113.6, the trigger's source
-    // is the stack object, so `trigger_zones = [Stack]`.
+    // CR 601.2i + CR 603.2: Self-cast trigger — all phrasings that describe
+    // *this spell being cast* fire the same event. The triggered ability fires
+    // as the spell is put onto the stack; per CR 117.2a and CR 113.6, the
+    // trigger's source is the stack object, so `trigger_zones = [Stack]`.
     //
-    // Equivalent phrasings (Oracle-text variants seen across printings):
-    //   - "When you cast this spell"        (modern self-reference)
-    //   - "When ~ is cast"                  (passive form; older templating)
-    //   - "When you cast ~"                 (direct name reference after
-    //                                        `normalize_card_name_refs` ⇒ "~";
-    //                                        e.g. Taught by Surrak)
-    //
-    // The word-boundary `scan_contains` admits leading qualifiers (e.g.
-    // intervening-if prefixes) without anchoring the trigger to start-of-line.
-    let self_cast_phrases = [
-        "when you cast this spell",
-        "whenever you cast this spell",
-        "when ~ is cast",
-        "when you cast ~",
-        "whenever you cast ~",
-    ];
-    if self_cast_phrases
-        .iter()
-        .any(|phrase| scan_contains(lower, phrase))
+    // Composed as a 2×3 cross product: {when, whenever} × {you cast this
+    // spell, you cast ~, ~ is cast}. After `normalize_card_name_refs`
+    // (CR 201.5) the card name becomes `~`, so direct-name references like
+    // "When you cast Taught by Surrak" reach this combinator as "when you
+    // cast ~". `scan_at_word_boundaries` admits leading qualifiers without
+    // anchoring the trigger to start-of-line. Per CLAUDE.md "Compose nom
+    // combinators, don't enumerate permutations" this is a single composed
+    // combinator rather than 6 sibling `tag` arms.
+    if nom_primitives::scan_at_word_boundaries(lower, |i| {
+        preceded(
+            alt((
+                tag::<_, _, OracleError<'_>>("when "),
+                tag("whenever "),
+            )),
+            alt((
+                tag("you cast this spell"),
+                tag("you cast ~"),
+                tag("~ is cast"),
+            )),
+        )
+        .parse(i)
+    })
+    .is_some()
     {
         let mut def = make_base();
         def.mode = TriggerMode::SpellCast;
@@ -10257,6 +10260,17 @@ mod tests {
     #[test]
     fn trigger_whenever_you_cast_self_by_name() {
         let def = parse_trigger_line("Whenever you cast Test Card, draw a card.", "Test Card");
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(def.trigger_zones.contains(&Zone::Stack));
+    }
+
+    /// CR 601.2i + CR 603.2: Passive "Whenever ~ is cast" phrasing — the third
+    /// cell of the {when, whenever} × {you cast this spell, you cast ~, ~ is
+    /// cast} cross-product. Exercises the composed `alt × alt` combinator path.
+    #[test]
+    fn trigger_whenever_self_is_cast() {
+        let def = parse_trigger_line("Whenever Test Card is cast, draw a card.", "Test Card");
         assert_eq!(def.mode, TriggerMode::SpellCast);
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
         assert!(def.trigger_zones.contains(&Zone::Stack));
