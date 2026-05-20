@@ -15617,6 +15617,125 @@ mod phase_trigger_regression_tests {
             "unchosen forest 2 must remain on the battlefield"
         );
     }
+
+    /// Build the synthesized cumulative-upkeep trigger for "Cumulative upkeep
+    /// — Pay 2 life" (Inner Sanctum's life-cost variant) by delegating to the
+    /// production synthesizer. Mirrors `cumulative_upkeep_mana_trigger` and
+    /// `cumulative_upkeep_sacrifice_land_trigger`; this helper exercises the
+    /// `PayLife` arm of `expand_per_counter` (CR 702.24a + CR 119.4).
+    fn cumulative_upkeep_pay_life_trigger(amount: i32) -> TriggerDefinition {
+        crate::database::synthesis::build_cumulative_upkeep_trigger(AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: amount },
+        })
+    }
+
+    /// Construct a solo state with Inner Sanctum on the battlefield (controller
+    /// = PlayerId(0) = active player) at Phase::Untap so `auto_advance` will
+    /// fire the upkeep trigger. **One age counter is pre-loaded** on Inner
+    /// Sanctum so the first upkeep that `auto_advance` resolves ticks the
+    /// counter from 1 → 2 — exercising the multiplicative step of the
+    /// `PayLife` arm of `expand_per_counter` (base 2 × counter 2 = 4 life).
+    /// This skips the structurally-trivial counter=1 case, which the Polar
+    /// Kraken sacrifice test already covers for the non-Mana arm.
+    fn setup_inner_sanctum_second_upkeep_state() -> (GameState, ObjectId) {
+        let mut state = new_game(42);
+        state.turn_number = 2;
+        state.phase = Phase::Untap;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let sanctum = create_object(
+            &mut state,
+            CardId(7200),
+            PlayerId(0),
+            "Inner Sanctum".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&sanctum).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.trigger_definitions
+                .push(cumulative_upkeep_pay_life_trigger(2));
+            // CR 702.24a: pre-load one age counter so the next upkeep tick
+            // produces counter=2, yielding the per-counter expansion
+            // PayLife{2 × 2} = PayLife{4}.
+            obj.counters
+                .insert(crate::types::counter::CounterType::Age, 1);
+        }
+
+        (state, sanctum)
+    }
+
+    /// CR 702.24a + CR 118.12 + CR 119.4: Paying the cumulative-upkeep cost
+    /// via the pay-life variant at counter=2. Pre-loading one age counter
+    /// means the second upkeep ticks the counter from 1 → 2, and the
+    /// `PerCounter` expansion of `PayLife { Fixed(2) }` yields
+    /// `PayLife { Fixed(4) }` (2 × 2 = 4 life). Paying 4 life keeps Inner
+    /// Sanctum on the battlefield and deducts 4 from the controller's life
+    /// total — the load-bearing assertion for the `PayLife` arm of
+    /// `expand_per_counter`'s `multiply_quantity_expr`.
+    #[test]
+    fn inner_sanctum_upkeep_two_age_counters_pays_four_life() {
+        let (mut state, sanctum_id) = setup_inner_sanctum_second_upkeep_state();
+        advance_to_unless_payment_prompt(&mut state);
+
+        // CR 702.24a: outer AddCounter resolved first; the pre-loaded counter
+        // ticked from 1 → 2 before the per-counter unless-cost is computed.
+        assert_eq!(
+            state.objects[&sanctum_id]
+                .counters
+                .get(&crate::types::counter::CounterType::Age)
+                .copied(),
+            Some(2),
+            "age counter should tick from 1 (pre-loaded) to 2 on this upkeep"
+        );
+
+        // CR 118.12 + CR 702.24a + CR 119.4: PerCounter expanded
+        // `PayLife { Fixed(2) }` for 2 age counters to `PayLife { Fixed(4) }`
+        // (2 × 2 = 4). This is the load-bearing multiplicative assertion for
+        // the `PayLife` arm of `expand_per_counter`.
+        match &state.waiting_for {
+            WaitingFor::UnlessPayment { player, cost, .. } => {
+                assert_eq!(*player, PlayerId(0), "controller is the unless-payer");
+                match cost {
+                    AbilityCost::PayLife { amount } => {
+                        assert_eq!(
+                            *amount,
+                            QuantityExpr::Fixed { value: 4 },
+                            "2 age counters × base 2 life = 4 life"
+                        );
+                    }
+                    other => panic!("expected PayLife cost, got {other:?}"),
+                }
+            }
+            other => panic!("expected UnlessPayment prompt, got {other:?}"),
+        }
+
+        // CR 119.4: pay-life unless-costs are auto-deducted from the player's
+        // life total at `PayUnlessCost { pay: true }` time — no intermediate
+        // choice prompt (unlike Sacrifice, which surfaces a permanent
+        // picker). Snapshot the life total before paying so the delta is
+        // measurable.
+        let life_before = state.players[0].life;
+        let _ = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
+
+        // CR 119.4: 4 life paid → life total decreases by exactly 4.
+        assert_eq!(
+            state.players[0].life,
+            life_before - 4,
+            "paying 4 life must reduce life total by 4"
+        );
+        // CR 702.24a: paying the cost keeps the permanent on the battlefield.
+        assert_eq!(
+            state.objects[&sanctum_id].zone,
+            Zone::Battlefield,
+            "paying the cumulative-upkeep cost must NOT sacrifice the permanent"
+        );
+        assert!(
+            !state.players[0].graveyard.contains(&sanctum_id),
+            "permanent must not be in graveyard when paid"
+        );
+    }
 }
 
 #[cfg(test)]
