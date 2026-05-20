@@ -124,6 +124,12 @@ impl KeywordTriggerInstaller {
     pub fn triggers_for(keyword: &Keyword) -> Vec<TriggerDefinition> {
         match keyword {
             Keyword::Echo(cost) => vec![build_echo_trigger(cost.clone())],
+            // CR 702.24a: Cumulative upkeep — at the beginning of your upkeep,
+            // put an age counter on this permanent, then sacrifice it unless
+            // you pay its upkeep cost for each age counter on it.
+            Keyword::CumulativeUpkeep(cost) => {
+                vec![build_cumulative_upkeep_trigger(cost.clone())]
+            }
             Keyword::Undying => vec![build_dies_return_with_counter_trigger(
                 "P1P1", "+1/+1", "702.93a",
             )],
@@ -151,6 +157,7 @@ impl KeywordTriggerInstaller {
     pub fn trigger_matches_keyword_kind(trigger: &TriggerDefinition, keyword: &Keyword) -> bool {
         match keyword {
             Keyword::Echo(_) => is_echo_trigger(trigger),
+            Keyword::CumulativeUpkeep(_) => is_cumulative_upkeep_trigger(trigger),
             Keyword::Undying => {
                 is_dies_return_with_counter_trigger(trigger, &CounterType::Plus1Plus1)
             }
@@ -1339,6 +1346,19 @@ pub fn synthesize_echo(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Echo(_)));
 }
 
+/// CR 702.24a: Cumulative upkeep is a triggered ability. "Cumulative upkeep
+/// [cost]" means "At the beginning of your upkeep, if this permanent is on
+/// the battlefield, put an age counter on this permanent. Then you may pay
+/// [cost] for each age counter on it. If you don't, sacrifice it."
+///
+/// See `build_cumulative_upkeep_trigger` for the chained-ability shape that
+/// preserves the rules ordering (counter add first, then per-counter prompt).
+pub fn synthesize_cumulative_upkeep(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| {
+        matches!(kw, Keyword::CumulativeUpkeep(_))
+    });
+}
+
 /// CR 702.175a: Offspring represents two abilities:
 ///   1. "You may pay an additional [cost] as you cast this spell" — modeled as
 ///      `AdditionalCost::Optional(AbilityCost::Mana { cost })`.
@@ -1848,6 +1868,106 @@ fn build_echo_trigger(cost: ManaCost) -> TriggerDefinition {
         payer: TargetFilter::Controller,
     });
     trigger
+}
+
+/// CR 702.24a: Cumulative-upkeep trigger shape — recognizer for synthesis
+/// idempotency. Mirrors `is_echo_trigger`: stays correct if the builder ever
+/// changes shape. The trigger's outer effect places the age counter; the
+/// sub-ability sacrifices unless the per-counter cost is paid.
+fn is_cumulative_upkeep_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::PayCumulativeUpkeep)
+        && t.phase == Some(Phase::Upkeep)
+        && matches!(t.valid_target, Some(TargetFilter::Controller))
+        && t.execute.as_deref().is_some_and(|outer| {
+            matches!(
+                outer.effect.as_ref(),
+                Effect::AddCounter {
+                    counter_type: CounterType::Age,
+                    ..
+                }
+            ) && outer.sub_ability.as_deref().is_some_and(|sub| {
+                matches!(
+                    sub.effect.as_ref(),
+                    Effect::Sacrifice {
+                        target: TargetFilter::SelfRef,
+                        ..
+                    }
+                ) && sub.unless_pay.as_ref().is_some_and(|u| {
+                    matches!(
+                        &u.cost,
+                        AbilityCost::PerCounter {
+                            counter: CounterType::Age,
+                            target: TargetFilter::SelfRef,
+                            ..
+                        },
+                    )
+                })
+            })
+        })
+}
+
+/// CR 702.24a: Cumulative upkeep is a triggered ability — "Cumulative upkeep
+/// [cost]" means "At the beginning of your upkeep, if this permanent is on
+/// the battlefield, put an age counter on this permanent. Then you may pay
+/// [cost] for each age counter on it. If you don't, sacrifice it."
+///
+/// The trigger is modeled as a chained `AbilityDefinition`:
+///   - Outer effect: `AddCounter { Age, 1, SelfRef }` (CR 122.1 + CR 702.24a)
+///     places one new age counter unconditionally before the prompt.
+///   - Sub-ability: `Sacrifice { SelfRef }` gated by
+///     `unless_pay = PerCounter { Age, SelfRef, base }`. The sub-ability
+///     resolves AFTER the parent (per `resolve_chain_body` in `effects/mod.rs`),
+///     so the `PerCounter` expansion reads the post-tick counter total — the
+///     exact semantics CR 702.24a requires.
+///
+/// The builder is generic over `base_cost: AbilityCost`: mana, life payment,
+/// sacrifice, and OneOf-disjunctive costs all compose with `PerCounter`
+/// uniformly (CLAUDE.md "build for the class").
+fn build_cumulative_upkeep_trigger(base_cost: AbilityCost) -> TriggerDefinition {
+    // Inner sub-ability: "sacrifice ~ unless you pay [base × age counters]".
+    // The `unless_pay` lives on the SUB-ability (not the outer trigger) so the
+    // outer AddCounter resolves first and the per-counter cost reads the
+    // post-tick total at sub-resolution time.
+    let mut sacrifice_branch = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Sacrifice {
+            target: TargetFilter::SelfRef,
+            count: QuantityExpr::Fixed { value: 1 },
+            min_count: 0,
+        },
+    );
+    sacrifice_branch.unless_pay = Some(UnlessPayModifier {
+        cost: AbilityCost::PerCounter {
+            counter: CounterType::Age,
+            target: TargetFilter::SelfRef,
+            base: Box::new(base_cost),
+        },
+        payer: TargetFilter::Controller,
+    });
+
+    // Outer execute: "put an age counter on ~", then the sacrifice-or-pay
+    // branch. CR 122.1: AddCounter is the typed primitive for placing a
+    // counter on a permanent.
+    let execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::AddCounter {
+            counter_type: CounterType::Age,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        },
+    )
+    .sub_ability(sacrifice_branch);
+
+    TriggerDefinition::new(TriggerMode::PayCumulativeUpkeep)
+        .phase(Phase::Upkeep)
+        .valid_target(TargetFilter::Controller)
+        .execute(execute)
+        .description(
+            "CR 702.24a: At the beginning of your upkeep, put an age \
+             counter on this permanent, then sacrifice it unless you pay \
+             its upkeep cost for each age counter on it."
+                .to_string(),
+        )
 }
 
 fn build_annihilator_trigger(n: u32) -> TriggerDefinition {
@@ -2932,6 +3052,12 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_madness_intrinsics(face);
     synthesize_evoke(face);
     synthesize_echo(face);
+    // CR 702.24a: Cumulative upkeep — at the beginning of your upkeep, put an
+    // age counter on this permanent, then sacrifice it unless you pay its
+    // upkeep cost for each age counter on it. Chained-ability shape
+    // (AddCounter → Sacrifice with PerCounter unless_pay) preserves the
+    // rules-mandated ordering: tick first, then prompt against post-tick total.
+    synthesize_cumulative_upkeep(face);
     // CR 702.175a: Offspring — optional additional cost + ETB 1/1 copy trigger.
     synthesize_offspring(face);
     // CR 702.123a: Fabricate N — ETB trigger with controller-chosen branch
@@ -5775,6 +5901,147 @@ mod echo_synthesis_tests {
     fn synthesize_echo_is_noop_without_keyword() {
         let mut face = CardFace::default();
         synthesize_echo(&mut face);
+
+        assert!(face.triggers.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod cumulative_upkeep_synthesis_tests {
+    use super::*;
+    use crate::types::mana::ManaCost;
+
+    fn cu_face_mana_one() -> CardFace {
+        let mut face = CardFace::default();
+        // CR 702.24a: Mystic Remora — "Cumulative upkeep {1}".
+        face.keywords
+            .push(Keyword::CumulativeUpkeep(AbilityCost::Mana {
+                cost: ManaCost::generic(1),
+            }));
+        face
+    }
+
+    /// CR 702.24a: The synthesized trigger is the chained-ability shape —
+    /// outer AddCounter(Age, SelfRef), inner Sacrifice(SelfRef) gated by
+    /// `unless_pay = PerCounter { Age, SelfRef, base }`. The outer effect
+    /// resolves first so the per-counter prompt reads the post-tick total.
+    #[test]
+    fn cumulative_upkeep_keyword_synthesizes_age_counter_trigger() {
+        let mut face = cu_face_mana_one();
+        synthesize_cumulative_upkeep(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::PayCumulativeUpkeep))
+            .expect("cumulative upkeep should add an upkeep trigger");
+        assert_eq!(trigger.phase, Some(Phase::Upkeep));
+        assert!(matches!(
+            trigger.valid_target,
+            Some(TargetFilter::Controller)
+        ));
+        // The trigger's own unless_pay is NOT used — the per-counter prompt
+        // lives on the sub-ability so it fires after the outer tick.
+        assert!(trigger.unless_pay.is_none());
+
+        let outer = trigger.execute.as_deref().expect("execute set");
+        match outer.effect.as_ref() {
+            Effect::AddCounter {
+                counter_type,
+                count,
+                target,
+            } => {
+                assert_eq!(*counter_type, CounterType::Age);
+                assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+                assert!(matches!(target, TargetFilter::SelfRef));
+            }
+            other => panic!("expected outer AddCounter, got {other:?}"),
+        }
+
+        let sub = outer.sub_ability.as_deref().expect("sub_ability set");
+        assert!(matches!(
+            sub.effect.as_ref(),
+            Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+
+        let unless = sub.unless_pay.as_ref().expect("unless_pay on sub");
+        assert!(matches!(unless.payer, TargetFilter::Controller));
+        match &unless.cost {
+            AbilityCost::PerCounter {
+                counter,
+                target,
+                base,
+            } => {
+                assert_eq!(*counter, CounterType::Age);
+                assert!(matches!(target, TargetFilter::SelfRef));
+                // Base cost preserved verbatim — {1} mana for Mystic Remora.
+                match base.as_ref() {
+                    AbilityCost::Mana { cost } => {
+                        assert_eq!(*cost, ManaCost::generic(1));
+                    }
+                    other => panic!("expected base Mana({{1}}), got {other:?}"),
+                }
+            }
+            other => panic!("expected unless_pay PerCounter, got {other:?}"),
+        }
+    }
+
+    /// CR 702.24a: The builder is generic over the base cost shape; non-mana
+    /// costs (life payment) compose through `PerCounter` unchanged.
+    #[test]
+    fn cumulative_upkeep_keyword_preserves_pay_life_base_cost() {
+        let mut face = CardFace::default();
+        face.keywords
+            .push(Keyword::CumulativeUpkeep(AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            }));
+        synthesize_cumulative_upkeep(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::PayCumulativeUpkeep))
+            .expect("cumulative upkeep should add an upkeep trigger");
+        let outer = trigger.execute.as_deref().expect("execute set");
+        let sub = outer.sub_ability.as_deref().expect("sub_ability set");
+        let unless = sub.unless_pay.as_ref().expect("unless_pay on sub");
+        match &unless.cost {
+            AbilityCost::PerCounter { base, .. } => match base.as_ref() {
+                AbilityCost::PayLife { amount } => {
+                    assert_eq!(*amount, QuantityExpr::Fixed { value: 2 });
+                }
+                other => panic!("expected base PayLife(2), got {other:?}"),
+            },
+            other => panic!("expected unless_pay PerCounter, got {other:?}"),
+        }
+    }
+
+    /// CR 604.1: Idempotent synthesis — re-running the synthesizer must not
+    /// duplicate the trigger. Recognizer pairs with builder so existing
+    /// printed triggers match and the second install is skipped.
+    #[test]
+    fn cumulative_upkeep_synthesis_is_idempotent() {
+        let mut face = cu_face_mana_one();
+        synthesize_cumulative_upkeep(&mut face);
+        synthesize_cumulative_upkeep(&mut face);
+
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|t| matches!(t.mode, TriggerMode::PayCumulativeUpkeep))
+                .count(),
+            1,
+            "duplicate synthesis should not add a second cumulative upkeep trigger"
+        );
+    }
+
+    #[test]
+    fn synthesize_cumulative_upkeep_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        synthesize_cumulative_upkeep(&mut face);
 
         assert!(face.triggers.is_empty());
     }
