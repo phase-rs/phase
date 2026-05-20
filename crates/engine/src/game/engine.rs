@@ -15850,6 +15850,315 @@ mod phase_trigger_regression_tests {
             "stack must be cleared after the no-op resolution"
         );
     }
+
+    /// CR 702.24b: "If a permanent has multiple instances of cumulative
+    /// upkeep, each triggers separately. However, the age counters are not
+    /// connected to any particular ability; each cumulative upkeep ability
+    /// will count the total number of age counters on the permanent at the
+    /// time that ability resolves."
+    ///
+    /// Construct a synthetic permanent with TWO `PayCumulativeUpkeep`
+    /// triggers — a `Mana{1}` base and a `PayLife{1}` base — controlled by
+    /// PlayerId(0). No real MTG card prints two cumulative-upkeep abilities,
+    /// so the only way to exercise the shared-counter semantics is to attach
+    /// both triggers in-test. Returns the perm's id; the controller is
+    /// PlayerId(0) (active player) and the phase is set so `auto_advance`
+    /// fires both triggers at upkeep.
+    fn setup_two_instance_cumulative_upkeep_state() -> (GameState, ObjectId) {
+        let mut state = new_game(42);
+        state.turn_number = 2;
+        state.phase = Phase::Untap;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let perm = create_object(
+            &mut state,
+            CardId(7300),
+            PlayerId(0),
+            "Synthetic Multi-Upkeep Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&perm).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            // CR 702.24b: each instance triggers separately. Attaching both
+            // to the same object is the load-bearing test setup — the
+            // production builders are reused unchanged so any regression in
+            // `build_cumulative_upkeep_trigger` (counter ordering, payer
+            // resolution, intervening-if guard) breaks this test loudly.
+            obj.trigger_definitions
+                .push(cumulative_upkeep_mana_trigger(1));
+            obj.trigger_definitions
+                .push(cumulative_upkeep_pay_life_trigger(1));
+        }
+
+        (state, perm)
+    }
+
+    /// CR 702.24b + CR 603.3b: Multi-instance cumulative upkeep — two
+    /// abilities each trigger separately and share the age-counter pool,
+    /// with each ability reading the running total at its own resolution
+    /// time. Synthetic permanent carries `Mana{1}` and `PayLife{1}` upkeep
+    /// triggers. At upkeep, both fire and the controller orders them via
+    /// `OrderTriggers` (CR 603.3b). Whichever trigger resolves first sees
+    /// the counter tick 0 → 1 (cost scales × 1); whichever resolves second
+    /// sees the counter tick 1 → 2 (cost scales × 2, the load-bearing
+    /// assertion). The stack order is the active player's choice — the
+    /// test pins ordering via a specific `OrderTriggers` permutation but
+    /// asserts the cost SET observed across both prompts (×1 paired with
+    /// ×2), independent of which printed trigger ended up where on the
+    /// stack. Final state: 2 age counters, no sacrifice, controller paid
+    /// the ×1 + ×2 multiples of each base across the two prompts.
+    ///
+    /// This is the load-bearing test for CR 702.24b — the only scenario
+    /// where the counter pool is read at resolution time (not at trigger
+    /// fire time) is multi-instance. Single-instance accumulation tests
+    /// (Mystic Remora three-upkeep) can't distinguish "read at fire" vs
+    /// "read at resolve" because only one tick happens between fire and
+    /// resolve. Two triggers in one batch make the distinction observable:
+    /// if the engine read at fire-time, both prompts would see counter=0;
+    /// if it read between AddCounter and unless-pay computation (post-tick
+    /// per trigger), the second prompt sees counter=2.
+    #[test]
+    fn cumulative_upkeep_multi_instance_each_ticks_own_counter() {
+        let (mut state, perm_id) = setup_two_instance_cumulative_upkeep_state();
+        let life_before = state.players[0].life;
+
+        // Step 1: `auto_advance` settles in Upkeep and `process_phase_triggers`
+        // collects both PayCumulativeUpkeep triggers. With two triggers from
+        // a single controller, the engine prompts P0 to order them via
+        // CR 603.3b before any trigger lands on the stack.
+        let mut events = Vec::new();
+        let _wf = crate::game::turns::auto_advance(&mut state, &mut events);
+        assert_eq!(
+            state.phase,
+            Phase::Upkeep,
+            "auto_advance must pause in Upkeep so both triggers can be ordered"
+        );
+        match &state.waiting_for {
+            WaitingFor::OrderTriggers { player, triggers } => {
+                assert_eq!(*player, PlayerId(0), "controller orders own triggers");
+                assert_eq!(
+                    triggers.len(),
+                    2,
+                    "both cumulative-upkeep triggers must be in the prompt"
+                );
+            }
+            other => panic!("expected OrderTriggers prompt, got {other:?}"),
+        }
+
+        // Step 2: CR 603.3b + CR 405.3: Submit a fixed permutation so the
+        // stack order is deterministic across runs. The CR 702.24b
+        // invariant under test — running-total semantics across two
+        // instances — holds regardless of WHICH printed trigger resolves
+        // first, so the per-cost assertions below are written against the
+        // RESOLUTION ORDER (`first_cost`, `second_cost`), not against the
+        // identity of the underlying trigger.
+        let _ =
+            apply_as_current(&mut state, GameAction::OrderTriggers { order: vec![1, 0] }).unwrap();
+        assert!(
+            !state.stack.is_empty(),
+            "both triggers must be on the stack after ordering"
+        );
+
+        // Step 3: Resolve the top of the stack — the first of two cumulative
+        // upkeep triggers. The outer AddCounter ticks the age counter 0 → 1;
+        // the sub-ability unless-pay reads counter=1 and expands the base
+        // cost × 1 (so Mana{1} → Mana{1}, or PayLife{1} → PayLife{1}).
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        // CR 702.24a + CR 702.24b: the first trigger's AddCounter resolved,
+        // so the counter is 1 before the unless-pay computes.
+        assert_eq!(
+            state.objects[&perm_id]
+                .counters
+                .get(&crate::types::counter::CounterType::Age)
+                .copied(),
+            Some(1),
+            "first resolving trigger must tick counter to 1"
+        );
+        let first_cost = match &state.waiting_for {
+            WaitingFor::UnlessPayment { player, cost, .. } => {
+                assert_eq!(*player, PlayerId(0), "controller pays the unless-cost");
+                cost.clone()
+            }
+            other => panic!("expected first UnlessPayment, got {other:?}"),
+        };
+
+        // CR 500.5: mana pools empty between phases — add the {1} payment
+        // AFTER auto_advance settles in Upkeep so the mana persists into
+        // `PayUnlessCost`. The cost shape is asserted in the set-based
+        // check below; here we just need to satisfy whichever cost arrived.
+        pay_unless_payment_dispatching(&mut state, &first_cost);
+
+        // Step 4: Resolve the next stack entry — the second cumulative
+        // upkeep trigger. Counter ticks 1 → 2; the unless-pay reads
+        // counter=2 and expands the base cost × 2 (so PayLife{1} →
+        // PayLife{2}, or Mana{1} → Mana{2}). This is the load-bearing
+        // assertion for CR 702.24b: the second trigger sees the running
+        // total, not the value the first trigger started with.
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects[&perm_id]
+                .counters
+                .get(&crate::types::counter::CounterType::Age)
+                .copied(),
+            Some(2),
+            "second resolving trigger must see post-tick total of 2 \
+             (CR 702.24b: shared counter pool, read at resolution time)"
+        );
+        let second_cost = match &state.waiting_for {
+            WaitingFor::UnlessPayment { player, cost, .. } => {
+                assert_eq!(*player, PlayerId(0), "controller pays the unless-cost");
+                cost.clone()
+            }
+            other => panic!("expected second UnlessPayment, got {other:?}"),
+        };
+
+        // CR 702.24b — the canonical assertion: the cost SET observed
+        // across the two prompts must include EXACTLY one ×1-scaled cost
+        // (the first trigger to resolve, ticking 0→1) and one ×2-scaled
+        // cost (the second trigger to resolve, ticking 1→2). Stack order
+        // is the active player's choice per CR 603.3b — both `{Mana{1},
+        // PayLife{2}}` and `{PayLife{1}, Mana{2}}` are valid outcomes,
+        // distinguished only by which trigger sits on top. The invariant
+        // under test is *running-total semantics*: one cost reads counter=1,
+        // the other reads counter=2. If the engine had read the counter
+        // pool at trigger-fire time (counter=0 for both) or post-double-
+        // tick (counter=2 for both), the SET would be `{Mana{0}, PayLife{0}}`
+        // or `{Mana{2}, PayLife{2}}` — both ruled out below.
+        let costs = [first_cost.clone(), second_cost.clone()];
+        // The first cost (resolved at counter=1) must be the ×1 form of
+        // either base — Mana{1} or PayLife{1}.
+        let first_is_one_scaled = matches!(
+            &first_cost,
+            AbilityCost::Mana { cost: mana } if *mana == ManaCost::generic(1)
+        ) || matches!(
+            &first_cost,
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+            }
+        );
+        assert!(
+            first_is_one_scaled,
+            "first-resolving trigger must read counter=1 and scale base × 1 \
+             (Mana{{1}} or PayLife(1)). Got {first_cost:?}"
+        );
+        // The second cost (resolved at counter=2) must be the ×2 form of
+        // either base — Mana{2} or PayLife{2}.
+        let second_is_two_scaled = matches!(
+            &second_cost,
+            AbilityCost::Mana { cost: mana } if *mana == ManaCost::generic(2)
+        ) || matches!(
+            &second_cost,
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            }
+        );
+        assert!(
+            second_is_two_scaled,
+            "second-resolving trigger must read counter=2 and scale base × 2 \
+             (Mana{{2}} or PayLife(2)) — this is the load-bearing CR 702.24b \
+             assertion that the counter pool is SHARED across instances and \
+             read at each ability's RESOLUTION TIME. Got {second_cost:?}"
+        );
+        // CR 702.24b — the cost types must be distinct (one Mana, one
+        // PayLife). If both triggers somehow surfaced the same shape we
+        // would have lost the separate-instance identity.
+        let mana_count = costs
+            .iter()
+            .filter(|c| matches!(c, AbilityCost::Mana { .. }))
+            .count();
+        let life_count = costs
+            .iter()
+            .filter(|c| matches!(c, AbilityCost::PayLife { .. }))
+            .count();
+        assert_eq!(
+            mana_count, 1,
+            "exactly one Mana cost across the two prompts; got {costs:?}"
+        );
+        assert_eq!(
+            life_count, 1,
+            "exactly one PayLife cost across the two prompts; got {costs:?}"
+        );
+
+        // Pay the second unless-cost. The dispatcher handles whichever
+        // shape arrived second.
+        pay_unless_payment_dispatching(&mut state, &second_cost);
+
+        // CR 702.24b: final state — both triggers paid, 2 age counters
+        // accumulated, permanent stayed on the battlefield, and the
+        // controller paid exactly the ×1 + ×2 multiples of the PayLife
+        // base across the two prompts.
+        assert_eq!(
+            state.objects[&perm_id]
+                .counters
+                .get(&crate::types::counter::CounterType::Age)
+                .copied(),
+            Some(2),
+            "both triggers' AddCounter effects must have ticked the shared pool"
+        );
+        assert_eq!(
+            state.objects[&perm_id].zone,
+            Zone::Battlefield,
+            "paying both cumulative-upkeep costs must keep the permanent on the battlefield"
+        );
+        assert!(
+            !state.players[0].graveyard.contains(&perm_id),
+            "permanent must not be sacrificed when both costs are paid"
+        );
+        // CR 119.4: total life delta = whichever resolution paid PayLife.
+        //   - If PayLife resolved FIRST (counter=1), it cost 1 life.
+        //   - If PayLife resolved SECOND (counter=2), it cost 2 life.
+        // Either way the Mana cost contributes 0 to the life delta. Compute
+        // the expected delta from the first cost shape: when the first cost
+        // was PayLife, total -1; when the first cost was Mana, total -2.
+        let expected_life_delta = if matches!(&first_cost, AbilityCost::PayLife { .. }) {
+            1
+        } else {
+            2
+        };
+        assert_eq!(
+            state.players[0].life,
+            life_before - expected_life_delta,
+            "controller paid exactly the PayLife trigger's scaled cost in life \
+             (the Mana trigger contributes 0 to life delta)"
+        );
+    }
+
+    /// Pay the unless-cost surfaced as `cost` on behalf of PlayerId(0).
+    /// Dispatches on the cost shape so the multi-instance test can pay
+    /// either `Mana{N}` or `PayLife{N}` in whichever order the engine
+    /// resolves the two triggers. Other cost shapes (Sacrifice, PayEnergy,
+    /// Discard) are not exercised by this test and are flagged with a
+    /// panic to surface scope-creep if a future cumulative-upkeep variant
+    /// is added.
+    fn pay_unless_payment_dispatching(state: &mut GameState, cost: &AbilityCost) {
+        match cost {
+            // CR 118.12 + CR 500.5: provision the colorless mana, then pay.
+            // CR 202.3: `mana_value()` is the authoritative count of mana
+            // units required — it folds generic + shards into a single int
+            // and is robust to future cost shapes (e.g. hybrid symbols)
+            // that aren't exercised by the current Mana{1} base.
+            AbilityCost::Mana { cost: mana_cost } => {
+                give_p0_colorless_mana(state, mana_cost.mana_value());
+                apply_as_current(state, GameAction::PayUnlessCost { pay: true })
+                    .expect("PayUnlessCost { pay: true } must succeed for Mana cost");
+            }
+            // CR 118.12 + CR 119.4: life is auto-deducted at PayUnlessCost time —
+            // no intermediate mana-payment prompt.
+            AbilityCost::PayLife { .. } => {
+                apply_as_current(state, GameAction::PayUnlessCost { pay: true })
+                    .expect("PayUnlessCost { pay: true } must succeed for PayLife cost");
+            }
+            other => panic!(
+                "unexpected unless-cost shape in multi-instance cumulative-upkeep test: {other:?}"
+            ),
+        }
+    }
 }
 
 #[cfg(test)]
