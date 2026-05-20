@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use draft_core::types::DraftCardInstance;
+use draft_core::types::{DeckAddableCardPolicy, DeckAddableCards, DraftCardInstance};
 use engine::database::CardDatabase;
 use phase_ai::config::AiDifficulty;
 use phase_ai::draft_eval;
@@ -15,8 +15,8 @@ pub struct SuggestedDeck {
 }
 
 /// A standard Limited deck is 40 cards: ~23 spells + ~17 lands.
-const TARGET_DECK_SIZE: usize = 40;
-const TARGET_SPELLS: usize = 23;
+const DEFAULT_DECK_SIZE: usize = 40;
+const DEFAULT_SPELLS: usize = 23;
 
 /// Auto-build a playable 40-card Limited deck from a pool.
 ///
@@ -32,6 +32,8 @@ pub fn suggest_deck(
     pool: &[DraftCardInstance],
     _difficulty: AiDifficulty,
     card_db: Option<&CardDatabase>,
+    min_deck_size: usize,
+    addable_cards: &DeckAddableCards,
 ) -> SuggestedDeck {
     // `_difficulty` is intentionally unused: deck suggestion always builds the
     // strongest legal deck. Difficulty governs the *opponents*, not the player's
@@ -67,14 +69,15 @@ pub fn suggest_deck(
         .copied()
         .collect();
 
-    let mut spells = select_spells_with_curve(&on_color, TARGET_SPELLS);
+    let target_spells = target_spell_count(min_deck_size);
+    let mut spells = select_spells_with_curve(&on_color, target_spells);
 
     // If we couldn't field 23 on-color playables, top up with the best
     // remaining cards from anywhere in the pool so the deck still hits 40.
-    if spells.len() < TARGET_SPELLS {
+    if spells.len() < target_spells {
         let chosen: HashSet<&str> = spells.iter().map(|c| c.instance_id.as_str()).collect();
         for entry in &scored {
-            if spells.len() >= TARGET_SPELLS {
+            if spells.len() >= target_spells {
                 break;
             }
             let card = entry.0;
@@ -89,8 +92,8 @@ pub fn suggest_deck(
     // concatenate the two — appending lands here as well would double-count them
     // (e.g. 23 spells + 17 lands in `main_deck`, then +17 lands again = 57).
     let spell_names: Vec<String> = spells.iter().map(|c| c.name.clone()).collect();
-    let land_total = TARGET_DECK_SIZE.saturating_sub(spell_names.len()).max(1) as u8;
-    let lands = distribute_lands(&spell_names, pool, land_total);
+    let land_total = min_deck_size.saturating_sub(spell_names.len()) as u8;
+    let lands = suggest_addable_cards(&spell_names, pool, land_total, addable_cards);
 
     SuggestedDeck {
         main_deck: spell_names,
@@ -208,11 +211,41 @@ fn select_spells_with_curve<'a>(
 /// Suggest a color-proportional land distribution for a set of spells, sized so
 /// that `spells + lands` reaches a standard 40-card deck (clamped to a sane
 /// 16–18 land count for hand-built decks). Per D-11.
-pub fn suggest_lands(spell_names: &[String], pool: &[DraftCardInstance]) -> HashMap<String, u8> {
-    let total_lands = TARGET_DECK_SIZE
+pub fn suggest_lands(
+    spell_names: &[String],
+    pool: &[DraftCardInstance],
+    min_deck_size: usize,
+) -> HashMap<String, u8> {
+    let total_lands = min_deck_size
         .saturating_sub(spell_names.len())
         .clamp(16, 18) as u8;
     distribute_lands(spell_names, pool, total_lands)
+}
+
+fn target_spell_count(min_deck_size: usize) -> usize {
+    ((min_deck_size * DEFAULT_SPELLS) / DEFAULT_DECK_SIZE).max(1)
+}
+
+fn suggest_addable_cards(
+    spell_names: &[String],
+    pool: &[DraftCardInstance],
+    total: u8,
+    addable_cards: &DeckAddableCards,
+) -> HashMap<String, u8> {
+    if total == 0 {
+        return HashMap::new();
+    }
+    if matches!(
+        addable_cards.policy,
+        DeckAddableCardPolicy::StandardBasics | DeckAddableCardPolicy::StandardBasicsPlusCustom
+    ) {
+        return distribute_lands(spell_names, pool, total);
+    }
+    let mut result = HashMap::new();
+    if let Some(card) = addable_cards.custom.first() {
+        result.insert(card.clone(), total);
+    }
+    result
 }
 
 /// Distribute exactly `total_lands` basics proportional to the colored-mana

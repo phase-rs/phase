@@ -1,4 +1,9 @@
-import type { GameAction, ManaCost, WaitingFor } from "../../adapter/types.ts";
+import type {
+  GameAction,
+  ManaCost,
+  SerializedAbilityCost,
+  WaitingFor,
+} from "../../adapter/types.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { ManaCostSymbols } from "../mana/ManaCostSymbols.tsx";
@@ -62,6 +67,30 @@ const KEYWORD_COPY: Record<
 };
 
 /**
+ * CR 702.74a + CR 601.2h: Compact display copy for the non-mana portion of
+ * an alternative cost (e.g., Solitude's Evoke "Exile a white card from your
+ * hand."). Mirrors the engine's typed `AbilityCost` taxonomy 1:1 by the
+ * discriminant `type` field — the FE does not interpret game state, it just
+ * renders the engine-provided variant.
+ */
+function describeAdditionalCost(cost: SerializedAbilityCost): string {
+  switch (cost.type) {
+    case "Exile":
+      return "+ Exile a card";
+    case "Sacrifice":
+      return "+ Sacrifice a permanent";
+    case "PayLife":
+      return "+ Pay life";
+    case "Discard":
+      return "+ Discard a card";
+    case "TapCreatures":
+      return "+ Tap creatures";
+    default:
+      return `+ ${cost.type}`;
+  }
+}
+
+/**
  * CR 118.9: Unified prompt for keyword-granted alternative casting costs
  * (Warp custom, Evoke per CR 702.74a, Overload per CR 702.96a, Bestow per
  * CR 702.103a). All four share the same player-decision shape; the engine's
@@ -83,6 +112,7 @@ export function AlternativeCostModal() {
       keyword={data.keyword.type}
       normalCost={data.normal_cost}
       alternativeCost={data.alternative_cost}
+      alternativeAdditionalCost={data.alternative_additional_cost}
       dispatch={dispatch}
     />
   );
@@ -93,12 +123,14 @@ function AlternativeCostContent({
   keyword,
   normalCost,
   alternativeCost,
+  alternativeAdditionalCost,
   dispatch,
 }: {
   objectId: number;
   keyword: Keyword;
   normalCost: ManaCost;
-  alternativeCost: ManaCost;
+  alternativeCost: ManaCost | null;
+  alternativeAdditionalCost: SerializedAbilityCost | null;
   dispatch: (action: GameAction) => Promise<unknown>;
 }) {
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
@@ -144,9 +176,16 @@ function AlternativeCostContent({
           className="rounded-[16px] border border-white/8 bg-white/5 px-4 py-3 text-left transition hover:bg-white/8 hover:ring-1 hover:ring-emerald-400/30"
         >
           <span className="font-semibold text-white">{copy.altLabel}</span>
-          <span className="ml-2">
-            <ManaCostSymbols cost={alternativeCost} />
-          </span>
+          {alternativeCost && (
+            <span className="ml-2">
+              <ManaCostSymbols cost={alternativeCost} />
+            </span>
+          )}
+          {alternativeAdditionalCost && (
+            <span className="ml-2 text-xs text-slate-300">
+              {describeAdditionalCost(alternativeAdditionalCost)}
+            </span>
+          )}
           {copy.altSuffix && (
             <span className="ml-1 text-xs text-slate-400">
               {copy.altSuffix}

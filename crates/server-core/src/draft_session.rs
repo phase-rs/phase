@@ -120,7 +120,7 @@ impl DraftSessionManager {
     ) -> (String, String, u8) {
         let draft_code = generate_draft_code();
         let player_token = generate_player_token();
-        let pod_size = config.kind.pod_size() as usize;
+        let pod_size = config.pod_size as usize;
 
         let mut player_tokens = vec![String::new(); pod_size];
         player_tokens[0] = player_token.clone();
@@ -423,14 +423,22 @@ pub fn draft_grace_period(status: &DraftStatus) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use draft_core::types::{DraftKind, PodPolicy, SpectatorVisibility, TournamentFormat};
+    use draft_core::types::{
+        DeckAddableCards, DraftKind, DraftSource, PodPolicy, SpectatorVisibility, TournamentFormat,
+    };
 
     fn test_config() -> DraftConfig {
         DraftConfig {
+            source: DraftSource::Set {
+                code: "TST".to_string(),
+            },
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,
+            pod_size: 8,
             cards_per_pack: 14,
             pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
             rng_seed: 42,
             tournament_format: TournamentFormat::Swiss,
             pod_policy: PodPolicy::Competitive,

@@ -101,10 +101,16 @@ mod tests {
 
     fn test_session(pod_size: u8) -> (DraftSession, FixturePackSource) {
         let config = DraftConfig {
+            source: DraftSource::Set {
+                code: "TST".to_string(),
+            },
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,
+            pod_size,
             cards_per_pack: 14,
             pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
             rng_seed: 42,
             tournament_format: TournamentFormat::Swiss,
             pod_policy: PodPolicy::Competitive,

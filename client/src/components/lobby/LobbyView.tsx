@@ -35,7 +35,8 @@ interface LobbyViewProps {
 const FILTER_GROUP_ORDER: Record<FormatGroup, number> = {
   Constructed: 0,
   Commander: 1,
-  Multiplayer: 2,
+  Limited: 2,
+  Multiplayer: 3,
 };
 
 const FORMAT_FILTER_GROUPS = (Object.keys(FILTER_GROUP_ORDER) as FormatGroup[])

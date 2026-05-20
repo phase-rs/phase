@@ -8964,6 +8964,20 @@ pub enum OriginConstraint {
     OneOf(Vec<Zone>),
 }
 
+impl OriginConstraint {
+    /// Serde default for `TriggerDefinition::spell_cast_origin` so older
+    /// serialized snapshots (which predate the field) round-trip as `Any`.
+    pub fn any_default() -> Self {
+        OriginConstraint::Any
+    }
+
+    /// Predicate for `#[serde(skip_serializing_if = ...)]` — keeps JSON output
+    /// compact for the common no-restriction case.
+    pub fn is_any(&self) -> bool {
+        matches!(self, OriginConstraint::Any)
+    }
+}
+
 /// CR 603.6 + CR 603.2: one clause of a disjunctive zone-change trigger.
 /// A zone-change event satisfies the trigger if it matches ANY clause
 /// (CR 603.2 — a game event matching the trigger condition fires the ability).
@@ -9037,6 +9051,18 @@ pub struct TriggerDefinition {
     pub valid_target: Option<TargetFilter>,
     #[serde(default)]
     pub valid_source: Option<TargetFilter>,
+    /// CR 601.2a + CR 603.2: Cast-origin constraint for `TriggerMode::SpellCast`
+    /// (and `SpellCastOrCopy` / `SpellCopy`) triggers. `Any` means no zone
+    /// restriction. Reuses `OriginConstraint` — the same typed source-zone
+    /// discriminator as `ZoneChangeClause.origin` (CR 603.6 zone-change source),
+    /// here applied to the cast event's `cast_from_zone` per CR 601.2a.
+    /// CR 707.10: copy events have no cast origin and are rejected by any
+    /// non-`Any` constraint.
+    #[serde(
+        default = "OriginConstraint::any_default",
+        skip_serializing_if = "OriginConstraint::is_any"
+    )]
+    pub spell_cast_origin: OriginConstraint,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
@@ -9080,6 +9106,7 @@ impl TriggerDefinition {
             secondary: false,
             valid_target: None,
             valid_source: None,
+            spell_cast_origin: OriginConstraint::Any,
             description: None,
             constraint: None,
             condition: None,
@@ -9144,6 +9171,13 @@ impl TriggerDefinition {
 
     pub fn valid_source(mut self, filter: TargetFilter) -> Self {
         self.valid_source = Some(filter);
+        self
+    }
+
+    /// CR 601.2a + CR 603.2: set the cast-origin constraint for SpellCast
+    /// triggers ("from your graveyard", "from anywhere other than their hand").
+    pub fn spell_cast_origin(mut self, constraint: OriginConstraint) -> Self {
+        self.spell_cast_origin = constraint;
         self
     }
 
@@ -10885,6 +10919,7 @@ mod tests {
             secondary: false,
             valid_target: None,
             valid_source: None,
+            spell_cast_origin: OriginConstraint::Any,
             description: Some("When ~ dies, draw a card.".to_string()),
             constraint: None,
             condition: None,

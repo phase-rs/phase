@@ -5975,6 +5975,30 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
                 .unwrap_or(after)
                 .trim();
 
+            // CR 601.2a: pre-extract the "from <zone>" cast-origin tail BEFORE
+            // running the type-phrase parser. `parse_type_phrase`'s
+            // `parse_zone_suffix` would otherwise attach the zone as a
+            // `FilterProp::InZone` on `valid_card` — semantically wrong for
+            // SpellCast triggers because the spell object's zone at
+            // fire-time is `Stack`, not its cast origin. Pulling the tail
+            // first keeps `valid_card` clean and routes the constraint
+            // through the matcher's typed `spell_cast_origin` gate.
+            let (payload, cast_origin) = match nom_primitives::split_once_on(payload, " from ") {
+                Ok((_, (before, after))) => {
+                    // Re-prepend the "from " literal so the tail
+                    // combinator's leading-tag matcher sees its expected
+                    // shape.
+                    let tail = format!("from {after}");
+                    let constraint =
+                        parse_origin_constraint_tail(tail.as_str(), parse_cast_origin_zone)
+                            .map(|(_, c)| c)
+                            .unwrap_or(OriginConstraint::Any);
+                    (before, constraint)
+                }
+                Err(_) => (payload, OriginConstraint::Any),
+            };
+            def.spell_cast_origin = cast_origin;
+
             // First, try the post-spell-modifier-aware decomposition for shapes
             // that include "with {X} in its mana cost" etc.
             if let Some(filter) = parse_spell_qualifier_payload(payload) {
@@ -5984,7 +6008,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
 
             // Fall back to the classic type-phrase parser for bare type filters.
             // TypeFilter::Card alone means "spell" with no type restriction — skip it.
-            let (filter, _rest) = parse_type_phrase(after);
+            let (filter, _rest) = parse_type_phrase(payload);
             let is_meaningful = match &filter {
                 TargetFilter::Typed(tf) => tf.has_meaningful_type_constraint(),
                 // Or-filters are always meaningful (e.g. "instant or sorcery spell")
@@ -6030,6 +6054,26 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             let spell_clause = nom_primitives::split_once_on(after_article, ", ")
                 .map(|(_, (before, _))| before)
                 .unwrap_or(after_article);
+            // CR 601.2a: pre-extract the "from <zone>" cast-origin tail (see
+            // the rationale in the "you cast a/an" branch above). Without
+            // this, the zone constraint is silently dropped (Ghostly Pilferer
+            // class) or mis-routed into `valid_card` via `parse_zone_suffix`.
+            // Only strip the tail when the zone combinator recognises it as
+            // a well-formed cast origin; an unrecognized residual
+            // ("from <some other phrase>") leaves the spell_clause intact
+            // so downstream parsing observes the original shape.
+            let (spell_clause, cast_origin) =
+                match nom_primitives::split_once_on(spell_clause, " from ") {
+                    Ok((_, (before, after))) => {
+                        let tail = format!("from {after}");
+                        match parse_origin_constraint_tail(tail.as_str(), parse_cast_origin_zone) {
+                            Ok((_, constraint)) => (before, constraint),
+                            Err(_) => (spell_clause, OriginConstraint::Any),
+                        }
+                    }
+                    Err(_) => (spell_clause, OriginConstraint::Any),
+                };
+            def.spell_cast_origin = cast_origin;
             // Handle "with mana value equal to the chosen number" (Talion, the Kindly Lord)
             // CR 202.3: Mana value comparison against a dynamic reference quantity.
             let chosen = spell_clause.strip_suffix("with mana value equal to the chosen number"); // allow-noncombinator: structural suffix on tokenized spell-quality chunk
@@ -6829,26 +6873,55 @@ fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinit
 /// Handles "from the battlefield" → `Equals`, "from anywhere other than the
 /// battlefield" → `NotEquals`, "from anywhere" / no clause → `Any`, and the
 /// possessive-zone forms reused from `parse_graveyard_origin_zone`.
+///
+/// Thin caller around `parse_origin_constraint_tail` parameterized on the
+/// graveyard-context zone combinator (`parse_graveyard_origin_zone`). Preserves
+/// the historical "no `from` tail → `Any`" semantics that the disjunctive
+/// zone-change matcher relies on.
 fn parse_put_into_graveyard_origin(input: &str) -> OracleResult<'_, OriginConstraint> {
+    parse_origin_constraint_tail(input, parse_graveyard_origin_zone)
+}
+
+/// CR 601.2a + CR 603.6: Parse a "from <zone>" source-zone tail into an
+/// `OriginConstraint`. Handles `from anywhere other than <zone>` (NotEquals),
+/// bare `from anywhere` (Any), single-zone tails (Equals), and the absent-
+/// clause case (Any).
+///
+/// `zone_combinator` returns `Option<Zone>`: `Some(z)` for a constrained zone,
+/// `None` for the bare "anywhere" leaf (so the caller's primitives can decide
+/// which zones are recognized in their context — graveyard-context recognizes
+/// "the battlefield" / "your library" etc.; cast-context recognizes "their
+/// hand" / "your graveyard" / "exile" / "any library" / "the command zone").
+fn parse_origin_constraint_tail<'a, F>(
+    input: &'a str,
+    mut zone_combinator: F,
+) -> OracleResult<'a, OriginConstraint>
+where
+    F: FnMut(&'a str) -> OracleResult<'a, Option<Zone>>,
+{
     let input = input.trim_start();
     // No "from" clause — any source zone.
     let Ok((after_from, ())) = value((), tag::<_, _, OracleError<'_>>("from ")).parse(input) else {
         return Ok((input, OriginConstraint::Any));
     };
     let after_from = after_from.trim_start();
-    // CR 603.6c: "from anywhere other than the battlefield" — the
-    // never-a-leaves-the-battlefield-ability form (Syr Konrad clause 2).
-    if let Ok((rest, ())) = value(
-        (),
-        tag::<_, _, OracleError<'_>>("anywhere other than the battlefield"),
-    )
-    .parse(after_from)
+    // CR 603.6c + CR 601.2a: "from anywhere other than <zone>" — the
+    // negative-discriminator form (Ghostly Pilferer: "from anywhere other
+    // than their hand"; Syr Konrad clause 2: "from anywhere other than the
+    // battlefield"). The zone token comes from the caller's combinator.
+    if let Ok((after_other, ())) =
+        value((), tag::<_, _, OracleError<'_>>("anywhere other than ")).parse(after_from)
     {
-        return Ok((rest, OriginConstraint::NotEquals(Zone::Battlefield)));
+        let (rest, zone_opt) = zone_combinator(after_other)?;
+        // `None` from the zone combinator means the inner phrase was a bare
+        // "anywhere" — "from anywhere other than anywhere" is malformed; fall
+        // through to the generic path which will treat the residual as Any.
+        if let Some(zone) = zone_opt {
+            return Ok((rest, OriginConstraint::NotEquals(zone)));
+        }
     }
-    // Reuse the shared origin-zone combinator for "the battlefield" / "anywhere"
-    // / possessive library/hand forms.
-    let (rest, zone) = parse_graveyard_origin_zone.parse(after_from)?;
+    // Single-zone tail or bare "anywhere".
+    let (rest, zone) = zone_combinator(after_from)?;
     Ok((
         rest,
         match zone {
@@ -6856,6 +6929,54 @@ fn parse_put_into_graveyard_origin(input: &str) -> OracleResult<'_, OriginConstr
             None => OriginConstraint::Any,
         },
     ))
+}
+
+/// CR 601.2a + CR 400.1: Parse a cast-origin zone phrase, including the
+/// possessive forms ("your graveyard", "their hand", "an opponent's library",
+/// "a player's graveyard"), bare possessive-less forms ("exile", "the command
+/// zone", "a library", "any library"), and the bare "anywhere" leaf.
+///
+/// Returns `Some(Zone)` for a constrained zone, `None` for the bare
+/// "anywhere" leaf. The valid_card filter on the trigger (already narrowed by
+/// `valid_target.controller`) provides the player-scope binding when needed.
+fn parse_cast_origin_zone(input: &str) -> OracleResult<'_, Option<Zone>> {
+    alt((
+        // CR 603.6c: bare "anywhere" → no origin restriction.
+        value(None, tag("anywhere")),
+        // Hand — every possessive form maps to Zone::Hand. CR 109.5: "their"
+        // is an anaphor back to the caster named earlier in the trigger
+        // condition; possessive does not narrow the zone selection itself.
+        value(Some(Zone::Hand), tag("your hand")),
+        value(Some(Zone::Hand), tag("their hand")),
+        value(Some(Zone::Hand), tag("an opponent's hand")),
+        value(Some(Zone::Hand), tag("a player's hand")),
+        value(Some(Zone::Hand), tag("any hand")),
+        // Graveyard — Snapcaster-class "from your graveyard"; flashback-payoff
+        // forms; opponent-graveyard payoffs.
+        value(Some(Zone::Graveyard), tag("your graveyard")),
+        value(Some(Zone::Graveyard), tag("their graveyard")),
+        value(Some(Zone::Graveyard), tag("an opponent's graveyard")),
+        value(Some(Zone::Graveyard), tag("a player's graveyard")),
+        value(Some(Zone::Graveyard), tag("a graveyard")),
+        value(Some(Zone::Graveyard), tag("any graveyard")),
+        // Library — cascade / impulse-draw "from exile" variants and library
+        // casts (rare but well-defined per CR 400.1).
+        value(Some(Zone::Library), tag("your library")),
+        value(Some(Zone::Library), tag("their library")),
+        value(Some(Zone::Library), tag("an opponent's library")),
+        value(Some(Zone::Library), tag("a player's library")),
+        value(Some(Zone::Library), tag("any library")),
+        // Exile — Mizzix-class exile-cast payoffs; flashback / suspend etc.
+        // Exile has no per-player partition (CR 400.1), so possessive forms
+        // are rare in printed text; bare "exile" is the dominant phrasing.
+        value(Some(Zone::Exile), tag("exile")),
+        // Command zone — commander-payoff cards.
+        value(Some(Zone::Command), tag("the command zone")),
+        value(Some(Zone::Command), tag("a command zone")),
+        // Battlefield (rare for cast triggers but defined per CR 400.1).
+        value(Some(Zone::Battlefield), tag("the battlefield")),
+    ))
+    .parse(input)
 }
 
 /// CR 603.6 + CR 603.2: Parse one clause of a disjunctive zone-change trigger
@@ -10192,6 +10313,47 @@ mod tests {
         assert!(def.valid_card.is_none());
         // But still restricted to controller
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        // No origin clause → no zone restriction (CR 601.2a).
+        assert_eq!(def.spell_cast_origin, OriginConstraint::Any);
+    }
+
+    /// CR 601.2a + #538: Ghostly Pilferer. The cast-origin discriminator
+    /// "from anywhere other than their hand" must survive parsing as
+    /// `NotEquals(Hand)`; without it the trigger fires on every opponent
+    /// hand cast.
+    #[test]
+    fn trigger_opponent_casts_from_anywhere_other_than_hand() {
+        let def = parse_trigger_line(
+            "Whenever an opponent casts a spell from anywhere other than their hand, draw a card.",
+            "Ghostly Pilferer",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+        assert_eq!(
+            def.spell_cast_origin,
+            OriginConstraint::NotEquals(Zone::Hand)
+        );
+    }
+
+    /// CR 601.2a — positive cast-origin form. Snapcaster-class triggers
+    /// must parse as `Equals(Graveyard)`.
+    #[test]
+    fn trigger_you_cast_a_spell_from_your_graveyard() {
+        let def = parse_trigger_line(
+            "Whenever you cast a spell from your graveyard, draw a card.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(
+            def.spell_cast_origin,
+            OriginConstraint::Equals(Zone::Graveyard)
+        );
     }
 
     /// CR 205.2a + CR 601.2: "whenever you cast an artifact creature spell" must

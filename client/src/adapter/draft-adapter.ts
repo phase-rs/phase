@@ -79,6 +79,8 @@ export interface DraftPlayerView {
   seats: SeatPublicView[];
   cards_per_pack: number;
   pack_count: number;
+  min_deck_size: number;
+  addable_cards: string[];
   timer_remaining_ms: number | null;
   standings: StandingEntry[];
   current_round: number;
@@ -90,6 +92,22 @@ export interface DraftPlayerView {
 export interface SuggestedDeck {
   main_deck: string[];
   lands: Record<string, number>;
+}
+
+export type DeckAddableCardPolicy =
+  | "StandardBasics"
+  | "CustomOnly"
+  | "StandardBasicsPlusCustom";
+
+export interface CubeDraftSettings {
+  pod_size: number;
+  pack_count: number;
+  cards_per_pack: number;
+  min_deck_size: number;
+  addable_cards: {
+    policy: DeckAddableCardPolicy;
+    custom: string[];
+  };
 }
 
 // ── Lazy WASM singleton ─────────────────────────────────────────────────
@@ -122,6 +140,23 @@ export class DraftAdapter {
   ): Promise<DraftPlayerView> {
     const wasm = await ensureDraftWasm();
     return wasm.start_quick_draft(setPoolJson, difficulty, seed) as DraftPlayerView;
+  }
+
+  async initializeCube(
+    cubeListText: string,
+    cubeName: string,
+    settings: CubeDraftSettings,
+    difficulty: number,
+    seed: number,
+  ): Promise<DraftPlayerView> {
+    const wasm = await ensureDraftWasm();
+    return wasm.start_quick_cube_draft(
+      cubeListText,
+      cubeName,
+      JSON.stringify(settings),
+      difficulty,
+      seed,
+    ) as DraftPlayerView;
   }
 
   async submitPick(cardInstanceId: string): Promise<DraftPlayerView> {

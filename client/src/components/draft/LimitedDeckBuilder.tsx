@@ -26,7 +26,14 @@ const BASIC_LANDS = [
   { name: "Forest", color: "G", colorClass: "bg-green-500" },
 ] as const;
 
-const MIN_DECK_SIZE = 40;
+const LAND_COLOR_CLASSES: Record<string, string> = {
+  Plains: "bg-yellow-200",
+  Island: "bg-blue-400",
+  Swamp: "bg-slate-400",
+  Mountain: "bg-red-500",
+  Forest: "bg-green-500",
+  Wastes: "bg-neutral-300",
+};
 
 // ── Card image tile ─────────────────────────────────────────────────────
 
@@ -189,13 +196,17 @@ export function LimitedDeckBuilder() {
   );
 
   const totalCards = mainDeck.length + totalLands;
-  const deckValid = totalCards >= MIN_DECK_SIZE;
+  const minDeckSize = view?.min_deck_size ?? 40;
+  const addableCards = view?.addable_cards?.length
+    ? view.addable_cards
+    : BASIC_LANDS.map((land) => land.name);
+  const deckValid = totalCards >= minDeckSize;
 
   if (!view) return null;
 
   return (
     <div className="flex h-full flex-col gap-4">
-      <DeckStatus spells={mainDeck.length} lands={totalLands} min={MIN_DECK_SIZE} />
+      <DeckStatus spells={mainDeck.length} lands={totalLands} min={minDeckSize} />
 
       <div className="flex min-h-0 flex-1 gap-6">
         {/* Left column: Pool + Main Deck */}
@@ -247,7 +258,7 @@ export function LimitedDeckBuilder() {
           <section>
             <div className="mb-3 flex items-center justify-between">
               <h3 className="text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
-                Basic Lands
+                Addable Cards
               </h3>
               <button
                 type="button"
@@ -258,11 +269,11 @@ export function LimitedDeckBuilder() {
               </button>
             </div>
             <div className="flex flex-col gap-2">
-              {BASIC_LANDS.map(({ name, colorClass }) => (
+              {addableCards.map((name) => (
                 <LandRow
                   key={name}
                   name={name}
-                  colorClass={colorClass}
+                  colorClass={LAND_COLOR_CLASSES[name] ?? "bg-cyan-300"}
                   count={landCounts[name] ?? 0}
                   onDecrement={() => setLandCount(name, (landCounts[name] ?? 0) - 1)}
                   onIncrement={() => setLandCount(name, (landCounts[name] ?? 0) + 1)}

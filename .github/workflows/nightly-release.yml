@@ -1,0 +1,367 @@
+name: Nightly Release
+
+on:
+  schedule:
+    - cron: "17 9 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  cut-nightly-release:
+    name: Cut Nightly Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    outputs:
+      dispatch_recovery: ${{ steps.release-run.outputs.dispatch_recovery }}
+      release_tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Verify release bot token
+        env:
+          RELEASE_BOT_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$RELEASE_BOT_TOKEN" ]; then
+            echo "::error::RELEASE_BOT_TOKEN is required so commit/tag pushes trigger downstream workflows"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_BOT_TOKEN }}
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-shared-key: rust-nightly-release
+
+      - name: Configure git
+        run: |
+          set -euo pipefail
+          git config user.name "phase-rs release bot"
+          git config user.email "phase-rs-release-bot@users.noreply.github.com"
+
+      - name: Compute release version
+        id: version
+        run: |
+          set -euo pipefail
+          VERSION=$(date -u +'%Y.%-m.%-d')
+          TAG="v$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Verify main and tags
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git fetch --force origin main
+          git fetch --force --tags origin
+
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
+            echo "::error::Checked-out HEAD is not origin/main"
+            exit 1
+          fi
+
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "Tag $TAG already exists; recovery checks will run without creating a new release commit."
+          fi
+
+      - name: Verify existing tag version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            exit 0
+          fi
+
+          check_toml_version() {
+            local path="$1"
+            local actual
+            actual=$(git show "$TAG:$path" | sed -nE 's/^version = "([^"]+)"/\1/p' | head -1)
+            if [ "$actual" != "$VERSION" ]; then
+              echo "::error::$path version $actual does not match $TAG"
+              exit 1
+            fi
+          }
+
+          check_json_version() {
+            local path="$1"
+            local actual
+            actual=$(git show "$TAG:$path" | jq -r '.version')
+            if [ "$actual" != "$VERSION" ]; then
+              echo "::error::$path version $actual does not match $TAG"
+              exit 1
+            fi
+          }
+
+          check_toml_version Cargo.toml
+          check_json_version client/package.json
+          check_json_version client/src-tauri/tauri.conf.json
+          check_toml_version client/src-tauri/Cargo.toml
+
+      - name: Check existing release workflow run
+        id: release-run
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          echo "dispatch_recovery=false" >> "$GITHUB_OUTPUT"
+          echo "skip_creation=false" >> "$GITHUB_OUTPUT"
+
+          if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            exit 0
+          fi
+
+          echo "skip_creation=true" >> "$GITHUB_OUTPUT"
+
+          TAG_SHA=$(git rev-list -n 1 "$TAG")
+          RUNS=$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/release.yml/runs" \
+            -f per_page=50)
+          MATCH=$(jq -r --arg sha "$TAG_SHA" '
+            [
+              .workflow_runs[]
+              | select(.head_sha == $sha)
+              | {status, conclusion, html_url, created_at}
+            ]
+            | sort_by(.created_at)
+            | reverse
+            | .[0] // empty
+            | @base64
+          ' <<< "$RUNS")
+
+          if [ -z "$MATCH" ]; then
+            echo "No Release workflow run exists for $TAG; dispatching recovery in the follow-up job."
+            echo "dispatch_recovery=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          run_field() {
+            echo "$MATCH" | base64 -d | jq -r "$1"
+          }
+
+          STATUS=$(run_field '.status')
+          CONCLUSION=$(run_field '.conclusion')
+          URL=$(run_field '.html_url')
+
+          if [ "$STATUS" != "completed" ]; then
+            echo "Release workflow for $TAG is already $STATUS: $URL"
+            exit 0
+          fi
+          if [ "$CONCLUSION" = "success" ]; then
+            echo "Release workflow for $TAG already succeeded: $URL"
+            exit 0
+          fi
+
+          echo "::error::Release workflow for $TAG completed with $CONCLUSION. Rerun it here: $URL"
+          exit 1
+
+      - name: Stop after existing tag handling
+        if: ${{ steps.release-run.outputs.skip_creation == 'true' }}
+        run: echo "Existing tag handled; no new release commit or tag will be created."
+
+      - name: Install pinned cargo-release
+        if: ${{ steps.release-run.outputs.skip_creation != 'true' }}
+        run: cargo install cargo-release --version 1.1.2 --locked
+
+      - name: Create release commit and local tag
+        if: ${{ steps.release-run.outputs.skip_creation != 'true' }}
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          current_version=$(sed -nE 's/^version = "([^"]+)"/\1/p' Cargo.toml | head -1)
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "Tag $TAG already exists; skipping release creation."
+            exit 0
+          fi
+
+          if [ "$current_version" = "$VERSION" ]; then
+            echo "origin/main is already at $VERSION without $TAG; creating the missing local tag."
+            git tag -a "$TAG" -m "$TAG"
+            exit 0
+          fi
+
+          cargo release "$VERSION" --workspace --execute --no-confirm --no-publish --no-push --allow-branch main
+
+      - name: Verify release commit and tag
+        if: ${{ steps.release-run.outputs.skip_creation != 'true' }}
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          check_toml_version() {
+            local path="$1"
+            local actual
+            actual=$(sed -nE 's/^version = "([^"]+)"/\1/p' "$path" | head -1)
+            if [ "$actual" != "$VERSION" ]; then
+              echo "::error::$path version $actual does not match $VERSION"
+              exit 1
+            fi
+          }
+
+          check_json_version() {
+            local path="$1"
+            local actual
+            actual=$(jq -r '.version' "$path")
+            if [ "$actual" != "$VERSION" ]; then
+              echo "::error::$path version $actual does not match $VERSION"
+              exit 1
+            fi
+          }
+
+          check_toml_version Cargo.toml
+          check_json_version client/package.json
+          check_json_version client/src-tauri/tauri.conf.json
+          check_toml_version client/src-tauri/Cargo.toml
+
+          if [ -n "$(git status --porcelain)" ]; then
+            git status --short
+            echo "::error::cargo-release left the working tree dirty"
+            exit 1
+          fi
+
+          if [ "$(git rev-list -n 1 "$TAG")" != "$(git rev-parse HEAD)" ]; then
+            echo "::error::$TAG does not point at HEAD"
+            exit 1
+          fi
+
+          current_version=$(git show HEAD:Cargo.toml | sed -nE 's/^version = "([^"]+)"/\1/p' | head -1)
+          if [ "$current_version" != "$VERSION" ]; then
+            echo "::error::HEAD version $current_version does not match $VERSION"
+            exit 1
+          fi
+
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
+            changed=$(git diff-tree --no-commit-id --name-only -r HEAD | sort)
+            allowed=$(printf '%s\n' \
+              Cargo.lock \
+              Cargo.toml \
+              client/package.json \
+              client/src-tauri/Cargo.toml \
+              client/src-tauri/tauri.conf.json \
+              | sort)
+            extra=$(comm -23 <(printf '%s\n' "$changed") <(printf '%s\n' "$allowed"))
+            if [ -n "$extra" ]; then
+              echo "::error::Release commit changed unexpected files:"
+              printf '%s\n' "$extra"
+              exit 1
+            fi
+          fi
+
+      - name: Push release commit
+        if: ${{ steps.release-run.outputs.skip_creation != 'true' }}
+        env:
+          RELEASE_BOT_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
+        run: |
+          set -euo pipefail
+          git fetch --force origin main
+          if [ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ]; then
+            base=$(git merge-base HEAD origin/main)
+            if [ "$base" != "$(git rev-parse origin/main)" ]; then
+              echo "::error::origin/main advanced while preparing the release"
+              exit 1
+            fi
+            git push "https://x-access-token:${RELEASE_BOT_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
+          else
+            echo "Release commit is already on origin/main."
+          fi
+
+      - name: Wait for CI on release commit
+        if: ${{ steps.release-run.outputs.skip_creation != 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
+        run: |
+          set -euo pipefail
+          RELEASE_SHA=$(git rev-parse HEAD)
+          deadline=$((SECONDS + 3600))
+
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            RUNS=$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+              -f branch=main \
+              -f event=push \
+              -f per_page=20)
+            MATCH=$(jq -r --arg sha "$RELEASE_SHA" '
+              [
+                .workflow_runs[]
+                | select(.head_sha == $sha)
+                | {status, conclusion, html_url, created_at}
+              ]
+              | sort_by(.created_at)
+              | reverse
+              | .[0] // empty
+              | @base64
+            ' <<< "$RUNS")
+
+            if [ -n "$MATCH" ]; then
+              decoded=$(echo "$MATCH" | base64 -d)
+              status=$(jq -r '.status' <<< "$decoded")
+              conclusion=$(jq -r '.conclusion' <<< "$decoded")
+              url=$(jq -r '.html_url' <<< "$decoded")
+
+              if [ "$status" = "completed" ]; then
+                if [ "$conclusion" = "success" ]; then
+                  echo "CI succeeded for $RELEASE_SHA: $url"
+                  exit 0
+                fi
+                echo "::error::CI completed with $conclusion for $RELEASE_SHA: $url"
+                exit 1
+              fi
+
+              echo "CI for $RELEASE_SHA is $status: $url"
+            else
+              echo "Waiting for CI run for $RELEASE_SHA..."
+            fi
+
+            sleep 30
+          done
+
+          echo "::error::Timed out waiting for CI on $RELEASE_SHA"
+          exit 1
+
+      - name: Push release tag
+        if: ${{ steps.release-run.outputs.skip_creation != 'true' }}
+        env:
+          RELEASE_BOT_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          RELEASE_SHA=$(git rev-parse HEAD)
+          git fetch --force origin main
+          if [ "$(git rev-parse origin/main)" != "$RELEASE_SHA" ]; then
+            echo "::error::origin/main no longer points at release commit $RELEASE_SHA"
+            exit 1
+          fi
+          git push "https://x-access-token:${RELEASE_BOT_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "refs/tags/$TAG"
+
+  dispatch-recovery:
+    name: Dispatch Existing Tag Recovery
+    needs: [cut-nightly-release]
+    if: ${{ needs.cut-nightly-release.outputs.dispatch_recovery == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Dispatch release workflow for existing tag
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
+          TAG: ${{ needs.cut-nightly-release.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          gh workflow run release.yml --ref "$TAG" -f tag="$TAG"

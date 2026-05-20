@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
 import type { FormatConfig, GameFormat, LobbyGame, MatchType, PlayerId } from "../adapter/types";
-import { FORMAT_REGISTRY, LIMITED_FORMAT_CONFIG } from "../data/formatRegistry";
+import { FORMAT_REGISTRY } from "../data/formatRegistry";
 import { PROTOCOL_VERSION, type ServerInfo } from "../adapter/ws-adapter";
 import {
   clearWsSession,
@@ -360,9 +360,8 @@ const TWO_HEADED_GIANT_DEFAULT: FormatConfig = {
 export const FORMAT_DEFAULTS: Record<GameFormat, FormatConfig> = {
   ...(Object.fromEntries(
     FORMAT_REGISTRY.map((m) => [m.format, m.default_config]),
-  ) as Record<Exclude<GameFormat, "TwoHeadedGiant" | "Limited">, FormatConfig>),
+  ) as Record<Exclude<GameFormat, "TwoHeadedGiant">, FormatConfig>),
   TwoHeadedGiant: TWO_HEADED_GIANT_DEFAULT,
-  Limited: LIMITED_FORMAT_CONFIG.default_config,
 };
 
 export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>()(

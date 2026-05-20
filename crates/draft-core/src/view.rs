@@ -67,6 +67,10 @@ pub struct DraftPlayerView {
     pub cards_per_pack: u8,
     /// Total pack count (for UI progress display)
     pub pack_count: u8,
+    /// Minimum main deck size for this draft.
+    pub min_deck_size: usize,
+    /// Cards available in unlimited quantity during deck construction.
+    pub addable_cards: Vec<String>,
     /// Milliseconds remaining on the pick timer. Always None from the reducer;
     /// the P2P host injects the authoritative value on the wire.
     pub timer_remaining_ms: Option<u32>,
@@ -99,6 +103,8 @@ pub struct SpectatorDraftView {
     pub seats: Vec<SeatPublicView>,
     pub cards_per_pack: u8,
     pub pack_count: u8,
+    pub min_deck_size: usize,
+    pub addable_cards: Vec<String>,
     pub standings: Vec<StandingEntry>,
     pub current_round: u8,
     pub tournament_format: TournamentFormat,
@@ -185,6 +191,8 @@ pub fn filter_for_spectator(
         seats,
         cards_per_pack: session.config.cards_per_pack,
         pack_count: session.config.pack_count,
+        min_deck_size: session.config.min_deck_size,
+        addable_cards: session.config.addable_cards.display_names(),
         standings,
         current_round: session.current_round,
         tournament_format: session.config.tournament_format,
@@ -275,6 +283,8 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
         seats,
         cards_per_pack: session.config.cards_per_pack,
         pack_count: session.config.pack_count,
+        min_deck_size: session.config.min_deck_size,
+        addable_cards: session.config.addable_cards.display_names(),
         timer_remaining_ms: None,
         standings,
         current_round: session.current_round,
@@ -400,10 +410,16 @@ mod tests {
 
     fn test_session(pod_size: u8) -> (DraftSession, FixturePackSource) {
         let config = DraftConfig {
+            source: DraftSource::Set {
+                code: "TST".to_string(),
+            },
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,
+            pod_size,
             cards_per_pack: 14,
             pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
             rng_seed: 42,
             tournament_format: TournamentFormat::Swiss,
             pod_policy: PodPolicy::Competitive,
@@ -635,10 +651,16 @@ mod tests {
     #[test]
     fn view_bot_seat_shows_as_bot() {
         let config = DraftConfig {
+            source: DraftSource::Set {
+                code: "TST".to_string(),
+            },
             set_code: "TST".to_string(),
             kind: DraftKind::Quick,
+            pod_size: 8,
             cards_per_pack: 14,
             pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
             rng_seed: 42,
             tournament_format: TournamentFormat::Swiss,
             pod_policy: PodPolicy::Competitive,

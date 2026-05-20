@@ -121,6 +121,11 @@ export function load_card_database(json_str: string): number;
 export function start_multiplayer_draft(set_pool_json: string, kind: string, seat_names_json: string, seed: number): any;
 
 /**
+ * Start a Quick Cube Draft session from a counted cube list.
+ */
+export function start_quick_cube_draft(cube_list_text: string, cube_name: string, settings_json: string, difficulty: number, seed: number): any;
+
+/**
  * Start a Quick Draft session: 1 human + 7 bots.
  *
  * - `set_pool_json`: serialized LimitedSetPool from draft-pools.json
@@ -195,6 +200,7 @@ export interface InitOutput {
     readonly import_draft_session: (a: number, b: number, c: number) => [number, number, number];
     readonly load_card_database: (a: number, b: number) => [number, number, number];
     readonly start_multiplayer_draft: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
+    readonly start_quick_cube_draft: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
     readonly start_quick_draft: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly submit_deck: (a: number, b: number) => [number, number, number];
     readonly submit_deck_for_seat: (a: number, b: number, c: number) => [number, number, number];

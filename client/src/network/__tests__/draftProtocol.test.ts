@@ -111,6 +111,8 @@ describe("draftProtocol", () => {
         seats: [],
         cards_per_pack: 14,
         pack_count: 3,
+        min_deck_size: 40,
+        addable_cards: ["Plains", "Island", "Swamp", "Mountain", "Forest"],
       };
       const msg: DraftP2PMessage = {
         type: "draft_state_update",

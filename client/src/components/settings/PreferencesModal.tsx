@@ -555,7 +555,7 @@ function ExperimentalSection() {
         or change without notice. Enable them to try things out early.
       </p>
 
-      <SettingGroup label="Draft Mode">
+      <SettingGroup label="Draft Experiments">
         <label className="flex min-h-11 items-center gap-3">
           <input
             type="checkbox"
@@ -564,9 +564,9 @@ function ExperimentalSection() {
             className="accent-cyan-500"
           />
           <div className="flex flex-col">
-            <span className="text-sm text-slate-200">Enable draft</span>
+            <span className="text-sm text-slate-200">Enable experimental draft features</span>
             <span className="text-xs text-slate-500">
-              Unlocks Quick Draft and Pod Draft on the main menu.
+              Unlocks Cube Draft and Pod Draft. Quick Draft vs AI is always available.
             </span>
           </div>
         </label>

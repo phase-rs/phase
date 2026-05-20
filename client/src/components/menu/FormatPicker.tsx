@@ -18,12 +18,13 @@ interface FormatGroup {
 const GROUP_TONE: Record<EngineFormatGroup, string> = {
   Constructed: "indigo",
   Commander: "amber",
+  Limited: "emerald",
   Multiplayer: "emerald",
 };
 
 // Render order for groups; mirrors how players think about the game's
-// format hierarchy (sanctioned → Commander → casual).
-const GROUP_ORDER: EngineFormatGroup[] = ["Constructed", "Commander", "Multiplayer"];
+// format hierarchy (sanctioned → Commander → Limited → casual).
+const GROUP_ORDER: EngineFormatGroup[] = ["Constructed", "Commander", "Limited", "Multiplayer"];
 
 // Groups derive from the engine-authored FORMAT_REGISTRY so a new format
 // added in `crates/engine/src/types/format.rs` automatically appears under

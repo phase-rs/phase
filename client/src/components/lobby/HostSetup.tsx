@@ -38,7 +38,8 @@ const FORMAT_OPTIONS: { format: GameFormat; label: string; description: string; 
 const GROUP_ORDER: Record<FormatGroup, number> = {
   Constructed: 0,
   Commander: 1,
-  Multiplayer: 2,
+  Limited: 2,
+  Multiplayer: 3,
 };
 
 const DIFFICULTY_OPTIONS = ["VeryEasy", "Easy", "Medium", "Hard", "VeryHard"];

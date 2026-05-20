@@ -1769,9 +1769,22 @@ pub enum WaitingFor {
         keyword: AlternativeCastKeyword,
         /// The card's printed mana cost (for display in the choice modal).
         normal_cost: ManaCost,
-        /// The keyword-granted alternative mana cost (for display in the
-        /// choice modal).
-        alternative_cost: ManaCost,
+        /// The mana portion of the keyword-granted alternative cost (for
+        /// display in the choice modal). `None` for purely non-mana
+        /// alternative costs (e.g., Solitude's "Evoke—Exile a white card from
+        /// your hand."). Typed `Option` rather than `ManaCost::zero()`
+        /// sentinel so callers must explicitly handle absence (no
+        /// `feedback_no_bool_flags`-style sentinel ambiguity).
+        #[serde(default)]
+        alternative_cost: Option<ManaCost>,
+        /// CR 702.74a + CR 118.9: Display payload for the non-mana portion of
+        /// the alternative cost (e.g., `AbilityCost::Exile { count, zone,
+        /// filter }` for the MH2 Evoke Incarnations). `None` when the
+        /// alternative cost is pure mana (Warp, Lorwyn Evoke, Overload,
+        /// Bestow, mana-only Flashback). Engine owns the derived display
+        /// string; the frontend renders the engine-provided description.
+        #[serde(default)]
+        alternative_additional_cost: Option<AbilityCost>,
     },
     /// CR 601.2b: Player chooses which legal cast permission / variant to use
     /// when more than one applies to the same spell from the same zone.

@@ -21,7 +21,6 @@ import {
   useGameStore,
 } from "../stores/gameStore";
 import type { ActiveGameMeta } from "../stores/gameStore";
-import { usePreferencesStore } from "../stores/preferencesStore";
 
 interface FormatCoverageSummary {
   total_cards: number;
@@ -47,7 +46,6 @@ export function MenuPage() {
   const [, setDeckCount] = useState(0);
   const [, setActiveDeckName] = useState<string | null>(null);
   const [formatCoverage, setFormatCoverage] = useState<[string, FormatCoverageSummary][]>([]);
-  const experimentalFeatures = usePreferencesStore((s) => s.experimentalFeatures);
   useAudioContext("menu");
 
   useEffect(() => {
@@ -157,16 +155,14 @@ export function MenuPage() {
         icon: <CrownIcon />,
       },
     );
-    if (experimentalFeatures) {
-      actions.push({
-        key: "draft",
-        title: "Draft",
-        description: "Solo Quick Draft against AI or live Pod Draft with friends.",
-        accent: "ember" as const,
-        onClick: () => navigate("/draft"),
-        icon: <DraftIcon />,
-      });
-    }
+    actions.push({
+      key: "draft",
+      title: "Draft",
+      description: "Quick Draft against AI, plus experimental cube and pod draft options.",
+      accent: "ember" as const,
+      onClick: () => navigate("/draft"),
+      icon: <DraftIcon />,
+    });
     actions.push(
       {
         key: "decks",
@@ -178,7 +174,7 @@ export function MenuPage() {
       },
     );
     return actions;
-  }, [hasSavedGame, experimentalFeatures, navigate, handleResumeGame]);
+  }, [hasSavedGame, navigate, handleResumeGame]);
 
   return (
     <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">

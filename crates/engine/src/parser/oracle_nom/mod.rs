@@ -11,6 +11,7 @@ pub mod bridge;
 pub mod condition;
 pub mod context;
 pub mod duration;
+pub mod enchant;
 pub mod error;
 pub mod filter;
 pub mod primitives;

@@ -36,6 +36,7 @@ import type { DeckCompatibilityResult } from "../services/deckCompatibility";
 const GROUP_DOT_TONE: Record<FormatGroup, string> = {
   Constructed: "bg-indigo-300",
   Commander: "bg-amber-300",
+  Limited: "bg-emerald-300",
   Multiplayer: "bg-emerald-300",
 };
 

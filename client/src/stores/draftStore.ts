@@ -2,6 +2,7 @@ import { create } from "zustand";
 
 import {
   DraftAdapter,
+  type CubeDraftSettings,
   type DraftPlayerView,
   type SuggestedDeck,
 } from "../adapter/draft-adapter";
@@ -48,6 +49,7 @@ interface DraftStoreState {
 
 interface DraftStoreActions {
   startDraft: (setPoolJson: string, setCode: string, setName: string, difficulty: number) => Promise<void>;
+  startCubeDraft: (cubeListText: string, cubeName: string, settings: CubeDraftSettings, difficulty: number) => Promise<void>;
   resumeDraft: () => Promise<void>;
   abandonDraft: () => Promise<void>;
   pickCard: (cardInstanceId: string) => Promise<void>;
@@ -124,9 +126,12 @@ function storeDraftDeckData(
   );
 }
 
-function pickBotSeat(usedSeats: number[]): number {
-  const available = [1, 2, 3, 4, 5, 6, 7].filter((s) => !usedSeats.includes(s));
-  if (available.length === 0) return Math.floor(Math.random() * 7) + 1;
+function pickBotSeat(usedSeats: number[], view: DraftPlayerView | null): number {
+  const botSeats = view?.seats
+    .filter((seat) => seat.is_bot)
+    .map((seat) => seat.seat_index) ?? [1, 2, 3, 4, 5, 6, 7];
+  const available = botSeats.filter((s) => !usedSeats.includes(s));
+  if (available.length === 0) return botSeats[Math.floor(Math.random() * botSeats.length)] ?? 1;
   return available[Math.floor(Math.random() * available.length)];
 }
 
@@ -210,6 +215,38 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
         difficulty,
         selectedSet: setCode,
         selectedSetName: setName,
+        selectedCard: null,
+        mainDeck: [],
+        landCounts: {},
+        runState: null,
+      });
+
+      persistDraft();
+    },
+
+    startCubeDraft: async (cubeListText, cubeName, settings, difficulty) => {
+      const oldMeta = loadActiveQuickDraft();
+      if (oldMeta) {
+        void clearDraftRun(oldMeta.id);
+      }
+
+      const adapter = new DraftAdapter();
+      const resp = await fetch(__CARD_DATA_URL__);
+      const json = await resp.text();
+      await adapter.loadCardDatabase(json);
+
+      const seed = Math.floor(Math.random() * 0xffffffff);
+      const view = await adapter.initializeCube(cubeListText, cubeName, settings, difficulty, seed);
+      const draftId = crypto.randomUUID();
+
+      set({
+        draftId,
+        adapter,
+        view,
+        phase: "drafting",
+        difficulty,
+        selectedSet: "custom-cube",
+        selectedSetName: cubeName,
         selectedCard: null,
         mainDeck: [],
         landCounts: {},
@@ -423,11 +460,11 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
     },
 
     launchMatch: async (navigate) => {
-      const { adapter, mainDeck, landCounts, difficulty, draftId, selectedSet, selectedSetName, runFormat } = get();
+      const { adapter, mainDeck, landCounts, difficulty, draftId, selectedSet, selectedSetName, runFormat, view } = get();
       if (!adapter || !draftId || !selectedSet) return;
 
       const fullDeck = [...mainDeck, ...expandLands(landCounts)];
-      const botSeat = pickBotSeat([]);
+      const botSeat = pickBotSeat([], view);
       const botDeck = await adapter.getBotDeck(botSeat);
       const botFullDeck = [
         ...botDeck.main_deck,
@@ -509,10 +546,10 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
     },
 
     launchNextMatch: async (navigate) => {
-      const { adapter, draftId, selectedSet, selectedSetName, difficulty, runState, runFormat } = get();
+      const { adapter, draftId, selectedSet, selectedSetName, difficulty, runState, runFormat, view } = get();
       if (!adapter || !draftId || !selectedSet || !runState) return;
 
-      const botSeat = pickBotSeat(runState.usedBotSeats);
+      const botSeat = pickBotSeat(runState.usedBotSeats, view);
       const botDeck = await adapter.getBotDeck(botSeat);
       const botFullDeck = [
         ...botDeck.main_deck,

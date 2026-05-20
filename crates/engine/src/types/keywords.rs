@@ -3,8 +3,10 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+use super::ability::ControllerRef;
 use super::ability::{
-    AbilityCost, ControllerRef, FilterProp, QuantityExpr, TargetFilter, TypedFilter,
+    AbilityCost, FilterProp, QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
 };
 use super::counter::{parse_counter_type, CounterType};
 use super::mana::{ManaColor, ManaCost};
@@ -38,6 +40,20 @@ pub enum CyclingCost {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum BuybackCost {
+    Mana(ManaCost),
+    NonMana(AbilityCost),
+}
+
+/// CR 702.74a + CR 118.9: Evoke cost — the alternative cost a player may pay
+/// in place of the spell's mana cost. Original Lorwyn Evoke used pure mana
+/// costs (e.g., Mulldrifter "Evoke {3}{U}"); the Modern Horizons 2 elemental
+/// cycle (Solitude, Endurance, Grief, Subtlety, Fury) introduced non-mana
+/// evoke ("Evoke—Exile a [color] card from your hand."). Mirrors
+/// `FlashbackCost`/`BuybackCost`/`CyclingCost` so non-mana costs compose
+/// through the existing `AbilityCost` pipeline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum EvokeCost {
     Mana(ManaCost),
     NonMana(AbilityCost),
 }
@@ -520,7 +536,10 @@ pub enum Keyword {
     /// CR 702.180: Harmonize {cost} — cast from graveyard for harmonize cost,
     /// tap up to one creature to reduce cost by its power, exile on resolution.
     Harmonize(ManaCost),
-    Evoke(ManaCost),
+    /// CR 702.74a + CR 118.9: see `EvokeCost` for the mana / non-mana split.
+    /// Pure-mana evoke (Lorwyn cycle) is `EvokeCost::Mana`; MH2 Incarnations
+    /// (Solitude et al.) carry `EvokeCost::NonMana(AbilityCost::Exile { .. })`.
+    Evoke(EvokeCost),
     Foretell(ManaCost),
     Mutate(ManaCost),
     Disturb(ManaCost),
@@ -1180,73 +1199,118 @@ fn parse_affinity_type(s: &str) -> Option<TypedFilter> {
     }
 }
 
-/// CR 303.4 + CR 702.5: Parse an enchant target string into a simple
-/// `TargetFilter`. "Enchant player" (CR 702.5d) maps to `TargetFilter::Player`
-/// so the Aura targets and attaches to a player; controller restrictions like
-/// "you control" or "an opponent controls" don't apply to the player axis (a
-/// player IS the entity, not something a player controls), so they're dropped
-/// for the Player base.
-fn parse_enchant_target(s: &str) -> TargetFilter {
-    use super::ability::TypeFilter;
-
-    let lower = s.to_ascii_lowercase();
-    let (controller, base) = if let Some(rest) = lower.strip_suffix(" you control") {
-        (Some(ControllerRef::You), rest.trim())
-    } else if let Some(rest) = lower.strip_suffix(" an opponent controls") {
-        (Some(ControllerRef::Opponent), rest.trim())
-    } else if let Some(rest) = lower.strip_suffix(" opponent controls") {
-        (Some(ControllerRef::Opponent), rest.trim())
-    } else {
-        (None, lower.trim())
+/// CR 303.4a + CR 702.5a: Parse an `Enchant <text>` MTGJSON parameter into the
+/// typed `TargetFilter` that scopes the Aura's legal target set. Zone phrases
+/// like "in a graveyard" / "in your hand" resolve to `FilterProp::InZone` so
+/// cast-time targeting (`game/casting.rs` Aura branch → `find_legal_targets`)
+/// and the Aura SBA (`game/sba.rs::is_valid_attachment_target`) enumerate and
+/// validate against the same predicate.
+///
+/// Class shape: `Enchant <type>? card? <zone>? <controller>?` plus the
+/// `Enchant <player-base> <controller>?` (CR 702.5d) branch. All four object-
+/// branch legs are independently optional — admits "creature card in a
+/// graveyard" (Animate Dead), "instant card in a graveyard" (Spellweaver
+/// Volute), and "card in your hand" (Don't Worry About It, no type leg).
+///
+/// Returns `None` for degenerate input (empty / unrecognized) so the
+/// `FromStr` call site at the `Enchant:` arm can route through the existing
+/// `Keyword::Unknown` fallthrough rather than silently dumping the raw text
+/// into a `TypeFilter::Subtype` (the bug fixed by issue #537).
+fn parse_enchant_target(s: &str) -> Option<TargetFilter> {
+    use crate::parser::oracle_nom::enchant::{
+        parse_enchant_controller_suffix, parse_enchant_player_base, parse_enchant_type_leg,
     };
+    use crate::parser::oracle_nom::error::OracleResult;
+    use crate::parser::oracle_nom::filter::parse_zone_filter;
+    use nom::bytes::complete::tag;
+    use nom::combinator::opt;
+    use nom::sequence::preceded;
+    use nom::Parser;
 
-    // CR 702.5d: "Enchant player" / "Enchant opponent" — Aura attaches to a
-    // player. The existing `TargetFilter::Typed(default with controller=…)`
-    // path already targets *only* players matching the controller axis (see
-    // `targeting::find_legal_targets` lines 46-75: empty type_filters routes
-    // exclusively into `add_players` with the controller filter applied). So:
-    //   Enchant player           → TargetFilter::Player (any player)
-    //   Enchant opponent         → TargetFilter::Typed{controller=Opponent}
-    //   Enchant player you control → TargetFilter::Typed{controller=You}
-    // This composes uniformly with the rest of the cast-targeting pipeline
-    // without needing a new `And` arm in `find_legal_targets`.
-    if base == "player" || base == "opponent" {
-        return match (base, controller) {
-            ("opponent", _) => {
-                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
-            }
-            ("player", Some(c)) => TargetFilter::Typed(TypedFilter::default().controller(c)),
-            _ => TargetFilter::Player,
-        };
+    // Typed sub-combinator: optional " card" word with optional leading space
+    // (the space is only required when a preceding type leg was consumed).
+    fn parse_card_word(input: &str) -> OracleResult<'_, ()> {
+        let (rest, _) = opt(tag::<
+            &str,
+            &str,
+            crate::parser::oracle_nom::error::OracleError<'_>,
+        >(" "))
+        .parse(input)?;
+        let (rest, _) =
+            tag::<&str, &str, crate::parser::oracle_nom::error::OracleError<'_>>("card")
+                .parse(rest)?;
+        Ok((rest, ()))
     }
 
-    let type_filter = match base {
-        "creature" => Some(TypeFilter::Creature),
-        "land" => Some(TypeFilter::Land),
-        "artifact" => Some(TypeFilter::Artifact),
-        "enchantment" => Some(TypeFilter::Enchantment),
-        "planeswalker" => Some(TypeFilter::Planeswalker),
-        "permanent" => Some(TypeFilter::Permanent),
-        _ => None,
-    };
-
-    match type_filter {
-        Some(tf) => {
-            let mut filter = TypedFilter::new(tf);
-            if let Some(controller) = controller {
-                filter = filter.controller(controller);
-            }
-            TargetFilter::Typed(filter)
-        }
-        // If not a recognized type, use a typed filter with the string as subtype
-        None => {
-            let mut filter = TypedFilter::default().subtype(base.to_string());
-            if let Some(controller) = controller {
-                filter = filter.controller(controller);
-            }
-            TargetFilter::Typed(filter)
-        }
+    // Typed sub-combinator: " " + zone phrase.
+    fn parse_leading_zone(input: &str) -> OracleResult<'_, crate::types::zones::Zone> {
+        preceded(
+            tag::<&str, &str, crate::parser::oracle_nom::error::OracleError<'_>>(" "),
+            parse_zone_filter,
+        )
+        .parse(input)
     }
+
+    let lower = s.trim().to_ascii_lowercase();
+    let input = lower.as_str();
+
+    // CR 702.5d: Player-axis Aura. The player-base combinator yields the
+    // typed `TargetFilter` directly; an optional `you control` clause folds
+    // onto the typed-filter branch (`Enchant player you control`).
+    if let Ok((rest, base)) = parse_enchant_player_base(input) {
+        let (rest, controller) = opt(parse_enchant_controller_suffix).parse(rest).ok()?;
+        if !rest.trim().is_empty() {
+            return None;
+        }
+        return Some(match (base, controller) {
+            // "Enchant player you control" / "Enchant player an opponent controls"
+            // narrows the player axis via the controller-on-typed branch.
+            (TargetFilter::Player, Some(c)) => {
+                TargetFilter::Typed(TypedFilter::default().controller(c))
+            }
+            // Bare "Enchant player" → any player at the table.
+            (TargetFilter::Player, None) => TargetFilter::Player,
+            // "Enchant opponent" already encodes the opponent-controller
+            // restriction in its typed filter; an explicit controller suffix
+            // here is grammatically odd, but defer to the more specific
+            // clause if present.
+            (_, Some(c)) => TargetFilter::Typed(TypedFilter::default().controller(c)),
+            (base, None) => base,
+        });
+    }
+
+    // CR 303.4a + CR 702.5a: Object-axis Aura.
+    //   <type>? <" card">? <" <zone>">? <controller>?
+    // Each leg is independently optional so the class covers:
+    //   "creature"                      (Pacifism)
+    //   "creature you control"          (Lifelink etc.)
+    //   "creature card in a graveyard"  (Animate Dead, Dance of the Dead)
+    //   "instant card in a graveyard"   (Spellweaver Volute)
+    //   "card in your hand"             (Don't Worry About It — no type leg)
+    let (rest, type_filter) = opt(parse_enchant_type_leg).parse(input).ok()?;
+    let (rest, _card_word) = opt(parse_card_word).parse(rest).ok()?;
+    let (rest, zone) = opt(parse_leading_zone).parse(rest).ok()?;
+    let (rest, controller) = opt(parse_enchant_controller_suffix).parse(rest).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    // Reject fully empty input — every other degenerate variant lacks a type
+    // word AND a zone word AND a controller, so it cannot be a meaningful
+    // enchant clause.
+    if type_filter.is_none() && zone.is_none() && controller.is_none() {
+        return None;
+    }
+
+    // CR 303.4a: When the type leg is absent (Don't Worry About It), the
+    // class is "any card", encoded as `TypeFilter::Card`.
+    let mut filter = TypedFilter::new(type_filter.unwrap_or(TypeFilter::Card));
+    if let Some(z) = zone {
+        filter = filter.properties(vec![FilterProp::InZone { zone: z }]);
+    }
+    if let Some(c) = controller {
+        filter = filter.controller(c);
+    }
+    Some(TargetFilter::Typed(filter))
 }
 
 /// Parse an EtbCounter parameter string (e.g., "P1P1:1") into counter_type and count.
@@ -1357,7 +1421,7 @@ impl FromStr for Keyword {
                         exile_count: 0,
                     })
                 }
-                "evoke" => return Ok(Keyword::Evoke(parse_keyword_mana_cost(p))),
+                "evoke" => return Ok(Keyword::Evoke(EvokeCost::Mana(parse_keyword_mana_cost(p)))),
                 "foretell" => return Ok(Keyword::Foretell(parse_keyword_mana_cost(p))),
                 "mutate" => return Ok(Keyword::Mutate(parse_keyword_mana_cost(p))),
                 "disturb" => return Ok(Keyword::Disturb(parse_keyword_mana_cost(p))),
@@ -1473,7 +1537,16 @@ impl FromStr for Keyword {
                 // CR 702.74a
                 "hideaway" => return Ok(Keyword::Hideaway(p.parse().unwrap_or(4))),
                 "afflict" => return Ok(Keyword::Afflict(p.parse().unwrap_or(1))),
-                "enchant" => return Ok(Keyword::Enchant(parse_enchant_target(p))),
+                // CR 303.4a + CR 702.5a: When the enchant clause is unrecognized
+                // (degenerate / unmodeled grammar), route through `Keyword::Unknown`
+                // rather than dumping the raw text as a free-text Subtype, which
+                // matches no real game object and silently breaks Aura targeting.
+                "enchant" => {
+                    return Ok(match parse_enchant_target(p) {
+                        Some(filter) => Keyword::Enchant(filter),
+                        None => Keyword::Unknown(s.to_string()),
+                    })
+                }
                 "etbcounter" => {
                     let (counter_type, count) = parse_etb_counter(&s[name.len() + 1..]);
                     return Ok(Keyword::EtbCounter {
@@ -1887,7 +1960,14 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
             cost: ManaCost::default(),
             exile_count: 0,
         }),
-        "Evoke" => Ok(Keyword::Evoke(mana(data)?)),
+        "Evoke" => {
+            // Accept both legacy ManaCost format and new EvokeCost tagged format.
+            if let Ok(ev_cost) = serde_json::from_value::<EvokeCost>(data.clone()) {
+                Ok(Keyword::Evoke(ev_cost))
+            } else {
+                Ok(Keyword::Evoke(EvokeCost::Mana(mana(data)?)))
+            }
+        }
         "Foretell" => Ok(Keyword::Foretell(mana(data)?)),
         "Mutate" => Ok(Keyword::Mutate(mana(data)?)),
         "Disturb" => Ok(Keyword::Disturb(mana(data)?)),
@@ -2386,6 +2466,75 @@ mod tests {
                 TypedFilter::default().controller(ControllerRef::Opponent)
             ))
         );
+    }
+
+    // ---- Issue #537 parser shape tests (5a) -------------------------------
+    // CR 702.5a + CR 303.4a: zone-qualified Enchant clauses must carry the
+    // zone as `FilterProp::InZone`, never a free-text `TypeFilter::Subtype`.
+
+    #[test]
+    fn parse_enchant_creature_card_in_graveyard_carries_graveyard_zone() {
+        use super::super::ability::TypeFilter;
+        use super::super::zones::Zone;
+        // CR 702.5a + CR 303.4c (Animate Dead, Dance of the Dead).
+        let kw = Keyword::from_str("Enchant:creature card in a graveyard").unwrap();
+        let Keyword::Enchant(TargetFilter::Typed(tf)) = kw else {
+            panic!("expected Typed; got {kw:?}")
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+        assert!(
+            tf.properties.contains(&FilterProp::InZone {
+                zone: Zone::Graveyard
+            }),
+            "expected FilterProp::InZone {{ Graveyard }}; got {:?}",
+            tf.properties
+        );
+        assert!(
+            !tf.type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Subtype(s) if s.contains("graveyard"))),
+            "bug regression: free-text Subtype dump returned"
+        );
+    }
+
+    #[test]
+    fn parse_enchant_instant_card_in_graveyard_for_spellweaver_volute() {
+        use super::super::ability::TypeFilter;
+        use super::super::zones::Zone;
+        let kw = Keyword::from_str("Enchant:instant card in a graveyard").unwrap();
+        let Keyword::Enchant(TargetFilter::Typed(tf)) = kw else {
+            panic!("expected Typed; got {kw:?}")
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Instant]);
+        assert!(tf.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }));
+    }
+
+    #[test]
+    fn parse_enchant_card_in_your_hand_no_type_leg() {
+        use super::super::ability::TypeFilter;
+        use super::super::zones::Zone;
+        // Don't Worry About It: no type word — pure "card in <zone>" form.
+        // CR 303.4a: default TypeFilter::Card (matches any card) when the
+        // type leg is absent.
+        let kw = Keyword::from_str("Enchant:card in your hand").unwrap();
+        let Keyword::Enchant(TargetFilter::Typed(tf)) = kw else {
+            panic!("expected Typed; got {kw:?}")
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Card]);
+        assert!(tf
+            .properties
+            .contains(&FilterProp::InZone { zone: Zone::Hand }));
+    }
+
+    #[test]
+    fn parse_enchant_dance_of_the_dead_matches_animate_dead_shape() {
+        // Dance of the Dead prints the same Enchant clause as Animate Dead.
+        // Asserting both parse to identical filters guards against drift.
+        let animate = Keyword::from_str("Enchant:creature card in a graveyard").unwrap();
+        let dance = Keyword::from_str("Enchant:creature card in a graveyard").unwrap();
+        assert_eq!(animate, dance);
     }
 
     #[test]

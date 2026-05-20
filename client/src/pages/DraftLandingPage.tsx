@@ -82,12 +82,23 @@ export function DraftLandingPage() {
           />
 
           {experimentalFeatures && (
-            <DraftModeCard
-              title="Pod Draft"
-              description="Host or join a pod with up to 8 players, draft live together, then play a Swiss or elimination tournament."
-              icon={<PodIcon />}
-              onClick={() => navigate("/draft-pod")}
-            />
+            <>
+              <DraftModeCard
+                title="Cube Draft"
+                description="Paste or load a cube list, tune pack and deck rules, then quick draft against AI bots."
+                icon={<CubeIcon />}
+                badge="Experimental"
+                onClick={() => navigate("/draft/quick?mode=cube")}
+              />
+
+              <DraftModeCard
+                title="Pod Draft"
+                description="Host or join a pod with up to 8 players, draft live together, then play a Swiss or elimination tournament."
+                icon={<PodIcon />}
+                badge="Experimental"
+                onClick={() => navigate("/draft-pod")}
+              />
+            </>
           )}
         </div>
       </div>
@@ -198,11 +209,13 @@ function DraftModeCard({
   title,
   description,
   icon,
+  badge,
   onClick,
 }: {
   title: string;
   description: string;
   icon: ReactNode;
+  badge?: string;
   onClick: () => void;
 }) {
   return (
@@ -215,7 +228,14 @@ function DraftModeCard({
         {icon}
       </div>
       <div className="min-w-0 flex-1">
-        <div className="text-base font-semibold text-white">{title}</div>
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="text-base font-semibold text-white">{title}</div>
+          {badge && (
+            <span className="rounded-full border border-cyan-300/20 bg-cyan-400/10 px-2 py-0.5 text-[0.62rem] font-semibold uppercase tracking-[0.14em] text-cyan-200">
+              {badge}
+            </span>
+          )}
+        </div>
         <p className="mt-1 text-sm text-white/40">{description}</p>
       </div>
       <div className="rounded-full border border-white/10 bg-black/18 px-3 py-2 text-white/40 transition-colors group-hover:text-white/70">
@@ -231,6 +251,14 @@ function BotIcon() {
   return (
     <svg aria-hidden="true" viewBox="0 0 24 24" className="h-6 w-6 fill-current">
       <path d="M17.753 14a2.25 2.25 0 0 1 2.25 2.25v.904A3.75 3.75 0 0 1 18.696 20H5.304a3.75 3.75 0 0 1-1.307-2.846v-.904A2.25 2.25 0 0 1 6.247 14h11.506ZM11 15.5H8a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5h3a.5.5 0 0 0 .5-.5v-1a.5.5 0 0 0-.5-.5Zm5 0h-1.5a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5H16a.5.5 0 0 0 .5-.5v-1a.5.5 0 0 0-.5-.5ZM12 2a4 4 0 0 1 4 4v4a4 4 0 0 1-8 0V6a4 4 0 0 1 4-4Zm-1.5 5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3Zm3 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3Z" />
+    </svg>
+  );
+}
+
+function CubeIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" className="h-6 w-6 fill-current">
+      <path d="M12 2.4 3.5 6.8v10.4L12 21.6l8.5-4.4V6.8L12 2.4Zm0 2.25 5.55 2.88L12 10.4 6.45 7.53 12 4.65Zm-6.5 4.5 5.5 2.85v6.8l-5.5-2.85v-6.8Zm7.5 9.65V12l5.5-2.85v6.8L13 18.8Z" />
     </svg>
   );
 }

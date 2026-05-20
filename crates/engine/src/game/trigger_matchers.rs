@@ -845,6 +845,34 @@ pub(super) fn match_spell_cast(
         return false;
     }
 
+    // CR 601.2a + CR 603.2: enforce the cast-origin discriminator BEFORE the
+    // card/player filters so the cheap one-lookup zone-equality check
+    // short-circuits before the expensive ControllerRef-resolving filters.
+    // `class` is bound at the destructuring above. SpellCopied events
+    // (CR 707.10) are copies, not casts — they carry no cast origin and are
+    // rejected by any non-Any constraint.
+    match (&trigger.spell_cast_origin, class) {
+        (OriginConstraint::Any, _) => {}
+        (_, SpellOnStackClass::Copy) => return false,
+        (constraint, SpellOnStackClass::Cast) => {
+            let Some(origin) = super::casting::spell_cast_origin(state, *object_id) else {
+                // CR 601.2a: every cast has an origin; absence here is a
+                // matcher data-flow bug. Fail-closed rather than fire
+                // spuriously.
+                return false;
+            };
+            let ok = match constraint {
+                OriginConstraint::Any => unreachable!(),
+                OriginConstraint::Equals(z) => *z == origin,
+                OriginConstraint::NotEquals(z) => *z != origin,
+                OriginConstraint::OneOf(zs) => zs.contains(&origin),
+            };
+            if !ok {
+                return false;
+            }
+        }
+    }
+
     // Check valid_card filter on the spell object.
     if trigger.valid_card.is_some() && !valid_card_matches(trigger, state, *object_id, source_id) {
         return false;
@@ -3788,6 +3816,164 @@ mod tests {
             object_id: ObjectId(10),
         };
         assert!(match_spell_cast(&event, &trigger, ObjectId(1), &state));
+    }
+
+    /// Push a spell stack entry whose `ResolvedAbility.context.cast_from_zone`
+    /// is set to `origin` — mirrors the production path in
+    /// `casting_costs.rs:2540` where the cast-origin zone is stamped on the
+    /// ability context before `GameEvent::SpellCast` is emitted.
+    fn push_spell_with_cast_origin(
+        state: &mut GameState,
+        object_id: ObjectId,
+        controller: PlayerId,
+        origin: Zone,
+    ) {
+        let mut ability = ResolvedAbility::new(
+            crate::types::ability::Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: crate::types::ability::TargetFilter::Controller,
+            },
+            vec![],
+            object_id,
+            controller,
+        );
+        ability.context.cast_from_zone = Some(origin);
+        state.stack.push_back(StackEntry {
+            id: object_id,
+            source_id: object_id,
+            controller,
+            kind: StackEntryKind::Spell {
+                card_id: CardId(100),
+                ability: Some(ability),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+    }
+
+    /// CR 601.2a + #538 — Ghostly Pilferer shape. Trigger has
+    /// `spell_cast_origin = NotEquals(Hand)`; an opponent casting an instant
+    /// from hand must NOT fire it. Discriminating: the pre-fix matcher (no
+    /// cast-origin gate) returned `true` for this event.
+    #[test]
+    fn spell_cast_not_equals_hand_rejects_hand_cast() {
+        let mut state = setup();
+        let trigger_controller = PlayerId(0);
+        let opponent = PlayerId(1);
+        // Trigger source must be a real object so `valid_target` resolution
+        // can read its controller (CR 109.5).
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            trigger_controller,
+            "Ghostly Pilferer".to_string(),
+            Zone::Battlefield,
+        );
+        let spell_id = ObjectId(70);
+        push_spell_with_cast_origin(&mut state, spell_id, opponent, Zone::Hand);
+
+        let mut trigger = make_trigger(TriggerMode::SpellCast);
+        trigger.valid_target = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent),
+        ));
+        trigger.spell_cast_origin = OriginConstraint::NotEquals(Zone::Hand);
+
+        let event = GameEvent::SpellCast {
+            card_id: CardId(100),
+            controller: opponent,
+            object_id: spell_id,
+        };
+        assert!(!match_spell_cast(&event, &trigger, source, &state));
+    }
+
+    /// CR 601.2a + #538 — same trigger shape, but the opponent casts from
+    /// exile (flashback). Trigger MUST fire. Companion discriminator to the
+    /// negative test above — together they prove the gate distinguishes
+    /// origins rather than uniformly accepting or rejecting.
+    #[test]
+    fn spell_cast_not_equals_hand_accepts_exile_cast() {
+        let mut state = setup();
+        let trigger_controller = PlayerId(0);
+        let opponent = PlayerId(1);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            trigger_controller,
+            "Ghostly Pilferer".to_string(),
+            Zone::Battlefield,
+        );
+        let spell_id = ObjectId(71);
+        push_spell_with_cast_origin(&mut state, spell_id, opponent, Zone::Exile);
+
+        let mut trigger = make_trigger(TriggerMode::SpellCast);
+        trigger.valid_target = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent),
+        ));
+        trigger.spell_cast_origin = OriginConstraint::NotEquals(Zone::Hand);
+
+        let event = GameEvent::SpellCast {
+            card_id: CardId(100),
+            controller: opponent,
+            object_id: spell_id,
+        };
+        assert!(match_spell_cast(&event, &trigger, source, &state));
+    }
+
+    /// CR 601.2a — positive-direction shape (Snapcaster-class "whenever you
+    /// cast a spell from your graveyard"). `Equals(Graveyard)` fires on
+    /// graveyard cast, rejects hand cast.
+    #[test]
+    fn spell_cast_equals_graveyard_discriminates() {
+        let mut state = setup();
+        let caster = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            caster,
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Graveyard cast → fires.
+        let gy_id = ObjectId(80);
+        push_spell_with_cast_origin(&mut state, gy_id, caster, Zone::Graveyard);
+        let mut trigger = make_trigger(TriggerMode::SpellCast);
+        trigger.valid_target = Some(TargetFilter::Controller);
+        trigger.spell_cast_origin = OriginConstraint::Equals(Zone::Graveyard);
+        let event = GameEvent::SpellCast {
+            card_id: CardId(100),
+            controller: caster,
+            object_id: gy_id,
+        };
+        assert!(match_spell_cast(&event, &trigger, source, &state));
+
+        // Hand cast → does not fire.
+        let hand_id = ObjectId(81);
+        push_spell_with_cast_origin(&mut state, hand_id, caster, Zone::Hand);
+        let event = GameEvent::SpellCast {
+            card_id: CardId(100),
+            controller: caster,
+            object_id: hand_id,
+        };
+        assert!(!match_spell_cast(&event, &trigger, source, &state));
+    }
+
+    /// CR 707.10 — a copy is not cast and has no cast origin. A SpellCopy /
+    /// SpellCastOrCopy trigger with a non-Any cast-origin constraint must
+    /// reject the SpellCopied event.
+    #[test]
+    fn spell_copy_rejected_when_origin_constraint_is_set() {
+        let state = setup();
+        let mut trigger = make_trigger(TriggerMode::SpellCastOrCopy);
+        trigger.spell_cast_origin = OriginConstraint::Equals(Zone::Graveyard);
+
+        let event = GameEvent::SpellCopied {
+            card_id: CardId(10),
+            controller: PlayerId(0),
+            object_id: ObjectId(10),
+            original_id: ObjectId(10),
+        };
+        assert!(!match_spell_cast(&event, &trigger, ObjectId(1), &state));
     }
 
     #[test]

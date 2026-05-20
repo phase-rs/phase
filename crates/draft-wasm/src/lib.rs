@@ -5,6 +5,9 @@ use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
+use draft_core::cube::{
+    cube_cards_from_entries, parse_cube_list, resolve_addable_cards, CubePackSource,
+};
 use draft_core::pack_generator::PackGenerator;
 use draft_core::session;
 use draft_core::set_pool::LimitedSetPool;
@@ -76,6 +79,36 @@ fn map_difficulty(val: u8) -> AiDifficulty {
     }
 }
 
+#[derive(Deserialize)]
+struct CubeDraftSettings {
+    #[serde(default = "default_cube_pod_size")]
+    pod_size: u8,
+    #[serde(default = "default_cube_pack_count")]
+    pack_count: u8,
+    #[serde(default = "default_cube_cards_per_pack")]
+    cards_per_pack: u8,
+    #[serde(default = "default_cube_min_deck_size")]
+    min_deck_size: usize,
+    #[serde(default = "DeckAddableCards::standard_basics")]
+    addable_cards: DeckAddableCards,
+}
+
+fn default_cube_pod_size() -> u8 {
+    8
+}
+
+fn default_cube_pack_count() -> u8 {
+    3
+}
+
+fn default_cube_cards_per_pack() -> u8 {
+    15
+}
+
+fn default_cube_min_deck_size() -> usize {
+    40
+}
+
 /// Initialize panic hook for better error messages in WASM.
 #[wasm_bindgen(start)]
 pub fn init_panic_hook() {
@@ -116,10 +149,16 @@ pub fn start_quick_draft(
     let set_code = set_pool.code.clone();
 
     let config = DraftConfig {
+        source: DraftSource::Set {
+            code: set_code.clone(),
+        },
         set_code,
         kind: DraftKind::Quick,
+        pod_size: 8,
         cards_per_pack: 14,
         pack_count: 3,
+        min_deck_size: 40,
+        addable_cards: DeckAddableCards::standard_basics(),
         rng_seed: seed as u64,
         tournament_format: TournamentFormat::Swiss,
         pod_policy: PodPolicy::Competitive,
@@ -149,6 +188,108 @@ pub fn start_quick_draft(
     // Store state in thread-locals
     DRAFT_SESSION.with(|cell| cell.set(Some(draft_session)));
     PACK_GEN.with(|cell| cell.set(Some(pack_gen)));
+    DIFFICULTY.with(|cell| cell.set(ai_difficulty));
+    RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(seed as u64))));
+
+    Ok(to_js(&view))
+}
+
+/// Start a Quick Cube Draft session from a counted cube list.
+#[wasm_bindgen]
+pub fn start_quick_cube_draft(
+    cube_list_text: &str,
+    cube_name: &str,
+    settings_json: &str,
+    difficulty: u8,
+    seed: u32,
+) -> Result<JsValue, JsValue> {
+    let settings: CubeDraftSettings = if settings_json.trim().is_empty() {
+        CubeDraftSettings {
+            pod_size: default_cube_pod_size(),
+            pack_count: default_cube_pack_count(),
+            cards_per_pack: default_cube_cards_per_pack(),
+            min_deck_size: default_cube_min_deck_size(),
+            addable_cards: DeckAddableCards::standard_basics(),
+        }
+    } else {
+        serde_json::from_str(settings_json)
+            .map_err(|e| JsValue::from_str(&format!("Failed to parse cube settings: {e}")))?
+    };
+    if settings.pod_size == 0 {
+        return Err(JsValue::from_str("Cube draft pod size must be at least 1"));
+    }
+
+    let entries = parse_cube_list(cube_list_text).map_err(|errors| {
+        JsValue::from_str(&format!(
+            "Failed to parse cube list: {}",
+            serde_json::to_string(&errors).unwrap_or_else(|_| "invalid lines".to_string())
+        ))
+    })?;
+    let (cards, addable_cards) = CARD_DB.with(|cell| {
+        let db_borrow = cell.borrow();
+        let db = db_borrow
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("Card database must be loaded before cube draft"))?;
+        let cards = cube_cards_from_entries(&entries, db).map_err(|errors| {
+            JsValue::from_str(&format!(
+                "Failed to resolve cube cards: {}",
+                serde_json::to_string(&errors).unwrap_or_else(|_| "unknown cards".to_string())
+            ))
+        })?;
+        let addable_cards =
+            resolve_addable_cards(&settings.addable_cards, db).map_err(|errors| {
+                JsValue::from_str(&format!(
+                    "Failed to resolve addable cards: {}",
+                    serde_json::to_string(&errors).unwrap_or_else(|_| "unknown cards".to_string())
+                ))
+            })?;
+        Ok::<_, JsValue>((cards, addable_cards))
+    })?;
+
+    let ai_difficulty = map_difficulty(difficulty);
+    let pod_size = settings.pod_size;
+    let config = DraftConfig {
+        source: DraftSource::Cube {
+            id: "custom-cube".to_string(),
+            name: cube_name.to_string(),
+        },
+        set_code: "custom-cube".to_string(),
+        kind: DraftKind::Quick,
+        pod_size,
+        cards_per_pack: settings.cards_per_pack,
+        pack_count: settings.pack_count,
+        min_deck_size: settings.min_deck_size,
+        addable_cards,
+        rng_seed: seed as u64,
+        tournament_format: TournamentFormat::Swiss,
+        pod_policy: PodPolicy::Competitive,
+        spectator_visibility: SpectatorVisibility::default(),
+    };
+
+    let mut seats = vec![DraftSeat::Human {
+        player_id: engine::types::player::PlayerId(0),
+        display_name: "Player".to_string(),
+        connected: true,
+    }];
+    for i in 1..pod_size {
+        seats.push(DraftSeat::Bot {
+            name: format!("Bot {i}"),
+        });
+    }
+
+    let mut draft_session = DraftSession::new(config, seats, "quick-cube-draft".to_string());
+    let pack_source = CubePackSource::new(cards);
+    session::apply(
+        &mut draft_session,
+        DraftAction::StartDraft,
+        Some(&pack_source),
+    )
+    .map_err(|e| JsValue::from_str(&format!("Failed to start cube draft: {e}")))?;
+
+    let view = filter_for_player(&draft_session, 0);
+
+    DRAFT_SESSION.with(|cell| cell.set(Some(draft_session)));
+    PACK_GEN.with(|cell| cell.set(None));
     DIFFICULTY.with(|cell| cell.set(ai_difficulty));
     RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(seed as u64))));
 
@@ -191,7 +332,7 @@ fn apply_human_pick_and_resolve_bots(
         let db_borrow = cell.borrow();
         let card_db = db_borrow.as_ref();
 
-        for seat in 1..8u8 {
+        for seat in 1..draft_session.seats.len() as u8 {
             let Some(Some(pack)) = draft_session.current_pack.get(seat as usize) else {
                 continue;
             };
@@ -316,7 +457,13 @@ pub fn suggest_deck() -> Result<JsValue, JsValue> {
         CARD_DB.with(|cell| {
             let db_borrow = cell.borrow();
             let card_db = db_borrow.as_ref();
-            let result = suggest::suggest_deck(pool, difficulty, card_db);
+            let result = suggest::suggest_deck(
+                pool,
+                difficulty,
+                card_db,
+                session.config.min_deck_size,
+                &session.config.addable_cards,
+            );
             to_js(&result)
         })
     })
@@ -334,7 +481,7 @@ pub fn suggest_lands(spells_json: &str) -> Result<JsValue, JsValue> {
 
     with_draft(|session| {
         let pool = &session.pools[0];
-        let lands = suggest::suggest_lands(&spell_names, pool);
+        let lands = suggest::suggest_lands(&spell_names, pool, session.config.min_deck_size);
         to_js(&lands)
     })
 }
@@ -376,10 +523,16 @@ pub fn start_multiplayer_draft(
 
     let set_code = set_pool.code.clone();
     let config = DraftConfig {
+        source: DraftSource::Set {
+            code: set_code.clone(),
+        },
         set_code,
         kind: draft_kind,
+        pod_size: seat_names.len() as u8,
         cards_per_pack: 14,
         pack_count: 3,
+        min_deck_size: 40,
+        addable_cards: DeckAddableCards::standard_basics(),
         rng_seed: seed as u64,
         tournament_format: TournamentFormat::default(),
         pod_policy: PodPolicy::default(),
@@ -517,21 +670,26 @@ pub fn all_picks_submitted() -> Result<bool, JsValue> {
 /// Returns a SuggestedDeck built from the bot's drafted pool.
 #[wasm_bindgen]
 pub fn get_bot_deck(bot_seat: u8) -> Result<JsValue, JsValue> {
-    if bot_seat == 0 || bot_seat > 7 {
-        return Err(JsValue::from_str("bot_seat must be 1-7"));
-    }
-
     with_draft(|session| {
+        if bot_seat == 0 || bot_seat as usize >= session.seats.len() {
+            return Err(JsValue::from_str("bot_seat is out of range"));
+        }
         let pool = &session.pools[bot_seat as usize];
         let difficulty = DIFFICULTY.with(|cell| cell.get());
 
         CARD_DB.with(|cell| {
             let db_borrow = cell.borrow();
             let card_db = db_borrow.as_ref();
-            let result = suggest::suggest_deck(pool, difficulty, card_db);
-            to_js(&result)
+            let result = suggest::suggest_deck(
+                pool,
+                difficulty,
+                card_db,
+                session.config.min_deck_size,
+                &session.config.addable_cards,
+            );
+            Ok(to_js(&result))
         })
-    })
+    })?
 }
 
 // ── Host-role exports for multiplayer (P2P) draft coordination ─────────
@@ -601,10 +759,16 @@ pub fn create_multiplayer_draft(
         .collect();
 
     let config = DraftConfig {
+        source: DraftSource::Set {
+            code: set_code.clone(),
+        },
         set_code,
         kind: draft_kind,
+        pod_size: seats.len() as u8,
         cards_per_pack: 14,
         pack_count: 3,
+        min_deck_size: 40,
+        addable_cards: DeckAddableCards::standard_basics(),
         rng_seed: seed as u64,
         tournament_format: TournamentFormat::default(),
         pod_policy: PodPolicy::default(),

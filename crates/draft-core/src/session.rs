@@ -9,7 +9,7 @@ use engine::types::player::PlayerId;
 use crate::pack_source::PackSource;
 use crate::pick_pass;
 use crate::types::*;
-use crate::validation::{validate_limited_deck, STANDARD_BASIC_LANDS};
+use crate::validation::validate_limited_deck;
 
 impl DraftSession {
     /// Create a new draft session in Lobby status.
@@ -434,15 +434,11 @@ fn apply_start_draft(
     let pod_size = session.seats.len() as u8;
     let mut rng = ChaCha20Rng::seed_from_u64(session.config.rng_seed);
 
-    // Generate all packs for all seats
-    for seat in 0..pod_size {
-        let mut seat_packs = Vec::new();
-        for pack_num in 0..session.config.pack_count {
-            seat_packs.push(pack_source.generate_pack(&mut rng, seat, pack_num));
-        }
+    let all_packs = pack_source.generate_packs(&mut rng, &session.config, pod_size)?;
+    for (seat, mut seat_packs) in all_packs.into_iter().enumerate() {
         // First pack goes to current_pack, rest go to packs_by_seat
-        session.current_pack[seat as usize] = Some(seat_packs.remove(0));
-        session.packs_by_seat[seat as usize] = seat_packs;
+        session.current_pack[seat] = Some(seat_packs.remove(0));
+        session.packs_by_seat[seat] = seat_packs;
     }
 
     session.status = DraftStatus::Drafting;
@@ -477,7 +473,12 @@ fn apply_submit_deck(
         .map(|c| c.name.clone())
         .collect();
 
-    if let Err(errors) = validate_limited_deck(&main_deck, &pool_names, STANDARD_BASIC_LANDS, 40) {
+    if let Err(errors) = validate_limited_deck(
+        &main_deck,
+        &pool_names,
+        &session.config.addable_cards,
+        session.config.min_deck_size,
+    ) {
         return Err(DraftError::ValidationFailed { errors });
     }
 
@@ -537,10 +538,16 @@ mod tests {
 
     fn test_session(pod_size: u8) -> (DraftSession, FixturePackSource) {
         let config = DraftConfig {
+            source: DraftSource::Set {
+                code: "TST".to_string(),
+            },
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,
+            pod_size,
             cards_per_pack: 14,
             pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
             rng_seed: 42,
             tournament_format: TournamentFormat::Swiss,
             pod_policy: PodPolicy::Competitive,
@@ -667,10 +674,16 @@ mod tests {
     #[test]
     fn submit_deck_all_submitted_quick_draft_transitions_to_complete() {
         let config = DraftConfig {
+            source: DraftSource::Set {
+                code: "TST".to_string(),
+            },
             set_code: "TST".to_string(),
             kind: DraftKind::Quick,
+            pod_size: 2,
             cards_per_pack: 14,
             pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
             rng_seed: 42,
             tournament_format: TournamentFormat::Swiss,
             pod_policy: PodPolicy::Competitive,
@@ -893,10 +906,16 @@ mod tests {
     #[test]
     fn test_se_bracket_8_players() {
         let config = DraftConfig {
+            source: DraftSource::Set {
+                code: "TST".to_string(),
+            },
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,
+            pod_size: 8,
             cards_per_pack: 14,
             pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
             rng_seed: 42,
             tournament_format: TournamentFormat::SingleElimination,
             pod_policy: PodPolicy::Competitive,

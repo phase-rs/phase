@@ -22,6 +22,7 @@ interface GameListItemProps {
 const GROUP_BADGE_CLASSES: Record<FormatGroup, string> = {
   Constructed: "bg-cyan-500/20 text-cyan-300",
   Commander: "bg-indigo-500/20 text-indigo-300",
+  Limited: "bg-emerald-500/20 text-emerald-300",
   Multiplayer: "bg-amber-500/20 text-amber-300",
 };
 

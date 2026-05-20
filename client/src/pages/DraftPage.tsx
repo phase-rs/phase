@@ -16,6 +16,8 @@ import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { menuButtonClass } from "../components/menu/buttonStyles";
 import { runLimits } from "../services/quickDraftPersistence";
 import type { DraftRunFormat, DraftRunState } from "../services/quickDraftPersistence";
+import type { CubeDraftSettings } from "../adapter/draft-adapter";
+import { usePreferencesStore } from "../stores/preferencesStore";
 
 // ── Format Picker ─────────────────────────────────────────────────────
 
@@ -24,6 +26,197 @@ const FORMAT_OPTIONS: Array<{ value: DraftRunFormat; label: string; description:
   { value: "bo3", label: "Best of Three", description: "Play a Bo3 match with sideboarding between games." },
   { value: "run", label: "Full Run", description: "Play Bo1 matches until you reach 7 wins or 3 losses." },
 ];
+
+type DraftSetupMode = "set" | "cube";
+
+const DEFAULT_CUBE_SETTINGS: CubeDraftSettings = {
+  pod_size: 8,
+  pack_count: 3,
+  cards_per_pack: 15,
+  min_deck_size: 40,
+  addable_cards: {
+    policy: "StandardBasics",
+    custom: [],
+  },
+};
+
+function CubeSetupPanel() {
+  const [cubeName, setCubeName] = useState("Custom Cube");
+  const [cubeText, setCubeText] = useState("");
+  const [cubeUrl, setCubeUrl] = useState("");
+  const [settings, setSettings] = useState<CubeDraftSettings>(DEFAULT_CUBE_SETTINGS);
+  const [customAddables, setCustomAddables] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const updateSetting = (key: keyof Omit<CubeDraftSettings, "addable_cards">, value: number) => {
+    setSettings((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const updateCustomAddables = (value: string) => {
+    setCustomAddables(value);
+    setSettings((prev) => ({
+      ...prev,
+      addable_cards: {
+        ...prev.addable_cards,
+        custom: value
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean),
+      },
+    }));
+  };
+
+  const handleFetchUrl = async () => {
+    if (!cubeUrl.trim()) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const resp = await fetch(cubeUrl.trim());
+      if (!resp.ok) throw new Error(`Fetch failed: ${resp.status}`);
+      setCubeText(await resp.text());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to fetch cube list");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleStart = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const { difficulty, startCubeDraft } = useDraftStore.getState();
+      await startCubeDraft(cubeText, cubeName, settings, difficulty);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to start cube draft");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const canStart = cubeText.trim().length > 0 && !loading;
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="grid gap-3 md:grid-cols-[1fr_220px_220px_220px]">
+        <label className="flex flex-col gap-1">
+          <span className="text-xs uppercase tracking-[0.16em] text-white/35">Cube Name</span>
+          <input
+            value={cubeName}
+            onChange={(e) => setCubeName(e.target.value)}
+            className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white outline-none focus:border-emerald-400/50"
+          />
+        </label>
+        <NumberField label="Seats" value={settings.pod_size} min={2} max={16} onChange={(v) => updateSetting("pod_size", v)} />
+        <NumberField label="Packs" value={settings.pack_count} min={1} max={6} onChange={(v) => updateSetting("pack_count", v)} />
+        <NumberField label="Pack Size" value={settings.cards_per_pack} min={1} max={30} onChange={(v) => updateSetting("cards_per_pack", v)} />
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-[220px_1fr_auto]">
+        <NumberField label="Min Deck" value={settings.min_deck_size} min={1} max={100} onChange={(v) => updateSetting("min_deck_size", v)} />
+        <label className="flex flex-col gap-1">
+          <span className="text-xs uppercase tracking-[0.16em] text-white/35">CubeCobra Export URL</span>
+          <input
+            value={cubeUrl}
+            onChange={(e) => setCubeUrl(e.target.value)}
+            placeholder="Paste a raw export URL, or paste the list below"
+            className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white outline-none placeholder:text-white/25 focus:border-emerald-400/50"
+          />
+        </label>
+        <button
+          type="button"
+          onClick={handleFetchUrl}
+          disabled={loading || !cubeUrl.trim()}
+          className={menuButtonClass({ tone: "neutral", size: "md", disabled: loading || !cubeUrl.trim(), className: "self-end" })}
+        >
+          Load URL
+        </button>
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-[260px_1fr]">
+        <label className="flex flex-col gap-1">
+          <span className="text-xs uppercase tracking-[0.16em] text-white/35">Deck Addables</span>
+          <select
+            value={settings.addable_cards.policy}
+            onChange={(e) =>
+              setSettings((prev) => ({
+                ...prev,
+                addable_cards: {
+                  ...prev.addable_cards,
+                  policy: e.target.value as CubeDraftSettings["addable_cards"]["policy"],
+                },
+              }))
+            }
+            className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white outline-none focus:border-emerald-400/50"
+          >
+            <option value="StandardBasics">Standard basics</option>
+            <option value="StandardBasicsPlusCustom">Basics plus custom</option>
+            <option value="CustomOnly">Custom only</option>
+          </select>
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-xs uppercase tracking-[0.16em] text-white/35">Custom Addable Cards</span>
+          <textarea
+            value={customAddables}
+            onChange={(e) => updateCustomAddables(e.target.value)}
+            placeholder="One card name per line"
+            className="min-h-10 resize-y rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white outline-none placeholder:text-white/25 focus:border-emerald-400/50"
+          />
+        </label>
+      </div>
+
+      <textarea
+        value={cubeText}
+        onChange={(e) => setCubeText(e.target.value)}
+        spellCheck={false}
+        placeholder="1 Lightning Bolt&#10;1 Black Lotus&#10;1 Tropical Island"
+        className="min-h-[280px] resize-y rounded-lg border border-white/10 bg-black/35 p-3 font-mono text-sm leading-6 text-white outline-none placeholder:text-white/25 focus:border-emerald-400/50"
+      />
+
+      {error && <div className="rounded-lg border border-red-400/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">{error}</div>}
+
+      <div className="flex justify-end">
+        <button
+          type="button"
+          onClick={handleStart}
+          disabled={!canStart}
+          className={menuButtonClass({ tone: "emerald", size: "lg", disabled: !canStart })}
+        >
+          Start Cube Draft
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function NumberField({
+  label,
+  value,
+  min,
+  max,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <label className="flex flex-col gap-1">
+      <span className="text-xs uppercase tracking-[0.16em] text-white/35">{label}</span>
+      <input
+        type="number"
+        min={min}
+        max={max}
+        value={value}
+        onChange={(e) => onChange(Math.min(max, Math.max(min, Number(e.target.value))))}
+        className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white outline-none focus:border-emerald-400/50"
+      />
+    </label>
+  );
+}
 
 function FormatPicker({ onLaunch }: { onLaunch: () => void }) {
   const runFormat = useDraftStore((s) => s.runFormat);
@@ -280,11 +473,16 @@ function MatchHistory({ results }: { results: DraftRunState["results"] }) {
 export function DraftPage() {
   const phase = useDraftStore((s) => s.phase);
   const reset = useDraftStore((s) => s.reset);
+  const experimentalFeatures = usePreferencesStore((s) => s.experimentalFeatures);
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+  const requestedSetupMode = searchParams.get("mode");
   const [hoveredCard, setHoveredCard] = useState<CardHoverInfo | null>(null);
   const [introDismissed, setIntroDismissed] = useState(false);
   const [resumeLoading, setResumeLoading] = useState(false);
+  const [setupMode, setSetupMode] = useState<DraftSetupMode>(() =>
+    requestedSetupMode === "cube" && experimentalFeatures ? "cube" : "set",
+  );
 
   useEffect(() => {
     if (searchParams.get("resume") !== "1") return;
@@ -304,6 +502,16 @@ export function DraftPage() {
     doResume();
     return () => { cancelled = true; };
   }, [searchParams]);
+
+  useEffect(() => {
+    if (requestedSetupMode === "cube") {
+      setSetupMode(experimentalFeatures ? "cube" : "set");
+    }
+  }, [requestedSetupMode, experimentalFeatures]);
+
+  useEffect(() => {
+    if (!experimentalFeatures) setSetupMode("set");
+  }, [experimentalFeatures]);
 
   useEffect(() => {
     return () => {
@@ -359,8 +567,32 @@ export function DraftPage() {
 
         {!resumeLoading && phase === "setup" && (
           <div className="mx-auto w-full max-w-4xl">
-            <h1 className="mb-8 menu-display text-3xl text-white">Quick Draft</h1>
-            <SetSelector onStartDraft={handleStartDraft} />
+            <h1 className="mb-8 menu-display text-3xl text-white">
+              {setupMode === "cube" ? "Cube Draft" : "Quick Draft"}
+            </h1>
+            {experimentalFeatures && (
+              <div className="mb-5 inline-flex rounded-lg border border-white/10 bg-black/25 p-1">
+                {(["set", "cube"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setSetupMode(mode)}
+                    className={`rounded-md px-4 py-2 text-sm font-medium transition-colors ${
+                      setupMode === mode
+                        ? "bg-emerald-400/18 text-emerald-100"
+                        : "text-white/50 hover:bg-white/6 hover:text-white/75"
+                    }`}
+                  >
+                    {mode === "set" ? "Set Draft" : "Cube"}
+                  </button>
+                ))}
+              </div>
+            )}
+            {setupMode === "set" ? (
+              <SetSelector onStartDraft={handleStartDraft} />
+            ) : (
+              <CubeSetupPanel />
+            )}
           </div>
         )}
 

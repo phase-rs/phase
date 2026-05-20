@@ -111,6 +111,7 @@ fn parse_remaining_state_presence_conditions(input: &str) -> OracleResult<'_, St
         parse_no_opponent_comparison_conditions,
         parse_opponent_comparison_conditions,
         parse_life_conditions,
+        parse_quantity_quantity_comparison,
         parse_zone_conditions,
         parse_there_are_counters_on_source,
         parse_there_are_conditions,
@@ -2185,6 +2186,43 @@ fn parse_life_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
             },
             comparator: Comparator::GE,
             rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+    ))
+}
+
+/// CR 107.3 + CR 608.2c + CR 700.5: "X is <comparator> <quantity>"
+/// intervening-if where the LHS is the spell-bound variable X (CR 107.3).
+/// Pairs with the X-substitution post-pass in `apply_where_x_ability_condition`
+/// so that, after `compute_sentence_where_x` forward-fills the binding into
+/// the trailing sentence, the LHS resolves to the bound dynamic ref (e.g.
+/// Thassa's Oracle's Devotion{Blue}) at AST-finalization time.
+///
+/// Scope is intentionally restricted to LHS=Variable("X") (not a general
+/// "<quantity> is <comp> <quantity>" combinator) so that the legacy
+/// devotion / hand-size fallback paths in `parse_static_condition`
+/// (oracle_static.rs) — which produce `DevotionGE` and `HandSize`-based
+/// `QuantityComparison` shapes for "your devotion to <color> is less than N"
+/// and "the number of cards in your hand is greater than your life total" —
+/// still win for those patterns. A broader `parse_quantity` LHS would steal
+/// those phrases and rewrite their AST shape, breaking the derived-state
+/// dirty tracker (see `game/derived.rs:65`) that scans for `DevotionGE`.
+fn parse_quantity_quantity_comparison(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("x").parse(input)?;
+    // Require word-boundary after 'x' so we don't consume the leading 'x' in
+    // "x is" but reject e.g. "x or more" / "xyz".
+    let (rest, _) = tag(" is ").parse(rest)?;
+    let (rest, comparator) = parse_life_total_comparator(rest)?;
+    let (rest, rhs) = nom_quantity::parse_quantity(rest)?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+            comparator,
+            rhs,
         },
     ))
 }
@@ -4546,9 +4584,70 @@ pub fn parse_zone_changed_this_way_clause(input: &str) -> OracleResult<'_, (Targ
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{CardTypeSetSource, RoundingMode, TypeFilter, TypedFilter};
+    use crate::types::ability::{
+        CardTypeSetSource, CountScope, RoundingMode, TypeFilter, TypedFilter, ZoneRef,
+    };
     use crate::types::card_type::Supertype;
     use crate::types::mana::{ManaColor, ManaCost};
+
+    #[test]
+    fn parse_quantity_quantity_comparison_x_ge_library() {
+        // CR 107.3 + CR 608.2c: Thassa's Oracle trailing intervening-if.
+        // After forward-fill substitution this becomes Devotion >= ZoneCardCount{Library},
+        // but pre-substitution the LHS is still Variable("X").
+        let (rest, c) = parse_inner_condition(
+            "x is greater than or equal to the number of cards in your library",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Library,
+                        card_types: Vec::new(),
+                        scope: CountScope::Controller,
+                    },
+                },
+            },
+        );
+    }
+
+    #[test]
+    fn parse_quantity_quantity_comparison_x_lt_library() {
+        // CR 107.3 + CR 608.2c: shape parity for the comparator dual. The new
+        // arm only fires when LHS is the spell-bound variable X — broader LHS
+        // forms (Devotion, HandSize) intentionally fall through to the legacy
+        // static-condition fallbacks (see derived.rs DevotionGE scan).
+        let (rest, c) =
+            parse_inner_condition("x is less than the number of cards in your library").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                comparator: Comparator::LT,
+                rhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Library,
+                        card_types: Vec::new(),
+                        scope: CountScope::Controller,
+                    },
+                },
+            },
+        );
+    }
 
     #[test]
     fn test_parse_condition_your_turn() {

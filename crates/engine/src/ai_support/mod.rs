@@ -963,6 +963,91 @@ mod tests {
         );
     }
 
+    /// Issue #537 cross-player AI test (5c): Animate Dead in player B's hand
+    /// must surface as a castable action even when the only legal target is
+    /// a creature card in player A's graveyard. The cross-player axis stresses
+    /// that `find_legal_targets` (zone branch) aggregates graveyards across
+    /// every player, not just the caster's.
+    ///
+    /// Pre-fix, the Enchant filter carried a free-text `Subtype: "creature
+    /// card in a graveyard"` that matched no real object, so the CastSpell
+    /// action was absent from `legal_actions`. Post-fix, the zone-aware filter
+    /// admits the cross-player graveyard creature.
+    ///
+    /// CR 303.4a + CR 702.5a: the Aura's enchant filter scopes the target set.
+    #[test]
+    fn legal_actions_offers_animate_dead_with_cross_player_graveyard_target() {
+        use crate::types::keywords::Keyword;
+        use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+        use std::str::FromStr;
+
+        // Player B (PlayerId(1)) has priority on their main phase.
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(1);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+
+        // Animate Dead in player B's hand.
+        let aura_id = create_object(
+            &mut state,
+            CardId(601),
+            PlayerId(1),
+            "Animate Dead".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&aura_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.keywords
+                .push(Keyword::from_str("Enchant:creature card in a graveyard").unwrap());
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 0,
+            };
+        }
+        state.players[1].mana_pool.add(ManaUnit {
+            color: ManaType::Black,
+            source_id: ObjectId(0),
+            snow: false,
+            source_could_produce_two_or_more_colors: false,
+            restrictions: Vec::new(),
+            grants: vec![],
+            expiry: None,
+        });
+
+        // Creature card in player A's graveyard (cross-player axis).
+        let creature_id = create_object(
+            &mut state,
+            CardId(602),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&creature_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let actions = legal_actions(&state);
+        let cast_present = actions
+            .iter()
+            .any(|a| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == aura_id));
+        assert!(
+            cast_present,
+            "legal_actions must surface CastSpell for Animate Dead targeting a cross-player graveyard creature; got {:?}",
+            actions
+        );
+    }
+
     #[test]
     fn legal_actions_for_viewer_gates_on_non_priority_decision_points() {
         // Regression: the viewer-gating wrapper dispatches purely on

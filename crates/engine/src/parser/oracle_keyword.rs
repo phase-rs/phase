@@ -14,9 +14,10 @@ use super::oracle_quantity::parse_cda_quantity;
 use super::oracle_target::parse_type_phrase;
 use super::oracle_util::strip_reminder_text;
 use crate::types::ability::{
-    AbilityCost, AdditionalCost, ControllerRef, Effect, QuantityExpr, TargetFilter, TypeFilter,
-    TypedFilter,
+    AbilityCost, AdditionalCost, Effect, QuantityExpr, TargetFilter, TypedFilter,
 };
+#[cfg(test)]
+use crate::types::ability::{ControllerRef, TypeFilter};
 use crate::types::keywords::{
     BloodthirstValue, BuybackCost, CyclingCost, FlashbackCost, Keyword, WardCost,
 };
@@ -361,65 +362,10 @@ fn parse_firebending_keyword_line(line: &str) -> Option<Keyword> {
     parse_cda_quantity(quantity_text).map(Keyword::Firebending)
 }
 
-/// Nom leaf combinator: match one of the six enchantable core types and yield
-/// the corresponding `TypeFilter`. Driven by `value()` + `alt()` so additional
-/// types slot in as one-line extensions.
-fn parse_enchant_type_leg(input: &str) -> nom::IResult<&str, TypeFilter, OracleError<'_>> {
-    alt((
-        value(TypeFilter::Creature, tag("creature")),
-        value(TypeFilter::Land, tag("land")),
-        value(TypeFilter::Artifact, tag("artifact")),
-        value(TypeFilter::Enchantment, tag("enchantment")),
-        value(TypeFilter::Planeswalker, tag("planeswalker")),
-        value(TypeFilter::Permanent, tag("permanent")),
-    ))
-    .parse(input)
-}
-
-/// Nom combinator: separator between enchant list legs. Covers serial-comma
-/// (", or "/", and "), bare comma (", "), and bare conjunction (" or "/" and ")
-/// forms so "A, B, or C", "A, B, C", and "A or B" all compose uniformly.
-fn parse_enchant_list_sep(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
-    value(
-        (),
-        alt((
-            tag(", or "),
-            tag(", and "),
-            tag(", "),
-            tag(" or "),
-            tag(" and "),
-        )),
-    )
-    .parse(input)
-}
-
-/// Nom combinator: parse a leg list with serial-comma or bare-conjunction
-/// separators. Returns the list in source order.
-fn parse_enchant_type_list(input: &str) -> nom::IResult<&str, Vec<TypeFilter>, OracleError<'_>> {
-    use nom::multi::many0;
-    use nom::sequence::preceded;
-
-    let (input, first) = parse_enchant_type_leg(input)?;
-    let (input, rest) =
-        many0(preceded(parse_enchant_list_sep, parse_enchant_type_leg)).parse(input)?;
-    let mut legs = Vec::with_capacity(rest.len() + 1);
-    legs.push(first);
-    legs.extend(rest);
-    Ok((input, legs))
-}
-
-/// Nom combinator: optional trailing controller clause. Ordered longest-first
-/// so "an opponent controls" isn't shadowed by "opponent controls".
-fn parse_enchant_controller_suffix(
-    input: &str,
-) -> nom::IResult<&str, ControllerRef, OracleError<'_>> {
-    alt((
-        value(ControllerRef::You, tag(" you control")),
-        value(ControllerRef::Opponent, tag(" an opponent controls")),
-        value(ControllerRef::Opponent, tag(" opponent controls")),
-    ))
-    .parse(input)
-}
+// Enchant combinators moved to `parser/oracle_nom/enchant.rs` so the MTGJSON
+// `FromStr` path (`types/keywords.rs::parse_enchant_target`) and this Oracle-
+// line parser compose against the same atoms.
+use super::oracle_nom::enchant::{parse_enchant_controller_suffix, parse_enchant_type_list};
 
 /// CR 303.4a + CR 702.5: Parse the Aura's "Enchant [types]" line into a single
 /// `Keyword::Enchant(TargetFilter)`. Multi-type lists ("Enchant creature, land,
@@ -620,6 +566,31 @@ fn parse_buyback_cost(cost_text: &str) -> Option<BuybackCost> {
     }
 }
 
+/// CR 702.74a: Parse an evoke cost following the em-dash separator
+/// (e.g., "evoke—exile a white card from your hand" on Solitude). Mirrors
+/// `parse_flashback_cost` / `parse_buyback_cost`: delegates to
+/// `parse_oracle_cost` so comma-separated parts compose into
+/// `AbilityCost::Composite`, and wraps the result in `EvokeCost::Mana` when
+/// it's a pure mana cost or `EvokeCost::NonMana` otherwise.
+fn parse_evoke_cost(cost_text: &str) -> Option<crate::types::keywords::EvokeCost> {
+    use crate::types::keywords::EvokeCost;
+    let trimmed = cost_text.trim().trim_end_matches('.').trim_end_matches(')');
+    let clean = opt(take_until::<_, _, OracleError<'_>>(" ("))
+        .parse(trimmed)
+        .map(|(_, before)| before.unwrap_or(trimmed))
+        .unwrap_or(trimmed)
+        .trim();
+    if clean.is_empty() {
+        return None;
+    }
+    let cost = super::oracle_cost::parse_oracle_cost(clean);
+    match cost {
+        AbilityCost::Mana { cost: mana_cost } => Some(EvokeCost::Mana(mana_cost)),
+        AbilityCost::Unimplemented { .. } => None,
+        other => Some(EvokeCost::NonMana(other)),
+    }
+}
+
 fn parse_cycling_cost(cost_text: &str) -> Option<CyclingCost> {
     let trimmed = cost_text.trim().trim_end_matches('.').trim_end_matches(')');
     // Strip reminder text in parentheses: take everything before the first " (".
@@ -774,6 +745,18 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("buyback\u{2014}").parse(text) {
         if let Some(bb_cost) = parse_buyback_cost(rest) {
             return Some(Keyword::Buyback(bb_cost));
+        }
+    }
+
+    // CR 702.74a + CR 601.2f-h: Evoke with em-dash cost — covers non-mana
+    // alternative costs ("evoke—exile a white card from your hand" on the MH2
+    // Incarnations: Solitude, Endurance, Grief, Subtlety, Fury) and the
+    // forward-compatible compound shape (mana + non-mana). Pure-mana evoke
+    // ("Evoke {3}{U}", original Lorwyn cycle) arrives via MTGJSON's keywords
+    // array and is handled by the `FromStr` path above.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("evoke\u{2014}").parse(text) {
+        if let Some(ev_cost) = parse_evoke_cost(rest) {
+            return Some(Keyword::Evoke(ev_cost));
         }
     }
 
@@ -2255,6 +2238,64 @@ mod tests {
         let kw = parse_keyword_from_oracle("flashback {3}{g}").unwrap();
         let Keyword::Flashback(FlashbackCost::Mana(_)) = kw else {
             panic!("expected FlashbackCost::Mana, got {:?}", kw);
+        };
+    }
+
+    /// CR 702.74a + CR 118.9: MH2 Incarnation evoke ("Evoke—Exile a [color]
+    /// card from your hand.") parses into `EvokeCost::NonMana(Exile{..})`.
+    /// Discriminator for #580: pre-fix `parse_keyword_from_oracle` returns
+    /// `None` for this line (no `evoke—` arm); post-fix returns the typed
+    /// non-mana cost so the runtime can surface the alt-cast prompt.
+    #[test]
+    fn parse_keyword_from_oracle_evoke_exile_white_card_from_hand() {
+        use crate::types::ability::FilterProp;
+        use crate::types::keywords::EvokeCost;
+        use crate::types::mana::ManaColor;
+        use crate::types::zones::Zone;
+
+        let kw =
+            parse_keyword_from_oracle("evoke\u{2014}exile a white card from your hand.").unwrap();
+        let Keyword::Evoke(EvokeCost::NonMana(AbilityCost::Exile {
+            count,
+            zone,
+            filter,
+        })) = kw
+        else {
+            panic!("expected Evoke(NonMana(Exile)), got {:?}", kw);
+        };
+        assert_eq!(count, 1u32);
+        assert_eq!(zone, Some(Zone::Hand));
+        // The filter must carry a White color property — verifies Solitude's
+        // "white card" Oracle subject mapped through to the typed filter.
+        let filter = filter.expect("expected a card-color filter");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {:?}", filter);
+        };
+        assert!(
+            typed.properties.iter().any(|p| {
+                matches!(
+                    p,
+                    FilterProp::HasColor {
+                        color: ManaColor::White
+                    }
+                )
+            }),
+            "expected a HasColor(White) property on the exile filter, got {:?}",
+            typed.properties,
+        );
+    }
+
+    /// CR 702.74a regression: pure-mana Evoke ({2}{U} Mulldrifter-class) must
+    /// continue to flow through the `FromStr` ingestion path and produce
+    /// `EvokeCost::Mana`. Guarantees the EvokeCost lift is compatible with
+    /// the legacy Lorwyn evoke serialization.
+    #[test]
+    fn from_str_evoke_pure_mana_unchanged() {
+        use crate::types::keywords::EvokeCost;
+        use std::str::FromStr;
+        let kw = Keyword::from_str("Evoke:2U").unwrap();
+        let Keyword::Evoke(EvokeCost::Mana(_)) = kw else {
+            panic!("expected Evoke(Mana), got {:?}", kw);
         };
     }
 

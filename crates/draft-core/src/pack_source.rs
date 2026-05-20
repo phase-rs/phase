@@ -1,9 +1,26 @@
-use crate::types::{DraftCardInstance, DraftPack};
+use crate::types::{DraftCardInstance, DraftConfig, DraftError, DraftPack};
 
 /// Abstraction for pack generation. Phase 53 provides FixturePackSource for testing.
 /// Phase 54 provides MtgjsonPackSource backed by draft-pools.json.
 pub trait PackSource {
     fn generate_pack(&self, rng: &mut dyn rand::RngCore, seat: u8, pack_number: u8) -> DraftPack;
+
+    fn generate_packs(
+        &self,
+        rng: &mut dyn rand::RngCore,
+        config: &DraftConfig,
+        seat_count: u8,
+    ) -> Result<Vec<Vec<DraftPack>>, DraftError> {
+        let mut packs = Vec::with_capacity(seat_count as usize);
+        for seat in 0..seat_count {
+            let mut seat_packs = Vec::with_capacity(config.pack_count as usize);
+            for pack_num in 0..config.pack_count {
+                seat_packs.push(self.generate_pack(rng, seat, pack_num));
+            }
+            packs.push(seat_packs);
+        }
+        Ok(packs)
+    }
 }
 
 /// Test fixture that generates packs with predictable card names.

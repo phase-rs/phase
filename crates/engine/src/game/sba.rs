@@ -646,7 +646,7 @@ fn check_unattached_auras(
             // SBAs run, an Aura with no host genuinely has no host.
             let unattached = match obj.attached_to {
                 Some(crate::game::game_object::AttachTarget::Object(t)) => {
-                    !is_valid_attachment_target(state, t)
+                    !is_valid_attachment_target(state, id, t)
                 }
                 Some(crate::game::game_object::AttachTarget::Player(pid)) => {
                     !is_player_in_game(state, pid)
@@ -710,7 +710,7 @@ fn check_unattached_equipment(state: &mut GameState, any_performed: &mut bool) {
                         // CR 301.5: Equipment must attach to an object;
                         // illegal-target check applies.
                         Some(crate::game::game_object::AttachTarget::Object(t)) => {
-                            !is_valid_attachment_target(state, t)
+                            !is_valid_attachment_target(state, *id, t)
                         }
                         // CR 704.5n: Equipment attached to a player is always illegal.
                         Some(crate::game::game_object::AttachTarget::Player(_)) => true,
@@ -1150,15 +1150,83 @@ fn check_token_cease_to_exist(state: &mut GameState, any_performed: &mut bool) {
     }
 }
 
+/// CR 303.4c: An Aura is enchanting an illegal object or player when its
+/// enchant ability (and other applicable effects) does not admit the host.
+/// The Aura's `Keyword::Enchant(filter)` is the single authority — exactly
+/// the same `matches_target_filter` predicate the cast-time path
+/// (`game/casting.rs` Aura branch) uses to enumerate legal targets, so
+/// cast-legality and SBA-legality cannot drift.
+///
+/// CR 702.5a: When the Enchant filter does not name a non-battlefield zone
+/// (every standard Aura: Pacifism, Rancor, etc.), legality additionally
+/// requires the host to be on the battlefield — this is the implicit "an
+/// Aura attached to X" zone constraint from the rule's printed wording.
+/// When the filter explicitly names a zone (CR 303.4a — Animate Dead,
+/// Spellweaver Volute, Don't Worry About It), that zone IS the legal host
+/// zone and the battlefield default is suspended.
+///
+/// CR 301.5 + CR 702.6: Equipment carries no `Keyword::Enchant`, so legality
+/// reduces to the printed "on the battlefield" requirement.
 fn is_valid_attachment_target(
     state: &GameState,
+    attacher_id: crate::types::identifiers::ObjectId,
     target_id: crate::types::identifiers::ObjectId,
 ) -> bool {
-    state
-        .objects
-        .get(&target_id)
-        .map(|obj| obj.zone == Zone::Battlefield)
-        .unwrap_or(false)
+    let Some(attacher) = state.objects.get(&attacher_id) else {
+        return false;
+    };
+    let Some(target) = state.objects.get(&target_id) else {
+        return false;
+    };
+    let enchant_filter = attacher.keywords.iter().find_map(|k| match k {
+        crate::types::keywords::Keyword::Enchant(f) => Some(f),
+        _ => None,
+    });
+    let Some(filter) = enchant_filter else {
+        // Equipment / non-Enchant attacher: only the battlefield is a legal host.
+        return target.zone == Zone::Battlefield;
+    };
+
+    // CR 702.5a battlefield default: if the filter does not opt into a
+    // non-battlefield zone via `FilterProp::InZone`, the host must be on the
+    // battlefield. Mirrors the cast-time `extract_explicit_zones` branch in
+    // `game::targeting::find_legal_targets`.
+    let allowed_zones = explicit_enchant_zones(filter);
+    if allowed_zones.is_empty() {
+        if target.zone != Zone::Battlefield {
+            return false;
+        }
+    } else if !allowed_zones.contains(&target.zone) {
+        return false;
+    }
+
+    let ctx = crate::game::filter::FilterContext::from_source_with_controller(
+        attacher_id,
+        attacher.controller,
+    );
+    crate::game::filter::matches_target_filter(state, target_id, filter, &ctx)
+}
+
+/// CR 303.4a: Collect every `FilterProp::InZone` zone reachable through the
+/// `TargetFilter` AST. Mirrors `game::targeting::extract_explicit_zones`; kept
+/// private here so the SBA helper does not depend on a `pub(crate)` lift in
+/// the targeting module.
+fn explicit_enchant_zones(filter: &crate::types::ability::TargetFilter) -> Vec<Zone> {
+    use crate::types::ability::{FilterProp, TargetFilter, TypedFilter};
+    match filter {
+        TargetFilter::Typed(TypedFilter { properties, .. }) => properties
+            .iter()
+            .filter_map(|p| match p {
+                FilterProp::InZone { zone } => Some(*zone),
+                _ => None,
+            })
+            .collect(),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().flat_map(explicit_enchant_zones).collect()
+        }
+        TargetFilter::Not { filter } => explicit_enchant_zones(filter),
+        _ => vec![],
+    }
 }
 
 /// CR 303.4c: A player has "left the game" when they are eliminated. Multiplayer
@@ -1397,6 +1465,205 @@ mod tests {
 
         assert!(!state.battlefield.contains(&aura_id));
         assert!(state.players[0].graveyard.contains(&aura_id));
+    }
+
+    /// Issue #537 SBA SHAPE test (5d) — **explicitly labeled SHAPE**: this
+    /// test constructs the post-resolution state by hand (Aura on battlefield
+    /// attached to a graveyard creature) and asserts the SBA helper accepts
+    /// it. It does NOT drive the cast → resolve pipeline; see
+    /// `sba_animate_dead_pipeline_aura_survives_after_etb` for the runtime
+    /// sibling.
+    ///
+    /// CR 303.4c: SBA legality is defined by the Aura's enchant filter, not
+    /// by a hardcoded `zone == Battlefield` predicate. Pre-fix, the helper
+    /// would have moved this Aura to the graveyard because the host is not
+    /// on the battlefield.
+    #[test]
+    fn sba_shape_aura_with_graveyard_enchant_filter_survives() {
+        use crate::types::ability::{FilterProp, TargetFilter, TypedFilter};
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup();
+        // The Aura on the battlefield with zone-aware Enchant filter.
+        let aura_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Animate Dead".to_string(),
+            Zone::Battlefield,
+        );
+        let host_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let host = state.objects.get_mut(&host_id).unwrap();
+            host.card_types.core_types.push(CoreType::Creature);
+        }
+        {
+            let aura = state.objects.get_mut(&aura_id).unwrap();
+            aura.card_types.core_types.push(CoreType::Enchantment);
+            aura.card_types.subtypes.push("Aura".to_string());
+            aura.keywords.push(Keyword::Enchant(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                }]),
+            )));
+            aura.attached_to = Some(host_id.into());
+        }
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        // CR 303.4c: graveyard host is legal per the Aura's enchant filter,
+        // so the Aura must remain on the battlefield (NOT moved to graveyard
+        // by the unattached-Aura SBA).
+        assert!(
+            state.battlefield.contains(&aura_id),
+            "Aura with zone-aware enchant filter must survive SBA when attached to a legal graveyard host"
+        );
+        assert!(!state.players[0].graveyard.contains(&aura_id));
+    }
+
+    /// Issue #537 runtime pipeline test (5e) — sibling to the 5d SHAPE test.
+    /// Drives the **cast pipeline** end-to-end (`handle_cast_spell` →
+    /// `find_legal_targets` over the MTGJSON-parsed Enchant keyword), then
+    /// runs the **SBA pipeline** (`check_state_based_actions`) against the
+    /// post-attachment state. This proves the parser fix threads correctly
+    /// through both pipelines.
+    ///
+    /// NOTE: Animate Dead's ETB-trigger reanimation (returning the graveyard
+    /// creature, then re-attaching) is OUT OF SCOPE per #537's plan. The
+    /// stack resolver's `validate_targets_in_chain`
+    /// (`ability_utils.rs:848-856`) filters object targets to the battlefield
+    /// for `Effect::Unimplemented`-placeholder Auras, which would fizzle the
+    /// Aura. To exercise the SBA helper against a legal graveyard host, the
+    /// attachment that a complete reanimation pipeline would create is spliced
+    /// in directly; the SBA helper then runs against the same shape it would
+    /// in the real pipeline. CR 117.5 / 704.3: SBAs run before priority;
+    /// CR 303.4c: legality is defined by the Aura's enchant filter, not a
+    /// hardcoded battlefield-only predicate.
+    #[test]
+    fn sba_animate_dead_pipeline_aura_survives_after_etb() {
+        use crate::game::casting::handle_cast_spell;
+        use crate::types::ability::TargetRef;
+        use crate::types::game_state::{StackEntryKind, WaitingFor};
+        use crate::types::identifiers::CardId;
+        use crate::types::keywords::Keyword;
+        use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+        use std::str::FromStr;
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        // Aura in hand, parsed through the MTGJSON FromStr path.
+        let aura_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Animate Dead".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&aura_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.keywords
+                .push(Keyword::from_str("Enchant:creature card in a graveyard").unwrap());
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 0,
+            };
+        }
+
+        // Add one black mana so the cast can be paid.
+        state.players[0].mana_pool.add(ManaUnit {
+            color: ManaType::Black,
+            source_id: crate::types::identifiers::ObjectId(0),
+            snow: false,
+            source_could_produce_two_or_more_colors: false,
+            restrictions: Vec::new(),
+            grants: vec![],
+            expiry: None,
+        });
+        // Creature card in opponent's graveyard.
+        let creature_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&creature_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // Cast: should auto-target the only legal graveyard creature.
+        let mut events = Vec::new();
+        let result =
+            handle_cast_spell(&mut state, PlayerId(0), aura_id, CardId(1), &mut events).unwrap();
+        assert!(
+            matches!(result, WaitingFor::Priority { .. }),
+            "expected cast to auto-target onto stack; got {result:?}"
+        );
+        assert_eq!(state.stack.len(), 1);
+
+        // Verify the cast recorded the cross-zone target on the stack.
+        let entry = state.stack.front().unwrap().clone();
+        let target = if let StackEntryKind::Spell {
+            ability: Some(ref a),
+            ..
+        } = entry.kind
+        {
+            a.targets
+                .iter()
+                .find_map(|t| match t {
+                    TargetRef::Object(id) => Some(*id),
+                    _ => None,
+                })
+                .expect("Aura cast must record an Object target")
+        } else {
+            panic!("expected Spell entry");
+        };
+        assert_eq!(target, creature_id);
+
+        // Splice in the post-ETB state (out-of-scope reanimation pipeline):
+        // Aura on the battlefield, attached to the graveyard-hosted creature
+        // card. This is the shape the SBA helper must accept.
+        state.players[0].hand.retain(|&id| id != aura_id);
+        state.stack.clear();
+        {
+            let obj = state.objects.get_mut(&aura_id).unwrap();
+            obj.zone = Zone::Battlefield;
+            obj.attached_to = Some(creature_id.into());
+        }
+        state.battlefield.push_back(aura_id);
+
+        // Pipeline 2: drive SBAs. With the zone-aware Enchant filter
+        // (CR 303.4c), the helper sees the graveyard host as legal and does
+        // NOT yank the Aura. CR 117.5 / 704.3: SBAs run as a single event.
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            state.battlefield.contains(&aura_id),
+            "Aura must survive SBA pass when attached to a creature card whose \
+             zone matches its zone-aware Enchant filter (CR 303.4c + 117.5)"
+        );
+        assert!(!state.players[0].graveyard.contains(&aura_id));
     }
 
     #[test]

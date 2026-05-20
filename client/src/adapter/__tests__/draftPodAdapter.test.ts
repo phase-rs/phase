@@ -95,6 +95,8 @@ function mockView(status: string): DraftPlayerView {
     seats: [],
     cards_per_pack: 14,
     pack_count: 3,
+    min_deck_size: 40,
+    addable_cards: ["Plains", "Island", "Swamp", "Mountain", "Forest"],
     timer_remaining_ms: null,
     standings: [],
     current_round: 0,

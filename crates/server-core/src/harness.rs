@@ -4,8 +4,8 @@
 use crate::draft_session::DraftSessionManager;
 use draft_core::pack_source::FixturePackSource;
 use draft_core::types::{
-    DraftAction, DraftConfig, DraftKind, DraftStatus, PodPolicy, SpectatorVisibility,
-    TournamentFormat,
+    DeckAddableCards, DraftAction, DraftConfig, DraftKind, DraftSource, DraftStatus, PodPolicy,
+    SpectatorVisibility, TournamentFormat,
 };
 use draft_core::view::DraftPlayerView;
 
@@ -27,10 +27,16 @@ impl TournamentHarness {
     pub fn new_premier_draft() -> Self {
         let mut manager = DraftSessionManager::new();
         let config = DraftConfig {
+            source: DraftSource::Set {
+                code: "TST".to_string(),
+            },
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,
+            pod_size: 8,
             cards_per_pack: 14,
             pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
             rng_seed: 42,
             tournament_format: TournamentFormat::Swiss,
             pod_policy: PodPolicy::Competitive,

@@ -14789,6 +14789,19 @@ fn compute_sentence_where_x(chunks: &[ClauseChunk]) -> Vec<Option<String>> {
             group_start = idx + 1;
         }
     }
+    // CR 107.3i: Normally, all instances of X on an object have the same value
+    // at any given time. The first pass binds per-sentence-group; this second
+    // pass forward-fills subsequent sentences with no own binding so X
+    // references in later sentences (e.g. Thassa's Oracle's "If X is greater
+    // than or equal to the number of cards in your library, ...") resolve to
+    // the earlier binding. A later sentence with its own binding shadows.
+    let mut current: Option<String> = None;
+    for slot in out.iter_mut() {
+        match slot {
+            Some(_) => current = slot.clone(),
+            None => *slot = current.clone(),
+        }
+    }
     out
 }
 
@@ -15112,6 +15125,13 @@ fn apply_where_x_to_filter_prop(prop: FilterProp, where_x_expression: Option<&st
 }
 
 fn apply_where_x_ability_expression(def: &mut AbilityDefinition, where_x_expression: Option<&str>) {
+    // CR 107.3i: All instances of X on an object share one value at any given
+    // time. Substitute X in this AbilityDefinition's condition before walking
+    // into effect/sub_ability/etc. The recursion below visits every chained
+    // SequentialSibling node, so each node's own `condition` is reached here.
+    if let Some(cond) = def.condition.as_mut() {
+        apply_where_x_ability_condition(cond, where_x_expression);
+    }
     if let Some(repeat_for) = def.repeat_for.take() {
         def.repeat_for = Some(apply_where_x_quantity_expression(
             repeat_for,
@@ -15132,6 +15152,32 @@ fn apply_where_x_ability_expression(def: &mut AbilityDefinition, where_x_express
     }
     for mode_ability in &mut def.mode_abilities {
         apply_where_x_ability_expression(mode_ability, where_x_expression);
+    }
+}
+
+/// CR 107.3i: Substitute the X binding into every quantity expression nested
+/// inside an `AbilityCondition`. Delegates leaf substitution to the existing
+/// `apply_where_x_quantity_expression`; recurses through compound arms
+/// (`And`/`Or`/`Not`/`ConditionInstead`). Leaf arms without quantity fields
+/// fall through to the no-op `_` arm.
+fn apply_where_x_ability_condition(cond: &mut AbilityCondition, where_x_expression: Option<&str>) {
+    match cond {
+        AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+            *lhs = apply_where_x_quantity_expression(lhs.clone(), where_x_expression);
+            *rhs = apply_where_x_quantity_expression(rhs.clone(), where_x_expression);
+        }
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            for c in conditions.iter_mut() {
+                apply_where_x_ability_condition(c, where_x_expression);
+            }
+        }
+        AbilityCondition::Not { condition } => {
+            apply_where_x_ability_condition(condition, where_x_expression);
+        }
+        AbilityCondition::ConditionInstead { inner } => {
+            apply_where_x_ability_condition(inner, where_x_expression);
+        }
+        _ => {}
     }
 }
 

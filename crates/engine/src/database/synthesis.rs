@@ -3936,10 +3936,13 @@ mod evoke_synthesis_tests {
 
     fn evoke_face() -> CardFace {
         let mut face = CardFace::default();
-        face.keywords.push(Keyword::Evoke(ManaCost::Cost {
-            shards: vec![ManaCostShard::Blue],
-            generic: 1,
-        }));
+        face.keywords
+            .push(Keyword::Evoke(crate::types::keywords::EvokeCost::Mana(
+                ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue],
+                    generic: 1,
+                },
+            )));
         face
     }
 

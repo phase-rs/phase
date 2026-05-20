@@ -3313,10 +3313,16 @@ async fn handle_client_message(
             );
 
             let config = draft_core::types::DraftConfig {
+                source: draft_core::types::DraftSource::Set {
+                    code: set_code.clone(),
+                },
                 set_code: set_code.clone(),
                 kind,
+                pod_size,
                 cards_per_pack: 14,
                 pack_count: 3,
+                min_deck_size: 40,
+                addable_cards: draft_core::types::DeckAddableCards::standard_basics(),
                 rng_seed: rand::random(),
                 tournament_format,
                 pod_policy,

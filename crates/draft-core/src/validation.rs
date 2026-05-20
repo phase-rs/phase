@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::types::DeckAddableCards;
+
 /// Standard basic land names that are always available in unlimited quantity.
 /// CR 100.2a: basic lands are exempt from copy limits. All cards with the
 /// Basic supertype are listed here (five originals, Wastes, and all
@@ -46,7 +48,7 @@ pub enum LimitedDeckError {
 pub fn validate_limited_deck(
     main_deck: &[String],
     pool: &[String],
-    basic_land_names: &[&str],
+    addable_cards: &DeckAddableCards,
     min_deck_size: usize,
 ) -> Result<(), Vec<LimitedDeckError>> {
     let mut errors = Vec::new();
@@ -73,8 +75,8 @@ pub fn validate_limited_deck(
 
     // 4. Validate each non-basic card against pool
     for (card_name, requested) in &deck_counts {
-        // Skip basic lands -- unlimited
-        if basic_land_names.iter().any(|b| b == card_name) {
+        // Skip configured addable cards -- unlimited
+        if addable_cards.is_addable(card_name) {
             continue;
         }
 
@@ -106,6 +108,10 @@ pub fn validate_limited_deck(
 mod tests {
     use super::*;
 
+    fn addable() -> DeckAddableCards {
+        DeckAddableCards::standard_basics()
+    }
+
     fn s(name: &str) -> String {
         name.to_string()
     }
@@ -118,14 +124,14 @@ mod tests {
     fn valid_40_card_deck() {
         let pool: Vec<String> = (0..45).map(|i| format!("Card {i}")).collect();
         let deck: Vec<String> = (0..40).map(|i| format!("Card {i}")).collect();
-        assert!(validate_limited_deck(&deck, &pool, STANDARD_BASIC_LANDS, 40).is_ok());
+        assert!(validate_limited_deck(&deck, &pool, &addable(), 40).is_ok());
     }
 
     #[test]
     fn too_few_cards() {
         let pool = pool_of(&["A", "B", "C"]);
         let deck = pool_of(&["A", "B", "C"]); // 3 cards, need 40
-        let result = validate_limited_deck(&deck, &pool, STANDARD_BASIC_LANDS, 40);
+        let result = validate_limited_deck(&deck, &pool, &addable(), 40);
         let errors = result.unwrap_err();
         assert!(errors.iter().any(|e| matches!(
             e,
@@ -141,7 +147,7 @@ mod tests {
         let pool: Vec<String> = (0..45).map(|i| format!("Card {i}")).collect();
         let mut deck: Vec<String> = (0..39).map(|i| format!("Card {i}")).collect();
         deck.push(s("Not In Pool"));
-        let result = validate_limited_deck(&deck, &pool, STANDARD_BASIC_LANDS, 40);
+        let result = validate_limited_deck(&deck, &pool, &addable(), 40);
         let errors = result.unwrap_err();
         assert!(errors.iter().any(|e| matches!(
             e,
@@ -157,7 +163,7 @@ mod tests {
         pool.push(s("Rare Card"));
         let mut deck: Vec<String> = (0..37).map(|i| format!("Card {i}")).collect();
         deck.extend([s("Rare Card"), s("Rare Card"), s("Rare Card")]);
-        let result = validate_limited_deck(&deck, &pool, STANDARD_BASIC_LANDS, 40);
+        let result = validate_limited_deck(&deck, &pool, &addable(), 40);
         let errors = result.unwrap_err();
         assert!(errors.iter().any(|e| matches!(
             e,
@@ -174,7 +180,7 @@ mod tests {
         deck.extend(std::iter::repeat_n(s("Plains"), 10));
         deck.extend(std::iter::repeat_n(s("Island"), 7));
         assert_eq!(deck.len(), 40);
-        assert!(validate_limited_deck(&deck, &pool, STANDARD_BASIC_LANDS, 40).is_ok());
+        assert!(validate_limited_deck(&deck, &pool, &addable(), 40).is_ok());
     }
 
     #[test]
@@ -183,14 +189,14 @@ mod tests {
         let mut deck: Vec<String> = (0..23).map(|i| format!("Card {i}")).collect();
         deck.extend(std::iter::repeat_n(s("Wastes"), 17));
         assert_eq!(deck.len(), 40);
-        assert!(validate_limited_deck(&deck, &pool, STANDARD_BASIC_LANDS, 40).is_ok());
+        assert!(validate_limited_deck(&deck, &pool, &addable(), 40).is_ok());
     }
 
     #[test]
     fn accumulates_multiple_errors() {
         let pool = pool_of(&["A"]);
         let deck = pool_of(&["A", "Not In Pool"]); // too few + not in pool
-        let result = validate_limited_deck(&deck, &pool, STANDARD_BASIC_LANDS, 40);
+        let result = validate_limited_deck(&deck, &pool, &addable(), 40);
         let errors = result.unwrap_err();
         assert!(
             errors.len() >= 2,
@@ -211,6 +217,6 @@ mod tests {
         pool.extend([s("Dupe"), s("Dupe")]);
         let mut deck: Vec<String> = (0..38).map(|i| format!("Card {i}")).collect();
         deck.extend([s("Dupe"), s("Dupe")]);
-        assert!(validate_limited_deck(&deck, &pool, STANDARD_BASIC_LANDS, 40).is_ok());
+        assert!(validate_limited_deck(&deck, &pool, &addable(), 40).is_ok());
     }
 }

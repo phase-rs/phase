@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use engine::types::match_config::{MatchConfig, MatchType};
 use engine::types::player::PlayerId;
 
-use crate::validation::LimitedDeckError;
+use crate::validation::{LimitedDeckError, STANDARD_BASIC_LANDS};
 
 /// Tournament pairing format for the draft event.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,8 +63,8 @@ pub enum DraftKind {
 }
 
 impl DraftKind {
-    /// Pod size is always 8 for all draft modes.
-    pub fn pod_size(self) -> u8 {
+    /// Default pod size for Arena-style drafts.
+    pub fn default_pod_size(self) -> u8 {
         8
     }
 
@@ -86,6 +86,81 @@ impl DraftKind {
                 match_type: MatchType::Bo3,
             },
         }
+    }
+}
+
+/// Origin of the draft card pool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum DraftSource {
+    Set { code: String },
+    Cube { id: String, name: String },
+}
+
+impl DraftSource {
+    pub fn set_code(&self) -> String {
+        match self {
+            DraftSource::Set { code } => code.clone(),
+            DraftSource::Cube { id, .. } => id.clone(),
+        }
+    }
+}
+
+impl Default for DraftSource {
+    fn default() -> Self {
+        DraftSource::Set {
+            code: "UNKNOWN".to_string(),
+        }
+    }
+}
+
+/// Which non-drafted cards are available in unlimited quantity while building
+/// a Limited deck.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeckAddableCardPolicy {
+    #[default]
+    StandardBasics,
+    CustomOnly,
+    StandardBasicsPlusCustom,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeckAddableCards {
+    pub policy: DeckAddableCardPolicy,
+    #[serde(default)]
+    pub custom: Vec<String>,
+}
+
+impl DeckAddableCards {
+    pub fn standard_basics() -> Self {
+        Self {
+            policy: DeckAddableCardPolicy::StandardBasics,
+            custom: Vec::new(),
+        }
+    }
+
+    pub fn is_addable(&self, name: &str) -> bool {
+        let standard = STANDARD_BASIC_LANDS.contains(&name);
+        let custom = self.custom.iter().any(|card| card == name);
+        match self.policy {
+            DeckAddableCardPolicy::StandardBasics => standard,
+            DeckAddableCardPolicy::CustomOnly => custom,
+            DeckAddableCardPolicy::StandardBasicsPlusCustom => standard || custom,
+        }
+    }
+
+    pub fn display_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        if matches!(
+            self.policy,
+            DeckAddableCardPolicy::StandardBasics | DeckAddableCardPolicy::StandardBasicsPlusCustom
+        ) {
+            names.extend(STANDARD_BASIC_LANDS.iter().map(|name| (*name).to_string()));
+        }
+        names.extend(self.custom.iter().cloned());
+        names.sort();
+        names.dedup();
+        names
     }
 }
 
@@ -246,15 +321,25 @@ pub enum DraftError {
     ValidationFailed { errors: Vec<LimitedDeckError> },
     #[error("pairing not found: {match_id}")]
     PairingNotFound { match_id: String },
+    #[error("draft source has {available} cards, but {required} cards are required")]
+    InsufficientCards { available: usize, required: usize },
 }
 
 /// Configuration for a draft session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DraftConfig {
+    #[serde(default)]
+    pub source: DraftSource,
     pub set_code: String,
     pub kind: DraftKind,
+    #[serde(default = "default_pod_size")]
+    pub pod_size: u8,
     pub cards_per_pack: u8,
     pub pack_count: u8,
+    #[serde(default = "default_min_deck_size")]
+    pub min_deck_size: usize,
+    #[serde(default = "DeckAddableCards::standard_basics")]
+    pub addable_cards: DeckAddableCards,
     pub rng_seed: u64,
     #[serde(default)]
     pub tournament_format: TournamentFormat,
@@ -262,6 +347,14 @@ pub struct DraftConfig {
     pub pod_policy: PodPolicy,
     #[serde(default)]
     pub spectator_visibility: SpectatorVisibility,
+}
+
+fn default_pod_size() -> u8 {
+    8
+}
+
+fn default_min_deck_size() -> usize {
+    40
 }
 
 /// A player's submitted deck for limited play.
@@ -329,10 +422,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn draft_kind_pod_size() {
-        assert_eq!(DraftKind::Quick.pod_size(), 8);
-        assert_eq!(DraftKind::Premier.pod_size(), 8);
-        assert_eq!(DraftKind::Traditional.pod_size(), 8);
+    fn draft_kind_default_pod_size() {
+        assert_eq!(DraftKind::Quick.default_pod_size(), 8);
+        assert_eq!(DraftKind::Premier.default_pod_size(), 8);
+        assert_eq!(DraftKind::Traditional.default_pod_size(), 8);
     }
 
     #[test]
