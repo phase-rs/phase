@@ -2580,6 +2580,29 @@ fn resolve_chain_body(
             // fixed `Mana { cost }` BEFORE entering the prompt — the runtime
             // payment site only handles static AbilityCost variants.
             let resolved_cost = match &unless_pay.cost {
+                AbilityCost::PerCounter {
+                    counter,
+                    target,
+                    base,
+                } => {
+                    // CR 702.24a + CR 702.24b: Count counters on `target` at
+                    // resolution time so multi-instance reads the post-tick
+                    // total.
+                    let n = match target {
+                        TargetFilter::SelfRef => state
+                            .objects
+                            .get(&ability.source_id)
+                            .map(|obj| obj.counters.get(counter).copied().unwrap_or(0))
+                            .unwrap_or(0),
+                        other => panic!(
+                            "PerCounter against non-SelfRef target {other:?} \
+                             is not currently produced by any cumulative-upkeep \
+                             card; extend the target resolution branch when a \
+                             second mechanic uses PerCounter."
+                        ),
+                    };
+                    expand_per_counter(base, n)
+                }
                 AbilityCost::ManaDynamic { quantity } => {
                     // CR 107.3a: thread ResolvedAbility.chosen_x so the announced
                     // X drives the unless-cost. The plain resolve_quantity path
@@ -3707,9 +3730,6 @@ fn resolve_unless_payers(
 /// `Fixed` is exercised by cumulative-upkeep cards in scope; dynamic
 /// quantity bases for the four supported cards do not exist in MTG.
 /// Adding support for additional variants is a single-arm extension.
-// Wired into the unless-payment resolution path in the next step; allow
-// dead_code so this lands cleanly as a pure-function helper unit.
-#[allow(dead_code)]
 fn multiply_quantity_expr(q: &QuantityExpr, n: u32) -> QuantityExpr {
     match q {
         QuantityExpr::Fixed { value } => QuantityExpr::Fixed {
@@ -3728,9 +3748,6 @@ fn multiply_quantity_expr(q: &QuantityExpr, n: u32) -> QuantityExpr {
 /// a zero mana cost (CR 118.5 — players can always pay 0). `OneOf`
 /// unfolds into a `Composite` of N independent disjunctive choices
 /// (CR 702.24a: each choice is made separately).
-// Wired into the unless-payment resolution path in the next step; allow
-// dead_code so this lands cleanly as a pure-function helper unit.
-#[allow(dead_code)]
 fn expand_per_counter(base: &AbilityCost, n: u32) -> AbilityCost {
     if n == 0 {
         return AbilityCost::Mana {
@@ -3746,7 +3763,7 @@ fn expand_per_counter(base: &AbilityCost, n: u32) -> AbilityCost {
         },
         AbilityCost::Sacrifice { target, count } => AbilityCost::Sacrifice {
             target: target.clone(),
-            count: count * n,
+            count: count.saturating_mul(n),
         },
         AbilityCost::OneOf { costs } => AbilityCost::Composite {
             costs: vec![
@@ -4663,7 +4680,20 @@ mod tests {
             panic!("expected Composite");
         };
         assert_eq!(costs.len(), 3);
-        assert!(costs.iter().all(|c| matches!(c, AbilityCost::OneOf { .. })));
+        for c in &costs {
+            match c {
+                AbilityCost::OneOf { costs: inner } => {
+                    assert_eq!(inner.len(), 2, "each OneOf must preserve both alternatives");
+                    assert!(inner.iter().all(|sub| matches!(
+                        sub,
+                        AbilityCost::Mana {
+                            cost: ManaCost::Cost { generic: 1, shards }
+                        } if shards.is_empty()
+                    )));
+                }
+                other => panic!("expected OneOf, got {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -4750,6 +4780,67 @@ mod tests {
                     *cost,
                     AbilityCost::Mana {
                         cost: ManaCost::generic(3),
+                    }
+                );
+            }
+            other => panic!("expected WaitingFor::UnlessPayment, got {other:?}"),
+        }
+    }
+
+    /// CR 702.24a + CR 702.24b: `AbilityCost::PerCounter` at the unless-payment
+    /// entry point reads the current counter total on the trigger source and
+    /// expands the base cost N-fold. With 3 age counters on the source and a
+    /// base of `{2}`, the player is prompted to pay `{6}`.
+    #[test]
+    fn unless_pay_per_counter_expands_against_source_counter_total() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        // CR 702.24b: source carries 3 age counters at upkeep resolution.
+        state
+            .objects
+            .get_mut(&source)
+            .expect("source object exists")
+            .counters
+            .insert(CounterType::Age, 3);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+            vec![TargetRef::Object(source)],
+            source,
+            PlayerId(0),
+        );
+        ability.unless_pay = Some(crate::types::ability::UnlessPayModifier {
+            cost: AbilityCost::PerCounter {
+                counter: CounterType::Age,
+                target: TargetFilter::SelfRef,
+                base: Box::new(AbilityCost::Mana {
+                    cost: ManaCost::generic(2),
+                }),
+            },
+            payer: TargetFilter::Controller,
+        });
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("unless-pay interceptor should arm a payment prompt");
+
+        match &state.waiting_for {
+            WaitingFor::UnlessPayment { player, cost, .. } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(
+                    *cost,
+                    AbilityCost::Mana {
+                        cost: ManaCost::generic(6),
                     }
                 );
             }
