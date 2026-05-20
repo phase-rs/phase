@@ -6,8 +6,8 @@ use nom::combinator::value;
 use nom::Parser;
 
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, Comparator, DieResultBranch, Effect, SolveCondition,
-    StaticDefinition, TargetFilter, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, Comparator, DieResultBranch, Effect,
+    SolveCondition, StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -379,24 +379,32 @@ pub(super) fn parse_cumulative_upkeep_keyword(line: &str) -> Option<Keyword> {
         .parse(i)
     });
     if let Some(((), rest)) = em_dash_rest {
-        let cost_text = strip_reminder_text(rest)
+        let _cost_text = strip_reminder_text(rest)
             .trim()
             .trim_end_matches('.')
             .to_string();
-        if !cost_text.is_empty() {
-            return Some(Keyword::CumulativeUpkeep(cost_text));
+        if !_cost_text.is_empty() {
+            return Some(Keyword::CumulativeUpkeep(
+                AbilityCost::Mana {
+                    cost: ManaCost::zero(),
+                }, // TODO Task 4: real parsing
+            ));
         }
     }
 
     let ((), rest) = nom_on_lower(line, &lower, |i| {
         value((), tag("cumulative upkeep ")).parse(i)
     })?;
-    let cost_text = strip_reminder_text(rest)
+    let _cost_text = strip_reminder_text(rest)
         .trim()
         .trim_end_matches('.')
         .to_string();
-    if cost_text.is_empty() {
+    if _cost_text.is_empty() {
         return None;
     }
-    Some(Keyword::CumulativeUpkeep(cost_text))
+    Some(Keyword::CumulativeUpkeep(
+        AbilityCost::Mana {
+            cost: ManaCost::zero(),
+        }, // TODO Task 4: real parsing
+    ))
 }
