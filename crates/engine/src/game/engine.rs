@@ -15435,6 +15435,188 @@ mod phase_trigger_regression_tests {
             "three age counters must have accumulated across three upkeeps"
         );
     }
+
+    /// Build the synthesized cumulative-upkeep trigger for "Cumulative upkeep
+    /// — Sacrifice a land" (Polar Kraken's sacrifice-cost variant) by delegating
+    /// to the production synthesizer. Mirrors `cumulative_upkeep_mana_trigger`
+    /// (which exercises the `Mana` arm of `expand_per_counter`); this helper
+    /// exercises the `Sacrifice` arm. Binding to the real builder ensures any
+    /// regression in `build_cumulative_upkeep_trigger`'s handling of a
+    /// non-Mana base cost (chained-ability ordering, PerCounter payer,
+    /// `.phase(Upkeep)` gating) breaks the Polar Kraken pipeline test loudly.
+    ///
+    /// CR 702.24a: cumulative upkeep cost format is `[cost]` where `[cost]`
+    /// may be any cost. Sacrifice-a-land is the canonical non-mana variant
+    /// (Polar Kraken, Phyrexian Soulgorger).
+    fn cumulative_upkeep_sacrifice_land_trigger() -> TriggerDefinition {
+        crate::database::synthesis::build_cumulative_upkeep_trigger(AbilityCost::Sacrifice {
+            target: TargetFilter::Typed(TypedFilter::land()),
+            count: 1,
+        })
+    }
+
+    /// Construct a solo state with Polar Kraken on the battlefield (controller
+    /// = PlayerId(0) = active player) plus three Forests for sacrifice fodder,
+    /// at Phase::Untap so `auto_advance` will fire the upkeep trigger. The
+    /// three-forest count is deliberate: the test sacrifices exactly one, and
+    /// the surviving two prove that `handle_unless_payment_sacrifice`'s
+    /// eligible-permanents collection didn't over-sacrifice or sacrifice the
+    /// wrong land.
+    ///
+    /// Returns `(state, kraken_id, [forest0, forest1, forest2])`.
+    fn setup_polar_kraken_upkeep_state() -> (GameState, ObjectId, Vec<ObjectId>) {
+        let mut state = new_game(42);
+        state.turn_number = 2;
+        state.phase = Phase::Untap;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let kraken = create_object(
+            &mut state,
+            CardId(7100),
+            PlayerId(0),
+            "Polar Kraken".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&kraken).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Kraken".to_string());
+            obj.trigger_definitions
+                .push(cumulative_upkeep_sacrifice_land_trigger());
+        }
+
+        let mut forests = Vec::with_capacity(3);
+        for i in 0..3 {
+            let forest = create_object(
+                &mut state,
+                CardId(7101 + i),
+                PlayerId(0),
+                "Forest".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&forest).unwrap();
+                obj.card_types.core_types.push(CoreType::Land);
+                obj.card_types.subtypes.push("Forest".to_string());
+            }
+            forests.push(forest);
+        }
+
+        (state, kraken, forests)
+    }
+
+    /// CR 702.24a + CR 118.12 + CR 701.21: Paying the cumulative-upkeep cost
+    /// via the sacrifice-a-land variant. At counter=1, the per-counter expansion
+    /// of `Sacrifice { Land, count: 1 }` yields `Sacrifice { Land, count: 1 }`
+    /// (1 × 1 = 1), and paying by sacrificing one of three controlled forests
+    /// keeps Polar Kraken on the battlefield with one forest in the graveyard
+    /// and two untouched. This is the structural-identity case for the
+    /// `Sacrifice` arm of `expand_per_counter` — Mystic Remora's three-upkeep
+    /// test already covers the multiplicative case for the `Mana` arm.
+    #[test]
+    fn polar_kraken_upkeep_sacrifice_cost_path() {
+        let (mut state, kraken_id, forest_ids) = setup_polar_kraken_upkeep_state();
+        advance_to_unless_payment_prompt(&mut state);
+
+        // CR 702.24a: outer AddCounter resolved first, so one age counter
+        // sits on the Kraken before the per-counter unless-cost is computed.
+        assert_eq!(
+            state.objects[&kraken_id]
+                .counters
+                .get(&crate::types::counter::CounterType::Age)
+                .copied(),
+            Some(1),
+            "age counter must be added before the unless-pay prompt"
+        );
+
+        // CR 118.12 + CR 702.24a: PerCounter expanded `Sacrifice { Land, 1 }`
+        // for 1 age counter to `Sacrifice { Land, 1 }` (1 × 1 = 1).
+        match &state.waiting_for {
+            WaitingFor::UnlessPayment { player, cost, .. } => {
+                assert_eq!(*player, PlayerId(0), "controller is the unless-payer");
+                match cost {
+                    AbilityCost::Sacrifice { target, count } => {
+                        assert_eq!(*count, 1, "1 age counter × base count 1 = 1");
+                        assert_eq!(
+                            *target,
+                            TargetFilter::Typed(TypedFilter::land()),
+                            "unless-cost target filter must remain Land"
+                        );
+                    }
+                    other => panic!("expected Sacrifice cost, got {other:?}"),
+                }
+            }
+            other => panic!("expected UnlessPayment prompt, got {other:?}"),
+        }
+
+        // CR 118.12 + CR 701.21: Pay → engine collects eligible controlled
+        // Lands and surfaces `WaitingFor::WardSacrificeChoice` for the player
+        // to pick which permanent to sacrifice.
+        let _ = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
+        match &state.waiting_for {
+            WaitingFor::WardSacrificeChoice {
+                player,
+                permanents,
+                remaining,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0), "controller picks the sacrifice");
+                assert_eq!(*remaining, 1, "exactly one sacrifice required");
+                assert_eq!(
+                    permanents.len(),
+                    3,
+                    "all three controlled forests must be eligible"
+                );
+                for fid in &forest_ids {
+                    assert!(
+                        permanents.contains(fid),
+                        "forest {fid:?} must be an eligible sacrifice"
+                    );
+                }
+            }
+            other => panic!("expected WardSacrificeChoice prompt, got {other:?}"),
+        }
+
+        // CR 701.21: Choose the first forest as the sacrifice victim.
+        let _ = apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![forest_ids[0]],
+            },
+        )
+        .unwrap();
+
+        // CR 702.24a: paying the cost keeps the permanent on the battlefield.
+        assert_eq!(
+            state.objects[&kraken_id].zone,
+            Zone::Battlefield,
+            "paying the cumulative-upkeep cost must NOT sacrifice the Kraken"
+        );
+        // CR 701.21a: To sacrifice a permanent, its controller moves it from
+        // the battlefield directly to its owner's graveyard.
+        assert_eq!(
+            state.objects[&forest_ids[0]].zone,
+            Zone::Graveyard,
+            "the chosen forest must be in the graveyard"
+        );
+        assert!(
+            state.players[0].graveyard.contains(&forest_ids[0]),
+            "graveyard must contain the sacrificed forest"
+        );
+        // The two unchosen forests stay on the battlefield — proves the
+        // sacrifice path didn't over-select.
+        assert_eq!(
+            state.objects[&forest_ids[1]].zone,
+            Zone::Battlefield,
+            "unchosen forest 1 must remain on the battlefield"
+        );
+        assert_eq!(
+            state.objects[&forest_ids[2]].zone,
+            Zone::Battlefield,
+            "unchosen forest 2 must remain on the battlefield"
+        );
+    }
 }
 
 #[cfg(test)]
