@@ -8681,7 +8681,7 @@ mod tests {
 
     #[test]
     fn parse_cumulative_upkeep_mana_cost() {
-        // CR 702.24: Mana-only cumulative upkeep — space-separated format.
+        // CR 702.24a: Mana-only cumulative upkeep — space-separated format.
         let r = parse(
             "Cumulative upkeep {1} (At the beginning of your upkeep, put an age counter on this permanent, then sacrifice it unless you pay its upkeep cost for each age counter on it.)",
             "Mystic Remora",
@@ -8695,22 +8695,19 @@ mod tests {
             .find(|k| matches!(k, Keyword::CumulativeUpkeep(_)));
         assert!(cu_kw.is_some(), "CumulativeUpkeep keyword not extracted");
         match cu_kw.unwrap() {
-            Keyword::CumulativeUpkeep(cost) => {
-                // Task 4 will refine this to assert the real parsed cost.
-                assert!(matches!(
-                    cost,
-                    AbilityCost::Mana {
-                        cost: ManaCost::Cost { generic: 0, .. }
-                    }
-                ));
+            Keyword::CumulativeUpkeep(AbilityCost::Mana {
+                cost: ManaCost::Cost { generic, shards },
+            }) => {
+                assert_eq!(*generic, 1);
+                assert!(shards.is_empty());
             }
-            _ => unreachable!(),
+            other => panic!("expected Mana({{1}}), got {other:?}"),
         }
     }
 
     #[test]
     fn parse_cumulative_upkeep_life_payment() {
-        // CR 702.24: Non-mana cost with em-dash separator.
+        // CR 702.24a: Non-mana cost with em-dash separator.
         let r = parse(
             "Cumulative upkeep\u{2014}Pay 2 life. (At the beginning of your upkeep, put an age counter on this permanent, then sacrifice it unless you pay its upkeep cost for each age counter on it.)",
             "Inner Sanctum",
@@ -8724,22 +8721,16 @@ mod tests {
             .find(|k| matches!(k, Keyword::CumulativeUpkeep(_)));
         assert!(cu_kw.is_some(), "CumulativeUpkeep keyword not extracted");
         match cu_kw.unwrap() {
-            Keyword::CumulativeUpkeep(cost) => {
-                // Task 4 will refine this to assert the real parsed cost.
-                assert!(matches!(
-                    cost,
-                    AbilityCost::Mana {
-                        cost: ManaCost::Cost { generic: 0, .. }
-                    }
-                ));
+            Keyword::CumulativeUpkeep(AbilityCost::PayLife { amount }) => {
+                assert_eq!(*amount, QuantityExpr::Fixed { value: 2 });
             }
-            _ => unreachable!(),
+            other => panic!("expected PayLife(2), got {other:?}"),
         }
     }
 
     #[test]
     fn parse_cumulative_upkeep_sacrifice() {
-        // CR 702.24: Sacrifice cost.
+        // CR 702.24a: Sacrifice cost.
         let r = parse(
             "Cumulative upkeep\u{2014}Sacrifice a land. (At the beginning of your upkeep, put an age counter on this permanent, then sacrifice it unless you pay its upkeep cost for each age counter on it.)",
             "Polar Kraken",
@@ -8753,22 +8744,21 @@ mod tests {
             .find(|k| matches!(k, Keyword::CumulativeUpkeep(_)));
         assert!(cu_kw.is_some(), "CumulativeUpkeep keyword not extracted");
         match cu_kw.unwrap() {
-            Keyword::CumulativeUpkeep(cost) => {
-                // Task 4 will refine this to assert the real parsed cost.
-                assert!(matches!(
-                    cost,
-                    AbilityCost::Mana {
-                        cost: ManaCost::Cost { generic: 0, .. }
-                    }
-                ));
+            Keyword::CumulativeUpkeep(AbilityCost::Sacrifice { target, count }) => {
+                assert_eq!(*count, 1);
+                // Target should be a typed filter (Land subtype filter).
+                assert!(
+                    matches!(target, TargetFilter::Typed(_)),
+                    "expected Typed Land filter, got {target:?}"
+                );
             }
-            _ => unreachable!(),
+            other => panic!("expected Sacrifice(Land, 1), got {other:?}"),
         }
     }
 
     #[test]
     fn parse_cumulative_upkeep_or_mana() {
-        // CR 702.24: "{G} or {W}" — alternative mana cost.
+        // CR 702.24a: "{G} or {W}" — disjunctive (alternative) mana cost.
         let r = parse(
             "Cumulative upkeep {G} or {W} (At the beginning of your upkeep, put an age counter on this permanent, then sacrifice it unless you pay its upkeep cost for each age counter on it.)",
             "Elephant Grass",
@@ -8782,17 +8772,70 @@ mod tests {
             .find(|k| matches!(k, Keyword::CumulativeUpkeep(_)));
         assert!(cu_kw.is_some(), "CumulativeUpkeep keyword not extracted");
         match cu_kw.unwrap() {
-            Keyword::CumulativeUpkeep(cost) => {
-                // Task 4 will refine this to assert the real parsed cost.
-                assert!(matches!(
-                    cost,
-                    AbilityCost::Mana {
-                        cost: ManaCost::Cost { generic: 0, .. }
-                    }
-                ));
+            Keyword::CumulativeUpkeep(AbilityCost::OneOf { costs }) => {
+                assert_eq!(costs.len(), 2);
+                for c in costs {
+                    assert!(
+                        matches!(c, AbilityCost::Mana { .. }),
+                        "expected each branch to be Mana, got {c:?}"
+                    );
+                }
             }
-            _ => unreachable!(),
+            other => panic!("expected OneOf with 2 Mana costs, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_two_cumulative_upkeep_instances_both_extracted() {
+        // CR 702.24b: A permanent can have multiple cumulative upkeep
+        // abilities. Each must surface as its own Keyword entry, AND each
+        // must carry its own typed cost so the synthesis pipeline produces
+        // independent triggers (not two copies of one cost).
+        let r = parse(
+            "Cumulative upkeep {1}\nCumulative upkeep\u{2014}Pay 1 life.",
+            "Test Two-Instance Permanent",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+        let cu_kws: Vec<_> = r
+            .extracted_keywords
+            .iter()
+            .filter(|k| matches!(k, Keyword::CumulativeUpkeep(_)))
+            .collect();
+        assert_eq!(
+            cu_kws.len(),
+            2,
+            "expected two CumulativeUpkeep keywords, got {cu_kws:?}"
+        );
+
+        // Order-independent check: one must be Mana{generic:1}, the other
+        // PayLife{Fixed:1}. A regression to zero-cost sentinels would fail
+        // both predicates.
+        let has_mana_one = cu_kws.iter().any(|k| {
+            matches!(
+                k,
+                Keyword::CumulativeUpkeep(AbilityCost::Mana {
+                    cost: ManaCost::Cost { generic: 1, shards },
+                }) if shards.is_empty()
+            )
+        });
+        let has_pay_life_one = cu_kws.iter().any(|k| {
+            matches!(
+                k,
+                Keyword::CumulativeUpkeep(AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                })
+            )
+        });
+        assert!(
+            has_mana_one,
+            "expected one CumulativeUpkeep(Mana({{1}})), got {cu_kws:?}"
+        );
+        assert!(
+            has_pay_life_one,
+            "expected one CumulativeUpkeep(PayLife(1)), got {cu_kws:?}"
+        );
     }
 
     #[test]

@@ -1,6 +1,8 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until};
 use nom::combinator::{all_consuming, map, rest, value};
+use nom::error::ParseError;
+use nom::multi::separated_list1;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -968,6 +970,53 @@ fn parse_life_equal_to_quantity_nom(
     Ok((i, QuantityRef::ColorsInCommandersColorIdentity))
 }
 
+/// CR 702.24a: Parse a sequence of mana costs separated by " or ", e.g.,
+/// `"{G} or {W}"` for Elephant Grass-style cumulative upkeep, or `"{1}{R} or
+/// {2}{B}"` for hybrid alternatives. Returns `Some(Vec<ManaCost>)` only when at
+/// least two alternatives are present — a single mana cost is *not* a
+/// disjunction and should fall through to the caller's plain mana-cost branch.
+///
+/// This is a building block for any disjunctive mana cost (cumulative upkeep,
+/// kicker, additional cost, alternative cost) — not just cumulative upkeep.
+///
+/// Implementation: `separated_list1(tag(" or "), parse_mana_cost_nom)` with a
+/// trailing `all_consuming` guard. `parse_mana_cost_nom` is a nom-compatible
+/// wrapper over the legacy `parse_mana_symbols` helper (which returns
+/// `Option<(ManaCost, &str)>` rather than an `IResult`).
+pub(crate) fn parse_or_separated_mana_costs(
+    text: &str,
+) -> Option<Vec<crate::types::mana::ManaCost>> {
+    let (_, costs) = all_consuming(separated_list1(
+        tag::<_, _, super::oracle_nom::error::OracleError<'_>>(" or "),
+        parse_mana_cost_nom,
+    ))
+    .parse(text.trim())
+    .ok()?;
+    if costs.len() < 2 {
+        None
+    } else {
+        Some(costs)
+    }
+}
+
+/// Nom-compatible wrapper over `parse_mana_symbols`. Consumes a single
+/// brace-delimited mana cost (`{G}`, `{2}{U}`, etc.) and returns the parsed
+/// `ManaCost` plus the remaining input. Fails as a nom error if the input
+/// doesn't start with a mana symbol.
+fn parse_mana_cost_nom(
+    input: &str,
+) -> super::oracle_nom::error::OracleResult<'_, crate::types::mana::ManaCost> {
+    match parse_mana_symbols(input) {
+        Some((cost, rest)) => Ok((rest, cost)),
+        None => Err(nom::Err::Error(
+            super::oracle_nom::error::OracleError::from_error_kind(
+                input,
+                nom::error::ErrorKind::Tag,
+            ),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -977,6 +1026,41 @@ mod tests {
     #[test]
     fn cost_tap() {
         assert_eq!(parse_oracle_cost("{T}"), AbilityCost::Tap);
+    }
+
+    // CR 702.24a: `parse_or_separated_mana_costs` building-block tests.
+    // Covers disjunctive mana costs used by cumulative upkeep, kicker
+    // alternatives, and any other "{X} or {Y}" mana cost class.
+
+    #[test]
+    fn parse_or_separated_mana_costs_two_alternatives() {
+        let r = parse_or_separated_mana_costs("{G} or {W}").unwrap();
+        assert_eq!(r.len(), 2);
+    }
+
+    #[test]
+    fn parse_or_separated_mana_costs_single_returns_none() {
+        assert!(parse_or_separated_mana_costs("{G}").is_none());
+    }
+
+    #[test]
+    fn parse_or_separated_mana_costs_three_alternatives() {
+        let r = parse_or_separated_mana_costs("{G} or {W} or {U}").unwrap();
+        assert_eq!(r.len(), 3);
+    }
+
+    #[test]
+    fn parse_or_separated_mana_costs_multi_symbol_costs() {
+        // CR 702.24a: alternatives can be multi-symbol, not just single pips.
+        let r = parse_or_separated_mana_costs("{1}{R} or {2}{B}").unwrap();
+        assert_eq!(r.len(), 2);
+    }
+
+    #[test]
+    fn parse_or_separated_mana_costs_trailing_text_rejected() {
+        // Trailing non-mana text must cause the helper to return None so the
+        // caller can fall through to a more general parser.
+        assert!(parse_or_separated_mana_costs("{G} or {W} and pay 1 life").is_none());
     }
 
     #[test]
