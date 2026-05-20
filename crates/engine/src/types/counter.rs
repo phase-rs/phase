@@ -32,6 +32,12 @@ pub enum CounterType {
     /// removed, the suspend "play it without paying its mana cost" trigger fires
     /// (CR 702.62a) or the Vanishing sacrifice trigger fires (CR 702.63a).
     Time,
+    /// CR 702.24a + CR 122.1a: Age counters track Cumulative Upkeep
+    /// duration. Each cumulative-upkeep trigger places one at the start
+    /// of its controller's upkeep, and the cost is multiplied by the
+    /// total age-counter count on the permanent at resolution time
+    /// (CR 702.24b).
+    Age,
     /// CR 122.1b: A keyword counter grants its keyword to the permanent (flying,
     /// first strike, deathtouch, lifelink, ...). Uses the parameterless
     /// `KeywordKind` discriminant — keyword counters never carry parameters
@@ -75,6 +81,7 @@ impl CounterType {
             CounterType::Stun => Cow::Borrowed("stun"),
             CounterType::Lore => Cow::Borrowed("lore"),
             CounterType::Time => Cow::Borrowed("time"),
+            CounterType::Age => Cow::Borrowed("age"),
             CounterType::Keyword(kind) => KEYWORD_COUNTERS
                 .iter()
                 .find(|(_, k)| k == kind)
@@ -95,6 +102,7 @@ impl CounterType {
             | CounterType::Stun
             | CounterType::Lore
             | CounterType::Time
+            | CounterType::Age
             | CounterType::Keyword(_)
             | CounterType::Generic(_) => None,
         }
@@ -159,6 +167,7 @@ pub fn parse_counter_type(text: &str) -> CounterType {
         "stun" => CounterType::Stun,
         "lore" | "LORE" => CounterType::Lore,
         "time" | "TIME" => CounterType::Time,
+        "age" => CounterType::Age,
         other => parse_parameterized_or_named_counter_type(other),
     }
 }
@@ -275,5 +284,16 @@ mod tests {
             .unwrap(),
             "\"-1/-0\""
         );
+    }
+
+    #[test]
+    fn age_counter_serializes_as_age_and_round_trips() {
+        let c = CounterType::Age;
+        assert_eq!(c.as_str().as_ref(), "age");
+        let json = serde_json::to_string(&c).unwrap();
+        assert_eq!(json, "\"age\"");
+        let back: CounterType = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, CounterType::Age);
+        assert_eq!(c.power_toughness_delta(), None);
     }
 }

@@ -7915,7 +7915,7 @@ mod tests {
                             },
                     }),
                 ..
-            } => assert_eq!(*ct, CounterType::Generic("age".to_string())),
+            } => assert_eq!(*ct, CounterType::Age),
             other => panic!("expected PreventDamage with dynamic age counters, got {other:?}"),
         }
         assert!(

@@ -1422,7 +1422,7 @@ mod tests {
             QuantityRef::CountersOn {
                 scope: ObjectScope::Source,
                 counter_type: Some(ref counter_type),
-            } => assert_eq!(*counter_type, CounterType::Generic("age".to_string())),
+            } => assert_eq!(*counter_type, CounterType::Age),
             other => panic!("Expected CountersOn{{Source, age}}, got {other:?}"),
         }
     }
