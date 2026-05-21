@@ -1404,7 +1404,10 @@ mod tests {
         else {
             panic!("expected PutCounter, got {effect:?}");
         };
-        assert_eq!(counter_type, CounterType::Keyword(KeywordKind::DoubleStrike));
+        assert_eq!(
+            counter_type,
+            CounterType::Keyword(KeywordKind::DoubleStrike)
+        );
         assert_eq!(count, QuantityExpr::Fixed { value: 1 });
         let TargetFilter::Typed(tf) = target else {
             panic!("expected Typed filter, got {target:?}");

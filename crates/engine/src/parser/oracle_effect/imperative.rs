@@ -8561,8 +8561,9 @@ mod tests {
         use crate::types::counter::CounterType;
         use crate::types::keywords::KeywordKind;
         let mut ctx = ParseContext::default();
-        let effect = try_parse_that_many_counters("put that many double strike counters on it", &mut ctx)
-            .expect("clause should parse");
+        let effect =
+            try_parse_that_many_counters("put that many double strike counters on it", &mut ctx)
+                .expect("clause should parse");
         match effect {
             Effect::PutCounter {
                 counter_type,
