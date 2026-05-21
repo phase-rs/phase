@@ -68,6 +68,17 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // CR 107.4f: PayLifeAsColoredMana carries the `ManaColor` axis
             // (K'rrik = Black; future printings any other color).
             | StaticMode::PayLifeAsColoredMana { .. }
+            // CR 614.1b + CR 614.10: SkipStep carries the `Phase` discriminant
+            // (Draw, Untap, Upkeep, etc.). Runtime enforcement is in
+            // turns.rs::should_skip_step_static(). Coverage support is via
+            // is_data_carrying_static() because the variant is parameterized
+            // and the registry uses exact-key lookup.
+            | StaticMode::SkipStep { .. }
+            // CR 614.1b + CR 614.10: RevealTopOfLibrary carries `all_players`.
+            // Runtime enforcement is in casting.rs::top_of_library_permission_source()
+            // and turns.rs::should_skip_draw(). Coverage support via
+            // is_data_carrying_static() because the variant is parameterized.
+            | StaticMode::RevealTopOfLibrary { .. }
     )
 }
 
@@ -6283,6 +6294,11 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 effective_lower.contains("as though those creatures had haste")
                     || effective_lower.contains("as though that creature had haste")
             }
+            // CR 614.1b + CR 614.10: "Skip your [step] step" — replacement effect.
+            // Matches any "skip your ... step" Oracle line.
+            StaticMode::SkipStep { .. } => {
+                effective_lower.contains("skip your ") && effective_lower.contains(" step")
+            }
             _ => false,
         });
 
@@ -9193,6 +9209,58 @@ mod tests {
             support,
             FeatureSupport::Handled,
             "StaticCondition::UnlessPay is resolved by combat-tax payment handling",
+        );
+    }
+
+    /// CR 614.1b + CR 614.10: `SkipStep { step: Draw }` must be recognised by
+    /// `is_data_carrying_static` so that cards like Necropotence and
+    /// Yawgmoth's Bargain are marked as supported.
+    #[test]
+    fn skip_draw_step_static_does_not_count_as_silent_drop() {
+        use crate::types::phase::Phase;
+        let mut face = make_face();
+        let oracle = "Skip your draw step.";
+        face.oracle_text = Some(oracle.to_string());
+        face.static_abilities.push(StaticDefinition {
+            mode: StaticMode::SkipStep { step: Phase::Draw },
+            affected: Some(TargetFilter::SelfRef),
+            modifications: vec![],
+            condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            active_zones: vec![],
+            characteristic_defining: false,
+            description: Some("Skip your draw step.".to_string()),
+        });
+
+        assert!(
+            audit_card_lines(oracle, &face).is_empty(),
+            "'Skip your draw step.' should be covered by SkipStep(Draw) static"
+        );
+    }
+
+    /// Regression: `SkipStep { step: Untap }` must also be recognised.
+    #[test]
+    fn skip_untap_step_static_does_not_count_as_silent_drop() {
+        use crate::types::phase::Phase;
+        let mut face = make_face();
+        let oracle = "Skip your untap step.";
+        face.oracle_text = Some(oracle.to_string());
+        face.static_abilities.push(StaticDefinition {
+            mode: StaticMode::SkipStep { step: Phase::Untap },
+            affected: Some(TargetFilter::SelfRef),
+            modifications: vec![],
+            condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            active_zones: vec![],
+            characteristic_defining: false,
+            description: Some("Skip your untap step.".to_string()),
+        });
+
+        assert!(
+            audit_card_lines(oracle, &face).is_empty(),
+            "'Skip your untap step.' should be covered by SkipStep(Untap) static"
         );
     }
 }
