@@ -2159,7 +2159,7 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     // re-enumerating the cross-product.
     if all_consuming((
         alt((tag::<_, _, OracleError<'_>>("can't "), tag("cannot "))),
-        tag("play lands"),
+        alt((tag("play lands"), tag("play land cards"))),
     ))
     .parse(lower)
     .is_ok()
@@ -3105,6 +3105,17 @@ mod tests {
             parse_restriction_modes("cannot lose life"),
             Some(vec![StaticMode::CantLoseLife])
         );
+    }
+
+    // CR 305.1: "can't play lands" and "can't play land cards" are the same
+    // land-play special-action prohibition after subject stripping.
+    #[test]
+    fn parse_restriction_modes_cant_play_land_variants() {
+        let expected = Some(vec![StaticMode::Other("CantPlayLand".to_string())]);
+        assert_eq!(parse_restriction_modes("can't play lands"), expected);
+        assert_eq!(parse_restriction_modes("cannot play lands"), expected);
+        assert_eq!(parse_restriction_modes("can't play land cards"), expected);
+        assert_eq!(parse_restriction_modes("cannot play land cards"), expected);
     }
 
     // CR 104.3 + CR 704.5: "can't lose the game" predicate emits `CantLoseTheGame`.

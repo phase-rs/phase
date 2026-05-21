@@ -1722,6 +1722,40 @@ mod tests {
         );
     }
 
+    /// CR 611.1 + CR 611.2c: A raw player-broadcast transient that grants a
+    /// named player-scoped static is visible to each player query. Most current
+    /// registration paths fan broadcasts out to `SpecificPlayer`, but the query
+    /// accepts `TargetFilter::Player` so all-player one-shot restrictions remain
+    /// observable if registered directly.
+    #[test]
+    fn player_static_other_query_matches_broadcast_transient() {
+        use crate::types::ability::{ContinuousModification, Duration};
+
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Broadcast Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        state.add_transient_continuous_effect(
+            source,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::Player,
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::Other("CantPlayLand".to_string()),
+            }],
+            None,
+        );
+
+        assert!(player_has_static_other(&state, PlayerId(0), "CantPlayLand"));
+        assert!(player_has_static_other(&state, PlayerId(1), "CantPlayLand"));
+        assert!(!player_has_static_other(&state, PlayerId(0), "CantShuffle"));
+    }
+
     /// CR 702.16j: Only `Protection(Everything)` triggers the query. Other
     /// protection qualities (color, card type) on a player do NOT satisfy
     /// `player_has_protection_from_everything` — they would have their own
