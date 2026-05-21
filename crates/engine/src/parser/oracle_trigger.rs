@@ -751,7 +751,7 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     //      legitimately inherits the player's chosen target.
     if let Some(execute) = def.execute.as_deref_mut() {
         if mode_carries_event_source_object(&def.mode)
-            && def.valid_target.is_none()
+            && (def.valid_target.is_none() || def.mode == TriggerMode::Unattach)
             && !execute.optional_targeting
         {
             lift_parent_target_to_triggering_source_in_ability(execute);
@@ -787,6 +787,7 @@ fn mode_carries_event_source_object(mode: &TriggerMode) -> bool {
             // it (Necroduality, Mimic Vat class). The batched ChangesZoneAll
             // mode is excluded — its event carries a set, not one object.
             | TriggerMode::ChangesZone
+            | TriggerMode::Unattach
     )
 }
 
@@ -802,6 +803,7 @@ fn lift_parent_target_to_triggering_source(effect: &mut Effect) {
     // surface anaphor was "that <object>", refers to the event object.
     let target = match effect {
         Effect::ChangeZone { target, .. } => target,
+        Effect::Sacrifice { target, .. } => target,
         // "create a token that's a copy of that creature" (Necroduality) — the
         // copy source is the entering object, not the trigger's own source.
         Effect::CopyTokenOf { target, .. } => target,
@@ -4431,6 +4433,25 @@ fn try_parse_event(
         SaddlesOrCrews,
         Crews,
         Saddles,
+        /// CR 701.3d: Equipment/Aura becomes unattached from a permanent.
+        BecomesUnattached(Option<TargetFilter>),
+        // CR 701.3a: Equipment/Aura becomes attached to a permanent.
+        BecomesAttached,
+    }
+    fn parse_becomes_unattached(input: &str) -> OracleResult<'_, SimpleEvent> {
+        let (remaining, _) = tag("becomes unattached").parse(input)?;
+        if remaining.is_empty() {
+            return Ok((remaining, SimpleEvent::BecomesUnattached(None)));
+        }
+        let (host, _) = tag(" from ").parse(remaining)?;
+        let (filter, rest) = parse_type_phrase(host);
+        if !rest.trim().is_empty() {
+            return Err(nom::Err::Error(OracleError::new(
+                rest,
+                nom::error::ErrorKind::Eof,
+            )));
+        }
+        Ok((rest, SimpleEvent::BecomesUnattached(Some(filter))))
     }
     fn parse_simple_event(input: &str) -> OracleResult<'_, SimpleEvent> {
         alt((
@@ -4480,10 +4501,19 @@ fn try_parse_event(
             // CR 702.171c: Actor-side saddle trigger (reserved — no cards today without
             // the compound, but the arm is ready for future printings).
             value(SimpleEvent::Saddles, tag("saddles a mount")),
+            // CR 701.3d: Equipment/Aura becomes unattached from a permanent.
+            parse_becomes_unattached,
+            // CR 701.3a: "becomes attached to [a creature / a permanent / …]" —
+            // Equipment/Aura attach trigger. The trailing target phrase ("to a
+            // creature", "to a permanent") is parsed to populate `valid_target`.
+            value(SimpleEvent::BecomesAttached, tag("becomes attached to ")),
+            // Short form: "becomes attached" without a trailing target phrase
+            // (future-proofing; no current Oracle cards use this form).
+            value(SimpleEvent::BecomesAttached, tag("becomes attached")),
         )))
         .parse(input)
     }
-    if let Ok((_, event)) = parse_simple_event.parse(rest) {
+    if let Ok((remaining, event)) = parse_simple_event.parse(rest) {
         let mut def = make_base();
         match event {
             SimpleEvent::BecomesBlocked => {
@@ -4572,6 +4602,36 @@ fn try_parse_event(
                 // either saddling a Mount or crewing a Vehicle.
                 def.mode = TriggerMode::SaddlesOrCrews;
                 def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::BecomesUnattached(host_filter) => {
+                // CR 701.3d: Equipment/Aura becomes unattached from a permanent.
+                // `valid_card` records the Equipment/Aura filter (the subject).
+                def.mode = TriggerMode::Unattach;
+                def.valid_card = Some(subject.clone());
+                def.valid_target = host_filter;
+                if filter_references_self(subject) {
+                    def.trigger_zones = vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile];
+                }
+            }
+            SimpleEvent::BecomesAttached => {
+                // CR 701.3a: "Whenever [this Equipment/Aura] becomes attached to
+                // [a creature / a permanent]" — fires when an Attach or AttachAll
+                // effect resolves and the source is now attached to something.
+                // Non-self subjects need an event payload naming the object that
+                // became attached; EffectResolved only carries the ability source.
+                if !matches!(subject, TargetFilter::SelfRef) {
+                    return None;
+                }
+                def.mode = TriggerMode::Attached;
+                def.valid_card = Some(subject.clone());
+                let remaining = remaining.trim();
+                if !remaining.is_empty() {
+                    let (filter, rest) = parse_type_phrase(remaining);
+                    if !rest.trim().is_empty() {
+                        return None;
+                    }
+                    def.valid_target = Some(filter);
+                }
             }
         }
         return Some((def.mode.clone(), def));
@@ -18087,6 +18147,141 @@ mod snapshot_tests {
                 "chain link {i} should be TriggeringSource, got {t:?}",
             );
         }
+    }
+
+    // CR 701.3d: "Whenever ~ becomes unattached from a permanent" trigger
+    // Covers Grafted Exoskeleton, Stitcher's Graft, Grafted Wargear, etc.
+    #[test]
+    fn trigger_becomes_unattached_from_permanent() {
+        let def = parse_trigger_line(
+            "Whenever this Equipment becomes unattached from a permanent, sacrifice that permanent.",
+            "Grafted Exoskeleton",
+        );
+        assert_eq!(def.mode, TriggerMode::Unattach);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(TypedFilter::permanent()))
+        );
+        assert_eq!(
+            def.trigger_zones,
+            vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile]
+        );
+        let execute = def.execute.as_deref().expect("trigger has execute");
+        let Effect::Sacrifice { target, .. } = execute.effect.as_ref() else {
+            panic!("expected Sacrifice, got {:?}", execute.effect);
+        };
+        assert_eq!(*target, TargetFilter::TriggeringSource);
+    }
+
+    // CR 701.3d: shorter form "becomes unattached" (future-proofing)
+    #[test]
+    fn trigger_becomes_unattached_short_form() {
+        let def = parse_trigger_line(
+            "Whenever ~ becomes unattached, sacrifice the permanent it was attached to.",
+            "Test Equipment",
+        );
+        assert_eq!(
+            def.mode,
+            TriggerMode::Unattach,
+            "Expected TriggerMode::Unattach for short form, got {:?}",
+            def.mode
+        );
+        assert_eq!(def.valid_target, None);
+    }
+
+    // Regression: "Whenever ~ becomes unattached from a permanent, sacrifice that permanent."
+    // should NOT be parsed as TriggerMode::Unknown.
+    #[test]
+    fn trigger_becomes_unattached_not_unknown() {
+        let def = parse_trigger_line(
+            "Whenever this Equipment becomes unattached from a permanent, sacrifice that permanent.",
+            "Stitcher's Graft",
+        );
+        assert!(
+            !matches!(def.mode, TriggerMode::Unknown(_)),
+            "Trigger should not fall through to Unknown; got {:?}",
+            def.mode
+        );
+    }
+
+    // CR 701.3a: "Whenever ~ becomes attached to a creature" trigger
+    // Covers Inchblade Companion, Assimilation Aegis, Enormous Energy Blade, Killer Cosplay.
+    #[test]
+    fn trigger_becomes_attached_to_a_creature() {
+        let def = parse_trigger_line(
+            "Whenever ~ becomes attached to a creature, that creature gets +1/+1 until end of turn.",
+            "Inchblade Companion",
+        );
+        assert_eq!(
+            def.mode,
+            TriggerMode::Attached,
+            "Expected TriggerMode::Attached, got {:?}",
+            def.mode
+        );
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::SelfRef),
+            "Expected valid_card = SelfRef (Equipment self-reference), got {:?}",
+            def.valid_card
+        );
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(TypedFilter::creature())),
+            "Expected valid_target = creature, got {:?}",
+            def.valid_target
+        );
+    }
+
+    // CR 701.3a: "becomes attached to a permanent" variant
+    #[test]
+    fn trigger_becomes_attached_to_a_permanent() {
+        let def = parse_trigger_line(
+            "Whenever ~ becomes attached to a permanent, draw a card.",
+            "Assimilation Aegis",
+        );
+        assert_eq!(
+            def.mode,
+            TriggerMode::Attached,
+            "Expected TriggerMode::Attached for 'attached to a permanent', got {:?}",
+            def.mode
+        );
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(TypedFilter::permanent())),
+            "Expected valid_target = permanent, got {:?}",
+            def.valid_target
+        );
+    }
+
+    // Regression: "Whenever ~ becomes attached to a creature" should NOT be TriggerMode::Unknown.
+    #[test]
+    fn trigger_becomes_attached_not_unknown() {
+        let def = parse_trigger_line(
+            "Whenever ~ becomes attached to a creature, that creature gets +2/+2 until end of turn.",
+            "Enormous Energy Blade",
+        );
+        assert!(
+            !matches!(def.mode, TriggerMode::Unknown(_)),
+            "Trigger should not fall through to Unknown; got {:?}",
+            def.mode
+        );
+    }
+
+    // Regression: non-self attached subjects are not supported by
+    // EffectResolved's source-only payload and must not parse as a broad
+    // TriggerMode::Attached trigger.
+    #[test]
+    fn trigger_becomes_attached_non_self_subject_stays_unknown() {
+        let def = parse_trigger_line(
+            "Whenever an Aura you control becomes attached to a creature you control, draw a card.",
+            "Siona, Captain of the Pyleas",
+        );
+        assert!(
+            matches!(def.mode, TriggerMode::Unknown(_)),
+            "non-self attachment trigger should stay Unknown, got {:?}",
+            def.mode
+        );
     }
 
     /// CR 701.43a: "Whenever you exert a creature" — actor-side exert trigger.

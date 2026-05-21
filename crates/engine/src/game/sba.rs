@@ -117,7 +117,7 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
         check_unattached_auras(state, events, &mut any_performed);
 
         // CR 704.5n: If an Equipment is attached to an illegal permanent, it becomes unattached.
-        check_unattached_equipment(state, &mut any_performed);
+        check_unattached_equipment(state, events, &mut any_performed);
 
         // CR 704.5y + CR 303.7a: If a permanent has more than one Role controlled
         // by the same player attached to it, all but the newest go to the
@@ -679,9 +679,22 @@ fn check_unattached_auras(
                 // on the battlefield unattached as an enchantment creature.
                 // The host's `attachments` list was already cleaned when the
                 // host changed zones.
+                let old_target = state.objects.get(&id).and_then(|obj| {
+                    obj.attached_to
+                        .map(crate::game::effects::attach::target_ref_from_attach_target)
+                });
                 crate::game::casting::revert_bestow_form(state, id);
                 if let Some(obj) = state.objects.get_mut(&id) {
                     obj.attached_to = None;
+                }
+                if let Some(old_target) = old_target
+                    .as_ref()
+                    .filter(|target| should_emit_sba_unattached_event(state, target))
+                {
+                    events.push(GameEvent::Unattached {
+                        attachment_id: id,
+                        old_target: old_target.clone(),
+                    });
                 }
             }
         }
@@ -694,7 +707,11 @@ fn check_unattached_auras(
 /// legally attach to a player (CR 301.5), so a `Player` host is *always*
 /// illegal and must be unattached on this SBA pass.
 /// CR 702.26b: Phased-out Equipment is treated as though it doesn't exist.
-fn check_unattached_equipment(state: &mut GameState, any_performed: &mut bool) {
+fn check_unattached_equipment(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    any_performed: &mut bool,
+) {
     let to_unattach: Vec<_> = state
         .battlefield_phased_in_ids()
         .into_iter()
@@ -722,6 +739,10 @@ fn check_unattached_equipment(state: &mut GameState, any_performed: &mut bool) {
         .collect();
 
     for equipment_id in to_unattach {
+        let old_target = state.objects.get(&equipment_id).and_then(|obj| {
+            obj.attached_to
+                .map(crate::game::effects::attach::target_ref_from_attach_target)
+        });
         // Clear the attachment reference on the equipment. Only Object hosts
         // have an `attachments` list to clean up — Player hosts do not.
         if let Some(crate::game::game_object::AttachTarget::Object(old_target_id)) = state
@@ -736,7 +757,29 @@ fn check_unattached_equipment(state: &mut GameState, any_performed: &mut bool) {
         if let Some(equipment) = state.objects.get_mut(&equipment_id) {
             equipment.attached_to = None;
         }
+        if let Some(old_target) = old_target
+            .as_ref()
+            .filter(|target| should_emit_sba_unattached_event(state, target))
+        {
+            events.push(GameEvent::Unattached {
+                attachment_id: equipment_id,
+                old_target: old_target.clone(),
+            });
+        }
         *any_performed = true;
+    }
+}
+
+fn should_emit_sba_unattached_event(
+    state: &GameState,
+    old_target: &crate::types::ability::TargetRef,
+) -> bool {
+    match old_target {
+        crate::types::ability::TargetRef::Object(target_id) => state
+            .objects
+            .get(target_id)
+            .is_some_and(|obj| obj.zone == Zone::Battlefield),
+        crate::types::ability::TargetRef::Player(_) => true,
     }
 }
 

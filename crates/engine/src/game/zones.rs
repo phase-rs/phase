@@ -273,6 +273,12 @@ pub fn move_to_zone(
     let obj = state.objects.get(&object_id).expect("object exists");
     let from = obj.zone;
     let owner = obj.owner;
+    let unattached_from = if from == Zone::Battlefield {
+        obj.attached_to
+            .map(super::effects::attach::target_ref_from_attach_target)
+    } else {
+        None
+    };
     let mut zone_change_record = obj.snapshot_for_zone_change(object_id, Some(from), to);
     // CR 603.10a + CR 603.6e: Capture attachment snapshot before SBA can detach.
     zone_change_record.attachments = capture_attachment_snapshot(state, obj);
@@ -352,6 +358,13 @@ pub fn move_to_zone(
     }
 
     super::restrictions::record_zone_change(state, zone_change_record.clone());
+
+    if let Some(old_target) = unattached_from {
+        events.push(GameEvent::Unattached {
+            attachment_id: object_id,
+            old_target,
+        });
+    }
 
     events.push(GameEvent::ZoneChanged {
         object_id,
@@ -437,6 +450,12 @@ pub fn move_to_library_at_index(
     let obj = state.objects.get(&object_id).expect("object exists");
     let from = obj.zone;
     let owner = obj.owner;
+    let unattached_from = if from == Zone::Battlefield {
+        obj.attached_to
+            .map(super::effects::attach::target_ref_from_attach_target)
+    } else {
+        None
+    };
     let mut zone_change_record = obj.snapshot_for_zone_change(object_id, Some(from), Zone::Library);
     // CR 603.10a + CR 603.6e: Capture attachment snapshot before SBA can detach.
     zone_change_record.attachments = capture_attachment_snapshot(state, obj);
@@ -465,6 +484,13 @@ pub fn move_to_library_at_index(
     }
 
     super::restrictions::record_zone_change(state, zone_change_record.clone());
+
+    if let Some(old_target) = unattached_from {
+        events.push(GameEvent::Unattached {
+            attachment_id: object_id,
+            old_target,
+        });
+    }
 
     events.push(GameEvent::ZoneChanged {
         object_id,
