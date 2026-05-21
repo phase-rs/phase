@@ -2427,10 +2427,8 @@ fn parse_player_counter_kind(input: &str) -> OracleResult<'_, PlayerCounterKind>
 }
 
 /// CR 122.1 + CR 109.5: Typed possessor alt mapping to `CountScope`. Each arm
-/// emits the scope variant directly. Targeted-player phrasings ("target
-/// opponent has", "that player has") are intentionally not represented
-/// because no current card requires them; extending here is a typed
-/// addition, not a string-match retrofit.
+/// emits the scope variant directly. New possessor phrases extend this typed
+/// alt rather than adding full phrase permutations.
 fn parse_player_counter_possessor(input: &str) -> OracleResult<'_, CountScope> {
     alt((
         value(CountScope::Controller, tag("you have")),
