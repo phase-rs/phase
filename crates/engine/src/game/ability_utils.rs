@@ -3268,6 +3268,7 @@ mod tests {
                     TypedFilter::creature().controller(ControllerRef::TargetPlayer),
                 ),
                 player_filter: None,
+                damage_source: None,
             },
         );
 
@@ -3335,6 +3336,7 @@ mod tests {
                     TypedFilter::creature().controller(ControllerRef::TargetPlayer),
                 ),
                 player_filter: None,
+                damage_source: None,
             },
         );
 

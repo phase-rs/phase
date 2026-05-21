@@ -4884,10 +4884,12 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                 amount,
                 target,
                 player_filter,
+                damage_source: None,
             } => Effect::DamageAll {
                 amount: replace_fixed_quantity(amount, quantity),
                 target,
                 player_filter,
+                damage_source: None,
             },
             other => other,
         };
@@ -6425,6 +6427,7 @@ fn try_parse_compound_player_object_damage(lower: &str) -> Option<ParsedEffectCl
             amount: qty,
             target: object_filter,
             player_filter: Some(player_filter),
+            damage_source: None,
         },
         duration: None,
         sub_ability: None,
@@ -6554,6 +6557,7 @@ fn try_parse_compound_object_player_damage(lower: &str) -> Option<ParsedEffectCl
             amount: qty,
             target: object_filter,
             player_filter: Some(PlayerFilter::All),
+            damage_source: None,
         },
         duration: None,
         sub_ability: None,
@@ -7960,18 +7964,15 @@ fn wrap_target_subject_damage(
     subject: &SubjectPhraseAst,
 ) -> Option<ParsedEffectClause> {
     let subject_target = subject.target.as_ref()?;
-    // CR 608.2c + CR 120.3: "target creature deals damage equal to its
+    // CR 608.2c + CR 120.1: "target creature deals damage equal to its
     // power..." makes the chosen source object, not the spell card, deal the
     // damage. "Its power" is therefore the first target's current power.
     // Both `DealDamage` (single recipient) and `DamageAll` (multi-recipient
-    // batch) carry this shape; only the source-attribution differs.
-    //
-    // NOTE: `Effect::DamageAll` has no `damage_source` field yet, so wrapping
-    // it produces the correct source-target picker and anaphoric power binding
-    // but the spell remains the damage source at resolution. That matters for
-    // protection-from-{color} rulings (CR 702.16 / CR 120.3 — Chandra's
-    // Ignition rulings 2015-06-22 mark the chosen creature as the source).
-    // Tracked as a follow-up; the present wrap unblocks the targeting flow.
+    // batch) carry this shape uniformly — `damage_source = Some(Target)` is
+    // honored by the resolver in `game/effects/deal_damage.rs` for protection
+    // (CR 702.16), wither/infect (CR 120.3b/d), and damage-source replacements
+    // (CR 614). The 2015-06-22 Chandra's Ignition rulings codify this for
+    // the multi-recipient case (DamageAll).
     match &mut clause.effect {
         Effect::DealDamage {
             amount,
@@ -7981,8 +7982,13 @@ fn wrap_target_subject_damage(
             rewrite_event_source_power_to_object_power(amount, ObjectScope::Target);
             *damage_source = Some(DamageSource::Target);
         }
-        Effect::DamageAll { amount, .. } => {
+        Effect::DamageAll {
+            amount,
+            damage_source,
+            ..
+        } => {
             rewrite_event_source_power_to_object_power(amount, ObjectScope::Target);
+            *damage_source = Some(DamageSource::Target);
         }
         _ => return None,
     }
@@ -14393,7 +14399,7 @@ fn try_parse_damage_with_remainder<'a>(
                     }
                     let (filter, remainder) = parse_target_with_ctx(target_phrase, ctx);
                     let (filter, remainder) = refine_damage_target_remainder(filter, remainder);
-                    // CR 119.5 + CR 700.4: "[N] damage to each creature and each
+                    // CR 119.2 + CR 120.3: "[N] damage to each creature and each
                     // player" — composite scope. The "each creature" parse
                     // captures the object filter; the trailing "and each player"
                     // (or variants) carries the player scope. Lift it into
@@ -14422,6 +14428,7 @@ fn try_parse_damage_with_remainder<'a>(
                             amount: qty,
                             target: filter,
                             player_filter,
+                            damage_source: None,
                         },
                         "",
                     ));
@@ -14528,7 +14535,7 @@ fn try_parse_damage_with_remainder<'a>(
         }
         let (target, rem) = parse_target_with_ctx(after_to_for_classification, ctx);
         let (target, rem) = refine_damage_target_remainder(target, rem);
-        // CR 119.5 + CR 700.4 + CR 120.3: Composite "each <object> and each <player>"
+        // CR 119.2 + CR 120.3: Composite "each <object> and each <player>"
         // (Chandra's Ignition: "to each other creature and each opponent"). The
         // object filter is captured above; if the remainder begins with
         // "and <player-scope>", lift it into `player_filter` so DamageAll covers
@@ -14547,6 +14554,7 @@ fn try_parse_damage_with_remainder<'a>(
                 amount,
                 target,
                 player_filter,
+                damage_source: None,
             },
             rem_out,
         ));
@@ -17076,6 +17084,7 @@ mod tests {
                     },
                 target: TargetFilter::Typed(tf),
                 player_filter: None,
+                damage_source: None,
             } => {
                 assert_eq!(tf.controller, Some(ControllerRef::TargetPlayer));
                 assert!(tf
@@ -17134,6 +17143,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 4 },
                 target,
                 player_filter: Some(PlayerFilter::Opponent),
+                damage_source: None,
             } => match target {
                 TargetFilter::Typed(tf) => {
                     assert_eq!(tf.controller, Some(ControllerRef::Opponent));
@@ -17160,6 +17170,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 1 },
                 target,
                 player_filter: Some(PlayerFilter::Opponent),
+                damage_source: None,
             } => match target {
                 TargetFilter::Typed(tf) => {
                     assert_eq!(tf.controller, Some(ControllerRef::Opponent));
@@ -17186,6 +17197,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Or { filters },
                 player_filter: Some(PlayerFilter::Opponent),
+                damage_source: None,
             } => {
                 assert_eq!(filters.len(), 2);
                 for f in &filters {
@@ -17214,6 +17226,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Typed(tf),
                 player_filter: Some(PlayerFilter::All),
+                damage_source: None,
             } => {
                 assert!(tf
                     .type_filters
@@ -17236,6 +17249,7 @@ mod tests {
                 amount: _,
                 target: TargetFilter::Typed(tf),
                 player_filter: Some(PlayerFilter::All),
+                damage_source: None,
             } => {
                 assert!(tf
                     .type_filters
@@ -17258,6 +17272,7 @@ mod tests {
                 amount: _,
                 target: TargetFilter::Typed(tf),
                 player_filter: Some(PlayerFilter::All),
+                damage_source: None,
             } => {
                 assert!(tf
                     .type_filters
@@ -17453,10 +17468,18 @@ mod tests {
             amount,
             target,
             player_filter,
+            damage_source,
         } = sub.effect.as_ref()
         else {
             panic!("expected DamageAll sub-effect, got {:?}", sub.effect);
         };
+        assert_eq!(
+            *damage_source,
+            Some(DamageSource::Target),
+            "DamageAll must carry damage_source=Target so the chosen creature \
+             (not the spell) is the source for protection / wither / infect / \
+             damage-source replacements (CR 120.1 + CR 608.2c)",
+        );
         assert!(
             matches!(
                 amount,
@@ -17758,6 +17781,7 @@ mod tests {
                 amount,
                 target,
                 player_filter,
+                damage_source: None,
             } => {
                 assert!(matches!(amount, QuantityExpr::Fixed { value: 1 }));
                 assert_eq!(
@@ -18781,6 +18805,7 @@ mod tests {
                 amount,
                 target,
                 player_filter,
+                damage_source: None,
             } => {
                 assert!(player_filter.is_none());
                 assert!(matches!(

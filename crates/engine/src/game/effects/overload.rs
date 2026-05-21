@@ -86,6 +86,7 @@ fn transform_effect_in_place(effect: &mut Effect) {
             amount,
             target,
             player_filter: None,
+            damage_source: None,
         },
         Effect::Tap { target } => Effect::TapAll { target },
         // CR 702.96b + CR 400.7 + CR 611.2c: Cyclonic Rift overload — promote

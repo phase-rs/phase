@@ -178,6 +178,24 @@ describe("partitionByType", () => {
     expect(result.support).toEqual([]);
   });
 
+  it("keeps attached non-attachment creatures in the creature row", () => {
+    const objects = [
+      makeGameObject({
+        id: 99,
+        attached_to: { type: "Object", data: 1 },
+        card_types: {
+          supertypes: [],
+          core_types: ["Creature"],
+          subtypes: ["Human", "Warrior"],
+        },
+      }),
+    ];
+
+    const result = partitionByType(objects);
+
+    expect(result.creatures).toEqual([99]);
+  });
+
   it("preserves player-attached Auras (status quo) in the support row", () => {
     // AttachTarget::Player(PlayerId) is currently lossy at the WASM boundary —
     // attached_to flattens to null for Curses. Until that's fixed, they must

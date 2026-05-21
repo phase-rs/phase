@@ -646,7 +646,7 @@ pub fn resolve(
 /// player as a single simultaneous damage event from one source.
 ///
 /// Reads amount, object filter, and optional player filter from
-/// `Effect::DamageAll { amount, target, player_filter }`.
+/// `Effect::DamageAll { amount, target, player_filter, damage_source }`.
 ///
 /// CR 120.3: Damage is dealt simultaneously to all affected objects and players
 /// from a single source. The batch is one effect resolution, so prevention and
@@ -662,16 +662,23 @@ pub fn resolve_all(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (amount, target_filter, player_filter): (
+    let (amount, target_filter, player_filter, damage_source): (
         &QuantityExpr,
         TargetFilter,
         Option<PlayerFilter>,
+        Option<DamageSource>,
     ) = match &ability.effect {
         Effect::DamageAll {
             amount,
             target,
             player_filter,
-        } => (amount, target.clone(), player_filter.clone()),
+            damage_source,
+        } => (
+            amount,
+            target.clone(),
+            player_filter.clone(),
+            *damage_source,
+        ),
         _ => return Err(EffectError::MissingParam("DamageAll amount".to_string())),
     };
     // CR 107.1b: Ability-context resolve so X-damage-to-all ("Deal X damage to each...")
@@ -703,11 +710,33 @@ pub fn resolve_all(
         None => Vec::new(),
     };
 
-    // CR 120.3h: Damage to a battle in `matching_objects` is routed through
-    // `apply_damage_to_target` below, which removes defense counters rather
-    // than marking damage.
-    let ctx = DamageContext::from_source(state, ability.source_id)
-        .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller));
+    // CR 120.1 + CR 608.2c: Determine damage source. When `damage_source` is
+    // `Some(Target)`, the chosen target object — not the ability's source
+    // permanent — is the damage source for protection (CR 702.16), wither/infect
+    // (CR 120.3b/d), and damage-source replacements (CR 614). Mirrors the
+    // `DealDamage` resolver above so wrap_target_subject_damage works uniformly
+    // for both single-recipient and batch damage shapes (Chandra's Ignition
+    // class). CR 120.3h: Damage to a battle in `matching_objects` is routed
+    // through `apply_damage_to_target` below, which removes defense counters
+    // rather than marking damage.
+    let ctx = match damage_source {
+        Some(DamageSource::Target) => ability
+            .targets
+            .iter()
+            .find_map(|t| match t {
+                TargetRef::Object(id) => DamageContext::from_source(state, *id),
+                _ => None,
+            })
+            .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
+        Some(DamageSource::TriggeringSource) => state
+            .current_trigger_event
+            .as_ref()
+            .and_then(crate::game::targeting::extract_source_from_event)
+            .and_then(|id| DamageContext::from_source(state, id))
+            .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
+        None => DamageContext::from_source(state, ability.source_id)
+            .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
+    };
 
     // CR 120.3 + CR 609.7: Assemble the full simultaneous recipient list as a
     // uniform stream of `TargetRef`s. Objects first, then players — CR 120.3
@@ -1532,6 +1561,7 @@ mod tests {
                     properties: vec![],
                 }),
                 player_filter: None,
+                damage_source: None,
             },
             vec![],
             ObjectId(100),
@@ -1619,6 +1649,7 @@ mod tests {
                     properties: vec![],
                 }),
                 player_filter: None,
+                damage_source: None,
             },
             vec![],
             source,
@@ -1928,6 +1959,7 @@ mod tests {
                     properties: vec![],
                 }),
                 player_filter: None,
+                damage_source: None,
             },
             vec![],
             ObjectId(100),
@@ -1979,6 +2011,7 @@ mod tests {
                     properties: vec![],
                 }),
                 player_filter: None,
+                damage_source: None,
             },
             vec![],
             source_id,
@@ -2396,6 +2429,7 @@ mod tests {
                     properties: vec![],
                 }),
                 player_filter: None,
+                damage_source: None,
             },
             vec![],
             source_id,
@@ -2510,6 +2544,7 @@ mod tests {
                     properties: vec![],
                 }),
                 player_filter: None,
+                damage_source: None,
             },
             vec![],
             source_id,
@@ -2695,6 +2730,7 @@ mod tests {
                     properties: vec![],
                 }),
                 player_filter: None,
+                damage_source: None,
             },
             vec![],
             ogre,
@@ -2916,6 +2952,7 @@ mod tests {
                     ],
                 },
                 player_filter: Some(PlayerFilter::Opponent),
+                damage_source: None,
             },
             vec![],
             source_id,
@@ -3132,6 +3169,7 @@ mod tests {
                     properties: vec![],
                 }),
                 player_filter: Some(PlayerFilter::Opponent),
+                damage_source: None,
             },
             vec![],
             source_id,
@@ -3221,6 +3259,7 @@ mod tests {
                     properties: vec![],
                 }),
                 player_filter: Some(PlayerFilter::All),
+                damage_source: None,
             },
             vec![],
             source_id,

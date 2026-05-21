@@ -35,13 +35,15 @@ export function partitionByType(objects: GameObject[]): BattlefieldPartition {
   const other: ObjectId[] = [];
 
   for (const obj of objects) {
-    // Attached permanents render through their host's surface, not the main
-    // battlefield rows: Object-host attachments peek behind the host card
-    // (see attachments.map in PermanentCard); Player-host attachments
-    // (Curse cycle, Faith's Fetters-class) surface as a HUD trailing badge
-    // that opens AttachmentsDialog (see EnchantmentsBadge). Either way,
-    // double-rendering them here would put two copies on screen.
-    if (obj.attached_to !== null) continue;
+    const subtypes = obj.card_types.subtypes;
+    const isAttachmentKind =
+      subtypes.includes("Aura")
+      || subtypes.includes("Equipment")
+      || subtypes.includes("Fortification");
+    // True attachment kinds render through their host surface instead of the
+    // main battlefield rows. Do not hide arbitrary permanents just because the
+    // engine gives them an attached_to relationship.
+    if (obj.attached_to !== null && isAttachmentKind) continue;
     const coreTypes = obj.card_types.core_types;
 
     if (coreTypes.includes("Creature")) {

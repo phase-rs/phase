@@ -4820,6 +4820,16 @@ pub enum Effect {
         /// as a single effect instead of two chained resolutions.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         player_filter: Option<PlayerFilter>,
+        /// CR 120.1 + CR 608.2c: Damage source override. When `Some(Target)`, the
+        /// damage is attributed to the spell/ability's first target object rather
+        /// than the ability's source. Mirrors `DealDamage::damage_source` for
+        /// "target creature you control deals damage equal to its power to each
+        /// other creature and each opponent" (Chandra's Ignition class) — the
+        /// chosen creature, not the spell, is the source for the purpose of
+        /// protection (CR 702.16), wither/infect (CR 120.3b/d), and damage-source
+        /// replacements (CR 614). `None` keeps the ability's source attribution.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        damage_source: Option<DamageSource>,
     },
     /// CR 120.3: Deal damage to each player matching a filter, with per-player quantity.
     /// Unlike `DamageAll` (which iterates battlefield objects with a fixed amount),

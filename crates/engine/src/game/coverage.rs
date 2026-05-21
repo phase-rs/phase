@@ -1441,6 +1441,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             amount: _,
             target,
             player_filter: _,
+            damage_source: _,
         } => {
             if !matches!(target, TargetFilter::None) {
                 d.push(("filter".into(), fmt_target(target)));

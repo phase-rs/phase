@@ -4343,12 +4343,14 @@ pub(super) fn parse_cost_resource_ast(
                 amount,
                 target,
                 player_filter: None,
+                damage_source: None,
             } => Some(CostResourceImperativeAst::Damage {
                 amount,
                 target,
                 all: true,
             }),
-            // DealDamage with damage_source, DamageEachPlayer, etc. — pass through directly
+            // DealDamage with damage_source, DamageEachPlayer, DamageAll with
+            // a non-default damage_source/player_filter — pass through directly.
             other => Some(CostResourceImperativeAst::DamageEffect(Box::new(other))),
         };
     }
@@ -4384,6 +4386,7 @@ pub(super) fn lower_cost_resource_ast(ast: CostResourceImperativeAst) -> Effect 
                     amount,
                     target,
                     player_filter: None,
+                    damage_source: None,
                 }
             } else {
                 Effect::DealDamage {
