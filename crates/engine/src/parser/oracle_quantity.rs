@@ -730,11 +730,6 @@ fn is_event_context_referent(prefix: &str) -> bool {
         "revealed",
         "drawn",
         "copied",
-        // CR 701.17a + CR 701.17c: "milled" is a past-participle event adjective —
-        // the milled card is the object that moved from library to graveyard as a
-        // result of the mill action. Heed the Mists: "draw cards equal to the
-        // milled card's mana value."
-        "milled",
     ];
     if prefix.starts_with("that ") || prefix.starts_with("the ") {
         let rest = prefix.split_once(' ').map_or("", |x| x.1);
