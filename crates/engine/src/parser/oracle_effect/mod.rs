@@ -15391,6 +15391,25 @@ fn apply_where_x_effect_expression(effect: &mut Effect, where_x_expression: Opti
                 *amount_dynamic = parse_where_x_quantity_expression(expr);
             }
         }
+        // CR 107.3i + CR 118.1: Resolution-time cost amounts (Life / Speed /
+        // Energy / per-object scaled mana) reference the same X as the
+        // surrounding ability. Tymna the Weaver's "you may pay X life, where X
+        // is the number of opponents that were dealt combat damage this turn"
+        // requires the PayCost amount to track the where-X binding alongside
+        // the sub-ability's "draw X cards"; without this arm the cost amount
+        // stayed as the bare `Variable("X")` and decoupled from the resolved
+        // expression.
+        Effect::PayCost { cost, .. } => match cost {
+            PaymentCost::Life { amount }
+            | PaymentCost::Speed { amount }
+            | PaymentCost::Energy { amount } => {
+                *amount = apply_where_x_quantity_expression(amount.clone(), where_x_expression);
+            }
+            PaymentCost::ScaledMana { times, .. } => {
+                *times = apply_where_x_quantity_expression(times.clone(), where_x_expression);
+            }
+            PaymentCost::Mana { .. } | PaymentCost::AbilityCost { .. } => {}
+        },
         _ => {}
     }
 }

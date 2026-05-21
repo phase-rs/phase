@@ -124,7 +124,10 @@ pub(crate) fn parse_quantity_ref_with_context(
             }
             let counter_type = normalize_counter_type(counter_text);
             let (filter, remainder) = parse_type_phrase_with_ctx(after_filter, ctx);
-            if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+            if remainder.trim().is_empty()
+                && !matches!(filter, TargetFilter::Any)
+                && !is_empty_typed_filter(&filter)
+            {
                 return Some(QuantityRef::CountersOnObjects {
                     counter_type: Some(counter_type),
                     filter,
@@ -169,7 +172,7 @@ pub(crate) fn parse_quantity_ref_with_context(
     .parse(trimmed)
     {
         let (filter, _) = parse_type_phrase_with_ctx(rest, ctx);
-        if !matches!(filter, TargetFilter::Any) {
+        if !matches!(filter, TargetFilter::Any) && !is_empty_typed_filter(&filter) {
             return Some(QuantityRef::Aggregate {
                 function: func,
                 property: prop,
@@ -186,8 +189,38 @@ pub(crate) fn parse_quantity_ref_with_context(
                 filter: PlayerFilter::Opponent,
             });
         }
+        // CR 120.1 + CR 510.1: "opponents that were dealt combat damage this turn".
+        // Singular/plural and "who/that" variants compose through one nom alt so the
+        // partner-quality "for each opponent that was dealt combat damage this turn"
+        // class (Tymna the Weaver) routes to the dedicated PlayerFilter rather than
+        // falling through to the type-phrase fallback below.
+        if let Ok((after, _)) = (
+            alt((tag::<_, _, OracleError<'_>>("opponents "), tag("opponent "))),
+            alt((
+                tag::<_, _, OracleError<'_>>("that were dealt combat damage this turn"),
+                tag("that was dealt combat damage this turn"),
+                tag("who were dealt combat damage this turn"),
+                tag("who was dealt combat damage this turn"),
+            )),
+        )
+            .parse(rest)
+        {
+            if after.trim().is_empty() {
+                return Some(QuantityRef::PlayerCount {
+                    filter: PlayerFilter::OpponentDealtCombatDamage,
+                });
+            }
+        }
         let (filter, _) = parse_type_phrase_with_ctx(rest, ctx);
-        if !matches!(filter, TargetFilter::Any) {
+        // CR 109.1: `parse_type_phrase_with_ctx` always returns `TargetFilter::Typed`,
+        // including the empty-shaped form (no `type_filters`, no `controller`, no
+        // `properties`) when the input has no recognized type word (e.g.
+        // "opponents that were dealt combat damage this turn"). The empty shape
+        // matches every battlefield object, so emitting an `ObjectCount` against
+        // it would silently drain every permanent. Treat the empty shape as
+        // "no type-phrase match" and fall through to the next pattern (or
+        // surface `Unimplemented`) instead.
+        if !matches!(filter, TargetFilter::Any) && !is_empty_typed_filter(&filter) {
             return Some(QuantityRef::ObjectCount { filter });
         }
     }
@@ -210,6 +243,23 @@ pub(crate) fn parse_quantity_ref_with_context(
         }
     }
     None
+}
+
+/// CR 109.1: `parse_type_phrase` always returns `TargetFilter::Typed`, even
+/// when no type word was matched — in that case all three of `type_filters`,
+/// `controller`, and `properties` are empty. An empty-shaped `Typed` matches
+/// *every* battlefield object, so callers that interpret a non-`Any` filter
+/// as "type phrase recognized" must reject this shape explicitly. The
+/// building-block guard lives here so every quantity parser that wraps
+/// `parse_type_phrase` shares one consistent rejection rule.
+pub(crate) fn is_empty_typed_filter(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::Typed(typed)
+            if typed.type_filters.is_empty()
+                && typed.controller.is_none()
+                && typed.properties.is_empty()
+    )
 }
 
 pub(crate) fn canonicalize_quantity_ref(qty: QuantityRef) -> QuantityRef {
@@ -1066,6 +1116,20 @@ fn parse_for_each_clause_with_they_controller(
         });
     }
 
+    // CR 120.1 + CR 510.1: "opponent that was dealt combat damage this turn"
+    // / "opponent who was dealt combat damage this turn". Mirrors the
+    // lost-life / gained-life arms above. `scan_contains` is the
+    // word-boundary-aware combinator equivalent of `.contains()` — it
+    // avoids substring false-positives like "opponent dealt" inside a
+    // sentence about something else.
+    if nom_primitives::scan_contains(clause, "opponent")
+        && nom_primitives::scan_contains(clause, "dealt combat damage")
+    {
+        return Some(QuantityRef::PlayerCount {
+            filter: PlayerFilter::OpponentDealtCombatDamage,
+        });
+    }
+
     // "opponent"
     if clause == "opponent" || clause == "opponent you have" {
         return Some(QuantityRef::PlayerCount {
@@ -1689,6 +1753,74 @@ mod tests {
                 }
             }
         ));
+    }
+
+    /// CR 120.1 + CR 510.1: Tymna the Weaver — "the number of opponents that
+    /// were dealt combat damage this turn" must route to the dedicated
+    /// `PlayerCount { OpponentDealtCombatDamage }` and NOT fall through into
+    /// the generic type-phrase fallback that produces an empty `ObjectCount`
+    /// (the latter matched every battlefield object and drained the deck).
+    #[test]
+    fn cda_quantity_opponents_dealt_combat_damage() {
+        let qty =
+            parse_cda_quantity("the number of opponents that were dealt combat damage this turn")
+                .unwrap();
+        assert_eq!(
+            qty,
+            QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::OpponentDealtCombatDamage,
+                }
+            }
+        );
+    }
+
+    /// Symmetric singular form ("opponent that was dealt combat damage this
+    /// turn") must hit the same `PlayerFilter::OpponentDealtCombatDamage` arm.
+    #[test]
+    fn cda_quantity_opponent_singular_dealt_combat_damage() {
+        let qty =
+            parse_cda_quantity("the number of opponent that was dealt combat damage this turn")
+                .unwrap();
+        assert_eq!(
+            qty,
+            QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::OpponentDealtCombatDamage,
+                }
+            }
+        );
+    }
+
+    /// CR 109.1: Defense-in-depth — when `parse_type_phrase` returns an
+    /// empty-shaped `Typed` filter (no type words, no controller, no
+    /// properties), `parse_quantity_ref` must decline rather than emit an
+    /// `ObjectCount` that would match every battlefield permanent.
+    ///
+    /// The exact text exercised here ("opponents that were dealt combat
+    /// damage this turn", without the `the number of` prefix) is the
+    /// substring that flows into `parse_type_phrase` for Tymna's body. If
+    /// `parse_quantity_ref` is ever called on it directly (e.g. by a future
+    /// quantity context that didn't bind the `PlayerCount` arm), the
+    /// empty-Typed guard ensures it declines rather than returning an
+    /// `ObjectCount` against an empty filter.
+    #[test]
+    fn parse_quantity_ref_empty_typed_filter_falls_through() {
+        // Strip "the number of " then exercise the empty-Typed guard via a
+        // remainder that produces a Typed filter with no type predicates.
+        let result = parse_quantity_ref("the number of  ");
+        assert!(
+            !matches!(
+                result,
+                Some(QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(ref typed),
+                }) if typed.type_filters.is_empty()
+                    && typed.controller.is_none()
+                    && typed.properties.is_empty(),
+            ),
+            "empty Typed filter must not produce ObjectCount, got {:?}",
+            result
+        );
     }
 
     #[test]

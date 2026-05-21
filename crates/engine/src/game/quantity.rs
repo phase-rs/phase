@@ -2687,6 +2687,17 @@ pub(crate) fn resolve_player_count(
                         PlayerFilter::OpponentGainedLife => {
                             p.id != controller && p.life_gained_this_turn > 0
                         }
+                        // CR 120.1 + CR 510.1: Each opponent who was dealt combat
+                        // damage this turn. Probes the `damage_dealt_this_turn`
+                        // ledger for any record targeting this player with
+                        // `is_combat = true`.
+                        PlayerFilter::OpponentDealtCombatDamage => {
+                            p.id != controller
+                                && state.damage_dealt_this_turn.iter().any(|r| {
+                                    r.is_combat
+                                        && matches!(r.target, TargetRef::Player(pid) if pid == p.id)
+                                })
+                        }
                         PlayerFilter::All => true,
                         PlayerFilter::HighestSpeed => {
                             let highest_speed = state
@@ -4818,6 +4829,68 @@ mod tests {
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::PlayerCount {
                 filter: PlayerFilter::OpponentLostLife,
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 0);
+    }
+
+    /// CR 120.1 + CR 510.1: Resolving `PlayerCount { OpponentDealtCombatDamage }`
+    /// against `damage_dealt_this_turn` records counts only opponents whose
+    /// player target appears in the ledger with `is_combat = true`. Mirrors
+    /// the partner-quality "for each opponent that was dealt combat damage
+    /// this turn" class (Tymna the Weaver) and the resolver's `Opponent`
+    /// guard ensures the controller's own combat-damage entries don't leak in.
+    #[test]
+    fn resolve_quantity_player_count_opponent_dealt_combat_damage() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        // Player 1 was dealt combat damage; player 2 was dealt non-combat
+        // damage; player 0 (controller) is excluded by the Opponent guard.
+        state.damage_dealt_this_turn.push(DamageRecord {
+            source_id: ObjectId(99),
+            source_controller: PlayerId(0),
+            target: TargetRef::Player(PlayerId(1)),
+            target_controller: PlayerId(1),
+            amount: 4,
+            is_combat: true,
+        });
+        state.damage_dealt_this_turn.push(DamageRecord {
+            source_id: ObjectId(99),
+            source_controller: PlayerId(0),
+            target: TargetRef::Player(PlayerId(2)),
+            target_controller: PlayerId(2),
+            amount: 2,
+            is_combat: false,
+        });
+        // Self-damage record must not count as an "opponent dealt combat damage".
+        state.damage_dealt_this_turn.push(DamageRecord {
+            source_id: ObjectId(99),
+            source_controller: PlayerId(0),
+            target: TargetRef::Player(PlayerId(0)),
+            target_controller: PlayerId(0),
+            amount: 1,
+            is_combat: true,
+        });
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::OpponentDealtCombatDamage,
+            },
+        };
+        // Controller = player 0: only player 1 satisfies (combat + opponent).
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 1);
+    }
+
+    /// CR 120.1 + CR 510.1: With no combat damage dealt this turn, the
+    /// quantity resolves to zero — the empty-ledger case mirrors
+    /// `resolve_quantity_player_count_opponent_lost_life_none_lost`.
+    #[test]
+    fn resolve_quantity_player_count_opponent_dealt_combat_damage_none() {
+        let state = GameState::new_two_player(42);
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::OpponentDealtCombatDamage,
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 0);

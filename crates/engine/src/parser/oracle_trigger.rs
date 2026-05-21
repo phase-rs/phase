@@ -14849,6 +14849,61 @@ mod tests {
         assert_eq!(def.constraint, None);
     }
 
+    /// CR 107.3i + CR 120.1 + CR 510.1: Tymna the Weaver — the trigger body
+    /// must bind `X` from the trailing "where X is …" clause across BOTH the
+    /// "pay X life" cost AND the "draw X cards" sub-ability. The bound
+    /// expression must resolve to
+    /// `PlayerCount { OpponentDealtCombatDamage }`, not to an empty-shaped
+    /// `ObjectCount` (which previously matched every battlefield permanent
+    /// and made Tymna draw all 12 of the player's permanents instead of 1).
+    #[test]
+    fn trigger_tymna_the_weaver_pays_and_draws_bound_x() {
+        use crate::types::ability::{Effect, PaymentCost, PlayerFilter, QuantityExpr, QuantityRef};
+
+        let def = parse_trigger_line(
+            "At the beginning of each of your postcombat main phases, you may pay X life, \
+             where X is the number of opponents that were dealt combat damage this turn. \
+             If you do, draw X cards.",
+            "Tymna the Weaver",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::PostCombatMain));
+        assert!(def.optional, "trigger should be optional ('you may')");
+
+        let bound_qty = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::OpponentDealtCombatDamage,
+            },
+        };
+
+        let execute = def
+            .execute
+            .as_ref()
+            .expect("trigger must have an execute body");
+
+        // CR 118.8 + CR 107.3i: pay-life cost amount carries the bound X.
+        match execute.effect.as_ref() {
+            Effect::PayCost {
+                cost: PaymentCost::Life { amount },
+                ..
+            } => assert_eq!(*amount, bound_qty, "pay-life cost amount must be bound X"),
+            other => panic!("expected PayCost::Life, got {:?}", other),
+        }
+
+        // CR 121.1 + CR 107.3i: the conditional "if you do, draw X cards"
+        // sub-ability count carries the SAME bound X.
+        let sub = execute
+            .sub_ability
+            .as_ref()
+            .expect("trigger must have draw sub-ability");
+        match sub.effect.as_ref() {
+            Effect::Draw { count, .. } => {
+                assert_eq!(*count, bound_qty, "draw count must be bound X");
+            }
+            other => panic!("expected Effect::Draw, got {:?}", other),
+        }
+    }
+
     #[test]
     fn trigger_first_main_phase() {
         // CR 505.1: "first main phase" is an alias for precombat main phase.
