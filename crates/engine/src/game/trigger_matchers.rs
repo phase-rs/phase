@@ -612,6 +612,8 @@ fn zone_change_clause_matches(
         OriginConstraint::Equals(z) => from == &Some(*z),
         OriginConstraint::NotEquals(z) => matches!(from, Some(f) if f != z),
         OriginConstraint::OneOf(zs) => matches!(from, Some(f) if zs.contains(f)),
+        // CR 603.6c: "from anywhere other than <zone-list>" — negated source-zone set.
+        OriginConstraint::NotOneOf(zs) => matches!(from, Some(f) if !zs.contains(f)),
     };
     if !origin_ok {
         return false;
@@ -866,6 +868,8 @@ pub(super) fn match_spell_cast(
                 OriginConstraint::Equals(z) => *z == origin,
                 OriginConstraint::NotEquals(z) => *z != origin,
                 OriginConstraint::OneOf(zs) => zs.contains(&origin),
+                // CR 603.6c: "from anywhere other than <zone-list>" — negated source-zone set.
+                OriginConstraint::NotOneOf(zs) => !zs.contains(&origin),
             };
             if !ok {
                 return false;
@@ -3209,6 +3213,99 @@ mod tests {
         };
         assert!(!match_changes_zone(
             &created_in_graveyard,
+            &trigger,
+            ObjectId(1),
+            &state
+        ));
+    }
+
+    #[test]
+    fn match_changes_zone_clause_not_one_of() {
+        use crate::types::ability::{OriginConstraint, ZoneChangeClause};
+
+        let state = setup();
+        let mut trigger = make_trigger(TriggerMode::ChangesZone);
+        // CR 603.6a + CR 603.2: "Name Sticker" Goblin's "enters from anywhere
+        // other than a graveyard or exile" — list-form negated origin. The
+        // matcher must accept any `from` zone NOT in {Graveyard, Exile} and
+        // reject the two excluded zones plus `from = None` (token creation,
+        // CR 111.1).
+        trigger.zone_change_clauses = vec![ZoneChangeClause {
+            origin: OriginConstraint::NotOneOf(vec![Zone::Graveyard, Zone::Exile]),
+            destination: Some(Zone::Battlefield),
+            valid_card: None,
+        }];
+
+        // Hand → Battlefield: Hand is not in the exclusion set, must match.
+        let from_hand = zone_changed_event(
+            ObjectId(5),
+            Zone::Hand,
+            Zone::Battlefield,
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(match_changes_zone(&from_hand, &trigger, ObjectId(1), &state));
+
+        // Library → Battlefield: Library is not in the exclusion set, must match.
+        let from_library = zone_changed_event(
+            ObjectId(6),
+            Zone::Library,
+            Zone::Battlefield,
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(match_changes_zone(
+            &from_library,
+            &trigger,
+            ObjectId(1),
+            &state
+        ));
+
+        // Graveyard → Battlefield: Graveyard IS in the exclusion set, must NOT match.
+        let from_graveyard = zone_changed_event(
+            ObjectId(7),
+            Zone::Graveyard,
+            Zone::Battlefield,
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(!match_changes_zone(
+            &from_graveyard,
+            &trigger,
+            ObjectId(1),
+            &state
+        ));
+
+        // Exile → Battlefield: Exile IS in the exclusion set, must NOT match.
+        let from_exile = zone_changed_event(
+            ObjectId(8),
+            Zone::Exile,
+            Zone::Battlefield,
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(!match_changes_zone(
+            &from_exile,
+            &trigger,
+            ObjectId(1),
+            &state
+        ));
+
+        // None → Battlefield: token created directly on the battlefield
+        // (CR 111.1). The matcher uses `matches!(from, Some(f) if !zs.contains(f))`,
+        // which rejects `None`.
+        let from_none = GameEvent::ZoneChanged {
+            object_id: ObjectId(9),
+            from: None,
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                ObjectId(9),
+                None,
+                Zone::Battlefield,
+            )),
+        };
+        assert!(!match_changes_zone(
+            &from_none,
             &trigger,
             ObjectId(1),
             &state
