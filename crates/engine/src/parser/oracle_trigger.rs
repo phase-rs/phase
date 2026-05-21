@@ -787,6 +787,7 @@ fn mode_carries_event_source_object(mode: &TriggerMode) -> bool {
             // it (Necroduality, Mimic Vat class). The batched ChangesZoneAll
             // mode is excluded — its event carries a set, not one object.
             | TriggerMode::ChangesZone
+            | TriggerMode::Unattach
     )
 }
 
