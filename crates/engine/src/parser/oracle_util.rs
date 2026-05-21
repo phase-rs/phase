@@ -879,6 +879,7 @@ const SUBTYPES: &[&str] = &[
     "Mongoose",
     "Monk",
     "Monkey",
+    "Moogle",
     "Moonfolk",
     "Mount",
     "Mouse",

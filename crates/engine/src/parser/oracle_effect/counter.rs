@@ -1305,6 +1305,46 @@ mod tests {
         );
     }
 
+    /// #588 (Summon: Good King Mog XII, chapter IV — "Put two +1/+1 counters
+    /// on each other Moogle you control"): a creature subtype absent from the
+    /// curated `SUBTYPES` list silently dropped BOTH the `Subtype` type-filter
+    /// AND the "you control" controller (the failed subtype parse cascaded),
+    /// collapsing the filter to "every other permanent" so the counters landed
+    /// on opponents and lands. Regression guard: the subtype must be recognized
+    /// so the whole filter stays scoped. Drives the real `parse_subtype` path.
+    #[test]
+    fn put_counter_each_other_moogle_you_control_scopes_filter() {
+        use crate::types::ability::{ControllerRef, FilterProp, TypeFilter};
+        let text = "put two +1/+1 counters on each other moogle you control";
+        let (effect, _rem, _) =
+            try_parse_put_counter(text, text, &mut default_ctx()).expect("parse");
+        let Effect::PutCounter { target, .. } = effect else {
+            panic!("expected PutCounter, got {effect:?}");
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("expected Typed filter, got {target:?}");
+        };
+        assert!(
+            tf.type_filters
+                .iter()
+                .any(|f| matches!(f, TypeFilter::Subtype(s) if s == "Moogle")),
+            "Moogle subtype must be captured, got {:?}",
+            tf.type_filters
+        );
+        assert_eq!(
+            tf.controller,
+            Some(ControllerRef::You),
+            "\"you control\" must scope the controller (it dropped when the subtype was unknown)"
+        );
+        assert!(
+            tf.properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::Another)),
+            "\"other\" must map to FilterProp::Another, got {:?}",
+            tf.properties
+        );
+    }
+
     /// CR 122.8 + CR 400.7: "put those counters on [target]" — anaphoric
     /// counter-copy from a dies/leaves trigger. Source = SelfRef; the runtime
     /// resolver in `effects::counters::resolve_move` performs LKI fallback so

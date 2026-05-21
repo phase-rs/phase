@@ -3618,6 +3618,10 @@ pub(crate) fn parse_that_clause_suffix(text: &str) -> Option<(Vec<FilterProp>, u
         return Some(parsed);
     }
 
+    if let Some(parsed) = parse_supertype_relative_clause_suffix(trimmed, leading_ws) {
+        return Some(parsed);
+    }
+
     if let Ok((rest, prop)) = parse_shared_quality_clause(trimmed) {
         let consumed = trimmed.len() - rest.len();
         return Some((vec![prop], leading_ws + consumed));
@@ -3713,6 +3717,61 @@ fn parse_color_relative_clause_suffix(
         }]
     };
     Some((props, consumed))
+}
+
+/// CR 205.4a: "that's / that is / that are <supertype>" → `HasSupertype`;
+/// "that aren't / that isn't / that's not / that are not / that is not
+/// <supertype>" → `NotSupertype`. Supertypes are legendary/basic/snow
+/// (CR 205.4). Mirrors `parse_color_relative_clause_suffix` and delegates the
+/// supertype word to the shared `nom_target::parse_supertype_word` building
+/// block. Negation intros are matched before the positive forms
+/// (longest-match-first so "that are not" / "that's not" are not partially
+/// eaten by "that are " / "that's "). Covers "Exile all nonland permanents that
+/// aren't legendary" (Urza's Ruinous Blast) and the legendary/nonlegendary
+/// trailing-clause mass-filter class.
+fn parse_supertype_relative_clause_suffix(
+    trimmed: &str,
+    leading_ws: usize,
+) -> Option<(Vec<FilterProp>, usize)> {
+    let (after_intro, intro_len, negated) =
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that aren't ").parse(trimmed) {
+            (rest, "that aren't ".len(), true)
+        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that isn't ").parse(trimmed) {
+            (rest, "that isn't ".len(), true)
+        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that's not ").parse(trimmed) {
+            (rest, "that's not ".len(), true)
+        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that are not ").parse(trimmed) {
+            (rest, "that are not ".len(), true)
+        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that is not ").parse(trimmed) {
+            (rest, "that is not ".len(), true)
+        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that's ").parse(trimmed) {
+            (rest, "that's ".len(), false)
+        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that is ").parse(trimmed) {
+            (rest, "that is ".len(), false)
+        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that are ").parse(trimmed) {
+            (rest, "that are ".len(), false)
+        } else {
+            return None;
+        };
+
+    let (rest, supertype) = nom_target::parse_supertype_word(after_intro).ok()?;
+    // Word-boundary check: the supertype word must terminate so we don't
+    // false-match e.g. "that's basically free" (basic + "ally free").
+    let next_char_is_boundary = rest
+        .chars()
+        .next()
+        .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+    if !next_char_is_boundary {
+        return None;
+    }
+
+    let consumed = leading_ws + intro_len + after_intro.len() - rest.len();
+    let prop = if negated {
+        FilterProp::NotSupertype { value: supertype }
+    } else {
+        FilterProp::HasSupertype { value: supertype }
+    };
+    Some((vec![prop], consumed))
 }
 
 fn parse_color_disjunction(
@@ -7856,6 +7915,59 @@ mod tests {
                     },
                 ],
             }]
+        );
+    }
+
+    /// #641 (Urza's Ruinous Blast — "Exile all nonland permanents that aren't
+    /// legendary"): the "that aren't legendary" relative clause was dropped, so
+    /// the filter exiled every nonland permanent (legendary included). The
+    /// plural "that aren't" negation form was missing AND supertypes were not
+    /// handled in any relative-clause parser. Regression guard for the negation.
+    #[test]
+    fn that_arent_legendary_emits_not_supertype() {
+        let result = parse_that_clause_suffix(" that aren't legendary");
+        let (props, consumed) = result.expect("should parse");
+        assert_eq!(consumed, " that aren't legendary".len());
+        assert_eq!(
+            props,
+            vec![FilterProp::NotSupertype {
+                value: Supertype::Legendary,
+            }]
+        );
+    }
+
+    /// CR 205.4a: sibling positive form — "that's legendary" → `HasSupertype`.
+    /// Confirms the building block covers both polarities, not just the
+    /// reported negation.
+    #[test]
+    fn thats_legendary_emits_has_supertype() {
+        let result = parse_that_clause_suffix(" that's legendary");
+        let (props, consumed) = result.expect("should parse");
+        assert_eq!(consumed, " that's legendary".len());
+        assert_eq!(
+            props,
+            vec![FilterProp::HasSupertype {
+                value: Supertype::Legendary,
+            }]
+        );
+    }
+
+    /// #641 end-to-end: the full Urza's Ruinous Blast target phrase must carry
+    /// the `NotSupertype(Legendary)` property alongside the nonland-permanent
+    /// type filters, so the mass-exile excludes legendary permanents.
+    #[test]
+    fn nonland_permanents_that_arent_legendary_full_target() {
+        let (filter, rest) = parse_target("all nonland permanents that aren't legendary");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.properties.contains(&FilterProp::NotSupertype {
+                value: Supertype::Legendary,
+            }),
+            "must exclude legendary permanents, got {:?}",
+            tf.properties
         );
     }
 
