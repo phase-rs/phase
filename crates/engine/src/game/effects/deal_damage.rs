@@ -1401,6 +1401,7 @@ mod tests {
                             count: QuantityExpr::Ref {
                                 qty: QuantityRef::EventContextAmount,
                             },
+                            face_down: false,
                         },
                     ))
                     .description("Crumbling Sanctuary prevention shield".to_string()),

@@ -4873,6 +4873,7 @@ mod tests {
                     count: QuantityExpr::Ref {
                         qty: QuantityRef::EventContextAmount
                     },
+                    face_down: false,
                 }
             ),
             "expected ExileTop against prevented damage recipient, got {:?}",

@@ -8806,6 +8806,7 @@ mod tests {
                 Effect::ExileTop {
                     player: TargetFilter::TriggeringPlayer,
                     count: QuantityExpr::Fixed { value: 1 },
+                    face_down: false,
                 }
             ),
             "expected ExileTop to bind to TriggeringPlayer, got {:?}",
@@ -10221,6 +10222,7 @@ mod tests {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
+                face_down: false,
             }
         ));
 
@@ -12996,6 +12998,48 @@ mod tests {
                 TypedFilter::new(TypeFilter::Card).controller(ControllerRef::Opponent)
             ))
         );
+    }
+
+    /// CR 701.9 + CR 603.7c + CR 406.1: Necropotence's on-discard trigger
+    /// exiles the just-discarded card from the graveyard. The "that card"
+    /// anaphor must lift from `ParentTarget` to `TriggeringSource` so the
+    /// `ChangeZone { origin: Some(Graveyard), destination: Exile }` resolves
+    /// against the discarded object, and the controller filter must be
+    /// `You`. Locks the parse output for the Necropotence punisher-class
+    /// (Necropotence, Yawgmoth's Bargain-ish self-discard punishers).
+    #[test]
+    fn trigger_necropotence_you_discard_exile_from_graveyard() {
+        let def = parse_trigger_line(
+            "Whenever you discard a card, exile that card from your graveyard.",
+            "Necropotence",
+        );
+        assert_eq!(def.mode, TriggerMode::Discarded);
+        match def.valid_card.as_ref().expect("valid_card must be set") {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            }
+            other => panic!("expected Typed filter, got {other:?}"),
+        }
+        let execute = def
+            .execute
+            .as_deref()
+            .expect("on-discard trigger must have an execute body");
+        match execute.effect.as_ref() {
+            Effect::ChangeZone {
+                origin,
+                destination,
+                target,
+                ..
+            } => {
+                assert_eq!(*origin, Some(Zone::Graveyard));
+                assert_eq!(*destination, Zone::Exile);
+                assert!(
+                    matches!(target, TargetFilter::TriggeringSource),
+                    "expected TriggeringSource after lift, got {target:?}",
+                );
+            }
+            other => panic!("expected ChangeZone (graveyard → exile), got {other:?}"),
+        }
     }
 
     /// CR 701.9a + CR 603.2c: type qualifier on the discarded card must be
