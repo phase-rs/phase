@@ -1331,7 +1331,7 @@ fn parse_object_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     Ok((rest, QuantityRef::ObjectManaValue { scope }))
 }
 
-/// CR 117.1 + CR 202.3: Cost-paid object's mana value.
+/// CR 608.2k + CR 202.3: Cost-paid object's mana value.
 ///
 /// Composes the prefix grammar
 /// `[the] (sacrificed|exiled|discarded|milled) (creature|card|permanent|artifact)'s (mana value|converted mana cost)`
