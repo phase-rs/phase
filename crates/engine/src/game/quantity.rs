@@ -439,7 +439,7 @@ fn resolve_event_scoped_ref(
     }
 }
 
-fn resolve_mana_spent_to_cast_metric(
+pub(crate) fn resolve_mana_spent_to_cast_metric(
     state: &GameState,
     cast_object: ObjectId,
     metric: &CastManaSpentMetric,
