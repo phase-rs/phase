@@ -934,4 +934,220 @@ mod tests {
             other => panic!("expected Mana{{Colorless}}, got {other:?}"),
         }
     }
+
+    /// CR 603.7 (defensive): If the parent ability has no Object targets,
+    /// the walker leaves the QuantityRef unmodified. At fire time the ref
+    /// evaluates against empty targets and returns 0 — same fail-closed
+    /// behavior as before the walker existed.
+    #[test]
+    fn snapshot_no_parent_targets_leaves_ref_intact() {
+        let mut state = GameState::new_two_player(42);
+        let delayed_inner = AbilityDefinition::new(
+            AbilityKind::Spell,
+            mana_colorless_effect(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject,
+                },
+            }),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::PreCombatMain,
+                    player: PlayerId(0),
+                },
+                effect: Box::new(delayed_inner),
+                uses_tracked_set: false,
+            },
+            vec![], // empty targets
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).expect("resolve must succeed");
+
+        let delayed = &state.delayed_triggers[0];
+        match &delayed.ability.effect {
+            Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                ..
+            } => {
+                assert!(
+                    matches!(
+                        count,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectManaValue { .. }
+                        }
+                    ),
+                    "empty parent targets must leave the ref unmodified, got {count:?}"
+                );
+            }
+            other => panic!("expected Mana{{Colorless}}, got {other:?}"),
+        }
+    }
+
+    /// CR 603.7 (defensive): If the target ObjectId exists in parent.targets
+    /// but `state.objects` does NOT contain that id (the spell already left
+    /// the game through a weirder replacement), snapshot to Fixed{0} via
+    /// the LKI-or-zero fallback chain.
+    #[test]
+    fn snapshot_target_missing_from_objects_baked_to_zero() {
+        let mut state = GameState::new_two_player(42);
+        // Do NOT insert an object for spell_id — simulate a missing target.
+        let spell_id = ObjectId(999);
+
+        let delayed_inner = AbilityDefinition::new(
+            AbilityKind::Spell,
+            mana_colorless_effect(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject,
+                },
+            }),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::PreCombatMain,
+                    player: PlayerId(0),
+                },
+                effect: Box::new(delayed_inner),
+                uses_tracked_set: false,
+            },
+            vec![TargetRef::Object(spell_id)],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).expect("resolve must succeed");
+
+        let delayed = &state.delayed_triggers[0];
+        match &delayed.ability.effect {
+            Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                ..
+            } => {
+                assert_eq!(
+                    *count,
+                    QuantityExpr::Fixed { value: 0 },
+                    "missing object must snapshot to Fixed{{0}}"
+                );
+            }
+            other => panic!("expected Mana{{Colorless}}, got {other:?}"),
+        }
+    }
+
+    /// CR 603.7: Non-snapshottable QuantityRef leaves (Source-scoped,
+    /// Controller, Variable, aggregate refs, etc.) pass through the walker
+    /// unmodified. They evaluate against live game state at fire time,
+    /// which is the correct semantic.
+    #[test]
+    fn snapshot_non_snapshottable_ref_passes_through() {
+        let mut state = GameState::new_two_player(42);
+        let delayed_inner = AbilityDefinition::new(
+            AbilityKind::Spell,
+            // Source-scoped — refers to the ability source, which persists
+            // at fire time. Walker must NOT snapshot.
+            mana_colorless_effect(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Source,
+                },
+            }),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::PreCombatMain,
+                    player: PlayerId(0),
+                },
+                effect: Box::new(delayed_inner),
+                uses_tracked_set: false,
+            },
+            vec![TargetRef::Object(ObjectId(42))],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).expect("resolve must succeed");
+
+        let delayed = &state.delayed_triggers[0];
+        match &delayed.ability.effect {
+            Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                ..
+            } => {
+                assert!(
+                    matches!(
+                        count,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectManaValue {
+                                scope: ObjectScope::Source
+                            }
+                        }
+                    ),
+                    "Source-scoped ref must pass through unmodified, got {count:?}"
+                );
+            }
+            other => panic!("expected Mana{{Colorless}}, got {other:?}"),
+        }
+    }
+
+    /// CR 603.7: Compound QuantityExpr variants (Offset, Multiply, Sum,
+    /// etc.) must recurse — the walker snapshots any snapshottable leaves
+    /// nested inside. Verifies an Offset(ObjectManaValue{CostPaidObject},
+    /// +1) rewrites to Offset(Fixed{N}, +1), not full collapse.
+    #[test]
+    fn snapshot_compound_expr_recurses() {
+        let mut state = GameState::new_two_player(42);
+        let spell_id = ObjectId(42);
+        inject_spell_with_mana_value(&mut state, spell_id, 2);
+
+        let delayed_inner = AbilityDefinition::new(
+            AbilityKind::Spell,
+            mana_colorless_effect(QuantityExpr::Offset {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::CostPaidObject,
+                    },
+                }),
+                offset: 1,
+            }),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::PreCombatMain,
+                    player: PlayerId(0),
+                },
+                effect: Box::new(delayed_inner),
+                uses_tracked_set: false,
+            },
+            vec![TargetRef::Object(spell_id)],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).expect("resolve must succeed");
+
+        let delayed = &state.delayed_triggers[0];
+        match &delayed.ability.effect {
+            Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                ..
+            } => {
+                assert_eq!(
+                    *count,
+                    QuantityExpr::Offset {
+                        inner: Box::new(QuantityExpr::Fixed { value: 2 }),
+                        offset: 1,
+                    },
+                    "compound Offset must recurse: inner snapshotted to Fixed{{2}}, outer Offset{{+1}} preserved"
+                );
+            }
+            other => panic!("expected Mana{{Colorless}}, got {other:?}"),
+        }
+    }
 }
