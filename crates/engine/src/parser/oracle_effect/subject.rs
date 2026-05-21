@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till};
-use nom::combinator::{all_consuming, opt, value, verify};
+use nom::combinator::{all_consuming, map, opt, value, verify};
 use nom::sequence::preceded;
 use nom::Parser;
 
@@ -41,6 +41,18 @@ pub(super) fn try_parse_subject_predicate_ast(
     // must intercept before continuous clause parsing which would incorrectly
     // extract "defender" as an AddKeyword from "didn't have defender".
     if let Some(clause) = try_parse_can_attack_with_defender(text, ctx) {
+        return Some(subject_predicate_ast_from_clause(
+            text,
+            clause,
+            |effect, duration, _sub_ability| PredicateAst::Restriction { effect, duration },
+            ctx,
+        ));
+    }
+
+    // CR 509.1a + CR 509.1b: "can block an additional creature [this turn]" —
+    // must intercept before continuous clause parsing which cannot produce the
+    // ExtraBlockers static mode from the predicate text.
+    if let Some(clause) = try_parse_can_block_additional(text, ctx) {
         return Some(subject_predicate_ast_from_clause(
             text,
             clause,
@@ -461,6 +473,88 @@ fn try_parse_can_attack_with_defender(
         optional: false,
         unless_pay: None,
     })
+}
+
+/// CR 509.1a + CR 509.1b: "[subject] can block an additional creature [this turn]"
+/// Produces a GenericEffect with ExtraBlockers { count: Some(1) } static mode.
+/// Mirrors the static-ability parser in `oracle_static.rs` but for activated/triggered
+/// effect text where the grant is transient (until end of turn).
+fn try_parse_can_block_additional(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    let (subject_lower, predicate_lower) =
+        nom_primitives::scan_split_at_phrase(&lower, |i| tag("can block ").parse(i))?;
+    let subject_text = &text[..subject_lower.len()];
+    let application = parse_subject_application(subject_text.trim(), ctx)?;
+
+    let (_rest, (_, _, _, _, count, duration, _)) = all_consuming((
+        tag("can"),
+        tag(" "),
+        tag("block"),
+        tag(" "),
+        parse_extra_blockers_count,
+        parse_block_grant_duration,
+        opt(tag(".")),
+    ))
+    .parse(predicate_lower)
+    .ok()?;
+    let mode = StaticMode::ExtraBlockers { count };
+    let affected = static_affected_for_application(&application);
+    Some(ParsedEffectClause {
+        effect: Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::new(mode.clone())
+                .affected(affected)
+                .modifications(vec![ContinuousModification::AddStaticMode { mode }])],
+            duration: duration.clone(),
+            target: application.target,
+        },
+        duration,
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
+fn parse_extra_blockers_count(input: &str) -> OracleResult<'_, Option<u32>> {
+    alt((
+        map(
+            (
+                nom_primitives::parse_number,
+                tag(" additional creature"),
+                opt(tag("s")),
+            ),
+            |(count, _, _)| Some(count),
+        ),
+        value(
+            None,
+            (
+                tag("any"),
+                tag(" "),
+                tag("number"),
+                tag(" "),
+                tag("of"),
+                tag(" "),
+                tag("creatures"),
+            ),
+        ),
+    ))
+    .parse(input)
+}
+
+fn parse_block_grant_duration(input: &str) -> OracleResult<'_, Option<Duration>> {
+    opt(preceded(
+        tag(" this "),
+        alt((
+            value(Duration::UntilEndOfTurn, tag("turn")),
+            value(Duration::UntilEndOfCombat, tag("combat")),
+        )),
+    ))
+    .parse(input)
 }
 
 pub(super) fn parse_subject_application(
@@ -3161,5 +3255,124 @@ mod tests {
                 StaticMode::CantWinTheGame
             ])
         );
+    }
+
+    /// CR 509.1a + CR 509.1b: Activated ability "~ can block an additional creature
+    /// this turn" produces a transient GenericEffect granting ExtraBlockers { count: Some(1) }
+    /// via AddStaticMode. Validates the `try_parse_can_block_additional` handler.
+    #[test]
+    fn can_block_additional_creature_this_turn_effect() {
+        let mut ctx = ParseContext {
+            card_name: Some("Luminous Guardian".to_string()),
+            ..Default::default()
+        };
+        let ability = crate::parser::oracle_effect::parse_effect_chain_with_context(
+            "~ can block an additional creature this turn.",
+            AbilityKind::Activated,
+            &mut ctx,
+        );
+        match &*ability.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                ..
+            } => {
+                assert_eq!(
+                    duration,
+                    &Some(Duration::UntilEndOfTurn),
+                    "duration must be UntilEndOfTurn"
+                );
+                assert_eq!(static_abilities.len(), 1);
+                let sd = &static_abilities[0];
+                assert_eq!(
+                    sd.mode,
+                    StaticMode::ExtraBlockers { count: Some(1) },
+                    "mode must be ExtraBlockers(1)"
+                );
+                assert!(
+                    sd.modifications.iter().any(|m| matches!(
+                        m,
+                        ContinuousModification::AddStaticMode {
+                            mode: StaticMode::ExtraBlockers { count: Some(1) }
+                        }
+                    )),
+                    "must have AddStaticMode(ExtraBlockers(1)) modification"
+                );
+            }
+            other => panic!("expected GenericEffect, got {other:?}"),
+        }
+    }
+
+    /// CR 509.1a: "~ can block any number of creatures this turn" produces
+    /// ExtraBlockers { count: None } via the same handler.
+    #[test]
+    fn can_block_any_number_this_turn_effect() {
+        let mut ctx = ParseContext {
+            card_name: Some("Test Card".to_string()),
+            ..Default::default()
+        };
+        let ability = crate::parser::oracle_effect::parse_effect_chain_with_context(
+            "~ can block any number of creatures this turn.",
+            AbilityKind::Activated,
+            &mut ctx,
+        );
+        match &*ability.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                ..
+            } => {
+                assert_eq!(
+                    duration,
+                    &Some(Duration::UntilEndOfTurn),
+                    "duration must be UntilEndOfTurn"
+                );
+                assert_eq!(static_abilities.len(), 1);
+                let sd = &static_abilities[0];
+                assert_eq!(
+                    sd.mode,
+                    StaticMode::ExtraBlockers { count: None },
+                    "mode must be ExtraBlockers(None)"
+                );
+            }
+            other => panic!("expected GenericEffect, got {other:?}"),
+        }
+    }
+
+    /// CR 509.1a + CR 509.1b: combat-scoped blocking permissions expire at
+    /// end of combat, and numeric counts are parsed through the shared number
+    /// combinator rather than a one-card string branch.
+    #[test]
+    fn can_block_two_additional_creatures_this_combat_effect() {
+        let mut ctx = ParseContext {
+            card_name: Some("Test Card".to_string()),
+            ..Default::default()
+        };
+        let ability = crate::parser::oracle_effect::parse_effect_chain_with_context(
+            "~ can block two additional creatures this combat.",
+            AbilityKind::Activated,
+            &mut ctx,
+        );
+        match &*ability.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                ..
+            } => {
+                assert_eq!(
+                    duration,
+                    &Some(Duration::UntilEndOfCombat),
+                    "duration must be UntilEndOfCombat"
+                );
+                assert_eq!(static_abilities.len(), 1);
+                let sd = &static_abilities[0];
+                assert_eq!(
+                    sd.mode,
+                    StaticMode::ExtraBlockers { count: Some(2) },
+                    "mode must be ExtraBlockers(2)"
+                );
+            }
+            other => panic!("expected GenericEffect, got {other:?}"),
+        }
     }
 }
