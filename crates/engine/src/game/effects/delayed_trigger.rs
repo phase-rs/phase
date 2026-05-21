@@ -341,6 +341,20 @@ fn snapshot_quantity_ref(
                 .unwrap_or(0);
             Some(value)
         }
+        QuantityRef::ManaSpentToCast {
+            scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
+            metric,
+        } => {
+            let filter_ctx =
+                crate::game::filter::FilterContext::from_source(state, ability.source_id);
+            crate::game::quantity::resolve_mana_spent_to_cast_metric(
+                state,
+                target_object_id,
+                metric,
+                &filter_ctx,
+            )
+            .or(Some(0))
+        }
         _ => None,
     }
 }
@@ -794,6 +808,75 @@ mod tests {
             vec![TargetRef::Object(vehicle_id)],
             "delayed ParentTarget effects must remember the object from the parent resolution"
         );
+    }
+
+    /// CR 603.7 + CR 106.3 + CR 608.2k: A delayed trigger whose inner
+    /// effect references `ManaSpentToCast{TriggeringSpell, Total}` (the
+    /// parser-emitted anaphor for "the amount of mana spent to cast that
+    /// spell" — used by Mana Sculpt) must have that leaf snapshotted to a
+    /// `Fixed` value at creation time. The snapshot reads
+    /// `state.objects[parent.targets[0]].mana_spent_to_cast_amount` via
+    /// `resolve_mana_spent_to_cast_metric`, bypassing the standard
+    /// TriggeringSpell resolver chain (which keys off
+    /// state.current_trigger_event — wrong context at firing time, and
+    /// also unset during Mana Sculpt's spell-card resolution).
+    #[test]
+    fn snapshot_mana_spent_to_cast_triggering_spell_baked_to_fixed() {
+        use crate::types::ability::{CastManaObjectScope, CastManaSpentMetric};
+
+        let mut state = GameState::new_two_player(42);
+        let spell_id = ObjectId(42);
+        // Reuse the fixture from Task 4 to create a spell GameObject, then
+        // override mana_spent_to_cast_amount specifically (mana_cost can be
+        // anything since this test exercises the ManaSpentToCast path, not
+        // ObjectManaValue).
+        inject_spell_with_mana_value(&mut state, spell_id, 0);
+        state
+            .objects
+            .get_mut(&spell_id)
+            .unwrap()
+            .mana_spent_to_cast_amount = 5;
+
+        let delayed_inner = AbilityDefinition::new(
+            AbilityKind::Spell,
+            mana_colorless_effect(QuantityExpr::Ref {
+                qty: QuantityRef::ManaSpentToCast {
+                    scope: CastManaObjectScope::TriggeringSpell,
+                    metric: CastManaSpentMetric::Total,
+                },
+            }),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::PreCombatMain,
+                    player: PlayerId(0),
+                },
+                effect: Box::new(delayed_inner),
+                uses_tracked_set: false,
+            },
+            vec![TargetRef::Object(spell_id)],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).expect("resolve must succeed");
+
+        let delayed = &state.delayed_triggers[0];
+        match &delayed.ability.effect {
+            Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                ..
+            } => {
+                assert_eq!(
+                    *count,
+                    QuantityExpr::Fixed { value: 5 },
+                    "ManaSpentToCast{{TriggeringSpell}} must snapshot to Fixed{{5}}"
+                );
+            }
+            other => panic!("expected Mana{{Colorless}}, got {other:?}"),
+        }
     }
 
     /// CR 603.7 + CR 202.3: A delayed trigger whose inner effect references
