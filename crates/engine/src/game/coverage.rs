@@ -32,51 +32,38 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 /// Data-carrying static mode variants that are supported but can't be registered
 /// by exact key in the static registry (because the key includes runtime data).
 fn is_data_carrying_static(mode: &StaticMode) -> bool {
-    matches!(
-        mode,
+    match mode {
         StaticMode::ReduceAbilityCost { .. }
-            | StaticMode::ModifyActivationLimit { .. }
-            | StaticMode::AdditionalLandDrop { .. }
-            | StaticMode::ReduceCost { .. }
-            | StaticMode::RaiseCost { .. }
-            | StaticMode::MinimumCost { .. }
-            | StaticMode::DefilerCostReduction { .. }
-            | StaticMode::CantPayCost { .. }
-            | StaticMode::CantBeCast { .. }
-            | StaticMode::CantCastDuring { .. }
-            | StaticMode::PerTurnCastLimit { .. }
-            | StaticMode::PerTurnDrawLimit { .. }
-            | StaticMode::GraveyardCastPermission { .. }
-            | StaticMode::TopOfLibraryCastPermission { .. }
-            | StaticMode::CastFromHandFree { .. }
-            | StaticMode::CastWithKeyword { .. }
-            // CR 702.16: PlayerProtection carries a `ProtectionTarget` (Strings) —
-            // open value space, consumed by direct match in `player_protection_from`.
-            | StaticMode::PlayerProtection { .. }
-            | StaticMode::ActivateAsInstant { .. }
-            | StaticMode::MaximumHandSize { .. }
-            | StaticMode::StepEndUnspentMana { .. }
-            | StaticMode::CantBeBlockedBy { .. }
-            // CR 509.1b: CantBeBlockedExceptBy with a Quality filter carries an open-value
-            // `TargetFilter` (e.g. Subtype("Wall"), Flying, artifact creatures) whose
-            // runtime enforcement lives in combat.rs::validate_blockers.
-            // The MinBlockers variant is handled by the Menace-style registry path;
-            // only Quality variants are data-carrying in the open-value sense.
-            | StaticMode::CantBeBlockedExceptBy {
-                kind: BlockExceptionKind::Quality(_),
-            }
-            // CR 602.5 + CR 603.2a: CantBeActivated carries `who` + `source_filter`.
-            | StaticMode::CantBeActivated { .. }
-            // CR 701.23 + CR 609.3: CantSearchLibrary carries `cause`.
-            | StaticMode::CantSearchLibrary { .. }
-            // CR 603.2g: SuppressTriggers carries `source_filter` + `events`.
-            | StaticMode::SuppressTriggers { .. }
-            // CR 603.2d: DoubleTriggers carries the `TriggerCause` predicate.
-            | StaticMode::DoubleTriggers { .. }
-            // CR 107.4f: PayLifeAsColoredMana carries the `ManaColor` axis
-            // (K'rrik = Black; future printings any other color).
-            | StaticMode::PayLifeAsColoredMana { .. }
-    )
+        | StaticMode::ModifyActivationLimit { .. }
+        | StaticMode::AdditionalLandDrop { .. }
+        | StaticMode::ReduceCost { .. }
+        | StaticMode::RaiseCost { .. }
+        | StaticMode::MinimumCost { .. }
+        | StaticMode::DefilerCostReduction { .. }
+        | StaticMode::CantPayCost { .. }
+        | StaticMode::CantBeCast { .. }
+        | StaticMode::CantCastDuring { .. }
+        | StaticMode::PerTurnCastLimit { .. }
+        | StaticMode::PerTurnDrawLimit { .. }
+        | StaticMode::GraveyardCastPermission { .. }
+        | StaticMode::TopOfLibraryCastPermission { .. }
+        | StaticMode::CastFromHandFree { .. }
+        | StaticMode::CastWithKeyword { .. }
+        | StaticMode::PlayerProtection { .. }
+        | StaticMode::ActivateAsInstant { .. }
+        | StaticMode::MaximumHandSize { .. }
+        | StaticMode::StepEndUnspentMana { .. }
+        | StaticMode::CantBeBlockedBy { .. }
+        | StaticMode::CantBeActivated { .. }
+        | StaticMode::CantSearchLibrary { .. }
+        | StaticMode::SuppressTriggers { .. }
+        | StaticMode::DoubleTriggers { .. }
+        | StaticMode::PayLifeAsColoredMana { .. } => true,
+        StaticMode::CantBeBlockedExceptBy {
+            kind: BlockExceptionKind::Quality(filter),
+        } if !matches!(filter, TargetFilter::Any) => true,
+        _ => false,
+    }
 }
 
 /// A lightweight node in the parse tree for a single card, representing one
