@@ -554,9 +554,11 @@ pub fn has_meaningful_priority_action(state: &GameState, actions: &[GameAction])
             source_id,
             ability_index,
         } => state.objects.get(source_id).is_some_and(|obj| {
-            obj.abilities
-                .get(*ability_index)
-                .is_some_and(|ability| !mana_abilities::is_mana_ability(ability))
+            obj.abilities.get(*ability_index).is_some_and(|ability| {
+                !mana_abilities::is_mana_ability(ability)
+                    || mana_sources::mana_ability_penalty(ability)
+                        .is_meaningful_priority_activation()
+            })
         }),
         _ => true,
     })
@@ -1756,6 +1758,81 @@ mod tests {
         assert!(
             super::has_meaningful_priority_action(&state, &actions),
             "The reusable helper must not apply the own-stack shortcut"
+        );
+    }
+
+    // Issue #544: Krark-Clan Ironworks ("Sacrifice an artifact: Add {C}{C}") is
+    // a mana ability whose cost sacrifices a permanent. Even though it is a mana
+    // ability, the sacrifice is a meaningful priority decision (CR 605.3a +
+    // 603.6), so auto-pass must NOT fire when it is the only available action.
+    #[test]
+    fn auto_pass_does_not_skip_sacrifice_for_mana_ability() {
+        use crate::game::zones::create_object;
+        use crate::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction,
+            QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
+        };
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::ManaColor;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let kci = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Krark-Clan Ironworks".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&kci).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            // KCI's real parsed cost: a BARE Sacrifice with a Typed(Artifact)
+            // target (not Composite, not SelfRef). Drive the real classifier.
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::AnyOneColor {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            color_options: vec![ManaColor::Red],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Sacrifice {
+                    target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                    count: 1,
+                }),
+            );
+        }
+
+        let actions = vec![
+            GameAction::PassPriority,
+            GameAction::ActivateAbility {
+                source_id: kci,
+                ability_index: 0,
+            },
+        ];
+        assert!(
+            super::has_meaningful_priority_action(&state, &actions),
+            "A sacrifice-for-mana ability is a meaningful priority decision (CR 605.3a + 603.6)"
+        );
+        assert!(
+            !super::auto_pass_recommended(&state, &actions),
+            "Auto-pass must not fire when only a sacrifice-for-mana ability is available (#544)"
         );
     }
 

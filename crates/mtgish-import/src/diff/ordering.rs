@@ -190,9 +190,9 @@ pub const ORDERING_MANIFEST: &[((&str, &str), OrderingClass)] = &[
         OrderingClass::SetEquivalent,
     ),
     (("ManaProduction", "options"), OrderingClass::SetEquivalent),
-    // ----- GameRestriction allowed_zones -----
+    // ----- ProhibitedActivity allowed_zones -----
     (
-        ("GameRestriction", "allowed_zones"),
+        ("ProhibitedActivity", "allowed_zones"),
         OrderingClass::SetEquivalent,
     ),
     // ----- FilterProp variants with embedded Vec<...> -----

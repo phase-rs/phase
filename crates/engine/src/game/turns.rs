@@ -582,8 +582,7 @@ pub fn execute_untap_with_choices(
         use crate::types::ability::GameRestriction;
 
         match restriction {
-            GameRestriction::CastOnlyFromZones { expiry, .. }
-            | GameRestriction::CantCastSpells { expiry, .. } => {
+            GameRestriction::ProhibitActivity { expiry, .. } => {
                 !matches!(expiry, RestrictionExpiry::UntilPlayerNextTurn { player } if *player == active)
             }
             GameRestriction::DamagePreventionDisabled { .. } => true,
@@ -944,8 +943,7 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
         use crate::types::ability::{GameRestriction, RestrictionExpiry};
         match r {
             GameRestriction::DamagePreventionDisabled { expiry, .. }
-            | GameRestriction::CastOnlyFromZones { expiry, .. }
-            | GameRestriction::CantCastSpells { expiry, .. } => {
+            | GameRestriction::ProhibitActivity { expiry, .. } => {
                 !matches!(expiry, RestrictionExpiry::EndOfTurn)
             }
         }
@@ -3789,7 +3787,9 @@ mod tests {
 
     #[test]
     fn execute_untap_prunes_until_player_next_turn_restrictions() {
-        use crate::types::ability::{GameRestriction, RestrictionExpiry, RestrictionPlayerScope};
+        use crate::types::ability::{
+            GameRestriction, ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope,
+        };
         use crate::types::identifiers::{CardId, ObjectId};
 
         let mut state = GameState::new_two_player(42);
@@ -3801,12 +3801,14 @@ mod tests {
             "Avatar's Wrath".to_string(),
             Zone::Exile,
         );
-        state.restrictions.push(GameRestriction::CastOnlyFromZones {
+        state.restrictions.push(GameRestriction::ProhibitActivity {
             source,
             affected_players: RestrictionPlayerScope::OpponentsOfSourceController,
-            allowed_zones: vec![Zone::Hand],
             expiry: RestrictionExpiry::UntilPlayerNextTurn {
                 player: PlayerId(1),
+            },
+            activity: ProhibitedActivity::CastOnlyFromZones {
+                allowed_zones: vec![Zone::Hand],
             },
         });
         state

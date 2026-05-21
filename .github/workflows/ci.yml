@@ -22,10 +22,10 @@ permissions:
   contents: read
 
 jobs:
-  rust-check:
-    name: Rust (fmt, clippy, test, coverage-gate)
+  rust-lint:
+    name: Rust lint (fmt, clippy, parser gate)
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,10 +36,6 @@ jobs:
         with:
           target: wasm32-unknown-unknown
           cache-shared-key: rust-debug
-
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -57,13 +53,41 @@ jobs:
           fi
           ./scripts/check-parser-combinators.sh "$BASE"
 
+  rust-test:
+    name: Rust tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-unknown-unknown
+          cache-shared-key: rust-debug
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
       - name: Run tests
         # PROPTEST_CASES split: PRs run a smaller case count for fast feedback;
         # pushes to main run the default (256) so any property regression is
         # caught before it lands on the branch that feeds staging/preview.
         env:
           PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '32' || '256' }}
-        run: cargo nextest run --workspace --exclude phase-tauri --features engine/proptest
+        run: cargo nextest run --workspace --exclude phase-tauri --features engine/proptest --status-level fail --final-status-level fail
+
+  card-data-gate:
+    name: Card data (generate, validate, coverage)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-unknown-unknown
+          cache-shared-key: rust-debug
 
       - name: Set cache keys
         id: cache-keys
@@ -159,8 +183,34 @@ jobs:
           npx wrangler r2 object put phase-rs-data/preview/coverage-summary.json --file data/coverage-summary.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
           npx wrangler r2 object put phase-rs-data/preview/semantic-audit.json --file data/semantic-audit.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
 
+  wasm-check:
+    name: WASM compile check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-unknown-unknown
+          cache-shared-key: rust-debug
+
       - name: WASM compile check
         run: cargo check --package engine-wasm --target wasm32-unknown-unknown
+
+  tauri-check:
+    name: Tauri compile check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-shared-key: rust-tauri
+          cache-workspaces: |
+            . -> target
+            client/src-tauri -> target
 
       - name: Install Linux Tauri build deps
         # Required by phase-tauri's transitive dependencies (webkit2gtk, gtk).
@@ -196,6 +246,34 @@ jobs:
         # Driven via --manifest-path because client/src-tauri is excluded
         # from the root workspace, so `-p phase-tauri` cannot resolve it.
         run: cargo check --manifest-path client/src-tauri/Cargo.toml
+
+  rust-check:
+    name: Rust (fmt, clippy, test, coverage-gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs:
+      - rust-lint
+      - rust-test
+      - card-data-gate
+      - wasm-check
+      - tauri-check
+    if: always()
+    steps:
+      - name: Check split Rust jobs
+        env:
+          RUST_LINT_RESULT: ${{ needs.rust-lint.result }}
+          RUST_TEST_RESULT: ${{ needs.rust-test.result }}
+          CARD_DATA_RESULT: ${{ needs.card-data-gate.result }}
+          WASM_RESULT: ${{ needs.wasm-check.result }}
+          TAURI_RESULT: ${{ needs.tauri-check.result }}
+        run: |
+          results="$RUST_LINT_RESULT $RUST_TEST_RESULT $CARD_DATA_RESULT $WASM_RESULT $TAURI_RESULT"
+          for result in $results; do
+            if [ "$result" != "success" ]; then
+              echo "One or more split Rust jobs failed: $results"
+              exit 1
+            fi
+          done
 
   frontend:
     name: Frontend (lint, type-check, test)

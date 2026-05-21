@@ -84,14 +84,23 @@ fn parse_non_prefix(input: &str) -> OracleResult<'_, &str> {
     alt((tag("non-"), tag("non"))).parse(input)
 }
 
-/// Parse a supertype prefix ("legendary ", "basic ", "snow ") consuming trailing space.
-pub fn parse_supertype_prefix(input: &str) -> OracleResult<'_, Supertype> {
-    let (rest, st) = alt((
+/// CR 205.4a: Parse a bare supertype word ("legendary", "basic", "snow")
+/// without consuming any trailing boundary. Shared building block for both the
+/// adjective-prefix form (`parse_supertype_prefix`, word + space) and trailing
+/// relative-clause forms ("that aren't legendary", where the word is at
+/// end-of-string). Callers that need a boundary apply their own check.
+pub fn parse_supertype_word(input: &str) -> OracleResult<'_, Supertype> {
+    alt((
         value(Supertype::Legendary, tag("legendary")),
         value(Supertype::Basic, tag("basic")),
         value(Supertype::Snow, tag("snow")),
     ))
-    .parse(input)?;
+    .parse(input)
+}
+
+/// Parse a supertype prefix ("legendary ", "basic ", "snow ") consuming trailing space.
+pub fn parse_supertype_prefix(input: &str) -> OracleResult<'_, Supertype> {
+    let (rest, st) = parse_supertype_word(input)?;
     let (rest, _) = space1.parse(rest)?;
     Ok((rest, st))
 }
