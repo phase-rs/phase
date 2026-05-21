@@ -1,7 +1,7 @@
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, CardPlayMode,
     CastTimingPermission, CastingPermission, ChoiceType, ContinuousModification, Duration, Effect,
-    GameRestriction, ModalSelectionCondition, QuantityExpr, ResolvedAbility,
+    GameRestriction, ModalSelectionCondition, ProhibitedActivity, QuantityExpr, ResolvedAbility,
     RestrictionPlayerScope, StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::card::LayoutKind;
@@ -184,6 +184,44 @@ fn append_to_ability_def_sub_chain(ability: &mut AbilityDefinition, next: Abilit
 
 /// CR 101.2 + CR 601.2a: Temporary restrictions can limit which zones affected
 /// players may cast spells from.
+fn restriction_scope_matches_player(
+    source_controller: Option<PlayerId>,
+    affected_players: &RestrictionPlayerScope,
+    caster: PlayerId,
+) -> bool {
+    // CR 101.2: Restriction scope defines who is affected by the prohibition.
+    match affected_players {
+        RestrictionPlayerScope::AllPlayers => true,
+        RestrictionPlayerScope::SpecificPlayer(player) => *player == caster,
+        RestrictionPlayerScope::TargetedPlayer => {
+            debug_assert!(
+                false,
+                "TargetedPlayer should be resolved by add_restriction"
+            );
+            false
+        }
+        RestrictionPlayerScope::OpponentsOfSourceController => {
+            source_controller.is_some_and(|controller| controller != caster)
+        }
+    }
+}
+
+/// CR 601.2a: Build the spell-record projection used by prohibition filters.
+fn spell_record_for_restrictions(spell_obj: &super::game_object::GameObject) -> SpellCastRecord {
+    SpellCastRecord {
+        name: spell_obj.name.clone(),
+        core_types: spell_obj.card_types.core_types.clone(),
+        supertypes: spell_obj.card_types.supertypes.clone(),
+        subtypes: spell_obj.card_types.subtypes.clone(),
+        keywords: spell_obj.keywords.clone(),
+        colors: spell_obj.color.clone(),
+        mana_value: spell_obj.mana_cost.mana_value(),
+        has_x_in_cost: super::casting_costs::cost_has_x(&spell_obj.mana_cost),
+        from_zone: spell_obj.zone,
+        cast_variant: crate::types::game_state::CastingVariant::Normal,
+    }
+}
+
 fn is_blocked_by_cast_only_from_zones(
     state: &GameState,
     obj: &crate::game::game_object::GameObject,
@@ -193,32 +231,21 @@ fn is_blocked_by_cast_only_from_zones(
         .restrictions
         .iter()
         .any(|restriction| match restriction {
-            GameRestriction::CastOnlyFromZones {
+            GameRestriction::ProhibitActivity {
                 source,
                 affected_players,
-                allowed_zones,
+                activity: ProhibitedActivity::CastOnlyFromZones { allowed_zones },
                 ..
             } => {
                 let source_controller = state
                     .objects
                     .get(source)
                     .map(|source_obj| source_obj.controller);
-                let caster_affected = match affected_players {
-                    RestrictionPlayerScope::AllPlayers => true,
-                    RestrictionPlayerScope::SpecificPlayer(player) => *player == caster,
-                    RestrictionPlayerScope::TargetedPlayer => {
-                        debug_assert!(false, "TargetedPlayer should be resolved by add_restriction");
-                        false
-                    }
-                    RestrictionPlayerScope::OpponentsOfSourceController => {
-                        source_controller.is_some_and(|controller| controller != caster)
-                    }
-                };
+                let caster_affected =
+                    restriction_scope_matches_player(source_controller, affected_players, caster);
                 caster_affected && !allowed_zones.contains(&obj.zone)
             }
-            GameRestriction::DamagePreventionDisabled { .. } => false,
-            GameRestriction::CantCastSpells { .. } => false,
-            GameRestriction::CantActivateAbilities { .. } => false,
+            _ => false,
         })
 }
 
@@ -229,11 +256,13 @@ fn is_blocked_by_cant_cast_spells(
     caster: PlayerId,
     spell_obj: Option<&super::game_object::GameObject>,
 ) -> bool {
+    let spell_record = spell_obj.map(spell_record_for_restrictions);
+
     state.restrictions.iter().any(|restriction| {
-        let GameRestriction::CantCastSpells {
+        let GameRestriction::ProhibitActivity {
             source,
             affected_players,
-            spell_filter,
+            activity: ProhibitedActivity::CastSpells { spell_filter },
             ..
         } = restriction
         else {
@@ -243,47 +272,22 @@ fn is_blocked_by_cant_cast_spells(
             .objects
             .get(source)
             .map(|source_obj| source_obj.controller);
-        let caster_affected = match affected_players {
-            RestrictionPlayerScope::AllPlayers => true,
-            RestrictionPlayerScope::SpecificPlayer(player) => *player == caster,
-            RestrictionPlayerScope::TargetedPlayer => {
-                debug_assert!(
-                    false,
-                    "TargetedPlayer should be resolved by add_restriction"
-                );
-                false
+        let caster_affected =
+            restriction_scope_matches_player(source_controller, affected_players, caster);
+
+        // CR 101.2: Once scope matches, filter-matching spells are prohibited.
+        caster_affected
+            && match spell_filter {
+                Some(filter) => spell_record.as_ref().is_some_and(|record| {
+                    super::filter::spell_record_matches_filter(
+                        record,
+                        filter,
+                        source_controller.unwrap_or(caster),
+                        &state.all_creature_types,
+                    )
+                }),
+                None => true,
             }
-            RestrictionPlayerScope::OpponentsOfSourceController => {
-                source_controller.is_some_and(|controller| controller != caster)
-            }
-        };
-        caster_affected && {
-            if let Some(filter) = spell_filter {
-                let Some(spell_obj) = spell_obj else {
-                    return false;
-                };
-                let spell_record = SpellCastRecord {
-                    name: spell_obj.name.clone(),
-                    core_types: spell_obj.card_types.core_types.clone(),
-                    supertypes: spell_obj.card_types.supertypes.clone(),
-                    subtypes: spell_obj.card_types.subtypes.clone(),
-                    keywords: spell_obj.keywords.clone(),
-                    colors: spell_obj.color.clone(),
-                    mana_value: spell_obj.mana_cost.mana_value(),
-                    has_x_in_cost: super::casting_costs::cost_has_x(&spell_obj.mana_cost),
-                    from_zone: spell_obj.zone,
-                    cast_variant: crate::types::game_state::CastingVariant::Normal,
-                };
-                super::filter::spell_record_matches_filter(
-                    &spell_record,
-                    filter,
-                    source_controller.unwrap_or(caster),
-                    &state.all_creature_types,
-                )
-            } else {
-                true
-            }
-        }
     })
 }
 
@@ -295,10 +299,10 @@ fn is_blocked_by_cant_activate_abilities(
     activating_ability: &AbilityDefinition,
 ) -> bool {
     state.restrictions.iter().any(|restriction| {
-        let GameRestriction::CantActivateAbilities {
+        let GameRestriction::ProhibitActivity {
             source,
             affected_players,
-            exemption,
+            activity: ProhibitedActivity::ActivateAbilities { exemption },
             ..
         } = restriction
         else {
@@ -308,26 +312,15 @@ fn is_blocked_by_cant_activate_abilities(
             .objects
             .get(source)
             .map(|source_obj| source_obj.controller);
-        let caster_affected = match affected_players {
-            RestrictionPlayerScope::AllPlayers => true,
-            RestrictionPlayerScope::SpecificPlayer(player) => *player == caster,
-            RestrictionPlayerScope::TargetedPlayer => {
-                debug_assert!(
-                    false,
-                    "TargetedPlayer should be resolved by add_restriction"
-                );
-                false
-            }
-            RestrictionPlayerScope::OpponentsOfSourceController => {
-                source_controller.is_some_and(|controller| controller != caster)
-            }
-        };
+        let caster_affected =
+            restriction_scope_matches_player(source_controller, affected_players, caster);
         if !caster_affected {
             return false;
         }
         match exemption {
             ActivationExemption::None => true,
             ActivationExemption::ManaAbilities => {
+                // CR 605.1a: Mana abilities are exempt from this prohibition.
                 !super::mana_abilities::is_mana_ability(activating_ability)
             }
         }
@@ -16187,11 +16180,13 @@ mod tests {
             "Restriction Source".to_string(),
             Zone::Exile,
         );
-        state.restrictions.push(GameRestriction::CastOnlyFromZones {
+        state.restrictions.push(GameRestriction::ProhibitActivity {
             source,
             affected_players,
-            allowed_zones: vec![Zone::Hand],
             expiry: RestrictionExpiry::UntilPlayerNextTurn { player: controller },
+            activity: ProhibitedActivity::CastOnlyFromZones {
+                allowed_zones: vec![Zone::Hand],
+            },
         });
         source
     }

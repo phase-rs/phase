@@ -31,9 +31,7 @@ pub fn resolve(
 fn fill_runtime_fields(restriction: &mut GameRestriction, ability: &ResolvedAbility) {
     match restriction {
         GameRestriction::DamagePreventionDisabled { source, .. }
-        | GameRestriction::CastOnlyFromZones { source, .. }
-        | GameRestriction::CantCastSpells { source, .. }
-        | GameRestriction::CantActivateAbilities { source, .. } => {
+        | GameRestriction::ProhibitActivity { source, .. } => {
             *source = ability.source_id;
         }
     }
@@ -41,13 +39,7 @@ fn fill_runtime_fields(restriction: &mut GameRestriction, ability: &ResolvedAbil
     let resolved_target_player = ability.target_player();
 
     match restriction {
-        GameRestriction::CastOnlyFromZones {
-            affected_players, ..
-        }
-        | GameRestriction::CantCastSpells {
-            affected_players, ..
-        }
-        | GameRestriction::CantActivateAbilities {
+        GameRestriction::ProhibitActivity {
             affected_players, ..
         } => {
             if matches!(
@@ -63,9 +55,7 @@ fn fill_runtime_fields(restriction: &mut GameRestriction, ability: &ResolvedAbil
     }
 
     match restriction {
-        GameRestriction::CastOnlyFromZones { expiry, .. }
-        | GameRestriction::CantCastSpells { expiry, .. }
-        | GameRestriction::CantActivateAbilities { expiry, .. } => {
+        GameRestriction::ProhibitActivity { expiry, .. } => {
             if let Some(crate::types::ability::Duration::UntilNextTurnOf {
                 player: crate::types::ability::PlayerScope::Controller,
             }) = ability.duration.as_ref()
@@ -83,7 +73,8 @@ fn fill_runtime_fields(restriction: &mut GameRestriction, ability: &ResolvedAbil
 mod tests {
     use super::*;
     use crate::types::ability::{
-        Duration, GameRestriction, RestrictionExpiry, RestrictionPlayerScope, TargetRef,
+        Duration, GameRestriction, ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope,
+        TargetRef,
     };
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
@@ -137,11 +128,13 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::AddRestriction {
-                restriction: GameRestriction::CastOnlyFromZones {
+                restriction: GameRestriction::ProhibitActivity {
                     source: ObjectId(0),
                     affected_players: RestrictionPlayerScope::OpponentsOfSourceController,
-                    allowed_zones: vec![Zone::Hand],
                     expiry: RestrictionExpiry::EndOfTurn,
+                    activity: ProhibitedActivity::CastOnlyFromZones {
+                        allowed_zones: vec![Zone::Hand],
+                    },
                 },
             },
             vec![],
@@ -157,11 +150,11 @@ mod tests {
 
         assert!(matches!(
             &state.restrictions[0],
-            GameRestriction::CastOnlyFromZones {
+            GameRestriction::ProhibitActivity {
                 source: ObjectId(9),
                 affected_players: RestrictionPlayerScope::OpponentsOfSourceController,
-                allowed_zones,
                 expiry: RestrictionExpiry::UntilPlayerNextTurn { player: PlayerId(1) },
+                activity: ProhibitedActivity::CastOnlyFromZones { allowed_zones },
             } if allowed_zones == &vec![Zone::Hand]
         ));
     }
@@ -172,11 +165,13 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::AddRestriction {
-                restriction: GameRestriction::CantActivateAbilities {
+                restriction: GameRestriction::ProhibitActivity {
                     source: ObjectId(0),
                     affected_players: RestrictionPlayerScope::TargetedPlayer,
-                    exemption: crate::types::statics::ActivationExemption::ManaAbilities,
                     expiry: RestrictionExpiry::EndOfTurn,
+                    activity: ProhibitedActivity::ActivateAbilities {
+                        exemption: crate::types::statics::ActivationExemption::ManaAbilities,
+                    },
                 },
             },
             vec![TargetRef::Player(PlayerId(1))],
@@ -189,9 +184,10 @@ mod tests {
 
         assert!(matches!(
             &state.restrictions[0],
-            GameRestriction::CantActivateAbilities {
+            GameRestriction::ProhibitActivity {
                 source: ObjectId(7),
                 affected_players: RestrictionPlayerScope::SpecificPlayer(PlayerId(1)),
+                activity: ProhibitedActivity::ActivateAbilities { .. },
                 ..
             }
         ));

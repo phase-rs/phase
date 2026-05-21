@@ -48,10 +48,10 @@ use crate::types::ability::{
     DamageModification, DamageSource, DelayedTriggerCondition, Duration, Effect, FilterProp,
     GainLifePlayer, GameRestriction, ManaProduction, ManaSpendPermission, MultiTargetSpec,
     ObjectProperty, ObjectScope, PaymentCost, PlayerFilter, PlayerScope, PreventionAmount,
-    PreventionScope, PtValue, QuantityExpr, QuantityRef, ReplacementDefinition, RestrictionExpiry,
-    RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition, SubAbilityLink,
-    TargetChoiceTiming, TargetFilter, TargetSelectionMode, TriggerCondition, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition,
+    PreventionScope, ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, ReplacementDefinition,
+    RestrictionExpiry, RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition,
+    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetSelectionMode, TriggerCondition,
+    TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
@@ -1480,11 +1480,13 @@ fn try_parse_cast_only_from_zones_restriction(tp: TextPair<'_>) -> Option<Parsed
 
     Some(ParsedEffectClause {
         effect: Effect::AddRestriction {
-            restriction: GameRestriction::CastOnlyFromZones {
+            restriction: GameRestriction::ProhibitActivity {
                 source: ObjectId(0),
                 affected_players,
-                allowed_zones: vec![Zone::Hand],
                 expiry,
+                activity: ProhibitedActivity::CastOnlyFromZones {
+                    allowed_zones: vec![Zone::Hand],
+                },
             },
         },
         duration,
@@ -1594,11 +1596,11 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
 
     Some(ParsedEffectClause {
         effect: Effect::AddRestriction {
-            restriction: GameRestriction::CantCastSpells {
+            restriction: GameRestriction::ProhibitActivity {
                 source: ObjectId(0),
                 affected_players,
-                spell_filter,
                 expiry,
+                activity: ProhibitedActivity::CastSpells { spell_filter },
             },
         },
         duration,
@@ -1666,11 +1668,13 @@ fn try_parse_cant_activate_non_mana_abilities_effect(
 
     Some(ParsedEffectClause {
         effect: Effect::AddRestriction {
-            restriction: GameRestriction::CantActivateAbilities {
+            restriction: GameRestriction::ProhibitActivity {
                 source: ObjectId(0),
                 affected_players,
-                exemption: ActivationExemption::ManaAbilities,
                 expiry: RestrictionExpiry::EndOfTurn,
+                activity: ProhibitedActivity::ActivateAbilities {
+                    exemption: ActivationExemption::ManaAbilities,
+                },
             },
         },
         duration: None,
@@ -27875,8 +27879,8 @@ mod tests {
         assert!(matches!(
             *def.effect,
             Effect::AddRestriction {
-                restriction: GameRestriction::CastOnlyFromZones {
-                    allowed_zones,
+                restriction: GameRestriction::ProhibitActivity {
+                    activity: ProhibitedActivity::CastOnlyFromZones { allowed_zones },
                     ..
                 }
             } if allowed_zones == vec![Zone::Hand]
@@ -27899,10 +27903,10 @@ mod tests {
         assert!(matches!(
             *def.effect,
             Effect::AddRestriction {
-                restriction: GameRestriction::CantCastSpells {
+                restriction: GameRestriction::ProhibitActivity {
                     affected_players: RestrictionPlayerScope::OpponentsOfSourceController,
-                    spell_filter: None,
                     expiry: RestrictionExpiry::EndOfTurn,
+                    activity: ProhibitedActivity::CastSpells { spell_filter: None },
                     ..
                 }
             }
@@ -27916,10 +27920,10 @@ mod tests {
         assert!(matches!(
             *def.effect,
             Effect::AddRestriction {
-                restriction: GameRestriction::CantCastSpells {
+                restriction: GameRestriction::ProhibitActivity {
                     affected_players: RestrictionPlayerScope::AllPlayers,
-                    spell_filter: None,
                     expiry: RestrictionExpiry::EndOfTurn,
+                    activity: ProhibitedActivity::CastSpells { spell_filter: None },
                     ..
                 }
             }
@@ -27936,9 +27940,11 @@ mod tests {
         assert!(matches!(
             *def.effect,
             Effect::AddRestriction {
-                restriction: GameRestriction::CantCastSpells {
+                restriction: GameRestriction::ProhibitActivity {
                     affected_players: RestrictionPlayerScope::TargetedPlayer,
-                    spell_filter: Some(_),
+                    activity: ProhibitedActivity::CastSpells {
+                        spell_filter: Some(_)
+                    },
                     ..
                 }
             }
@@ -27948,9 +27954,11 @@ mod tests {
         assert!(matches!(
             *sub.effect,
             Effect::AddRestriction {
-                restriction: GameRestriction::CantActivateAbilities {
+                restriction: GameRestriction::ProhibitActivity {
                     affected_players: RestrictionPlayerScope::TargetedPlayer,
-                    exemption: ActivationExemption::ManaAbilities,
+                    activity: ProhibitedActivity::ActivateAbilities {
+                        exemption: ActivationExemption::ManaAbilities,
+                    },
                     ..
                 }
             }

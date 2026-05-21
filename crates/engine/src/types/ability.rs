@@ -791,25 +791,23 @@ impl<'de> serde::Deserialize<'de> for DevotionColors {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type")]
 pub enum ManaProduction {
-    /// Produce an explicit fixed sequence of colored mana symbols (e.g. `{W}{U}`).
+    /// Produce one or more specific colors.
     Fixed {
         #[serde(default)]
         colors: Vec<ManaColor>,
-        /// CR 605.1a: Whether this is base or additional (e.g. Wild Growth,
-        /// Verdant Haven) mana.
+        /// CR 605.1a: Whether this is base or additional (e.g. Fertile Ground) mana.
         #[serde(
             default = "default_mana_contribution",
             skip_serializing_if = "is_default_mana_contribution"
         )]
         contribution: ManaContribution,
     },
-    /// Produce N colorless mana (e.g. `{C}`, `{C}{C}`).
+    /// Produce strictly colorless mana (e.g. "Add {C}").
     Colorless {
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
     },
-    /// CR 106.1: Produce a mix of colorless and colored mana (e.g. `{C}{W}`, `{C}{C}{R}`).
-    /// Used by Ravnica bounce lands (Karoo, Azorius Chancery) and similar.
+    /// Produce a mixed bundle of fixed colorless + colored mana (e.g. "Add {C}{R}").
     Mixed {
         colorless_count: u32,
         colors: Vec<ManaColor>,
@@ -1183,31 +1181,29 @@ pub enum GameRestriction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scope: Option<RestrictionScope>,
     },
-    /// CR 101.2 + CR 601.2a: A temporary effect restricts affected players to casting
-    /// spells only from the listed zones until the restriction expires.
-    CastOnlyFromZones {
+    /// CR 101.2 + CR 601.2a + CR 602.5: A temporary effect prohibits one activity
+    /// axis for affected players until expiry.
+    ProhibitActivity {
         source: ObjectId,
         affected_players: RestrictionPlayerScope,
-        allowed_zones: Vec<Zone>,
         expiry: RestrictionExpiry,
+        activity: ProhibitedActivity,
     },
-    /// CR 101.2: A temporary effect prevents affected players from casting any spell
-    /// until the restriction expires. E.g., Silence: "Your opponents can't cast spells this turn."
-    CantCastSpells {
-        source: ObjectId,
-        affected_players: RestrictionPlayerScope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ProhibitedActivity {
+    /// CR 101.2 + CR 601.2a: Restrict casting to the listed zones.
+    CastOnlyFromZones { allowed_zones: Vec<Zone> },
+    /// CR 101.2: Prevent casting matching spells.
+    CastSpells {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         spell_filter: Option<TargetFilter>,
-        expiry: RestrictionExpiry,
     },
-    /// CR 101.2 + CR 602.5: A temporary effect prevents affected players from
-    /// activating abilities, optionally exempting mana abilities.
-    CantActivateAbilities {
-        source: ObjectId,
-        affected_players: RestrictionPlayerScope,
-        exemption: ActivationExemption,
-        expiry: RestrictionExpiry,
-    },
+    /// CR 101.2 + CR 602.5 + CR 605.1a: Prevent activating abilities, optionally
+    /// exempting mana abilities.
+    ActivateAbilities { exemption: ActivationExemption },
 }
 
 /// When a game restriction expires.

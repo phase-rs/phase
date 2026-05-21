@@ -10438,7 +10438,10 @@ mod tests {
         assert!(matches!(
             *r.abilities[1].effect,
             Effect::AddRestriction {
-                restriction: crate::types::ability::GameRestriction::CastOnlyFromZones { .. }
+                restriction: crate::types::ability::GameRestriction::ProhibitActivity {
+                    activity: crate::types::ability::ProhibitedActivity::CastOnlyFromZones { .. },
+                    ..
+                }
             }
         ));
         assert_eq!(
