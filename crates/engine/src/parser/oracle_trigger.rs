@@ -4865,6 +4865,19 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
         }
     }
 
+    // CR 120.3: "whenever/when a source deals damage to ~" — self-damage trigger.
+    // Fires when any source (combat or noncombat) deals damage to this card.
+    // "this creature" / card name is normalized to ~ before trigger parsing.
+    if matches!(
+        lower,
+        "whenever a source deals damage to ~" | "when a source deals damage to ~"
+    ) {
+        let mut def = make_base();
+        def.mode = TriggerMode::DamageReceived;
+        def.valid_card = Some(TargetFilter::SelfRef);
+        return Some((TriggerMode::DamageReceived, def));
+    }
+
     if matches!(
         lower,
         "whenever you commit a crime" | "when you commit a crime"
@@ -10676,6 +10689,19 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::DamageReceived);
         assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+    }
+
+    #[test]
+    fn trigger_source_deals_damage_to_self() {
+        // Phyrexian Obliterator (NPH/DMR): "Whenever a source deals damage to this creature,
+        // that source's controller sacrifices that many permanents."
+        let def = parse_trigger_line(
+            "Whenever a source deals damage to this creature, that source's controller sacrifices that many permanents of their choice.",
+            "Phyrexian Obliterator",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageReceived);
+        assert_eq!(def.damage_kind, DamageKindFilter::Any);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
     }
 
     #[test]
