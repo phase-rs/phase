@@ -14308,7 +14308,9 @@ fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<ParsedEffect
         },
         duration: None,
         sub_ability: None,
-        distribute: Some(DistributionUnit::Counters(counter_type.as_str().into_owned())),
+        distribute: Some(DistributionUnit::Counters(
+            counter_type.as_str().into_owned(),
+        )),
         multi_target,
         condition: None,
         optional: false,
