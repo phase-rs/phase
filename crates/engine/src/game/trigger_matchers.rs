@@ -2072,13 +2072,20 @@ pub(super) fn match_excess_damage_all(
 }
 
 /// YouAttack: fires once when a player declares attackers matching the trigger's
-/// player-scope filter.
+/// player-scope filter AND attacker-type filter.
 ///
 /// CR 508.1m + CR 603.2c: If `trigger.valid_target` is set, the matcher resolves
 /// the attacking player (the common controller of the attackers — CR 506.2 / CR
 /// 508.1) and checks it against the filter (e.g. `ControllerRef::Opponent` for
 /// "another player attacks"). With no filter, the legacy "you attack" semantics
 /// apply: fire when any attacker is controlled by the trigger's source controller.
+///
+/// CR 508.1 + CR 506.2: If `trigger.valid_card` is set, the trigger is an
+/// "attack with one or more <TYPE>" form — it fires iff at least one declared
+/// attacker (CR 506.2: controlled by the active player) matches the type filter.
+/// The batch fires the trigger once (CR 603.2c). With no `valid_card`, any
+/// attacker satisfies the type gate (legacy behavior preserved). Both the
+/// player-scope (`valid_target`) and type (`valid_card`) gates must hold.
 pub(super) fn match_you_attack(
     event: &GameEvent,
     trigger: &TriggerDefinition,
@@ -2099,11 +2106,26 @@ pub(super) fn match_you_attack(
     else {
         return false;
     };
-    if trigger.valid_target.is_some() {
+    // CR 603.2c: the player-scope gate (valid_target). No filter ⇒ legacy
+    // "attackers controlled by the trigger's source controller" semantics.
+    let player_ok = if trigger.valid_target.is_some() {
         valid_player_matches(trigger, state, attacking_player, source_id)
     } else {
         let source_controller = state.objects.get(&source_id).map(|o| o.controller);
         Some(attacking_player) == source_controller
+    };
+    if !player_ok {
+        return false;
+    }
+
+    // CR 508.1 + CR 603.2c: the attacker-type gate (valid_card). "Attack with one
+    // or more <TYPE>" fires iff at least one attacker in the batch matches the
+    // type filter. No filter ⇒ any attacker (current behavior preserved).
+    match &trigger.valid_card {
+        None => true,
+        Some(filter) => attacker_ids
+            .iter()
+            .any(|id| target_filter_matches_object(state, *id, filter, source_id)),
     }
 }
 

@@ -394,6 +394,14 @@ const REPLACEMENT_CONTAINS_PATTERNS: &[&str] = &[
     // `parse_replacement_line` even when its suffix carries a static keyword
     // pattern like "has haste" that would otherwise classify it as static.
     "become a copy of",
+    // CR 614.6 + CR 614.7 + CR 122.1: Self-targeted counter-prohibition
+    // replacements ("~ can't have counters put on it." — Melira's Keepers
+    // class). The line lacks "would"/"instead" so it does not match the
+    // damage/destroy/draw replacement surface phrases, and the static
+    // classifier's `can't have ` pattern (if any) would otherwise miscategorize
+    // it as a static. Routing it as a replacement keeps it in the CR 614
+    // pipeline where `add_counter_applier` short-circuits the proposed event.
+    "can't have counters put on",
 ];
 
 pub(crate) fn is_replacement_pattern(lower: &str) -> bool {

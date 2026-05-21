@@ -77,11 +77,15 @@ pub enum ManaSourcePenalty {
     /// Examples: Mana Confluence (1), Starting Town (1).
     PaysLifeOnActivation { fixed_amount: Option<u16> },
 
-    /// CR 605.3b: Cost contains `AbilityCost::Sacrifice { target: SelfRef }`.
-    /// The source leaves the battlefield on activation, so the activation is
-    /// never rewindable.
+    /// CR 605.3b + CR 701.21: Cost contains an `AbilityCost::Sacrifice { .. }`
+    /// component — bare or nested in a `Composite`, for any target filter. The
+    /// activation sacrifices a permanent (the source itself OR another), so the
+    /// sacrifice is irreversible and the activation is never rewindable.
     ///
-    /// Examples: Treasure, Gold, Lotus Petal.
+    /// Covers both self-sac tokens (Treasure, Gold, Lotus Petal —
+    /// `Composite[Tap, Sacrifice{SelfRef}]`) and sacrifice-engine mana sources
+    /// (Krark-Clan Ironworks — bare `Sacrifice{Typed(Artifact)}`; Ashnod's
+    /// Altar — `Sacrifice{Typed(Creature)}`; Phyrexian Tower).
     Sacrifices,
 }
 
@@ -171,6 +175,20 @@ impl ManaSourcePenalty {
     pub fn is_free(self) -> bool {
         matches!(self, Self::None)
     }
+
+    /// CR 605.3a: a player may activate a mana ability whenever they have
+    /// priority, so a priority window offering one is only auto-passable when
+    /// the activation is pure, reversible mana production. A `Sacrifices`
+    /// activation is different: the sacrificed permanent leaving the
+    /// battlefield is a goal a player may independently want (CR 603.6
+    /// leaves-the-battlefield triggers, recursion engines, graveyard-matters,
+    /// sac-fodder), so it is a meaningful priority decision. Life/damage/
+    /// depletion penalties are pure costs no rational player pays with nothing
+    /// to spend the mana on (mana empties at end of step per CR 500.5), so they
+    /// stay auto-passable.
+    pub fn is_meaningful_priority_activation(self) -> bool {
+        matches!(self, Self::Sacrifices)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,19 +237,17 @@ pub(crate) fn has_tap_component(cost: &Option<AbilityCost>) -> bool {
     }
 }
 
-/// Check whether an ability cost requires sacrificing the source permanent.
-fn cost_requires_sacrifice(cost: &Option<AbilityCost>) -> bool {
+/// CR 701.21: True when paying this ability's cost sacrifices a permanent
+/// (the source itself or another). Matches a bare `Sacrifice` cost and a
+/// `Sacrifice` nested inside a `Composite`, for any target filter.
+fn cost_includes_sacrifice(cost: &Option<AbilityCost>) -> bool {
+    fn is_sac(c: &AbilityCost) -> bool {
+        matches!(c, AbilityCost::Sacrifice { .. })
+    }
     match cost {
-        Some(AbilityCost::Composite { costs }) => costs.iter().any(|c| {
-            matches!(
-                c,
-                AbilityCost::Sacrifice {
-                    target: TargetFilter::SelfRef,
-                    ..
-                }
-            )
-        }),
-        _ => false,
+        Some(AbilityCost::Composite { costs }) => costs.iter().any(is_sac),
+        Some(c) => is_sac(c),
+        None => false,
     }
 }
 
@@ -383,7 +399,7 @@ fn chain_has_non_mana_effect(ability: &AbilityDefinition) -> bool {
 /// lands, self-haste lands, `Effect::Unimplemented` tails, etc.) — assumed
 /// to commit irreversible state so they aren't offered as undoable.
 pub(crate) fn mana_ability_penalty(ability: &AbilityDefinition) -> ManaSourcePenalty {
-    if cost_requires_sacrifice(&ability.cost) {
+    if cost_includes_sacrifice(&ability.cost) {
         return ManaSourcePenalty::Sacrifices;
     }
     if let Some(fixed_amount) = cost_life_payment_amount(&ability.cost) {
@@ -2148,6 +2164,89 @@ mod tests {
         assert!(
             penalty.priority_amount() > fixed_max.priority_amount(),
             "unknown amount (None) must sort strictly worse than any known amount (conservative worst)"
+        );
+    }
+
+    /// Build a `{T}`-cost tap-mana producer whose cost is `cost`. Used by the
+    /// sacrifice-classifier tests to drive the real `mana_ability_penalty`
+    /// against the real parsed cost shapes.
+    fn mana_ability_with_cost(cost: AbilityCost) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    color_options: vec![ManaColor::Red],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(cost)
+    }
+
+    /// CR 701.21: Krark-Clan Ironworks — "Sacrifice an artifact: Add {C}{C}."
+    /// Its parsed cost is a BARE `Sacrifice` with a `Typed(Artifact)` target
+    /// (not `Composite`, not `SelfRef`). Before the classifier was widened this
+    /// fell through to `None`, so the priority gate auto-passed it (issue #544).
+    #[test]
+    fn krark_clan_ironworks_classifies_as_sacrifices() {
+        use crate::types::ability::{TargetFilter, TypeFilter, TypedFilter};
+        let ability = mana_ability_with_cost(AbilityCost::Sacrifice {
+            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+            count: 1,
+        });
+        assert_eq!(
+            mana_ability_penalty(&ability),
+            ManaSourcePenalty::Sacrifices,
+            "a bare Sacrifice cost with a Typed target must classify as Sacrifices"
+        );
+    }
+
+    /// CR 701.21: Phyrexian Tower / Ashnod's Altar shape — `Composite[Tap,
+    /// Sacrifice{Typed(Creature)}]`. Sacrifices a permanent other than the
+    /// source, nested inside a `Composite`.
+    #[test]
+    fn phyrexian_tower_shape_classifies_as_sacrifices() {
+        use crate::types::ability::{TargetFilter, TypedFilter};
+        let ability = mana_ability_with_cost(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Tap,
+                AbilityCost::Sacrifice {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    count: 1,
+                },
+            ],
+        });
+        assert_eq!(
+            mana_ability_penalty(&ability),
+            ManaSourcePenalty::Sacrifices,
+            "a Composite cost containing a Sacrifice{{Typed(Creature)}} must classify as Sacrifices"
+        );
+    }
+
+    /// CR 701.21: self-sac token shape (Treasure / Gold / Lotus Petal) —
+    /// `Composite[Tap, Sacrifice{SelfRef}]`. Must still classify as
+    /// `Sacrifices` after the classifier was widened (no regression).
+    #[test]
+    fn self_sac_token_shape_still_classifies_as_sacrifices() {
+        use crate::types::ability::TargetFilter;
+        let ability = mana_ability_with_cost(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Tap,
+                AbilityCost::Sacrifice {
+                    target: TargetFilter::SelfRef,
+                    count: 1,
+                },
+            ],
+        });
+        assert_eq!(
+            mana_ability_penalty(&ability),
+            ManaSourcePenalty::Sacrifices,
+            "a Composite cost containing a Sacrifice{{SelfRef}} must still classify as Sacrifices"
         );
     }
 
