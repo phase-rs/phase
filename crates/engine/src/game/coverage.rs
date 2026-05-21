@@ -26,6 +26,9 @@ use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::StaticMode;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
+use nom::bytes::complete::tag;
+use nom::combinator::{all_consuming, value};
+use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -74,10 +77,11 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // is_data_carrying_static() because the variant is parameterized
             // and the registry uses exact-key lookup.
             | StaticMode::SkipStep { .. }
-            // CR 401.4: RevealTopOfLibrary carries `all_players`.
-            // Runtime enforcement is in casting.rs::top_of_library_permission_source()
-            // and turns.rs::should_skip_draw(). Coverage support via
-            // is_data_carrying_static() because the variant is parameterized.
+            // CR 400.2: RevealTopOfLibrary carries `all_players`; libraries
+            // are hidden zones unless revealed by an effect. Runtime permission
+            // is in casting.rs::top_of_library_permission_source(). Coverage
+            // support via is_data_carrying_static() because the variant is
+            // parameterized.
             | StaticMode::RevealTopOfLibrary { .. }
     )
 }
@@ -1291,6 +1295,26 @@ fn fmt_phase(p: &Phase) -> &'static str {
         Phase::End => "end step",
         Phase::Cleanup => "cleanup",
     }
+}
+
+fn skip_step_phrase(step: Phase) -> Option<&'static str> {
+    match step {
+        Phase::Untap => Some("untap step"),
+        Phase::Upkeep => Some("upkeep step"),
+        Phase::Draw => Some("draw step"),
+        _ => None,
+    }
+}
+
+fn oracle_line_matches_skip_step(effective_lower: &str, step: Phase) -> bool {
+    let Some(step_phrase) = skip_step_phrase(step) else {
+        return false;
+    };
+
+    let result: nom::IResult<&str, ()> =
+        all_consuming(value((), (tag("skip your "), tag(step_phrase), tag("."))))
+            .parse(effective_lower);
+    result.is_ok()
 }
 
 fn fmt_double_pt_mode(mode: &DoublePTMode) -> &'static str {
@@ -6301,11 +6325,10 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 effective_lower.contains("as though those creatures had haste")
                     || effective_lower.contains("as though that creature had haste")
             }
-            // CR 614.1b + CR 614.10: "Skip your [step] step" — replacement effect.
-            // Matches any "skip your ... step" Oracle line.
-            StaticMode::SkipStep { .. } => {
-                effective_lower.starts_with("skip your ") && effective_lower.ends_with(" step.")
-            }
+            // CR 614.1b + CR 614.10: "Skip your [step] step" is a
+            // step-specific replacement effect, so coverage must match the
+            // parsed `Phase` rather than any syntactically similar skip line.
+            StaticMode::SkipStep { step } => oracle_line_matches_skip_step(&effective_lower, *step),
             _ => false,
         });
 
@@ -9230,8 +9253,7 @@ mod tests {
     /// `is_data_carrying_static` so that cards like Necropotence and
     /// Yawgmoth's Bargain are marked as supported.
     #[test]
-    fn skip_draw_step_static_does_not_count_as_silent_drop() {
-        use crate::types::phase::Phase;
+    fn skip_draw_step_static_has_no_coverage_gap() {
         let mut face = make_face();
         let oracle = "Skip your draw step.";
         face.oracle_text = Some(oracle.to_string());
@@ -9248,33 +9270,17 @@ mod tests {
         });
 
         assert!(
-            audit_card_lines(oracle, &face).is_empty(),
+            card_face_gaps(&face).is_empty(),
             "'Skip your draw step.' should be covered by SkipStep(Draw) static"
         );
     }
 
-    /// Regression: `SkipStep { step: Untap }` must also be recognised.
+    /// Regression: `SkipStep { step: Untap }` must not cover a draw-step line.
     #[test]
-    fn skip_untap_step_static_does_not_count_as_silent_drop() {
-        use crate::types::phase::Phase;
-        let mut face = make_face();
-        let oracle = "Skip your untap step.";
-        face.oracle_text = Some(oracle.to_string());
-        face.static_abilities.push(StaticDefinition {
-            mode: StaticMode::SkipStep { step: Phase::Untap },
-            affected: Some(TargetFilter::SelfRef),
-            modifications: vec![],
-            condition: None,
-            affected_zone: None,
-            effect_zone: None,
-            active_zones: vec![],
-            characteristic_defining: false,
-            description: Some("Skip your untap step.".to_string()),
-        });
-
+    fn skip_step_static_must_match_parsed_phase() {
         assert!(
-            audit_card_lines(oracle, &face).is_empty(),
-            "'Skip your untap step.' should be covered by SkipStep(Untap) static"
+            !oracle_line_matches_skip_step("skip your draw step.", Phase::Untap),
+            "'Skip your draw step.' must not be covered by SkipStep(Untap)"
         );
     }
 }
