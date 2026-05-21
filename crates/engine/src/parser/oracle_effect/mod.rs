@@ -3531,7 +3531,7 @@ fn parse_conjure_zone(lower: &str) -> Option<(Zone, &str)> {
     .map(|(rest, zone)| (zone, rest))
 }
 
-/// CR 611.2b: Parse "have [subject] [predicate]" subject redirection.
+/// CR 611.2: Parse "have [subject] [predicate]" subject redirection.
 ///
 /// In imperative Oracle text, "have" followed by a target reference or anaphoric pronoun
 /// means "cause [subject] to [predicate]". Examples:
@@ -3575,9 +3575,33 @@ fn try_parse_have_redirection(text: &str, ctx: &mut ParseContext) -> Option<Pars
         }
     }
 
-    // Guard: don't intercept if what follows "have" is not a recognizable subject reference.
-    // Subject references start with: "target", "it", "that", "each", "all", "them",
-    // "another target", "this", "~", "enchanted", "equipped".
+    // Strip "have " from the original text (preserving original casing).
+    let redirected_text = text["have ".len()..].trim();
+
+    // CR 113.1a + CR 608.2c + CR 611.1: A successful subject-predicate parse
+    // on the post-"have" text is unambiguous evidence that this is the
+    // causative-grant form. CR 113.1a explicitly names "has"/"have"/"gains"/
+    // "gain" as the granted-ability terminology; CR 608.2c is the in-order
+    // instruction-following step where the controller of the resolving
+    // ability applies the grant; CR 611.1 is the continuous-effect that
+    // results. Delegate the "is this a valid subject + predicate?" question
+    // to the existing AST parser rather than gating on a hardcoded word
+    // allowlist. This unlocks the filter-subject class ("have Ally creatures
+    // you control gain first strike", "have creatures you control gain
+    // trample", "have Spirit creatures you control gain flying", etc.) that
+    // the prior allowlist (`target | it | that | each | all | them | another
+    // | this | ~ | enchanted | equipped`) rejected.
+    if let Some(ast) = subject::try_parse_subject_predicate_ast(redirected_text, ctx) {
+        return Some(lower_clause_ast(ast, ctx));
+    }
+
+    // Guard: for the recursive `parse_effect_clause` fallback below (handles
+    // "have it fight target creature", "have it deal damage", etc. where the
+    // predicate verb is a non-subject-predicate verb), restrict to recognizable
+    // anaphoric / target subject references so a bare imperative recursion
+    // does not silently convert non-redirection text into a redirection.
+    // Subject references covered here: "target", "it", "that", "each", "all",
+    // "them", "another target", "this", "~", "enchanted", "equipped".
     let first_word = after_have.split_whitespace().next().unwrap_or("");
     let is_subject_ref = matches!(
         first_word,
@@ -3595,14 +3619,6 @@ fn try_parse_have_redirection(text: &str, ctx: &mut ParseContext) -> Option<Pars
     );
     if !is_subject_ref {
         return None;
-    }
-
-    // Strip "have " from the original text (preserving original casing)
-    let redirected_text = text["have ".len()..].trim();
-
-    // Try the subject-predicate AST parser on the redirected text.
-    if let Some(ast) = subject::try_parse_subject_predicate_ast(redirected_text, ctx) {
-        return Some(lower_clause_ast(ast, ctx));
     }
 
     // Fallback: if subject-predicate doesn't match, try parsing the redirected text
@@ -26501,6 +26517,134 @@ mod tests {
             !matches!(e, Effect::Unimplemented { .. }),
             "have fight should not be Unimplemented: {e:?}"
         );
+    }
+
+    /// CR 113.1a + CR 608.2c + CR 702.7: Highland Berserker class — Ally
+    /// tribal "have <filter> gain <keyword>" causative grant. The trigger's
+    /// `you may` strips to the trigger record's `optional: true`, so the
+    /// effect text reaching the parser is just `have Ally creatures you
+    /// control gain first strike until end of turn`. Must produce
+    /// `Effect::GenericEffect` with an Ally-creature-you-control filter and a
+    /// First Strike grant. Without the redirection fix this returns
+    /// `Effect::Unimplemented { name: "have" }`.
+    #[test]
+    fn have_redirection_filter_subject_ally_creatures_gain_first_strike() {
+        let def = parse_effect_chain(
+            "have Ally creatures you control gain first strike until end of turn",
+            AbilityKind::Spell,
+        );
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } = &*def.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", def.effect);
+        };
+        assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+        assert!(
+            target.is_none(),
+            "filter-subject grant must not carry a target slot: {target:?}"
+        );
+        assert_eq!(static_abilities.len(), 1, "{static_abilities:#?}");
+        let sd = &static_abilities[0];
+        assert!(
+            sd.modifications
+                .contains(&ContinuousModification::AddKeyword {
+                    keyword: Keyword::FirstStrike,
+                }),
+            "missing AddKeyword(FirstStrike): {:?}",
+            sd.modifications
+        );
+        let Some(TargetFilter::Typed(tf)) = &sd.affected else {
+            panic!("expected Typed affected, got {:?}", sd.affected);
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(tf.type_filters.contains(&TypeFilter::Creature), "{tf:?}");
+        assert!(
+            tf.type_filters
+                .contains(&TypeFilter::Subtype("Ally".to_string())),
+            "{tf:?}"
+        );
+    }
+
+    /// CR 113.1a + CR 608.2c + CR 702.15: Talus Paladin class — "have Allies
+    /// you control gain lifelink". Lifelink keyword grant under the same
+    /// "have <filter> gain <keyword>" causative.
+    #[test]
+    fn have_redirection_filter_subject_allies_gain_lifelink() {
+        let def = parse_effect_chain(
+            "have Allies you control gain lifelink until end of turn",
+            AbilityKind::Spell,
+        );
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", def.effect);
+        };
+        assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+        assert!(static_abilities.iter().any(|sd| sd.modifications.contains(
+            &ContinuousModification::AddKeyword {
+                keyword: Keyword::Lifelink,
+            }
+        )));
+    }
+
+    /// CR 113.1a + CR 608.2c + CR 702.20: Joraga Bard class — "have Ally
+    /// creatures you control gain vigilance". Confirms the same Ally-creature
+    /// filter resolves vigilance grants identically to first strike, proving
+    /// the parser handles the keyword axis independently of the filter axis.
+    #[test]
+    fn have_redirection_filter_subject_ally_creatures_gain_vigilance() {
+        let def = parse_effect_chain(
+            "have Ally creatures you control gain vigilance until end of turn",
+            AbilityKind::Spell,
+        );
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*def.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", def.effect);
+        };
+        assert!(static_abilities.iter().any(|sd| sd.modifications.contains(
+            &ContinuousModification::AddKeyword {
+                keyword: Keyword::Vigilance,
+            }
+        )));
+    }
+
+    /// CR 113.1a + CR 608.2c + CR 702.19a: Tribal-agnostic generalization —
+    /// "have creatures you control gain trample". Same causative-have parse
+    /// path with no subtype constraint on the filter.
+    #[test]
+    fn have_redirection_filter_subject_creatures_gain_trample() {
+        let def = parse_effect_chain(
+            "have creatures you control gain trample until end of turn",
+            AbilityKind::Spell,
+        );
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*def.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", def.effect);
+        };
+        let sd = static_abilities
+            .iter()
+            .find(|sd| {
+                sd.modifications
+                    .contains(&ContinuousModification::AddKeyword {
+                        keyword: Keyword::Trample,
+                    })
+            })
+            .expect("missing AddKeyword(Trample)");
+        let Some(TargetFilter::Typed(tf)) = &sd.affected else {
+            panic!("expected Typed affected, got {:?}", sd.affected);
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
     }
 
     // CR 603.2 + CR 111.10: Najeela, the Blade-Blossom — "have its controller
