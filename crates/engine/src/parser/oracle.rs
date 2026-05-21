@@ -10290,6 +10290,74 @@ mod tests {
         );
     }
 
+    // CR 305.1 + CR 602.1 + CR 611.1 + CR 611.2c + CR 701.21a:
+    // Pardic Miner — "Sacrifice this creature: Target player can't play lands
+    // this turn." The activated ability resolves to a `GenericEffect` carrying
+    // a `CantPlayLand` static with a `TargetFilter::Player` target slot and
+    // `Duration::UntilEndOfTurn`. At resolution the runtime registers a
+    // transient continuous effect bound to `SpecificPlayer { id }` (the chosen
+    // target), and `player_has_static_other(state, target, "CantPlayLand")`
+    // returns true through the new TCE scan in `check_static_other_by_name`.
+    //
+    // This is the class of "target player can't [verb] this turn" effects —
+    // proves the parser routes the player-scoped restriction through
+    // `parse_restriction_modes` and emits the canonical `GenericEffect` shape.
+    #[test]
+    fn activated_target_player_cant_play_lands_pardic_miner() {
+        use crate::types::statics::StaticMode;
+        let r = parse(
+            "Sacrifice this creature: Target player can't play lands this turn.",
+            "Pardic Miner",
+            &[],
+            &["Creature"],
+            &["Dwarf"],
+        );
+        assert_eq!(
+            r.abilities.len(),
+            1,
+            "Pardic Miner has exactly one activated ability"
+        );
+        let ab = &r.abilities[0];
+        assert_eq!(ab.kind, AbilityKind::Activated);
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } = &*ab.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", ab.effect);
+        };
+        assert_eq!(
+            *duration,
+            Some(crate::types::ability::Duration::UntilEndOfTurn),
+            "duration must be UntilEndOfTurn for 'this turn'"
+        );
+        assert_eq!(
+            target.as_ref(),
+            Some(&TargetFilter::Player),
+            "target slot must be TargetFilter::Player for 'Target player'"
+        );
+        assert_eq!(static_abilities.len(), 1, "single CantPlayLand static");
+        let def = &static_abilities[0];
+        assert_eq!(
+            def.mode,
+            StaticMode::Other("CantPlayLand".to_string()),
+            "mode must be CantPlayLand"
+        );
+        // CR 305.1 + CR 611.2c: AddStaticMode is required so the TCE carries
+        // the mode into runtime queries (player_has_static_other). Without it
+        // the transient effect has empty modifications and the prohibition
+        // never reaches the play-land gate.
+        assert!(
+            def.modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddStaticMode { mode: StaticMode::Other(name) } if name == "CantPlayLand"
+            )),
+            "modifications must include AddStaticMode {{ Other(\"CantPlayLand\") }}, got {:?}",
+            def.modifications
+        );
+    }
+
     #[test]
     fn spell_restriction_then_damage_skullcrack() {
         // Skullcrack: "Players can't gain life this turn. Damage can't be prevented this turn.
