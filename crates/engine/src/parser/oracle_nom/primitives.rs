@@ -1,7 +1,7 @@
 //! Atomic parsing combinators for numbers, mana symbols, colors, counters, and P/T modifiers.
 
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_until, take_while_m_n};
+use nom::bytes::complete::{tag, take_till1, take_until, take_while_m_n};
 use nom::character::complete::{char, digit1, space0};
 use nom::combinator::{all_consuming, map, map_res, not, opt, peek, recognize, value};
 use nom::multi::{many0, many1};
@@ -284,6 +284,14 @@ pub fn parse_counter_type_typed(input: &str) -> OracleResult<'_, CounterType> {
             crate::types::counter::parse_counter_type(raw)
         }),
         map(parse_named_counter_type, |raw| {
+            crate::types::counter::parse_counter_type(raw)
+        }),
+        // CR 122.1b: custom Oracle-named counter types ("hunger", "oil", "page",
+        // "feather", …) are open-ended. Consume one whitespace-delimited token
+        // and let `types::counter::parse_counter_type` map it to
+        // `CounterType::Generic`. Must be the LAST arm so the enumerated
+        // alternatives win when they apply.
+        map(take_till1(|c: char| c.is_whitespace()), |raw: &str| {
             crate::types::counter::parse_counter_type(raw)
         }),
     ))
