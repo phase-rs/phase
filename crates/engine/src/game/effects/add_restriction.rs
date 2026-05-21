@@ -45,6 +45,7 @@ fn fill_runtime_fields(restriction: &mut GameRestriction, ability: &ResolvedAbil
             if matches!(
                 affected_players,
                 crate::types::ability::RestrictionPlayerScope::TargetedPlayer
+                    | crate::types::ability::RestrictionPlayerScope::ParentTargetedPlayer
             ) {
                 *affected_players = crate::types::ability::RestrictionPlayerScope::SpecificPlayer(
                     resolved_target_player,
@@ -168,6 +169,40 @@ mod tests {
                 restriction: GameRestriction::ProhibitActivity {
                     source: ObjectId(0),
                     affected_players: RestrictionPlayerScope::TargetedPlayer,
+                    expiry: RestrictionExpiry::EndOfTurn,
+                    activity: ProhibitedActivity::ActivateAbilities {
+                        exemption: crate::types::statics::ActivationExemption::ManaAbilities,
+                    },
+                },
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(7),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(matches!(
+            &state.restrictions[0],
+            GameRestriction::ProhibitActivity {
+                source: ObjectId(7),
+                affected_players: RestrictionPlayerScope::SpecificPlayer(PlayerId(1)),
+                activity: ProhibitedActivity::ActivateAbilities { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parent_targeted_player_scope_is_resolved_from_inherited_target() {
+        let mut state = GameState::new_two_player(42);
+
+        let ability = ResolvedAbility::new(
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    source: ObjectId(0),
+                    affected_players: RestrictionPlayerScope::ParentTargetedPlayer,
                     expiry: RestrictionExpiry::EndOfTurn,
                     activity: ProhibitedActivity::ActivateAbilities {
                         exemption: crate::types::statics::ActivationExemption::ManaAbilities,

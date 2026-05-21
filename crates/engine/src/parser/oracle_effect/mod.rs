@@ -1547,7 +1547,10 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
             value(RestrictionPlayerScope::AllPlayers, tag("players")),
             value(RestrictionPlayerScope::AllPlayers, tag("each player")),
             value(RestrictionPlayerScope::TargetedPlayer, tag("target player")),
-            value(RestrictionPlayerScope::TargetedPlayer, tag("that player")),
+            value(
+                RestrictionPlayerScope::ParentTargetedPlayer,
+                tag("that player"),
+            ),
         ))
         .parse(input)
     })?;
@@ -1633,7 +1636,10 @@ fn try_parse_cant_activate_non_mana_abilities_effect(
             value(RestrictionPlayerScope::AllPlayers, tag("players")),
             value(RestrictionPlayerScope::AllPlayers, tag("each player")),
             value(RestrictionPlayerScope::TargetedPlayer, tag("target player")),
-            value(RestrictionPlayerScope::TargetedPlayer, tag("that player")),
+            value(
+                RestrictionPlayerScope::ParentTargetedPlayer,
+                tag("that player"),
+            ),
         ))
         .parse(input)
     })?;
@@ -27955,7 +27961,7 @@ mod tests {
             *sub.effect,
             Effect::AddRestriction {
                 restriction: GameRestriction::ProhibitActivity {
-                    affected_players: RestrictionPlayerScope::TargetedPlayer,
+                    affected_players: RestrictionPlayerScope::ParentTargetedPlayer,
                     activity: ProhibitedActivity::ActivateAbilities {
                         exemption: ActivationExemption::ManaAbilities,
                     },

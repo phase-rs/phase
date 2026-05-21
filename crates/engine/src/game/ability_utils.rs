@@ -1,7 +1,8 @@
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, ControllerRef, Effect, ModalChoice,
+    AbilityCondition, AbilityDefinition, ControllerRef, Effect, GameRestriction, ModalChoice,
     ModalSelectionCondition, ModalSelectionConstraint, QuantityExpr, QuantityRef, ResolvedAbility,
-    SpellContext, TargetChoiceTiming, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    RestrictionPlayerScope, SpellContext, TargetChoiceTiming, TargetFilter, TargetRef, TypeFilter,
+    TypedFilter,
 };
 #[cfg(test)]
 use crate::types::counter::CounterType;
@@ -1113,11 +1114,22 @@ fn multi_target_slot_count(
         .min(legal_target_count)
 }
 
-/// CR 109.4 + CR 115.1: Returns true if any filter inside `effect` references
-/// `ControllerRef::TargetPlayer`. Used to surface a companion
-/// `TargetFilter::Player` target slot for mass-placement effects like
-/// `PutCounterAll { target: Typed { controller: TargetPlayer, .. } }`.
+/// CR 109.4 + CR 115.1: Returns true if `effect` needs a companion
+/// `TargetFilter::Player` target slot. This covers filters that reference
+/// `ControllerRef::TargetPlayer` and restriction effects whose affected player
+/// scope is the declared "target player".
 fn effect_references_target_player(effect: &Effect) -> bool {
+    if let Effect::AddRestriction {
+        restriction:
+            GameRestriction::ProhibitActivity {
+                affected_players: RestrictionPlayerScope::TargetedPlayer,
+                ..
+            },
+    } = effect
+    {
+        return true;
+    }
+
     if let Effect::Attach { attachment, target } = effect {
         return filter_references_target_player(attachment)
             || filter_references_target_player(target);
@@ -2841,8 +2853,9 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCost, AbilityKind, CounterTransferMode, Duration, Effect, FilterProp,
-        LibraryPosition, ModalChoice, ModalSelectionConstraint, MultiTargetSpec, PtValue,
-        QuantityExpr, QuantityRef, SearchSelectionConstraint, TargetFilter, TargetRef, TypeFilter,
+        GameRestriction, LibraryPosition, ModalChoice, ModalSelectionConstraint, MultiTargetSpec,
+        ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, RestrictionExpiry,
+        RestrictionPlayerScope, SearchSelectionConstraint, TargetFilter, TargetRef, TypeFilter,
         TypedFilter, UnlessPayModifier,
     };
     use crate::types::card_type::CoreType;
@@ -3299,6 +3312,73 @@ mod tests {
             vec![p_b],
             "DamageAll should get target 1 (the second player slot)"
         );
+    }
+
+    #[test]
+    fn add_restriction_targeted_player_surfaces_one_slot_and_that_player_inherits_it() {
+        use crate::types::statics::ActivationExemption;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(0xABE),
+            PlayerId(0),
+            "Abeyance".to_string(),
+            Zone::Stack,
+        );
+
+        let root = ResolvedAbility::new(
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    source: ObjectId(0),
+                    affected_players: RestrictionPlayerScope::TargetedPlayer,
+                    expiry: RestrictionExpiry::EndOfTurn,
+                    activity: ProhibitedActivity::CastSpells { spell_filter: None },
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    source: ObjectId(0),
+                    affected_players: RestrictionPlayerScope::ParentTargetedPlayer,
+                    expiry: RestrictionExpiry::EndOfTurn,
+                    activity: ProhibitedActivity::ActivateAbilities {
+                        exemption: ActivationExemption::ManaAbilities,
+                    },
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        ));
+
+        let slots = build_target_slots(&state, &root).expect("target slots should build");
+        assert_eq!(
+            slots.len(),
+            1,
+            "\"target player\" declares one target; the \"that player\" tail inherits it"
+        );
+
+        let mut resolved = root;
+        assign_targets_in_chain(&state, &mut resolved, &[TargetRef::Player(PlayerId(1))])
+            .expect("single selected player should assign to the root restriction");
+
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &resolved, &mut events, 0)
+            .expect("restriction chain should resolve");
+
+        assert_eq!(state.restrictions.len(), 2);
+        assert!(state.restrictions.iter().all(|restriction| matches!(
+            restriction,
+            GameRestriction::ProhibitActivity {
+                affected_players: RestrictionPlayerScope::SpecificPlayer(PlayerId(1)),
+                ..
+            }
+        )));
     }
 
     #[test]

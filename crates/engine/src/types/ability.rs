@@ -1233,6 +1233,11 @@ pub enum RestrictionPlayerScope {
     /// Placeholder used by parser lowering for effects that target a player.
     /// Resolved to `SpecificPlayer` by `add_restriction` at resolution time.
     TargetedPlayer,
+    /// CR 608.2c: Anaphoric "that player" in a sub-ability reuses a player
+    /// target already chosen for an earlier instruction in the same chain.
+    /// Resolved to `SpecificPlayer` by `add_restriction` after parent target
+    /// propagation, without declaring a second target slot.
+    ParentTargetedPlayer,
     OpponentsOfSourceController,
 }
 

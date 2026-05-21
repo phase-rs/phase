@@ -200,6 +200,13 @@ fn restriction_scope_matches_player(
             );
             false
         }
+        RestrictionPlayerScope::ParentTargetedPlayer => {
+            debug_assert!(
+                false,
+                "ParentTargetedPlayer should be resolved by add_restriction"
+            );
+            false
+        }
         RestrictionPlayerScope::OpponentsOfSourceController => {
             source_controller.is_some_and(|controller| controller != caster)
         }
@@ -7776,9 +7783,10 @@ mod tests {
         CastVariantPaid, CastingPermission, ChosenAttribute, ChosenSubtypeKind, Comparator,
         ContinuousModification, ControllerRef, CostCategory, FilterProp, GainLifePlayer,
         GameRestriction, KickerVariant, ManaContribution, ManaProduction, ManaSpendPermission,
-        ManaSpendRestriction, ModalSelectionCondition, ModalSelectionConstraint, QuantityExpr,
-        RestrictionExpiry, RestrictionPlayerScope, SearchSelectionConstraint, StaticCondition,
-        StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+        ManaSpendRestriction, ModalSelectionCondition, ModalSelectionConstraint,
+        ProhibitedActivity, QuantityExpr, RestrictionExpiry, RestrictionPlayerScope,
+        SearchSelectionConstraint, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
+        TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CoreType, Supertype};
@@ -8643,6 +8651,93 @@ mod tests {
             };
         }
         obj_id
+    }
+
+    #[test]
+    fn prohibit_activity_cast_spells_filter_blocks_only_matching_spell_types() {
+        // CR 101.2 + CR 601.2a: Abeyance-style restrictions can prohibit only
+        // the matching spell class while leaving other spell types castable.
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(0xA8E1),
+            PlayerId(1),
+            "Abeyance Source".to_string(),
+            Zone::Exile,
+        );
+        state.restrictions.push(GameRestriction::ProhibitActivity {
+            source,
+            affected_players: RestrictionPlayerScope::SpecificPlayer(PlayerId(0)),
+            expiry: RestrictionExpiry::EndOfTurn,
+            activity: ProhibitedActivity::CastSpells {
+                spell_filter: Some(TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                    ],
+                }),
+            },
+        });
+
+        let instant = create_instant_in_hand(&mut state, PlayerId(0));
+        let sorcery = create_sorcery_in_hand(&mut state, PlayerId(0));
+        let creature = create_creature_spell_in_hand(&mut state, PlayerId(0));
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 8);
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 8);
+
+        assert!(!can_cast_object_now(&state, PlayerId(0), instant));
+        assert!(!can_cast_object_now(&state, PlayerId(0), sorcery));
+        assert!(can_cast_object_now(&state, PlayerId(0), creature));
+    }
+
+    #[test]
+    fn prohibit_activity_activate_abilities_blocks_non_mana_but_exempts_mana() {
+        // CR 602.5 + CR 605.1a: Abeyance prohibits non-mana activated abilities
+        // while leaving mana abilities available.
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(0xA8E2),
+            PlayerId(1),
+            "Abeyance Source".to_string(),
+            Zone::Exile,
+        );
+        state.restrictions.push(GameRestriction::ProhibitActivity {
+            source,
+            affected_players: RestrictionPlayerScope::SpecificPlayer(PlayerId(0)),
+            expiry: RestrictionExpiry::EndOfTurn,
+            activity: ProhibitedActivity::ActivateAbilities {
+                exemption: ActivationExemption::ManaAbilities,
+            },
+        });
+
+        let non_mana_source = add_artifact_with_activated_ability(&mut state, PlayerId(0));
+        let mana_source = create_object(
+            &mut state,
+            CardId(0xA8E3),
+            PlayerId(0),
+            "Mana Rock".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&mana_source).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.entered_battlefield_turn = Some(0);
+            Arc::make_mut(&mut obj.abilities).push(make_tap_for_green_mana_ability());
+        }
+
+        assert!(!can_activate_ability_now(
+            &state,
+            PlayerId(0),
+            non_mana_source,
+            0
+        ));
+        assert!(can_activate_ability_now(
+            &state,
+            PlayerId(0),
+            mana_source,
+            0
+        ));
     }
 
     fn create_gloomlake_verge(state: &mut GameState, player: PlayerId) -> ObjectId {
