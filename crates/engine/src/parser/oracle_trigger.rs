@@ -2,7 +2,7 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::one_of;
-use nom::combinator::{all_consuming, eof, opt, peek, recognize, value};
+use nom::combinator::{all_consuming, eof, opt, peek, recognize, rest, value};
 use nom::multi::many1;
 use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
@@ -4431,8 +4431,6 @@ fn try_parse_event(
         SaddlesOrCrews,
         Crews,
         Saddles,
-        // CR 701.43: Actor-side exert trigger.
-        Exerts,
     }
     fn parse_simple_event(input: &str) -> OracleResult<'_, SimpleEvent> {
         alt((
@@ -4482,11 +4480,6 @@ fn try_parse_event(
             // CR 702.171c: Actor-side saddle trigger (reserved — no cards today without
             // the compound, but the arm is ready for future printings).
             value(SimpleEvent::Saddles, tag("saddles a mount")),
-            // CR 701.43a: "exerts a creature" — actor-side exert trigger. Fires when
-            // a player exerts a creature they control. The canonical form is
-            // "Whenever you exert a creature" (Trueheart Twins, Battlefield Scavenger,
-            // Rohirrim Chargers, Vizier of the True, Resolute Survivors).
-            value(SimpleEvent::Exerts, tag("exerts")),
         )))
         .parse(input)
     }
@@ -4578,10 +4571,6 @@ fn try_parse_event(
                 // CR 702.122 + CR 702.171c: Compound actor-side trigger. Fires on
                 // either saddling a Mount or crewing a Vehicle.
                 def.mode = TriggerMode::SaddlesOrCrews;
-                def.valid_card = Some(subject.clone());
-            }
-            SimpleEvent::Exerts => {
-                def.mode = TriggerMode::Exerted;
                 def.valid_card = Some(subject.clone());
             }
         }
@@ -5940,27 +5929,43 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some((TriggerMode::CycledOrDiscarded, def));
     }
     // CR 701.43a: "Whenever you exert a creature" — actor-side exert trigger.
-    // The trigger fires when any creature the controller exerts resolves its
-    // exert declaration during the declare-attackers step (CR 701.43b).
-    if let Ok((_, (who, _))) = nom_primitives::split_once_on(lower, " exert ") {
+    // The player actor belongs in valid_target; the exerted permanent belongs
+    // in valid_card.
+    fn parse_exert_trigger_line(i: &str) -> OracleResult<'_, (Option<ControllerRef>, &str)> {
+        preceded(
+            alt((tag("whenever "), tag("when "))),
+            pair(
+                alt((
+                    value(Some(ControllerRef::You), tag("you exert ")),
+                    value(Some(ControllerRef::Opponent), tag("an opponent exerts ")),
+                    value(None, tag("a player exerts ")),
+                )),
+                rest,
+            ),
+        )
+        .parse(i)
+    }
+    if let Ok((rem, (actor, subject_text))) = parse_exert_trigger_line(lower) {
+        if !rem.trim().is_empty() {
+            return None;
+        }
+
+        let (filter, remainder) = super::oracle_target::parse_target(subject_text);
+        if !remainder.trim().is_empty() || matches!(filter, TargetFilter::Any) {
+            return None;
+        }
+
         let mut def = make_base();
         def.mode = TriggerMode::Exerted;
-        if scan_contains(who, "opponent") {
-            def.valid_target = Some(TargetFilter::Typed(
-                TypedFilter::default().controller(ControllerRef::Opponent),
-            ));
-        } else if scan_contains(who, "you") {
-            def.valid_target = Some(TargetFilter::Controller);
-        }
-        let after_exert = &lower[who.len() + " exert ".len()..].trim_start();
-        let (filter, _) = parse_type_phrase(after_exert);
-        if let TargetFilter::Typed(tf) = &filter {
-            if tf.has_meaningful_type_constraint() {
-                def.valid_card = Some(filter);
+        def.valid_target = Some(match actor {
+            Some(ControllerRef::You) => TargetFilter::Controller,
+            Some(ControllerRef::Opponent) => {
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
             }
-        } else if !matches!(filter, TargetFilter::Any) {
-            def.valid_card = Some(filter);
-        }
+            None => TargetFilter::Player,
+            Some(_) => TargetFilter::Player,
+        });
+        def.valid_card = Some(filter);
         return Some((TriggerMode::Exerted, def));
     }
 
@@ -18053,23 +18058,48 @@ mod snapshot_tests {
             "Trueheart Twins",
         );
         assert_eq!(def.mode, TriggerMode::Exerted);
-        // valid_card should be set (the exerted creature subject)
-        assert!(
-            def.valid_card.is_some(),
-            "expected valid_card to be set for exert trigger, got None"
-        );
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        let Some(TargetFilter::Typed(tf)) = def.valid_card else {
+            panic!(
+                "expected typed exerted creature filter, got {:?}",
+                def.valid_card
+            );
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
     }
 
-    /// CR 701.43a: Regression guard — bare "exerts" fallback arm should also
-    /// produce TriggerMode::Exerted (future-proof for alternate phrasings).
+    /// CR 701.43a: Self-reference is the exerted permanent, not a degraded
+    /// generic filter.
     #[test]
-    fn trigger_you_exert_creature_canonical_form() {
+    fn trigger_you_exert_self_ref() {
+        let def = parse_trigger_line("Whenever you exert ~, untap it.", "Vizier of the True");
+        assert_eq!(def.mode, TriggerMode::Exerted);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    /// CR 701.43a: Opponent actor scope must be recorded on valid_target while
+    /// the exerted creature remains the valid_card filter.
+    #[test]
+    fn trigger_opponent_exerts_a_creature() {
         let def = parse_trigger_line(
-            "Whenever you exert a creature, untap it.",
-            "Vizier of the True",
+            "Whenever an opponent exerts a creature, you gain 1 life.",
+            "Exertion Watcher",
         );
         assert_eq!(def.mode, TriggerMode::Exerted);
-        assert!(def.valid_card.is_some());
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+        let Some(TargetFilter::Typed(tf)) = def.valid_card else {
+            panic!(
+                "expected typed exerted creature filter, got {:?}",
+                def.valid_card
+            );
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
     }
 
     /// CR 701.43a: Resolute Survivors — "Whenever you exert a creature" with a
