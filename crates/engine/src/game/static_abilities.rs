@@ -925,11 +925,18 @@ fn transient_grants_other_static_to_context(
     for tce in &state.transient_continuous_effects {
         // CR 611.2c: The set of objects/players a transient continuous effect
         // affects is determined at registration; here we just confirm the bound
-        // filter pins the context. Object queries match `SpecificObject`;
-        // player queries match `SpecificPlayer`.
+        // filter pins the context. The typical shape is a `SpecificObject` /
+        // `SpecificPlayer` registration (player-scoped registration via
+        // `register_transient_effect` fans `TargetFilter::Player` broadcasts
+        // out into one per-player `SpecificPlayer` TCE), but the broadcast
+        // `Player` variant is also matched defensively here so any call site
+        // that registers a raw all-players TCE without fan-out (e.g. future
+        // "Players can't play lands this turn" instants) is still observable
+        // to player-scoped runtime queries.
         let pins_context = match (&tce.affected, context.target_id, context.player_id) {
             (TargetFilter::SpecificObject { id }, Some(target), _) => *id == target,
             (TargetFilter::SpecificPlayer { id }, _, Some(player)) => *id == player,
+            (TargetFilter::Player, _, Some(_)) => true,
             _ => continue,
         };
         if !pins_context {
