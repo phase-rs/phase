@@ -14932,7 +14932,7 @@ mod tests {
     /// 3. CR 122.1: "remove all charge counters from ~" →
     ///    `Effect::RemoveCounter { counter_type: "charge", count: -1, target:
     ///    SelfRef }` (count=-1 is the "remove all" sentinel).
-    /// 4. CR 609.3 + CR 106.1 + CR 122.1: "If you do, add one mana of any
+    /// 4. CR 608.2c + CR 106.1 + CR 122.1: "If you do, add one mana of any
     ///    color for each charge counter removed this way" →
     ///    sub_ability with `condition: Some(IfYouDo)` and effect
     ///    `Effect::Mana { produced: AnyOneColor { count:

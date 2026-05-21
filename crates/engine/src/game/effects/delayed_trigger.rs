@@ -1,6 +1,6 @@
 use crate::types::ability::{
-    DelayedTriggerCondition, Effect, EffectError, EffectKind, QuantityExpr, QuantityRef,
-    ResolvedAbility, TargetFilter, TargetRef,
+    DelayedTriggerCondition, Effect, EffectError, EffectKind, ManaProduction, PtValue,
+    QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef,
 };
 #[cfg(test)]
 use crate::types::counter::CounterType;
@@ -77,7 +77,7 @@ pub fn resolve(
         vec![]
     };
 
-    // CR 603.7 + CR 608.2k: Snapshot parent-resolution-dependent
+    // CR 603.7 + CR 608.2h: Snapshot parent-resolution-dependent
     // quantity refs to Fixed before the delayed trigger gets stashed.
     // After this call, `delayed_effect` holds no parent context refs.
     snapshot_parent_dependent_quantities(&mut delayed_effect, state, ability);
@@ -229,7 +229,7 @@ fn bind_tracked_set_to_condition(condition: &mut DelayedTriggerCondition, real_i
     }
 }
 
-/// CR 603.7 + CR 202.3 + CR 608.2k: Snapshot QuantityRef leaves in the
+/// CR 603.7 + CR 202.3 + CR 608.2h: Snapshot QuantityRef leaves in the
 /// delayed trigger's inner effect that depend on parent-resolution
 /// context (the countered spell on the stack, the cast-time mana
 /// snapshot, etc.). After this walker runs, the delayed trigger holds
@@ -249,10 +249,13 @@ fn snapshot_parent_dependent_quantities(
     state: &GameState,
     ability: &ResolvedAbility,
 ) {
-    use crate::types::ability::ManaProduction;
     match effect {
         Effect::Mana {
-            produced: ManaProduction::Colorless { count },
+            produced:
+                ManaProduction::Colorless { count }
+                | ManaProduction::AnyOneColor { count, .. }
+                | ManaProduction::AnyCombination { count, .. }
+                | ManaProduction::ChosenColor { count, .. },
             ..
         } => {
             snapshot_quantity_expr(count, state, ability);
@@ -269,7 +272,22 @@ fn snapshot_parent_dependent_quantities(
         | Effect::PutCounter { count: amount, .. } => {
             snapshot_quantity_expr(amount, state, ability);
         }
+        Effect::Pump {
+            power, toughness, ..
+        }
+        | Effect::PumpAll {
+            power, toughness, ..
+        } => {
+            snapshot_pt_value(power, state, ability);
+            snapshot_pt_value(toughness, state, ability);
+        }
         _ => {}
+    }
+}
+
+fn snapshot_pt_value(value: &mut PtValue, state: &GameState, ability: &ResolvedAbility) {
+    if let PtValue::Quantity(expr) = value {
+        snapshot_quantity_expr(expr, state, ability);
     }
 }
 
@@ -404,7 +422,7 @@ mod tests {
     use crate::game::game_object::GameObject;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, DamageKindFilter, DelayedTriggerCondition, Effect,
-        ManaProduction, ObjectScope, QuantityExpr, QuantityRef, TriggerDefinition,
+        ManaProduction, ObjectScope, PtValue, QuantityExpr, QuantityRef, TriggerDefinition,
     };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::ManaCost;
@@ -433,6 +451,20 @@ mod tests {
     fn mana_colorless_effect(count: QuantityExpr) -> Effect {
         Effect::Mana {
             produced: ManaProduction::Colorless { count },
+            restrictions: Vec::new(),
+            grants: Vec::new(),
+            expiry: None,
+            target: None,
+        }
+    }
+
+    fn mana_any_one_color_effect(count: QuantityExpr) -> Effect {
+        Effect::Mana {
+            produced: ManaProduction::AnyOneColor {
+                count,
+                color_options: crate::types::mana::ManaColor::ALL.to_vec(),
+                contribution: Default::default(),
+            },
             restrictions: Vec::new(),
             grants: Vec::new(),
             expiry: None,
@@ -810,7 +842,7 @@ mod tests {
         );
     }
 
-    /// CR 603.7 + CR 106.3 + CR 608.2k: A delayed trigger whose inner
+    /// CR 603.7 + CR 106.3 + CR 608.2h: A delayed trigger whose inner
     /// effect references `ManaSpentToCast{TriggeringSpell, Total}` (the
     /// parser-emitted anaphor for "the amount of mana spent to cast that
     /// spell" — used by Mana Sculpt) must have that leaf snapshotted to a
@@ -932,6 +964,112 @@ mod tests {
                 );
             }
             other => panic!("expected Mana{{Colorless}}, got {other:?}"),
+        }
+    }
+
+    /// CR 603.7 + CR 608.2h: The snapshot walker must cover every
+    /// quantity-bearing mana-production sibling, including "one color" mana.
+    #[test]
+    fn snapshot_any_one_color_count_baked_to_fixed() {
+        let mut state = GameState::new_two_player(42);
+        let spell_id = ObjectId(42);
+        inject_spell_with_mana_value(&mut state, spell_id, 4);
+
+        let delayed_inner = AbilityDefinition::new(
+            AbilityKind::Spell,
+            mana_any_one_color_effect(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject,
+                },
+            }),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::PreCombatMain,
+                    player: PlayerId(0),
+                },
+                effect: Box::new(delayed_inner),
+                uses_tracked_set: false,
+            },
+            vec![TargetRef::Object(spell_id)],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).expect("resolve must succeed");
+
+        let delayed = &state.delayed_triggers[0];
+        match &delayed.ability.effect {
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor { count, .. },
+                ..
+            } => {
+                assert_eq!(
+                    *count,
+                    QuantityExpr::Fixed { value: 4 },
+                    "AnyOneColor count must be snapshotted to Fixed{{4}}"
+                );
+            }
+            other => panic!("expected Mana{{AnyOneColor}}, got {other:?}"),
+        }
+    }
+
+    /// CR 603.7 + CR 608.2h: Pump effects carry dynamic quantities inside
+    /// `PtValue::Quantity`, not directly as `QuantityExpr`, so they need their
+    /// own walker branch.
+    #[test]
+    fn snapshot_pump_pt_quantity_baked_to_fixed() {
+        let mut state = GameState::new_two_player(42);
+        let spell_id = ObjectId(42);
+        inject_spell_with_mana_value(&mut state, spell_id, 6);
+
+        let delayed_inner = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Pump {
+                power: PtValue::Quantity(QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::CostPaidObject,
+                    },
+                }),
+                toughness: PtValue::Quantity(QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::Target,
+                    },
+                }),
+                target: TargetFilter::SelfRef,
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::PreCombatMain,
+                    player: PlayerId(0),
+                },
+                effect: Box::new(delayed_inner),
+                uses_tracked_set: false,
+            },
+            vec![TargetRef::Object(spell_id)],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).expect("resolve must succeed");
+
+        let delayed = &state.delayed_triggers[0];
+        match &delayed.ability.effect {
+            Effect::Pump {
+                power, toughness, ..
+            } => {
+                assert_eq!(*power, PtValue::Quantity(QuantityExpr::Fixed { value: 6 }));
+                assert_eq!(
+                    *toughness,
+                    PtValue::Quantity(QuantityExpr::Fixed { value: 6 })
+                );
+            }
+            other => panic!("expected Pump, got {other:?}"),
         }
     }
 

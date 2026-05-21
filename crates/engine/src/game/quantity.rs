@@ -1730,7 +1730,10 @@ fn scoped_players<'a>(
     ctx: QuantityContext,
     controller: PlayerId,
 ) -> impl Iterator<Item = &'a crate::types::player::Player> {
-    let scoped_player = ctx.scoped_player.unwrap_or(controller);
+    let scoped_player = ctx
+        .scoped_player
+        .or_else(|| triggering_event_player(state))
+        .unwrap_or(controller);
     state.players.iter().filter(move |p| match scope {
         CountScope::Controller => p.id == controller,
         CountScope::ScopedPlayer => p.id == scoped_player,
@@ -3340,6 +3343,34 @@ mod tests {
             resolve_quantity(&state, &all_expr, PlayerId(0), ObjectId(0)),
             8
         );
+    }
+
+    /// CR 122.1 + CR 603.7c: "that player has" on a damage trigger binds to
+    /// the damaged player carried by `current_trigger_event`.
+    #[test]
+    fn resolve_quantity_player_counter_scoped_player_from_damage_event() {
+        use crate::types::events::GameEvent;
+        use crate::types::player::PlayerCounterKind;
+
+        let mut state = GameState::new_two_player(42);
+        state.players[0].poison_counters = 1;
+        state.players[1].poison_counters = 4;
+        state.current_trigger_event = Some(GameEvent::DamageDealt {
+            source_id: ObjectId(7),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        });
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCounter {
+                kind: PlayerCounterKind::Poison,
+                scope: CountScope::ScopedPlayer,
+            },
+        };
+
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(7)), 4);
     }
 
     #[test]

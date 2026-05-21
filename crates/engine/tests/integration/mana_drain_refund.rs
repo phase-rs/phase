@@ -20,7 +20,7 @@ use engine::types::ability::{
 };
 use engine::types::game_state::{CastingVariant, GameState, StackEntry, StackEntryKind};
 use engine::types::identifiers::{CardId, ObjectId};
-use engine::types::mana::ManaType;
+use engine::types::mana::{ManaCost, ManaType};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 use engine::types::PlayerId;
@@ -158,11 +158,8 @@ fn mana_drain_refunds_colorless_equal_to_countered_spells_mana_value() {
         Zone::Stack,
     );
     // Set the mana cost to generic {3} so mana_value() == 3.
-    {
-        use engine::types::mana::ManaCost;
-        let obj = state.objects.get_mut(&spell_id).unwrap();
-        obj.mana_cost = ManaCost::generic(3);
-    }
+    let obj = state.objects.get_mut(&spell_id).unwrap();
+    obj.mana_cost = ManaCost::generic(3);
 
     // Push a StackEntry so counter::resolve can find and remove the spell.
     state.stack.push_back(StackEntry {

@@ -11,7 +11,7 @@ use std::str::FromStr;
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::value;
+use nom::combinator::{all_consuming, opt, value};
 use nom::sequence::{pair, terminated};
 use nom::Parser;
 
@@ -57,6 +57,15 @@ pub(crate) fn parse_quantity_ref_with_context(
     }
 
     // Complex patterns requiring type phrase parsing or counter normalization.
+
+    // CR 608.2c + CR 122.1: "the number of [kind] counter[s] removed this way"
+    // is a dynamic amount from the preceding RemoveCounter effect, not an
+    // object count over a battlefield type phrase.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("the number of ").parse(trimmed) {
+        if try_parse_counters_removed_this_way(rest) {
+            return Some(QuantityRef::PreviousEffectAmount);
+        }
+    }
 
     // "[counter type] counter(s) on ~" / "[counter type] counter(s) on it"
     // Handles both plural ("counters on ~") and singular ("counter on ~") forms.
@@ -189,36 +198,15 @@ pub(crate) fn parse_quantity_ref_with_context(
                 filter: PlayerFilter::Opponent,
             });
         }
-        // CR 120.1 + CR 510.1: "opponents that were dealt combat damage [this turn]".
-        // Singular/plural and "who/that" / "were/was" variants compose through
-        // nested alt() blocks. The trailing " this turn" suffix is optional
-        // because upstream callers (e.g., draw-count parsing through
-        // `strip_trailing_duration`) strip the duration before this parser
-        // sees the phrase. PlayerCount{OpponentDealtCombatDamage} is
-        // inherently scoped to this turn (queries
-        // `state.damage_dealt_this_turn`), so the suffix is informational
-        // here, not semantic.
-        if let Ok((after_verb, _)) = (
-            alt((tag::<_, _, OracleError<'_>>("opponents "), tag("opponent "))),
-            alt((
-                tag::<_, _, OracleError<'_>>("that were"),
-                tag("that was"),
-                tag("who were"),
-                tag("who was"),
-            )),
-            tag(" dealt combat damage"),
-        )
-            .parse(rest)
-        {
-            let after = tag::<_, _, OracleError<'_>>(" this turn")
-                .parse(after_verb)
-                .map(|(rest, _)| rest)
-                .unwrap_or(after_verb);
-            if after.trim().is_empty() {
-                return Some(QuantityRef::PlayerCount {
-                    filter: PlayerFilter::OpponentDealtCombatDamage,
-                });
-            }
+        // CR 120.1 + CR 510.1: "opponents that were dealt combat damage
+        // [this turn]". The trailing " this turn" suffix is optional because
+        // upstream callers may strip durations before this parser sees the
+        // phrase. PlayerCount{OpponentDealtCombatDamage} is inherently scoped
+        // to this turn through `state.damage_dealt_this_turn`.
+        if parse_opponent_dealt_combat_damage_clause(rest).is_ok() {
+            return Some(QuantityRef::PlayerCount {
+                filter: PlayerFilter::OpponentDealtCombatDamage,
+            });
         }
         let (filter, _) = parse_type_phrase_with_ctx(rest, ctx);
         // CR 109.1: `parse_type_phrase_with_ctx` always returns `TargetFilter::Typed`,
@@ -502,15 +490,76 @@ pub(crate) fn parse_cda_quantity_with_context(
 
     None
 }
+
+fn parse_previous_effect_amount_this_way(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    all_consuming(value(
+        (),
+        terminated(
+            (
+                opt(tag("the ")),
+                alt((
+                    parse_life_paid_or_lost_phrase,
+                    parse_damage_dealt_phrase,
+                    parse_dealt_damage_phrase,
+                    parse_counters_removed_phrase,
+                )),
+            ),
+            tag(" this way"),
+        ),
+    ))
+    .parse(input)
+}
+
+fn parse_life_paid_or_lost_phrase(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    let (input, _) = opt(take_until("life ")).parse(input)?;
+    let (input, _) = tag("life ").parse(input)?;
+    let (input, _) = alt((tag("lost"), tag("paid"))).parse(input)?;
+    Ok((input, ()))
+}
+
+fn parse_damage_dealt_phrase(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    let (input, _) = opt(take_until("damage dealt")).parse(input)?;
+    let (input, _) = tag("damage dealt").parse(input)?;
+    Ok((input, ()))
+}
+
+fn parse_dealt_damage_phrase(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    let (input, _) = opt(take_until("dealt damage")).parse(input)?;
+    let (input, _) = tag("dealt damage").parse(input)?;
+    Ok((input, ()))
+}
+
+fn parse_counters_removed_phrase(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    let (input, _) = opt(take_until("counter")).parse(input)?;
+    let (input, _) = alt((tag("counters removed"), tag("counter removed"))).parse(input)?;
+    Ok((input, ()))
+}
+
+fn parse_opponent_dealt_combat_damage_clause(
+    input: &str,
+) -> nom::IResult<&str, (), OracleError<'_>> {
+    all_consuming((
+        alt((tag::<_, _, OracleError<'_>>("opponents"), tag("opponent"))),
+        tag(" "),
+        alt((tag("that"), tag("who"))),
+        tag(" "),
+        alt((tag("were"), tag("was"))),
+        tag(" dealt combat damage"),
+        opt(tag(" this turn")),
+    ))
+    .parse(input)
+    .map(|(rest, _)| (rest, ()))
+}
+
 /// Parse event-context quantity references from Oracle text fragments.
 /// Returns None for unrecognized patterns (caller falls back to Variable).
 pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
     let lower = text.to_lowercase();
     let lower = lower.trim();
-    // CR 609.3: "the X <verb>ed/<verb> this way" — numeric result from the
+    // CR 608.2c + CR 608.2h: "the X <verb>ed/<verb> this way" — numeric result from the
     // preceding effect (or trigger event) in the same resolution. Must check
     // before "that much" to avoid false match on "this way" vs. "this turn".
-    // Verb-phrase substrings cover:
+    // Verb-phrase combinators cover:
     //   - life-payment/loss: "life lost", "life paid"
     //   - combat-damage triggers: "damage dealt" (active voice),
     //     "dealt damage" (passive voice — e.g. Hordewing Skaab's
@@ -520,14 +569,7 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
     //     `state.last_effect_amount` is stamped by the preceding RemoveCounter).
     // PreviousEffectAmount reads `state.last_effect_amount`, which the
     // upstream effect (damage / counter removal / life loss) stamps.
-    if lower.ends_with("this way")
-        && (nom_primitives::scan_contains(lower, "life lost")
-            || nom_primitives::scan_contains(lower, "damage dealt")
-            || nom_primitives::scan_contains(lower, "dealt damage")
-            || nom_primitives::scan_contains(lower, "life paid")
-            || nom_primitives::scan_contains(lower, "counters removed")
-            || nom_primitives::scan_contains(lower, "counter removed"))
-    {
+    if parse_previous_effect_amount_this_way(lower).is_ok() {
         return Some(QuantityExpr::Ref {
             qty: QuantityRef::PreviousEffectAmount,
         });
@@ -846,7 +888,7 @@ fn try_parse_exiled_from_hand_this_way(lower: &str) -> Option<()> {
     })
 }
 
-/// CR 609.3 + CR 122.1: Detect "counter[s] removed this way" — the for-each
+/// CR 608.2c + CR 122.1: Detect "counter[s] removed this way" — the for-each
 /// quantifier shape produced by cards that drain self-counters and reference
 /// the count in a downstream effect (Coalition Relic, Storage Counter cycle).
 ///
@@ -1101,7 +1143,7 @@ fn parse_for_each_clause_with_they_controller(
                 });
             }
         }
-        // CR 609.3 + CR 122.1: "[counter-type] counter[s] removed this way" — the
+        // CR 608.2c + CR 122.1: "[counter-type] counter[s] removed this way" — the
         // numeric amount of counters removed by the preceding `Effect::RemoveCounter`
         // in the sub-ability chain. The parent-effect-aware scan in
         // `effects/mod.rs` reads `GameEvent::CounterRemoved` for RemoveCounter
@@ -1141,13 +1183,9 @@ fn parse_for_each_clause_with_they_controller(
 
     // CR 120.1 + CR 510.1: "opponent that was dealt combat damage this turn"
     // / "opponent who was dealt combat damage this turn". Mirrors the
-    // lost-life / gained-life arms above. `scan_contains` is the
-    // word-boundary-aware combinator equivalent of `.contains()` — it
-    // avoids substring false-positives like "opponent dealt" inside a
-    // sentence about something else.
-    if nom_primitives::scan_contains(clause, "opponent")
-        && nom_primitives::scan_contains(clause, "dealt combat damage")
-    {
+    // lost-life / gained-life arms above, but consumes the full clause instead
+    // of doing substring dispatch.
+    if parse_opponent_dealt_combat_damage_clause(clause).is_ok() {
         return Some(QuantityRef::PlayerCount {
             filter: PlayerFilter::OpponentDealtCombatDamage,
         });
@@ -1319,7 +1357,7 @@ fn parse_for_each_clause_with_they_controller(
     None
 }
 
-/// CR 608.2c + CR 609.3: Parse the object set named by a "for each [object]"
+/// CR 608.2c: Parse the object set named by a "for each [object]"
 /// clause when the following instruction acts on each object itself rather than
 /// only needing the count. This preserves object identity for patterns such as
 /// "for each token you control that entered this turn, create a token that's a
@@ -1557,7 +1595,7 @@ mod tests {
         assert_eq!(qty, QuantityRef::ExiledFromHandThisResolution);
     }
 
-    /// CR 609.3 + CR 122.1: "[type] counter[s] removed this way" must dispatch
+    /// CR 608.2c + CR 122.1: "[type] counter[s] removed this way" must dispatch
     /// to `PreviousEffectAmount` so the resolver picks up the actual count of
     /// counters removed by the parent `Effect::RemoveCounter`. Coalition Relic
     /// and the Storage Counter cycle depend on this dispatch — without it, the
@@ -1590,6 +1628,30 @@ mod tests {
         // counter type. Must produce the same dispatch.
         let qty = parse_for_each_clause("storage counter removed this way").unwrap();
         assert_eq!(qty, QuantityRef::PreviousEffectAmount);
+    }
+
+    #[test]
+    fn quantity_ref_number_of_counters_removed_this_way_is_previous_effect_amount() {
+        let qty = parse_quantity_ref("the number of study counters removed this way").unwrap();
+        assert_eq!(qty, QuantityRef::PreviousEffectAmount);
+    }
+
+    #[test]
+    fn for_each_opponent_dealt_combat_damage_is_player_count() {
+        for phrase in [
+            "opponent that was dealt combat damage this turn",
+            "opponent who was dealt combat damage this turn",
+            "opponents that were dealt combat damage this turn",
+            "opponents who were dealt combat damage",
+        ] {
+            assert_eq!(
+                parse_for_each_clause(phrase),
+                Some(QuantityRef::PlayerCount {
+                    filter: PlayerFilter::OpponentDealtCombatDamage,
+                }),
+                "phrase {phrase:?} must consume as OpponentDealtCombatDamage"
+            );
+        }
     }
 
     #[test]
@@ -2088,6 +2150,26 @@ mod tests {
                 qty: QuantityRef::EventContextAmount
             })
         );
+    }
+
+    #[test]
+    fn parse_event_context_quantity_previous_effect_this_way_variants() {
+        for phrase in [
+            "the life lost this way",
+            "the amount of life paid this way",
+            "the damage dealt this way",
+            "the amount of excess damage dealt this way",
+            "opponents dealt damage this way",
+            "the number of stun counters removed this way",
+        ] {
+            assert_eq!(
+                parse_event_context_quantity(phrase),
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount,
+                }),
+                "phrase {phrase:?} must map to PreviousEffectAmount"
+            );
+        }
     }
 
     /// CR 614.1a: "that much life plus N" — Heron of Hope / Angel of Vitality /
