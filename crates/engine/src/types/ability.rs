@@ -9457,6 +9457,26 @@ pub enum QuantityModification {
     Plus { value: u32 },
     /// count.saturating_sub(value) — Vizier of Remedies (-1)
     Minus { value: u32 },
+    /// CR 113.6i + CR 614.17 + CR 614.6 + CR 614.7 + CR 122.1: Fully replace the
+    /// quantity event with nothing — the proposed `AddCounter` / `CreateToken`
+    /// event "never happens" (CR 614.6).
+    ///
+    /// CR 113.6i is the *authorizing* rule for permanent-scoped counter
+    /// prohibitions ("an object's ability that states counters can't be put on
+    /// that object functions as that object is entering the battlefield in
+    /// addition to functioning while that object is on the battlefield").
+    /// CR 614.17 is the framework for "can't" effects — they aren't replacement
+    /// effects but follow similar rules — which is why we model the prohibition
+    /// through the replacement pipeline. CR 122.1 ("a counter is a marker
+    /// placed on an object or player") identifies the placement event the
+    /// prohibition suppresses; CR 614.6/614.7 govern the resulting "event
+    /// never happens" outcome.
+    ///
+    /// Used by self-targeted counter-prohibition replacements ("~ can't have
+    /// counters put on it." — Melira's Keepers). Composes with `valid_card:
+    /// SelfRef` for permanent-scoped protection and with player-scope filters
+    /// for the future Solemnity-class global variant.
+    Prevent,
 }
 
 /// CR 106.3 + CR 614.1a: Mana-production replacement payload.

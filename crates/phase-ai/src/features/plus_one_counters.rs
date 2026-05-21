@@ -253,8 +253,13 @@ fn effect_places_plus_one_counter(e: &&Effect) -> bool {
 }
 
 /// True if this replacement definition modifies the quantity of +1/+1 counters
-/// placed. Matches `ReplacementEvent::AddCounter` with a non-None
-/// `quantity_modification`. CR 614.1a.
+/// placed. Matches `ReplacementEvent::AddCounter` with a counter-scaling
+/// `quantity_modification` (`Double` / `Plus` / `Minus`). CR 614.1a.
+///
+/// Excludes `QuantityModification::Prevent` (CR 614.6 + CR 614.7) — those
+/// replacements *suppress* counter placement entirely (Melira's Keepers class)
+/// rather than scale a P1P1 payoff, so a deck containing one is NOT exhibiting
+/// a +1/+1-counters commitment signal.
 ///
 /// Note: `ReplacementEvent::AddCounter` is a unit variant with no counter-type
 /// discriminator, so this predicate cannot distinguish a P1P1 doubler from
@@ -262,7 +267,16 @@ fn effect_places_plus_one_counter(e: &&Effect) -> bool {
 /// practice this is fine — a deck running counter-quantity replacements is
 /// almost certainly running them for the deck's primary counter type.
 pub(crate) fn replacement_modifies_p1p1_counters_parts(rep: &ReplacementDefinition) -> bool {
-    rep.event == ReplacementEvent::AddCounter && rep.quantity_modification.is_some()
+    use engine::types::ability::QuantityModification;
+    rep.event == ReplacementEvent::AddCounter
+        && matches!(
+            rep.quantity_modification,
+            Some(
+                QuantityModification::Double
+                    | QuantityModification::Plus { .. }
+                    | QuantityModification::Minus { .. }
+            )
+        )
 }
 
 fn replacement_modifies_p1p1_counters(rep: &ReplacementDefinition) -> bool {
