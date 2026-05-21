@@ -2158,10 +2158,7 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     // related prohibitions can reuse the same negation prefix without
     // re-enumerating the cross-product.
     if all_consuming((
-        alt((
-            tag::<_, _, OracleError<'_>>("can't "),
-            tag("cannot "),
-        )),
+        alt((tag::<_, _, OracleError<'_>>("can't "), tag("cannot "))),
         tag("play lands"),
     ))
     .parse(lower)
