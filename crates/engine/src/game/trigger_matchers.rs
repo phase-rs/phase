@@ -115,6 +115,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::NinjutsuActivated => match_ninjutsu_activated,
         TriggerMode::BoastAbilityActivated => match_boast_ability_activated,
         TriggerMode::ExhaustAbilityActivated => match_exhaust_ability_activated,
+        TriggerMode::OutlastAbilityActivated => match_outlast_ability_activated,
         TriggerMode::Firebend => match_firebend,
         TriggerMode::Airbend => match_airbend,
         TriggerMode::Earthbend => match_earthbend,
@@ -439,6 +440,10 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     r.insert(
         TriggerMode::ExhaustAbilityActivated,
         match_exhaust_ability_activated,
+    );
+    r.insert(
+        TriggerMode::OutlastAbilityActivated,
+        match_outlast_ability_activated,
     );
 
     // Avatar crossover: bending trigger matchers
@@ -2417,6 +2422,25 @@ pub(super) fn match_exhaust_ability_activated(
     state: &GameState,
 ) -> bool {
     if let GameEvent::ExhaustAbilityActivated { player_id, .. } = event {
+        state
+            .objects
+            .get(&source_id)
+            .map(|obj| obj.controller == *player_id)
+            .unwrap_or(false)
+    } else {
+        false
+    }
+}
+
+/// CR 702.107a + CR 603.2: Matches when a player activates this creature's outlast ability.
+/// Fires only for the controller of the trigger source (Herald of Anafenza and siblings).
+pub(super) fn match_outlast_ability_activated(
+    event: &GameEvent,
+    _trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::OutlastAbilityActivated { player_id, .. } = event {
         state
             .objects
             .get(&source_id)

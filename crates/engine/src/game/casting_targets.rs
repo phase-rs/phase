@@ -479,6 +479,12 @@ pub(crate) fn emit_keyword_ability_event_if_tagged(
                 is_mana_ability: super::mana_abilities::is_mana_ability(def),
             });
         }
+        Some(AbilityTag::Outlast) => {
+            events.push(GameEvent::OutlastAbilityActivated {
+                player_id: player,
+                source_id,
+            });
+        }
         None => {}
     }
 }

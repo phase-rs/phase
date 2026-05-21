@@ -559,6 +559,14 @@ pub enum GameEvent {
         is_mana_ability: bool,
     },
 
+    /// CR 702.107a: An outlast ability was activated. Emitted alongside AbilityActivated
+    /// when the activated ability has `ability_tag == Some(AbilityTag::Outlast)`.
+    /// Enables "whenever you activate this creature's outlast ability" triggers.
+    OutlastAbilityActivated {
+        player_id: PlayerId,
+        source_id: ObjectId,
+    },
+
     /// CR 702.110: A creature exploited another creature (sacrificed via exploit ETB).
     CreatureExploited {
         exploiter: ObjectId,

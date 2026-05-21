@@ -2578,6 +2578,16 @@ fn try_parse_keyword_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
             def.mode = TriggerMode::BoastAbilityActivated;
             return Some((TriggerMode::BoastAbilityActivated, def));
         }
+        // CR 702.107a: Match "~'s outlast ability" — "this creature" is normalized to ~
+        // before trigger parsing, so the condition arrives as "~'s outlast ability".
+        if tag::<_, _, OracleError<'_>>("~'s outlast ability")
+            .parse(rest)
+            .is_ok()
+        {
+            let mut def = make_base();
+            def.mode = TriggerMode::OutlastAbilityActivated;
+            return Some((TriggerMode::OutlastAbilityActivated, def));
+        }
         if all_consuming(tag::<_, _, OracleError<'_>>("an exhaust ability"))
             .parse(rest)
             .is_ok()

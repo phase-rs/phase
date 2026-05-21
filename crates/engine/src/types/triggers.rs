@@ -201,6 +201,8 @@ pub enum TriggerMode {
     BoastAbilityActivated,
     /// CR 702.177a: Triggers when a player activates an exhaust ability.
     ExhaustAbilityActivated,
+    /// CR 702.107a: Triggers when a player activates this creature's outlast ability.
+    OutlastAbilityActivated,
     /// CR 702.100: Evolve trigger — when a creature enters with greater power/toughness.
     Evolved,
     /// CR 701.44: Triggers when a creature explores.
@@ -453,6 +455,7 @@ impl FromStr for TriggerMode {
             "NinjutsuActivated" => TriggerMode::NinjutsuActivated,
             "BoastAbilityActivated" => TriggerMode::BoastAbilityActivated,
             "ExhaustAbilityActivated" => TriggerMode::ExhaustAbilityActivated,
+            "OutlastAbilityActivated" => TriggerMode::OutlastAbilityActivated,
             "PayCumulativeUpkeep" => TriggerMode::PayCumulativeUpkeep,
             "PayEcho" => TriggerMode::PayEcho,
             "PayLife" => TriggerMode::PayLife,
@@ -714,6 +717,7 @@ mod tests {
             "NinjutsuActivated",
             "BoastAbilityActivated",
             "ExhaustAbilityActivated",
+            "OutlastAbilityActivated",
             "PayCumulativeUpkeep",
             "PayEcho",
             "PayLife",

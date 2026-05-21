@@ -101,6 +101,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::NinjutsuActivated { .. }
         | GameEvent::BoastAbilityActivated { .. }
         | GameEvent::ExhaustAbilityActivated { .. }
+        | GameEvent::OutlastAbilityActivated { .. }
         | GameEvent::StackPushed { .. }
         | GameEvent::StackResolved { .. }
         | GameEvent::SpellCountered { .. } => LogCategory::Stack,
@@ -285,6 +286,15 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         } => vec![
             player_seg(state, *player_id),
             text(" activates exhaust: "),
+            card_seg(state, *source_id),
+        ],
+
+        GameEvent::OutlastAbilityActivated {
+            player_id,
+            source_id,
+        } => vec![
+            player_seg(state, *player_id),
+            text(" activates outlast: "),
             card_seg(state, *source_id),
         ],
 

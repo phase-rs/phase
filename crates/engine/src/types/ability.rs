@@ -7584,6 +7584,8 @@ pub enum AbilityTag {
     Boast,
     /// CR 702.177a: This ability originated from an Exhaust keyword definition.
     Exhaust,
+    /// CR 702.107a: This ability originated from an Outlast keyword definition.
+    Outlast,
 }
 
 /// Structured activation-time restrictions parsed from Oracle text.
