@@ -10,7 +10,7 @@ use nom::Parser;
 
 use super::error::{OracleError, OracleResult};
 use crate::types::ability::PtValue;
-use crate::types::counter::CounterType;
+use crate::types::counter::{CounterType, KEYWORD_COUNTERS};
 use crate::types::keywords::KeywordKind;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 
@@ -306,9 +306,9 @@ pub fn parse_counter_type_typed(input: &str) -> OracleResult<'_, CounterType> {
 /// trample, vigilance).
 ///
 /// SOURCE OF TRUTH: `crate::types::counter::KEYWORD_COUNTERS`
-/// (`crates/engine/src/types/counter.rs:53`). If you add a new keyword counter
-/// to `KEYWORD_COUNTERS`, also add its `tag` here. The iterating test below
-/// enforces consistency at compile-test time.
+/// (`crates/engine/src/types/counter.rs:53`). The parser iterates that table
+/// and applies nom `tag()` to each entry, so additions to the table
+/// automatically become parseable keyword counters.
 ///
 /// Multi-word entries (`first strike`, `double strike`) MUST come before any
 /// single-word entry whose name could be a prefix of them — nom `alt` commits
@@ -316,26 +316,17 @@ pub fn parse_counter_type_typed(input: &str) -> OracleResult<'_, CounterType> {
 /// prefix of `first` or `double`, but the ordering is preserved as a
 /// non-negotiable invariant for future additions.
 fn parse_keyword_counter_name(input: &str) -> OracleResult<'_, &str> {
-    alt((
-        // Multi-word entries first (longest-match-first within the alt).
-        tag("first strike"),
-        tag("double strike"),
-        // Single-word entries follow, in `KEYWORD_COUNTERS` order.
-        tag("flying"),
-        tag("deathtouch"),
-        tag("decayed"),
-        tag("exalted"),
-        tag("haste"),
-        tag("hexproof"),
-        tag("indestructible"),
-        tag("lifelink"),
-        tag("menace"),
-        tag("reach"),
-        tag("shadow"),
-        tag("trample"),
-        tag("vigilance"),
-    ))
-    .parse(input)
+    for (name, _) in KEYWORD_COUNTERS {
+        let parsed: OracleResult<'_, &str> = tag(*name).parse(input);
+        if parsed.is_ok() {
+            return parsed;
+        }
+    }
+
+    Err(nom::Err::Error(nom::error::Error::new(
+        input,
+        nom::error::ErrorKind::Tag,
+    )))
 }
 
 /// Parse a named counter type: "loyalty", "charge", "lore", "defense", etc.
@@ -1292,12 +1283,9 @@ mod tests {
 
     /// CR 122.1b: every entry in `KEYWORD_COUNTERS` must be recognized by
     /// `parse_keyword_counter_name` and round-trip through `parse_counter_type_typed`
-    /// to the corresponding `CounterType::Keyword(kind)`. Adding a 16th keyword to
-    /// `KEYWORD_COUNTERS` without updating `parse_keyword_counter_name` will fail
-    /// this test.
+    /// to the corresponding `CounterType::Keyword(kind)`.
     #[test]
     fn test_parse_keyword_counter_name_covers_table() {
-        use crate::types::counter::KEYWORD_COUNTERS;
         for (name, kind) in KEYWORD_COUNTERS {
             // 1. The bare keyword name parses through the keyword combinator.
             let (rest, raw) = parse_keyword_counter_name(name)
@@ -1312,6 +1300,18 @@ mod tests {
                 .unwrap_or_else(|_| panic!("parse_counter_type_typed failed for {name:?}"));
             assert_eq!(ct, CounterType::Keyword(*kind), "keyword name {name:?}");
             assert_eq!(rest, " counter on it", "keyword name {name:?}");
+        }
+    }
+
+    #[test]
+    fn test_keyword_counter_table_is_longest_match_first() {
+        for pair in KEYWORD_COUNTERS.windows(2) {
+            assert!(
+                pair[0].0.len() >= pair[1].0.len(),
+                "KEYWORD_COUNTERS must stay longest-match-first: {:?} before {:?}",
+                pair[0].0,
+                pair[1].0
+            );
         }
     }
 
@@ -1337,7 +1337,6 @@ mod tests {
     /// effect's counter clause through `parse_counter_type_typed`.
     #[test]
     fn test_parse_counter_type_typed_double_strike_full_clause() {
-        use crate::types::keywords::KeywordKind;
         let (rest, ct) =
             parse_counter_type_typed("double strike counter on another target attacking creature")
                 .unwrap();
