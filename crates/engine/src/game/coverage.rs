@@ -2421,6 +2421,24 @@ fn keyword_label(kw: &Keyword) -> String {
         .unwrap_or_else(|| format!("{kw:?}"))
 }
 
+fn keyword_supported(kw: &Keyword) -> bool {
+    match kw {
+        Keyword::Unknown(_) => false,
+        Keyword::CumulativeUpkeep(cost) => cost.supports_cumulative_upkeep_payment(),
+        _ => true,
+    }
+}
+
+fn keyword_gap_label(kw: &Keyword) -> Option<String> {
+    match kw {
+        Keyword::Unknown(s) => Some(format!("Keyword:{s}")),
+        Keyword::CumulativeUpkeep(cost) if !cost.supports_cumulative_upkeep_payment() => {
+            Some("Keyword:CumulativeUpkeepUnsupportedCost".to_string())
+        }
+        _ => None,
+    }
+}
+
 /// Build a hierarchical parse tree from a `CardFace`, checking each item against
 /// the engine's trigger and static registries for support status.
 pub fn build_parse_details(
@@ -2436,7 +2454,7 @@ pub fn build_parse_details(
             category: ParseCategory::Keyword,
             label: keyword_label(kw),
             source_text: None,
-            supported: !matches!(kw, Keyword::Unknown(_)),
+            supported: keyword_supported(kw),
             details: vec![],
             children: vec![],
         });
@@ -3574,8 +3592,7 @@ fn check_triggers(
 
 fn check_keywords(keywords: &[Keyword], missing: &mut Vec<String>) {
     for kw in keywords {
-        if let Keyword::Unknown(s) = kw {
-            let label = format!("Keyword:{}", s);
+        if let Some(label) = keyword_gap_label(kw) {
             if !missing.contains(&label) {
                 missing.push(label);
             }
@@ -8911,6 +8928,48 @@ mod tests {
         assert!(gaps
             .iter()
             .any(|gap| gap == "Replacement:Unrecognized(you revealed a Dragon card)"));
+    }
+
+    #[test]
+    fn unsupported_cumulative_upkeep_cost_counts_as_keyword_gap() {
+        let mut face = make_face();
+        face.keywords
+            .push(Keyword::CumulativeUpkeep(AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: None,
+                random: false,
+                self_ref: false,
+            }));
+
+        let gaps = card_face_gaps(&face);
+        assert!(gaps
+            .iter()
+            .any(|gap| gap == "Keyword:CumulativeUpkeepUnsupportedCost"));
+
+        let parse_details = build_parse_details_for_face(&face);
+        let keyword = parse_details
+            .iter()
+            .find(|item| item.category == ParseCategory::Keyword)
+            .expect("keyword parse item");
+        assert!(!keyword.supported);
+    }
+
+    #[test]
+    fn supported_cumulative_upkeep_cost_has_no_keyword_gap() {
+        let mut face = make_face();
+        face.keywords
+            .push(Keyword::CumulativeUpkeep(AbilityCost::Mana {
+                cost: ManaCost::generic(1),
+            }));
+
+        assert!(card_face_gaps(&face).is_empty());
+
+        let parse_details = build_parse_details_for_face(&face);
+        let keyword = parse_details
+            .iter()
+            .find(|item| item.category == ParseCategory::Keyword)
+            .expect("keyword parse item");
+        assert!(keyword.supported);
     }
 
     /// Regression: cards with a concrete `AdditionalCost` + one spell ability

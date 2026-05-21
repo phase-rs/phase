@@ -128,9 +128,9 @@ impl KeywordTriggerInstaller {
             // put an age counter on this permanent, then sacrifice it unless
             // you pay its upkeep cost for each age counter on it.
             //
-            // Gate by base-cost shape: `handle_unless_payment` + the
-            // `expand_per_counter` pipeline only know how to pay Mana, PayLife,
-            // Sacrifice, OneOf-of-Mana, and Composite-of-supported shapes.
+            // Gate by base-cost shape: `AbilityCost` owns the single support
+            // boundary for what `handle_unless_payment` + the
+            // `expand_per_counter` pipeline can pay end-to-end today.
             // Installing the trigger for an unsupported base (Discard, Exile,
             // EffectCost, etc.) would silently sacrifice the permanent every
             // upkeep because the payment falls through to `payment_failed =
@@ -138,7 +138,7 @@ impl KeywordTriggerInstaller {
             // Pre-branch these cards had no trigger at all (silent no-op),
             // which is the correct fallback until the resolution pipeline is
             // extended per shape.
-            Keyword::CumulativeUpkeep(cost) if is_supported_cumulative_upkeep_base(cost) => {
+            Keyword::CumulativeUpkeep(cost) if cost.supports_cumulative_upkeep_payment() => {
                 vec![build_cumulative_upkeep_trigger(cost.clone())]
             }
             Keyword::CumulativeUpkeep(_) => vec![],
@@ -1927,42 +1927,6 @@ fn is_cumulative_upkeep_trigger(t: &TriggerDefinition) -> bool {
         })
 }
 
-/// CR 702.24a: Returns true iff `cost` is a base-cost shape the cumulative-
-/// upkeep expansion + payment pipeline can handle end-to-end.
-///
-/// Supported shapes (covered by `expand_per_counter` + `handle_unless_payment`
-/// + `handle_unless_payment_choose_cost`):
-///   - `Mana` — multiplied generic/colored payments
-///   - `PayLife` — multiplied life payment
-///   - `Sacrifice` — multiplied sacrifice count (Phyrexian Tower-family bases)
-///   - `OneOf` of `Mana` — disjunctive mana choice (Jötun Owl Keeper "{W} or {U}")
-///   - `Composite` of any of the above (recursively)
-///
-/// Unsupported base shapes (Discard, EffectCost, Exile, mixed-shape Composite,
-/// etc.) would otherwise route through `handle_unless_payment`, fail to find a
-/// matching payment branch, set `payment_failed = true`, and force the unless-
-/// effect (Sacrifice) to fire every upkeep — strictly worse than the pre-
-/// synthesizer state where no trigger existed at all. Returning `false` here
-/// keeps such cards in the "trigger not installed" silent-no-op state until
-/// the resolution pipeline gains explicit support per shape.
-fn is_supported_cumulative_upkeep_base(cost: &AbilityCost) -> bool {
-    match cost {
-        AbilityCost::Mana { .. } | AbilityCost::PayLife { .. } | AbilityCost::Sacrifice { .. } => {
-            true
-        }
-        // CR 118.12a: OneOf at the base must be a disjunction of mana costs;
-        // mixed-shape disjunctions (e.g., "{2} or sacrifice a creature") are
-        // not yet expanded into per-counter Composite-of-OneOf form.
-        AbilityCost::OneOf { costs } => {
-            !costs.is_empty() && costs.iter().all(|c| matches!(c, AbilityCost::Mana { .. }))
-        }
-        AbilityCost::Composite { costs } => {
-            !costs.is_empty() && costs.iter().all(is_supported_cumulative_upkeep_base)
-        }
-        _ => false,
-    }
-}
-
 /// CR 702.24a: Cumulative upkeep is a triggered ability — "Cumulative upkeep
 /// [cost]" means "At the beginning of your upkeep, if this permanent is on
 /// the battlefield, put an age counter on this permanent. Then you may pay
@@ -1980,8 +1944,8 @@ fn is_supported_cumulative_upkeep_base(cost: &AbilityCost) -> bool {
 /// The builder is generic over `base_cost: AbilityCost`: mana, life payment,
 /// sacrifice, and OneOf-disjunctive costs all compose with `PerCounter`
 /// uniformly (CLAUDE.md "build for the class"). Callers must pre-filter the
-/// base cost through `is_supported_cumulative_upkeep_base` — the builder
-/// itself does not refuse unsupported shapes.
+/// base cost through `AbilityCost::supports_cumulative_upkeep_payment` — the
+/// builder itself does not refuse unsupported shapes.
 ///
 /// Exposed `pub(crate)` so the end-to-end Mystic Remora tests in
 /// `game::engine::phase_trigger_regression_tests` bind directly to the
@@ -6199,8 +6163,8 @@ mod cumulative_upkeep_synthesis_tests {
     }
 
     /// CR 702.24a: Sanity — the supported base shapes (Mana, PayLife,
-    /// Sacrifice, OneOf-of-Mana, Composite-of-supported) MUST still install a
-    /// single trigger so the gating fix doesn't accidentally break the 69
+    /// Sacrifice, OneOf-of-Mana, Composite-of-Mana) MUST still install a
+    /// single trigger so the gating fix doesn't accidentally break the
     /// payable cumulative-upkeep cards.
     #[test]
     fn cumulative_upkeep_synthesizer_installs_supported_base_shapes() {
@@ -6249,8 +6213,25 @@ mod cumulative_upkeep_synthesis_tests {
             "OneOf-of-Mana base must install exactly one cumulative-upkeep trigger"
         );
 
-        // Composite of supported shapes — e.g., "{1}, pay 1 life".
-        let composite_supported_kw = Keyword::CumulativeUpkeep(AbilityCost::Composite {
+        // Composite of all-Mana shapes — folds to one combined mana payment.
+        let composite_mana_kw = Keyword::CumulativeUpkeep(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(2),
+                },
+            ],
+        });
+        assert_eq!(
+            KeywordTriggerInstaller::triggers_for(&composite_mana_kw).len(),
+            1,
+            "Composite of Mana costs must install exactly one cumulative-upkeep trigger"
+        );
+
+        // Mixed Composite is not currently payable end-to-end.
+        let composite_mixed_kw = Keyword::CumulativeUpkeep(AbilityCost::Composite {
             costs: vec![
                 AbilityCost::Mana {
                     cost: ManaCost::generic(1),
@@ -6261,9 +6242,9 @@ mod cumulative_upkeep_synthesis_tests {
             ],
         });
         assert_eq!(
-            KeywordTriggerInstaller::triggers_for(&composite_supported_kw).len(),
-            1,
-            "Composite of supported shapes must install exactly one cumulative-upkeep trigger"
+            KeywordTriggerInstaller::triggers_for(&composite_mixed_kw).len(),
+            0,
+            "mixed Composite costs must remain unsupported until sequenced payment exists"
         );
     }
 }

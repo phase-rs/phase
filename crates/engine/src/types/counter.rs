@@ -32,7 +32,7 @@ pub enum CounterType {
     /// removed, the suspend "play it without paying its mana cost" trigger fires
     /// (CR 702.62a) or the Vanishing sacrifice trigger fires (CR 702.63a).
     Time,
-    /// CR 702.24a + CR 122.1a: Age counters track Cumulative Upkeep
+    /// CR 702.24a + CR 122.1: Age counters track Cumulative Upkeep
     /// duration. Each cumulative-upkeep trigger places one at the start
     /// of its controller's upkeep, and the cost is multiplied by the
     /// total age-counter count on the permanent at resolution time

@@ -3773,23 +3773,6 @@ fn resolve_unless_payers(
     }
 }
 
-/// CR 702.24a: Multiply a `QuantityExpr` by a runtime count. Today only
-/// `Fixed` is exercised by cumulative-upkeep cards in scope; dynamic
-/// quantity bases for the four supported cards do not exist in MTG.
-/// Adding support for additional variants is a single-arm extension.
-fn multiply_quantity_expr(q: &QuantityExpr, n: u32) -> QuantityExpr {
-    match q {
-        QuantityExpr::Fixed { value } => QuantityExpr::Fixed {
-            value: value.saturating_mul(n as i32),
-        },
-        other => unreachable!(
-            "multiply_quantity_expr: unsupported variant {other:?}; \
-             extend when a new cumulative-upkeep card with a dynamic base \
-             cost ships"
-        ),
-    }
-}
-
 /// CR 702.24a: Expand `pay [base] for each counter on it` into the
 /// concrete N-fold cost the player actually pays. N=0 short-circuits to
 /// a zero mana cost (CR 118.5 — players can always pay 0). `OneOf`
@@ -3806,7 +3789,7 @@ fn expand_per_counter(base: &AbilityCost, n: u32) -> AbilityCost {
             cost: cost.scaled(n),
         },
         AbilityCost::PayLife { amount } => AbilityCost::PayLife {
-            amount: multiply_quantity_expr(amount, n),
+            amount: amount.scaled_by(n),
         },
         AbilityCost::Sacrifice { target, count } => AbilityCost::Sacrifice {
             target: target.clone(),

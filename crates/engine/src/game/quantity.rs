@@ -253,7 +253,7 @@ fn fold_compose(expr: &QuantityExpr, recurse: impl Fn(&QuantityExpr) -> i32) -> 
             rounding,
         } => divide_rounded(recurse(inner), *divisor, *rounding),
         QuantityExpr::Offset { inner, offset } => recurse(inner) + offset,
-        QuantityExpr::Multiply { factor, inner } => factor * recurse(inner),
+        QuantityExpr::Multiply { factor, inner } => factor.saturating_mul(recurse(inner)),
         QuantityExpr::Sum { exprs } => exprs.iter().map(&recurse).sum(),
         // CR 107.3: `base ^ exponent` with the exponent resolved from a
         // QuantityExpr (typically the X variable on a cost). The exponent is
@@ -5971,6 +5971,20 @@ mod tests {
         assert_eq!(
             resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)),
             12
+        );
+    }
+
+    #[test]
+    fn resolve_multiply_saturates_overflow() {
+        let state = GameState::new_two_player(42);
+        let expr = QuantityExpr::Multiply {
+            factor: i32::MAX,
+            inner: Box::new(QuantityExpr::Fixed { value: 2 }),
+        };
+
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)),
+            i32::MAX
         );
     }
 

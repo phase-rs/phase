@@ -15713,7 +15713,7 @@ mod phase_trigger_regression_tests {
     /// `PayLife { Fixed(4) }` (2 × 2 = 4 life). Paying 4 life keeps Inner
     /// Sanctum on the battlefield and deducts 4 from the controller's life
     /// total — the load-bearing assertion for the `PayLife` arm of
-    /// `expand_per_counter`'s `multiply_quantity_expr`.
+    /// `expand_per_counter`'s `QuantityExpr::scaled_by` composition.
     #[test]
     fn inner_sanctum_upkeep_two_age_counters_pays_four_life() {
         let (mut state, sanctum_id) = setup_inner_sanctum_second_upkeep_state();
