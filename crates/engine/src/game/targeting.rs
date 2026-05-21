@@ -586,6 +586,10 @@ pub(crate) fn extract_source_from_event(
         GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
         GameEvent::CreatureDestroyed { object_id } => Some(*object_id),
         GameEvent::PermanentSacrificed { object_id, .. } => Some(*object_id),
+        GameEvent::Unattached {
+            old_target: TargetRef::Object(object_id),
+            ..
+        } => Some(*object_id),
         GameEvent::Discarded { object_id, .. } => Some(*object_id),
         GameEvent::Transformed { object_id } => Some(*object_id),
         GameEvent::TurnedFaceUp { object_id } => Some(*object_id),
@@ -635,6 +639,10 @@ pub(crate) fn extract_player_from_event(
         GameEvent::LandPlayed { player_id, .. } => Some(*player_id),
         GameEvent::SpellCast { controller, .. } => Some(*controller),
         GameEvent::PermanentSacrificed { player_id, .. } => Some(*player_id),
+        GameEvent::Unattached {
+            old_target: TargetRef::Player(player_id),
+            ..
+        } => Some(*player_id),
         GameEvent::Cycled { player_id, .. } => Some(*player_id),
         GameEvent::PlayerPerformedAction { player_id, .. } => Some(*player_id),
         GameEvent::CrimeCommitted { player_id, .. } => Some(*player_id),
@@ -2187,7 +2195,7 @@ mod tests {
         assert_eq!(result, Some(PlayerId(1)));
     }
 
-    /// CR 603.7a + CR 109.4 + CR 603.10a: For `ZoneChanged` events
+    /// CR 603.6 + CR 109.4 + CR 603.10a: For `ZoneChanged` events
     /// (ETB, dies, discard, return-to-hand), `TriggeringPlayer` must
     /// resolve to the moving object's controller as captured in the
     /// `ZoneChangeRecord` snapshot — NOT the ability controller and

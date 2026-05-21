@@ -401,6 +401,7 @@ mod tests {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
                 player_filter: None,
+                damage_source: None,
             },
         )
     }

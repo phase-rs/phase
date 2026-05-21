@@ -594,7 +594,7 @@ fn parse_pay_life_as_colored_mana(text: &str) -> Option<StaticDefinition> {
     let (_, color) = parser_result.ok()?;
     Some(
         StaticDefinition::new(StaticMode::PayLifeAsColoredMana { color })
-            .affected(TargetFilter::Player)
+            .affected(TargetFilter::Controller)
             .description(text.to_string()),
     )
 }
@@ -9470,7 +9470,17 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
         } else {
             prefix
         };
-        let type_desc = without_from
+        // CR 201.3 / CR 113.6: Strip the trailing "with the chosen name" qualifier
+        // (Disruptor Flute: "Spells with the chosen name cost {3} more to cast.")
+        // before the standard suffix-trim chain runs. Track it so the spell filter is
+        // composed with `HasChosenName` after type parsing — same convention used by
+        // `parse_continuous_subject_filter` for object-class chosen-name phrases.
+        let (without_chosen, has_chosen_name) =
+            match nom_primitives::split_once_on(without_from, " with the chosen name") {
+                Ok((_, (before, _))) => (before, true),
+                Err(_) => (without_from, false),
+            };
+        let type_desc = without_chosen
             .trim_end_matches(" you cast")
             .trim_end_matches(" your opponents cast")
             .trim_end_matches(" opponents cast")
@@ -9478,7 +9488,8 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
             .trim_end_matches(" spell")
             .trim();
         // "spells" alone means no type restriction (bare "Spells you cast cost...")
-        if type_desc.is_empty() || type_desc == "spells" || type_desc == "spell" {
+        let typed_filter = if type_desc.is_empty() || type_desc == "spells" || type_desc == "spell"
+        {
             None
         } else {
             // First try parse_type_phrase for standard type patterns
@@ -9501,6 +9512,16 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
                     })
                 }
             }
+        };
+        // Compose chosen-name constraint with the typed prefix (if any). Bare
+        // "Spells with the chosen name" → `HasChosenName` alone; typed
+        // "<Type> spells with the chosen name" → `And{Typed, HasChosenName}`.
+        match (typed_filter, has_chosen_name) {
+            (Some(tf), true) => Some(TargetFilter::And {
+                filters: vec![tf, TargetFilter::HasChosenName],
+            }),
+            (None, true) => Some(TargetFilter::HasChosenName),
+            (tf, false) => tf,
         }
     } else {
         None
@@ -11097,6 +11118,33 @@ mod tests {
                 _ => panic!("Expected Typed filter"),
             }
         }
+    }
+
+    /// CR 201.3 / CR 113.6 + CR 601.2f: Disruptor Flute — "Spells with the
+    /// chosen name cost {3} more to cast." Bare "spells" (no type adjective)
+    /// composes with the `HasChosenName` filter so the cost bump applies only
+    /// to spells matching the source's bound `ChosenAttribute::CardName`, not
+    /// every spell on every player's stack. Regression discriminator for #603:
+    /// previously the chosen-name suffix was swallowed and the parser emitted
+    /// a bare `Typed(Card)` filter, taxing every spell in hand.
+    #[test]
+    fn static_spells_with_chosen_name_cost_more_disruptor_flute() {
+        let def = parse_static_line("Spells with the chosen name cost {3} more to cast.").unwrap();
+        let StaticMode::RaiseCost {
+            amount,
+            spell_filter,
+            dynamic_count,
+        } = def.mode
+        else {
+            panic!("expected RaiseCost, got {:?}", def.mode);
+        };
+        assert!(matches!(amount, ManaCost::Cost { generic: 3, .. }));
+        assert!(dynamic_count.is_none());
+        assert_eq!(
+            spell_filter,
+            Some(TargetFilter::HasChosenName),
+            "bare 'Spells with the chosen name' must lower to HasChosenName, not Typed(Card)"
+        );
     }
 
     /// CR 601.2f: Trinisphere — the cost-floor static. The line begins with
@@ -20351,7 +20399,7 @@ mod snapshot_tests {
                 color: crate::types::mana::ManaColor::Black,
             },
         );
-        assert!(matches!(def.affected, Some(TargetFilter::Player)));
+        assert!(matches!(def.affected, Some(TargetFilter::Controller)));
     }
 
     /// The combinator must reject other colors only by routing the wrong

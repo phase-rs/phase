@@ -241,6 +241,8 @@ pub(super) fn handle_unless_payment_choose_cost(
         pending_effect,
         trigger_event,
         effect_description,
+        mut remaining_choices,
+        mut chosen,
     } = waiting_for
     else {
         return Err(EngineError::InvalidAction(
@@ -250,19 +252,45 @@ pub(super) fn handle_unless_payment_choose_cost(
 
     match choice {
         UnlessCostBranch::Pay { index } => {
-            let chosen = costs.get(index).cloned().ok_or_else(|| {
+            let picked = costs.get(index).cloned().ok_or_else(|| {
                 EngineError::InvalidAction(format!(
                     "ChooseUnlessCostBranch index {index} out of range \
                      (have {} sub-costs)",
                     costs.len()
                 ))
             })?;
-            // Re-enter the standard single-cost path with `pay: true`. The
+            // CR 702.24a + CR 118.12: If more disjunctive prompts remain
+            // (cumulative-upkeep `OneOf × N` expansion), accumulate this pick
+            // and surface the next prompt without paying anything yet.
+            // "Each choice is made separately for each age counter, then
+            // either the entire set of costs is paid, or none of them is
+            // paid."
+            chosen.push(picked);
+            if !remaining_choices.is_empty() {
+                let next_costs = remaining_choices.remove(0);
+                state.waiting_for = WaitingFor::UnlessPaymentChooseCost {
+                    player,
+                    costs: next_costs,
+                    pending_effect,
+                    trigger_event,
+                    effect_description,
+                    remaining_choices,
+                    chosen,
+                };
+                return Ok(action_result(events, state.waiting_for.clone()));
+            }
+            // All choices made — collapse into a single cost and re-enter
+            // the standard single-cost path with `pay: true`. The
             // pending_effect already has `unless_pay = None` (cleared by
             // `surface_unless_payment`).
+            let final_cost = if chosen.len() == 1 {
+                chosen.into_iter().next().unwrap()
+            } else {
+                AbilityCost::Composite { costs: chosen }
+            };
             let next = WaitingFor::UnlessPayment {
                 player,
-                cost: chosen,
+                cost: final_cost,
                 pending_effect,
                 trigger_event,
                 effect_description,
@@ -273,11 +301,13 @@ pub(super) fn handle_unless_payment_choose_cost(
             handle_unless_payment(state, next, true, events)
         }
         UnlessCostBranch::Decline => {
-            // CR 118.12: Declining the choice is identical to declining a
-            // single-cost `PayUnlessCost { pay: false }` — re-enter
+            // CR 118.12 + CR 702.24a: Declining any prompt in the sequence
+            // declines the whole disjunctive unless-cost — falls through to
+            // the effect happening, equivalent to `PayUnlessCost { pay:
+            // false }` on the single-cost path. Re-enter
             // `handle_unless_payment` with `pay: false` and any
             // representative cost (the cost is unused on the decline path:
-            // `handle_unless_payment` line 570 routes straight to
+            // `handle_unless_payment` routes straight to
             // `resolve_ability_chain` on the `!pay || payment_failed`
             // branch, never reading `cost`). Use the first sub-cost as a
             // stand-in so the WaitingFor shape is valid even though the
@@ -532,6 +562,52 @@ pub(super) fn handle_unless_payment(
                      reaching handle_unless_payment"
                 );
             }
+            // CR 702.24a: `PerCounter` is expanded against game state at the
+            // unless-payment entry point in `effects/mod.rs` — the expanded
+            // base (Mana / Composite / OneOf / PayLife / Sacrifice), not the
+            // `PerCounter` wrapper, reaches this match. Listed here so the
+            // exhaustive match documents the invariant.
+            AbilityCost::PerCounter { .. } => {
+                unreachable!(
+                    "PerCounter unless-cost should have been expanded against \
+                     game state at the unless-payment entry point before \
+                     reaching handle_unless_payment"
+                );
+            }
+            // CR 702.24a + CR 118.12: `Composite` of `Mana` sub-costs is the
+            // shape produced when `handle_unless_payment_choose_cost`
+            // accumulates per-counter disjunctive picks for an `OneOf × N`
+            // cumulative-upkeep expansion (e.g., Jötun Owl Keeper at N age
+            // counters chooses `{W}` or `{U}` for each, yielding `Composite[
+            // Mana{...}, Mana{...}, ...]`). Sum the inner mana costs via
+            // `ManaCost::plus` and pay as a single combined mana cost — the
+            // same aggregation used by combat-tax `scaled()` payment.
+            // "Then either the entire set of costs is paid, or none of them
+            // is paid. Partial payments aren't allowed."
+            //
+            // Mixed `Composite` (e.g., `Composite[Mana, PayLife]`) is
+            // **explicitly out of scope** here — no current MTG card
+            // produces a mixed unless-payment composite. Extend with a
+            // sequenced sub-cost payer when one ships.
+            AbilityCost::Composite { costs }
+                if costs.iter().all(|c| matches!(c, AbilityCost::Mana { .. })) =>
+            {
+                let combined = costs.iter().fold(ManaCost::zero(), |acc, c| match c {
+                    AbilityCost::Mana { cost } => acc.plus(cost),
+                    _ => unreachable!("guard ensures all Mana"),
+                });
+                casting::pay_unless_cost(state, player, &combined, events)?;
+            }
+            AbilityCost::Composite { .. } => {
+                // CR 702.24a + CR 118.12: A non-all-Mana `Composite`
+                // unless-cost is not yet supported. No current MTG card
+                // produces this shape (cumulative upkeep with mixed
+                // disjunctive sub-costs is empirically Mana-only). Falling
+                // through to `payment_failed = true` makes the unless-effect
+                // happen, which is the rules-correct fallback for an
+                // unpayable cost (CR 118.12: declining is equivalent).
+                payment_failed = true;
+            }
             AbilityCost::Tap
             | AbilityCost::Untap
             | AbilityCost::Unattach
@@ -546,7 +622,6 @@ pub(super) fn handle_unless_payment(
             | AbilityCost::Blight { .. }
             | AbilityCost::Reveal { .. }
             | AbilityCost::Behold { .. }
-            | AbilityCost::Composite { .. }
             | AbilityCost::Waterbend { .. }
             | AbilityCost::NinjutsuFamily { .. }
             | AbilityCost::EffectCost { .. }
@@ -1338,6 +1413,8 @@ mod tests {
             pending_effect: Box::new(pending),
             trigger_event: None,
             effect_description: None,
+            remaining_choices: vec![],
+            chosen: vec![],
         };
 
         let mut events = Vec::new();
@@ -1374,6 +1451,8 @@ mod tests {
             pending_effect: Box::new(pending),
             trigger_event: None,
             effect_description: None,
+            remaining_choices: vec![],
+            chosen: vec![],
         };
 
         let mut events = Vec::new();
@@ -1407,6 +1486,8 @@ mod tests {
             pending_effect: Box::new(pending),
             trigger_event: None,
             effect_description: None,
+            remaining_choices: vec![],
+            chosen: vec![],
         };
 
         crate::game::engine::apply_as_current(
@@ -1436,6 +1517,8 @@ mod tests {
             pending_effect: Box::new(pending),
             trigger_event: None,
             effect_description: None,
+            remaining_choices: vec![],
+            chosen: vec![],
         };
 
         crate::game::engine::apply_as_current(
@@ -1447,6 +1530,255 @@ mod tests {
         .expect("apply_action should resolve the decline");
         // Effect happens: 20 + 7 = 27.
         assert_eq!(state.players[0].life, 27);
+    }
+
+    /// CR 702.24a + CR 118.12: A `Composite`-of-`OneOf`s unless-cost (the
+    /// shape `expand_per_counter` produces from a `OneOf` base at N ≥ 2 — e.g.
+    /// Jötun Owl Keeper's `{W} or {U}` cumulative upkeep with 2 age counters)
+    /// drives sequential disjunctive choices: each prompt resolves
+    /// independently and picks accumulate into `chosen`. After the last
+    /// prompt, the accumulated picks collapse into a `Composite` cost and the
+    /// state transitions to `UnlessPayment` for the single combined payment.
+    /// "Each choice is made separately for each age counter, then either the
+    /// entire set of costs is paid, or none of them is paid."
+    ///
+    /// This test exercises **only the multi-choice routing** through
+    /// `handle_unless_payment_choose_cost`. The single-cost
+    /// `handle_unless_payment` handler's response to a `Composite` cost is
+    /// out of scope here (covered by subsequent tasks); we cut the run
+    /// short before that handler runs by inspecting `state.waiting_for`
+    /// between the choose-cost handler and the unless-payment handler
+    /// transition.
+    #[test]
+    fn unless_payment_composite_of_one_ofs_routes_through_sequential_choose() {
+        // Two-prompt sequence: first prompt offers PayLife{3}/PayLife{1};
+        // second prompt offers PayLife{2}/PayLife{5}. Distinct values per
+        // prompt so the accumulated `chosen` list is unambiguous.
+        let first_costs = vec![
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+            },
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+            },
+        ];
+        let second_costs = vec![
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+            },
+        ];
+
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 20;
+        let pending = ResolvedAbility::new(gain_life(7), vec![], ObjectId(100), PlayerId(0));
+        state.waiting_for = WaitingFor::UnlessPaymentChooseCost {
+            player: PlayerId(0),
+            costs: first_costs,
+            pending_effect: Box::new(pending),
+            trigger_event: None,
+            effect_description: None,
+            remaining_choices: vec![second_costs.clone()],
+            chosen: vec![],
+        };
+
+        // First pick: index 0 (PayLife{3}). Expected post-state: still in
+        // UnlessPaymentChooseCost, now showing the second prompt;
+        // remaining_choices drained to empty; chosen carries [PayLife{3}].
+        let mut events = Vec::new();
+        let wf = state.waiting_for.clone();
+        handle_unless_payment_choose_cost(
+            &mut state,
+            wf,
+            crate::types::actions::UnlessCostBranch::Pay { index: 0 },
+            &mut events,
+        )
+        .expect("first choose-cost prompt should accumulate, not pay");
+        match &state.waiting_for {
+            WaitingFor::UnlessPaymentChooseCost {
+                costs,
+                remaining_choices,
+                chosen,
+                ..
+            } => {
+                assert_eq!(
+                    costs, &second_costs,
+                    "second prompt's costs are surfaced verbatim"
+                );
+                assert!(
+                    remaining_choices.is_empty(),
+                    "after popping the only queued prompt, remaining_choices is empty"
+                );
+                assert_eq!(chosen.len(), 1, "first pick accumulated into `chosen`");
+                assert!(
+                    matches!(
+                        &chosen[0],
+                        AbilityCost::PayLife {
+                            amount: QuantityExpr::Fixed { value: 3 }
+                        }
+                    ),
+                    "first pick is PayLife{{3}} as selected by index 0"
+                );
+            }
+            other => panic!("expected second UnlessPaymentChooseCost prompt, got {other:?}"),
+        }
+        assert_eq!(
+            state.players[0].life, 20,
+            "no payment yet — picks accumulate until the final prompt"
+        );
+
+        // Second pick: index 1 (PayLife{5}). Expected post-state: the
+        // multi-choice routing collapses into a `Composite` cost and
+        // re-enters `handle_unless_payment` for the combined payment. The
+        // single-cost handler's behavior with a Composite cost is out of
+        // scope for this routing test; what matters is that the accumulated
+        // picks formed the expected Composite before `handle_unless_payment`
+        // was called.
+        //
+        // Drive the routing by hand (rather than via
+        // `handle_unless_payment_choose_cost` which then re-enters
+        // `handle_unless_payment`): pull out the final picks and assert the
+        // shape of the would-be `UnlessPayment::cost`.
+        let WaitingFor::UnlessPaymentChooseCost {
+            costs,
+            mut chosen,
+            remaining_choices,
+            ..
+        } = state.waiting_for.clone()
+        else {
+            panic!("expected UnlessPaymentChooseCost before final pick");
+        };
+        assert!(remaining_choices.is_empty(), "queue is drained");
+        chosen.push(costs[1].clone());
+        let final_cost = if chosen.len() == 1 {
+            chosen.into_iter().next().unwrap()
+        } else {
+            AbilityCost::Composite { costs: chosen }
+        };
+        match final_cost {
+            AbilityCost::Composite { costs } => {
+                assert_eq!(costs.len(), 2, "two picks → 2-element Composite");
+                assert!(matches!(
+                    &costs[0],
+                    AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 3 }
+                    }
+                ));
+                assert!(matches!(
+                    &costs[1],
+                    AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 5 }
+                    }
+                ));
+            }
+            other => panic!("expected Composite[PayLife{{3}}, PayLife{{5}}], got {other:?}"),
+        }
+    }
+
+    /// CR 702.24a + CR 118.12: End-to-end OneOf × N flow — driving both
+    /// disjunctive picks through `handle_unless_payment_choose_cost`,
+    /// collapsing the accumulated picks into a `Composite` of `Mana` costs,
+    /// and paying the combined mana cost in a single `handle_unless_payment`
+    /// step. Mirrors Jötun Owl Keeper's "{W} or {U}" cumulative-upkeep cost
+    /// at N=2 age counters: 2 prompts, each picking `{W}` or `{U}`, summed
+    /// into a single `{W}{U}` (or `{W}{W}`, etc.) payment. "Then either the
+    /// entire set of costs is paid, or none of them is paid."
+    ///
+    /// Verifies the full Task 14 contract: pick → pick → pay succeeds, the
+    /// unless-effect (would-be `GainLife`) does NOT happen (life unchanged),
+    /// and the combined mana cost is deducted from the player's pool.
+    #[test]
+    fn unless_payment_composite_of_one_ofs_pays_combined_mana_e2e() {
+        use crate::types::mana::{ManaType, ManaUnit};
+        // Two-prompt sequence mirroring `OneOf{[Mana{W}, Mana{U}]}` expanded
+        // to N=2 (the shape Jötun Owl Keeper produces at 2 age counters).
+        let oneof_wu = vec![
+            AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![crate::types::mana::ManaCostShard::White],
+                    generic: 0,
+                },
+            },
+            AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![crate::types::mana::ManaCostShard::Blue],
+                    generic: 0,
+                },
+            },
+        ];
+
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 20;
+        // Provision {W}{W} so the payer can pay either combination of two
+        // {W}-or-{U} picks if they choose {W} twice (the cheaper scenario
+        // here just verifies the routing flow — picking {W} twice is the
+        // simplest mana-pool model).
+        for _ in 0..2 {
+            state.players[0].mana_pool.add(ManaUnit::new(
+                ManaType::White,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+        }
+
+        let pending = ResolvedAbility::new(gain_life(7), vec![], ObjectId(100), PlayerId(0));
+        state.waiting_for = WaitingFor::UnlessPaymentChooseCost {
+            player: PlayerId(0),
+            costs: oneof_wu.clone(),
+            pending_effect: Box::new(pending),
+            trigger_event: None,
+            effect_description: None,
+            remaining_choices: vec![oneof_wu.clone()],
+            chosen: vec![],
+        };
+
+        // First pick: {W} (index 0). State remains UnlessPaymentChooseCost.
+        let mut events = Vec::new();
+        let wf = state.waiting_for.clone();
+        handle_unless_payment_choose_cost(
+            &mut state,
+            wf,
+            crate::types::actions::UnlessCostBranch::Pay { index: 0 },
+            &mut events,
+        )
+        .expect("first choose-cost prompt should accumulate, not pay");
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::UnlessPaymentChooseCost { .. }
+            ),
+            "intermediate state must remain UnlessPaymentChooseCost"
+        );
+
+        // Second pick: {W} (index 0) again. State transitions through
+        // UnlessPayment{Composite[Mana{W}, Mana{W}]} → combined Mana{W}{W}
+        // payment → success. Pending GainLife is suppressed.
+        let mut events = Vec::new();
+        let wf = state.waiting_for.clone();
+        handle_unless_payment_choose_cost(
+            &mut state,
+            wf,
+            crate::types::actions::UnlessCostBranch::Pay { index: 0 },
+            &mut events,
+        )
+        .expect("final choose-cost prompt should pay the combined Composite-of-Mana");
+
+        // Combined Mana{W}{W} drained the mana pool.
+        let p0 = state.players.iter().find(|p| p.id == PlayerId(0)).unwrap();
+        assert_eq!(
+            p0.mana_pool.total(),
+            0,
+            "combined {{W}}{{W}} cost drains the two {{W}} units from the mana pool"
+        );
+        // Pending GainLife suppressed (CR 118.12: paying the unless-cost
+        // means the effect does NOT happen).
+        assert_eq!(
+            p0.life, 20,
+            "GainLife(7) suppressed because the combined unless-cost was paid"
+        );
     }
 
     /// CR 118.12 (M1 fold + Harvest Wurm shape): An unless ReturnToHand cost

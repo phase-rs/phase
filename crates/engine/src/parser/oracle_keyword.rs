@@ -13,14 +13,15 @@ use super::oracle_nom::primitives::{scan_at_word_boundaries, scan_contains, spli
 use super::oracle_quantity::parse_cda_quantity;
 use super::oracle_target::parse_type_phrase;
 use super::oracle_util::strip_reminder_text;
-use crate::types::ability::{
-    AbilityCost, AdditionalCost, Effect, QuantityExpr, TargetFilter, TypedFilter,
-};
 #[cfg(test)]
-use crate::types::ability::{ControllerRef, TypeFilter};
+use crate::types::ability::ControllerRef;
+use crate::types::ability::{
+    AbilityCost, AdditionalCost, Effect, QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
+};
 use crate::types::keywords::{
     BloodthirstValue, BuybackCost, CyclingCost, FlashbackCost, Keyword, WardCost,
 };
+use crate::types::mana::{ManaCost, ManaCostShard};
 
 /// CR 702.16 + CR 702.11f: Expand compound "X from A and from B" keyword lines.
 /// Handles both "protection from X and from Y" and "hexproof from X and from Y"
@@ -944,12 +945,17 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::StartYourEngines => "start your engines!".to_string(),
         Keyword::Soulbond => "soulbond".to_string(),
         Keyword::Banding => "banding".to_string(),
+        // CR 702.24a: Cumulative upkeep's display includes its base cost so
+        // tooltips and AI hint text show the actual payment ("cumulative upkeep
+        // — {1}", "cumulative upkeep — Pay 2 life", etc.) instead of a bare
+        // keyword name. No generic typed-cost formatter exists today; the
+        // local helper handles only the four shapes the cumulative-upkeep
+        // parser emits (Mana, PayLife, Sacrifice, OneOf).
         Keyword::CumulativeUpkeep(ref cost) => {
-            if cost.is_empty() {
-                "cumulative upkeep".to_string()
-            } else {
-                format!("cumulative upkeep\u{2014}{cost}")
-            }
+            format!(
+                "cumulative upkeep — {}",
+                format_cumulative_upkeep_cost(cost)
+            )
         }
         Keyword::Epic => "epic".to_string(),
         Keyword::Fuse => "fuse".to_string(),
@@ -1102,6 +1108,146 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Specialize(_) => "specialize".to_string(),
         Keyword::Offering(quality) => format!("{} offering", quality.to_lowercase()),
         Keyword::Unknown(s) => s.to_lowercase(),
+    }
+}
+
+/// CR 702.24a: Render a cumulative-upkeep base cost as the display fragment
+/// used after `cumulative upkeep — `. Only the four cost shapes the
+/// cumulative-upkeep parser actually emits are handled (`Mana`, `PayLife`,
+/// `Sacrifice`, `OneOf`); any other variant falls through to a debug
+/// representation so a future cost shape never silently swallows the cost
+/// text in tooltips.
+fn format_cumulative_upkeep_cost(cost: &AbilityCost) -> String {
+    match cost {
+        AbilityCost::Mana { cost } => format_mana_cost_symbols(cost),
+        AbilityCost::PayLife { amount } => match amount {
+            QuantityExpr::Fixed { value } => format!("Pay {value} life"),
+            other => format!("Pay {other:?} life"),
+        },
+        AbilityCost::Sacrifice { target, count } => {
+            let subject = format_sacrifice_subject(target);
+            if *count == 1 {
+                format!("Sacrifice a {subject}")
+            } else {
+                format!("Sacrifice {count} {subject}s")
+            }
+        }
+        AbilityCost::OneOf { costs } => costs
+            .iter()
+            .map(format_cumulative_upkeep_cost)
+            .collect::<Vec<_>>()
+            .join(" or "),
+        other => format!("{other:?}"),
+    }
+}
+
+/// Render a `ManaCost` as MTG-style brace symbols (e.g. `{2}{U}{U}`).
+/// `NoCost` collapses to `{0}`; `SelfManaCost` renders the Oracle phrase
+/// players see on cards like Snapcaster Mage's flashback.
+fn format_mana_cost_symbols(cost: &ManaCost) -> String {
+    match cost {
+        ManaCost::NoCost => "{0}".to_string(),
+        ManaCost::SelfManaCost => "its mana cost".to_string(),
+        ManaCost::Cost { shards, generic } => {
+            let mut out = String::new();
+            if *generic > 0 {
+                out.push_str(&format!("{{{generic}}}"));
+            }
+            for shard in shards {
+                out.push('{');
+                out.push_str(mana_shard_symbol(*shard));
+                out.push('}');
+            }
+            if out.is_empty() {
+                "{0}".to_string()
+            } else {
+                out
+            }
+        }
+    }
+}
+
+/// Render a single mana shard as its MTG abbreviation (inverse of
+/// `ManaCostShard::FromStr`). Used by cumulative-upkeep display formatting;
+/// kept local to this module because no other caller needs it today.
+fn mana_shard_symbol(shard: ManaCostShard) -> &'static str {
+    match shard {
+        ManaCostShard::White => "W",
+        ManaCostShard::Blue => "U",
+        ManaCostShard::Black => "B",
+        ManaCostShard::Red => "R",
+        ManaCostShard::Green => "G",
+        ManaCostShard::Colorless => "C",
+        ManaCostShard::Snow => "S",
+        ManaCostShard::X => "X",
+        ManaCostShard::TwoOrMoreColorSource => "Z",
+        ManaCostShard::WhiteBlue => "W/U",
+        ManaCostShard::WhiteBlack => "W/B",
+        ManaCostShard::BlueBlack => "U/B",
+        ManaCostShard::BlueRed => "U/R",
+        ManaCostShard::BlackRed => "B/R",
+        ManaCostShard::BlackGreen => "B/G",
+        ManaCostShard::RedWhite => "R/W",
+        ManaCostShard::RedGreen => "R/G",
+        ManaCostShard::GreenWhite => "G/W",
+        ManaCostShard::GreenBlue => "G/U",
+        ManaCostShard::TwoWhite => "2/W",
+        ManaCostShard::TwoBlue => "2/U",
+        ManaCostShard::TwoBlack => "2/B",
+        ManaCostShard::TwoRed => "2/R",
+        ManaCostShard::TwoGreen => "2/G",
+        ManaCostShard::PhyrexianWhite => "W/P",
+        ManaCostShard::PhyrexianBlue => "U/P",
+        ManaCostShard::PhyrexianBlack => "B/P",
+        ManaCostShard::PhyrexianRed => "R/P",
+        ManaCostShard::PhyrexianGreen => "G/P",
+        ManaCostShard::PhyrexianWhiteBlue => "W/U/P",
+        ManaCostShard::PhyrexianWhiteBlack => "W/B/P",
+        ManaCostShard::PhyrexianBlueBlack => "U/B/P",
+        ManaCostShard::PhyrexianBlueRed => "U/R/P",
+        ManaCostShard::PhyrexianBlackRed => "B/R/P",
+        ManaCostShard::PhyrexianBlackGreen => "B/G/P",
+        ManaCostShard::PhyrexianRedWhite => "R/W/P",
+        ManaCostShard::PhyrexianRedGreen => "R/G/P",
+        ManaCostShard::PhyrexianGreenWhite => "G/W/P",
+        ManaCostShard::PhyrexianGreenBlue => "G/U/P",
+        ManaCostShard::ColorlessWhite => "C/W",
+        ManaCostShard::ColorlessBlue => "C/U",
+        ManaCostShard::ColorlessBlack => "C/B",
+        ManaCostShard::ColorlessRed => "C/R",
+        ManaCostShard::ColorlessGreen => "C/G",
+    }
+}
+
+/// Best-effort lowercase noun for the sacrificed permanent (e.g. "land",
+/// "creature"). Falls back to "permanent" when the filter is more complex than
+/// a single primary type; cumulative-upkeep sacrifice costs in practice are
+/// always single-type ("Sacrifice a land", "Sacrifice a creature").
+fn format_sacrifice_subject(target: &TargetFilter) -> String {
+    if let TargetFilter::Typed(tf) = target {
+        if let Some(primary) = tf.get_primary_type() {
+            return type_filter_subject_name(primary);
+        }
+    }
+    "permanent".to_string()
+}
+
+fn type_filter_subject_name(tf: &TypeFilter) -> String {
+    match tf {
+        TypeFilter::Creature => "creature".to_string(),
+        TypeFilter::Land => "land".to_string(),
+        TypeFilter::Artifact => "artifact".to_string(),
+        TypeFilter::Enchantment => "enchantment".to_string(),
+        TypeFilter::Instant => "instant".to_string(),
+        TypeFilter::Sorcery => "sorcery".to_string(),
+        TypeFilter::Planeswalker => "planeswalker".to_string(),
+        TypeFilter::Battle => "battle".to_string(),
+        TypeFilter::Permanent => "permanent".to_string(),
+        TypeFilter::Card => "card".to_string(),
+        TypeFilter::Any => "permanent".to_string(),
+        TypeFilter::Subtype(s) => s.to_ascii_lowercase(),
+        TypeFilter::Non(inner) => format!("non-{}", type_filter_subject_name(inner)),
+        TypeFilter::AnyOf(_) => "permanent".to_string(),
     }
 }
 
@@ -2371,5 +2517,83 @@ mod tests {
             };
             assert_eq!(tf.controller, Some(ControllerRef::You));
         }
+    }
+
+    // ── Cumulative upkeep display (CR 702.24a) ──
+
+    #[test]
+    fn cumulative_upkeep_keyword_display_mana() {
+        // CR 702.24a: Mana-only cumulative upkeep renders its cost symbols
+        // ("cumulative upkeep — {1}") so tooltips show the payment, not just
+        // the bare keyword name.
+        let kw = Keyword::CumulativeUpkeep(AbilityCost::Mana {
+            cost: ManaCost::generic(1),
+        });
+        let s = keyword_display_name(&kw);
+        // allow-noncombinator: substring assertion on display-formatter output, not parsing dispatch.
+        assert!(s.contains("cumulative upkeep"), "{s}");
+        // allow-noncombinator: substring assertion on display-formatter output, not parsing dispatch.
+        assert!(s.contains("{1}"), "{s}");
+    }
+
+    #[test]
+    fn cumulative_upkeep_keyword_display_pay_life() {
+        // CR 702.24a + CR 119.4: Pay-life cumulative upkeep renders as
+        // "cumulative upkeep — Pay N life".
+        let kw = Keyword::CumulativeUpkeep(AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: 2 },
+        });
+        let s = keyword_display_name(&kw);
+        // allow-noncombinator: substring assertion on display-formatter output, not parsing dispatch.
+        assert!(s.contains("cumulative upkeep"), "{s}");
+        // allow-noncombinator: substring assertion on display-formatter output, not parsing dispatch.
+        assert!(s.contains("Pay 2 life"), "{s}");
+    }
+
+    #[test]
+    fn cumulative_upkeep_keyword_display_sacrifice() {
+        // CR 702.24a: Sacrifice cumulative upkeep renders the subject from
+        // the typed filter ("Sacrifice a land" for Polar Kraken).
+        use crate::types::ability::{TypeFilter, TypedFilter};
+        let kw = Keyword::CumulativeUpkeep(AbilityCost::Sacrifice {
+            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)),
+            count: 1,
+        });
+        let s = keyword_display_name(&kw);
+        // allow-noncombinator: substring assertion on display-formatter output, not parsing dispatch.
+        assert!(s.contains("cumulative upkeep"), "{s}");
+        // allow-noncombinator: substring assertion on display-formatter output, not parsing dispatch.
+        assert!(s.contains("Sacrifice a land"), "{s}");
+    }
+
+    #[test]
+    fn cumulative_upkeep_keyword_display_one_of() {
+        // CR 702.24a: Disjunctive cumulative upkeep ("{G} or {W}", Elephant
+        // Grass) joins each branch with " or ".
+        let kw = Keyword::CumulativeUpkeep(AbilityCost::OneOf {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::Green],
+                        generic: 0,
+                    },
+                },
+                AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::White],
+                        generic: 0,
+                    },
+                },
+            ],
+        });
+        let s = keyword_display_name(&kw);
+        // allow-noncombinator: substring assertion on display-formatter output, not parsing dispatch.
+        assert!(s.contains("cumulative upkeep"), "{s}");
+        // allow-noncombinator: substring assertion on display-formatter output, not parsing dispatch.
+        assert!(s.contains(" or "), "{s}");
+        // allow-noncombinator: substring assertion on display-formatter output, not parsing dispatch.
+        assert!(s.contains("{G}"), "{s}");
+        // allow-noncombinator: substring assertion on display-formatter output, not parsing dispatch.
+        assert!(s.contains("{W}"), "{s}");
     }
 }

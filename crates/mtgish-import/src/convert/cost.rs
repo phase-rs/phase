@@ -154,7 +154,7 @@ pub fn convert(cost: &Cost) -> ConvResult<AbilityCost> {
         // when the target permanent is `ThisPermanent`; else the engine's typed target slot.
         Cost::RemoveACounterOfTypeFromPermanent(ct, target) => AbilityCost::RemoveCounter {
             count: 1,
-            counter_type: counter_type_name(ct),
+            counter_type: engine::types::counter::CounterMatch::OfType(counter_type_name(ct)),
             target: counter_target(target)?,
         },
         // CR 122.1d: "Remove N {type} counters from ~" — fixed count form.
@@ -167,7 +167,7 @@ pub fn convert(cost: &Cost) -> ConvResult<AbilityCost> {
                     "AbilityCost::RemoveCounter",
                     "count: QuantityExpr (X-bound / dynamic count)",
                 )?,
-                counter_type: counter_type_name(ct),
+                counter_type: engine::types::counter::CounterMatch::OfType(counter_type_name(ct)),
                 target: counter_target(target)?,
             }
         }
@@ -175,7 +175,7 @@ pub fn convert(cost: &Cost) -> ConvResult<AbilityCost> {
         // as the "all" sentinel (matches the native parser, see oracle_cost.rs).
         Cost::RemoveAllCountersOfTypeFromPermanent(ct, target) => AbilityCost::RemoveCounter {
             count: u32::MAX,
-            counter_type: counter_type_name(ct),
+            counter_type: engine::types::counter::CounterMatch::OfType(counter_type_name(ct)),
             target: counter_target(target)?,
         },
 

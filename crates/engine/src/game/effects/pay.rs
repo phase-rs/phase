@@ -444,6 +444,12 @@ fn can_pay_resolution_ability_cost(
         // The matching arms in `resolve_ability_cost_payment` return
         // `EffectError::InvalidParam`; refusing here is the conservative
         // affordability answer (treat as "can't pay" → effect proceeds).
+        //
+        // CR 702.24a: `PerCounter` is expanded into a concrete cost at the
+        // unless-payment entry point (Task 6 wires resolution); the resolved
+        // base is what gets payability-checked. The wrapper itself is not a
+        // direct resolution-time cost, so refusing here keeps the effect
+        // proceeding pre-expansion.
         AbilityCost::Tap
         | AbilityCost::Untap
         | AbilityCost::Unattach
@@ -462,6 +468,7 @@ fn can_pay_resolution_ability_cost(
         | AbilityCost::Waterbend { .. }
         | AbilityCost::NinjutsuFamily { .. }
         | AbilityCost::EffectCost { .. }
+        | AbilityCost::PerCounter { .. }
         | AbilityCost::Unimplemented { .. } => false,
     }
 }

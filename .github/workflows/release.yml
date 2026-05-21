@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: CalVer tag to recover, e.g. v2026.5.20
+        description: Release tag to recover, e.g. v0.1.32
         required: true
         type: string
 
@@ -38,8 +38,8 @@ jobs:
 
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             TAG="$INPUT_TAG"
-            if ! [[ "$TAG" =~ ^v[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}$ ]]; then
-              echo "::error::workflow_dispatch tag must be a CalVer tag like v2026.5.20"
+            if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::workflow_dispatch tag must be a release tag like v0.1.32"
               exit 1
             fi
           else
@@ -401,7 +401,7 @@ jobs:
     name: Build Server (${{ matrix.os }})
     needs: [resolve-release-ref, tauri-preflight, build-wasm]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
+    timeout-minutes: 35
     env:
       RELEASE_TAG: ${{ needs.resolve-release-ref.outputs.release_tag }}
       RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}

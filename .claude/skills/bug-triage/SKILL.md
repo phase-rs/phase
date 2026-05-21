@@ -25,6 +25,12 @@ bun scripts/sync-bug-reports.ts render
 # reports get missed. `triage` prints the delta + an orphan roll-call.
 bun scripts/sync-bug-reports.ts delta      # re-emit delta without re-classifying
 
+# CRITICAL — `publish` ONLY acts on items classified `create_issue`. Items
+# classified `append_to_existing` or `needs_human_review` are silently parked
+# and will appear as orphans next cycle. After running `publish`, you MUST
+# resolve every remaining non-skip delta item inline — see
+# *Delta Completion Invariant* below for the mandatory close-out procedure.
+
 # Publish: for each --thread, CREATE a new GH issue from the triage item AND
 # react 👀 + post a tracking link inside the originating Discord thread.
 # IMPORTANT: `publish` ALWAYS creates a NEW issue (resolveIssue(..., "created"))
@@ -56,6 +62,95 @@ gh issue view <N> --repo phase-rs/phase --json subIssues,title,body
 # Browse closed trackers (retrospective archive)
 gh issue list --repo phase-rs/phase --label "collector" --state closed --limit 50 --json number,title,closedAt
 ```
+
+## Delta Completion Invariant — Every Non-Skip Item, Same Cycle
+
+**Hard rule.** A fetch cycle is NOT done until *every* delta item with a
+non-`skip*` proposed action has been resolved — either an issue created with
+write-back, an existing issue linked + write-back, OR a `mark-handled`
+sentinel. The bottom line: after a fetch cycle, the count of unhandled
+non-skip threads must be **zero**. There is no "I'll come back to these
+later" — later never comes, and the reporter sees a stale Discord thread.
+
+**The recurring failure (fixed by this section, do NOT regress it):**
+`bun scripts/sync-bug-reports.ts publish` only acts on items classified
+`create_issue`. The script prints an "orphan roll-call" for items classified
+`append_to_existing` or `needs_human_review`, but takes **no action** on
+them. Operators have repeatedly run `publish` on the `create_issue` slice,
+glanced at the orphan roll-call, and moved on — leaving the `append_to_existing`
+and `needs_human_review` threads with no Discord eyes / no tracking link /
+no published_threads entry. This is the orphan source. Two fetch rounds in
+a row hit it; the user noticed.
+
+**Mandatory cycle close-out** — run after `publish` on the `create_issue` slice:
+
+```bash
+# 1. List every delta item that is NOT classified create_issue or skip.
+#    These MUST all be resolved before the cycle is done.
+jq -r 'select(.proposed_action != "create_issue"
+              and .proposed_action != "skip"
+              and .proposed_action != "skip_existing_closed")
+       | "\(.thread_id) | \(.thread_name) | \(.proposed_action)"' \
+  triage/triage-delta.jsonl
+```
+
+For each thread the list prints, do ONE of the following inline — do NOT
+park it for a subagent unless you can sit and watch the subagent finish:
+
+| Decision | Action |
+|----------|--------|
+| **NEW** — heuristic misclassified; this is a fresh report no existing issue covers | `gh issue create` + Discord write-back (Path B in *Discord Write-Back*); record `mode:"inline"` in `published_threads` |
+| **DUP-OF-#N** — true duplicate of an existing open/closed issue | Discord write-back to #N (Path B); record `mode:"reconciled"` in `published_threads` |
+| **APPEND-TO-#N** — followup on a still-open issue worth a comment | `gh issue comment N --body "..."` + Discord write-back; record `mode:"reconciled"` |
+| **MARK-HANDLED** — chatter / self-resolved / not a bug | Write a sentinel `{issue_number:0, mode:"mark-handled", reason:"<one line>"}` in `published_threads`; no GH, no Discord |
+
+Inline procedure for fast batch handling — a single shell session can do the
+12-thread case in a couple of minutes:
+
+```bash
+set -a; . ./.env; set +a                  # load DISCORD_BOT_TOKEN
+DC=https://discord.com/api/v10/channels
+GH=phase-rs/phase
+
+# Pull raw content for the threads in one pass to inform decisions:
+for tid in $TID_LIST; do
+  echo "=== $tid ==="
+  jq -r --arg t "$tid" 'select(.thread_id==$t) | "\(.thread_name)\n  \(.content)"' \
+    triage/raw/discord-messages.jsonl | head -8
+done
+
+# Then, for each decision, use the helpers documented in
+# *Discord Write-Back* (Path B). The 2026-05-20 inline-batch implementation
+# at git log -1 --grep "12 unpublished threads" is a worked reference.
+```
+
+**Verification — same as the published_threads invariant audit:**
+
+```bash
+# Every delta non-skip thread must now appear in published_threads with
+# either a real reply_message_id (real issue) OR mode:"mark-handled".
+jq -r 'select(.proposed_action != "create_issue"
+              and .proposed_action != "skip"
+              and .proposed_action != "skip_existing_closed")
+       | .thread_id' triage/triage-delta.jsonl \
+  | while read tid; do
+      entry=$(jq --arg t "$tid" '.published_threads[$t]' triage/sync-state.json)
+      if [ "$entry" = "null" ]; then
+        echo "ORPHAN (no published_threads entry): $tid"
+      fi
+    done
+```
+
+This MUST print nothing before you call the cycle done.
+
+**Why subagents alone are not sufficient:** subagents are fine for the
+*decisions* (DUP vs NEW vs MARK-HANDLED), but the GH `create` + Discord
+write-back calls have side effects that must succeed end-to-end in the same
+window. Park a 13-thread dedupe in a subagent and you'll come back to find
+the user filed two more cycles' worth of reports while those 13 still have
+no eyes. Decisions can parallelize; the I/O loop closes inline.
+
+---
 
 ## Discord Write-Back — MANDATORY After Every Issue Filing
 

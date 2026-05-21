@@ -10,7 +10,7 @@
 //! type-system lookup; there is no semantic translation. Cost/filter
 //! keywords need real conversion logic, so they land with their phase.
 
-use engine::types::ability::QuantityExpr;
+use engine::types::ability::{AbilityCost, QuantityExpr};
 use engine::types::keywords::{
     ActivationCadence, BloodthirstValue, BuybackCost, CyclingCost, FlashbackCost, HexproofFilter,
     ProtectionTarget, WardCost,
@@ -212,11 +212,13 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
         Rule::Unearth(c) => Keyword::Unearth(pure_mana(c, "Rule::Unearth", path)?),
         Rule::Warp(c) => Keyword::Warp(pure_mana(c, "Rule::Warp", path)?),
         Rule::CumulativeUpkeep(c) => {
-            // Engine stores the per-age cost as a string (the Oracle-text form).
-            // Without the original Oracle text accessible here, render the mana
-            // pips from the parsed cost.
+            // CR 702.24a: Cumulative upkeep — wrap the parsed mana cost in
+            // `AbilityCost::Mana` so it matches the engine's typed shape.
+            // Non-mana cumulative-upkeep shapes (life payment, sacrifice,
+            // disjunctive) come through different `Rule` variants and are
+            // not handled here today.
             let mc = pure_mana(c, "Rule::CumulativeUpkeep", path)?;
-            Keyword::CumulativeUpkeep(format!("{mc:?}"))
+            Keyword::CumulativeUpkeep(AbilityCost::Mana { cost: mc })
         }
         Rule::Surge(syms) => Keyword::Surge(crate::convert::mana::convert(syms)?),
 

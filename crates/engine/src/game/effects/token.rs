@@ -1077,6 +1077,38 @@ fn lander_ability() -> AbilityDefinition {
     })
 }
 
+/// CR 111.10v: Mutagen — "{1}, {T}, Sacrifice this token: Put a +1/+1 counter
+/// on target creature. Activate only as a sorcery."
+fn mutagen_ability() -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Activated,
+        // CR 122.1: a single +1/+1 counter on the chosen target creature.
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Typed(TypedFilter::creature()),
+        },
+    )
+    .cost(AbilityCost::Composite {
+        costs: vec![
+            AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![],
+                    generic: 1,
+                },
+            },
+            AbilityCost::Tap,
+            AbilityCost::Sacrifice {
+                target: TargetFilter::SelfRef,
+                count: 1,
+            },
+        ],
+    })
+    // CR 307.5: "Activate only as a sorcery" — controller has priority, during
+    // their main phase, with the stack empty.
+    .activation_restrictions(vec![ActivationRestriction::AsSorcery])
+}
+
 /// CR 111.10a–v: Predefined token abilities keyed by subtype.
 /// Returns ability definitions to inject for the given subtype, or empty if none.
 pub fn predefined_token_abilities(subtype: &str) -> Vec<AbilityDefinition> {
@@ -1089,6 +1121,7 @@ pub fn predefined_token_abilities(subtype: &str) -> Vec<AbilityDefinition> {
         "Map" => vec![map_ability()],
         "Spawn" => vec![spawn_ability()],
         "Lander" => vec![lander_ability()],
+        "Mutagen" => vec![mutagen_ability()],
         // TODO: Incubator (transform), Shard, Gold, Junk
         _ => vec![],
     }
@@ -2213,6 +2246,57 @@ mod tests {
             vec![ActivationRestriction::AsSorcery]
         );
         match abilities[0].cost.as_ref().expect("map needs a cost") {
+            AbilityCost::Composite { costs } => {
+                assert!(costs.iter().any(|cost| matches!(
+                    cost,
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost { generic: 1, .. }
+                    }
+                )));
+                assert!(costs.iter().any(|cost| matches!(cost, AbilityCost::Tap)));
+                assert!(costs.iter().any(|cost| matches!(
+                    cost,
+                    AbilityCost::Sacrifice {
+                        target: TargetFilter::SelfRef,
+                        count: 1
+                    }
+                )));
+            }
+            other => panic!("expected composite cost, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn predefined_mutagen_has_counter_ability() {
+        // CR 111.10v: Mutagen — "{1}, {T}, Sacrifice this token: Put a +1/+1
+        // counter on target creature. Activate only as a sorcery." (#660)
+        let abilities = predefined_token_abilities("Mutagen");
+        assert_eq!(abilities.len(), 1);
+        match &*abilities[0].effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target: TargetFilter::Typed(tf),
+            } => {
+                assert_eq!(*counter_type, CounterType::Plus1Plus1);
+                assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+                assert!(
+                    tf.type_filters
+                        .contains(&crate::types::ability::TypeFilter::Creature),
+                    "must target a creature"
+                );
+                assert!(
+                    tf.controller.is_none(),
+                    "Mutagen targets ANY creature, not just controller's"
+                );
+            }
+            other => panic!("expected PutCounter on target creature, got {other:?}"),
+        }
+        assert_eq!(
+            abilities[0].activation_restrictions,
+            vec![ActivationRestriction::AsSorcery]
+        );
+        match abilities[0].cost.as_ref().expect("mutagen needs a cost") {
             AbilityCost::Composite { costs } => {
                 assert!(costs.iter().any(|cost| matches!(
                     cost,

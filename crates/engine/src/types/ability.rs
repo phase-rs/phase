@@ -18,7 +18,7 @@ use super::mana::{ManaColor, ManaCost, ManaType};
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
 use super::replacements::ReplacementEvent;
-use super::statics::{CastFrequency, StaticMode};
+use super::statics::{ActivationExemption, CastFrequency, StaticMode};
 use super::triggers::TriggerMode;
 use super::zones::Zone;
 use crate::types::events::PlayerActionKind;
@@ -791,25 +791,23 @@ impl<'de> serde::Deserialize<'de> for DevotionColors {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type")]
 pub enum ManaProduction {
-    /// Produce an explicit fixed sequence of colored mana symbols (e.g. `{W}{U}`).
+    /// Produce one or more specific colors.
     Fixed {
         #[serde(default)]
         colors: Vec<ManaColor>,
-        /// CR 605.1a: Whether this is base or additional (e.g. Wild Growth,
-        /// Verdant Haven) mana.
+        /// CR 605.1a: Whether this is base or additional (e.g. Fertile Ground) mana.
         #[serde(
             default = "default_mana_contribution",
             skip_serializing_if = "is_default_mana_contribution"
         )]
         contribution: ManaContribution,
     },
-    /// Produce N colorless mana (e.g. `{C}`, `{C}{C}`).
+    /// Produce strictly colorless mana (e.g. "Add {C}").
     Colorless {
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
     },
-    /// CR 106.1: Produce a mix of colorless and colored mana (e.g. `{C}{W}`, `{C}{C}{R}`).
-    /// Used by Ravnica bounce lands (Karoo, Azorius Chancery) and similar.
+    /// Produce a mixed bundle of fixed colorless + colored mana (e.g. "Add {C}{R}").
     Mixed {
         colorless_count: u32,
         colors: Vec<ManaColor>,
@@ -1183,21 +1181,29 @@ pub enum GameRestriction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scope: Option<RestrictionScope>,
     },
-    /// CR 101.2 + CR 601.2a: A temporary effect restricts affected players to casting
-    /// spells only from the listed zones until the restriction expires.
-    CastOnlyFromZones {
-        source: ObjectId,
-        affected_players: RestrictionPlayerScope,
-        allowed_zones: Vec<Zone>,
-        expiry: RestrictionExpiry,
-    },
-    /// CR 101.2: A temporary effect prevents affected players from casting any spell
-    /// until the restriction expires. E.g., Silence: "Your opponents can't cast spells this turn."
-    CantCastSpells {
+    /// CR 101.2 + CR 601.2a + CR 602.5: A temporary effect prohibits one activity
+    /// axis for affected players until expiry.
+    ProhibitActivity {
         source: ObjectId,
         affected_players: RestrictionPlayerScope,
         expiry: RestrictionExpiry,
+        activity: ProhibitedActivity,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ProhibitedActivity {
+    /// CR 101.2 + CR 601.2a: Restrict casting to the listed zones.
+    CastOnlyFromZones { allowed_zones: Vec<Zone> },
+    /// CR 101.2: Prevent casting matching spells.
+    CastSpells {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spell_filter: Option<TargetFilter>,
+    },
+    /// CR 101.2 + CR 602.5 + CR 605.1a: Prevent activating abilities, optionally
+    /// exempting mana abilities.
+    ActivateAbilities { exemption: ActivationExemption },
 }
 
 /// When a game restriction expires.
@@ -1224,6 +1230,14 @@ pub enum RestrictionScope {
 pub enum RestrictionPlayerScope {
     AllPlayers,
     SpecificPlayer(PlayerId),
+    /// Placeholder used by parser lowering for effects that target a player.
+    /// Resolved to `SpecificPlayer` by `add_restriction` at resolution time.
+    TargetedPlayer,
+    /// CR 608.2c: Anaphoric "that player" in a sub-ability reuses a player
+    /// target already chosen for an earlier instruction in the same chain.
+    /// Resolved to `SpecificPlayer` by `add_restriction` after parent target
+    /// propagation, without declaring a second target slot.
+    ParentTargetedPlayer,
     OpponentsOfSourceController,
 }
 
@@ -3167,6 +3181,25 @@ pub enum QuantityExpr {
 }
 
 impl QuantityExpr {
+    /// Scale a quantity expression by a non-negative runtime factor. Fixed
+    /// values fold immediately; dynamic quantities compose through
+    /// `QuantityExpr::Multiply` so the existing quantity resolver evaluates the
+    /// scaled expression in context.
+    pub fn scaled_by(&self, factor: u32) -> Self {
+        let factor = i32::try_from(factor).unwrap_or(i32::MAX);
+        match (factor, self) {
+            (0, _) => QuantityExpr::Fixed { value: 0 },
+            (1, expr) => expr.clone(),
+            (_, QuantityExpr::Fixed { value }) => QuantityExpr::Fixed {
+                value: value.saturating_mul(factor),
+            },
+            (_, expr) => QuantityExpr::Multiply {
+                factor,
+                inner: Box::new(expr.clone()),
+            },
+        }
+    }
+
     /// Construct an `UpTo { max }` expression, debug-asserting the
     /// non-nesting invariant. Always use this rather than the raw struct
     /// literal.
@@ -3968,9 +4001,16 @@ pub enum AbilityCost {
         count: u32,
         filter: TargetFilter,
     },
+    /// CR 122.1 + CR 601.2h: Remove `count` counters matching `counter_type`
+    /// as an additional cost. `CounterMatch::Any` is the untyped "remove a
+    /// counter" form (Loch Mare's `{1}{U}, Remove a counter from ~`); the
+    /// payment path sums across every counter type on the chosen permanent
+    /// and resolves to a concrete kind at payment time. `CounterMatch::OfType`
+    /// is the typed form ("remove a +1/+1 counter", "remove a charge counter"),
+    /// scoped to a single counter kind.
     RemoveCounter {
         count: u32,
-        counter_type: CounterType,
+        counter_type: CounterMatch,
         #[serde(default)]
         target: Option<TargetFilter>,
     },
@@ -4055,6 +4095,24 @@ pub enum AbilityCost {
     EffectCost {
         effect: Box<Effect>,
     },
+    /// CR 702.24a: A cost that multiplies a base cost by the number of
+    /// counters of `counter` type on `target`. The runtime resolves the
+    /// multiplier at the unless-payment entry point and expands `base`
+    /// into the effective payment: mana scales via `ManaCost::scaled(n)`,
+    /// life/sacrifice counts multiply directly, and `OneOf` unfolds into
+    /// a `Composite` of `n` independent disjunctive choices (each made
+    /// separately per CR 702.24a).
+    ///
+    /// Building block, not a special case: this is the typed shape of
+    /// "pay [cost] for each counter on it". Cumulative upkeep is the
+    /// only mechanic using it today, but the variant is composable with
+    /// every existing base cost (Mana, PayLife, Sacrifice, OneOf,
+    /// Composite).
+    PerCounter {
+        counter: CounterType,
+        target: TargetFilter,
+        base: Box<AbilityCost>,
+    },
     Unimplemented {
         description: String,
     },
@@ -4092,6 +4150,34 @@ pub enum CostCategory {
 }
 
 impl AbilityCost {
+    /// CR 702.24a + CR 118.12: True iff this cost can be used as the base
+    /// cost for a cumulative-upkeep trigger and then paid by the current
+    /// unless-payment pipeline after `PerCounter` expansion.
+    ///
+    /// This is the single support boundary for cumulative-upkeep synthesis and
+    /// coverage reporting. Widen it only when `expand_per_counter` and
+    /// `handle_unless_payment` can pay the resulting expanded shape end-to-end.
+    pub fn supports_cumulative_upkeep_payment(&self) -> bool {
+        match self {
+            AbilityCost::Mana { .. }
+            | AbilityCost::PayLife { .. }
+            | AbilityCost::Sacrifice { .. } => true,
+            // CR 118.12a: OneOf at the base must be a disjunction of mana
+            // costs; mixed-shape disjunctions are not yet expanded into a
+            // payable per-counter form.
+            AbilityCost::OneOf { costs } => {
+                !costs.is_empty() && costs.iter().all(|c| matches!(c, AbilityCost::Mana { .. }))
+            }
+            // The payment path currently folds only all-Mana composites into a
+            // single combined mana cost. Mixed composites need sequenced
+            // sub-cost payment before they can be installed safely.
+            AbilityCost::Composite { costs } => {
+                !costs.is_empty() && costs.iter().all(|c| matches!(c, AbilityCost::Mana { .. }))
+            }
+            _ => false,
+        }
+    }
+
     /// CR 118: Classify this cost into one or more `CostCategory` buckets.
     ///
     /// `Composite` recurses, flattening every sub-cost. Variants that pay
@@ -4160,6 +4246,9 @@ impl AbilityCost {
                 }
                 _ => Vec::new(),
             },
+            // CR 702.24a: The multiplier doesn't change *what kind* of cost
+            // this is, only *how much* — delegate classification to the base.
+            AbilityCost::PerCounter { base, .. } => base.categories(),
             AbilityCost::Unimplemented { .. } => Vec::new(),
         }
     }
@@ -4185,6 +4274,9 @@ impl AbilityCost {
             AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
                 costs.iter().any(AbilityCost::consumes_source)
             }
+            // CR 702.24a: The PerCounter wrapper multiplies its base; whether
+            // the source is consumed is determined entirely by the base cost.
+            AbilityCost::PerCounter { base, .. } => base.consumes_source(),
             // Every other variant: pays mana / life / loyalty / counters /
             // taps / sacrifices-or-exiles-other — none destroys the source.
             AbilityCost::Mana { .. }
@@ -4749,6 +4841,16 @@ pub enum Effect {
         /// as a single effect instead of two chained resolutions.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         player_filter: Option<PlayerFilter>,
+        /// CR 120.1 + CR 608.2c: Damage source override. When `Some(Target)`, the
+        /// damage is attributed to the spell/ability's first target object rather
+        /// than the ability's source. Mirrors `DealDamage::damage_source` for
+        /// "target creature you control deals damage equal to its power to each
+        /// other creature and each opponent" (Chandra's Ignition class) — the
+        /// chosen creature, not the spell, is the source for the purpose of
+        /// protection (CR 702.16), wither/infect (CR 120.3b/d), and damage-source
+        /// replacements (CR 614). `None` keeps the ability's source attribution.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        damage_source: Option<DamageSource>,
     },
     /// CR 120.3: Deal damage to each player matching a filter, with per-player quantity.
     /// Unlike `DamageAll` (which iterates battlefield objects with a fixed amount),
@@ -5335,6 +5437,18 @@ pub enum Effect {
         /// Number of cards to exile.
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
+        /// CR 406.3: When true the exiled cards enter Exile face down and
+        /// must not be examinable by any player (the resolver flips the
+        /// moved object's `face_down` flag, and `visibility.rs` redacts the
+        /// card unless a separate effect grants look permission). Covers the
+        /// Necropotence / Bomat Courier / Asmodeus the Archfiend /
+        /// Knowledge Vault class — every card
+        /// whose Oracle text says "exile the top card of your library face
+        /// down". Skipped from serialization when false so JSON snapshots
+        /// and stored card-data for face-up `ExileTop` effects are
+        /// unchanged.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        face_down: bool,
     },
     /// No-op effect that only establishes targeting for sub-abilities in the chain.
     /// Produced by Oracle text like "Choose target creature" where the sentence exists
@@ -5601,8 +5715,8 @@ pub enum Effect {
     VentureInto {
         dungeon: crate::game::dungeon::DungeonId,
     },
-    /// CR 725.2: Take the initiative. Grants initiative designation and triggers
-    /// venture into the Undercity.
+    /// CR 726.1 + CR 726.2: Take the initiative. Grants the initiative
+    /// designation and triggers venture into Undercity.
     TakeTheInitiative,
     /// CR 728.1: Process rad counters — mill cards equal to rad counter count,
     /// lose 1 life and remove one rad counter per nonland card milled.
@@ -9369,6 +9483,26 @@ pub enum QuantityModification {
     Plus { value: u32 },
     /// count.saturating_sub(value) — Vizier of Remedies (-1)
     Minus { value: u32 },
+    /// CR 113.6i + CR 614.17 + CR 614.6 + CR 614.7 + CR 122.1: Fully replace the
+    /// quantity event with nothing — the proposed `AddCounter` / `CreateToken`
+    /// event "never happens" (CR 614.6).
+    ///
+    /// CR 113.6i is the *authorizing* rule for permanent-scoped counter
+    /// prohibitions ("an object's ability that states counters can't be put on
+    /// that object functions as that object is entering the battlefield in
+    /// addition to functioning while that object is on the battlefield").
+    /// CR 614.17 is the framework for "can't" effects — they aren't replacement
+    /// effects but follow similar rules — which is why we model the prohibition
+    /// through the replacement pipeline. CR 122.1 ("a counter is a marker
+    /// placed on an object or player") identifies the placement event the
+    /// prohibition suppresses; CR 614.6/614.7 govern the resulting "event
+    /// never happens" outcome.
+    ///
+    /// Used by self-targeted counter-prohibition replacements ("~ can't have
+    /// counters put on it." — Melira's Keepers). Composes with `valid_card:
+    /// SelfRef` for permanent-scoped protection and with player-scope filters
+    /// for the future Solemnity-class global variant.
+    Prevent,
 }
 
 /// CR 106.3 + CR 614.1a: Mana-production replacement payload.
@@ -10568,6 +10702,105 @@ mod tests {
     }
 
     #[test]
+    fn per_counter_cost_delegates_categories_to_base() {
+        let base = AbilityCost::Mana {
+            cost: ManaCost::generic(1),
+        };
+        let wrapped = AbilityCost::PerCounter {
+            counter: CounterType::Age,
+            target: TargetFilter::SelfRef,
+            base: Box::new(base.clone()),
+        };
+        assert_eq!(wrapped.categories(), base.categories());
+    }
+
+    #[test]
+    fn quantity_expr_scaled_by_folds_fixed_and_composes_dynamic_values() {
+        assert_eq!(
+            QuantityExpr::Fixed { value: 3 }.scaled_by(4),
+            QuantityExpr::Fixed { value: 12 },
+        );
+
+        let dynamic = QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        };
+
+        assert_eq!(dynamic.scaled_by(1), dynamic);
+        assert_eq!(dynamic.scaled_by(0), QuantityExpr::Fixed { value: 0 });
+        assert_eq!(
+            dynamic.scaled_by(4),
+            QuantityExpr::Multiply {
+                factor: 4,
+                inner: Box::new(dynamic),
+            },
+        );
+    }
+
+    #[test]
+    fn cumulative_upkeep_support_boundary_matches_payment_pipeline() {
+        assert!(AbilityCost::Mana {
+            cost: ManaCost::generic(1)
+        }
+        .supports_cumulative_upkeep_payment());
+        assert!(AbilityCost::PayLife {
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+        }
+        .supports_cumulative_upkeep_payment());
+        assert!(AbilityCost::Sacrifice {
+            target: TargetFilter::SelfRef,
+            count: 1,
+        }
+        .supports_cumulative_upkeep_payment());
+        assert!(AbilityCost::OneOf {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(2),
+                },
+            ],
+        }
+        .supports_cumulative_upkeep_payment());
+        assert!(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(2),
+                },
+            ],
+        }
+        .supports_cumulative_upkeep_payment());
+
+        assert!(!AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                },
+            ],
+        }
+        .supports_cumulative_upkeep_payment());
+        assert!(!AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter: None,
+            random: false,
+            self_ref: false,
+        }
+        .supports_cumulative_upkeep_payment());
+    }
+
+    #[test]
     fn choice_type_color_deserializes_legacy_unit_variant() {
         let choice_type: ChoiceType = serde_json::from_str("\"Color\"").unwrap();
 
@@ -11554,7 +11787,7 @@ mod tests {
         fn remove_counter() {
             let cost = AbilityCost::RemoveCounter {
                 count: 1,
-                counter_type: CounterType::Plus1Plus1,
+                counter_type: CounterMatch::OfType(CounterType::Plus1Plus1),
                 target: None,
             };
             assert_eq!(cost.categories(), vec![CostCategory::RemovesCounters]);

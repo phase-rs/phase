@@ -6151,6 +6151,58 @@ mod tests {
     }
 
     #[test]
+    fn apply_play_land_rejects_under_cant_play_land_transient_effect() {
+        // CR 305.2 + CR 611.1 + CR 611.2c: An activated ability that creates a
+        // continuous effect with "until end of turn" duration (Pardic Miner:
+        // "Sacrifice this creature: Target player can't play lands this turn.")
+        // registers a transient continuous effect bound to
+        // `TargetFilter::SpecificPlayer { id }`. The play-land gate must
+        // observe this TCE the same way it observes the printed-static form,
+        // because the source object has already left the battlefield (sacrifice
+        // cost) by the time the effect resolves.
+        use crate::types::ability::{ContinuousModification, Duration};
+        use crate::types::statics::StaticMode;
+
+        let mut state = setup_game_at_main_phase();
+
+        let land_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Hand,
+        );
+
+        // Register a SpecificPlayer-bound TCE granting CantPlayLand to P0,
+        // mirroring what `effect.rs::register_transient_effect` would emit
+        // when Pardic Miner's activated ability resolves with P0 chosen as
+        // the target.
+        state.add_transient_continuous_effect(
+            ObjectId(99),
+            PlayerId(1),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificPlayer { id: PlayerId(0) },
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::Other("CantPlayLand".to_string()),
+            }],
+            None,
+        );
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::PlayLand {
+                object_id: land_id,
+                card_id: CardId(1),
+            },
+        );
+
+        assert!(
+            result.is_err(),
+            "PlayLand must be rejected under transient CantPlayLand effect (Pardic Miner class)"
+        );
+    }
+
+    #[test]
     fn new_game_creates_two_player_state() {
         let state = new_game(42);
         assert_eq!(state.players.len(), 2);
@@ -15194,6 +15246,1241 @@ mod phase_trigger_regression_tests {
             "active player must receive priority in declare blockers step \
              (CR 117.1c) so they can activate Sneak (CR 702.49); got {:?}",
             result.waiting_for
+        );
+    }
+
+    // ---- CR 702.24a: Cumulative upkeep end-to-end (Mystic Remora) ----------
+    //
+    // These tests exercise the full pipeline from "upkeep trigger fires" to
+    // "controller pays or sacrifices":
+    //   1. Synthesized trigger (PayCumulativeUpkeep, Phase=Upkeep, valid_target
+    //      Controller) fires when the controller's upkeep step begins.
+    //   2. Outer `Effect::AddCounter { CounterType::Age }` ticks the counter
+    //      on the source before the sub-ability runs.
+    //   3. Sub-ability `Effect::Sacrifice` carries `unless_pay` =
+    //      `AbilityCost::PerCounter { Age, SelfRef, base }`, which expands at
+    //      resolution time to `Mana { N × base }`.
+    //   4. Player answers `PayUnlessCost { pay: bool }` — pay keeps the
+    //      permanent, decline sacrifices it.
+    //
+    // Closest precedent: `setup_esper_sentinel_unless_payment` (CR 118.12 tax
+    // trigger) — same `auto_advance` → `resolve_top` → `PayUnlessCost`
+    // scaffolding. The Mystic Remora flow differs only in how the trigger is
+    // sourced (synthesized by Keyword::CumulativeUpkeep, not parsed) and in
+    // the `PerCounter` expansion that lives in the sub-ability's unless-cost.
+
+    /// Build the synthesized cumulative-upkeep trigger for "Cumulative upkeep
+    /// {N}" (mana base cost) by delegating to the production synthesizer.
+    /// Binding the end-to-end tests to the real builder ensures any regression
+    /// in `build_cumulative_upkeep_trigger` (e.g., flipping AddCounter →
+    /// Sacrifice ordering, dropping `.phase(Upkeep)`, or changing the
+    /// PerCounter payer) breaks the Mystic Remora pipeline tests loudly
+    /// rather than silently passing against a stale inline mirror.
+    fn cumulative_upkeep_mana_trigger(generic: u32) -> TriggerDefinition {
+        crate::database::synthesis::build_cumulative_upkeep_trigger(AbilityCost::Mana {
+            cost: ManaCost::generic(generic),
+        })
+    }
+
+    /// Construct a solo state with Mystic Remora on the battlefield,
+    /// controller = PlayerId(0) = active player, at Phase::Untap so
+    /// `auto_advance` will fire the upkeep trigger.
+    fn setup_mystic_remora_upkeep_state() -> (GameState, ObjectId) {
+        let mut state = new_game(42);
+        state.turn_number = 2;
+        state.phase = Phase::Untap;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let remora = create_object(
+            &mut state,
+            CardId(7024),
+            PlayerId(0),
+            "Mystic Remora".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&remora).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.trigger_definitions
+                .push(cumulative_upkeep_mana_trigger(1));
+        }
+
+        (state, remora)
+    }
+
+    /// Advance from Untap through Upkeep, fire the cumulative-upkeep trigger,
+    /// and resolve it. Mirrors the Esper Sentinel pattern of `auto_advance`
+    /// (to populate the stack) then `resolve_top` (to walk the outer
+    /// AddCounter → sub-ability Sacrifice/PerCounter chain into
+    /// `WaitingFor::UnlessPayment`).
+    fn advance_to_unless_payment_prompt(state: &mut GameState) {
+        let mut events = Vec::new();
+        let _wf = crate::game::turns::auto_advance(state, &mut events);
+        // CR 503.1a: the trigger landed on the stack during Phase::Upkeep.
+        assert_eq!(state.phase, Phase::Upkeep);
+        assert!(
+            !state.stack.is_empty(),
+            "cumulative-upkeep trigger must be on the stack after auto_advance"
+        );
+        crate::game::stack::resolve_top(state, &mut events);
+    }
+
+    /// Give PlayerId(0) `generic` colorless mana units so they can satisfy a
+    /// `Mana { generic: N }` unless-cost. Mirrors the `mana_pool.add` idiom
+    /// used by `setup_esper_sentinel_unless_payment`.
+    fn give_p0_colorless_mana(state: &mut GameState, generic: u32) {
+        let p0 = state
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(0))
+            .expect("PlayerId(0)");
+        for _ in 0..generic {
+            p0.mana_pool.add(ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+        }
+    }
+
+    /// Reset `phase`, `active_player`, `priority_player`, `stack`,
+    /// `pending_trigger`, and `waiting_for` so the next `auto_advance`
+    /// re-enters PlayerId(0)'s upkeep and re-fires the cumulative-upkeep
+    /// trigger. The age counter on `remora` persists across this transition
+    /// (counters live on the object and outlive phase changes), which is
+    /// exactly the CR 702.24a "accumulates each upkeep" invariant under
+    /// test.
+    ///
+    /// Does NOT clear per-turn bookkeeping (`priority_passes`,
+    /// `spells_cast_this_turn`, `spells_cast_this_turn_by_player`,
+    /// `pending_trigger_event_batch`, etc.) — safe for cumulative-upkeep
+    /// tests that never pass priority or cast spells mid-test. Tasks 10-13
+    /// (Polar Kraken, Inner Sanctum, source-gone, multi-instance) must
+    /// re-evaluate this scope if their flow does either; expanding the
+    /// resets is preferable to silent state drift.
+    fn rewind_to_next_p0_upkeep(state: &mut GameState) {
+        state.turn_number += 2;
+        state.phase = Phase::Untap;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.stack.clear();
+        state.pending_trigger = None;
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+    }
+
+    /// CR 702.24a + CR 118.12: Paying the cumulative-upkeep cost keeps the
+    /// permanent on the battlefield. Verifies the age counter ticks first
+    /// (outer AddCounter resolves before the sub-ability), the prompt expands
+    /// to `Mana{1}` (1 counter × base {1}), and the post-pay state has the
+    /// permanent still on the battlefield with the age counter intact.
+    #[test]
+    fn mystic_remora_upkeep_pay_path_keeps_permanent_and_adds_age_counter() {
+        let (mut state, remora_id) = setup_mystic_remora_upkeep_state();
+
+        advance_to_unless_payment_prompt(&mut state);
+        // CR 500.5: mana pools empty between phases. Add the unless-cost
+        // payment AFTER `auto_advance` settles in Upkeep so the mana persists
+        // through to `PayUnlessCost` (mirrors what real play models: the
+        // controller would tap a land in response to the trigger).
+        give_p0_colorless_mana(&mut state, 1);
+
+        // CR 702.24a: outer AddCounter resolved first, so the counter exists
+        // before the per-counter unless-cost is computed.
+        assert_eq!(
+            state.objects[&remora_id]
+                .counters
+                .get(&crate::types::counter::CounterType::Age)
+                .copied(),
+            Some(1),
+            "age counter must be added before the unless-pay prompt"
+        );
+
+        // CR 118.12 + CR 702.24a: PerCounter expanded to {1} for 1 age counter.
+        match &state.waiting_for {
+            WaitingFor::UnlessPayment { player, cost, .. } => {
+                assert_eq!(*player, PlayerId(0), "controller is the unless-payer");
+                match cost {
+                    AbilityCost::Mana { cost: mana } => {
+                        assert_eq!(
+                            *mana,
+                            ManaCost::generic(1),
+                            "1 age counter × base {{1}} = {{1}}"
+                        );
+                    }
+                    other => panic!("expected Mana cost, got {other:?}"),
+                }
+            }
+            other => panic!("expected UnlessPayment prompt, got {other:?}"),
+        }
+
+        let _ = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
+
+        // CR 702.24a: paying the cost keeps the permanent on the battlefield.
+        assert_eq!(
+            state.objects[&remora_id].zone,
+            Zone::Battlefield,
+            "paying the cumulative-upkeep cost must NOT sacrifice the permanent"
+        );
+        assert!(
+            !state.players[0].graveyard.contains(&remora_id),
+            "permanent must not be in graveyard when paid"
+        );
+    }
+
+    /// CR 702.24a + CR 118.12: Declining the cumulative-upkeep cost sacrifices
+    /// the permanent. The sub-ability's `Effect::Sacrifice` runs because the
+    /// player chose not to pay; the source moves to its controller's
+    /// graveyard.
+    #[test]
+    fn mystic_remora_upkeep_decline_path_sacrifices() {
+        let (mut state, remora_id) = setup_mystic_remora_upkeep_state();
+
+        advance_to_unless_payment_prompt(&mut state);
+
+        let _ = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: false }).unwrap();
+
+        // CR 701.21a: To sacrifice a permanent, its controller moves it from
+        // the battlefield directly to its owner's graveyard.
+        assert!(
+            state.players[0].graveyard.contains(&remora_id),
+            "declining the unless-cost must sacrifice the permanent; graveyard={:?}",
+            state.players[0].graveyard
+        );
+        assert_ne!(
+            state.objects[&remora_id].zone,
+            Zone::Battlefield,
+            "permanent must leave the battlefield on decline"
+        );
+    }
+
+    /// CR 702.24a: "...put an age counter on it. Then sacrifice it unless you
+    /// pay its upkeep cost for each age counter on it." Three consecutive
+    /// upkeeps with payment must yield costs {1}, {2}, {3} (1, 2, 3 counters
+    /// respectively) and three age counters at the end. This is the
+    /// load-bearing test for the `PerCounter` expansion: it confirms that
+    /// each tick of the counter strictly precedes the cost computation, and
+    /// that counters accumulate across turns.
+    #[test]
+    fn mystic_remora_three_upkeeps_costs_one_two_three() {
+        let (mut state, remora_id) = setup_mystic_remora_upkeep_state();
+
+        for (turn_idx, expected_generic) in [1u32, 2, 3].iter().enumerate() {
+            advance_to_unless_payment_prompt(&mut state);
+            // CR 500.5: mana pools empty between phases. Provide the unless-
+            // cost payment AFTER `auto_advance` settles in Upkeep so the
+            // mana survives into `PayUnlessCost`.
+            give_p0_colorless_mana(&mut state, *expected_generic);
+
+            // The age counter for THIS upkeep is already in place when we
+            // reach the unless-pay prompt — counter total is turn_idx + 1.
+            let expected_counters = (turn_idx + 1) as u32;
+            assert_eq!(
+                state.objects[&remora_id]
+                    .counters
+                    .get(&crate::types::counter::CounterType::Age)
+                    .copied(),
+                Some(expected_counters),
+                "upkeep {turn_idx}: expected {expected_counters} age counter(s) before payment"
+            );
+
+            match &state.waiting_for {
+                WaitingFor::UnlessPayment {
+                    cost: AbilityCost::Mana { cost: mana },
+                    ..
+                } => {
+                    assert_eq!(
+                        *mana,
+                        ManaCost::generic(*expected_generic),
+                        "upkeep {turn_idx}: expected Mana({{{expected_generic}}}), got {mana:?}"
+                    );
+                }
+                other => {
+                    panic!("upkeep {turn_idx}: expected Mana unless-payment prompt, got {other:?}")
+                }
+            }
+
+            let _ = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
+            assert_eq!(
+                state.objects[&remora_id].zone,
+                Zone::Battlefield,
+                "upkeep {turn_idx}: paying keeps the permanent on the battlefield"
+            );
+
+            // Reset to next controller upkeep for the next iteration.
+            if turn_idx < 2 {
+                rewind_to_next_p0_upkeep(&mut state);
+            }
+        }
+
+        // CR 702.24a: counters strictly accumulate. After three paid upkeeps,
+        // the permanent carries three age counters.
+        assert_eq!(
+            state.objects[&remora_id]
+                .counters
+                .get(&crate::types::counter::CounterType::Age)
+                .copied(),
+            Some(3),
+            "three age counters must have accumulated across three upkeeps"
+        );
+    }
+
+    /// Build the synthesized cumulative-upkeep trigger for "Cumulative upkeep
+    /// — Sacrifice a land" (Polar Kraken's sacrifice-cost variant) by delegating
+    /// to the production synthesizer. Mirrors `cumulative_upkeep_mana_trigger`
+    /// (which exercises the `Mana` arm of `expand_per_counter`); this helper
+    /// exercises the `Sacrifice` arm. Binding to the real builder ensures any
+    /// regression in `build_cumulative_upkeep_trigger`'s handling of a
+    /// non-Mana base cost (chained-ability ordering, PerCounter payer,
+    /// `.phase(Upkeep)` gating) breaks the Polar Kraken pipeline test loudly.
+    ///
+    /// CR 702.24a: cumulative upkeep cost format is `[cost]` where `[cost]`
+    /// may be any cost. Sacrifice-a-land is the canonical non-mana variant
+    /// (Polar Kraken, Phyrexian Soulgorger).
+    fn cumulative_upkeep_sacrifice_land_trigger() -> TriggerDefinition {
+        crate::database::synthesis::build_cumulative_upkeep_trigger(AbilityCost::Sacrifice {
+            target: TargetFilter::Typed(TypedFilter::land()),
+            count: 1,
+        })
+    }
+
+    /// Construct a solo state with Polar Kraken on the battlefield (controller
+    /// = PlayerId(0) = active player) plus three Forests for sacrifice fodder,
+    /// at Phase::Untap so `auto_advance` will fire the upkeep trigger. The
+    /// three-forest count is deliberate: the test sacrifices exactly one, and
+    /// the surviving two prove that `handle_unless_payment_sacrifice`'s
+    /// eligible-permanents collection didn't over-sacrifice or sacrifice the
+    /// wrong land.
+    ///
+    /// Returns `(state, kraken_id, [forest0, forest1, forest2])`.
+    fn setup_polar_kraken_upkeep_state() -> (GameState, ObjectId, Vec<ObjectId>) {
+        let mut state = new_game(42);
+        state.turn_number = 2;
+        state.phase = Phase::Untap;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let kraken = create_object(
+            &mut state,
+            CardId(7100),
+            PlayerId(0),
+            "Polar Kraken".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&kraken).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Kraken".to_string());
+            obj.trigger_definitions
+                .push(cumulative_upkeep_sacrifice_land_trigger());
+        }
+
+        let mut forests = Vec::with_capacity(3);
+        for i in 0..3 {
+            let forest = create_object(
+                &mut state,
+                CardId(7101 + i),
+                PlayerId(0),
+                "Forest".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&forest).unwrap();
+                obj.card_types.core_types.push(CoreType::Land);
+                obj.card_types.subtypes.push("Forest".to_string());
+            }
+            forests.push(forest);
+        }
+
+        (state, kraken, forests)
+    }
+
+    /// CR 702.24a + CR 118.12 + CR 701.21: Paying the cumulative-upkeep cost
+    /// via the sacrifice-a-land variant. At counter=1, the per-counter expansion
+    /// of `Sacrifice { Land, count: 1 }` yields `Sacrifice { Land, count: 1 }`
+    /// (1 × 1 = 1), and paying by sacrificing one of three controlled forests
+    /// keeps Polar Kraken on the battlefield with one forest in the graveyard
+    /// and two untouched. This is the structural-identity case for the
+    /// `Sacrifice` arm of `expand_per_counter` — Mystic Remora's three-upkeep
+    /// test already covers the multiplicative case for the `Mana` arm.
+    #[test]
+    fn polar_kraken_upkeep_sacrifice_cost_path() {
+        let (mut state, kraken_id, forest_ids) = setup_polar_kraken_upkeep_state();
+        advance_to_unless_payment_prompt(&mut state);
+
+        // CR 702.24a: outer AddCounter resolved first, so one age counter
+        // sits on the Kraken before the per-counter unless-cost is computed.
+        assert_eq!(
+            state.objects[&kraken_id]
+                .counters
+                .get(&crate::types::counter::CounterType::Age)
+                .copied(),
+            Some(1),
+            "age counter must be added before the unless-pay prompt"
+        );
+
+        // CR 118.12 + CR 702.24a: PerCounter expanded `Sacrifice { Land, 1 }`
+        // for 1 age counter to `Sacrifice { Land, 1 }` (1 × 1 = 1).
+        match &state.waiting_for {
+            WaitingFor::UnlessPayment { player, cost, .. } => {
+                assert_eq!(*player, PlayerId(0), "controller is the unless-payer");
+                match cost {
+                    AbilityCost::Sacrifice { target, count } => {
+                        assert_eq!(*count, 1, "1 age counter × base count 1 = 1");
+                        assert_eq!(
+                            *target,
+                            TargetFilter::Typed(TypedFilter::land()),
+                            "unless-cost target filter must remain Land"
+                        );
+                    }
+                    other => panic!("expected Sacrifice cost, got {other:?}"),
+                }
+            }
+            other => panic!("expected UnlessPayment prompt, got {other:?}"),
+        }
+
+        // CR 118.12 + CR 701.21: Pay → engine collects eligible controlled
+        // Lands and surfaces `WaitingFor::WardSacrificeChoice` for the player
+        // to pick which permanent to sacrifice.
+        let _ = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
+        match &state.waiting_for {
+            WaitingFor::WardSacrificeChoice {
+                player,
+                permanents,
+                remaining,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0), "controller picks the sacrifice");
+                assert_eq!(*remaining, 1, "exactly one sacrifice required");
+                assert_eq!(
+                    permanents.len(),
+                    3,
+                    "all three controlled forests must be eligible"
+                );
+                for fid in &forest_ids {
+                    assert!(
+                        permanents.contains(fid),
+                        "forest {fid:?} must be an eligible sacrifice"
+                    );
+                }
+            }
+            other => panic!("expected WardSacrificeChoice prompt, got {other:?}"),
+        }
+
+        // CR 701.21: Choose the first forest as the sacrifice victim.
+        let _ = apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![forest_ids[0]],
+            },
+        )
+        .unwrap();
+
+        // CR 702.24a: paying the cost keeps the permanent on the battlefield.
+        assert_eq!(
+            state.objects[&kraken_id].zone,
+            Zone::Battlefield,
+            "paying the cumulative-upkeep cost must NOT sacrifice the Kraken"
+        );
+        // CR 701.21a: To sacrifice a permanent, its controller moves it from
+        // the battlefield directly to its owner's graveyard.
+        assert_eq!(
+            state.objects[&forest_ids[0]].zone,
+            Zone::Graveyard,
+            "the chosen forest must be in the graveyard"
+        );
+        assert!(
+            state.players[0].graveyard.contains(&forest_ids[0]),
+            "graveyard must contain the sacrificed forest"
+        );
+        // The two unchosen forests stay on the battlefield — proves the
+        // sacrifice path didn't over-select.
+        assert_eq!(
+            state.objects[&forest_ids[1]].zone,
+            Zone::Battlefield,
+            "unchosen forest 1 must remain on the battlefield"
+        );
+        assert_eq!(
+            state.objects[&forest_ids[2]].zone,
+            Zone::Battlefield,
+            "unchosen forest 2 must remain on the battlefield"
+        );
+    }
+
+    /// Build the synthesized cumulative-upkeep trigger for "Cumulative upkeep
+    /// — Pay 2 life" (Inner Sanctum's life-cost variant) by delegating to the
+    /// production synthesizer. Mirrors `cumulative_upkeep_mana_trigger` and
+    /// `cumulative_upkeep_sacrifice_land_trigger`; this helper exercises the
+    /// `PayLife` arm of `expand_per_counter` (CR 702.24a + CR 119.4).
+    fn cumulative_upkeep_pay_life_trigger(amount: i32) -> TriggerDefinition {
+        crate::database::synthesis::build_cumulative_upkeep_trigger(AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: amount },
+        })
+    }
+
+    /// Construct a solo state with Inner Sanctum on the battlefield (controller
+    /// = PlayerId(0) = active player) at Phase::Untap so `auto_advance` will
+    /// fire the upkeep trigger. **One age counter is pre-loaded** on Inner
+    /// Sanctum so the first upkeep that `auto_advance` resolves ticks the
+    /// counter from 1 → 2 — exercising the multiplicative step of the
+    /// `PayLife` arm of `expand_per_counter` (base 2 × counter 2 = 4 life).
+    /// This skips the structurally-trivial counter=1 case, which the Polar
+    /// Kraken sacrifice test already covers for the non-Mana arm.
+    fn setup_inner_sanctum_second_upkeep_state() -> (GameState, ObjectId) {
+        let mut state = new_game(42);
+        state.turn_number = 2;
+        state.phase = Phase::Untap;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let sanctum = create_object(
+            &mut state,
+            CardId(7200),
+            PlayerId(0),
+            "Inner Sanctum".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&sanctum).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.trigger_definitions
+                .push(cumulative_upkeep_pay_life_trigger(2));
+            // CR 702.24a: pre-load one age counter so the next upkeep tick
+            // produces counter=2, yielding the per-counter expansion
+            // PayLife{2 × 2} = PayLife{4}.
+            obj.counters
+                .insert(crate::types::counter::CounterType::Age, 1);
+        }
+
+        (state, sanctum)
+    }
+
+    /// CR 702.24a + CR 118.12 + CR 119.4: Paying the cumulative-upkeep cost
+    /// via the pay-life variant at counter=2. Pre-loading one age counter
+    /// means the second upkeep ticks the counter from 1 → 2, and the
+    /// `PerCounter` expansion of `PayLife { Fixed(2) }` yields
+    /// `PayLife { Fixed(4) }` (2 × 2 = 4 life). Paying 4 life keeps Inner
+    /// Sanctum on the battlefield and deducts 4 from the controller's life
+    /// total — the load-bearing assertion for the `PayLife` arm of
+    /// `expand_per_counter`'s `QuantityExpr::scaled_by` composition.
+    #[test]
+    fn inner_sanctum_upkeep_two_age_counters_pays_four_life() {
+        let (mut state, sanctum_id) = setup_inner_sanctum_second_upkeep_state();
+        advance_to_unless_payment_prompt(&mut state);
+
+        // CR 702.24a: outer AddCounter resolved first; the pre-loaded counter
+        // ticked from 1 → 2 before the per-counter unless-cost is computed.
+        assert_eq!(
+            state.objects[&sanctum_id]
+                .counters
+                .get(&crate::types::counter::CounterType::Age)
+                .copied(),
+            Some(2),
+            "age counter should tick from 1 (pre-loaded) to 2 on this upkeep"
+        );
+
+        // CR 118.12 + CR 702.24a + CR 119.4: PerCounter expanded
+        // `PayLife { Fixed(2) }` for 2 age counters to `PayLife { Fixed(4) }`
+        // (2 × 2 = 4). This is the load-bearing multiplicative assertion for
+        // the `PayLife` arm of `expand_per_counter`.
+        match &state.waiting_for {
+            WaitingFor::UnlessPayment { player, cost, .. } => {
+                assert_eq!(*player, PlayerId(0), "controller is the unless-payer");
+                match cost {
+                    AbilityCost::PayLife { amount } => {
+                        assert_eq!(
+                            *amount,
+                            QuantityExpr::Fixed { value: 4 },
+                            "2 age counters × base 2 life = 4 life"
+                        );
+                    }
+                    other => panic!("expected PayLife cost, got {other:?}"),
+                }
+            }
+            other => panic!("expected UnlessPayment prompt, got {other:?}"),
+        }
+
+        // CR 119.4: pay-life unless-costs are auto-deducted from the player's
+        // life total at `PayUnlessCost { pay: true }` time — no intermediate
+        // choice prompt (unlike Sacrifice, which surfaces a permanent
+        // picker). Snapshot the life total before paying so the delta is
+        // measurable.
+        let life_before = state.players[0].life;
+        let _ = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
+
+        // CR 119.4: 4 life paid → life total decreases by exactly 4.
+        assert_eq!(
+            state.players[0].life,
+            life_before - 4,
+            "paying 4 life must reduce life total by 4"
+        );
+        // CR 702.24a: paying the cost keeps the permanent on the battlefield.
+        assert_eq!(
+            state.objects[&sanctum_id].zone,
+            Zone::Battlefield,
+            "paying the cumulative-upkeep cost must NOT sacrifice the permanent"
+        );
+        assert!(
+            !state.players[0].graveyard.contains(&sanctum_id),
+            "permanent must not be in graveyard when paid"
+        );
+    }
+
+    /// CR 702.24a + CR 603.4 + CR 400.7: "if this permanent is on the
+    /// battlefield" is an intervening-if condition re-checked at trigger
+    /// resolution. If the source permanent has left the battlefield between
+    /// trigger fire and resolution (bounced, exiled, etc.), the entire
+    /// chained ability no-ops: no age counter is placed, no unless-pay prompt
+    /// is emitted, and no sacrifice occurs.
+    ///
+    /// This is the regression test for the cumulative-upkeep
+    /// `TriggerCondition::SourceInZone { Battlefield }` guard wired in
+    /// `build_cumulative_upkeep_trigger`. Without that guard, the trigger
+    /// would resolve against the (now-hand-zone) source object: the outer
+    /// `Effect::AddCounter` would still write an age counter onto the object
+    /// in hand, and the sub-ability would still prompt the controller with a
+    /// `Mana{1}` unless-payment — a spurious prompt fundamentally inconsistent
+    /// with CR 702.24a.
+    ///
+    /// The flow exercises the resolution-time re-evaluation specifically:
+    ///   1. `auto_advance` from Untap into Upkeep, firing the trigger onto the
+    ///      stack (source is still on the battlefield at fire-time, so the
+    ///      intervening-if passes).
+    ///   2. Move the source to hand (simulates a bounce spell resolving on
+    ///      top of the upkeep trigger).
+    ///   3. `resolve_top` should see the condition fail at resolution time
+    ///      (per `stack::resolve_top`'s CR 603.4 re-check) and walk away
+    ///      without invoking the AddCounter → sub-ability chain.
+    #[test]
+    fn cumulative_upkeep_source_gone_before_resolution_is_noop() {
+        let (mut state, remora_id) = setup_mystic_remora_upkeep_state();
+
+        // Step 1: fire the trigger onto the stack but DO NOT resolve it.
+        // `auto_advance` settles in Phase::Upkeep with the trigger queued.
+        let mut events = Vec::new();
+        let _wf = crate::game::turns::auto_advance(&mut state, &mut events);
+        assert_eq!(
+            state.phase,
+            Phase::Upkeep,
+            "auto_advance must pause in Upkeep with the trigger queued"
+        );
+        assert!(
+            !state.stack.is_empty(),
+            "cumulative-upkeep trigger must be on the stack pre-bounce"
+        );
+        // Source is still on the battlefield at fire-time and has no age
+        // counter yet (outer AddCounter resolves at stack resolution).
+        assert_eq!(state.objects[&remora_id].zone, Zone::Battlefield);
+        assert_eq!(
+            state.objects[&remora_id]
+                .counters
+                .get(&crate::types::counter::CounterType::Age)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "no age counter before stack resolution"
+        );
+
+        // Step 2: bounce the source to its owner's hand. In real play this
+        // would be a Boomerang or Unsummon resolving on top of the upkeep
+        // trigger. We move it directly to keep the test focused on the
+        // intervening-if re-check at resolution time.
+        // CR 400.7: this conceptually creates a new object in the hand zone;
+        // here ObjectId is preserved (engine maintains object identity in the
+        // `objects` map across zone changes), which is the harder case for
+        // the no-op semantics — the same id remains addressable.
+        crate::game::zones::move_to_zone(&mut state, remora_id, Zone::Hand, &mut events);
+        assert_eq!(
+            state.objects[&remora_id].zone,
+            Zone::Hand,
+            "source must be in hand after bounce"
+        );
+
+        // Step 3: resolve the top of the stack. The
+        // `TriggerCondition::SourceInZone { Battlefield }` re-check should
+        // fail (source is in Hand now), so `stack::resolve_top` emits
+        // `StackResolved` without invoking the outer AddCounter or the
+        // sub-ability chain.
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        // No unless-payment prompt — the chain never reached the sub-ability.
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::UnlessPayment { .. }),
+            "no unless-pay prompt when source has left the battlefield; got: {:?}",
+            state.waiting_for
+        );
+
+        // No age counter — outer AddCounter never ran.
+        assert_eq!(
+            state.objects[&remora_id]
+                .counters
+                .get(&crate::types::counter::CounterType::Age)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "no age counter should be placed when the intervening-if no-ops"
+        );
+
+        // Source stays in hand. Not sacrificed, not returned to battlefield.
+        assert_eq!(
+            state.objects[&remora_id].zone,
+            Zone::Hand,
+            "source must remain in hand; no Effect::Sacrifice ran"
+        );
+        assert!(
+            !state.players[0].graveyard.contains(&remora_id),
+            "source must not be sacrificed to graveyard when the chain no-ops"
+        );
+
+        // The trigger left the stack via the CR 603.4 no-op exit, not via
+        // normal resolution — stack is now empty.
+        assert!(
+            state.stack.is_empty(),
+            "stack must be cleared after the no-op resolution"
+        );
+    }
+
+    /// CR 702.24b: "If a permanent has multiple instances of cumulative
+    /// upkeep, each triggers separately. However, the age counters are not
+    /// connected to any particular ability; each cumulative upkeep ability
+    /// will count the total number of age counters on the permanent at the
+    /// time that ability resolves."
+    ///
+    /// Construct a synthetic permanent with TWO `PayCumulativeUpkeep`
+    /// triggers — a `Mana{1}` base and a `PayLife{1}` base — controlled by
+    /// PlayerId(0). No real MTG card prints two cumulative-upkeep abilities,
+    /// so the only way to exercise the shared-counter semantics is to attach
+    /// both triggers in-test. Returns the perm's id; the controller is
+    /// PlayerId(0) (active player) and the phase is set so `auto_advance`
+    /// fires both triggers at upkeep.
+    fn setup_two_instance_cumulative_upkeep_state() -> (GameState, ObjectId) {
+        let mut state = new_game(42);
+        state.turn_number = 2;
+        state.phase = Phase::Untap;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let perm = create_object(
+            &mut state,
+            CardId(7300),
+            PlayerId(0),
+            "Synthetic Multi-Upkeep Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&perm).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            // CR 702.24b: each instance triggers separately. Attaching both
+            // to the same object is the load-bearing test setup — the
+            // production builders are reused unchanged so any regression in
+            // `build_cumulative_upkeep_trigger` (counter ordering, payer
+            // resolution, intervening-if guard) breaks this test loudly.
+            obj.trigger_definitions
+                .push(cumulative_upkeep_mana_trigger(1));
+            obj.trigger_definitions
+                .push(cumulative_upkeep_pay_life_trigger(1));
+        }
+
+        (state, perm)
+    }
+
+    /// CR 702.24b + CR 603.3b: Multi-instance cumulative upkeep — two
+    /// abilities each trigger separately and share the age-counter pool,
+    /// with each ability reading the running total at its own resolution
+    /// time. Synthetic permanent carries `Mana{1}` and `PayLife{1}` upkeep
+    /// triggers. At upkeep, both fire and the controller orders them via
+    /// `OrderTriggers` (CR 603.3b). Whichever trigger resolves first sees
+    /// the counter tick 0 → 1 (cost scales × 1); whichever resolves second
+    /// sees the counter tick 1 → 2 (cost scales × 2, the load-bearing
+    /// assertion). The stack order is the active player's choice — the
+    /// test pins ordering via a specific `OrderTriggers` permutation but
+    /// asserts the cost SET observed across both prompts (×1 paired with
+    /// ×2), independent of which printed trigger ended up where on the
+    /// stack. Final state: 2 age counters, no sacrifice, controller paid
+    /// the ×1 + ×2 multiples of each base across the two prompts.
+    ///
+    /// This is the load-bearing test for CR 702.24b — the only scenario
+    /// where the counter pool is read at resolution time (not at trigger
+    /// fire time) is multi-instance. Single-instance accumulation tests
+    /// (Mystic Remora three-upkeep) can't distinguish "read at fire" vs
+    /// "read at resolve" because only one tick happens between fire and
+    /// resolve. Two triggers in one batch make the distinction observable:
+    /// if the engine read at fire-time, both prompts would see counter=0;
+    /// if it read between AddCounter and unless-pay computation (post-tick
+    /// per trigger), the second prompt sees counter=2.
+    #[test]
+    fn cumulative_upkeep_multi_instance_each_ticks_own_counter() {
+        let (mut state, perm_id) = setup_two_instance_cumulative_upkeep_state();
+        let life_before = state.players[0].life;
+
+        // Step 1: `auto_advance` settles in Upkeep and `process_phase_triggers`
+        // collects both PayCumulativeUpkeep triggers. With two triggers from
+        // a single controller, the engine prompts P0 to order them via
+        // CR 603.3b before any trigger lands on the stack.
+        let mut events = Vec::new();
+        let _wf = crate::game::turns::auto_advance(&mut state, &mut events);
+        assert_eq!(
+            state.phase,
+            Phase::Upkeep,
+            "auto_advance must pause in Upkeep so both triggers can be ordered"
+        );
+        match &state.waiting_for {
+            WaitingFor::OrderTriggers { player, triggers } => {
+                assert_eq!(*player, PlayerId(0), "controller orders own triggers");
+                assert_eq!(
+                    triggers.len(),
+                    2,
+                    "both cumulative-upkeep triggers must be in the prompt"
+                );
+            }
+            other => panic!("expected OrderTriggers prompt, got {other:?}"),
+        }
+
+        // Step 2: CR 603.3b + CR 405.3: Submit a fixed permutation so the
+        // stack order is deterministic across runs. The CR 702.24b
+        // invariant under test — running-total semantics across two
+        // instances — holds regardless of WHICH printed trigger resolves
+        // first, so the per-cost assertions below are written against the
+        // RESOLUTION ORDER (`first_cost`, `second_cost`), not against the
+        // identity of the underlying trigger.
+        let _ =
+            apply_as_current(&mut state, GameAction::OrderTriggers { order: vec![1, 0] }).unwrap();
+        assert!(
+            !state.stack.is_empty(),
+            "both triggers must be on the stack after ordering"
+        );
+
+        // Step 3: Resolve the top of the stack — the first of two cumulative
+        // upkeep triggers. The outer AddCounter ticks the age counter 0 → 1;
+        // the sub-ability unless-pay reads counter=1 and expands the base
+        // cost × 1 (so Mana{1} → Mana{1}, or PayLife{1} → PayLife{1}).
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        // CR 702.24a + CR 702.24b: the first trigger's AddCounter resolved,
+        // so the counter is 1 before the unless-pay computes.
+        assert_eq!(
+            state.objects[&perm_id]
+                .counters
+                .get(&crate::types::counter::CounterType::Age)
+                .copied(),
+            Some(1),
+            "first resolving trigger must tick counter to 1"
+        );
+        let first_cost = match &state.waiting_for {
+            WaitingFor::UnlessPayment { player, cost, .. } => {
+                assert_eq!(*player, PlayerId(0), "controller pays the unless-cost");
+                cost.clone()
+            }
+            other => panic!("expected first UnlessPayment, got {other:?}"),
+        };
+
+        // CR 500.5: mana pools empty between phases — add the {1} payment
+        // AFTER auto_advance settles in Upkeep so the mana persists into
+        // `PayUnlessCost`. The cost shape is asserted in the set-based
+        // check below; here we just need to satisfy whichever cost arrived.
+        pay_unless_payment_dispatching(&mut state, &first_cost);
+
+        // Step 4: Resolve the next stack entry — the second cumulative
+        // upkeep trigger. Counter ticks 1 → 2; the unless-pay reads
+        // counter=2 and expands the base cost × 2 (so PayLife{1} →
+        // PayLife{2}, or Mana{1} → Mana{2}). This is the load-bearing
+        // assertion for CR 702.24b: the second trigger sees the running
+        // total, not the value the first trigger started with.
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects[&perm_id]
+                .counters
+                .get(&crate::types::counter::CounterType::Age)
+                .copied(),
+            Some(2),
+            "second resolving trigger must see post-tick total of 2 \
+             (CR 702.24b: shared counter pool, read at resolution time)"
+        );
+        let second_cost = match &state.waiting_for {
+            WaitingFor::UnlessPayment { player, cost, .. } => {
+                assert_eq!(*player, PlayerId(0), "controller pays the unless-cost");
+                cost.clone()
+            }
+            other => panic!("expected second UnlessPayment, got {other:?}"),
+        };
+
+        // CR 702.24b — the canonical assertion: the cost SET observed
+        // across the two prompts must include EXACTLY one ×1-scaled cost
+        // (the first trigger to resolve, ticking 0→1) and one ×2-scaled
+        // cost (the second trigger to resolve, ticking 1→2). Stack order
+        // is the active player's choice per CR 603.3b — both `{Mana{1},
+        // PayLife{2}}` and `{PayLife{1}, Mana{2}}` are valid outcomes,
+        // distinguished only by which trigger sits on top. The invariant
+        // under test is *running-total semantics*: one cost reads counter=1,
+        // the other reads counter=2. If the engine had read the counter
+        // pool at trigger-fire time (counter=0 for both) or post-double-
+        // tick (counter=2 for both), the SET would be `{Mana{0}, PayLife{0}}`
+        // or `{Mana{2}, PayLife{2}}` — both ruled out below.
+        let costs = [first_cost.clone(), second_cost.clone()];
+        // The first cost (resolved at counter=1) must be the ×1 form of
+        // either base — Mana{1} or PayLife{1}.
+        let first_is_one_scaled = matches!(
+            &first_cost,
+            AbilityCost::Mana { cost: mana } if *mana == ManaCost::generic(1)
+        ) || matches!(
+            &first_cost,
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+            }
+        );
+        assert!(
+            first_is_one_scaled,
+            "first-resolving trigger must read counter=1 and scale base × 1 \
+             (Mana{{1}} or PayLife(1)). Got {first_cost:?}"
+        );
+        // The second cost (resolved at counter=2) must be the ×2 form of
+        // either base — Mana{2} or PayLife{2}.
+        let second_is_two_scaled = matches!(
+            &second_cost,
+            AbilityCost::Mana { cost: mana } if *mana == ManaCost::generic(2)
+        ) || matches!(
+            &second_cost,
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            }
+        );
+        assert!(
+            second_is_two_scaled,
+            "second-resolving trigger must read counter=2 and scale base × 2 \
+             (Mana{{2}} or PayLife(2)) — this is the load-bearing CR 702.24b \
+             assertion that the counter pool is SHARED across instances and \
+             read at each ability's RESOLUTION TIME. Got {second_cost:?}"
+        );
+        // CR 702.24b — the cost types must be distinct (one Mana, one
+        // PayLife). If both triggers somehow surfaced the same shape we
+        // would have lost the separate-instance identity.
+        let mana_count = costs
+            .iter()
+            .filter(|c| matches!(c, AbilityCost::Mana { .. }))
+            .count();
+        let life_count = costs
+            .iter()
+            .filter(|c| matches!(c, AbilityCost::PayLife { .. }))
+            .count();
+        assert_eq!(
+            mana_count, 1,
+            "exactly one Mana cost across the two prompts; got {costs:?}"
+        );
+        assert_eq!(
+            life_count, 1,
+            "exactly one PayLife cost across the two prompts; got {costs:?}"
+        );
+
+        // Pay the second unless-cost. The dispatcher handles whichever
+        // shape arrived second.
+        pay_unless_payment_dispatching(&mut state, &second_cost);
+
+        // CR 702.24b: final state — both triggers paid, 2 age counters
+        // accumulated, permanent stayed on the battlefield, and the
+        // controller paid exactly the ×1 + ×2 multiples of the PayLife
+        // base across the two prompts.
+        assert_eq!(
+            state.objects[&perm_id]
+                .counters
+                .get(&crate::types::counter::CounterType::Age)
+                .copied(),
+            Some(2),
+            "both triggers' AddCounter effects must have ticked the shared pool"
+        );
+        assert_eq!(
+            state.objects[&perm_id].zone,
+            Zone::Battlefield,
+            "paying both cumulative-upkeep costs must keep the permanent on the battlefield"
+        );
+        assert!(
+            !state.players[0].graveyard.contains(&perm_id),
+            "permanent must not be sacrificed when both costs are paid"
+        );
+        // CR 119.4: total life delta = whichever resolution paid PayLife.
+        //   - If PayLife resolved FIRST (counter=1), it cost 1 life.
+        //   - If PayLife resolved SECOND (counter=2), it cost 2 life.
+        // Either way the Mana cost contributes 0 to the life delta. Compute
+        // the expected delta from the first cost shape: when the first cost
+        // was PayLife, total -1; when the first cost was Mana, total -2.
+        let expected_life_delta = if matches!(&first_cost, AbilityCost::PayLife { .. }) {
+            1
+        } else {
+            2
+        };
+        assert_eq!(
+            state.players[0].life,
+            life_before - expected_life_delta,
+            "controller paid exactly the PayLife trigger's scaled cost in life \
+             (the Mana trigger contributes 0 to life delta)"
+        );
+    }
+
+    /// Pay the unless-cost surfaced as `cost` on behalf of PlayerId(0).
+    /// Dispatches on the cost shape so the multi-instance test can pay
+    /// either `Mana{N}` or `PayLife{N}` in whichever order the engine
+    /// resolves the two triggers. Other cost shapes (Sacrifice, PayEnergy,
+    /// Discard) are not exercised by this test and are flagged with a
+    /// panic to surface scope-creep if a future cumulative-upkeep variant
+    /// is added.
+    fn pay_unless_payment_dispatching(state: &mut GameState, cost: &AbilityCost) {
+        match cost {
+            // CR 118.12 + CR 500.5: provision the colorless mana, then pay.
+            // CR 202.3: `mana_value()` is the authoritative count of mana
+            // units required — it folds generic + shards into a single int
+            // and is robust to future cost shapes (e.g. hybrid symbols)
+            // that aren't exercised by the current Mana{1} base.
+            AbilityCost::Mana { cost: mana_cost } => {
+                give_p0_colorless_mana(state, mana_cost.mana_value());
+                apply_as_current(state, GameAction::PayUnlessCost { pay: true })
+                    .expect("PayUnlessCost { pay: true } must succeed for Mana cost");
+            }
+            // CR 118.12 + CR 119.4: life is auto-deducted at PayUnlessCost time —
+            // no intermediate mana-payment prompt.
+            AbilityCost::PayLife { .. } => {
+                apply_as_current(state, GameAction::PayUnlessCost { pay: true })
+                    .expect("PayUnlessCost { pay: true } must succeed for PayLife cost");
+            }
+            other => panic!(
+                "unexpected unless-cost shape in multi-instance cumulative-upkeep test: {other:?}"
+            ),
+        }
+    }
+
+    /// Build the synthesized cumulative-upkeep trigger for "Cumulative upkeep
+    /// {W} or {U}" (Jötun Owl Keeper's disjunctive cost variant) by delegating
+    /// to the production synthesizer. Mirrors `cumulative_upkeep_mana_trigger`,
+    /// `cumulative_upkeep_sacrifice_land_trigger`, and
+    /// `cumulative_upkeep_pay_life_trigger`; this helper exercises the `OneOf`
+    /// arm of `expand_per_counter` plus the Composite-of-OneOfs routing path in
+    /// `handle_unless_payment_choose_cost` (CR 702.24a: "If [cost] has choices
+    /// associated with it, each choice is made separately for each age counter,
+    /// then either the entire set of costs is paid, or none of them is paid").
+    ///
+    /// CR 702.24a: a `OneOf { Mana(W), Mana(U) }` base cost is the canonical
+    /// disjunctive cumulative-upkeep shape (Jötun Owl Keeper, Arctic Nishoba,
+    /// Earthen Goo).
+    fn cumulative_upkeep_one_of_w_or_u_trigger() -> TriggerDefinition {
+        let mana_w = AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                shards: vec![crate::types::mana::ManaCostShard::White],
+                generic: 0,
+            },
+        };
+        let mana_u = AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                shards: vec![crate::types::mana::ManaCostShard::Blue],
+                generic: 0,
+            },
+        };
+        crate::database::synthesis::build_cumulative_upkeep_trigger(AbilityCost::OneOf {
+            costs: vec![mana_w, mana_u],
+        })
+    }
+
+    /// Construct a solo state with Jötun Owl Keeper on the battlefield
+    /// (controller = PlayerId(0) = active player) at Phase::Untap so
+    /// `auto_advance` will fire the upkeep trigger. **One age counter is
+    /// pre-loaded** on the Owl Keeper so the first upkeep that
+    /// `auto_advance` resolves ticks the counter from 1 → 2 — exercising the
+    /// multiplicative step of the `OneOf` arm of `expand_per_counter`, which
+    /// expands `OneOf{[W,U]}` × 2 → `Composite { [OneOf{[W,U]}, OneOf{[W,U]}] }`.
+    /// This is the load-bearing setup for CR 702.24a's "each choice is made
+    /// separately for each age counter" clause — counter=1 would collapse to a
+    /// trivial single-prompt case, and we specifically want the multi-prompt
+    /// disjunctive flow.
+    fn setup_jotun_owl_keeper_second_upkeep_state() -> (GameState, ObjectId) {
+        let mut state = new_game(42);
+        state.turn_number = 2;
+        state.phase = Phase::Untap;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let owl = create_object(
+            &mut state,
+            CardId(7400),
+            PlayerId(0),
+            "Jötun Owl Keeper".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&owl).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Giant".to_string());
+            obj.trigger_definitions
+                .push(cumulative_upkeep_one_of_w_or_u_trigger());
+            // CR 702.24a: pre-load one age counter so the next upkeep tick
+            // produces counter=2, yielding the per-counter expansion
+            // `OneOf{[W,U]}` × 2 → `Composite { [OneOf{[W,U]}, OneOf{[W,U]}] }`.
+            obj.counters
+                .insert(crate::types::counter::CounterType::Age, 1);
+        }
+
+        (state, owl)
+    }
+
+    /// CR 702.24a + CR 118.12: End-to-end OneOf × N flow — Jötun Owl Keeper's
+    /// "{W} or {U}" cumulative-upkeep cost at counter=2 expands to a
+    /// `Composite` of two `OneOf` sub-costs. The engine surfaces one
+    /// `UnlessPaymentChooseCost` prompt per disjunctive sub-cost; each pick
+    /// accumulates into `chosen`. After the last prompt, the accumulated picks
+    /// collapse into `Composite { [Mana(W), Mana(U)] }` which the single-cost
+    /// `handle_unless_payment` folds into a combined `{W}{U}` mana payment.
+    /// Paying the combined cost keeps the Owl Keeper on the battlefield and
+    /// drains the controller's mana pool of the two colored units.
+    ///
+    /// This is the capstone test for the OneOf × N pipeline: it exercises the
+    /// synthesizer (Task 7) producing the trigger, the PerCounter resolution
+    /// (Task 6) expanding `OneOf × 2` → `Composite[OneOf, OneOf]`, the
+    /// multi-choice routing (Task 14) walking each disjunctive choice, and the
+    /// Composite-of-Mana payment (Task 14) folding the picks into a combined
+    /// mana payment. CR 702.24a: "each choice is made separately for each age
+    /// counter, then either the entire set of costs is paid, or none of them
+    /// is paid."
+    #[test]
+    fn jotun_owl_keeper_one_of_x_n_pays_combined_mana() {
+        use crate::types::actions::UnlessCostBranch;
+        let (mut state, owl_id) = setup_jotun_owl_keeper_second_upkeep_state();
+        advance_to_unless_payment_prompt(&mut state);
+
+        // CR 702.24a: outer AddCounter resolved first; the pre-loaded counter
+        // ticked from 1 → 2 before the per-counter unless-cost is computed.
+        assert_eq!(
+            state.objects[&owl_id]
+                .counters
+                .get(&crate::types::counter::CounterType::Age)
+                .copied(),
+            Some(2),
+            "age counter should tick from 1 (pre-loaded) to 2 on this upkeep"
+        );
+
+        // CR 702.24a + CR 118.12a: PerCounter expanded `OneOf{[W,U]}` × 2 to
+        // `Composite { [OneOf{[W,U]}, OneOf{[W,U]}] }`. The engine surfaces
+        // the FIRST disjunctive choice with one entry remaining in
+        // `remaining_choices`.
+        match &state.waiting_for {
+            WaitingFor::UnlessPaymentChooseCost {
+                player,
+                costs,
+                remaining_choices,
+                chosen,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0), "controller is the unless-payer");
+                assert_eq!(costs.len(), 2, "first choice exposes both alternatives");
+                assert_eq!(
+                    remaining_choices.len(),
+                    1,
+                    "one more disjunctive choice queued (counter=2 → 2 prompts)"
+                );
+                assert!(
+                    chosen.is_empty(),
+                    "no choices made yet before the first prompt"
+                );
+            }
+            other => panic!("expected first UnlessPaymentChooseCost, got {other:?}"),
+        }
+
+        // Pick {W} (index 0). The first pick accumulates into `chosen`; the
+        // queue is drained; the second OneOf prompt surfaces.
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseUnlessCostBranch {
+                choice: UnlessCostBranch::Pay { index: 0 },
+            },
+        )
+        .expect("first ChooseUnlessCostBranch should surface the next prompt");
+
+        // CR 702.24a + CR 118.12a: SECOND disjunctive choice prompt.
+        // `remaining_choices` is now empty; `chosen` carries [Mana(W)].
+        match &state.waiting_for {
+            WaitingFor::UnlessPaymentChooseCost {
+                costs,
+                remaining_choices,
+                chosen,
+                ..
+            } => {
+                assert_eq!(costs.len(), 2, "second choice exposes both alternatives");
+                assert!(
+                    remaining_choices.is_empty(),
+                    "no more disjunctive choices queued"
+                );
+                assert_eq!(chosen.len(), 1, "first pick accumulated into `chosen`");
+                assert!(
+                    matches!(
+                        &chosen[0],
+                        AbilityCost::Mana { cost: ManaCost::Cost { shards, generic: 0 } }
+                            if shards.as_slice() == [crate::types::mana::ManaCostShard::White]
+                    ),
+                    "first pick is Mana({{W}}) as selected by index 0; got {:?}",
+                    &chosen[0]
+                );
+            }
+            other => panic!("expected second UnlessPaymentChooseCost, got {other:?}"),
+        }
+
+        // CR 500.5 + CR 118.12: Provision {W}{U} in P0's mana pool BEFORE the
+        // final pick. The second ChooseUnlessCostBranch routes through
+        // `handle_unless_payment_choose_cost` → builds
+        // `Composite { [Mana(W), Mana(U)] }` → re-enters
+        // `handle_unless_payment(state, .., pay=true)` → folds the Composite
+        // into a combined `{W}{U}` ManaCost → calls `pay_unless_cost`. So the
+        // mana must already be in the pool by the time the second action is
+        // dispatched. Real play would tap a Plains and an Island in response
+        // to the trigger before answering the second prompt; we shortcut by
+        // dropping the mana directly into the pool.
+        let p0 = state
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(0))
+            .expect("PlayerId(0)");
+        p0.mana_pool
+            .add(ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]));
+        p0.mana_pool
+            .add(ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]));
+
+        // Pick {U} (index 1). The second pick accumulates, the queue is
+        // empty, so `handle_unless_payment_choose_cost` collapses
+        // `chosen = [Mana(W), Mana(U)]` into `Composite { ... }` and routes
+        // straight into `handle_unless_payment` with `pay = true`. That
+        // handler's all-Mana-Composite arm folds the inner costs via
+        // `ManaCost::plus` and pays the combined `{W}{U}` cost — there is no
+        // intermediate `UnlessPayment` prompt visible to the test, the
+        // payment happens inline. (See `engine_payment_choices::handle_unless_payment`
+        // L592-599 for the fold + pay logic.)
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseUnlessCostBranch {
+                choice: UnlessCostBranch::Pay { index: 1 },
+            },
+        )
+        .expect("second ChooseUnlessCostBranch should fold + pay the combined Composite-of-Mana");
+
+        // CR 702.24a: paying the cost keeps the permanent on the battlefield.
+        assert_eq!(
+            state.objects[&owl_id].zone,
+            Zone::Battlefield,
+            "paying the cumulative-upkeep cost must NOT sacrifice the Owl Keeper"
+        );
+        assert!(
+            !state.players[0].graveyard.contains(&owl_id),
+            "permanent must not be in graveyard when paid"
+        );
+
+        // CR 118.12 + CR 202.3: The combined `{W}{U}` payment drained the
+        // White + Blue units from the mana pool. This is the load-bearing
+        // assertion that the Composite-of-Mana fold path actually paid the
+        // colored cost (and not, e.g., zero generic via a buggy unwrap).
+        let p0_after = state.players.iter().find(|p| p.id == PlayerId(0)).unwrap();
+        assert_eq!(
+            p0_after.mana_pool.total(),
+            0,
+            "combined {{W}}{{U}} cost drains both colored mana units from the pool"
         );
     }
 }

@@ -6,13 +6,14 @@ use nom::combinator::value;
 use nom::Parser;
 
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, Comparator, DieResultBranch, Effect, SolveCondition,
-    StaticDefinition, TargetFilter, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, Comparator, DieResultBranch, Effect,
+    SolveCondition, StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::statics::StaticMode;
 
+use super::oracle_cost::{parse_or_separated_mana_costs, parse_single_cost};
 use super::oracle_effect::imperative::try_parse_die_result_line;
 use super::oracle_effect::{capitalize, parse_effect_chain};
 use super::oracle_nom::bridge::nom_on_lower;
@@ -364,6 +365,44 @@ pub(super) fn parse_harmonize_keyword(line: &str) -> Option<Keyword> {
     Some(Keyword::Harmonize(cost))
 }
 
+/// CR 702.24a: Dispatch a cumulative-upkeep cost text into a typed
+/// `AbilityCost`. Tries disjunctive mana (`"{G} or {W}"`), then pure mana
+/// (`"{1}"`), then falls back to the generic single-cost parser (which handles
+/// "Pay N life", "Sacrifice a land", etc.). Returns `None` only when no
+/// recognized cost shape can be extracted, so the caller can suppress emitting
+/// a malformed `Keyword::CumulativeUpkeep` entry.
+fn parse_cumulative_upkeep_cost(text: &str) -> Option<AbilityCost> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+
+    // Disjunctive mana: "{G} or {W}" → AbilityCost::OneOf { [Mana, Mana] }.
+    if let Some(costs) = parse_or_separated_mana_costs(text) {
+        return Some(AbilityCost::OneOf {
+            costs: costs
+                .into_iter()
+                .map(|c| AbilityCost::Mana { cost: c })
+                .collect(),
+        });
+    }
+
+    // Pure mana: "{1}" / "{2}{U}" — must fully consume the input.
+    if let Some((cost, rest)) = parse_mana_symbols(text) {
+        if rest.trim().is_empty() {
+            return Some(AbilityCost::Mana { cost });
+        }
+    }
+
+    // Non-mana costs: "Pay 2 life", "Sacrifice a land", etc.
+    let cost = parse_single_cost(text);
+    if matches!(cost, AbilityCost::Unimplemented { .. }) {
+        None
+    } else {
+        Some(cost)
+    }
+}
+
 /// CR 702.24: Parse "Cumulative upkeep—[cost]" or "Cumulative upkeep {mana}" from Oracle text.
 pub(super) fn parse_cumulative_upkeep_keyword(line: &str) -> Option<Keyword> {
     let lower = line.to_lowercase();
@@ -379,24 +418,17 @@ pub(super) fn parse_cumulative_upkeep_keyword(line: &str) -> Option<Keyword> {
         .parse(i)
     });
     if let Some(((), rest)) = em_dash_rest {
-        let cost_text = strip_reminder_text(rest)
-            .trim()
-            .trim_end_matches('.')
-            .to_string();
-        if !cost_text.is_empty() {
-            return Some(Keyword::CumulativeUpkeep(cost_text));
-        }
+        let stripped = strip_reminder_text(rest);
+        let cost_text = stripped.trim().trim_end_matches('.');
+        let cost = parse_cumulative_upkeep_cost(cost_text)?;
+        return Some(Keyword::CumulativeUpkeep(cost));
     }
 
     let ((), rest) = nom_on_lower(line, &lower, |i| {
         value((), tag("cumulative upkeep ")).parse(i)
     })?;
-    let cost_text = strip_reminder_text(rest)
-        .trim()
-        .trim_end_matches('.')
-        .to_string();
-    if cost_text.is_empty() {
-        return None;
-    }
-    Some(Keyword::CumulativeUpkeep(cost_text))
+    let stripped = strip_reminder_text(rest);
+    let cost_text = stripped.trim().trim_end_matches('.');
+    let cost = parse_cumulative_upkeep_cost(cost_text)?;
+    Some(Keyword::CumulativeUpkeep(cost))
 }

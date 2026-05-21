@@ -1289,7 +1289,7 @@ pub fn is_known_effect(effect: &Effect) -> bool {
 /// what makes compound exile (Suspend Aggression's
 /// "Exile target nonland permanent and the top card of your library ...
 /// for each of those cards") expose both exiled objects to the grant.
-fn next_sub_needs_tracked_set(ability: &ResolvedAbility) -> bool {
+pub(crate) fn next_sub_needs_tracked_set(ability: &ResolvedAbility) -> bool {
     ability
         .sub_ability
         .as_deref()
@@ -2580,6 +2580,41 @@ fn resolve_chain_body(
             // fixed `Mana { cost }` BEFORE entering the prompt — the runtime
             // payment site only handles static AbilityCost variants.
             let resolved_cost = match &unless_pay.cost {
+                AbilityCost::PerCounter {
+                    counter,
+                    target,
+                    base,
+                } => {
+                    // CR 702.24a + CR 702.24b: Count counters on `target` at
+                    // resolution time so multi-instance reads the post-tick
+                    // total.
+                    let n = match target {
+                        TargetFilter::SelfRef => state
+                            .objects
+                            .get(&ability.source_id)
+                            .map(|obj| obj.counters.get(counter).copied().unwrap_or(0))
+                            .unwrap_or(0),
+                        other => {
+                            // CR 702.24a: No current mechanic constructs a
+                            // non-SelfRef `PerCounter`. If one ever does,
+                            // returning 0 routes through the CR 118.5 zero-
+                            // cost short-circuit (the unless-effect proceeds
+                            // without prompting), which is the least-
+                            // surprising default until the target-resolution
+                            // branch is implemented.
+                            // CR 113.6b: TargetFilter resolution against game
+                            // state belongs in `game/filter.rs`; wire it here
+                            // when the second mechanic lands.
+                            tracing::warn!(
+                                "PerCounter resolution against non-SelfRef target {:?} \
+                                 not yet implemented; defaulting to n=0",
+                                other
+                            );
+                            0
+                        }
+                    };
+                    expand_per_counter(base, n)
+                }
                 AbilityCost::ManaDynamic { quantity } => {
                     // CR 107.3a: thread ResolvedAbility.chosen_x so the announced
                     // X drives the unless-cost. The plain resolve_quantity path
@@ -2631,7 +2666,42 @@ fn resolve_chain_body(
                         pending_effect: Box::new(pending),
                         trigger_event: state.current_trigger_event.clone(),
                         effect_description: ability.description.clone(),
+                        remaining_choices: vec![],
+                        chosen: vec![],
                     },
+                    // CR 702.24a + CR 118.12: A `Composite` of `OneOf`s is
+                    // what `expand_per_counter` produces from a `OneOf` base
+                    // cost at N ≥ 2 (e.g., Jötun Owl Keeper's "{W} or {U}"
+                    // cumulative-upkeep cost with 2 age counters → 2
+                    // independent disjunctive choices). Drive each choice
+                    // sequentially via `UnlessPaymentChooseCost`, accumulate
+                    // picks, and re-enter `UnlessPayment` with the resulting
+                    // `Composite` of chosen sub-costs as a single payment.
+                    // "Each choice is made separately for each age counter,
+                    // then either the entire set of costs is paid, or none
+                    // of them is paid."
+                    AbilityCost::Composite { costs }
+                        if !costs.is_empty()
+                            && costs.iter().all(|c| matches!(c, AbilityCost::OneOf { .. })) =>
+                    {
+                        let mut queue: Vec<Vec<AbilityCost>> = costs
+                            .into_iter()
+                            .map(|c| match c {
+                                AbilityCost::OneOf { costs } => costs,
+                                _ => unreachable!("matched all-OneOf guard above"),
+                            })
+                            .collect();
+                        let first = queue.remove(0);
+                        WaitingFor::UnlessPaymentChooseCost {
+                            player: payer,
+                            costs: first,
+                            pending_effect: Box::new(pending),
+                            trigger_event: state.current_trigger_event.clone(),
+                            effect_description: ability.description.clone(),
+                            remaining_choices: queue,
+                            chosen: vec![],
+                        }
+                    }
                     cost => WaitingFor::UnlessPayment {
                         player: payer,
                         cost,
@@ -3703,6 +3773,49 @@ fn resolve_unless_payers(
     }
 }
 
+/// CR 702.24a: Expand `pay [base] for each counter on it` into the
+/// concrete N-fold cost the player actually pays. N=0 short-circuits to
+/// a zero mana cost (CR 118.5 — players can always pay 0). `OneOf`
+/// unfolds into a `Composite` of N independent disjunctive choices
+/// (CR 702.24a: each choice is made separately).
+fn expand_per_counter(base: &AbilityCost, n: u32) -> AbilityCost {
+    if n == 0 {
+        return AbilityCost::Mana {
+            cost: ManaCost::zero(),
+        };
+    }
+    match base {
+        AbilityCost::Mana { cost } => AbilityCost::Mana {
+            cost: cost.scaled(n),
+        },
+        AbilityCost::PayLife { amount } => AbilityCost::PayLife {
+            amount: amount.scaled_by(n),
+        },
+        AbilityCost::Sacrifice { target, count } => AbilityCost::Sacrifice {
+            target: target.clone(),
+            count: count.saturating_mul(n),
+        },
+        AbilityCost::OneOf { costs } => AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::OneOf {
+                    costs: costs.clone()
+                };
+                n as usize
+            ],
+        },
+        AbilityCost::Composite { costs } => AbilityCost::Composite {
+            costs: costs.iter().map(|c| expand_per_counter(c, n)).collect(),
+        },
+        // YAGNI fallback: no current cumulative-upkeep card uses these
+        // base variants. If a future mechanic does, the
+        // Composite-of-N-copies expansion is semantically correct for
+        // most cost shapes; refactor per-variant if needed.
+        other => AbilityCost::Composite {
+            costs: vec![other.clone(); n as usize],
+        },
+    }
+}
+
 /// CR 601.2f: "The next spell you cast this turn costs {N} less to cast."
 /// Pushes a one-shot cost reduction entry consumed when the player casts their next spell.
 fn resolve_reduce_next_spell_cost(
@@ -4531,6 +4644,119 @@ mod tests {
         );
     }
 
+    #[test]
+    fn expand_per_counter_zero_returns_zero_mana() {
+        let base = AbilityCost::Mana {
+            cost: ManaCost::generic(5),
+        };
+        let expanded = expand_per_counter(&base, 0);
+        assert!(matches!(expanded, AbilityCost::Mana { cost } if cost == ManaCost::zero()));
+    }
+
+    #[test]
+    fn expand_per_counter_mana_scales() {
+        let base = AbilityCost::Mana {
+            cost: ManaCost::generic(2),
+        };
+        let expanded = expand_per_counter(&base, 3);
+        let AbilityCost::Mana {
+            cost: ManaCost::Cost { generic, .. },
+        } = expanded
+        else {
+            panic!("expected Mana");
+        };
+        assert_eq!(generic, 6);
+    }
+
+    #[test]
+    fn expand_per_counter_pay_life_multiplies() {
+        let base = AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: 2 },
+        };
+        let expanded = expand_per_counter(&base, 3);
+        let AbilityCost::PayLife { amount } = expanded else {
+            panic!("expected PayLife");
+        };
+        assert_eq!(amount, QuantityExpr::Fixed { value: 6 });
+    }
+
+    #[test]
+    fn expand_per_counter_sacrifice_multiplies_count() {
+        let base = AbilityCost::Sacrifice {
+            target: TargetFilter::SelfRef,
+            count: 1,
+        };
+        let expanded = expand_per_counter(&base, 3);
+        let AbilityCost::Sacrifice { count, .. } = expanded else {
+            panic!("expected Sacrifice");
+        };
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn expand_per_counter_one_of_unfolds_to_composite_of_one_ofs() {
+        let base = AbilityCost::OneOf {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+            ],
+        };
+        let expanded = expand_per_counter(&base, 3);
+        let AbilityCost::Composite { costs } = expanded else {
+            panic!("expected Composite");
+        };
+        assert_eq!(costs.len(), 3);
+        for c in &costs {
+            match c {
+                AbilityCost::OneOf { costs: inner } => {
+                    assert_eq!(inner.len(), 2, "each OneOf must preserve both alternatives");
+                    assert!(inner.iter().all(|sub| matches!(
+                        sub,
+                        AbilityCost::Mana {
+                            cost: ManaCost::Cost { generic: 1, shards }
+                        } if shards.is_empty()
+                    )));
+                }
+                other => panic!("expected OneOf, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn expand_per_counter_composite_recurses() {
+        let base = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                },
+            ],
+        };
+        let expanded = expand_per_counter(&base, 2);
+        let AbilityCost::Composite { costs } = expanded else {
+            panic!("expected Composite");
+        };
+        assert_eq!(costs.len(), 2);
+        assert!(matches!(
+            costs[0],
+            AbilityCost::Mana {
+                cost: ManaCost::Cost { generic: 2, .. }
+            }
+        ));
+        assert!(matches!(
+            costs[1],
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 }
+            }
+        ));
+    }
+
     /// CR 107.3a: a bare `{X}` unless-cost (`ManaDynamic` with `Variable("X")`)
     /// must resolve against the carrying ability's announced `chosen_x`. The
     /// interceptor folds the dynamic cost into a fixed `Mana` cost before
@@ -4584,6 +4810,67 @@ mod tests {
                     *cost,
                     AbilityCost::Mana {
                         cost: ManaCost::generic(3),
+                    }
+                );
+            }
+            other => panic!("expected WaitingFor::UnlessPayment, got {other:?}"),
+        }
+    }
+
+    /// CR 702.24a + CR 702.24b: `AbilityCost::PerCounter` at the unless-payment
+    /// entry point reads the current counter total on the trigger source and
+    /// expands the base cost N-fold. With 3 age counters on the source and a
+    /// base of `{2}`, the player is prompted to pay `{6}`.
+    #[test]
+    fn unless_pay_per_counter_expands_against_source_counter_total() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        // CR 702.24b: source carries 3 age counters at upkeep resolution.
+        state
+            .objects
+            .get_mut(&source)
+            .expect("source object exists")
+            .counters
+            .insert(CounterType::Age, 3);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+            vec![TargetRef::Object(source)],
+            source,
+            PlayerId(0),
+        );
+        ability.unless_pay = Some(crate::types::ability::UnlessPayModifier {
+            cost: AbilityCost::PerCounter {
+                counter: CounterType::Age,
+                target: TargetFilter::SelfRef,
+                base: Box::new(AbilityCost::Mana {
+                    cost: ManaCost::generic(2),
+                }),
+            },
+            payer: TargetFilter::Controller,
+        });
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("unless-pay interceptor should arm a payment prompt");
+
+        match &state.waiting_for {
+            WaitingFor::UnlessPayment { player, cost, .. } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(
+                    *cost,
+                    AbilityCost::Mana {
+                        cost: ManaCost::generic(6),
                     }
                 );
             }
@@ -7521,6 +7808,7 @@ mod tests {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
+                face_down: false,
             },
             vec![],
             evelyn,
@@ -7599,6 +7887,7 @@ mod tests {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
+                face_down: false,
             },
             vec![],
             source,
@@ -9428,6 +9717,7 @@ mod tests {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                face_down: false,
             },
             vec![],
             ObjectId(100),

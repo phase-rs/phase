@@ -2,8 +2,8 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::{one_of, space1};
-use nom::combinator::{all_consuming, eof, opt, peek, recognize, value};
-use nom::multi::many1;
+use nom::combinator::{all_consuming, eof, opt, peek, recognize, rest, value};
+use nom::multi::{many1, separated_list1};
 use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
 
@@ -14,7 +14,7 @@ use super::oracle_effect::{
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::trigger::{TriggerBody, TriggerIr, TriggerModifiers};
 use super::oracle_nom::condition::parse_inner_condition;
-use super::oracle_nom::error::OracleResult;
+use super::oracle_nom::error::{oracle_err, OracleResult};
 use super::oracle_nom::filter::parse_enters_origin_zone;
 use super::oracle_nom::primitives::{
     self as nom_primitives, scan_contains, scan_preceded, scan_split_at_phrase,
@@ -751,7 +751,7 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     //      legitimately inherits the player's chosen target.
     if let Some(execute) = def.execute.as_deref_mut() {
         if mode_carries_event_source_object(&def.mode)
-            && def.valid_target.is_none()
+            && (def.valid_target.is_none() || def.mode == TriggerMode::Unattach)
             && !execute.optional_targeting
         {
             lift_parent_target_to_triggering_source_in_ability(execute);
@@ -781,6 +781,13 @@ fn mode_carries_event_source_object(mode: &TriggerMode) -> bool {
             | TriggerMode::CycledOrDiscarded
             | TriggerMode::Milled
             | TriggerMode::MilledOnce
+            // CR 608.2k: A single-object zone-change trigger ("Whenever a
+            // nontoken Zombie you control enters") carries the entering/leaving
+            // object as the event source; "that creature" in the body refers to
+            // it (Necroduality, Mimic Vat class). The batched ChangesZoneAll
+            // mode is excluded — its event carries a set, not one object.
+            | TriggerMode::ChangesZone
+            | TriggerMode::Unattach
     )
 }
 
@@ -792,10 +799,18 @@ fn mode_carries_event_source_object(mode: &TriggerMode) -> bool {
 /// object (e.g. `ChangeZone` operating on the just-discarded card). Other
 /// effect variants are left untouched.
 fn lift_parent_target_to_triggering_source(effect: &mut Effect) {
-    if let Effect::ChangeZone { target, .. } = effect {
-        if matches!(target, TargetFilter::ParentTarget) {
-            *target = TargetFilter::TriggeringSource;
-        }
+    // CR 608.2k: each variant carries a top-level `target` that, when the
+    // surface anaphor was "that <object>", refers to the event object.
+    let target = match effect {
+        Effect::ChangeZone { target, .. } => target,
+        Effect::Sacrifice { target, .. } => target,
+        // "create a token that's a copy of that creature" (Necroduality) — the
+        // copy source is the entering object, not the trigger's own source.
+        Effect::CopyTokenOf { target, .. } => target,
+        _ => return,
+    };
+    if matches!(target, TargetFilter::ParentTarget) {
+        *target = TargetFilter::TriggeringSource;
     }
 }
 
@@ -807,12 +822,39 @@ fn lift_parent_target_to_triggering_source(effect: &mut Effect) {
 /// Without the descent, the second link would silently bind to the trigger
 /// source object instead of the just-acted-on event object.
 fn lift_parent_target_to_triggering_source_in_ability(ability: &mut AbilityDefinition) {
-    lift_parent_target_to_triggering_source(ability.effect.as_mut());
-    let mut next = ability.sub_ability.as_deref_mut();
-    while let Some(child) = next {
-        lift_parent_target_to_triggering_source(child.effect.as_mut());
-        next = child.sub_ability.as_deref_mut();
+    // CR 608.2c + CR 608.2k: Stop the descent as soon as a link introduces a
+    // player-*chosen* object target. A later `ParentTarget` then refers to
+    // *that* choice, not the trigger event — the enters-flicker class
+    // ("exile target permanent, then return that card": Felidar Guardian,
+    // Restoration Angel) keeps its sub-ability bound to the chosen permanent.
+    // Necroduality (top-level `CopyTokenOf` with no prior choice) and Tergrid
+    // ("put that card …, then create a token") still lift correctly.
+    let mut node = Some(ability);
+    while let Some(link) = node {
+        if introduces_chosen_object_target(link.effect.as_ref()) {
+            break;
+        }
+        lift_parent_target_to_triggering_source(link.effect.as_mut());
+        node = link.sub_ability.as_deref_mut();
     }
+}
+
+/// CR 608.2c: Does this effect introduce a freshly *chosen* object target — one
+/// that a subsequent "that <object>" (`ParentTarget`) anaphor binds to, rather
+/// than the trigger event? True for player-selected object filters (`Typed`,
+/// and `Or`/`And` combinations of them); false for anaphoric/contextual refs
+/// (`ParentTarget`, `TriggeringSource`, `SelfRef`, …) and untargeted effects.
+fn introduces_chosen_object_target(effect: &Effect) -> bool {
+    fn is_chosen(filter: &TargetFilter) -> bool {
+        match filter {
+            TargetFilter::Typed(_) => true,
+            TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+                filters.iter().any(is_chosen)
+            }
+            _ => false,
+        }
+    }
+    effect.target_filter().is_some_and(is_chosen)
 }
 
 /// Thin wrapper: parse trigger line through IR production + lowering.
@@ -4055,16 +4097,55 @@ fn try_parse_event(
         // separated upstream by `split_trigger`, so a tail clause like
         // "return that card from your graveyard" cannot poison this scan.)
         //
-        // TODO: extend `parse_enters_origin_zone` to handle "from anywhere",
-        // "from anywhere other than <zone>", and opponent-scoped origins as
-        // those patterns surface in real cards.
+        // CR 603.6a + CR 603.6c: at each word boundary, first try the rich
+        // `parse_origin_constraint_tail` combinator (which recognizes
+        // `from anywhere`, `from anywhere other than <zone>`, and the list-form
+        // `from anywhere other than <zone> or <zone>`). When it produces
+        // anything richer than `Equals(z)` / `Any`, route the constraint
+        // through `zone_change_clauses` so the disjunctive-clause matcher path
+        // (`zone_change_clause_matches`) can enforce `NotEquals` / `OneOf`
+        // — the scalar `def.origin` path only models a single positive zone.
+        // Otherwise fall through to the legacy scalar scan so existing card
+        // data (one positive `from <single-zone>` clause) stays byte-identical.
+        // This is the SelfRef-ETB analog of the cast-origin / put-into-graveyard
+        // routing already wired elsewhere in this file ("Name Sticker" Goblin's
+        // "enters from anywhere other than a graveyard or exile" is the
+        // first card to exercise it from the ETB side).
         let mut scan = after_enter.trim_start();
+        let mut matched_clause = false;
         while !scan.is_empty() {
+            if let Ok((_, constraint)) = parse_origin_constraint_tail(scan, parse_cast_origin_zone)
+            {
+                match constraint {
+                    // Bare "from anywhere" / no "from" clause / single-zone
+                    // positive: drop back to the scalar path so the emitted
+                    // JSON shape is unchanged for the existing card corpus.
+                    OriginConstraint::Any | OriginConstraint::Equals(_) => {}
+                    rich @ (OriginConstraint::NotEquals(_) | OriginConstraint::OneOf(_)) => {
+                        def.zone_change_clauses.push(ZoneChangeClause {
+                            origin: rich,
+                            destination: Some(Zone::Battlefield),
+                            valid_card: Some(subject.clone()),
+                        });
+                        matched_clause = true;
+                        break;
+                    }
+                }
+            }
             if let Ok((_, origin)) = parse_enters_origin_zone(scan) {
                 def.origin = Some(origin);
                 break;
             }
             scan = scan.find(' ').map_or("", |i| scan[i + 1..].trim_start());
+        }
+        // When a `zone_change_clauses` entry was emitted, the disjunctive
+        // matcher path supersedes the scalar `valid_card` / `destination` /
+        // `origin` fields (see `match_changes_zone` in `game/trigger_matchers.rs`).
+        // Clearing the scalar fields keeps the JSON minimal and prevents the
+        // matcher from double-counting the destination via two routes.
+        if matched_clause {
+            def.valid_card = None;
+            def.destination = None;
         }
 
         // CR 603.6a + CR 110.5b: "enters untapped" / "enters tapped" — conditional
@@ -4392,6 +4473,25 @@ fn try_parse_event(
         SaddlesOrCrews,
         Crews,
         Saddles,
+        /// CR 701.3d: Equipment/Aura becomes unattached from a permanent.
+        BecomesUnattached(Option<TargetFilter>),
+        // CR 701.3a: Equipment/Aura becomes attached to a permanent.
+        BecomesAttached,
+    }
+    fn parse_becomes_unattached(input: &str) -> OracleResult<'_, SimpleEvent> {
+        let (remaining, _) = tag("becomes unattached").parse(input)?;
+        if remaining.is_empty() {
+            return Ok((remaining, SimpleEvent::BecomesUnattached(None)));
+        }
+        let (host, _) = tag(" from ").parse(remaining)?;
+        let (filter, rest) = parse_type_phrase(host);
+        if !rest.trim().is_empty() {
+            return Err(nom::Err::Error(OracleError::new(
+                rest,
+                nom::error::ErrorKind::Eof,
+            )));
+        }
+        Ok((rest, SimpleEvent::BecomesUnattached(Some(filter))))
     }
     fn parse_simple_event(input: &str) -> OracleResult<'_, SimpleEvent> {
         alt((
@@ -4446,10 +4546,19 @@ fn try_parse_event(
             // CR 702.171c: Actor-side saddle trigger (reserved — no cards today without
             // the compound, but the arm is ready for future printings).
             value(SimpleEvent::Saddles, tag("saddles a mount")),
+            // CR 701.3d: Equipment/Aura becomes unattached from a permanent.
+            parse_becomes_unattached,
+            // CR 701.3a: "becomes attached to [a creature / a permanent / …]" —
+            // Equipment/Aura attach trigger. The trailing target phrase ("to a
+            // creature", "to a permanent") is parsed to populate `valid_target`.
+            value(SimpleEvent::BecomesAttached, tag("becomes attached to ")),
+            // Short form: "becomes attached" without a trailing target phrase
+            // (future-proofing; no current Oracle cards use this form).
+            value(SimpleEvent::BecomesAttached, tag("becomes attached")),
         )))
         .parse(input)
     }
-    if let Ok((_, event)) = parse_simple_event.parse(rest) {
+    if let Ok((remaining, event)) = parse_simple_event.parse(rest) {
         let mut def = make_base();
         match event {
             SimpleEvent::BecomesBlocked => {
@@ -4542,6 +4651,36 @@ fn try_parse_event(
                 // either saddling a Mount or crewing a Vehicle.
                 def.mode = TriggerMode::SaddlesOrCrews;
                 def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::BecomesUnattached(host_filter) => {
+                // CR 701.3d: Equipment/Aura becomes unattached from a permanent.
+                // `valid_card` records the Equipment/Aura filter (the subject).
+                def.mode = TriggerMode::Unattach;
+                def.valid_card = Some(subject.clone());
+                def.valid_target = host_filter;
+                if filter_references_self(subject) {
+                    def.trigger_zones = vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile];
+                }
+            }
+            SimpleEvent::BecomesAttached => {
+                // CR 701.3a: "Whenever [this Equipment/Aura] becomes attached to
+                // [a creature / a permanent]" — fires when an Attach or AttachAll
+                // effect resolves and the source is now attached to something.
+                // Non-self subjects need an event payload naming the object that
+                // became attached; EffectResolved only carries the ability source.
+                if !matches!(subject, TargetFilter::SelfRef) {
+                    return None;
+                }
+                def.mode = TriggerMode::Attached;
+                def.valid_card = Some(subject.clone());
+                let remaining = remaining.trim();
+                if !remaining.is_empty() {
+                    let (filter, rest) = parse_type_phrase(remaining);
+                    if !rest.trim().is_empty() {
+                        return None;
+                    }
+                    def.valid_target = Some(filter);
+                }
             }
         }
         return Some((def.mode.clone(), def));
@@ -5051,26 +5190,69 @@ fn try_parse_attack_with_n_creatures(lower: &str) -> Option<(TriggerMode, Trigge
         .parse(after_actor)
         .ok()?;
 
-    // Parse "N or more creatures" — N is a positive integer word/digit.
+    // Parse the count word/digit. `parse_number` already maps "one"→1 as well as
+    // digits and other number-words; do NOT add a duplicate `value(1, tag("one"))`.
     let (after_n, n) = nom_primitives::parse_number.parse(after_with).ok()?;
-    let (after_or_more, ()) = value((), tag::<_, _, OracleError<'_>>(" or more creatures"))
+    let (after_or_more, ()) = value((), tag::<_, _, OracleError<'_>>(" or more "))
         .parse(after_n)
+        .ok()?;
+
+    if n < 1 {
+        return None;
+    }
+
+    if n == 1 {
+        // CR 508.1 + CR 603.2c: actor-led "you attack with one or more <TYPE>".
+        // The count==1 form needs no count condition — the matcher's
+        // "≥ 1 attacker matching valid_card" semantics IS "one or more". Capture
+        // the head-noun type phrase via the shared `parse_type_phrase` building
+        // block (handles negated subtypes like "non-Gnome" and controller scope
+        // like "Gods you control") and store it on `valid_card`.
+        let (filter, remainder) = parse_type_phrase(after_or_more);
+        // Accept optional trailing " each turn" / " this turn" qualifier; the
+        // remainder after the type phrase must otherwise be empty.
+        let (rest, _) = opt(alt((
+            tag::<_, _, OracleError<'_>>(" each turn"),
+            tag(" this turn"),
+        )))
+        .parse(remainder)
+        .ok()?;
+        if !rest.trim().is_empty() {
+            return None;
+        }
+
+        let mut def = make_base();
+        def.mode = TriggerMode::YouAttack;
+        def.batched = true;
+        // `valid_target` drives both the matcher's attacking-player check and the
+        // "they" pronoun resolver in the effect body.
+        def.valid_target = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(actor),
+        ));
+        // CR 508.1: the attacker-type gate the matcher now reads.
+        def.valid_card = Some(filter);
+        return Some((TriggerMode::YouAttack, def));
+    }
+
+    // count > 1 ("two or more creatures"): byte-identical to the pre-existing
+    // behavior — hardcoded "creatures" head noun, count condition via
+    // `AttackersDeclaredMin`, no `valid_card`. Typed count>1 ("two or more Gods")
+    // is deferred — populating `valid_card` for count>1 without a condition-level
+    // type axis would over-fire (≥1 God + ≥2 any-attackers).
+    let (after_creatures, ()) = value((), tag::<_, _, OracleError<'_>>("creatures"))
+        .parse(after_or_more)
         .ok()?;
     // Accept optional trailing " each turn" / " this turn" qualifier (unused here,
     // but keeps the matcher permissive for CR 603.4 timing qualifiers). Must end
     // at the condition boundary — the caller already split the effect text off,
-    // so `after_or_more` should be empty or punctuation-only.
+    // so `after_creatures` should be empty or punctuation-only.
     let (rest, _) = opt(alt((
         tag::<_, _, OracleError<'_>>(" each turn"),
         tag(" this turn"),
     )))
-    .parse(after_or_more)
+    .parse(after_creatures)
     .ok()?;
     if !rest.trim().is_empty() {
-        return None;
-    }
-
-    if n < 1 {
         return None;
     }
 
@@ -5854,6 +6036,46 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             TypedFilter::default().properties(vec![FilterProp::Another]),
         ));
         return Some((TriggerMode::CycledOrDiscarded, def));
+    }
+    // CR 701.43a: "Whenever you exert a creature" — actor-side exert trigger.
+    // The player actor belongs in valid_target; the exerted permanent belongs
+    // in valid_card.
+    fn parse_exert_trigger_line(i: &str) -> OracleResult<'_, (Option<ControllerRef>, &str)> {
+        preceded(
+            alt((tag("whenever "), tag("when "))),
+            pair(
+                alt((
+                    value(Some(ControllerRef::You), tag("you exert ")),
+                    value(Some(ControllerRef::Opponent), tag("an opponent exerts ")),
+                    value(None, tag("a player exerts ")),
+                )),
+                rest,
+            ),
+        )
+        .parse(i)
+    }
+    if let Ok((rem, (actor, subject_text))) = parse_exert_trigger_line(lower) {
+        if !rem.trim().is_empty() {
+            return None;
+        }
+
+        let (filter, remainder) = super::oracle_target::parse_target(subject_text);
+        if !remainder.trim().is_empty() || matches!(filter, TargetFilter::Any) {
+            return None;
+        }
+
+        let mut def = make_base();
+        def.mode = TriggerMode::Exerted;
+        def.valid_target = Some(match actor {
+            Some(ControllerRef::You) => TargetFilter::Controller,
+            Some(ControllerRef::Opponent) => {
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+            }
+            None => TargetFilter::Player,
+            Some(_) => TargetFilter::Player,
+        });
+        def.valid_card = Some(filter);
+        return Some((TriggerMode::Exerted, def));
     }
 
     if matches!(
@@ -6780,7 +7002,13 @@ fn try_parse_counter_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinit
 
     let mut def = make_base();
     def.mode = TriggerMode::CounterAdded;
-    if let Some(filter) = parse_counter_threshold_prefix(counter_prefix) {
+    // CR 122.1: capture an explicit counter restriction so the trigger fires
+    // only on the named counter kind — a threshold form ("the twelfth hour
+    // counter") or a plain type form ("one or more -1/-1 counters", Hapatra).
+    // No type word ("one or more counters") leaves the filter unset → any kind.
+    if let Some(filter) = parse_counter_threshold_prefix(counter_prefix)
+        .or_else(|| parse_counter_type_prefix(counter_prefix))
+    {
         def = def.counter_filter(filter);
     }
 
@@ -6819,6 +7047,56 @@ fn parse_counter_threshold_prefix(prefix: &str) -> Option<CounterTriggerFilter> 
     Some(CounterTriggerFilter {
         counter_type: crate::types::counter::parse_counter_type(counter_type_text),
         threshold: Some(threshold),
+    })
+}
+
+/// CR 122.1: Extract an explicit counter *type* from the text preceding
+/// "counter" in a placement trigger ("you put one or more -1/-1 counters
+/// on …", "a +1/+1 counter is put on …"). Strips the leading timing word,
+/// optional placement verb, and quantity phrase (article / "one or more" /
+/// numeral); whatever typed remainder names the counter type. Returns `None`
+/// when no type word remains ("one or more counters" → any kind, no filter),
+/// so the trigger keeps firing on every counter as printed.
+fn parse_counter_type_prefix(prefix: &str) -> Option<CounterTriggerFilter> {
+    let (rest, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>("whenever "),
+        tag("when "),
+    )))
+    .parse(prefix.trim_start())
+    .ok()?;
+    let (rest, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>("you've put "),
+        tag("you have put "),
+        tag("you put "),
+    )))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>("one or more "),
+        tag("another "),
+        tag("an "),
+        tag("a "),
+    )))
+    .parse(rest)
+    .ok()?;
+    // Optional numeral count ("you put two +1/+1 counters …"). Counter types
+    // never begin with a bare digit, so a leading "number " is safely a
+    // quantity; consume it (number + trailing space) as one combinator.
+    let rest = (
+        nom_primitives::parse_number,
+        tag::<_, _, OracleError<'_>>(" "),
+    )
+        .parse(rest)
+        .map_or(rest, |(after, _)| after);
+    // Only build a filter when the remainder is a genuinely recognized counter
+    // type. The prefix strip is deliberately loose, so non-"you" subjects ("an
+    // opponent puts …", "you create a token or put a …") leave leftover subject
+    // text here; `try_parse_counter_type` rejects multi-word junk (→ None), so
+    // those any-counter triggers keep firing on every counter as printed.
+    let counter_type = crate::types::counter::try_parse_counter_type(rest.trim())?;
+    Some(CounterTriggerFilter {
+        counter_type,
+        threshold: None,
     })
 }
 
@@ -6909,10 +7187,55 @@ fn parse_put_into_graveyard_origin(input: &str) -> OracleResult<'_, OriginConstr
     parse_origin_constraint_tail(input, parse_graveyard_origin_zone)
 }
 
+fn origin_zones_except(excluded: &[Zone]) -> Vec<Zone> {
+    [
+        Zone::Library,
+        Zone::Hand,
+        Zone::Battlefield,
+        Zone::Graveyard,
+        Zone::Stack,
+        Zone::Exile,
+        Zone::Command,
+    ]
+    .into_iter()
+    .filter(|zone| !excluded.contains(zone))
+    .collect()
+}
+
+/// Parses an Oxford-comma tolerant enumeration of source zones using the
+/// caller's zone combinator. The separator grammar accepts `", "`, `" or "`,
+/// and `", or "` as a single `alt()` consumed by `separated_list1`. This is
+/// templated Oracle text grammar, not a CR-specified construct; the CR anchors
+/// live on the callers that interpret the list. Zone tokens come from
+/// `zone_combinator`; a bare `None` ("anywhere" leaf) inside the list is
+/// treated as malformed.
+fn parse_zone_list<'a, F>(input: &'a str, zone_combinator: &mut F) -> OracleResult<'a, Vec<Zone>>
+where
+    F: FnMut(&'a str) -> OracleResult<'a, Option<Zone>>,
+{
+    let mut zone = |inner| {
+        let (rest, zone) = zone_combinator(inner)?;
+        let Some(zone) = zone else {
+            return Err(oracle_err(inner));
+        };
+        Ok((rest, zone))
+    };
+    let separator = alt((
+        value((), tag::<_, _, OracleError<'_>>(", or ")),
+        value((), tag::<_, _, OracleError<'_>>(" or ")),
+        value((), tag::<_, _, OracleError<'_>>(", ")),
+    ));
+    {
+        let mut parser = separated_list1(separator, &mut zone);
+        parser.parse(input)
+    }
+}
+
 /// CR 601.2a + CR 603.6: Parse a "from <zone>" source-zone tail into an
 /// `OriginConstraint`. Handles `from anywhere other than <zone>` (NotEquals),
-/// bare `from anywhere` (Any), single-zone tails (Equals), and the absent-
-/// clause case (Any).
+/// `from anywhere other than <zone> or <zone>` (OneOf all non-excluded zones), bare `from
+/// anywhere` (Any), single-zone tails (Equals), and the absent-clause case
+/// (Any).
 ///
 /// `zone_combinator` returns `Option<Zone>`: `Some(z)` for a constrained zone,
 /// `None` for the bare "anywhere" leaf (so the caller's primitives can decide
@@ -6932,20 +7255,29 @@ where
         return Ok((input, OriginConstraint::Any));
     };
     let after_from = after_from.trim_start();
-    // CR 603.6c + CR 601.2a: "from anywhere other than <zone>" — the
-    // negative-discriminator form (Ghostly Pilferer: "from anywhere other
-    // than their hand"; Syr Konrad clause 2: "from anywhere other than the
-    // battlefield"). The zone token comes from the caller's combinator.
+    // CR 603.6c + CR 601.2a: "from anywhere other than <zone-list>" — the
+    // negative-discriminator form. Single-zone form: Ghostly Pilferer ("from
+    // anywhere other than their hand"), Syr Konrad clause 2 ("from anywhere
+    // other than the battlefield"). List form: "Name Sticker" Goblin ("from
+    // anywhere other than a graveyard or exile"). The zone tokens come from
+    // the caller's combinator; the list grammar (Oxford-comma tolerant) is
+    // shared across all callers. A single-element list collapses back to
+    // `NotEquals(Zone)` so existing card-data snapshots remain byte-identical.
+    // Multi-zone negation reuses `OneOf` with every concrete zone except the
+    // excluded zones to avoid adding a polarity/cardinality sibling variant.
     if let Ok((after_other, ())) =
         value((), tag::<_, _, OracleError<'_>>("anywhere other than ")).parse(after_from)
     {
-        let (rest, zone_opt) = zone_combinator(after_other)?;
-        // `None` from the zone combinator means the inner phrase was a bare
-        // "anywhere" — "from anywhere other than anywhere" is malformed; fall
-        // through to the generic path which will treat the residual as Any.
-        if let Some(zone) = zone_opt {
-            return Ok((rest, OriginConstraint::NotEquals(zone)));
+        if let Ok((rest, zones)) = parse_zone_list(after_other, &mut zone_combinator) {
+            let constraint = match zones.len() {
+                1 => OriginConstraint::NotEquals(zones[0]),
+                _ => OriginConstraint::OneOf(origin_zones_except(&zones)),
+            };
+            return Ok((rest, constraint));
         }
+        // If the list combinator failed (e.g., bare "anywhere" as the inner
+        // phrase — "from anywhere other than anywhere" is malformed), fall
+        // through to the generic path which will treat the residual as Any.
     }
     // Single-zone tail or bare "anywhere".
     let (rest, zone) = zone_combinator(after_from)?;
@@ -7869,6 +8201,39 @@ mod tests {
     }
 
     #[test]
+    fn parse_origin_constraint_tail_excludes_graveyard_and_exile_with_one_of() {
+        // CR 603.6c: "from anywhere other than a graveyard or exile" is the
+        // list-form negation introduced for "Name Sticker" Goblin. The parser
+        // models this with the existing positive `OneOf` set over all concrete
+        // zones except Graveyard and Exile, not a new negated-set variant.
+        let (_rest, constraint) = parse_origin_constraint_tail(
+            "from anywhere other than a graveyard or exile",
+            parse_cast_origin_zone,
+        )
+        .expect("parse list-form negation");
+        assert_eq!(
+            constraint,
+            OriginConstraint::OneOf(vec![
+                Zone::Library,
+                Zone::Hand,
+                Zone::Battlefield,
+                Zone::Stack,
+                Zone::Command,
+            ]),
+        );
+
+        // Single-zone negation must still collapse to `NotEquals` so existing
+        // card-data snapshots (Ghostly Pilferer, Syr Konrad clause 2) remain
+        // byte-identical.
+        let (_rest, single) = parse_origin_constraint_tail(
+            "from anywhere other than their hand",
+            parse_cast_origin_zone,
+        )
+        .expect("parse single-zone negation");
+        assert_eq!(single, OriginConstraint::NotEquals(Zone::Hand));
+    }
+
+    #[test]
     fn static_condition_to_trigger_condition_source_in_battlefield() {
         // SUB-FIX B regression: the existing SourceInZone mapper must pass
         // Zone::Battlefield through unchanged so the new battlefield condition
@@ -7894,6 +8259,42 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::ChangesZone);
         assert_eq!(def.destination, Some(Zone::Battlefield));
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(def.execute.is_some());
+    }
+
+    // CR 603.6a + CR 603.6c: SelfRef-ETB with a list-form negated origin —
+    // "Name Sticker" Goblin. The "from anywhere other than a graveyard or
+    // exile" tail must route through `zone_change_clauses` so the disjunctive
+    // matcher can enforce the positive non-excluded `OneOf` origin set; the scalar
+    // `origin`/`valid_card`/`destination` fields only model a single positive
+    // zone and would silently drop the negation otherwise.
+    #[test]
+    fn trigger_etb_self_from_anywhere_other_than_graveyard_or_exile() {
+        let def = parse_trigger_line(
+            "When this creature enters from anywhere other than a graveyard or exile, \
+             create a Treasure token.",
+            "\"Name Sticker\" Goblin",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        // Scalar discriminator fields cleared — the disjunctive clause path
+        // supersedes them (see `match_changes_zone`).
+        assert_eq!(def.origin, None);
+        assert_eq!(def.destination, None);
+        assert_eq!(def.valid_card, None);
+        assert_eq!(def.zone_change_clauses.len(), 1);
+        let clause = &def.zone_change_clauses[0];
+        assert_eq!(
+            clause.origin,
+            OriginConstraint::OneOf(vec![
+                Zone::Library,
+                Zone::Hand,
+                Zone::Battlefield,
+                Zone::Stack,
+                Zone::Command,
+            ]),
+        );
+        assert_eq!(clause.destination, Some(Zone::Battlefield));
+        assert_eq!(clause.valid_card, Some(TargetFilter::SelfRef));
         assert!(def.execute.is_some());
     }
 
@@ -8608,6 +9009,7 @@ mod tests {
                 Effect::ExileTop {
                     player: TargetFilter::TriggeringPlayer,
                     count: QuantityExpr::Fixed { value: 1 },
+                    face_down: false,
                 }
             ),
             "expected ExileTop to bind to TriggeringPlayer, got {:?}",
@@ -9686,6 +10088,117 @@ mod tests {
     }
 
     #[test]
+    fn necroduality_copies_entering_zombie_not_source() {
+        // CR 608.2k: "Whenever a nontoken Zombie you control enters, create a
+        // token that's a copy of that creature." "That creature" is the
+        // entering Zombie (the event source), NOT Necroduality itself. The
+        // untargeted ChangesZone trigger lifts CopyTokenOf's ParentTarget to
+        // TriggeringSource. (#596)
+        let def = parse_trigger_line(
+            "Whenever a nontoken Zombie you control enters, create a token that's a copy of that creature.",
+            "Necroduality",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        let exec = def.execute.as_ref().expect("execute must be Some");
+        match &*exec.effect {
+            Effect::CopyTokenOf { target, .. } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::TriggeringSource,
+                    "copy source must be the entering Zombie, not the trigger's own source"
+                );
+            }
+            other => panic!("expected Effect::CopyTokenOf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn flicker_enters_trigger_keeps_chosen_target_anaphor() {
+        // CR 608.2c: "When ~ enters, you may exile another target permanent you
+        // control, then return that card …" — "that card" refers to the CHOSEN
+        // exiled permanent (ParentTarget), NOT the trigger event. The enters
+        // event-source lift must STOP at the first chosen target so the
+        // sub-ability stays ParentTarget (regression guard for #596 — Felidar
+        // Guardian / Restoration Angel flicker class).
+        let def = parse_trigger_line(
+            "When this creature enters, you may exile another target permanent you control, then return that card to the battlefield under your control.",
+            "Felidar Guardian",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        let exec = def.execute.as_ref().expect("execute must be Some");
+        // Top link targets the chosen permanent.
+        assert!(
+            matches!(exec.effect.target_filter(), Some(TargetFilter::Typed(_))),
+            "top-level exile must keep its chosen Typed target, got {:?}",
+            exec.effect.target_filter()
+        );
+        // Sub-ability "that card" must remain ParentTarget, not be lifted.
+        let sub = exec
+            .sub_ability
+            .as_ref()
+            .expect("flicker chains to a return");
+        assert_eq!(
+            sub.effect.target_filter(),
+            Some(&TargetFilter::ParentTarget),
+            "return-that-card must bind to the chosen permanent (ParentTarget), not TriggeringSource"
+        );
+    }
+
+    #[test]
+    fn counter_added_trigger_captures_explicit_type() {
+        // CR 122.1: Hapatra — "Whenever you put one or more -1/-1 counters on a
+        // creature, create a Snake" must fire ONLY on -1/-1 counters, not any
+        // counter. The type-prefix extractor sets counter_filter. (#589)
+        let def = parse_trigger_line(
+            "Whenever you put one or more -1/-1 counters on a creature, create a 1/1 green Snake creature token with deathtouch.",
+            "Hapatra, Vizier of Poisons",
+        );
+        assert_eq!(def.mode, TriggerMode::CounterAdded);
+        let filter = def
+            .counter_filter
+            .as_ref()
+            .expect("explicit -1/-1 counter type must be captured");
+        assert_eq!(
+            filter.counter_type,
+            crate::types::counter::CounterType::Minus1Minus1
+        );
+        assert_eq!(filter.threshold, None, "no threshold form here");
+    }
+
+    #[test]
+    fn counter_added_trigger_generic_has_no_type_filter() {
+        // "one or more counters" (no type word) keeps firing on any counter
+        // kind — the extractor must leave counter_filter unset.
+        let def = parse_trigger_line(
+            "Whenever you put one or more counters on a creature, draw a card.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::CounterAdded);
+        assert!(
+            def.counter_filter.is_none(),
+            "generic counter trigger must not set a type filter"
+        );
+    }
+
+    #[test]
+    fn counter_added_trigger_rejects_non_type_remainder() {
+        // Regression (#589 review): the prefix strip is loose, so a non-"you"
+        // subject ("an opponent puts one or more counters") leaves leftover
+        // subject text in the type slot. try_parse_counter_type must reject that
+        // multi-word junk → counter_filter stays None → the any-counter trigger
+        // (Bold Plagiarist class) keeps firing on every counter, not none.
+        let def = parse_trigger_line(
+            "Whenever an opponent puts one or more counters on a creature they control, create a 1/1 colorless Thopter artifact creature token with flying.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::CounterAdded);
+        assert!(
+            def.counter_filter.is_none(),
+            "loose prefix strip must not manufacture a bogus typed filter from subject text"
+        );
+    }
+
+    #[test]
     fn doran_attack_block_pump_resolves_pt_difference() {
         // Issue #417 — Doran, Besieged by Time.
         // "Whenever a creature you control attacks or blocks, it gets +X/+X
@@ -9912,6 +10425,7 @@ mod tests {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
+                face_down: false,
             }
         ));
 
@@ -12697,6 +13211,48 @@ mod tests {
                 TypedFilter::new(TypeFilter::Card).controller(ControllerRef::Opponent)
             ))
         );
+    }
+
+    /// CR 701.9 + CR 603.7c + CR 406.1: Necropotence's on-discard trigger
+    /// exiles the just-discarded card from the graveyard. The "that card"
+    /// anaphor must lift from `ParentTarget` to `TriggeringSource` so the
+    /// `ChangeZone { origin: Some(Graveyard), destination: Exile }` resolves
+    /// against the discarded object, and the controller filter must be
+    /// `You`. Locks the parse output for the Necropotence punisher-class
+    /// (Necropotence, Yawgmoth's Bargain-ish self-discard punishers).
+    #[test]
+    fn trigger_necropotence_you_discard_exile_from_graveyard() {
+        let def = parse_trigger_line(
+            "Whenever you discard a card, exile that card from your graveyard.",
+            "Necropotence",
+        );
+        assert_eq!(def.mode, TriggerMode::Discarded);
+        match def.valid_card.as_ref().expect("valid_card must be set") {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            }
+            other => panic!("expected Typed filter, got {other:?}"),
+        }
+        let execute = def
+            .execute
+            .as_deref()
+            .expect("on-discard trigger must have an execute body");
+        match execute.effect.as_ref() {
+            Effect::ChangeZone {
+                origin,
+                destination,
+                target,
+                ..
+            } => {
+                assert_eq!(*origin, Some(Zone::Graveyard));
+                assert_eq!(*destination, Zone::Exile);
+                assert!(
+                    matches!(target, TargetFilter::TriggeringSource),
+                    "expected TriggeringSource after lift, got {target:?}",
+                );
+            }
+            other => panic!("expected ChangeZone (graveyard → exile), got {other:?}"),
+        }
     }
 
     /// CR 701.9a + CR 603.2c: type qualifier on the discarded card must be
@@ -16919,6 +17475,91 @@ mod tests {
     // CR 508.1 + CR 603.2c + CR 603.4: Attacks-with-N-creatures trigger family
     // (Firemane Commando and analogous cards).
 
+    /// Issue #610 — Kratos, Stoic Father. The actor-led count==1 "attack with one
+    /// or more <TYPE>" form must populate `valid_card` with the attacker-type
+    /// filter (and NO count condition; the matcher's "≥1 matching attacker" IS
+    /// "one or more"). Pre-fix this text fell through to the bare "you attack"
+    /// fallback, dropping the God filter entirely.
+    #[test]
+    fn you_attack_with_one_or_more_gods_populates_filter() {
+        let def = parse_trigger_line(
+            "Whenever you attack with one or more Gods, you get an experience counter.",
+            "Kratos, Stoic Father",
+        );
+        assert_eq!(def.mode, TriggerMode::YouAttack);
+        assert!(def.batched);
+        // No count condition for the count==1 form.
+        assert_eq!(def.condition, None);
+        // valid_target carries the controller (You) axis.
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You)
+            ))
+        );
+        // valid_card carries the God attacker-type filter (load-bearing fix).
+        match &def.valid_card {
+            Some(TargetFilter::Typed(tf)) => assert!(
+                tf.type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "God")),
+                "expected God subtype in valid_card, got {:?}",
+                tf.type_filters,
+            ),
+            other => panic!("expected Typed valid_card with God subtype, got {other:?}"),
+        }
+    }
+
+    /// Issue #610 (Anim Pakal class) — negated subtype head noun. "non-Gnome
+    /// creatures" must yield a negated-Gnome filter on `valid_card`. `parse_type_phrase`
+    /// already emits the negation; verify it survives onto `valid_card`.
+    #[test]
+    fn you_attack_with_one_or_more_non_gnome_creatures() {
+        let def = parse_trigger_line(
+            "Whenever you attack with one or more non-Gnome creatures, create a 1/1 Gnome.",
+            "Anim Pakal, Thousandth Moon",
+        );
+        assert_eq!(def.mode, TriggerMode::YouAttack);
+        assert_eq!(def.condition, None);
+        match &def.valid_card {
+            Some(TargetFilter::Typed(tf)) => assert!(
+                tf.type_filters.iter().any(|t| matches!(
+                    t,
+                    TypeFilter::Non(inner) if matches!(&**inner, TypeFilter::Subtype(s) if s == "Gnome")
+                )),
+                "expected negated Gnome subtype in valid_card, got {:?}",
+                tf.type_filters,
+            ),
+            other => panic!("expected Typed valid_card with negated Gnome, got {other:?}"),
+        }
+    }
+
+    /// Issue #610 REV 2 GUARDRAIL (deferral lock). The actor-led count>1 form
+    /// ("two or more creatures") must remain byte-identical to pre-fix behavior:
+    /// `valid_card` UNSET and the count condition is the unchanged 2-field
+    /// `AttackersDeclaredMin { scope, minimum }`. Populating `valid_card` for
+    /// count>1 without a condition-level type axis would over-fire. This test
+    /// locks the deferral so a future edit cannot silently regress it.
+    #[test]
+    fn you_attack_with_two_or_more_creatures_defers_filter() {
+        let def = parse_trigger_line(
+            "Whenever you attack with two or more creatures, draw a card.",
+            "Firemane Commando",
+        );
+        assert_eq!(def.mode, TriggerMode::YouAttack);
+        assert_eq!(
+            def.valid_card, None,
+            "count>1 must NOT set valid_card (REV 2 deferral)"
+        );
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::AttackersDeclaredMin {
+                scope: ControllerRef::You,
+                minimum: 2,
+            })
+        );
+    }
+
     #[test]
     fn trigger_you_attack_with_two_or_more_creatures() {
         let def = parse_trigger_line(
@@ -17688,5 +18329,210 @@ mod snapshot_tests {
                 "chain link {i} should be TriggeringSource, got {t:?}",
             );
         }
+    }
+
+    // CR 701.3d: "Whenever ~ becomes unattached from a permanent" trigger
+    // Covers Grafted Exoskeleton, Stitcher's Graft, Grafted Wargear, etc.
+    #[test]
+    fn trigger_becomes_unattached_from_permanent() {
+        let def = parse_trigger_line(
+            "Whenever this Equipment becomes unattached from a permanent, sacrifice that permanent.",
+            "Grafted Exoskeleton",
+        );
+        assert_eq!(def.mode, TriggerMode::Unattach);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(TypedFilter::permanent()))
+        );
+        assert_eq!(
+            def.trigger_zones,
+            vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile]
+        );
+        let execute = def.execute.as_deref().expect("trigger has execute");
+        let Effect::Sacrifice { target, .. } = execute.effect.as_ref() else {
+            panic!("expected Sacrifice, got {:?}", execute.effect);
+        };
+        assert_eq!(*target, TargetFilter::TriggeringSource);
+    }
+
+    // CR 701.3d: shorter form "becomes unattached" (future-proofing)
+    #[test]
+    fn trigger_becomes_unattached_short_form() {
+        let def = parse_trigger_line(
+            "Whenever ~ becomes unattached, sacrifice the permanent it was attached to.",
+            "Test Equipment",
+        );
+        assert_eq!(
+            def.mode,
+            TriggerMode::Unattach,
+            "Expected TriggerMode::Unattach for short form, got {:?}",
+            def.mode
+        );
+        assert_eq!(def.valid_target, None);
+    }
+
+    // Regression: "Whenever ~ becomes unattached from a permanent, sacrifice that permanent."
+    // should NOT be parsed as TriggerMode::Unknown.
+    #[test]
+    fn trigger_becomes_unattached_not_unknown() {
+        let def = parse_trigger_line(
+            "Whenever this Equipment becomes unattached from a permanent, sacrifice that permanent.",
+            "Stitcher's Graft",
+        );
+        assert!(
+            !matches!(def.mode, TriggerMode::Unknown(_)),
+            "Trigger should not fall through to Unknown; got {:?}",
+            def.mode
+        );
+    }
+
+    // CR 701.3a: "Whenever ~ becomes attached to a creature" trigger
+    // Covers Inchblade Companion, Assimilation Aegis, Enormous Energy Blade, Killer Cosplay.
+    #[test]
+    fn trigger_becomes_attached_to_a_creature() {
+        let def = parse_trigger_line(
+            "Whenever ~ becomes attached to a creature, that creature gets +1/+1 until end of turn.",
+            "Inchblade Companion",
+        );
+        assert_eq!(
+            def.mode,
+            TriggerMode::Attached,
+            "Expected TriggerMode::Attached, got {:?}",
+            def.mode
+        );
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::SelfRef),
+            "Expected valid_card = SelfRef (Equipment self-reference), got {:?}",
+            def.valid_card
+        );
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(TypedFilter::creature())),
+            "Expected valid_target = creature, got {:?}",
+            def.valid_target
+        );
+    }
+
+    // CR 701.3a: "becomes attached to a permanent" variant
+    #[test]
+    fn trigger_becomes_attached_to_a_permanent() {
+        let def = parse_trigger_line(
+            "Whenever ~ becomes attached to a permanent, draw a card.",
+            "Assimilation Aegis",
+        );
+        assert_eq!(
+            def.mode,
+            TriggerMode::Attached,
+            "Expected TriggerMode::Attached for 'attached to a permanent', got {:?}",
+            def.mode
+        );
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(TypedFilter::permanent())),
+            "Expected valid_target = permanent, got {:?}",
+            def.valid_target
+        );
+    }
+
+    // Regression: "Whenever ~ becomes attached to a creature" should NOT be TriggerMode::Unknown.
+    #[test]
+    fn trigger_becomes_attached_not_unknown() {
+        let def = parse_trigger_line(
+            "Whenever ~ becomes attached to a creature, that creature gets +2/+2 until end of turn.",
+            "Enormous Energy Blade",
+        );
+        assert!(
+            !matches!(def.mode, TriggerMode::Unknown(_)),
+            "Trigger should not fall through to Unknown; got {:?}",
+            def.mode
+        );
+    }
+
+    // Regression: non-self attached subjects are not supported by
+    // EffectResolved's source-only payload and must not parse as a broad
+    // TriggerMode::Attached trigger.
+    #[test]
+    fn trigger_becomes_attached_non_self_subject_stays_unknown() {
+        let def = parse_trigger_line(
+            "Whenever an Aura you control becomes attached to a creature you control, draw a card.",
+            "Siona, Captain of the Pyleas",
+        );
+        assert!(
+            matches!(def.mode, TriggerMode::Unknown(_)),
+            "non-self attachment trigger should stay Unknown, got {:?}",
+            def.mode
+        );
+    }
+
+    /// CR 701.43a: "Whenever you exert a creature" — actor-side exert trigger.
+    /// Trueheart Twins, Battlefield Scavenger, Rohirrim Chargers, Vizier of the
+    /// True, and Resolute Survivors all share this exact trigger phrasing.
+    /// The parser must emit TriggerMode::Exerted with valid_card set to the
+    /// subject (a creature the controller exerts, i.e. a generic creature filter
+    /// scoped to the controller).
+    #[test]
+    fn trigger_you_exert_a_creature() {
+        let def = parse_trigger_line(
+            "Whenever you exert a creature, that creature gets +1/+0 and gains first strike until end of turn.",
+            "Trueheart Twins",
+        );
+        assert_eq!(def.mode, TriggerMode::Exerted);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        let Some(TargetFilter::Typed(tf)) = def.valid_card else {
+            panic!(
+                "expected typed exerted creature filter, got {:?}",
+                def.valid_card
+            );
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+    }
+
+    /// CR 701.43a: Self-reference is the exerted permanent, not a degraded
+    /// generic filter.
+    #[test]
+    fn trigger_you_exert_self_ref() {
+        let def = parse_trigger_line("Whenever you exert ~, untap it.", "Vizier of the True");
+        assert_eq!(def.mode, TriggerMode::Exerted);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    /// CR 701.43a: Opponent actor scope must be recorded on valid_target while
+    /// the exerted creature remains the valid_card filter.
+    #[test]
+    fn trigger_opponent_exerts_a_creature() {
+        let def = parse_trigger_line(
+            "Whenever an opponent exerts a creature, you gain 1 life.",
+            "Exertion Watcher",
+        );
+        assert_eq!(def.mode, TriggerMode::Exerted);
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+        let Some(TargetFilter::Typed(tf)) = def.valid_card else {
+            panic!(
+                "expected typed exerted creature filter, got {:?}",
+                def.valid_card
+            );
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+    }
+
+    /// CR 701.43a: Resolute Survivors — "Whenever you exert a creature" with a
+    /// life-gain effect. Ensures the trigger body is parsed independently of
+    /// the trigger condition.
+    #[test]
+    fn trigger_exert_resolute_survivors() {
+        let def = parse_trigger_line(
+            "Whenever you exert a creature, you gain 1 life.",
+            "Resolute Survivors",
+        );
+        assert_eq!(def.mode, TriggerMode::Exerted);
+        assert!(def.valid_card.is_some());
     }
 }

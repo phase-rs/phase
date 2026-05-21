@@ -26,6 +26,9 @@ use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::StaticMode;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
+use nom::bytes::complete::tag;
+use nom::combinator::{all_consuming, value};
+use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -57,6 +60,8 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::MaximumHandSize { .. }
             | StaticMode::StepEndUnspentMana { .. }
             | StaticMode::CantBeBlockedBy { .. }
+            // CR 509.1b: CantBeBlockedExceptBy carries `kind`.
+            | StaticMode::CantBeBlockedExceptBy { .. }
             // CR 602.5 + CR 603.2a: CantBeActivated carries `who` + `source_filter`.
             | StaticMode::CantBeActivated { .. }
             // CR 701.23 + CR 609.3: CantSearchLibrary carries `cause`.
@@ -68,6 +73,21 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // CR 107.4f: PayLifeAsColoredMana carries the `ManaColor` axis
             // (K'rrik = Black; future printings any other color).
             | StaticMode::PayLifeAsColoredMana { .. }
+            // CR 121.6: CantDraw carries `who` (controller vs all_players) —
+            // runtime enforcement is in game/effects/draw.rs::allowed_draw_count.
+            | StaticMode::CantDraw { .. }
+            // CR 614.1b + CR 614.10: SkipStep carries the `Phase` discriminant
+            // (Draw, Untap, Upkeep, etc.). Runtime enforcement is in
+            // turns.rs::should_skip_step_static(). Coverage support is via
+            // is_data_carrying_static() because the variant is parameterized
+            // and the registry uses exact-key lookup.
+            | StaticMode::SkipStep { .. }
+            // CR 400.2: RevealTopOfLibrary carries `all_players`; libraries
+            // are hidden zones unless revealed by an effect. Runtime permission
+            // is in casting.rs::top_of_library_permission_source(). Coverage
+            // support via is_data_carrying_static() because the variant is
+            // parameterized.
+            | StaticMode::RevealTopOfLibrary { .. }
     )
 }
 
@@ -1282,6 +1302,26 @@ fn fmt_phase(p: &Phase) -> &'static str {
     }
 }
 
+fn skip_step_phrase(step: Phase) -> Option<&'static str> {
+    match step {
+        Phase::Untap => Some("untap step"),
+        Phase::Upkeep => Some("upkeep step"),
+        Phase::Draw => Some("draw step"),
+        _ => None,
+    }
+}
+
+fn oracle_line_matches_skip_step(effective_lower: &str, step: Phase) -> bool {
+    let Some(step_phrase) = skip_step_phrase(step) else {
+        return false;
+    };
+
+    let result: nom::IResult<&str, ()> =
+        all_consuming(value((), (tag("skip your "), tag(step_phrase), tag("."))))
+            .parse(effective_lower);
+    result.is_ok()
+}
+
 fn fmt_double_pt_mode(mode: &DoublePTMode) -> &'static str {
     match mode {
         DoublePTMode::Power => "power",
@@ -1384,9 +1424,16 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("player".into(), fmt_target(player)));
             }
         }
-        Effect::ExileTop { player, count } => {
+        Effect::ExileTop {
+            player,
+            count,
+            face_down,
+        } => {
             d.push(("player".into(), fmt_target(player)));
             d.push(("count".into(), fmt_quantity(count)));
+            if *face_down {
+                d.push(("face_down".into(), "true".into()));
+            }
         }
         Effect::Pump {
             power,
@@ -1441,6 +1488,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             amount: _,
             target,
             player_filter: _,
+            damage_source: _,
         } => {
             if !matches!(target, TargetFilter::None) {
                 d.push(("filter".into(), fmt_target(target)));
@@ -2421,6 +2469,24 @@ fn keyword_label(kw: &Keyword) -> String {
         .unwrap_or_else(|| format!("{kw:?}"))
 }
 
+fn keyword_supported(kw: &Keyword) -> bool {
+    match kw {
+        Keyword::Unknown(_) => false,
+        Keyword::CumulativeUpkeep(cost) => cost.supports_cumulative_upkeep_payment(),
+        _ => true,
+    }
+}
+
+fn keyword_gap_label(kw: &Keyword) -> Option<String> {
+    match kw {
+        Keyword::Unknown(s) => Some(format!("Keyword:{s}")),
+        Keyword::CumulativeUpkeep(cost) if !cost.supports_cumulative_upkeep_payment() => {
+            Some("Keyword:CumulativeUpkeepUnsupportedCost".to_string())
+        }
+        _ => None,
+    }
+}
+
 /// Build a hierarchical parse tree from a `CardFace`, checking each item against
 /// the engine's trigger and static registries for support status.
 pub fn build_parse_details(
@@ -2436,7 +2502,7 @@ pub fn build_parse_details(
             category: ParseCategory::Keyword,
             label: keyword_label(kw),
             source_text: None,
-            supported: !matches!(kw, Keyword::Unknown(_)),
+            supported: keyword_supported(kw),
             details: vec![],
             children: vec![],
         });
@@ -3574,8 +3640,7 @@ fn check_triggers(
 
 fn check_keywords(keywords: &[Keyword], missing: &mut Vec<String>) {
     for kw in keywords {
-        if let Keyword::Unknown(s) = kw {
-            let label = format!("Keyword:{}", s);
+        if let Some(label) = keyword_gap_label(kw) {
             if !missing.contains(&label) {
                 missing.push(label);
             }
@@ -6265,6 +6330,10 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 effective_lower.contains("as though those creatures had haste")
                     || effective_lower.contains("as though that creature had haste")
             }
+            // CR 614.1b + CR 614.10: "Skip your [step] step" is a
+            // step-specific replacement effect, so coverage must match the
+            // parsed `Phase` rather than any syntactically similar skip line.
+            StaticMode::SkipStep { step } => oracle_line_matches_skip_step(&effective_lower, *step),
             _ => false,
         });
 
@@ -6398,7 +6467,14 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 effective_lower.contains("token") && effective_lower.contains("instead")
             }
             ReplacementEvent::AddCounter => {
-                effective_lower.contains("counter") && effective_lower.contains("instead")
+                (effective_lower.contains("counter") && effective_lower.contains("instead"))
+                    // CR 614.6 + CR 122.1: counter-prohibition replacements
+                    // (Melira's Keepers class — "can't have counters put on it")
+                    // are CR 614.6 "event never happens" replacements, not
+                    // "X instead Y" rewrites, so they don't match the
+                    // "counter ... instead" surface above.
+                    || (effective_lower.contains("can't have")
+                        && effective_lower.contains("counter"))
             }
             ReplacementEvent::ProduceMana => {
                 effective_lower.contains("tapped for mana") && effective_lower.contains("instead")
@@ -7788,6 +7864,7 @@ mod tests {
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::replacements::ReplacementEvent;
+    use crate::types::statics::{BlockExceptionKind, ProhibitionScope};
     use crate::types::zones::Zone;
 
     fn make_obj() -> GameObject {
@@ -8913,6 +8990,48 @@ mod tests {
             .any(|gap| gap == "Replacement:Unrecognized(you revealed a Dragon card)"));
     }
 
+    #[test]
+    fn unsupported_cumulative_upkeep_cost_counts_as_keyword_gap() {
+        let mut face = make_face();
+        face.keywords
+            .push(Keyword::CumulativeUpkeep(AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: None,
+                random: false,
+                self_ref: false,
+            }));
+
+        let gaps = card_face_gaps(&face);
+        assert!(gaps
+            .iter()
+            .any(|gap| gap == "Keyword:CumulativeUpkeepUnsupportedCost"));
+
+        let parse_details = build_parse_details_for_face(&face);
+        let keyword = parse_details
+            .iter()
+            .find(|item| item.category == ParseCategory::Keyword)
+            .expect("keyword parse item");
+        assert!(!keyword.supported);
+    }
+
+    #[test]
+    fn supported_cumulative_upkeep_cost_has_no_keyword_gap() {
+        let mut face = make_face();
+        face.keywords
+            .push(Keyword::CumulativeUpkeep(AbilityCost::Mana {
+                cost: ManaCost::generic(1),
+            }));
+
+        assert!(card_face_gaps(&face).is_empty());
+
+        let parse_details = build_parse_details_for_face(&face);
+        let keyword = parse_details
+            .iter()
+            .find(|item| item.category == ParseCategory::Keyword)
+            .expect("keyword parse item");
+        assert!(keyword.supported);
+    }
+
     /// Regression: cards with a concrete `AdditionalCost` + one spell ability
     /// (e.g. Vicious Rivalry, Fix What's Broken) produce exactly one Oracle
     /// line for the "As an additional cost..." preamble. That line must be
@@ -9133,6 +9252,136 @@ mod tests {
             support,
             FeatureSupport::Handled,
             "StaticCondition::UnlessPay is resolved by combat-tax payment handling",
+        );
+    }
+
+    /// CR 614.1b + CR 614.10: `SkipStep { step: Draw }` must be recognised by
+    /// `is_data_carrying_static` so that cards like Necropotence and
+    /// Yawgmoth's Bargain are marked as supported.
+    #[test]
+    fn skip_draw_step_static_has_no_coverage_gap() {
+        let mut face = make_face();
+        let oracle = "Skip your draw step.";
+        face.oracle_text = Some(oracle.to_string());
+        face.static_abilities.push(StaticDefinition {
+            mode: StaticMode::SkipStep { step: Phase::Draw },
+            affected: Some(TargetFilter::SelfRef),
+            modifications: vec![],
+            condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            active_zones: vec![],
+            characteristic_defining: false,
+            description: Some("Skip your draw step.".to_string()),
+        });
+
+        assert!(
+            card_face_gaps(&face).is_empty(),
+            "'Skip your draw step.' should be covered by SkipStep(Draw) static"
+        );
+    }
+
+    /// Regression: `SkipStep { step: Untap }` must not cover a draw-step line.
+    #[test]
+    fn skip_step_static_must_match_parsed_phase() {
+        assert!(
+            !oracle_line_matches_skip_step("skip your draw step.", Phase::Untap),
+            "'Skip your draw step.' must not be covered by SkipStep(Untap)"
+        );
+    }
+
+    /// CR 121.6: `CantDraw { who: AllPlayers }` must be recognised by
+    /// `is_data_carrying_static` so that cards like Maralen of the Mornsong
+    /// and Omen Machine are marked as supported.
+    #[test]
+    fn cant_draw_all_players_static_does_not_count_as_silent_drop() {
+        let mut face = make_face();
+        let oracle = "Players can't draw cards.";
+        face.oracle_text = Some(oracle.to_string());
+        face.static_abilities.push(StaticDefinition {
+            mode: StaticMode::CantDraw {
+                who: ProhibitionScope::AllPlayers,
+            },
+            affected: Some(TargetFilter::SelfRef),
+            modifications: vec![],
+            condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            active_zones: vec![],
+            characteristic_defining: false,
+            description: Some("Players can't draw cards.".to_string()),
+        });
+
+        let gaps = card_face_gaps(&face);
+        assert!(
+            gaps.is_empty(),
+            "'Players can't draw cards.' should be fully supported by CantDraw(all_players), but got gaps: {:?}",
+            gaps
+        );
+    }
+
+    /// Regression: `CantDraw { who: Controller }` must also be recognised.
+    #[test]
+    fn cant_draw_controller_static_does_not_count_as_silent_drop() {
+        let mut face = make_face();
+        let oracle = "You can't draw cards.";
+        face.oracle_text = Some(oracle.to_string());
+        face.static_abilities.push(StaticDefinition {
+            mode: StaticMode::CantDraw {
+                who: ProhibitionScope::Controller,
+            },
+            affected: Some(TargetFilter::SelfRef),
+            modifications: vec![],
+            condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            active_zones: vec![],
+            characteristic_defining: false,
+            description: Some("You can't draw cards.".to_string()),
+        });
+
+        let gaps = card_face_gaps(&face);
+        assert!(
+            gaps.is_empty(),
+            "'You can't draw cards.' should be fully supported by CantDraw(controller), but got gaps: {:?}",
+            gaps
+        );
+    }
+
+    /// CR 509.1b: `CantBeBlockedExceptBy` carries the blocking exception kind
+    /// and is enforced by the combat restriction handler rather than exact
+    /// registry-key lookup.
+    #[test]
+    fn cant_be_blocked_except_by_statics_have_no_coverage_gap() {
+        let mut face = make_face();
+        for (kind, description) in [
+            (
+                BlockExceptionKind::Quality(TargetFilter::Typed(TypedFilter::default())),
+                "This creature can't be blocked except by creatures with flying.",
+            ),
+            (
+                BlockExceptionKind::MinBlockers { min: 2 },
+                "This creature can't be blocked except by two or more creatures.",
+            ),
+        ] {
+            face.static_abilities.push(StaticDefinition {
+                mode: StaticMode::CantBeBlockedExceptBy { kind },
+                affected: Some(TargetFilter::SelfRef),
+                modifications: vec![],
+                condition: None,
+                affected_zone: None,
+                effect_zone: None,
+                active_zones: vec![],
+                characteristic_defining: false,
+                description: Some(description.to_string()),
+            });
+        }
+
+        let gaps = card_face_gaps(&face);
+        assert!(
+            gaps.is_empty(),
+            "CantBeBlockedExceptBy variants should be fully supported, but got gaps: {:?}",
+            gaps
         );
     }
 }

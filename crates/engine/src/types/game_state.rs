@@ -1988,6 +1988,19 @@ pub enum WaitingFor {
         /// Human-readable description for the frontend.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effect_description: Option<String>,
+        /// CR 702.24a + CR 118.12: Remaining disjunctive choice queues, one
+        /// entry per remaining `OneOf` sub-cost in a `Composite`-of-`OneOf`s
+        /// expansion. Used to drive sequential per-counter choices for
+        /// cumulative-upkeep-style "each choice is made separately for each
+        /// age counter" prompts. Empty for single-choice unless-payments.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        remaining_choices: Vec<Vec<AbilityCost>>,
+        /// CR 702.24a + CR 118.12: Picks accumulated from prior prompts in the
+        /// sequence; combined into a final `Composite` cost when
+        /// `remaining_choices` is exhausted. Empty for single-choice
+        /// unless-payments.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        chosen: Vec<AbilityCost>,
     },
     /// CR 702.21a: Player must choose a card to discard as ward cost payment.
     WardDiscardChoice {

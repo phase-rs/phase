@@ -579,9 +579,12 @@ pub enum Keyword {
     /// CR 702.41a: Affinity for [type] — this spell costs {1} less for each [type] you control.
     Affinity(TypedFilter),
 
-    /// CR 702.24a: Cumulative upkeep — triggered ability that imposes an increasing cost.
-    /// The cost string contains the per-age-counter cost (mana, life payment, sacrifice, etc.).
-    CumulativeUpkeep(String),
+    /// CR 702.24a: cost paid per age counter on this permanent at the
+    /// start of the controller's upkeep, or sacrifice. The typed
+    /// `AbilityCost` lets the synthesis pipeline wire the
+    /// cumulative-upkeep trigger uniformly across mana / life /
+    /// sacrifice / disjunctive cost shapes.
+    CumulativeUpkeep(AbilityCost),
 
     // Simple keywords (no params)
     Banding,
@@ -1673,7 +1676,9 @@ impl FromStr for Keyword {
             "firebending" => Ok(Keyword::Firebending(QuantityExpr::Fixed { value: 1 })),
             "bloodthirst" => Ok(Keyword::Bloodthirst(BloodthirstValue::Fixed(1))),
             "hideaway" => Ok(Keyword::Hideaway(4)),
-            "cumulative" => Ok(Keyword::CumulativeUpkeep(String::new())),
+            "cumulative" => Ok(Keyword::CumulativeUpkeep(AbilityCost::Mana {
+                cost: ManaCost::zero(),
+            })),
             "ripple" => Ok(Keyword::Ripple),
             "totem" => Ok(Keyword::Totem),
             // Unit keywords added for MTGJSON keyword name recognition
@@ -1891,10 +1896,30 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Dethrone" => Ok(Keyword::Dethrone),
         "DoubleTeam" => Ok(Keyword::DoubleTeam),
         "LivingMetal" => Ok(Keyword::LivingMetal),
-        "Cumulative" => Ok(Keyword::CumulativeUpkeep(String::new())),
-        "CumulativeUpkeep" => Ok(Keyword::CumulativeUpkeep(
-            data.as_str().unwrap_or("").to_string(),
-        )),
+        // CR 702.24a: Legacy serialized data had `Keyword::CumulativeUpkeep`
+        // carry a raw `String` cost (e.g. "{1}"). Task 3 changed the field
+        // to a typed `AbilityCost`, but parsing the legacy string requires
+        // the Oracle parser, which doesn't live in this deserialization
+        // path. Card-data.json is regenerated from MTGJSON+Oracle text by
+        // the pipeline (`./scripts/gen-card-data.sh`), so the practical
+        // fix is to re-run that pipeline rather than recover legacy data
+        // here. The zero-cost sentinel is a well-formed placeholder until
+        // the pipeline rebuilds the typed cost.
+        "Cumulative" => Ok(Keyword::CumulativeUpkeep(AbilityCost::Mana {
+            cost: ManaCost::zero(),
+        })),
+        // CR 702.24a: Legacy serialized data had `Keyword::CumulativeUpkeep`
+        // carry a raw `String` cost (e.g. "{1}"). Task 3 changed the field
+        // to a typed `AbilityCost`, but parsing the legacy string requires
+        // the Oracle parser, which doesn't live in this deserialization
+        // path. Card-data.json is regenerated from MTGJSON+Oracle text by
+        // the pipeline (`./scripts/gen-card-data.sh`), so the practical
+        // fix is to re-run that pipeline rather than recover legacy data
+        // here. The zero-cost sentinel is a well-formed placeholder until
+        // the pipeline rebuilds the typed cost.
+        "CumulativeUpkeep" => Ok(Keyword::CumulativeUpkeep(AbilityCost::Mana {
+            cost: ManaCost::zero(),
+        })),
         "Ripple" => Ok(Keyword::Ripple),
         "Totem" => Ok(Keyword::Totem),
         // Parameterized: ManaCost (new keywords)
@@ -2610,7 +2635,9 @@ mod tests {
         assert_eq!(Keyword::from_str("Hideaway").unwrap(), Keyword::Hideaway(4));
         assert_eq!(
             Keyword::from_str("Cumulative").unwrap(),
-            Keyword::CumulativeUpkeep(String::new())
+            Keyword::CumulativeUpkeep(AbilityCost::Mana {
+                cost: ManaCost::zero()
+            })
         );
         assert_eq!(Keyword::from_str("Ripple").unwrap(), Keyword::Ripple);
         assert_eq!(Keyword::from_str("Totem").unwrap(), Keyword::Totem);

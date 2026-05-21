@@ -3085,13 +3085,15 @@ fn try_parse_that_many_counters(lower: &str, ctx: &mut ParseContext) -> Option<E
     let (rest, _) = tag::<_, _, OracleError<'_>>("put that many ")
         .parse(lower)
         .ok()?;
-    // Next word(s) are counter type: "+1/+1", "charge", "loyalty", etc.
-    let type_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
-    let raw_type = &rest[..type_end];
-    let counter_type = super::counter::normalize_counter_type(raw_type);
+    // Counter type (e.g. "+1/+1", "charge", "loyalty", "double strike").
+    // CR 122.1 + CR 122.1b: route through the shared `parse_counter_type_typed`
+    // combinator so multi-word keyword counter names ("first strike", "double
+    // strike") canonicalize to `CounterType::Keyword(...)` instead of being
+    // truncated at the first whitespace.
+    let (after_type, counter_type) = nom_primitives::parse_counter_type_typed(rest).ok()?;
 
     // Skip "counter" or "counters" keyword
-    let after_type = rest[type_end..].trim_start();
+    let after_type = after_type.trim_start();
     let after_counter = alt((tag::<_, _, OracleError<'_>>("counters"), tag("counter")))
         .parse(after_type)
         .map(|(r, _)| r)
@@ -3809,6 +3811,12 @@ pub(super) fn parse_exile_ast(
             ("cards of each player's library", TargetFilter::Player),
         ] {
             if let Ok((after_lib, _)) = tag::<_, _, OracleError<'_>>(pattern).parse(remainder) {
+                // CR 406.3: Detect the "face down" suffix Oracle text uses to
+                // mark hidden-information exiles (Necropotence / Bomat Courier
+                // / Asmodeus the Archfiend / Knowledge Vault class). The
+                // resolver propagates this to the moved object's `face_down`
+                // flag so `visibility.rs` redacts the card for non-owners.
+                let (after_lib, face_down) = strip_exile_top_face_down(after_lib);
                 // CR 107.3i: Optional ", where x is <quantity expr>" suffix
                 // overrides the leading `Variable { "X" }` binding with the
                 // dynamic quantity expression. Mirrors the
@@ -3817,7 +3825,11 @@ pub(super) fn parse_exile_ast(
                 // (it's an ETB-triggered ability, not a cast), and the count
                 // would default to 0 at resolution time.
                 let count = resolve_exile_top_where_x_binding(after_lib, initial_count);
-                return Some(ZoneCounterImperativeAst::ExileTop { player, count });
+                return Some(ZoneCounterImperativeAst::ExileTop {
+                    player,
+                    count,
+                    face_down,
+                });
             }
         }
     }
@@ -3971,6 +3983,28 @@ fn that_player_library_filter(ctx: &ParseContext) -> TargetFilter {
         Some(TargetFilter::Player) => TargetFilter::TriggeringPlayer,
         _ => TargetFilter::ParentTarget,
     }
+}
+
+/// CR 406.3: Strip a trailing "face down" suffix from the remainder of an
+/// `exile the top ... library` body. Returns `(remaining_text, face_down)`.
+/// The Oracle text places "face down" immediately after the library clause
+/// and before any subsequent dynamic-count or follow-on phrase (Necropotence,
+/// Bomat Courier, Asmodeus the Archfiend, Knowledge Vault). Matching at this
+/// boundary keeps the downstream `where x is` and "those cards" lowering
+/// paths untouched.
+fn strip_exile_top_face_down(after_lib: &str) -> (&str, bool) {
+    let trimmed = after_lib.trim_start();
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("face down").parse(trimmed) {
+        // Word-boundary check after the nom tag accepted: clause
+        // terminators (EOF, '.', ',') or a separator (' ') keep us from
+        // bleeding into a larger identifier. Not a parser dispatch — the
+        // dispatch was the `tag` above; this is post-tag validation.
+        match rest.chars().next() {
+            None | Some('.') | Some(',') | Some(' ') => return (rest, true),
+            _ => {}
+        }
+    }
+    (after_lib, false)
 }
 
 /// CR 107.3i: Resolve a `", where x is <quantity expr>"` suffix that follows an
@@ -4343,12 +4377,14 @@ pub(super) fn parse_cost_resource_ast(
                 amount,
                 target,
                 player_filter: None,
+                damage_source: None,
             } => Some(CostResourceImperativeAst::Damage {
                 amount,
                 target,
                 all: true,
             }),
-            // DealDamage with damage_source, DamageEachPlayer, etc. — pass through directly
+            // DealDamage with damage_source, DamageEachPlayer, DamageAll with
+            // a non-default damage_source/player_filter — pass through directly.
             other => Some(CostResourceImperativeAst::DamageEffect(Box::new(other))),
         };
     }
@@ -4384,6 +4420,7 @@ pub(super) fn lower_cost_resource_ast(ast: CostResourceImperativeAst) -> Effect 
                     amount,
                     target,
                     player_filter: None,
+                    damage_source: None,
                 }
             } else {
                 Effect::DealDamage {
@@ -4799,7 +4836,7 @@ pub(super) fn parse_imperative_family_ast(
         .ok()
         .map(|(_, ast)| ast),
         // CR 500.7: "take an extra turn after this one"
-        // CR 725: "take the initiative"
+        // CR 726.1: "take the initiative"
         "take" | "takes" => {
             if alt((
                 value((), tag::<_, _, OracleError<'_>>("take the initiative")),
@@ -5814,7 +5851,15 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                 }
             }
         }
-        ZoneCounterImperativeAst::ExileTop { player, count } => Effect::ExileTop { player, count },
+        ZoneCounterImperativeAst::ExileTop {
+            player,
+            count,
+            face_down,
+        } => Effect::ExileTop {
+            player,
+            count,
+            face_down,
+        },
         ZoneCounterImperativeAst::Counter {
             target,
             source_static,
@@ -8544,5 +8589,43 @@ mod tests {
             try_parse_gain_quoted_ability("gain flying until end of turn").is_none(),
             "no quote marks → not a quoted-ability candidate"
         );
+    }
+
+    /// CR 122.1b: "put that many <keyword> counter(s) on <target>" must
+    /// canonicalize multi-word keyword counter names ("double strike", "first
+    /// strike") to `CounterType::Keyword(...)`. The previous
+    /// `.find(whitespace)` slicing truncated at the first space, mapping
+    /// "double strike" → `CounterType::Generic("double")`.
+    #[test]
+    fn that_many_counters_multi_word_keyword() {
+        use crate::types::counter::CounterType;
+        use crate::types::keywords::KeywordKind;
+        let mut ctx = ParseContext::default();
+        let effect =
+            try_parse_that_many_counters("put that many double strike counters on it", &mut ctx)
+                .expect("clause should parse");
+        match effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                ..
+            } => {
+                assert_eq!(
+                    counter_type,
+                    CounterType::Keyword(KeywordKind::DoubleStrike),
+                    "multi-word keyword counter must canonicalize to Keyword(DoubleStrike)"
+                );
+                assert!(
+                    matches!(
+                        count,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::EventContextAmount
+                        }
+                    ),
+                    "'that many' must resolve to event-context amount, got {count:?}"
+                );
+            }
+            other => panic!("expected Effect::PutCounter, got {other:?}"),
+        }
     }
 }

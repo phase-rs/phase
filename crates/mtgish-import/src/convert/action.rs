@@ -340,6 +340,11 @@ fn rewrite_bound_x_in_ability_cost(cost: &mut AbilityCost, binding: &QuantityExp
             .iter_mut()
             .map(|cost| rewrite_bound_x_in_ability_cost(cost, binding))
             .sum(),
+        // CR 702.24a: The wrapper itself carries no quantity, but its base
+        // cost may carry an X-bound `QuantityExpr` (e.g. mana / life / discard
+        // amounts). Recurse into the base so the bound-X rewrite walks the
+        // full cost tree.
+        AbilityCost::PerCounter { base, .. } => rewrite_bound_x_in_ability_cost(base, binding),
         AbilityCost::Mana { .. }
         | AbilityCost::Tap
         | AbilityCost::Untap
@@ -3308,6 +3313,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         Action::ExileTopCardOfLibrary => Effect::ExileTop {
             player: TargetFilter::Controller,
             count: QuantityExpr::Fixed { value: 1 },
+            face_down: false,
         },
 
         // CR 701.13 + CR 400.7: "Exile the top N cards of your library." Same
@@ -3316,6 +3322,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         Action::ExileTheTopNumberCardsOfLibrary(n) => Effect::ExileTop {
             player: TargetFilter::Controller,
             count: quantity::convert(n)?,
+            face_down: false,
         },
 
         // CR 701.20a: "Reveal the top card of your library." Maps onto
@@ -5199,9 +5206,12 @@ fn apply_player_target(effect: Effect, target_filter: TargetFilter) -> ConvResul
         },
         // CR 701.10 + CR 115.2: "Target player exiles the top N cards
         // of their library."
-        Effect::ExileTop { count, .. } => Effect::ExileTop {
+        Effect::ExileTop {
+            count, face_down, ..
+        } => Effect::ExileTop {
             player: target_filter,
             count,
+            face_down,
         },
         // CR 111.10 + CR 115.2: "Target player creates a [token]." The
         // `Effect::Token.owner` slot is already a `TargetFilter` —

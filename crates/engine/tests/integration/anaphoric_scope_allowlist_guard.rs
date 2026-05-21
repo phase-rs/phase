@@ -92,14 +92,12 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "bartz and boko",
     "be'lakor, the dark master",
     "beastie beatdown",
-    "betrayal at the vault",
     "blood poet",
     "bottle golems",
     "boulderbranch golem",
     "brainstealer dragon",
     "champion of the path",
     "champion of wits",
-    "chandra's ignition",
     "chastise",
     "circus of the sun",
     "common black removal",
@@ -208,7 +206,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "sorin, grim nemesis",
     "south wind avatar",
     "spinal embrace",
-    "spinning wheel kick",
     "spoils of the hunt",
     "stalking vengeance",
     "steadfast armasaur",
@@ -236,7 +233,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "vein drinker",
     "vivien's invocation",
     "vraska's stoneglare",
-    "waltz of rage",
     "warstorm surge",
     "willow geist",
     "wolverine riders",
@@ -300,15 +296,17 @@ fn anaphoric_scope_set_is_frozen() {
     // both this and ANAPHORIC_SCOPE_CARDS shrink together.
     assert_eq!(
         observed.len(),
-        160,
-        "Expected exactly 160 cards retaining ObjectScope::Anaphoric (the #495 \
-         behavior-neutral floor); count moved to {}.",
+        156,
+        "Expected exactly 156 cards retaining ObjectScope::Anaphoric (the #495 \
+         behavior-neutral floor, minus four cards unlocked by #607's target-subject \
+         DamageAll source wrapper: Betrayal at the Vault, Chandra's Ignition, \
+         Spinning Wheel Kick, Waltz of Rage); count moved to {}.",
         observed.len()
     );
     assert_eq!(
         ANAPHORIC_SCOPE_CARDS.len(),
-        160,
-        "ANAPHORIC_SCOPE_CARDS must list exactly 160 cards."
+        156,
+        "ANAPHORIC_SCOPE_CARDS must list exactly 156 cards."
     );
 }
 

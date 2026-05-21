@@ -674,6 +674,25 @@ fn starts_with_until_duration(line: &str) -> bool {
     .is_some()
 }
 
+fn ends_with_quoted_activated_ability(line: &str) -> bool {
+    let trimmed = line.trim_end();
+    if !matches!(trimmed.chars().next_back(), Some('"')) {
+        return false;
+    }
+
+    let mut quote_positions = trimmed
+        .char_indices()
+        .filter_map(|(idx, ch)| (ch == '"').then_some(idx))
+        .rev();
+    let Some(close_quote) = quote_positions.next() else {
+        return false;
+    };
+    let Some(open_quote) = quote_positions.next() else {
+        return false;
+    };
+    find_activated_colon(&trimmed[open_quote + 1..close_quote]).is_some()
+}
+
 fn is_standalone_spell_keyword_action_line(line: &str) -> bool {
     let lower = line.to_lowercase();
     let parsed = all_consuming(value(
@@ -2484,6 +2503,7 @@ pub(crate) fn parse_oracle_ir(
 
                 if next_prepared.has_ability_word_prefix
                     || starts_with_until_duration(&next_prepared.effect_text)
+                    || ends_with_quoted_activated_ability(&prepared_line.effect_text)
                     || is_self_exile_cleanup_line(&next_prepared.effect_text, card_name)
                     || is_standalone_spell_keyword_action_line(&prepared_line.effect_text)
                     || !is_spell_resolution_instruction_line(
@@ -5657,6 +5677,55 @@ mod tests {
     }
 
     #[test]
+    fn quoted_spell_grant_does_not_absorb_next_line_delayed_trigger() {
+        let r = parse(
+            "Until end of turn, target creature gains haste and \"{0}: Untap this creature. Activate only once.\"\nDraw a card at the beginning of the next turn's upkeep.",
+            "Touch of Vitae",
+            &[],
+            &["Instant"],
+            &[],
+        );
+
+        assert!(
+            r.parse_warnings
+                .iter()
+                .all(|warning| !matches!(warning, OracleDiagnostic::CascadeLoss { .. })),
+            "unexpected cascade-loss warning: {:?}",
+            r.parse_warnings
+        );
+        assert_eq!(r.abilities.len(), 2);
+
+        let first = &r.abilities[0];
+        assert_eq!(
+            first.duration,
+            Some(crate::types::ability::Duration::UntilEndOfTurn)
+        );
+        let Effect::GenericEffect {
+            static_abilities,
+            target,
+            ..
+        } = &*first.effect
+        else {
+            panic!("expected immediate GenericEffect, got {:?}", first.effect);
+        };
+        assert!(matches!(target, Some(TargetFilter::Typed(_))));
+        assert!(static_abilities.iter().any(|static_def| {
+            static_def.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::GrantAbility { definition }
+                        if matches!(&*definition.effect, Effect::Untap { .. })
+                )
+            })
+        }));
+
+        assert!(matches!(
+            *r.abilities[1].effect,
+            Effect::CreateDelayedTrigger { .. }
+        ));
+    }
+
+    #[test]
     fn activated_as_sorcery_constraint_sets_sorcery_speed() {
         let r = parse(
             "{2}{W}, Sacrifice this artifact: Target creature you control gets +2/+2 and gains flying until end of turn. Draw a card. Activate only as a sorcery.",
@@ -8005,7 +8074,7 @@ mod tests {
                             },
                     }),
                 ..
-            } => assert_eq!(*ct, CounterType::Generic("age".to_string())),
+            } => assert_eq!(*ct, CounterType::Age),
             other => panic!("expected PreventDamage with dynamic age counters, got {other:?}"),
         }
         assert!(
@@ -8771,7 +8840,7 @@ mod tests {
 
     #[test]
     fn parse_cumulative_upkeep_mana_cost() {
-        // CR 702.24: Mana-only cumulative upkeep — space-separated format.
+        // CR 702.24a: Mana-only cumulative upkeep — space-separated format.
         let r = parse(
             "Cumulative upkeep {1} (At the beginning of your upkeep, put an age counter on this permanent, then sacrifice it unless you pay its upkeep cost for each age counter on it.)",
             "Mystic Remora",
@@ -8785,14 +8854,19 @@ mod tests {
             .find(|k| matches!(k, Keyword::CumulativeUpkeep(_)));
         assert!(cu_kw.is_some(), "CumulativeUpkeep keyword not extracted");
         match cu_kw.unwrap() {
-            Keyword::CumulativeUpkeep(cost) => assert_eq!(cost, "{1}"),
-            _ => unreachable!(),
+            Keyword::CumulativeUpkeep(AbilityCost::Mana {
+                cost: ManaCost::Cost { generic, shards },
+            }) => {
+                assert_eq!(*generic, 1);
+                assert!(shards.is_empty());
+            }
+            other => panic!("expected Mana({{1}}), got {other:?}"),
         }
     }
 
     #[test]
     fn parse_cumulative_upkeep_life_payment() {
-        // CR 702.24: Non-mana cost with em-dash separator.
+        // CR 702.24a: Non-mana cost with em-dash separator.
         let r = parse(
             "Cumulative upkeep\u{2014}Pay 2 life. (At the beginning of your upkeep, put an age counter on this permanent, then sacrifice it unless you pay its upkeep cost for each age counter on it.)",
             "Inner Sanctum",
@@ -8806,14 +8880,16 @@ mod tests {
             .find(|k| matches!(k, Keyword::CumulativeUpkeep(_)));
         assert!(cu_kw.is_some(), "CumulativeUpkeep keyword not extracted");
         match cu_kw.unwrap() {
-            Keyword::CumulativeUpkeep(cost) => assert_eq!(cost, "Pay 2 life"),
-            _ => unreachable!(),
+            Keyword::CumulativeUpkeep(AbilityCost::PayLife { amount }) => {
+                assert_eq!(*amount, QuantityExpr::Fixed { value: 2 });
+            }
+            other => panic!("expected PayLife(2), got {other:?}"),
         }
     }
 
     #[test]
     fn parse_cumulative_upkeep_sacrifice() {
-        // CR 702.24: Sacrifice cost.
+        // CR 702.24a: Sacrifice cost.
         let r = parse(
             "Cumulative upkeep\u{2014}Sacrifice a land. (At the beginning of your upkeep, put an age counter on this permanent, then sacrifice it unless you pay its upkeep cost for each age counter on it.)",
             "Polar Kraken",
@@ -8827,14 +8903,21 @@ mod tests {
             .find(|k| matches!(k, Keyword::CumulativeUpkeep(_)));
         assert!(cu_kw.is_some(), "CumulativeUpkeep keyword not extracted");
         match cu_kw.unwrap() {
-            Keyword::CumulativeUpkeep(cost) => assert_eq!(cost, "Sacrifice a land"),
-            _ => unreachable!(),
+            Keyword::CumulativeUpkeep(AbilityCost::Sacrifice { target, count }) => {
+                assert_eq!(*count, 1);
+                // Target should be a typed filter (Land subtype filter).
+                assert!(
+                    matches!(target, TargetFilter::Typed(_)),
+                    "expected Typed Land filter, got {target:?}"
+                );
+            }
+            other => panic!("expected Sacrifice(Land, 1), got {other:?}"),
         }
     }
 
     #[test]
     fn parse_cumulative_upkeep_or_mana() {
-        // CR 702.24: "{G} or {W}" — alternative mana cost.
+        // CR 702.24a: "{G} or {W}" — disjunctive (alternative) mana cost.
         let r = parse(
             "Cumulative upkeep {G} or {W} (At the beginning of your upkeep, put an age counter on this permanent, then sacrifice it unless you pay its upkeep cost for each age counter on it.)",
             "Elephant Grass",
@@ -8848,9 +8931,70 @@ mod tests {
             .find(|k| matches!(k, Keyword::CumulativeUpkeep(_)));
         assert!(cu_kw.is_some(), "CumulativeUpkeep keyword not extracted");
         match cu_kw.unwrap() {
-            Keyword::CumulativeUpkeep(cost) => assert_eq!(cost, "{G} or {W}"),
-            _ => unreachable!(),
+            Keyword::CumulativeUpkeep(AbilityCost::OneOf { costs }) => {
+                assert_eq!(costs.len(), 2);
+                for c in costs {
+                    assert!(
+                        matches!(c, AbilityCost::Mana { .. }),
+                        "expected each branch to be Mana, got {c:?}"
+                    );
+                }
+            }
+            other => panic!("expected OneOf with 2 Mana costs, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_two_cumulative_upkeep_instances_both_extracted() {
+        // CR 702.24b: A permanent can have multiple cumulative upkeep
+        // abilities. Each must surface as its own Keyword entry, AND each
+        // must carry its own typed cost so the synthesis pipeline produces
+        // independent triggers (not two copies of one cost).
+        let r = parse(
+            "Cumulative upkeep {1}\nCumulative upkeep\u{2014}Pay 1 life.",
+            "Test Two-Instance Permanent",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+        let cu_kws: Vec<_> = r
+            .extracted_keywords
+            .iter()
+            .filter(|k| matches!(k, Keyword::CumulativeUpkeep(_)))
+            .collect();
+        assert_eq!(
+            cu_kws.len(),
+            2,
+            "expected two CumulativeUpkeep keywords, got {cu_kws:?}"
+        );
+
+        // Order-independent check: one must be Mana{generic:1}, the other
+        // PayLife{Fixed:1}. A regression to zero-cost sentinels would fail
+        // both predicates.
+        let has_mana_one = cu_kws.iter().any(|k| {
+            matches!(
+                k,
+                Keyword::CumulativeUpkeep(AbilityCost::Mana {
+                    cost: ManaCost::Cost { generic: 1, shards },
+                }) if shards.is_empty()
+            )
+        });
+        let has_pay_life_one = cu_kws.iter().any(|k| {
+            matches!(
+                k,
+                Keyword::CumulativeUpkeep(AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                })
+            )
+        });
+        assert!(
+            has_mana_one,
+            "expected one CumulativeUpkeep(Mana({{1}})), got {cu_kws:?}"
+        );
+        assert!(
+            has_pay_life_one,
+            "expected one CumulativeUpkeep(PayLife(1)), got {cu_kws:?}"
+        );
     }
 
     #[test]
@@ -10146,6 +10290,74 @@ mod tests {
         );
     }
 
+    // CR 305.1 + CR 602.1 + CR 611.1 + CR 611.2c + CR 701.21a:
+    // Pardic Miner — "Sacrifice this creature: Target player can't play lands
+    // this turn." The activated ability resolves to a `GenericEffect` carrying
+    // a `CantPlayLand` static with a `TargetFilter::Player` target slot and
+    // `Duration::UntilEndOfTurn`. At resolution the runtime registers a
+    // transient continuous effect bound to `SpecificPlayer { id }` (the chosen
+    // target), and `player_has_static_other(state, target, "CantPlayLand")`
+    // returns true through the new TCE scan in `check_static_other_by_name`.
+    //
+    // This is the class of "target player can't [verb] this turn" effects —
+    // proves the parser routes the player-scoped restriction through
+    // `parse_restriction_modes` and emits the canonical `GenericEffect` shape.
+    #[test]
+    fn activated_target_player_cant_play_lands_pardic_miner() {
+        use crate::types::statics::StaticMode;
+        let r = parse(
+            "Sacrifice this creature: Target player can't play lands this turn.",
+            "Pardic Miner",
+            &[],
+            &["Creature"],
+            &["Dwarf"],
+        );
+        assert_eq!(
+            r.abilities.len(),
+            1,
+            "Pardic Miner has exactly one activated ability"
+        );
+        let ab = &r.abilities[0];
+        assert_eq!(ab.kind, AbilityKind::Activated);
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } = &*ab.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", ab.effect);
+        };
+        assert_eq!(
+            *duration,
+            Some(crate::types::ability::Duration::UntilEndOfTurn),
+            "duration must be UntilEndOfTurn for 'this turn'"
+        );
+        assert_eq!(
+            target.as_ref(),
+            Some(&TargetFilter::Player),
+            "target slot must be TargetFilter::Player for 'Target player'"
+        );
+        assert_eq!(static_abilities.len(), 1, "single CantPlayLand static");
+        let def = &static_abilities[0];
+        assert_eq!(
+            def.mode,
+            StaticMode::Other("CantPlayLand".to_string()),
+            "mode must be CantPlayLand"
+        );
+        // CR 305.1 + CR 611.2c: AddStaticMode is required so the TCE carries
+        // the mode into runtime queries (player_has_static_other). Without it
+        // the transient effect has empty modifications and the prohibition
+        // never reaches the play-land gate.
+        assert!(
+            def.modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddStaticMode { mode: StaticMode::Other(name) } if name == "CantPlayLand"
+            )),
+            "modifications must include AddStaticMode {{ Other(\"CantPlayLand\") }}, got {:?}",
+            def.modifications
+        );
+    }
+
     #[test]
     fn spell_restriction_then_damage_skullcrack() {
         // Skullcrack: "Players can't gain life this turn. Damage can't be prevented this turn.
@@ -10294,7 +10506,10 @@ mod tests {
         assert!(matches!(
             *r.abilities[1].effect,
             Effect::AddRestriction {
-                restriction: crate::types::ability::GameRestriction::CastOnlyFromZones { .. }
+                restriction: crate::types::ability::GameRestriction::ProhibitActivity {
+                    activity: crate::types::ability::ProhibitedActivity::CastOnlyFromZones { .. },
+                    ..
+                }
             }
         ));
         assert_eq!(
@@ -11045,10 +11260,9 @@ mod tests {
         // Standalone exert line produces no output (trigger is separate)
         assert!(r.abilities.is_empty());
         assert_eq!(r.triggers.len(), 1);
-        assert_eq!(
-            r.triggers[0].mode,
-            TriggerMode::Unknown("Whenever you exert a creature".to_string())
-        );
+        assert_eq!(r.triggers[0].mode, TriggerMode::Exerted);
+        assert_eq!(r.triggers[0].valid_target, Some(TargetFilter::Controller));
+        assert!(r.triggers[0].valid_card.is_some());
     }
 
     #[test]
@@ -12059,6 +12273,7 @@ mod tests {
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::EventContextAmount
                 },
+                face_down: false,
             }
         ));
     }
