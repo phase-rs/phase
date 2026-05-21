@@ -3518,6 +3518,109 @@ mod tests {
     }
 
     #[test]
+    fn match_changes_zone_clause_origin_one_of_excluding_graveyard_and_exile() {
+        use crate::types::ability::{OriginConstraint, ZoneChangeClause};
+
+        let state = setup();
+        let mut trigger = make_trigger(TriggerMode::ChangesZone);
+        // CR 603.6a + CR 603.2: "Name Sticker" Goblin's "enters from anywhere
+        // other than a graveyard or exile" is modeled with the existing
+        // positive source-zone set over every concrete zone except Graveyard
+        // and Exile. `from = None` (token creation, CR 111.1) still rejects.
+        trigger.zone_change_clauses = vec![ZoneChangeClause {
+            origin: OriginConstraint::OneOf(vec![
+                Zone::Library,
+                Zone::Hand,
+                Zone::Battlefield,
+                Zone::Stack,
+                Zone::Command,
+            ]),
+            destination: Some(Zone::Battlefield),
+            valid_card: None,
+        }];
+
+        // Hand → Battlefield: Hand is in the allowed set, must match.
+        let from_hand = zone_changed_event(
+            ObjectId(5),
+            Zone::Hand,
+            Zone::Battlefield,
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(match_changes_zone(
+            &from_hand,
+            &trigger,
+            ObjectId(1),
+            &state
+        ));
+
+        // Library → Battlefield: Library is in the allowed set, must match.
+        let from_library = zone_changed_event(
+            ObjectId(6),
+            Zone::Library,
+            Zone::Battlefield,
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(match_changes_zone(
+            &from_library,
+            &trigger,
+            ObjectId(1),
+            &state
+        ));
+
+        // Graveyard → Battlefield: Graveyard is not in the allowed set, must NOT match.
+        let from_graveyard = zone_changed_event(
+            ObjectId(7),
+            Zone::Graveyard,
+            Zone::Battlefield,
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(!match_changes_zone(
+            &from_graveyard,
+            &trigger,
+            ObjectId(1),
+            &state
+        ));
+
+        // Exile → Battlefield: Exile is not in the allowed set, must NOT match.
+        let from_exile = zone_changed_event(
+            ObjectId(8),
+            Zone::Exile,
+            Zone::Battlefield,
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(!match_changes_zone(
+            &from_exile,
+            &trigger,
+            ObjectId(1),
+            &state
+        ));
+
+        // None → Battlefield: token created directly on the battlefield
+        // (CR 111.1). `OriginConstraint::OneOf` only matches concrete
+        // `Some(zone)` origins, so it rejects `None`.
+        let from_none = GameEvent::ZoneChanged {
+            object_id: ObjectId(9),
+            from: None,
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                ObjectId(9),
+                None,
+                Zone::Battlefield,
+            )),
+        };
+        assert!(!match_changes_zone(
+            &from_none,
+            &trigger,
+            ObjectId(1),
+            &state
+        ));
+    }
+
+    #[test]
     fn nontoken_artifact_etb_trigger_rejects_created_artifact_tokens() {
         let mut state = setup();
         let source_id = create_object(
