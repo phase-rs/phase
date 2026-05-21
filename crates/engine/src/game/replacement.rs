@@ -910,6 +910,11 @@ fn gain_life_applier(
                 QuantityModification::Double => amount.saturating_mul(2),
                 QuantityModification::Plus { value } => amount.saturating_add(value),
                 QuantityModification::Minus { value } => amount.saturating_sub(value),
+                // CR 614.6 + CR 614.7: No life-gain replacement uses Prevent
+                // today (Tainted Remedy converts gain → loss via execute chain),
+                // but the variant composes here for symmetry — fully suppress
+                // the gain event.
+                QuantityModification::Prevent => return ApplyResult::Prevented,
             };
             return ApplyResult::Modified(ProposedEvent::LifeGain {
                 player_id,
@@ -1104,6 +1109,11 @@ fn add_counter_applier(
             QuantityModification::Double => count.saturating_mul(2),
             QuantityModification::Plus { value } => count.saturating_add(value),
             QuantityModification::Minus { value } => count.saturating_sub(value),
+            // CR 614.6 + CR 614.7 + CR 122.1: "~ can't have counters put on it."
+            // — the proposed counter-placement event never happens
+            // (Melira's Keepers class). The replacement fires, but its outcome
+            // is to fully suppress the event rather than scale the count.
+            QuantityModification::Prevent => return ApplyResult::Prevented,
         };
         ApplyResult::Modified(ProposedEvent::AddCounter {
             actor,
@@ -1202,6 +1212,12 @@ fn create_token_applier(
             Some(QuantityModification::Double) => count.saturating_mul(2),
             Some(QuantityModification::Plus { value }) => count.saturating_add(value),
             Some(QuantityModification::Minus { value }) => count.saturating_sub(value),
+            // CR 614.6 + CR 614.7 + CR 111.1: No printed token-creation
+            // replacement uses Prevent today, but the variant composes here for
+            // symmetry — fully suppress the token-creation event so any future
+            // "tokens can't be created" replacement slots in without re-touching
+            // this applier.
+            Some(QuantityModification::Prevent) => return ApplyResult::Prevented,
             None => count,
         };
 
