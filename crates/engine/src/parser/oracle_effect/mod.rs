@@ -13889,6 +13889,16 @@ fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerCondition>) 
                 },
                 tag("at the beginning of your next end step, "),
             ),
+            // CR 505.1 + CR 603.7a: "your next main phase" → PreCombatMain.
+            // PlayerId(0) rewritten to ability.controller at resolve time
+            // in effects::delayed_trigger::resolve.
+            value(
+                DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::PreCombatMain,
+                    player: crate::types::player::PlayerId(0),
+                },
+                tag("at the beginning of your next main phase, "),
+            ),
             // CR 500.8 + CR 603.7a: "at the beginning of that combat" refers to an
             // additional combat phase just scheduled by the parent effect
             // (e.g., Moraug, Fury of Akoum's landfall trigger). The additional
@@ -22354,6 +22364,27 @@ mod tests {
             cond,
             Some(DelayedTriggerCondition::AtNextPhase {
                 phase: Phase::Upkeep
+            })
+        );
+    }
+
+    /// CR 505.1 + CR 603.7a: "At the beginning of your next main phase, …"
+    /// prefix-position form used by Mana Drain. Mirrors the suffix-position
+    /// arm in `strip_temporal_suffix`.
+    #[test]
+    fn strip_temporal_prefix_your_next_main_phase() {
+        let (text, cond) = strip_temporal_prefix(
+            "at the beginning of your next main phase, add an amount of {C} equal to that spell's mana value",
+        );
+        assert_eq!(
+            text,
+            "add an amount of {C} equal to that spell's mana value"
+        );
+        assert_eq!(
+            cond,
+            Some(DelayedTriggerCondition::AtNextPhaseForPlayer {
+                phase: Phase::PreCombatMain,
+                player: crate::types::player::PlayerId(0),
             })
         );
     }
