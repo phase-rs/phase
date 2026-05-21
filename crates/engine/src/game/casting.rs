@@ -6136,7 +6136,12 @@ pub fn pay_ability_cost(
                     "Cannot unattach: source is not attached".to_string(),
                 ));
             }
-            super::effects::attach::unattach(state, source_id);
+            if let Some(old_target) = super::effects::attach::unattach(state, source_id) {
+                events.push(GameEvent::Unattached {
+                    attachment_id: source_id,
+                    old_target,
+                });
+            }
         }
         // CR 606.4: Loyalty abilities use loyalty counter adjustment as their cost.
         // Called after target selection when the ability was initiated interactively.
