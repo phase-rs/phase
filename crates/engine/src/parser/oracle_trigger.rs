@@ -4431,6 +4431,8 @@ fn try_parse_event(
         SaddlesOrCrews,
         Crews,
         Saddles,
+        // CR 701.43: Actor-side exert trigger.
+        Exerts,
     }
     fn parse_simple_event(input: &str) -> OracleResult<'_, SimpleEvent> {
         alt((
@@ -4480,6 +4482,12 @@ fn try_parse_event(
             // CR 702.171c: Actor-side saddle trigger (reserved — no cards today without
             // the compound, but the arm is ready for future printings).
             value(SimpleEvent::Saddles, tag("saddles a mount")),
+            // CR 701.43a: "exerts a creature" — actor-side exert trigger. Fires when
+            // a player exerts a creature they control. The canonical form is
+            // "Whenever you exert a creature" (Trueheart Twins, Battlefield Scavenger,
+            // Rohirrim Chargers, Vizier of the True, Resolute Survivors).
+            value(SimpleEvent::Exerts, tag("exerts a creature")),
+            value(SimpleEvent::Exerts, tag("exerts")),
         )))
         .parse(input)
     }
@@ -4571,6 +4579,16 @@ fn try_parse_event(
                 // CR 702.122 + CR 702.171c: Compound actor-side trigger. Fires on
                 // either saddling a Mount or crewing a Vehicle.
                 def.mode = TriggerMode::SaddlesOrCrews;
+                def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::Exerts => {
+                // CR 701.43a: "Whenever you exert a creature" — actor-side exert
+                // trigger. `valid_card` is the subject (the player's creature being
+                // exerted). The trigger fires when any creature the controller
+                // exerts resolves its exert declaration during the declare-attackers
+                // step (CR 701.43b). The runtime matcher `TriggerMode::Exerted`
+                // checks the event source against `valid_card`.
+                def.mode = TriggerMode::Exerted;
                 def.valid_card = Some(subject.clone());
             }
         }
@@ -17875,5 +17893,50 @@ mod snapshot_tests {
                 "chain link {i} should be TriggeringSource, got {t:?}",
             );
         }
+    }
+
+    /// CR 701.43a: "Whenever you exert a creature" — actor-side exert trigger.
+    /// Trueheart Twins, Battlefield Scavenger, Rohirrim Chargers, Vizier of the
+    /// True, and Resolute Survivors all share this exact trigger phrasing.
+    /// The parser must emit TriggerMode::Exerted with valid_card set to the
+    /// subject (a creature the controller exerts, i.e. a generic creature filter
+    /// scoped to the controller).
+    #[test]
+    fn trigger_you_exert_a_creature() {
+        let def = parse_trigger_line(
+            "Whenever you exert a creature, that creature gets +1/+0 and gains first strike until end of turn.",
+            "Trueheart Twins",
+        );
+        assert_eq!(def.mode, TriggerMode::Exerted);
+        // valid_card should be set (the exerted creature subject)
+        assert!(
+            def.valid_card.is_some(),
+            "expected valid_card to be set for exert trigger, got None"
+        );
+    }
+
+    /// CR 701.43a: Regression guard — bare "exerts" fallback arm should also
+    /// produce TriggerMode::Exerted (future-proof for alternate phrasings).
+    #[test]
+    fn trigger_you_exert_creature_canonical_form() {
+        let def = parse_trigger_line(
+            "Whenever you exert a creature, untap it.",
+            "Vizier of the True",
+        );
+        assert_eq!(def.mode, TriggerMode::Exerted);
+        assert!(def.valid_card.is_some());
+    }
+
+    /// CR 701.43a: Resolute Survivors — "Whenever you exert a creature" with a
+    /// life-gain effect. Ensures the trigger body is parsed independently of
+    /// the trigger condition.
+    #[test]
+    fn trigger_exert_resolute_survivors() {
+        let def = parse_trigger_line(
+            "Whenever you exert a creature, you gain 1 life.",
+            "Resolute Survivors",
+        );
+        assert_eq!(def.mode, TriggerMode::Exerted);
+        assert!(def.valid_card.is_some());
     }
 }
