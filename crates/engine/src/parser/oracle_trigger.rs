@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::one_of;
+use nom::character::complete::{one_of, space1};
 use nom::combinator::{all_consuming, eof, opt, peek, recognize, value};
 use nom::multi::many1;
 use nom::sequence::{delimited, pair, preceded, terminated};
@@ -4422,8 +4422,11 @@ fn try_parse_event(
             value(SimpleEvent::BecomesUntapped, tag("becomes untapped")),
             value(SimpleEvent::BecomesUntapped, tag("untaps")),
             value(SimpleEvent::TurnFaceUp, tag("is turned face up")),
-            // CR 701.37a: "When ~ becomes monstrous" trigger event.
-            value(SimpleEvent::BecomesMonstrous, tag("becomes monstrous")),
+            // CR 701.37b: "When ~ becomes monstrous" trigger event.
+            value(
+                SimpleEvent::BecomesMonstrous,
+                (tag("becomes"), space1, tag("monstrous")),
+            ),
             value(SimpleEvent::Mutates, tag("mutates")),
             // CR 702.110b: "exploits a creature" — exploit trigger
             value(SimpleEvent::ExploitsCreature, tag("exploits a creature")),
