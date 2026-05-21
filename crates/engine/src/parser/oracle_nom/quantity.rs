@@ -415,10 +415,11 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_life_gained_ref,
         parse_starting_life_ref,
         parse_object_mana_value_ref,
-        // CR 117.1 + CR 202.3: cost-paid object's mana value — must precede
-        // `parse_event_context_refs` so the cost-paid resolver wins over the
-        // generic event-source resolver for sacrificed/exiled possessives
-        // (Food Chain, Burnt Offering, Metamorphosis).
+        // CR 608.2k + CR 400.7j + CR 202.3: previously-referenced object's
+        // mana value — must precede `parse_event_context_refs` so the
+        // cost/effect referent resolver wins over the generic event-source
+        // resolver for sacrificed/exiled/milled possessives (Food Chain, Burnt
+        // Offering, Metamorphosis, Heed the Mists).
         parse_cost_paid_object_ref,
         parse_event_context_refs,
     ))
@@ -1331,7 +1332,7 @@ fn parse_object_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     Ok((rest, QuantityRef::ObjectManaValue { scope }))
 }
 
-/// CR 608.2k + CR 202.3: Cost-paid object's mana value.
+/// CR 608.2k + CR 400.7j + CR 202.3: Previously-referenced object's mana value.
 ///
 /// Composes the prefix grammar
 /// `[the] (sacrificed|exiled|discarded|milled) (creature|card|permanent|artifact)'s (mana value|converted mana cost)`
@@ -1345,8 +1346,9 @@ fn parse_object_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 /// Heed the Mists / Mindshrieker ("the milled card's mana value"),
 /// and the broader cost-paid-by-property class.
 ///
-/// CR 701.17a + CR 701.17c: "milled" card refers to the object that moved
-/// from the library to the graveyard; its mana value is read from LKI.
+/// CR 701.17a + CR 701.17c + CR 400.7j: "milled" card refers to the
+/// object that moved from the library to the graveyard; its mana value is read
+/// from that public-zone object or LKI as needed.
 fn parse_cost_paid_object_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = opt(tag("the ")).parse(input)?;
     let (rest, _) = alt((

@@ -2698,9 +2698,9 @@ mod tests {
         assert_eq!(result, None);
     }
 
-    /// CR 701.17a + CR 701.17c: "the milled card's mana value" resolves to
-    /// `ObjectManaValue { CostPaidObject }` — the milled card is the event
-    /// context object whose LKI snapshot provides the mana value.
+    /// CR 701.17a + CR 701.17c + CR 400.7j: "the milled card's mana value"
+    /// resolves to `ObjectManaValue { CostPaidObject }` via the existing
+    /// previously-referenced-object quantity path.
     /// Heed the Mists: "draw cards equal to the milled card's mana value."
     #[test]
     fn event_context_milled_card_mana_value() {

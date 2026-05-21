@@ -24082,13 +24082,14 @@ mod tests {
         ));
     }
 
-    /// CR 701.17a + CR 701.17c + CR 608.2c: "Mill a card, then draw cards equal
-    /// to the milled card's mana value." — Heed the Mists.
+    /// CR 701.17a + CR 701.17c + CR 400.7j + CR 608.2c: "Mill a card, then draw
+    /// cards equal to the milled card's mana value." — Heed the Mists.
     ///
     /// The `Mill` effect must chain (via `sub_ability`) to a `Draw` effect
     /// whose count is `QuantityExpr::Ref { ObjectManaValue { CostPaidObject } }`.
-    /// `CostPaidObject` is correct because the milled card is the event-context
-    /// object whose LKI snapshot is consulted at resolution (CR 608.2h).
+    /// `CostPaidObject` is the existing parser scope for explicit possessive
+    /// prior-object references; at runtime it falls through to the
+    /// instruction-order moved object snapshot when no cost object is present.
     #[test]
     fn mill_then_draw_equal_to_milled_card_mana_value() {
         let def = parse_effect_chain(
