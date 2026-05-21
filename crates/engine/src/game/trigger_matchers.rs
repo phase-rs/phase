@@ -612,8 +612,6 @@ fn zone_change_clause_matches(
         OriginConstraint::Equals(z) => from == &Some(*z),
         OriginConstraint::NotEquals(z) => matches!(from, Some(f) if f != z),
         OriginConstraint::OneOf(zs) => matches!(from, Some(f) if zs.contains(f)),
-        // CR 603.6c: "from anywhere other than <zone-list>" — negated source-zone set.
-        OriginConstraint::NotOneOf(zs) => matches!(from, Some(f) if !zs.contains(f)),
     };
     if !origin_ok {
         return false;
@@ -868,8 +866,6 @@ pub(super) fn match_spell_cast(
                 OriginConstraint::Equals(z) => *z == origin,
                 OriginConstraint::NotEquals(z) => *z != origin,
                 OriginConstraint::OneOf(zs) => zs.contains(&origin),
-                // CR 603.6c: "from anywhere other than <zone-list>" — negated source-zone set.
-                OriginConstraint::NotOneOf(zs) => !zs.contains(&origin),
             };
             if !ok {
                 return false;
@@ -3372,23 +3368,28 @@ mod tests {
     }
 
     #[test]
-    fn match_changes_zone_clause_not_one_of() {
+    fn match_changes_zone_clause_origin_one_of_excluding_graveyard_and_exile() {
         use crate::types::ability::{OriginConstraint, ZoneChangeClause};
 
         let state = setup();
         let mut trigger = make_trigger(TriggerMode::ChangesZone);
         // CR 603.6a + CR 603.2: "Name Sticker" Goblin's "enters from anywhere
-        // other than a graveyard or exile" — list-form negated origin. The
-        // matcher must accept any `from` zone NOT in {Graveyard, Exile} and
-        // reject the two excluded zones plus `from = None` (token creation,
-        // CR 111.1).
+        // other than a graveyard or exile" is modeled with the existing
+        // positive source-zone set over every concrete zone except Graveyard
+        // and Exile. `from = None` (token creation, CR 111.1) still rejects.
         trigger.zone_change_clauses = vec![ZoneChangeClause {
-            origin: OriginConstraint::NotOneOf(vec![Zone::Graveyard, Zone::Exile]),
+            origin: OriginConstraint::OneOf(vec![
+                Zone::Library,
+                Zone::Hand,
+                Zone::Battlefield,
+                Zone::Stack,
+                Zone::Command,
+            ]),
             destination: Some(Zone::Battlefield),
             valid_card: None,
         }];
 
-        // Hand → Battlefield: Hand is not in the exclusion set, must match.
+        // Hand → Battlefield: Hand is in the allowed set, must match.
         let from_hand = zone_changed_event(
             ObjectId(5),
             Zone::Hand,
@@ -3396,9 +3397,14 @@ mod tests {
             Vec::new(),
             Vec::new(),
         );
-        assert!(match_changes_zone(&from_hand, &trigger, ObjectId(1), &state));
+        assert!(match_changes_zone(
+            &from_hand,
+            &trigger,
+            ObjectId(1),
+            &state
+        ));
 
-        // Library → Battlefield: Library is not in the exclusion set, must match.
+        // Library → Battlefield: Library is in the allowed set, must match.
         let from_library = zone_changed_event(
             ObjectId(6),
             Zone::Library,
@@ -3413,7 +3419,7 @@ mod tests {
             &state
         ));
 
-        // Graveyard → Battlefield: Graveyard IS in the exclusion set, must NOT match.
+        // Graveyard → Battlefield: Graveyard is not in the allowed set, must NOT match.
         let from_graveyard = zone_changed_event(
             ObjectId(7),
             Zone::Graveyard,
@@ -3428,7 +3434,7 @@ mod tests {
             &state
         ));
 
-        // Exile → Battlefield: Exile IS in the exclusion set, must NOT match.
+        // Exile → Battlefield: Exile is not in the allowed set, must NOT match.
         let from_exile = zone_changed_event(
             ObjectId(8),
             Zone::Exile,
@@ -3444,8 +3450,8 @@ mod tests {
         ));
 
         // None → Battlefield: token created directly on the battlefield
-        // (CR 111.1). The matcher uses `matches!(from, Some(f) if !zs.contains(f))`,
-        // which rejects `None`.
+        // (CR 111.1). `OriginConstraint::OneOf` only matches concrete
+        // `Some(zone)` origins, so it rejects `None`.
         let from_none = GameEvent::ZoneChanged {
             object_id: ObjectId(9),
             from: None,

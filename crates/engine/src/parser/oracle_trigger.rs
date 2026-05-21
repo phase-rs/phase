@@ -3,7 +3,7 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::one_of;
 use nom::combinator::{all_consuming, eof, opt, peek, recognize, rest, value};
-use nom::multi::many1;
+use nom::multi::{many1, separated_list1};
 use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
 
@@ -4101,7 +4101,7 @@ fn try_parse_event(
         // `from anywhere other than <zone> or <zone>`). When it produces
         // anything richer than `Equals(z)` / `Any`, route the constraint
         // through `zone_change_clauses` so the disjunctive-clause matcher path
-        // (`zone_change_clause_matches`) can enforce `NotEquals` / `NotOneOf`
+        // (`zone_change_clause_matches`) can enforce `NotEquals` / `OneOf`
         // — the scalar `def.origin` path only models a single positive zone.
         // Otherwise fall through to the legacy scalar scan so existing card
         // data (one positive `from <single-zone>` clause) stays byte-identical.
@@ -4112,17 +4112,14 @@ fn try_parse_event(
         let mut scan = after_enter.trim_start();
         let mut matched_clause = false;
         while !scan.is_empty() {
-            if let Ok((_, constraint)) =
-                parse_origin_constraint_tail(scan, parse_cast_origin_zone)
+            if let Ok((_, constraint)) = parse_origin_constraint_tail(scan, parse_cast_origin_zone)
             {
                 match constraint {
                     // Bare "from anywhere" / no "from" clause / single-zone
                     // positive: drop back to the scalar path so the emitted
                     // JSON shape is unchanged for the existing card corpus.
                     OriginConstraint::Any | OriginConstraint::Equals(_) => {}
-                    rich @ (OriginConstraint::NotEquals(_)
-                    | OriginConstraint::OneOf(_)
-                    | OriginConstraint::NotOneOf(_)) => {
+                    rich @ (OriginConstraint::NotEquals(_) | OriginConstraint::OneOf(_)) => {
                         def.zone_change_clauses.push(ZoneChangeClause {
                             origin: rich,
                             destination: Some(Zone::Battlefield),
@@ -7149,47 +7146,53 @@ fn parse_put_into_graveyard_origin(input: &str) -> OracleResult<'_, OriginConstr
     parse_origin_constraint_tail(input, parse_graveyard_origin_zone)
 }
 
+fn origin_zones_except(excluded: &[Zone]) -> Vec<Zone> {
+    [
+        Zone::Library,
+        Zone::Hand,
+        Zone::Battlefield,
+        Zone::Graveyard,
+        Zone::Stack,
+        Zone::Exile,
+        Zone::Command,
+    ]
+    .into_iter()
+    .filter(|zone| !excluded.contains(zone))
+    .collect()
+}
+
 /// Parses an Oxford-comma tolerant enumeration of source zones using the
 /// caller's zone combinator. The separator grammar accepts `", "`, `" or "`,
-/// and `", or "` as a single `alt()` — no string scanning, no permutation
-/// enumeration. This is templated Oracle text grammar, not a CR-specified
-/// construct; the CR anchors live on the callers that interpret the list
-/// (e.g., `parse_origin_constraint_tail`'s "from anywhere other than ..."
-/// negation form). Zone tokens come from `zone_combinator`; a bare `None`
-/// ("anywhere" leaf) inside the list is treated as malformed.
+/// and `", or "` as a single `alt()` consumed by `separated_list1`. This is
+/// templated Oracle text grammar, not a CR-specified construct; the CR anchors
+/// live on the callers that interpret the list. Zone tokens come from
+/// `zone_combinator`; a bare `None` ("anywhere" leaf) inside the list is
+/// treated as malformed.
 fn parse_zone_list<'a, F>(input: &'a str, zone_combinator: &mut F) -> OracleResult<'a, Vec<Zone>>
 where
     F: FnMut(&'a str) -> OracleResult<'a, Option<Zone>>,
 {
-    let (mut rest, first) = zone_combinator(input)?;
-    let Some(first) = first else {
-        return Err(oracle_err(input));
+    let mut zone = |inner| {
+        let (rest, zone) = zone_combinator(inner)?;
+        let Some(zone) = zone else {
+            return Err(oracle_err(inner));
+        };
+        Ok((rest, zone))
     };
-    let mut zones = vec![first];
-    loop {
-        // Oxford-comma tolerant separator grammar — `", or "` MUST precede
-        // `", "` and `" or "` so the longer match wins.
-        let sep_result = alt((
-            value((), tag::<_, _, OracleError<'_>>(", or ")),
-            value((), tag::<_, _, OracleError<'_>>(" or ")),
-            value((), tag::<_, _, OracleError<'_>>(", ")),
-        ))
-        .parse(rest);
-        let Ok((after_sep, ())) = sep_result else {
-            break;
-        };
-        let Ok((after_zone, Some(z))) = zone_combinator(after_sep) else {
-            break;
-        };
-        zones.push(z);
-        rest = after_zone;
+    let separator = alt((
+        value((), tag::<_, _, OracleError<'_>>(", or ")),
+        value((), tag::<_, _, OracleError<'_>>(" or ")),
+        value((), tag::<_, _, OracleError<'_>>(", ")),
+    ));
+    {
+        let mut parser = separated_list1(separator, &mut zone);
+        parser.parse(input)
     }
-    Ok((rest, zones))
 }
 
 /// CR 601.2a + CR 603.6: Parse a "from <zone>" source-zone tail into an
 /// `OriginConstraint`. Handles `from anywhere other than <zone>` (NotEquals),
-/// `from anywhere other than <zone> or <zone>` (NotOneOf), bare `from
+/// `from anywhere other than <zone> or <zone>` (OneOf all non-excluded zones), bare `from
 /// anywhere` (Any), single-zone tails (Equals), and the absent-clause case
 /// (Any).
 ///
@@ -7219,13 +7222,15 @@ where
     // the caller's combinator; the list grammar (Oxford-comma tolerant) is
     // shared across all callers. A single-element list collapses back to
     // `NotEquals(Zone)` so existing card-data snapshots remain byte-identical.
+    // Multi-zone negation reuses `OneOf` with every concrete zone except the
+    // excluded zones to avoid adding a polarity/cardinality sibling variant.
     if let Ok((after_other, ())) =
         value((), tag::<_, _, OracleError<'_>>("anywhere other than ")).parse(after_from)
     {
         if let Ok((rest, zones)) = parse_zone_list(after_other, &mut zone_combinator) {
             let constraint = match zones.len() {
                 1 => OriginConstraint::NotEquals(zones[0]),
-                _ => OriginConstraint::NotOneOf(zones),
+                _ => OriginConstraint::OneOf(origin_zones_except(&zones)),
             };
             return Ok((rest, constraint));
         }
@@ -8155,25 +8160,35 @@ mod tests {
     }
 
     #[test]
-    fn parse_origin_constraint_tail_not_one_of_graveyard_or_exile() {
+    fn parse_origin_constraint_tail_excludes_graveyard_and_exile_with_one_of() {
         // CR 603.6c: "from anywhere other than a graveyard or exile" is the
-        // list-form negation introduced for "Name Sticker" Goblin. The combinator
-        // must produce `NotOneOf(vec![Graveyard, Exile])`, not collapse to
-        // `NotEquals` (which would only negate one zone).
-        let (_rest, constraint) =
-            parse_origin_constraint_tail("from anywhere other than a graveyard or exile", parse_cast_origin_zone)
-                .expect("parse list-form negation");
+        // list-form negation introduced for "Name Sticker" Goblin. The parser
+        // models this with the existing positive `OneOf` set over all concrete
+        // zones except Graveyard and Exile, not a new negated-set variant.
+        let (_rest, constraint) = parse_origin_constraint_tail(
+            "from anywhere other than a graveyard or exile",
+            parse_cast_origin_zone,
+        )
+        .expect("parse list-form negation");
         assert_eq!(
             constraint,
-            OriginConstraint::NotOneOf(vec![Zone::Graveyard, Zone::Exile]),
+            OriginConstraint::OneOf(vec![
+                Zone::Library,
+                Zone::Hand,
+                Zone::Battlefield,
+                Zone::Stack,
+                Zone::Command,
+            ]),
         );
 
         // Single-zone negation must still collapse to `NotEquals` so existing
         // card-data snapshots (Ghostly Pilferer, Syr Konrad clause 2) remain
         // byte-identical.
-        let (_rest, single) =
-            parse_origin_constraint_tail("from anywhere other than their hand", parse_cast_origin_zone)
-                .expect("parse single-zone negation");
+        let (_rest, single) = parse_origin_constraint_tail(
+            "from anywhere other than their hand",
+            parse_cast_origin_zone,
+        )
+        .expect("parse single-zone negation");
         assert_eq!(single, OriginConstraint::NotEquals(Zone::Hand));
     }
 
@@ -8209,7 +8224,7 @@ mod tests {
     // CR 603.6a + CR 603.6c: SelfRef-ETB with a list-form negated origin —
     // "Name Sticker" Goblin. The "from anywhere other than a graveyard or
     // exile" tail must route through `zone_change_clauses` so the disjunctive
-    // matcher can enforce `NotOneOf([Graveyard, Exile])`; the scalar
+    // matcher can enforce the positive non-excluded `OneOf` origin set; the scalar
     // `origin`/`valid_card`/`destination` fields only model a single positive
     // zone and would silently drop the negation otherwise.
     #[test]
@@ -8229,7 +8244,13 @@ mod tests {
         let clause = &def.zone_change_clauses[0];
         assert_eq!(
             clause.origin,
-            OriginConstraint::NotOneOf(vec![Zone::Graveyard, Zone::Exile]),
+            OriginConstraint::OneOf(vec![
+                Zone::Library,
+                Zone::Hand,
+                Zone::Battlefield,
+                Zone::Stack,
+                Zone::Command,
+            ]),
         );
         assert_eq!(clause.destination, Some(Zone::Battlefield));
         assert_eq!(clause.valid_card, Some(TargetFilter::SelfRef));

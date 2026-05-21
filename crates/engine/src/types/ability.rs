@@ -9076,14 +9076,6 @@ pub enum OriginConstraint {
     NotEquals(Zone),
     /// Matches when the source zone is one of these. Subsumes inclusion sets.
     OneOf(Vec<Zone>),
-    /// CR 603.6a + CR 603.2: "from anywhere other than [zone] or [zone]" — the
-    /// negated *set* form of `NotEquals`. Matches when the source zone is
-    /// `Some(z)` and `z` is NOT in this list. Per CR 603.2, the trigger event
-    /// matches when the game state matches the ability's trigger event; this
-    /// variant expresses the disjunctive matching semantics "source zone is
-    /// not in {z1, z2, ...}" as a single negated set. Like `NotEquals`, an
-    /// object with `from = None` (token creation per CR 111.1) does not match.
-    NotOneOf(Vec<Zone>),
 }
 
 impl OriginConstraint {
