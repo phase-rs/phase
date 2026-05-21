@@ -4,8 +4,8 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::char;
-use nom::combinator::{opt, peek, value};
-use nom::sequence::{pair, preceded};
+use nom::combinator::{all_consuming, opt, peek, value};
+use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
 use super::oracle_effect::become_copy_except::parse_except_clause;
@@ -399,6 +399,18 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         if let Some(def) = parse_counter_replacement(&lower, &text) {
             return Some(def);
         }
+    }
+
+    // --- Counter-prohibition replacement: "~ can't have counters put on it." ---
+    // CR 614.6 + CR 614.7 + CR 122.1: A self-targeted counter-placement
+    // prohibition. The proposed `AddCounter` event never happens
+    // (CR 614.6 — "if an event is replaced, it never happens"). Melira's
+    // Keepers class. The Solemnity-class global variant (no player gets
+    // counters anywhere) lifts the SelfRef scope to a wider filter and is
+    // out of scope for this PR — the typed shape (Prevent + valid_card)
+    // composes cleanly for it.
+    if let Some(def) = parse_no_counters_replacement(&norm_lower, &text) {
+        return Some(def);
     }
 
     // --- Damage redirection: "all damage that would be dealt to [target] is dealt to ~ instead" ---
@@ -3752,6 +3764,72 @@ fn extract_replacement_counter_type(lower: &str) -> Option<CounterType> {
     )
         .map(|(_, _, ct, _): (&str, &str, CounterType, &str)| ct);
     combinator.parse(lower).ok().map(|(_rest, ct)| ct)
+}
+
+/// CR 113.6i + CR 614.17 + CR 614.6 + CR 614.7 + CR 122.1: Parse a self-targeted
+/// counter-prohibition replacement effect.
+///
+/// CR 113.6i is the authorizing rule: "An object's ability that states
+/// counters can't be put on that object functions as that object is entering
+/// the battlefield in addition to functioning while that object is on the
+/// battlefield." CR 614.17 is the "can't" effects framework — these aren't
+/// strictly replacement effects, but follow similar rules — which is why we
+/// model the prohibition through the replacement pipeline. CR 614.6/614.7
+/// describe the resulting "event never happens" outcome; CR 122.1 names the
+/// counter-placement event the prohibition suppresses.
+///
+/// Recognizes:
+/// - `~ can't have counters put on it.` (Melira's Keepers — Human Scout)
+/// - `~ can't have counters put on them.` (plural-pronoun variants)
+///
+/// The engine produces a `ReplacementDefinition` keyed on
+/// `ReplacementEvent::AddCounter` with `valid_card: SelfRef` and
+/// `quantity_modification: Some(QuantityModification::Prevent)`, so
+/// `add_counter_applier` short-circuits to `ApplyResult::Prevented` (CR
+/// 614.6: replaced events never happen) and `apply_counter_addition` is
+/// never reached.
+///
+/// `norm_lower` is the lowercased, self-ref-normalized text (i.e. "this
+/// creature" → "~"). `original_text` is the unmodified Oracle line used for
+/// the `description` field.
+///
+/// The combinator is composed end-to-end with nom: a typed `alt` over the
+/// two pronoun variants ("on it" / "on them") gated by the fixed
+/// "~ can't have counters put " prefix, followed by an optional trailing
+/// period. No `find()`/`split_once()`/`contains()` for dispatch — the
+/// classifier-level `scan_contains` only routes the line to this parser;
+/// the parser itself uses nom combinators throughout.
+fn parse_no_counters_replacement(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    use crate::types::ability::QuantityModification;
+
+    // The parser receives normalized text where "this creature" / "this
+    // permanent" etc. have already been replaced by `~` (engine-internal
+    // self-reference convention; CR 201.5 governs the underlying "object
+    // refers to itself by name" semantics). `all_consuming` enforces that
+    // the combinator matches the entire line as a single shape so adjacent
+    // text (e.g., an "as long as ~ is tapped" prefix) is correctly
+    // rejected — those compose via the outer dispatch in
+    // `parse_replacement_line_inner`, not here. `terminated(.., opt(tag(".")))`
+    // absorbs the optional trailing period inside the combinator, keeping
+    // the entire dispatch in idiomatic nom.
+    let mut combinator = all_consuming(terminated(
+        (
+            tag::<_, _, OracleError<'_>>("~ can't have counters put on "),
+            alt((tag("it"), tag("them"))),
+        ),
+        opt(tag(".")),
+    ));
+    combinator.parse(norm_lower.trim()).ok()?;
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .valid_card(TargetFilter::SelfRef)
+            .quantity_modification(QuantityModification::Prevent)
+            .description(original_text.to_string()),
+    )
 }
 
 /// CR 614.1a: Parse damage redirection replacement effects.
@@ -7691,6 +7769,63 @@ mod tests {
                 ..
             })) if type_filters == vec![TypeFilter::Creature]
         ));
+    }
+
+    #[test]
+    fn no_counters_replacement_melira_keepers() {
+        // CR 614.6 + CR 614.7 + CR 122.1: Melira's Keepers — Human Scout that
+        // can't be counter-targeted. The Oracle line is normalized to "~ can't
+        // have counters put on it." before reaching the parser; the resulting
+        // replacement is self-targeted (valid_card: SelfRef) and uses the
+        // `Prevent` quantity-modification variant so the applier returns
+        // ApplyResult::Prevented.
+        use crate::types::ability::QuantityModification;
+        let def = parse_replacement_line(
+            "This creature can't have counters put on it.",
+            "Melira's Keepers",
+        )
+        .expect("Melira's Keepers replacement must parse");
+        assert_eq!(def.event, ReplacementEvent::AddCounter);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Prevent)
+        );
+        // CR 122.1: counter-type-agnostic — applies to every counter type
+        // (loyalty, charge, +1/+1, -1/-1, …).
+        assert_eq!(def.counter_match, None);
+    }
+
+    #[test]
+    fn no_counters_replacement_tilde_form() {
+        // The parser receives self-ref-normalized text. Verify the typed form
+        // ("~ can't have counters put on it.") parses identically — the
+        // upstream normalization step is the single authority for the
+        // "this creature" → "~" rewrite.
+        use crate::types::ability::QuantityModification;
+        let def = parse_replacement_line("~ can't have counters put on it.", "Some Creature")
+            .expect("tilde-form must parse");
+        assert_eq!(def.event, ReplacementEvent::AddCounter);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Prevent)
+        );
+    }
+
+    #[test]
+    fn no_counters_replacement_rejects_non_self_subject() {
+        // CR 614.1a: the parser must NOT match the global "creatures can't
+        // have counters put on them" wording — that is a different (wider)
+        // replacement class (Solemnity-style) which is intentionally out of
+        // scope for this PR. The current scope is strictly self-targeted.
+        // A non-self subject must fall through to the unimplemented path
+        // rather than silently lower into a SelfRef replacement.
+        let def = parse_replacement_line("Creatures can't have counters put on them.", "Test Card");
+        assert!(
+            def.is_none(),
+            "non-self subject must not match the SelfRef-scoped parser"
+        );
     }
 
     #[test]

@@ -10438,7 +10438,10 @@ mod tests {
         assert!(matches!(
             *r.abilities[1].effect,
             Effect::AddRestriction {
-                restriction: crate::types::ability::GameRestriction::CastOnlyFromZones { .. }
+                restriction: crate::types::ability::GameRestriction::ProhibitActivity {
+                    activity: crate::types::ability::ProhibitedActivity::CastOnlyFromZones { .. },
+                    ..
+                }
             }
         ));
         assert_eq!(
@@ -11189,10 +11192,9 @@ mod tests {
         // Standalone exert line produces no output (trigger is separate)
         assert!(r.abilities.is_empty());
         assert_eq!(r.triggers.len(), 1);
-        assert_eq!(
-            r.triggers[0].mode,
-            TriggerMode::Unknown("Whenever you exert a creature".to_string())
-        );
+        assert_eq!(r.triggers[0].mode, TriggerMode::Exerted);
+        assert_eq!(r.triggers[0].valid_target, Some(TargetFilter::Controller));
+        assert!(r.triggers[0].valid_card.is_some());
     }
 
     #[test]

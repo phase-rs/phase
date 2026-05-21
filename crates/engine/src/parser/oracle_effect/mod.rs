@@ -48,10 +48,10 @@ use crate::types::ability::{
     DamageModification, DamageSource, DelayedTriggerCondition, Duration, Effect, FilterProp,
     GainLifePlayer, GameRestriction, ManaProduction, ManaSpendPermission, MultiTargetSpec,
     ObjectProperty, ObjectScope, PaymentCost, PlayerFilter, PlayerScope, PreventionAmount,
-    PreventionScope, PtValue, QuantityExpr, QuantityRef, ReplacementDefinition, RestrictionExpiry,
-    RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition, SubAbilityLink,
-    TargetChoiceTiming, TargetFilter, TargetSelectionMode, TriggerCondition, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition,
+    PreventionScope, ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, ReplacementDefinition,
+    RestrictionExpiry, RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition,
+    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetSelectionMode, TriggerCondition,
+    TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
@@ -61,7 +61,7 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
-use crate::types::statics::{CastFrequency, StaticMode};
+use crate::types::statics::{ActivationExemption, CastFrequency, StaticMode};
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
@@ -1480,11 +1480,13 @@ fn try_parse_cast_only_from_zones_restriction(tp: TextPair<'_>) -> Option<Parsed
 
     Some(ParsedEffectClause {
         effect: Effect::AddRestriction {
-            restriction: GameRestriction::CastOnlyFromZones {
+            restriction: GameRestriction::ProhibitActivity {
                 source: ObjectId(0),
                 affected_players,
-                allowed_zones: vec![Zone::Hand],
                 expiry,
+                activity: ProhibitedActivity::CastOnlyFromZones {
+                    allowed_zones: vec![Zone::Hand],
+                },
             },
         },
         duration,
@@ -1502,38 +1504,183 @@ fn try_parse_cast_only_from_zones_restriction(tp: TextPair<'_>) -> Option<Parsed
 /// Must be called AFTER try_parse_cast_only_from_zones_restriction (which handles the more
 /// specific "can't cast spells from anywhere other than" variant).
 fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
-    // Must contain "can't cast spells" but NOT "can't cast spells from" (that's CastOnlyFromZones).
-    if !nom_primitives::scan_contains(tp.lower, "can't cast spells")
-        && !nom_primitives::scan_contains(tp.lower, "cannot cast spells")
-    {
-        return None;
-    }
-    if nom_primitives::scan_contains(tp.lower, "can't cast spells from")
-        || nom_primitives::scan_contains(tp.lower, "cannot cast spells from")
+    let (scope_tp, expiry, duration) = if let Some(((expiry, duration), rest_orig)) =
+        nom_on_lower(tp.original, tp.lower, |input| {
+            alt((
+                value(
+                    (
+                        RestrictionExpiry::EndOfTurn,
+                        Some(Duration::UntilNextTurnOf {
+                            player: PlayerScope::Controller,
+                        }),
+                    ),
+                    tag("until your next turn, "),
+                ),
+                value(
+                    (RestrictionExpiry::EndOfTurn, Some(Duration::UntilEndOfTurn)),
+                    tag("until end of turn, "),
+                ),
+                value((RestrictionExpiry::EndOfTurn, None), tag("this turn, ")),
+            ))
+            .parse(input)
+        }) {
+        let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
+        (TextPair::new(rest_orig, rest_lower), expiry, duration)
+    } else {
+        (tp, RestrictionExpiry::EndOfTurn, None)
+    };
+
+    let (affected_players, rest_orig) = nom_on_lower(scope_tp.original, scope_tp.lower, |input| {
+        alt((
+            value(
+                RestrictionPlayerScope::OpponentsOfSourceController,
+                tag("your opponents"),
+            ),
+            value(
+                RestrictionPlayerScope::OpponentsOfSourceController,
+                tag("opponents"),
+            ),
+            value(
+                RestrictionPlayerScope::OpponentsOfSourceController,
+                tag("each opponent"),
+            ),
+            value(RestrictionPlayerScope::AllPlayers, tag("players")),
+            value(RestrictionPlayerScope::AllPlayers, tag("each player")),
+            value(RestrictionPlayerScope::TargetedPlayer, tag("target player")),
+            value(
+                RestrictionPlayerScope::ParentTargetedPlayer,
+                tag("that player"),
+            ),
+        ))
+        .parse(input)
+    })?;
+    let rest_lower = &scope_tp.lower[scope_tp.lower.len() - rest_orig.len()..];
+
+    let (spell_filter_text, remaining) = nom_on_lower(rest_orig, rest_lower, |input| {
+        alt((
+            value(None, tag(" can't cast spells")),
+            value(None, tag(" cannot cast spells")),
+            map(
+                preceded(
+                    tag(" can't cast "),
+                    nom::sequence::terminated(take_until(" spells"), tag(" spells")),
+                ),
+                |text: &str| Some(text.to_string()),
+            ),
+            map(
+                preceded(
+                    tag(" cannot cast "),
+                    nom::sequence::terminated(take_until(" spells"), tag(" spells")),
+                ),
+                |text: &str| Some(text.to_string()),
+            ),
+        ))
+        .parse(input)
+    })?;
+    let remaining_lower = &rest_lower[rest_lower.len() - remaining.len()..];
+
+    if tag::<_, _, OracleError<'_>>(" from")
+        .parse(remaining_lower)
+        .is_ok()
     {
         return None;
     }
 
-    // Determine affected player scope from subject prefix.
-    let affected_players = if alt((
-        tag::<_, _, OracleError<'_>>("your opponents"),
-        tag("opponents"),
-        tag("each opponent"),
-    ))
-    .parse(tp.lower)
-    .is_ok()
-    {
-        RestrictionPlayerScope::OpponentsOfSourceController
-    } else {
-        RestrictionPlayerScope::AllPlayers
+    let spell_filter = match spell_filter_text {
+        None => None,
+        Some(text) => {
+            let (filter, rem) = parse_type_phrase(text.trim());
+            if !rem.trim().is_empty() || matches!(filter, TargetFilter::Any) {
+                return None;
+            }
+            Some(filter)
+        }
     };
 
     Some(ParsedEffectClause {
         effect: Effect::AddRestriction {
-            restriction: GameRestriction::CantCastSpells {
+            restriction: GameRestriction::ProhibitActivity {
+                source: ObjectId(0),
+                affected_players,
+                expiry,
+                activity: ProhibitedActivity::CastSpells { spell_filter },
+            },
+        },
+        duration,
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
+fn try_parse_cant_activate_non_mana_abilities_effect(
+    tp: TextPair<'_>,
+) -> Option<ParsedEffectClause> {
+    let (affected_players, rest_orig) = nom_on_lower(tp.original, tp.lower, |input| {
+        alt((
+            value(
+                RestrictionPlayerScope::OpponentsOfSourceController,
+                tag("your opponents"),
+            ),
+            value(
+                RestrictionPlayerScope::OpponentsOfSourceController,
+                tag("opponents"),
+            ),
+            value(
+                RestrictionPlayerScope::OpponentsOfSourceController,
+                tag("each opponent"),
+            ),
+            value(RestrictionPlayerScope::AllPlayers, tag("players")),
+            value(RestrictionPlayerScope::AllPlayers, tag("each player")),
+            value(RestrictionPlayerScope::TargetedPlayer, tag("target player")),
+            value(
+                RestrictionPlayerScope::ParentTargetedPlayer,
+                tag("that player"),
+            ),
+        ))
+        .parse(input)
+    })?;
+    let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
+
+    let (_, remaining) = nom_on_lower(rest_orig, rest_lower, |input| {
+        alt((
+            value(
+                (),
+                tag(" can't activate abilities that aren't mana abilities"),
+            ),
+            value(
+                (),
+                tag(" cannot activate abilities that aren't mana abilities"),
+            ),
+            value(
+                (),
+                tag(" can't activate abilities that are not mana abilities"),
+            ),
+            value(
+                (),
+                tag(" cannot activate abilities that are not mana abilities"),
+            ),
+        ))
+        .parse(input)
+    })?;
+
+    let remaining_lower = &rest_lower[rest_lower.len() - remaining.len()..];
+    if !remaining_lower.trim().is_empty() {
+        return None;
+    }
+
+    Some(ParsedEffectClause {
+        effect: Effect::AddRestriction {
+            restriction: GameRestriction::ProhibitActivity {
                 source: ObjectId(0),
                 affected_players,
                 expiry: RestrictionExpiry::EndOfTurn,
+                activity: ProhibitedActivity::ActivateAbilities {
+                    exemption: ActivationExemption::ManaAbilities,
+                },
             },
         },
         duration: None,
@@ -3028,6 +3175,10 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // CR 101.2: "Your opponents can't cast spells this turn" — blanket temporary prohibition.
     // Must run AFTER cast_only_from_zones (more specific "from zones" check).
     if let Some(clause) = try_parse_cant_cast_spells_effect(tp) {
+        return clause;
+    }
+
+    if let Some(clause) = try_parse_cant_activate_non_mana_abilities_effect(tp) {
         return clause;
     }
 
@@ -27734,8 +27885,8 @@ mod tests {
         assert!(matches!(
             *def.effect,
             Effect::AddRestriction {
-                restriction: GameRestriction::CastOnlyFromZones {
-                    allowed_zones,
+                restriction: GameRestriction::ProhibitActivity {
+                    activity: ProhibitedActivity::CastOnlyFromZones { allowed_zones },
                     ..
                 }
             } if allowed_zones == vec![Zone::Hand]
@@ -27758,9 +27909,10 @@ mod tests {
         assert!(matches!(
             *def.effect,
             Effect::AddRestriction {
-                restriction: GameRestriction::CantCastSpells {
+                restriction: GameRestriction::ProhibitActivity {
                     affected_players: RestrictionPlayerScope::OpponentsOfSourceController,
                     expiry: RestrictionExpiry::EndOfTurn,
+                    activity: ProhibitedActivity::CastSpells { spell_filter: None },
                     ..
                 }
             }
@@ -27774,13 +27926,52 @@ mod tests {
         assert!(matches!(
             *def.effect,
             Effect::AddRestriction {
-                restriction: GameRestriction::CantCastSpells {
+                restriction: GameRestriction::ProhibitActivity {
                     affected_players: RestrictionPlayerScope::AllPlayers,
                     expiry: RestrictionExpiry::EndOfTurn,
+                    activity: ProhibitedActivity::CastSpells { spell_filter: None },
                     ..
                 }
             }
         ));
+    }
+
+    #[test]
+    fn abeyance_clause_chain_parses_both_restrictions() {
+        let def = parse_effect_chain(
+            "Until end of turn, target player can't cast instant or sorcery spells, and that player can't activate abilities that aren't mana abilities. Draw a card.",
+            AbilityKind::Spell,
+        );
+
+        assert!(matches!(
+            *def.effect,
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::TargetedPlayer,
+                    activity: ProhibitedActivity::CastSpells {
+                        spell_filter: Some(_)
+                    },
+                    ..
+                }
+            }
+        ));
+
+        let sub = def.sub_ability.expect("expected chained restriction");
+        assert!(matches!(
+            *sub.effect,
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::ParentTargetedPlayer,
+                    activity: ProhibitedActivity::ActivateAbilities {
+                        exemption: ActivationExemption::ManaAbilities,
+                    },
+                    ..
+                }
+            }
+        ));
+
+        let draw = sub.sub_ability.expect("expected trailing draw clause");
+        assert!(matches!(*draw.effect, Effect::Draw { .. }));
     }
 
     #[test]
