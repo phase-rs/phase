@@ -114,17 +114,24 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
-    let hidden_foretold_exile_ids: Vec<ObjectId> = filtered
+    // CR 406.3: A card exiled face down can't be examined by any player
+    // except when an instruction allows it. Foretell is the only modeled
+    // face-down-exile look permission today; other face-down exile classes
+    // (Necropotence / Asmodeus by default, Bomat-style look permissions until
+    // their static is modeled) fail closed and redact the card for every
+    // viewer.
+    let hidden_facedown_exile_ids: Vec<ObjectId> = filtered
         .exile
         .iter()
         .copied()
         .filter(|obj_id| {
             state.objects.get(obj_id).is_some_and(|obj| {
-                obj.foretold && obj.face_down && !can_view_private_for_player(obj.owner)
+                let viewer_can_examine = obj.foretold && can_view_private_for_player(obj.owner);
+                obj.face_down && !viewer_can_examine
             })
         })
         .collect();
-    for obj_id in hidden_foretold_exile_ids {
+    for obj_id in hidden_facedown_exile_ids {
         hide_card(&mut filtered, obj_id);
     }
 
@@ -1009,5 +1016,28 @@ mod tests {
         assert!(!opponent_obj.foretold);
         assert!(opponent_obj.face_down);
         assert!(opponent_obj.casting_permissions.is_empty());
+    }
+
+    #[test]
+    fn generic_face_down_exile_card_identity_hidden_from_everyone() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let card_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Necropotence Exile".to_string(),
+            Zone::Exile,
+        );
+        state.objects.get_mut(&card_id).unwrap().face_down = true;
+
+        let owner_view = filter_state_for_viewer(&state, PlayerId(0));
+        let owner_obj = owner_view.objects.get(&card_id).unwrap();
+        assert_eq!(owner_obj.name, "Hidden Card");
+        assert!(owner_obj.face_down);
+
+        let opponent_view = filter_state_for_viewer(&state, PlayerId(1));
+        let opponent_obj = opponent_view.objects.get(&card_id).unwrap();
+        assert_eq!(opponent_obj.name, "Hidden Card");
+        assert!(opponent_obj.face_down);
     }
 }

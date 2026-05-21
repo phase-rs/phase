@@ -25,7 +25,12 @@ pub fn resolve(
     let target_id = resolve_object_filter(state, ability, target_filter, &mut target_slots)
         .ok_or_else(|| EffectError::MissingParam("No target for Attach".to_string()))?;
 
-    attach_to(state, attachment_id, target_id);
+    if let Some(old_target) = attach_to(state, attachment_id, target_id) {
+        events.push(GameEvent::Unattached {
+            attachment_id,
+            old_target,
+        });
+    }
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
@@ -33,6 +38,21 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+pub(crate) fn target_ref_from_attach_target(target: AttachTarget) -> TargetRef {
+    match target {
+        AttachTarget::Object(id) => TargetRef::Object(id),
+        AttachTarget::Player(id) => TargetRef::Player(id),
+    }
+}
+
+fn current_attachment_target(state: &GameState, attachment_id: ObjectId) -> Option<TargetRef> {
+    state
+        .objects
+        .get(&attachment_id)
+        .and_then(|obj| obj.attached_to)
+        .map(target_ref_from_attach_target)
 }
 
 fn resolve_object_filter<'a>(
@@ -70,13 +90,17 @@ fn resolve_object_filter<'a>(
 /// CR 701.3c: Attaching to a different object gives the attachment a new timestamp.
 /// Core attachment logic: attach `attachment_id` to `target_id`.
 /// Handles detaching from a previous target if already attached.
-pub fn attach_to(state: &mut GameState, attachment_id: ObjectId, target_id: ObjectId) {
+pub fn attach_to(
+    state: &mut GameState,
+    attachment_id: ObjectId,
+    target_id: ObjectId,
+) -> Option<TargetRef> {
     // CR 701.3, CR 702.5, CR 702.6: Attachment prohibitions on the target.
     // `CantBeAttached` blocks any attachment (Aura / Equipment / Fortification);
     // `CantBeEnchanted` blocks Auras specifically; `CantBeEquipped` blocks Equipment.
     // A blocked attachment is a silent no-op — no state mutation, no events.
     if crate::game::static_abilities::object_has_static_other(state, target_id, "CantBeAttached") {
-        return;
+        return None;
     }
     let attacher_is_aura = state
         .objects
@@ -93,7 +117,7 @@ pub fn attach_to(state: &mut GameState, attachment_id: ObjectId, target_id: Obje
             "CantBeEnchanted",
         )
     {
-        return;
+        return None;
     }
     if attacher_is_equipment
         && crate::game::static_abilities::object_has_static_other(
@@ -102,8 +126,11 @@ pub fn attach_to(state: &mut GameState, attachment_id: ObjectId, target_id: Obje
             "CantBeEquipped",
         )
     {
-        return;
+        return None;
     }
+
+    let old_target = current_attachment_target(state, attachment_id)
+        .filter(|target| *target != TargetRef::Object(target_id));
 
     // CR 701.3a: Attaching moves attachment onto target.
     // If already attached to something, detach first. We only need to clear an
@@ -134,6 +161,7 @@ pub fn attach_to(state: &mut GameState, attachment_id: ObjectId, target_id: Obje
     }
 
     state.layers_dirty = true;
+    old_target
 }
 
 /// CR 303.4 + CR 702.5: Attach an Aura to a player (Curse cycle, Faith's
@@ -147,7 +175,11 @@ pub fn attach_to(state: &mut GameState, attachment_id: ObjectId, target_id: Obje
 /// caller that has already validated the source (the cast pipeline, the
 /// debug spawn-attached path) sees no change in state, and a buggy caller
 /// that hasn't validated cannot drive the engine into an illegal state.
-pub fn attach_to_player(state: &mut GameState, attachment_id: ObjectId, target_player: PlayerId) {
+pub fn attach_to_player(
+    state: &mut GameState,
+    attachment_id: ObjectId,
+    target_player: PlayerId,
+) -> Option<TargetRef> {
     // CR 301.5: Equipment / Fortification cannot attach to a player.
     // CR 303.4: Only Auras may have a player host. Any non-Aura attachment is
     // silently rejected here so the only paths into a `Player` `attached_to`
@@ -161,8 +193,11 @@ pub fn attach_to_player(state: &mut GameState, attachment_id: ObjectId, target_p
         .get(&attachment_id)
         .is_some_and(|obj| obj.card_types.subtypes.iter().any(|s| s == "Aura"));
     if !is_aura {
-        return;
+        return None;
     }
+
+    let old_target = current_attachment_target(state, attachment_id)
+        .filter(|target| *target != TargetRef::Player(target_player));
 
     // CR 701.3a: If already attached to an object, detach from that object's
     // `attachments` list. Re-attaching to a player has no symmetric cleanup —
@@ -182,28 +217,30 @@ pub fn attach_to_player(state: &mut GameState, attachment_id: ObjectId, target_p
     }
 
     state.layers_dirty = true;
+    old_target
 }
 
 /// CR 701.3d: Move an Equipment away from the object it is equipping while it
 /// remains on the battlefield. This is the single graph update primitive for
 /// explicit unattach costs and effects.
-pub(crate) fn unattach(state: &mut GameState, attachment_id: ObjectId) {
-    let Some(old_target_id) = state
+pub(crate) fn unattach(state: &mut GameState, attachment_id: ObjectId) -> Option<TargetRef> {
+    let old_target = current_attachment_target(state, attachment_id)?;
+    let old_target_id = state
         .objects
         .get(&attachment_id)
         .and_then(|obj| obj.attached_to)
-        .and_then(|target| target.as_object())
-    else {
-        return;
-    };
+        .and_then(|target| target.as_object());
 
-    if let Some(old_target) = state.objects.get_mut(&old_target_id) {
-        old_target.attachments.retain(|&id| id != attachment_id);
+    if let Some(old_target_id) = old_target_id {
+        if let Some(old_target) = state.objects.get_mut(&old_target_id) {
+            old_target.attachments.retain(|&id| id != attachment_id);
+        }
     }
     if let Some(attachment) = state.objects.get_mut(&attachment_id) {
         attachment.attached_to = None;
     }
     state.layers_dirty = true;
+    Some(old_target)
 }
 
 #[cfg(test)]
@@ -382,7 +419,8 @@ mod tests {
         );
 
         // Re-equip to creature B
-        attach_to(&mut state, equipment_id, creature_b);
+        let old_target = attach_to(&mut state, equipment_id, creature_b);
+        assert_eq!(old_target, Some(TargetRef::Object(creature_a)));
 
         // Should be attached to B now
         assert_eq!(
@@ -400,6 +438,35 @@ mod tests {
         assert!(!state
             .objects
             .get(&creature_a)
+            .unwrap()
+            .attachments
+            .contains(&equipment_id));
+    }
+
+    #[test]
+    fn reattach_to_same_creature_returns_no_unattach_target() {
+        let mut state = setup();
+        let equipment_id = spawn_with_subtype(&mut state, "Sword", "Equipment");
+        let creature_id = spawn_creature(&mut state, "Bear");
+
+        assert_eq!(attach_to(&mut state, equipment_id, creature_id), None);
+        assert_eq!(attach_to(&mut state, equipment_id, creature_id), None);
+    }
+
+    #[test]
+    fn unattach_returns_previous_host() {
+        let mut state = setup();
+        let equipment_id = spawn_with_subtype(&mut state, "Sword", "Equipment");
+        let creature_id = spawn_creature(&mut state, "Bear");
+        attach_to(&mut state, equipment_id, creature_id);
+
+        let old_target = unattach(&mut state, equipment_id);
+
+        assert_eq!(old_target, Some(TargetRef::Object(creature_id)));
+        assert_eq!(state.objects.get(&equipment_id).unwrap().attached_to, None);
+        assert!(!state
+            .objects
+            .get(&creature_id)
             .unwrap()
             .attachments
             .contains(&equipment_id));

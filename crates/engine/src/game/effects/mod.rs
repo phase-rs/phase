@@ -1289,7 +1289,7 @@ pub fn is_known_effect(effect: &Effect) -> bool {
 /// what makes compound exile (Suspend Aggression's
 /// "Exile target nonland permanent and the top card of your library ...
 /// for each of those cards") expose both exiled objects to the grant.
-fn next_sub_needs_tracked_set(ability: &ResolvedAbility) -> bool {
+pub(crate) fn next_sub_needs_tracked_set(ability: &ResolvedAbility) -> bool {
     ability
         .sub_ability
         .as_deref()
@@ -7808,6 +7808,7 @@ mod tests {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
+                face_down: false,
             },
             vec![],
             evelyn,
@@ -7886,6 +7887,7 @@ mod tests {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
+                face_down: false,
             },
             vec![],
             source,
@@ -9715,6 +9717,7 @@ mod tests {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                face_down: false,
             },
             vec![],
             ObjectId(100),
