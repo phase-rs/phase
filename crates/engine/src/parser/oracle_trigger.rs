@@ -6518,6 +6518,11 @@ fn try_parse_player_action_trigger(lower: &str) -> Option<(TriggerMode, TriggerD
                 def.mode = TriggerMode::Surveil;
                 return Some((TriggerMode::Surveil, def));
             }
+            // CR 701.59a: Collect evidence — exile cards from your graveyard with total mana value N or more.
+            [PlayerActionKind::CollectEvidence] => {
+                def.mode = TriggerMode::CollectEvidence;
+                return Some((TriggerMode::CollectEvidence, def));
+            }
             _ => {
                 def.mode = TriggerMode::PlayerPerformedAction;
                 def.player_actions = Some(actions.clone());
@@ -6551,6 +6556,8 @@ fn parse_player_action_phrase(text: &str) -> Option<PlayerActionKind> {
         "search your library" | "searches their library" => Some(PlayerActionKind::SearchedLibrary),
         "scry" | "scries" => Some(PlayerActionKind::Scry),
         "surveil" | "surveils" => Some(PlayerActionKind::Surveil),
+        // CR 701.59a: Collect evidence — exile cards from your graveyard with total mana value N or more.
+        "collect evidence" | "collects evidence" => Some(PlayerActionKind::CollectEvidence),
         _ => None,
     }
 }
@@ -12203,6 +12210,18 @@ mod tests {
             "Mirko, Obsessive Theorist",
         );
         assert_eq!(def.mode, TriggerMode::Surveil);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_you_collect_evidence() {
+        // Surveillance Monitor (MKM): "Whenever you collect evidence, create a 1/1 colorless
+        // Thopter artifact creature token with flying."
+        let def = parse_trigger_line(
+            "Whenever you collect evidence, create a 1/1 colorless Thopter artifact creature token with flying.",
+            "Surveillance Monitor",
+        );
+        assert_eq!(def.mode, TriggerMode::CollectEvidence);
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
     }
 
