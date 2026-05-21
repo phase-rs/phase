@@ -14,7 +14,7 @@ use super::oracle_effect::{
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::trigger::{TriggerBody, TriggerIr, TriggerModifiers};
 use super::oracle_nom::condition::parse_inner_condition;
-use super::oracle_nom::error::OracleResult;
+use super::oracle_nom::error::{oracle_err, OracleResult};
 use super::oracle_nom::filter::parse_enters_origin_zone;
 use super::oracle_nom::primitives::{
     self as nom_primitives, scan_contains, scan_preceded, scan_split_at_phrase,
@@ -4095,16 +4095,58 @@ fn try_parse_event(
         // separated upstream by `split_trigger`, so a tail clause like
         // "return that card from your graveyard" cannot poison this scan.)
         //
-        // TODO: extend `parse_enters_origin_zone` to handle "from anywhere",
-        // "from anywhere other than <zone>", and opponent-scoped origins as
-        // those patterns surface in real cards.
+        // CR 603.6a + CR 603.6c: at each word boundary, first try the rich
+        // `parse_origin_constraint_tail` combinator (which recognizes
+        // `from anywhere`, `from anywhere other than <zone>`, and the list-form
+        // `from anywhere other than <zone> or <zone>`). When it produces
+        // anything richer than `Equals(z)` / `Any`, route the constraint
+        // through `zone_change_clauses` so the disjunctive-clause matcher path
+        // (`zone_change_clause_matches`) can enforce `NotEquals` / `NotOneOf`
+        // — the scalar `def.origin` path only models a single positive zone.
+        // Otherwise fall through to the legacy scalar scan so existing card
+        // data (one positive `from <single-zone>` clause) stays byte-identical.
+        // This is the SelfRef-ETB analog of the cast-origin / put-into-graveyard
+        // routing already wired elsewhere in this file ("Name Sticker" Goblin's
+        // "enters from anywhere other than a graveyard or exile" is the
+        // first card to exercise it from the ETB side).
         let mut scan = after_enter.trim_start();
+        let mut matched_clause = false;
         while !scan.is_empty() {
+            if let Ok((_, constraint)) =
+                parse_origin_constraint_tail(scan, parse_cast_origin_zone)
+            {
+                match constraint {
+                    // Bare "from anywhere" / no "from" clause / single-zone
+                    // positive: drop back to the scalar path so the emitted
+                    // JSON shape is unchanged for the existing card corpus.
+                    OriginConstraint::Any | OriginConstraint::Equals(_) => {}
+                    rich @ (OriginConstraint::NotEquals(_)
+                    | OriginConstraint::OneOf(_)
+                    | OriginConstraint::NotOneOf(_)) => {
+                        def.zone_change_clauses.push(ZoneChangeClause {
+                            origin: rich,
+                            destination: Some(Zone::Battlefield),
+                            valid_card: Some(subject.clone()),
+                        });
+                        matched_clause = true;
+                        break;
+                    }
+                }
+            }
             if let Ok((_, origin)) = parse_enters_origin_zone(scan) {
                 def.origin = Some(origin);
                 break;
             }
             scan = scan.find(' ').map_or("", |i| scan[i + 1..].trim_start());
+        }
+        // When a `zone_change_clauses` entry was emitted, the disjunctive
+        // matcher path supersedes the scalar `valid_card` / `destination` /
+        // `origin` fields (see `match_changes_zone` in `game/trigger_matchers.rs`).
+        // Clearing the scalar fields keeps the JSON minimal and prevents the
+        // matcher from double-counting the destination via two routes.
+        if matched_clause {
+            def.valid_card = None;
+            def.destination = None;
         }
 
         // CR 603.6a + CR 110.5b: "enters untapped" / "enters tapped" — conditional
@@ -7078,10 +7120,49 @@ fn parse_put_into_graveyard_origin(input: &str) -> OracleResult<'_, OriginConstr
     parse_origin_constraint_tail(input, parse_graveyard_origin_zone)
 }
 
+/// Parses an Oxford-comma tolerant enumeration of source zones using the
+/// caller's zone combinator. The separator grammar accepts `", "`, `" or "`,
+/// and `", or "` as a single `alt()` — no string scanning, no permutation
+/// enumeration. This is templated Oracle text grammar, not a CR-specified
+/// construct; the CR anchors live on the callers that interpret the list
+/// (e.g., `parse_origin_constraint_tail`'s "from anywhere other than ..."
+/// negation form). Zone tokens come from `zone_combinator`; a bare `None`
+/// ("anywhere" leaf) inside the list is treated as malformed.
+fn parse_zone_list<'a, F>(input: &'a str, zone_combinator: &mut F) -> OracleResult<'a, Vec<Zone>>
+where
+    F: FnMut(&'a str) -> OracleResult<'a, Option<Zone>>,
+{
+    let (mut rest, first) = zone_combinator(input)?;
+    let Some(first) = first else {
+        return Err(oracle_err(input));
+    };
+    let mut zones = vec![first];
+    loop {
+        // Oxford-comma tolerant separator grammar — `", or "` MUST precede
+        // `", "` and `" or "` so the longer match wins.
+        let sep_result = alt((
+            value((), tag::<_, _, OracleError<'_>>(", or ")),
+            value((), tag::<_, _, OracleError<'_>>(" or ")),
+            value((), tag::<_, _, OracleError<'_>>(", ")),
+        ))
+        .parse(rest);
+        let Ok((after_sep, ())) = sep_result else {
+            break;
+        };
+        let Ok((after_zone, Some(z))) = zone_combinator(after_sep) else {
+            break;
+        };
+        zones.push(z);
+        rest = after_zone;
+    }
+    Ok((rest, zones))
+}
+
 /// CR 601.2a + CR 603.6: Parse a "from <zone>" source-zone tail into an
 /// `OriginConstraint`. Handles `from anywhere other than <zone>` (NotEquals),
-/// bare `from anywhere` (Any), single-zone tails (Equals), and the absent-
-/// clause case (Any).
+/// `from anywhere other than <zone> or <zone>` (NotOneOf), bare `from
+/// anywhere` (Any), single-zone tails (Equals), and the absent-clause case
+/// (Any).
 ///
 /// `zone_combinator` returns `Option<Zone>`: `Some(z)` for a constrained zone,
 /// `None` for the bare "anywhere" leaf (so the caller's primitives can decide
@@ -7101,20 +7182,27 @@ where
         return Ok((input, OriginConstraint::Any));
     };
     let after_from = after_from.trim_start();
-    // CR 603.6c + CR 601.2a: "from anywhere other than <zone>" — the
-    // negative-discriminator form (Ghostly Pilferer: "from anywhere other
-    // than their hand"; Syr Konrad clause 2: "from anywhere other than the
-    // battlefield"). The zone token comes from the caller's combinator.
+    // CR 603.6c + CR 601.2a: "from anywhere other than <zone-list>" — the
+    // negative-discriminator form. Single-zone form: Ghostly Pilferer ("from
+    // anywhere other than their hand"), Syr Konrad clause 2 ("from anywhere
+    // other than the battlefield"). List form: "Name Sticker" Goblin ("from
+    // anywhere other than a graveyard or exile"). The zone tokens come from
+    // the caller's combinator; the list grammar (Oxford-comma tolerant) is
+    // shared across all callers. A single-element list collapses back to
+    // `NotEquals(Zone)` so existing card-data snapshots remain byte-identical.
     if let Ok((after_other, ())) =
         value((), tag::<_, _, OracleError<'_>>("anywhere other than ")).parse(after_from)
     {
-        let (rest, zone_opt) = zone_combinator(after_other)?;
-        // `None` from the zone combinator means the inner phrase was a bare
-        // "anywhere" — "from anywhere other than anywhere" is malformed; fall
-        // through to the generic path which will treat the residual as Any.
-        if let Some(zone) = zone_opt {
-            return Ok((rest, OriginConstraint::NotEquals(zone)));
+        if let Ok((rest, zones)) = parse_zone_list(after_other, &mut zone_combinator) {
+            let constraint = match zones.len() {
+                1 => OriginConstraint::NotEquals(zones[0]),
+                _ => OriginConstraint::NotOneOf(zones),
+            };
+            return Ok((rest, constraint));
         }
+        // If the list combinator failed (e.g., bare "anywhere" as the inner
+        // phrase — "from anywhere other than anywhere" is malformed), fall
+        // through to the generic path which will treat the residual as Any.
     }
     // Single-zone tail or bare "anywhere".
     let (rest, zone) = zone_combinator(after_from)?;
@@ -8038,6 +8126,29 @@ mod tests {
     }
 
     #[test]
+    fn parse_origin_constraint_tail_not_one_of_graveyard_or_exile() {
+        // CR 603.6c: "from anywhere other than a graveyard or exile" is the
+        // list-form negation introduced for "Name Sticker" Goblin. The combinator
+        // must produce `NotOneOf(vec![Graveyard, Exile])`, not collapse to
+        // `NotEquals` (which would only negate one zone).
+        let (_rest, constraint) =
+            parse_origin_constraint_tail("from anywhere other than a graveyard or exile", parse_cast_origin_zone)
+                .expect("parse list-form negation");
+        assert_eq!(
+            constraint,
+            OriginConstraint::NotOneOf(vec![Zone::Graveyard, Zone::Exile]),
+        );
+
+        // Single-zone negation must still collapse to `NotEquals` so existing
+        // card-data snapshots (Ghostly Pilferer, Syr Konrad clause 2) remain
+        // byte-identical.
+        let (_rest, single) =
+            parse_origin_constraint_tail("from anywhere other than their hand", parse_cast_origin_zone)
+                .expect("parse single-zone negation");
+        assert_eq!(single, OriginConstraint::NotEquals(Zone::Hand));
+    }
+
+    #[test]
     fn static_condition_to_trigger_condition_source_in_battlefield() {
         // SUB-FIX B regression: the existing SourceInZone mapper must pass
         // Zone::Battlefield through unchanged so the new battlefield condition
@@ -8063,6 +8174,36 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::ChangesZone);
         assert_eq!(def.destination, Some(Zone::Battlefield));
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(def.execute.is_some());
+    }
+
+    // CR 603.6a + CR 603.6c: SelfRef-ETB with a list-form negated origin —
+    // "Name Sticker" Goblin. The "from anywhere other than a graveyard or
+    // exile" tail must route through `zone_change_clauses` so the disjunctive
+    // matcher can enforce `NotOneOf([Graveyard, Exile])`; the scalar
+    // `origin`/`valid_card`/`destination` fields only model a single positive
+    // zone and would silently drop the negation otherwise.
+    #[test]
+    fn trigger_etb_self_from_anywhere_other_than_graveyard_or_exile() {
+        let def = parse_trigger_line(
+            "When this creature enters from anywhere other than a graveyard or exile, \
+             create a Treasure token.",
+            "\"Name Sticker\" Goblin",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        // Scalar discriminator fields cleared — the disjunctive clause path
+        // supersedes them (see `match_changes_zone`).
+        assert_eq!(def.origin, None);
+        assert_eq!(def.destination, None);
+        assert_eq!(def.valid_card, None);
+        assert_eq!(def.zone_change_clauses.len(), 1);
+        let clause = &def.zone_change_clauses[0];
+        assert_eq!(
+            clause.origin,
+            OriginConstraint::NotOneOf(vec![Zone::Graveyard, Zone::Exile]),
+        );
+        assert_eq!(clause.destination, Some(Zone::Battlefield));
+        assert_eq!(clause.valid_card, Some(TargetFilter::SelfRef));
         assert!(def.execute.is_some());
     }
 
