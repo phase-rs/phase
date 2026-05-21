@@ -68,7 +68,7 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // CR 107.4f: PayLifeAsColoredMana carries the `ManaColor` axis
             // (K'rrik = Black; future printings any other color).
             | StaticMode::PayLifeAsColoredMana { .. }
-            // CR 120.6: CantDraw carries `who` (controller vs all_players) —
+            // CR 121.6: CantDraw carries `who` (controller vs all_players) —
             // runtime enforcement is in game/effects/draw.rs::draw_cards.
             | StaticMode::CantDraw { .. }
     )
@@ -9199,7 +9199,7 @@ mod tests {
         );
     }
 
-    /// CR 120.6: `CantDraw { who: AllPlayers }` must be recognised by
+    /// CR 121.6: `CantDraw { who: AllPlayers }` must be recognised by
     /// `is_data_carrying_static` so that cards like Maralen of the Mornsong
     /// and Omen Machine are marked as supported.
     #[test]
@@ -9222,9 +9222,11 @@ mod tests {
             description: Some("Players can't draw cards.".to_string()),
         });
 
+        let gaps = audit_card_lines(oracle, &face);
         assert!(
-            audit_card_lines(oracle, &face).is_empty(),
-            "'Players can\'t draw cards.' should be covered by CantDraw(all_players) static"
+            gaps.is_empty(),
+            "'Players can't draw cards.' should be covered by CantDraw(all_players) static, but got gaps: {:?}",
+            gaps
         );
     }
 
@@ -9249,9 +9251,11 @@ mod tests {
             description: Some("You can't draw cards.".to_string()),
         });
 
+        let gaps = audit_card_lines(oracle, &face);
         assert!(
-            audit_card_lines(oracle, &face).is_empty(),
-            "'You can\'t draw cards.' should be covered by CantDraw(controller) static"
+            gaps.is_empty(),
+            "'You can't draw cards.' should be covered by CantDraw(controller) static, but got gaps: {:?}",
+            gaps
         );
     }
 }
