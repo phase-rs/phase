@@ -14300,6 +14300,7 @@ fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<ParsedEffect
     }
     let _ = counter_word_len; // used above
 
+    let counter_name = counter_type.as_str().into_owned();
     Some(ParsedEffectClause {
         effect: Effect::PutCounter {
             counter_type,
@@ -14308,9 +14309,7 @@ fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<ParsedEffect
         },
         duration: None,
         sub_ability: None,
-        distribute: Some(DistributionUnit::Counters(
-            counter_type.as_str().into_owned(),
-        )),
+        distribute: Some(DistributionUnit::Counters(counter_name)),
         multi_target,
         condition: None,
         optional: false,
