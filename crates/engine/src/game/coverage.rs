@@ -1384,9 +1384,16 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("player".into(), fmt_target(player)));
             }
         }
-        Effect::ExileTop { player, count } => {
+        Effect::ExileTop {
+            player,
+            count,
+            face_down,
+        } => {
             d.push(("player".into(), fmt_target(player)));
             d.push(("count".into(), fmt_quantity(count)));
+            if *face_down {
+                d.push(("face_down".into(), "true".into()));
+            }
         }
         Effect::Pump {
             power,
@@ -6416,7 +6423,14 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 effective_lower.contains("token") && effective_lower.contains("instead")
             }
             ReplacementEvent::AddCounter => {
-                effective_lower.contains("counter") && effective_lower.contains("instead")
+                (effective_lower.contains("counter") && effective_lower.contains("instead"))
+                    // CR 614.6 + CR 122.1: counter-prohibition replacements
+                    // (Melira's Keepers class — "can't have counters put on it")
+                    // are CR 614.6 "event never happens" replacements, not
+                    // "X instead Y" rewrites, so they don't match the
+                    // "counter ... instead" surface above.
+                    || (effective_lower.contains("can't have")
+                        && effective_lower.contains("counter"))
             }
             ReplacementEvent::ProduceMana => {
                 effective_lower.contains("tapped for mana") && effective_lower.contains("instead")

@@ -1633,45 +1633,116 @@ pub(super) fn match_exiled(
 /// Attached: fires when source becomes attached to a permanent.
 pub(super) fn match_attached(
     event: &GameEvent,
-    _trigger: &TriggerDefinition,
+    trigger: &TriggerDefinition,
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
     match event {
         GameEvent::EffectResolved {
-            kind: EffectKind::Attach | EffectKind::AttachAll,
-            ..
-        } => state
-            .objects
-            .get(&source_id)
-            .map(|obj| obj.attached_to.is_some())
-            .unwrap_or(false),
+            kind: EffectKind::Attach | EffectKind::AttachAll | EffectKind::Equip,
+            source_id: event_source_id,
+        } => {
+            if !matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::AttachAll,
+                    ..
+                }
+            ) && *event_source_id != source_id
+            {
+                return false;
+            }
+            if !valid_card_matches(trigger, state, source_id, source_id) {
+                return false;
+            }
+            attached_host_matches(trigger, state, source_id)
+        }
         _ => false,
     }
 }
 
-/// Unattach: fires when attachment is removed from a permanent.
-/// CR 303.4 + CR 301.5: Only fires when the host was an object that left the
-/// battlefield. A player host (Curse cycle) leaves via game-loss, which is a
-/// different SBA path (CR 704.5m for the Aura) — not modeled by this matcher.
+fn attached_host_matches(
+    trigger: &TriggerDefinition,
+    state: &GameState,
+    source_id: ObjectId,
+) -> bool {
+    let Some(host) = state
+        .objects
+        .get(&source_id)
+        .and_then(|obj| obj.attached_to)
+    else {
+        return false;
+    };
+    let Some(filter) = trigger.valid_target.as_ref() else {
+        return true;
+    };
+    match host {
+        crate::game::game_object::AttachTarget::Object(object_id) => {
+            target_filter_matches_object(state, object_id, filter, source_id)
+        }
+        crate::game::game_object::AttachTarget::Player(player_id) => {
+            player_matches_filter(filter, state, player_id, source_id)
+        }
+    }
+}
+
+fn target_ref_matches_filter(
+    target: &TargetRef,
+    filter: &TargetFilter,
+    state: &GameState,
+    source_id: ObjectId,
+) -> bool {
+    match target {
+        TargetRef::Object(object_id) => {
+            target_filter_matches_object(state, *object_id, filter, source_id)
+        }
+        TargetRef::Player(player_id) => player_matches_filter(filter, state, *player_id, source_id),
+    }
+}
+
+fn unattach_target_matches(
+    trigger: &TriggerDefinition,
+    old_target: &TargetRef,
+    state: &GameState,
+    source_id: ObjectId,
+) -> bool {
+    trigger
+        .valid_target
+        .as_ref()
+        .is_none_or(|filter| target_ref_matches_filter(old_target, filter, state, source_id))
+}
+
+/// Unattach: fires when an attachment ceases to be attached.
+/// CR 701.3d covers explicit unattach effects, reattachment to a different
+/// host, and the attached object or host leaving the battlefield.
 pub(super) fn match_unattach(
     event: &GameEvent,
-    _trigger: &TriggerDefinition,
+    trigger: &TriggerDefinition,
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
     match event {
+        GameEvent::Unattached {
+            attachment_id,
+            old_target,
+        } => {
+            *attachment_id == source_id
+                && valid_card_matches(trigger, state, *attachment_id, source_id)
+                && unattach_target_matches(trigger, old_target, state, source_id)
+        }
         GameEvent::ZoneChanged {
             object_id, from, ..
         } if *from == Some(Zone::Battlefield) => {
-            // Check if source was attached to the object that left
-            state
-                .objects
-                .get(&source_id)
-                .and_then(|obj| obj.attached_to)
-                .and_then(|t| t.as_object())
-                .map(|attached| attached == *object_id)
-                .unwrap_or(false)
+            let old_target = TargetRef::Object(*object_id);
+            valid_card_matches(trigger, state, source_id, source_id)
+                && unattach_target_matches(trigger, &old_target, state, source_id)
+                && state
+                    .objects
+                    .get(&source_id)
+                    .and_then(|obj| obj.attached_to)
+                    .and_then(|t| t.as_object())
+                    .map(|attached| attached == *object_id)
+                    .unwrap_or(false)
         }
         _ => false,
     }
@@ -2072,13 +2143,20 @@ pub(super) fn match_excess_damage_all(
 }
 
 /// YouAttack: fires once when a player declares attackers matching the trigger's
-/// player-scope filter.
+/// player-scope filter AND attacker-type filter.
 ///
 /// CR 508.1m + CR 603.2c: If `trigger.valid_target` is set, the matcher resolves
 /// the attacking player (the common controller of the attackers — CR 506.2 / CR
 /// 508.1) and checks it against the filter (e.g. `ControllerRef::Opponent` for
 /// "another player attacks"). With no filter, the legacy "you attack" semantics
 /// apply: fire when any attacker is controlled by the trigger's source controller.
+///
+/// CR 508.1 + CR 506.2: If `trigger.valid_card` is set, the trigger is an
+/// "attack with one or more <TYPE>" form — it fires iff at least one declared
+/// attacker (CR 506.2: controlled by the active player) matches the type filter.
+/// The batch fires the trigger once (CR 603.2c). With no `valid_card`, any
+/// attacker satisfies the type gate (legacy behavior preserved). Both the
+/// player-scope (`valid_target`) and type (`valid_card`) gates must hold.
 pub(super) fn match_you_attack(
     event: &GameEvent,
     trigger: &TriggerDefinition,
@@ -2099,11 +2177,26 @@ pub(super) fn match_you_attack(
     else {
         return false;
     };
-    if trigger.valid_target.is_some() {
+    // CR 603.2c: the player-scope gate (valid_target). No filter ⇒ legacy
+    // "attackers controlled by the trigger's source controller" semantics.
+    let player_ok = if trigger.valid_target.is_some() {
         valid_player_matches(trigger, state, attacking_player, source_id)
     } else {
         let source_controller = state.objects.get(&source_id).map(|o| o.controller);
         Some(attacking_player) == source_controller
+    };
+    if !player_ok {
+        return false;
+    }
+
+    // CR 508.1 + CR 603.2c: the attacker-type gate (valid_card). "Attack with one
+    // or more <TYPE>" fires iff at least one attacker in the batch matches the
+    // type filter. No filter ⇒ any attacker (current behavior preserved).
+    match &trigger.valid_card {
+        None => true,
+        Some(filter) => attacker_ids
+            .iter()
+            .any(|id| target_filter_matches_object(state, *id, filter, source_id)),
     }
 }
 
@@ -2686,6 +2779,237 @@ mod tests {
     /// Helper to create a minimal TriggerDefinition with typed fields.
     fn make_trigger(mode: TriggerMode) -> TriggerDefinition {
         TriggerDefinition::new(mode)
+    }
+
+    #[test]
+    fn attached_trigger_matches_equipped_source_and_host_filter() {
+        let mut state = setup();
+        let equipment = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Inchblade Companion".to_string(),
+            Zone::Battlefield,
+        );
+        let creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state.objects.get_mut(&equipment).unwrap().attached_to = Some(creature.into());
+
+        let mut trigger = make_trigger(TriggerMode::Attached);
+        trigger.valid_card = Some(TargetFilter::SelfRef);
+        trigger.valid_target = Some(TargetFilter::Typed(TypedFilter::creature()));
+        let event = GameEvent::EffectResolved {
+            kind: EffectKind::Equip,
+            source_id: equipment,
+        };
+
+        assert!(match_attached(&event, &trigger, equipment, &state));
+    }
+
+    #[test]
+    fn attached_trigger_rejects_wrong_host_filter() {
+        let mut state = setup();
+        let equipment = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Assimilation Aegis".to_string(),
+            Zone::Battlefield,
+        );
+        let land = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        state.objects.get_mut(&equipment).unwrap().attached_to = Some(land.into());
+
+        let mut trigger = make_trigger(TriggerMode::Attached);
+        trigger.valid_card = Some(TargetFilter::SelfRef);
+        trigger.valid_target = Some(TargetFilter::Typed(TypedFilter::creature()));
+        let event = GameEvent::EffectResolved {
+            kind: EffectKind::Equip,
+            source_id: equipment,
+        };
+
+        assert!(!match_attached(&event, &trigger, equipment, &state));
+    }
+
+    #[test]
+    fn attached_trigger_rejects_unrelated_equip_resolution() {
+        let mut state = setup();
+        let equipment = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Enormous Energy Blade".to_string(),
+            Zone::Battlefield,
+        );
+        let other_equipment = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Other Equipment".to_string(),
+            Zone::Battlefield,
+        );
+        let creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state.objects.get_mut(&equipment).unwrap().attached_to = Some(creature.into());
+
+        let trigger = make_trigger(TriggerMode::Attached);
+        let event = GameEvent::EffectResolved {
+            kind: EffectKind::Equip,
+            source_id: other_equipment,
+        };
+
+        assert!(!match_attached(&event, &trigger, equipment, &state));
+    }
+
+    #[test]
+    fn unattach_trigger_matches_explicit_unattached_event_and_host_filter() {
+        let mut state = setup();
+        let equipment = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bludgeon Brawl".to_string(),
+            Zone::Battlefield,
+        );
+        let creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut trigger = make_trigger(TriggerMode::Unattach);
+        trigger.valid_card = Some(TargetFilter::SelfRef);
+        trigger.valid_target = Some(TargetFilter::Typed(TypedFilter::creature()));
+        let event = GameEvent::Unattached {
+            attachment_id: equipment,
+            old_target: TargetRef::Object(creature),
+        };
+
+        assert!(match_unattach(&event, &trigger, equipment, &state));
+    }
+
+    #[test]
+    fn unattach_trigger_rejects_wrong_old_host_filter() {
+        let mut state = setup();
+        let equipment = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bludgeon Brawl".to_string(),
+            Zone::Battlefield,
+        );
+        let land = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let mut trigger = make_trigger(TriggerMode::Unattach);
+        trigger.valid_card = Some(TargetFilter::SelfRef);
+        trigger.valid_target = Some(TargetFilter::Typed(TypedFilter::creature()));
+        let event = GameEvent::Unattached {
+            attachment_id: equipment,
+            old_target: TargetRef::Object(land),
+        };
+
+        assert!(!match_unattach(&event, &trigger, equipment, &state));
+    }
+
+    #[test]
+    fn unattach_trigger_matches_host_leaving_battlefield() {
+        let mut state = setup();
+        let equipment = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bludgeon Brawl".to_string(),
+            Zone::Battlefield,
+        );
+        let creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state.objects.get_mut(&equipment).unwrap().attached_to = Some(creature.into());
+
+        let mut trigger = make_trigger(TriggerMode::Unattach);
+        trigger.valid_card = Some(TargetFilter::SelfRef);
+        trigger.valid_target = Some(TargetFilter::Typed(TypedFilter::creature()));
+        let event = GameEvent::ZoneChanged {
+            object_id: creature,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                creature,
+                Some(Zone::Battlefield),
+                Zone::Graveyard,
+            )),
+        };
+
+        assert!(match_unattach(&event, &trigger, equipment, &state));
     }
 
     #[test]

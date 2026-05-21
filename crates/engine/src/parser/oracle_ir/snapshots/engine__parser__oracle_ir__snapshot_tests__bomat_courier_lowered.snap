@@ -90,7 +90,8 @@ expression: "&lowered"
           "count": {
             "type": "Fixed",
             "value": 1
-          }
+          },
+          "face_down": true
         },
         "cost": null,
         "sub_ability": null,

@@ -48,10 +48,10 @@ use crate::types::ability::{
     DamageModification, DamageSource, DelayedTriggerCondition, Duration, Effect, FilterProp,
     GainLifePlayer, GameRestriction, ManaProduction, ManaSpendPermission, MultiTargetSpec,
     ObjectProperty, ObjectScope, PaymentCost, PlayerFilter, PlayerScope, PreventionAmount,
-    PreventionScope, PtValue, QuantityExpr, QuantityRef, ReplacementDefinition, RestrictionExpiry,
-    RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition, SubAbilityLink,
-    TargetChoiceTiming, TargetFilter, TargetSelectionMode, TriggerCondition, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition,
+    PreventionScope, ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, ReplacementDefinition,
+    RestrictionExpiry, RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition,
+    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetSelectionMode, TriggerCondition,
+    TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
@@ -61,7 +61,7 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
-use crate::types::statics::{CastFrequency, StaticMode};
+use crate::types::statics::{ActivationExemption, CastFrequency, StaticMode};
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
@@ -1480,11 +1480,13 @@ fn try_parse_cast_only_from_zones_restriction(tp: TextPair<'_>) -> Option<Parsed
 
     Some(ParsedEffectClause {
         effect: Effect::AddRestriction {
-            restriction: GameRestriction::CastOnlyFromZones {
+            restriction: GameRestriction::ProhibitActivity {
                 source: ObjectId(0),
                 affected_players,
-                allowed_zones: vec![Zone::Hand],
                 expiry,
+                activity: ProhibitedActivity::CastOnlyFromZones {
+                    allowed_zones: vec![Zone::Hand],
+                },
             },
         },
         duration,
@@ -1502,38 +1504,183 @@ fn try_parse_cast_only_from_zones_restriction(tp: TextPair<'_>) -> Option<Parsed
 /// Must be called AFTER try_parse_cast_only_from_zones_restriction (which handles the more
 /// specific "can't cast spells from anywhere other than" variant).
 fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
-    // Must contain "can't cast spells" but NOT "can't cast spells from" (that's CastOnlyFromZones).
-    if !nom_primitives::scan_contains(tp.lower, "can't cast spells")
-        && !nom_primitives::scan_contains(tp.lower, "cannot cast spells")
-    {
-        return None;
-    }
-    if nom_primitives::scan_contains(tp.lower, "can't cast spells from")
-        || nom_primitives::scan_contains(tp.lower, "cannot cast spells from")
+    let (scope_tp, expiry, duration) = if let Some(((expiry, duration), rest_orig)) =
+        nom_on_lower(tp.original, tp.lower, |input| {
+            alt((
+                value(
+                    (
+                        RestrictionExpiry::EndOfTurn,
+                        Some(Duration::UntilNextTurnOf {
+                            player: PlayerScope::Controller,
+                        }),
+                    ),
+                    tag("until your next turn, "),
+                ),
+                value(
+                    (RestrictionExpiry::EndOfTurn, Some(Duration::UntilEndOfTurn)),
+                    tag("until end of turn, "),
+                ),
+                value((RestrictionExpiry::EndOfTurn, None), tag("this turn, ")),
+            ))
+            .parse(input)
+        }) {
+        let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
+        (TextPair::new(rest_orig, rest_lower), expiry, duration)
+    } else {
+        (tp, RestrictionExpiry::EndOfTurn, None)
+    };
+
+    let (affected_players, rest_orig) = nom_on_lower(scope_tp.original, scope_tp.lower, |input| {
+        alt((
+            value(
+                RestrictionPlayerScope::OpponentsOfSourceController,
+                tag("your opponents"),
+            ),
+            value(
+                RestrictionPlayerScope::OpponentsOfSourceController,
+                tag("opponents"),
+            ),
+            value(
+                RestrictionPlayerScope::OpponentsOfSourceController,
+                tag("each opponent"),
+            ),
+            value(RestrictionPlayerScope::AllPlayers, tag("players")),
+            value(RestrictionPlayerScope::AllPlayers, tag("each player")),
+            value(RestrictionPlayerScope::TargetedPlayer, tag("target player")),
+            value(
+                RestrictionPlayerScope::ParentTargetedPlayer,
+                tag("that player"),
+            ),
+        ))
+        .parse(input)
+    })?;
+    let rest_lower = &scope_tp.lower[scope_tp.lower.len() - rest_orig.len()..];
+
+    let (spell_filter_text, remaining) = nom_on_lower(rest_orig, rest_lower, |input| {
+        alt((
+            value(None, tag(" can't cast spells")),
+            value(None, tag(" cannot cast spells")),
+            map(
+                preceded(
+                    tag(" can't cast "),
+                    nom::sequence::terminated(take_until(" spells"), tag(" spells")),
+                ),
+                |text: &str| Some(text.to_string()),
+            ),
+            map(
+                preceded(
+                    tag(" cannot cast "),
+                    nom::sequence::terminated(take_until(" spells"), tag(" spells")),
+                ),
+                |text: &str| Some(text.to_string()),
+            ),
+        ))
+        .parse(input)
+    })?;
+    let remaining_lower = &rest_lower[rest_lower.len() - remaining.len()..];
+
+    if tag::<_, _, OracleError<'_>>(" from")
+        .parse(remaining_lower)
+        .is_ok()
     {
         return None;
     }
 
-    // Determine affected player scope from subject prefix.
-    let affected_players = if alt((
-        tag::<_, _, OracleError<'_>>("your opponents"),
-        tag("opponents"),
-        tag("each opponent"),
-    ))
-    .parse(tp.lower)
-    .is_ok()
-    {
-        RestrictionPlayerScope::OpponentsOfSourceController
-    } else {
-        RestrictionPlayerScope::AllPlayers
+    let spell_filter = match spell_filter_text {
+        None => None,
+        Some(text) => {
+            let (filter, rem) = parse_type_phrase(text.trim());
+            if !rem.trim().is_empty() || matches!(filter, TargetFilter::Any) {
+                return None;
+            }
+            Some(filter)
+        }
     };
 
     Some(ParsedEffectClause {
         effect: Effect::AddRestriction {
-            restriction: GameRestriction::CantCastSpells {
+            restriction: GameRestriction::ProhibitActivity {
+                source: ObjectId(0),
+                affected_players,
+                expiry,
+                activity: ProhibitedActivity::CastSpells { spell_filter },
+            },
+        },
+        duration,
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
+fn try_parse_cant_activate_non_mana_abilities_effect(
+    tp: TextPair<'_>,
+) -> Option<ParsedEffectClause> {
+    let (affected_players, rest_orig) = nom_on_lower(tp.original, tp.lower, |input| {
+        alt((
+            value(
+                RestrictionPlayerScope::OpponentsOfSourceController,
+                tag("your opponents"),
+            ),
+            value(
+                RestrictionPlayerScope::OpponentsOfSourceController,
+                tag("opponents"),
+            ),
+            value(
+                RestrictionPlayerScope::OpponentsOfSourceController,
+                tag("each opponent"),
+            ),
+            value(RestrictionPlayerScope::AllPlayers, tag("players")),
+            value(RestrictionPlayerScope::AllPlayers, tag("each player")),
+            value(RestrictionPlayerScope::TargetedPlayer, tag("target player")),
+            value(
+                RestrictionPlayerScope::ParentTargetedPlayer,
+                tag("that player"),
+            ),
+        ))
+        .parse(input)
+    })?;
+    let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
+
+    let (_, remaining) = nom_on_lower(rest_orig, rest_lower, |input| {
+        alt((
+            value(
+                (),
+                tag(" can't activate abilities that aren't mana abilities"),
+            ),
+            value(
+                (),
+                tag(" cannot activate abilities that aren't mana abilities"),
+            ),
+            value(
+                (),
+                tag(" can't activate abilities that are not mana abilities"),
+            ),
+            value(
+                (),
+                tag(" cannot activate abilities that are not mana abilities"),
+            ),
+        ))
+        .parse(input)
+    })?;
+
+    let remaining_lower = &rest_lower[rest_lower.len() - remaining.len()..];
+    if !remaining_lower.trim().is_empty() {
+        return None;
+    }
+
+    Some(ParsedEffectClause {
+        effect: Effect::AddRestriction {
+            restriction: GameRestriction::ProhibitActivity {
                 source: ObjectId(0),
                 affected_players,
                 expiry: RestrictionExpiry::EndOfTurn,
+                activity: ProhibitedActivity::ActivateAbilities {
+                    exemption: ActivationExemption::ManaAbilities,
+                },
             },
         },
         duration: None,
@@ -3028,6 +3175,10 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // CR 101.2: "Your opponents can't cast spells this turn" — blanket temporary prohibition.
     // Must run AFTER cast_only_from_zones (more specific "from zones" check).
     if let Some(clause) = try_parse_cant_cast_spells_effect(tp) {
+        return clause;
+    }
+
+    if let Some(clause) = try_parse_cant_activate_non_mana_abilities_effect(tp) {
         return clause;
     }
 
@@ -4751,6 +4902,7 @@ pub(crate) fn try_parse_exile_top_each_library_with_collection_counter(
         Effect::ExileTop {
             player: TargetFilter::Controller,
             count: QuantityExpr::Fixed { value: 1 },
+            face_down: false,
         },
     );
     def.player_scope = Some(PlayerFilter::All);
@@ -7550,6 +7702,7 @@ fn lower_subject_predicate_ast(
                 return parsed_clause(Effect::ExileTop {
                     player: subject.affected,
                     count,
+                    face_down: false,
                 });
             }
             // CR 701.40a + CR 608.2c: "<player> manifests the top [N] card(s) of
@@ -9450,6 +9603,16 @@ fn parse_choose_filter_from_sentence(lower: &str, ctx: &mut ParseContext) -> Tar
 /// Check if an effect exiles objects (candidate for tracked set recording).
 /// Also looks inside `CreateDelayedTrigger` wrappers, since a previous clause's
 /// exile may have already been wrapped by `strip_temporal_suffix`.
+///
+/// CR 406.1 + CR 603.7: `ExileTop` exiles the top N cards of a library — the
+/// same library-to-exile zone transfer that `ChangeZone { destination: Exile }`
+/// performs for a specifically-targeted card. Cross-clause anaphors like
+/// "put that card into your hand at the beginning of your next end step"
+/// (Necropotence, Bomat Courier, Asmodeus the Archfiend, Knowledge Vault — the
+/// exile-top-then-recall class, ~16 cards) bind to the just-exiled cards via
+/// the tracked-set pathway. Without including `ExileTop` here, follow-up
+/// clauses against an `ExileTop` prior never publish a tracked set and the
+/// delayed-trigger return resolves with `ParentTarget` pointing nowhere.
 fn is_exile_effect(effect: &Effect) -> bool {
     match effect {
         Effect::ChangeZone {
@@ -9459,7 +9622,8 @@ fn is_exile_effect(effect: &Effect) -> bool {
         | Effect::ChangeZoneAll {
             destination: Zone::Exile,
             ..
-        } => true,
+        }
+        | Effect::ExileTop { .. } => true,
         Effect::CreateDelayedTrigger { effect: inner, .. } => is_exile_effect(&inner.effect),
         _ => false,
     }
@@ -9490,18 +9654,47 @@ fn contains_explicit_tracked_set_pronoun(lower: &str) -> bool {
         || scan_contains_phrase(lower, "the exiled creature")
 }
 
-/// CR 603.7: Detect implicit anaphora ("return it/them to the battlefield")
-/// when preceded by an exile effect. Context-sensitive — only matches when
-/// the pronoun is in a return-to-battlefield construction.
+/// CR 603.7: Detect implicit anaphora when preceded by an exile effect.
+/// Context-sensitive — only matches when the pronoun is in a recall
+/// construction whose destination is one of the supported zones.
 /// `lower` must be the pre-lowered version of the text.
+///
+/// Two recall shapes are recognized:
+///   * "return it/them to the battlefield" — the Aetherling / Crackling Drake
+///     class (exile-then-return-to-battlefield).
+///   * "put that card/them/it into your hand" — the Necropotence / Bomat
+///     Courier / Asmodeus class (exile-then-recall-to-hand). The hand-recall
+///     branch is what unlocks Necropotence's "Pay 1 life: Exile the top card
+///     of your library face down. Put that card into your hand at the
+///     beginning of your next end step." pattern (~16 cards).
 fn contains_implicit_tracked_set_pronoun(lower: &str) -> bool {
-    alt((
+    // Battlefield recall — "return it/them ... battlefield". Start-anchored
+    // because cross-clause anaphors begin the recall clause.
+    let battlefield_recall = alt((
         tag::<_, _, OracleError<'_>>("return it "),
         tag("return them "),
     ))
     .parse(lower)
     .is_ok()
-        && scan_contains_phrase(lower, "battlefield")
+        && scan_contains_phrase(lower, "battlefield");
+
+    // Hand recall — "put {that card,them,it} into your hand". Composed via
+    // nested `alt()` over the pronoun axis (CLAUDE.md "compose nom
+    // combinators, don't enumerate permutations") within a shared "put …
+    // into your hand" frame.
+    let hand_recall = (
+        tag::<_, _, OracleError<'_>>("put "),
+        alt((
+            tag::<_, _, OracleError<'_>>("that card"),
+            tag("them"),
+            tag("it"),
+        )),
+        tag(" into your hand"),
+    )
+        .parse(lower)
+        .is_ok();
+
+    battlefield_recall || hand_recall
 }
 
 fn mark_uses_tracked_set(def: &mut AbilityDefinition) {
@@ -12280,9 +12473,17 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                 // snapshotted referent has left that zone. Sibling of (not nested
                 // in) the tracked-set rewrite above — this must fire for the
                 // non-anaphor "that card" phrasing too.
+                //
+                // CR 406.1: `ExileTop` always moves cards to `Zone::Exile`. Without
+                // this arm the Necropotence / Bomat Courier class's delayed return
+                // ("put that card into your hand at the beginning of your next end
+                // step") would not have its `origin: Exile` stamped, so the
+                // resolver's referent-zone guard would erroneously suppress the
+                // recall even when the card is still in exile.
                 let prev_zone: Option<Zone> = match prev_eff {
                     Effect::ChangeZone { destination, .. }
                     | Effect::ChangeZoneAll { destination, .. } => Some(*destination),
+                    Effect::ExileTop { .. } => Some(Zone::Exile),
                     _ => None,
                 };
                 if let Some(zone) = prev_zone {
@@ -21523,9 +21724,32 @@ mod tests {
                 Effect::ExileTop {
                     player: TargetFilter::Controller,
                     count: QuantityExpr::Fixed { value: 1 },
+                    face_down: false,
                 }
             ),
             "Expected ExileTop(controller, 1), got {:?}",
+            effect
+        );
+    }
+
+    /// CR 406.3: A trailing "face down" qualifier on an `exile the top card`
+    /// clause must lower to `Effect::ExileTop { face_down: true }` so the
+    /// resolver flips the object's `face_down` flag and `visibility.rs`
+    /// redacts the card from non-owner viewers. Covers the Necropotence /
+    /// Bomat Courier / Asmodeus the Archfiend / Knowledge Vault class.
+    #[test]
+    fn exile_top_card_of_your_library_face_down_parses_with_face_down_true() {
+        let effect = parse_effect("Exile the top card of your library face down");
+        assert!(
+            matches!(
+                &effect,
+                Effect::ExileTop {
+                    player: TargetFilter::Controller,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    face_down: true,
+                }
+            ),
+            "Expected ExileTop(controller, 1, face_down=true), got {:?}",
             effect
         );
     }
@@ -23964,6 +24188,7 @@ mod tests {
                 Effect::ExileTop {
                     player: TargetFilter::Controller,
                     count: QuantityExpr::Fixed { value: 2 },
+                    face_down: false,
                 }
             ),
             "Expected ExileTop(controller, 2), got {:?}",
@@ -24002,6 +24227,7 @@ mod tests {
                 Effect::ExileTop {
                     player: TargetFilter::Controller,
                     count: QuantityExpr::Fixed { value: 2 },
+                    face_down: false,
                 }
             ),
             "Expected ExileTop(controller, 2), got {:?}",
@@ -24166,6 +24392,7 @@ mod tests {
                     count: QuantityExpr::Ref {
                         qty: QuantityRef::Variable { ref name }
                     },
+                    face_down: false,
                 } if name == "X"
             ),
             "Expected ExileTop(controller, X), got {:?}",
@@ -24191,6 +24418,7 @@ mod tests {
                                 },
                         },
                 },
+            face_down: false,
         } = &*def.effect
         else {
             panic!(
@@ -24236,6 +24464,7 @@ mod tests {
                             metric: crate::types::ability::CastManaSpentMetric::Total,
                         },
                 },
+            face_down: false,
         } = &*def.effect
         else {
             panic!(
@@ -24270,6 +24499,7 @@ mod tests {
                 Effect::ExileTop {
                     player: TargetFilter::ParentTarget,
                     count: QuantityExpr::Fixed { value: 1 },
+                    face_down: false,
                 }
             ),
             "Expected ExileTop(parent target, 1), got {:?}",
@@ -24620,6 +24850,7 @@ mod tests {
                 Effect::ExileTop {
                     player: TargetFilter::DefendingPlayer,
                     count: QuantityExpr::Fixed { value: 20 },
+                    face_down: false,
                 }
             ),
             "Expected ExileTop(DefendingPlayer, 20), got {:?}",
@@ -24634,7 +24865,11 @@ mod tests {
             AbilityKind::Spell,
         );
         match &*def.effect {
-            Effect::ExileTop { player, count } => {
+            Effect::ExileTop {
+                player,
+                count,
+                face_down: _,
+            } => {
                 assert!(
                     matches!(player, TargetFilter::Typed(tf) if tf.controller == Some(ControllerRef::Opponent)),
                     "Expected opponent target, got {player:?}"
@@ -27734,8 +27969,8 @@ mod tests {
         assert!(matches!(
             *def.effect,
             Effect::AddRestriction {
-                restriction: GameRestriction::CastOnlyFromZones {
-                    allowed_zones,
+                restriction: GameRestriction::ProhibitActivity {
+                    activity: ProhibitedActivity::CastOnlyFromZones { allowed_zones },
                     ..
                 }
             } if allowed_zones == vec![Zone::Hand]
@@ -27758,9 +27993,10 @@ mod tests {
         assert!(matches!(
             *def.effect,
             Effect::AddRestriction {
-                restriction: GameRestriction::CantCastSpells {
+                restriction: GameRestriction::ProhibitActivity {
                     affected_players: RestrictionPlayerScope::OpponentsOfSourceController,
                     expiry: RestrictionExpiry::EndOfTurn,
+                    activity: ProhibitedActivity::CastSpells { spell_filter: None },
                     ..
                 }
             }
@@ -27774,13 +28010,52 @@ mod tests {
         assert!(matches!(
             *def.effect,
             Effect::AddRestriction {
-                restriction: GameRestriction::CantCastSpells {
+                restriction: GameRestriction::ProhibitActivity {
                     affected_players: RestrictionPlayerScope::AllPlayers,
                     expiry: RestrictionExpiry::EndOfTurn,
+                    activity: ProhibitedActivity::CastSpells { spell_filter: None },
                     ..
                 }
             }
         ));
+    }
+
+    #[test]
+    fn abeyance_clause_chain_parses_both_restrictions() {
+        let def = parse_effect_chain(
+            "Until end of turn, target player can't cast instant or sorcery spells, and that player can't activate abilities that aren't mana abilities. Draw a card.",
+            AbilityKind::Spell,
+        );
+
+        assert!(matches!(
+            *def.effect,
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::TargetedPlayer,
+                    activity: ProhibitedActivity::CastSpells {
+                        spell_filter: Some(_)
+                    },
+                    ..
+                }
+            }
+        ));
+
+        let sub = def.sub_ability.expect("expected chained restriction");
+        assert!(matches!(
+            *sub.effect,
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::ParentTargetedPlayer,
+                    activity: ProhibitedActivity::ActivateAbilities {
+                        exemption: ActivationExemption::ManaAbilities,
+                    },
+                    ..
+                }
+            }
+        ));
+
+        let draw = sub.sub_ability.expect("expected trailing draw clause");
+        assert!(matches!(*draw.effect, Effect::Draw { .. }));
     }
 
     #[test]
@@ -31709,6 +31984,7 @@ mod tests {
         let Effect::ExileTop {
             player: TargetFilter::Controller,
             count: QuantityExpr::Fixed { value: 1 },
+            face_down: false,
         } = *def.effect
         else {
             panic!("expected all-player ExileTop, got {:?}", def.effect);

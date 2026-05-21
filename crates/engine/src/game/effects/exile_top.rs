@@ -10,12 +10,17 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (count, player_filter) = match &ability.effect {
-        Effect::ExileTop { count, player } => (
+    let (count, player_filter, face_down) = match &ability.effect {
+        Effect::ExileTop {
+            count,
+            player,
+            face_down,
+        } => (
             // Use resolve_quantity_with_targets so that TargetZoneCardCount (and
             // DivideRounded wrapping it) can resolve against the targeted player.
             resolve_quantity_with_targets(state, count, ability) as usize,
             player.clone(),
+            *face_down,
         ),
         _ => return Err(EffectError::MissingParam("ExileTop count".to_string())),
     };
@@ -43,10 +48,29 @@ pub fn resolve(
     let track_exiled_by_source =
         crate::game::exile_links::should_track_exiled_by_source(state, ability.source_id, ability);
 
+    // CR 603.7: Tracked-set publishing for ExileTop is handled by the
+    // generic chain processor in `effects::resolve_ability_chain` via
+    // `affected_objects_from_events` (which already maps `ExileTop` to the
+    // Exile destination zone). Publishing here as well would double-count
+    // the moved objects in the unified set — see the
+    // `compound_zone_change_chain_unifies_tracked_set` regression. Mirrors
+    // `change_zone::resolve`, which likewise delegates publishing to the
+    // chain processor.
     for object_id in top_cards {
         zones::move_to_zone(state, object_id, Zone::Exile, events);
         if track_exiled_by_source {
             crate::game::exile_links::push_tracked_by_source(state, object_id, ability.source_id);
+        }
+        // CR 406.3: A card exiled face down can't be examined by any player
+        // except when instructions allow it. Set the moved object's
+        // face-down state immediately after the zone change (mirrors the
+        // foretell pattern in `casting.rs`) so `visibility.rs`'s
+        // per-viewer redaction hides the card unless a separate effect grants
+        // look permission (Necropotence / Bomat Courier / Asmodeus class).
+        if face_down {
+            if let Some(obj) = state.objects.get_mut(&object_id) {
+                obj.face_down = true;
+            }
         }
     }
 
@@ -79,6 +103,7 @@ mod tests {
                 count: QuantityExpr::Fixed {
                     value: count as i32,
                 },
+                face_down: false,
             },
             vec![],
             ObjectId(100),
@@ -152,6 +177,7 @@ mod tests {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
+                face_down: false,
             },
             vec![],
             source,
@@ -202,6 +228,7 @@ mod tests {
             Effect::ExileTop {
                 player: TargetFilter::TriggeringPlayer,
                 count: QuantityExpr::Fixed { value: 1 },
+                face_down: false,
             },
             vec![],
             ObjectId(100),
@@ -289,6 +316,7 @@ mod tests {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
+                face_down: false,
             },
             vec![TargetRef::Player(PlayerId(1))], // inherited parent target
             ObjectId(100),
@@ -412,6 +440,7 @@ mod tests {
                         },
                     },
                 },
+                face_down: false,
             },
             vec![],
             source,
@@ -454,5 +483,175 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    /// CR 603.7 + CR 406.1: `ExileTop` must publish a tracked set when a
+    /// downstream `CreateDelayedTrigger { uses_tracked_set: true }` consumes
+    /// it. Necropotence / Bomat Courier / Asmodeus class: the recall delayed
+    /// trigger binds via `TargetFilter::TrackedSet { id: 0 }` (sentinel
+    /// resolved to the most recently published set on this resolution chain).
+    /// Without the publish, the recall would have an empty set and never
+    /// return the exiled card.
+    #[test]
+    fn exile_top_publishes_tracked_set_when_followed_by_recall_delayed_trigger() {
+        use crate::types::ability::DelayedTriggerCondition;
+        use crate::types::phase::Phase;
+
+        let mut state = GameState::new_two_player(42);
+        let top = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Top".to_string(),
+            Zone::Library,
+        );
+        let _bottom = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bottom".to_string(),
+            Zone::Library,
+        );
+
+        // Build the Necropotence activated ability shape:
+        // ExileTop -> sub_ability: CreateDelayedTrigger{uses_tracked_set: true,
+        //   effect: ChangeZone{ origin: Exile, destination: Hand,
+        //     target: TrackedSet{id: 0} }}
+        let recall_inner = crate::types::ability::AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Exile),
+                destination: Zone::Hand,
+                target: TargetFilter::TrackedSet {
+                    id: crate::types::identifiers::TrackedSetId(0),
+                },
+                under_your_control: false,
+                enter_transformed: false,
+                enter_tapped: false,
+                owner_library: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+        );
+        let delayed = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::End,
+                    player: PlayerId(0),
+                },
+                effect: Box::new(recall_inner),
+                uses_tracked_set: true,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut top_ability = make_exile_top_ability(1);
+        top_ability.sub_ability = Some(Box::new(delayed));
+
+        // CR 603.7: Drive through `resolve_ability_chain` so the generic
+        // chain processor's tracked-set publish runs (mirrors live game
+        // resolution); the leaf `exile_top::resolve` deliberately delegates
+        // publishing to the chain layer to avoid double-counting.
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &top_ability, &mut events, 0)
+            .unwrap();
+
+        // The top card moved to exile.
+        assert_eq!(
+            state.objects.get(&top).map(|obj| obj.zone),
+            Some(Zone::Exile)
+        );
+
+        // And a tracked set was published containing exactly that card so the
+        // delayed-trigger recall can later resolve it.
+        assert!(
+            !state.tracked_object_sets.is_empty(),
+            "expected ExileTop to publish a tracked set when followed by a uses_tracked_set delayed trigger",
+        );
+        let any_set_contains_top = state
+            .tracked_object_sets
+            .values()
+            .any(|ids| ids.contains(&top));
+        assert!(
+            any_set_contains_top,
+            "the published tracked set must contain the exiled object ({top:?}), got {:?}",
+            state.tracked_object_sets,
+        );
+    }
+
+    /// CR 406.3: `Effect::ExileTop { face_down: true }` must flip the
+    /// exiled object's `face_down` flag so `visibility.rs` can redact the
+    /// card unless a separate effect grants look permission (Necropotence /
+    /// Bomat Courier / Asmodeus the Archfiend / Knowledge Vault class).
+    #[test]
+    fn exile_top_face_down_sets_object_face_down_flag() {
+        let mut state = GameState::new_two_player(42);
+        let top = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Top".to_string(),
+            Zone::Library,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::ExileTop {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+                face_down: true,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let obj = state.objects.get(&top).expect("object should exist");
+        assert_eq!(obj.zone, Zone::Exile);
+        assert!(
+            obj.face_down,
+            "expected face_down=true on the exiled object after `Effect::ExileTop {{ face_down: true }}`",
+        );
+    }
+
+    /// CR 406.3: A face-up `Effect::ExileTop` must leave `face_down`
+    /// untouched (default `false`) so cards exiled face up — the Cascade /
+    /// Impulse / Adventure class — remain inspectable by every player.
+    #[test]
+    fn exile_top_face_up_does_not_set_face_down_flag() {
+        let mut state = GameState::new_two_player(42);
+        let top = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Top".to_string(),
+            Zone::Library,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::ExileTop {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+                face_down: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let obj = state.objects.get(&top).expect("object should exist");
+        assert_eq!(obj.zone, Zone::Exile);
+        assert!(
+            !obj.face_down,
+            "face-up ExileTop must not flip the object's `face_down` flag",
+        );
     }
 }

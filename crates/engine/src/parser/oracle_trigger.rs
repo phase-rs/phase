@@ -2,7 +2,7 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::one_of;
-use nom::combinator::{all_consuming, eof, opt, peek, recognize, value};
+use nom::combinator::{all_consuming, eof, opt, peek, recognize, rest, value};
 use nom::multi::many1;
 use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
@@ -751,7 +751,7 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     //      legitimately inherits the player's chosen target.
     if let Some(execute) = def.execute.as_deref_mut() {
         if mode_carries_event_source_object(&def.mode)
-            && def.valid_target.is_none()
+            && (def.valid_target.is_none() || def.mode == TriggerMode::Unattach)
             && !execute.optional_targeting
         {
             lift_parent_target_to_triggering_source_in_ability(execute);
@@ -803,6 +803,7 @@ fn lift_parent_target_to_triggering_source(effect: &mut Effect) {
     // surface anaphor was "that <object>", refers to the event object.
     let target = match effect {
         Effect::ChangeZone { target, .. } => target,
+        Effect::Sacrifice { target, .. } => target,
         // "create a token that's a copy of that creature" (Necroduality) — the
         // copy source is the entering object, not the trigger's own source.
         Effect::CopyTokenOf { target, .. } => target,
@@ -4433,7 +4434,24 @@ fn try_parse_event(
         Crews,
         Saddles,
         /// CR 701.3d: Equipment/Aura becomes unattached from a permanent.
-        BecomesUnattached,
+        BecomesUnattached(Option<TargetFilter>),
+        // CR 701.3a: Equipment/Aura becomes attached to a permanent.
+        BecomesAttached,
+    }
+    fn parse_becomes_unattached(input: &str) -> OracleResult<'_, SimpleEvent> {
+        let (remaining, _) = tag("becomes unattached").parse(input)?;
+        if remaining.is_empty() {
+            return Ok((remaining, SimpleEvent::BecomesUnattached(None)));
+        }
+        let (host, _) = tag(" from ").parse(remaining)?;
+        let (filter, rest) = parse_type_phrase(host);
+        if !rest.trim().is_empty() {
+            return Err(nom::Err::Error(OracleError::new(
+                rest,
+                nom::error::ErrorKind::Eof,
+            )));
+        }
+        Ok((rest, SimpleEvent::BecomesUnattached(Some(filter))))
     }
     fn parse_simple_event(input: &str) -> OracleResult<'_, SimpleEvent> {
         alt((
@@ -4484,20 +4502,18 @@ fn try_parse_event(
             // the compound, but the arm is ready for future printings).
             value(SimpleEvent::Saddles, tag("saddles a mount")),
             // CR 701.3d: Equipment/Aura becomes unattached from a permanent.
-            // Covers "becomes unattached from a permanent" (Grafted Exoskeleton,
-            // Stitcher's Graft, Grafted Wargear) and the shorter form
-            // "becomes unattached" (future-proofing).
-            value(
-                SimpleEvent::BecomesUnattached,
-                alt((
-                    tag("becomes unattached from a permanent"),
-                    tag("becomes unattached"),
-                )),
-            ),
+            parse_becomes_unattached,
+            // CR 701.3a: "becomes attached to [a creature / a permanent / …]" —
+            // Equipment/Aura attach trigger. The trailing target phrase ("to a
+            // creature", "to a permanent") is parsed to populate `valid_target`.
+            value(SimpleEvent::BecomesAttached, tag("becomes attached to ")),
+            // Short form: "becomes attached" without a trailing target phrase
+            // (future-proofing; no current Oracle cards use this form).
+            value(SimpleEvent::BecomesAttached, tag("becomes attached")),
         )))
         .parse(input)
     }
-    if let Ok((_, event)) = parse_simple_event.parse(rest) {
+    if let Ok((remaining, event)) = parse_simple_event.parse(rest) {
         let mut def = make_base();
         match event {
             SimpleEvent::BecomesBlocked => {
@@ -4587,14 +4603,35 @@ fn try_parse_event(
                 def.mode = TriggerMode::SaddlesOrCrews;
                 def.valid_card = Some(subject.clone());
             }
-            SimpleEvent::BecomesUnattached => {
+            SimpleEvent::BecomesUnattached(host_filter) => {
                 // CR 701.3d: Equipment/Aura becomes unattached from a permanent.
                 // `valid_card` records the Equipment/Aura filter (the subject).
-                // `match_unattach` in trigger_matchers.rs fires when the
-                // attached-to permanent leaves the battlefield, or when the
-                // Equipment is moved to a new host via equip/attach.
                 def.mode = TriggerMode::Unattach;
                 def.valid_card = Some(subject.clone());
+                def.valid_target = host_filter;
+                if filter_references_self(subject) {
+                    def.trigger_zones = vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile];
+                }
+            }
+            SimpleEvent::BecomesAttached => {
+                // CR 701.3a: "Whenever [this Equipment/Aura] becomes attached to
+                // [a creature / a permanent]" — fires when an Attach or AttachAll
+                // effect resolves and the source is now attached to something.
+                // Non-self subjects need an event payload naming the object that
+                // became attached; EffectResolved only carries the ability source.
+                if !matches!(subject, TargetFilter::SelfRef) {
+                    return None;
+                }
+                def.mode = TriggerMode::Attached;
+                def.valid_card = Some(subject.clone());
+                let remaining = remaining.trim();
+                if !remaining.is_empty() {
+                    let (filter, rest) = parse_type_phrase(remaining);
+                    if !rest.trim().is_empty() {
+                        return None;
+                    }
+                    def.valid_target = Some(filter);
+                }
             }
         }
         return Some((def.mode.clone(), def));
@@ -5104,26 +5141,69 @@ fn try_parse_attack_with_n_creatures(lower: &str) -> Option<(TriggerMode, Trigge
         .parse(after_actor)
         .ok()?;
 
-    // Parse "N or more creatures" — N is a positive integer word/digit.
+    // Parse the count word/digit. `parse_number` already maps "one"→1 as well as
+    // digits and other number-words; do NOT add a duplicate `value(1, tag("one"))`.
     let (after_n, n) = nom_primitives::parse_number.parse(after_with).ok()?;
-    let (after_or_more, ()) = value((), tag::<_, _, OracleError<'_>>(" or more creatures"))
+    let (after_or_more, ()) = value((), tag::<_, _, OracleError<'_>>(" or more "))
         .parse(after_n)
+        .ok()?;
+
+    if n < 1 {
+        return None;
+    }
+
+    if n == 1 {
+        // CR 508.1 + CR 603.2c: actor-led "you attack with one or more <TYPE>".
+        // The count==1 form needs no count condition — the matcher's
+        // "≥ 1 attacker matching valid_card" semantics IS "one or more". Capture
+        // the head-noun type phrase via the shared `parse_type_phrase` building
+        // block (handles negated subtypes like "non-Gnome" and controller scope
+        // like "Gods you control") and store it on `valid_card`.
+        let (filter, remainder) = parse_type_phrase(after_or_more);
+        // Accept optional trailing " each turn" / " this turn" qualifier; the
+        // remainder after the type phrase must otherwise be empty.
+        let (rest, _) = opt(alt((
+            tag::<_, _, OracleError<'_>>(" each turn"),
+            tag(" this turn"),
+        )))
+        .parse(remainder)
+        .ok()?;
+        if !rest.trim().is_empty() {
+            return None;
+        }
+
+        let mut def = make_base();
+        def.mode = TriggerMode::YouAttack;
+        def.batched = true;
+        // `valid_target` drives both the matcher's attacking-player check and the
+        // "they" pronoun resolver in the effect body.
+        def.valid_target = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(actor),
+        ));
+        // CR 508.1: the attacker-type gate the matcher now reads.
+        def.valid_card = Some(filter);
+        return Some((TriggerMode::YouAttack, def));
+    }
+
+    // count > 1 ("two or more creatures"): byte-identical to the pre-existing
+    // behavior — hardcoded "creatures" head noun, count condition via
+    // `AttackersDeclaredMin`, no `valid_card`. Typed count>1 ("two or more Gods")
+    // is deferred — populating `valid_card` for count>1 without a condition-level
+    // type axis would over-fire (≥1 God + ≥2 any-attackers).
+    let (after_creatures, ()) = value((), tag::<_, _, OracleError<'_>>("creatures"))
+        .parse(after_or_more)
         .ok()?;
     // Accept optional trailing " each turn" / " this turn" qualifier (unused here,
     // but keeps the matcher permissive for CR 603.4 timing qualifiers). Must end
     // at the condition boundary — the caller already split the effect text off,
-    // so `after_or_more` should be empty or punctuation-only.
+    // so `after_creatures` should be empty or punctuation-only.
     let (rest, _) = opt(alt((
         tag::<_, _, OracleError<'_>>(" each turn"),
         tag(" this turn"),
     )))
-    .parse(after_or_more)
+    .parse(after_creatures)
     .ok()?;
     if !rest.trim().is_empty() {
-        return None;
-    }
-
-    if n < 1 {
         return None;
     }
 
@@ -5907,6 +5987,46 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             TypedFilter::default().properties(vec![FilterProp::Another]),
         ));
         return Some((TriggerMode::CycledOrDiscarded, def));
+    }
+    // CR 701.43a: "Whenever you exert a creature" — actor-side exert trigger.
+    // The player actor belongs in valid_target; the exerted permanent belongs
+    // in valid_card.
+    fn parse_exert_trigger_line(i: &str) -> OracleResult<'_, (Option<ControllerRef>, &str)> {
+        preceded(
+            alt((tag("whenever "), tag("when "))),
+            pair(
+                alt((
+                    value(Some(ControllerRef::You), tag("you exert ")),
+                    value(Some(ControllerRef::Opponent), tag("an opponent exerts ")),
+                    value(None, tag("a player exerts ")),
+                )),
+                rest,
+            ),
+        )
+        .parse(i)
+    }
+    if let Ok((rem, (actor, subject_text))) = parse_exert_trigger_line(lower) {
+        if !rem.trim().is_empty() {
+            return None;
+        }
+
+        let (filter, remainder) = super::oracle_target::parse_target(subject_text);
+        if !remainder.trim().is_empty() || matches!(filter, TargetFilter::Any) {
+            return None;
+        }
+
+        let mut def = make_base();
+        def.mode = TriggerMode::Exerted;
+        def.valid_target = Some(match actor {
+            Some(ControllerRef::You) => TargetFilter::Controller,
+            Some(ControllerRef::Opponent) => {
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+            }
+            None => TargetFilter::Player,
+            Some(_) => TargetFilter::Player,
+        });
+        def.valid_card = Some(filter);
+        return Some((TriggerMode::Exerted, def));
     }
 
     if matches!(
@@ -8717,6 +8837,7 @@ mod tests {
                 Effect::ExileTop {
                     player: TargetFilter::TriggeringPlayer,
                     count: QuantityExpr::Fixed { value: 1 },
+                    face_down: false,
                 }
             ),
             "expected ExileTop to bind to TriggeringPlayer, got {:?}",
@@ -10132,6 +10253,7 @@ mod tests {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
+                face_down: false,
             }
         ));
 
@@ -12907,6 +13029,48 @@ mod tests {
                 TypedFilter::new(TypeFilter::Card).controller(ControllerRef::Opponent)
             ))
         );
+    }
+
+    /// CR 701.9 + CR 603.7c + CR 406.1: Necropotence's on-discard trigger
+    /// exiles the just-discarded card from the graveyard. The "that card"
+    /// anaphor must lift from `ParentTarget` to `TriggeringSource` so the
+    /// `ChangeZone { origin: Some(Graveyard), destination: Exile }` resolves
+    /// against the discarded object, and the controller filter must be
+    /// `You`. Locks the parse output for the Necropotence punisher-class
+    /// (Necropotence, Yawgmoth's Bargain-ish self-discard punishers).
+    #[test]
+    fn trigger_necropotence_you_discard_exile_from_graveyard() {
+        let def = parse_trigger_line(
+            "Whenever you discard a card, exile that card from your graveyard.",
+            "Necropotence",
+        );
+        assert_eq!(def.mode, TriggerMode::Discarded);
+        match def.valid_card.as_ref().expect("valid_card must be set") {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            }
+            other => panic!("expected Typed filter, got {other:?}"),
+        }
+        let execute = def
+            .execute
+            .as_deref()
+            .expect("on-discard trigger must have an execute body");
+        match execute.effect.as_ref() {
+            Effect::ChangeZone {
+                origin,
+                destination,
+                target,
+                ..
+            } => {
+                assert_eq!(*origin, Some(Zone::Graveyard));
+                assert_eq!(*destination, Zone::Exile);
+                assert!(
+                    matches!(target, TargetFilter::TriggeringSource),
+                    "expected TriggeringSource after lift, got {target:?}",
+                );
+            }
+            other => panic!("expected ChangeZone (graveyard → exile), got {other:?}"),
+        }
     }
 
     /// CR 701.9a + CR 603.2c: type qualifier on the discarded card must be
@@ -17129,6 +17293,91 @@ mod tests {
     // CR 508.1 + CR 603.2c + CR 603.4: Attacks-with-N-creatures trigger family
     // (Firemane Commando and analogous cards).
 
+    /// Issue #610 — Kratos, Stoic Father. The actor-led count==1 "attack with one
+    /// or more <TYPE>" form must populate `valid_card` with the attacker-type
+    /// filter (and NO count condition; the matcher's "≥1 matching attacker" IS
+    /// "one or more"). Pre-fix this text fell through to the bare "you attack"
+    /// fallback, dropping the God filter entirely.
+    #[test]
+    fn you_attack_with_one_or_more_gods_populates_filter() {
+        let def = parse_trigger_line(
+            "Whenever you attack with one or more Gods, you get an experience counter.",
+            "Kratos, Stoic Father",
+        );
+        assert_eq!(def.mode, TriggerMode::YouAttack);
+        assert!(def.batched);
+        // No count condition for the count==1 form.
+        assert_eq!(def.condition, None);
+        // valid_target carries the controller (You) axis.
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You)
+            ))
+        );
+        // valid_card carries the God attacker-type filter (load-bearing fix).
+        match &def.valid_card {
+            Some(TargetFilter::Typed(tf)) => assert!(
+                tf.type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "God")),
+                "expected God subtype in valid_card, got {:?}",
+                tf.type_filters,
+            ),
+            other => panic!("expected Typed valid_card with God subtype, got {other:?}"),
+        }
+    }
+
+    /// Issue #610 (Anim Pakal class) — negated subtype head noun. "non-Gnome
+    /// creatures" must yield a negated-Gnome filter on `valid_card`. `parse_type_phrase`
+    /// already emits the negation; verify it survives onto `valid_card`.
+    #[test]
+    fn you_attack_with_one_or_more_non_gnome_creatures() {
+        let def = parse_trigger_line(
+            "Whenever you attack with one or more non-Gnome creatures, create a 1/1 Gnome.",
+            "Anim Pakal, Thousandth Moon",
+        );
+        assert_eq!(def.mode, TriggerMode::YouAttack);
+        assert_eq!(def.condition, None);
+        match &def.valid_card {
+            Some(TargetFilter::Typed(tf)) => assert!(
+                tf.type_filters.iter().any(|t| matches!(
+                    t,
+                    TypeFilter::Non(inner) if matches!(&**inner, TypeFilter::Subtype(s) if s == "Gnome")
+                )),
+                "expected negated Gnome subtype in valid_card, got {:?}",
+                tf.type_filters,
+            ),
+            other => panic!("expected Typed valid_card with negated Gnome, got {other:?}"),
+        }
+    }
+
+    /// Issue #610 REV 2 GUARDRAIL (deferral lock). The actor-led count>1 form
+    /// ("two or more creatures") must remain byte-identical to pre-fix behavior:
+    /// `valid_card` UNSET and the count condition is the unchanged 2-field
+    /// `AttackersDeclaredMin { scope, minimum }`. Populating `valid_card` for
+    /// count>1 without a condition-level type axis would over-fire. This test
+    /// locks the deferral so a future edit cannot silently regress it.
+    #[test]
+    fn you_attack_with_two_or_more_creatures_defers_filter() {
+        let def = parse_trigger_line(
+            "Whenever you attack with two or more creatures, draw a card.",
+            "Firemane Commando",
+        );
+        assert_eq!(def.mode, TriggerMode::YouAttack);
+        assert_eq!(
+            def.valid_card, None,
+            "count>1 must NOT set valid_card (REV 2 deferral)"
+        );
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::AttackersDeclaredMin {
+                scope: ControllerRef::You,
+                minimum: 2,
+            })
+        );
+    }
+
     #[test]
     fn trigger_you_attack_with_two_or_more_creatures() {
         let def = parse_trigger_line(
@@ -17908,18 +18157,21 @@ mod snapshot_tests {
             "Whenever this Equipment becomes unattached from a permanent, sacrifice that permanent.",
             "Grafted Exoskeleton",
         );
+        assert_eq!(def.mode, TriggerMode::Unattach);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
         assert_eq!(
-            def.mode,
-            TriggerMode::Unattach,
-            "Expected TriggerMode::Unattach, got {:?}",
-            def.mode
+            def.valid_target,
+            Some(TargetFilter::Typed(TypedFilter::permanent()))
         );
         assert_eq!(
-            def.valid_card,
-            Some(TargetFilter::SelfRef),
-            "Expected valid_card = SelfRef (Equipment self-reference), got {:?}",
-            def.valid_card
+            def.trigger_zones,
+            vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile]
         );
+        let execute = def.execute.as_deref().expect("trigger has execute");
+        let Effect::Sacrifice { target, .. } = execute.effect.as_ref() else {
+            panic!("expected Sacrifice, got {:?}", execute.effect);
+        };
+        assert_eq!(*target, TargetFilter::TriggeringSource);
     }
 
     // CR 701.3d: shorter form "becomes unattached" (future-proofing)
@@ -17935,6 +18187,7 @@ mod snapshot_tests {
             "Expected TriggerMode::Unattach for short form, got {:?}",
             def.mode
         );
+        assert_eq!(def.valid_target, None);
     }
 
     // Regression: "Whenever ~ becomes unattached from a permanent, sacrifice that permanent."
@@ -17950,5 +18203,154 @@ mod snapshot_tests {
             "Trigger should not fall through to Unknown; got {:?}",
             def.mode
         );
+    }
+
+    // CR 701.3a: "Whenever ~ becomes attached to a creature" trigger
+    // Covers Inchblade Companion, Assimilation Aegis, Enormous Energy Blade, Killer Cosplay.
+    #[test]
+    fn trigger_becomes_attached_to_a_creature() {
+        let def = parse_trigger_line(
+            "Whenever ~ becomes attached to a creature, that creature gets +1/+1 until end of turn.",
+            "Inchblade Companion",
+        );
+        assert_eq!(
+            def.mode,
+            TriggerMode::Attached,
+            "Expected TriggerMode::Attached, got {:?}",
+            def.mode
+        );
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::SelfRef),
+            "Expected valid_card = SelfRef (Equipment self-reference), got {:?}",
+            def.valid_card
+        );
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(TypedFilter::creature())),
+            "Expected valid_target = creature, got {:?}",
+            def.valid_target
+        );
+    }
+
+    // CR 701.3a: "becomes attached to a permanent" variant
+    #[test]
+    fn trigger_becomes_attached_to_a_permanent() {
+        let def = parse_trigger_line(
+            "Whenever ~ becomes attached to a permanent, draw a card.",
+            "Assimilation Aegis",
+        );
+        assert_eq!(
+            def.mode,
+            TriggerMode::Attached,
+            "Expected TriggerMode::Attached for 'attached to a permanent', got {:?}",
+            def.mode
+        );
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(TypedFilter::permanent())),
+            "Expected valid_target = permanent, got {:?}",
+            def.valid_target
+        );
+    }
+
+    // Regression: "Whenever ~ becomes attached to a creature" should NOT be TriggerMode::Unknown.
+    #[test]
+    fn trigger_becomes_attached_not_unknown() {
+        let def = parse_trigger_line(
+            "Whenever ~ becomes attached to a creature, that creature gets +2/+2 until end of turn.",
+            "Enormous Energy Blade",
+        );
+        assert!(
+            !matches!(def.mode, TriggerMode::Unknown(_)),
+            "Trigger should not fall through to Unknown; got {:?}",
+            def.mode
+        );
+    }
+
+    // Regression: non-self attached subjects are not supported by
+    // EffectResolved's source-only payload and must not parse as a broad
+    // TriggerMode::Attached trigger.
+    #[test]
+    fn trigger_becomes_attached_non_self_subject_stays_unknown() {
+        let def = parse_trigger_line(
+            "Whenever an Aura you control becomes attached to a creature you control, draw a card.",
+            "Siona, Captain of the Pyleas",
+        );
+        assert!(
+            matches!(def.mode, TriggerMode::Unknown(_)),
+            "non-self attachment trigger should stay Unknown, got {:?}",
+            def.mode
+        );
+    }
+
+    /// CR 701.43a: "Whenever you exert a creature" — actor-side exert trigger.
+    /// Trueheart Twins, Battlefield Scavenger, Rohirrim Chargers, Vizier of the
+    /// True, and Resolute Survivors all share this exact trigger phrasing.
+    /// The parser must emit TriggerMode::Exerted with valid_card set to the
+    /// subject (a creature the controller exerts, i.e. a generic creature filter
+    /// scoped to the controller).
+    #[test]
+    fn trigger_you_exert_a_creature() {
+        let def = parse_trigger_line(
+            "Whenever you exert a creature, that creature gets +1/+0 and gains first strike until end of turn.",
+            "Trueheart Twins",
+        );
+        assert_eq!(def.mode, TriggerMode::Exerted);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        let Some(TargetFilter::Typed(tf)) = def.valid_card else {
+            panic!(
+                "expected typed exerted creature filter, got {:?}",
+                def.valid_card
+            );
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+    }
+
+    /// CR 701.43a: Self-reference is the exerted permanent, not a degraded
+    /// generic filter.
+    #[test]
+    fn trigger_you_exert_self_ref() {
+        let def = parse_trigger_line("Whenever you exert ~, untap it.", "Vizier of the True");
+        assert_eq!(def.mode, TriggerMode::Exerted);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    /// CR 701.43a: Opponent actor scope must be recorded on valid_target while
+    /// the exerted creature remains the valid_card filter.
+    #[test]
+    fn trigger_opponent_exerts_a_creature() {
+        let def = parse_trigger_line(
+            "Whenever an opponent exerts a creature, you gain 1 life.",
+            "Exertion Watcher",
+        );
+        assert_eq!(def.mode, TriggerMode::Exerted);
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+        let Some(TargetFilter::Typed(tf)) = def.valid_card else {
+            panic!(
+                "expected typed exerted creature filter, got {:?}",
+                def.valid_card
+            );
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+    }
+
+    /// CR 701.43a: Resolute Survivors — "Whenever you exert a creature" with a
+    /// life-gain effect. Ensures the trigger body is parsed independently of
+    /// the trigger condition.
+    #[test]
+    fn trigger_exert_resolute_survivors() {
+        let def = parse_trigger_line(
+            "Whenever you exert a creature, you gain 1 life.",
+            "Resolute Survivors",
+        );
+        assert_eq!(def.mode, TriggerMode::Exerted);
+        assert!(def.valid_card.is_some());
     }
 }
