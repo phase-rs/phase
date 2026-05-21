@@ -159,33 +159,62 @@ impl CounterMatch {
 
 pub fn parse_counter_type(text: &str) -> CounterType {
     let trimmed = text.trim().trim_end_matches(" counter").trim();
-    match trimmed {
-        "P1P1" | "+1/+1" | "plus1plus1" => CounterType::Plus1Plus1,
-        "M1M1" | "-1/-1" | "minus1minus1" => CounterType::Minus1Minus1,
-        "LOYALTY" | "loyalty" => CounterType::Loyalty,
-        "defense" | "DEFENSE" => CounterType::Defense,
-        "stun" => CounterType::Stun,
-        "lore" | "LORE" => CounterType::Lore,
-        "time" | "TIME" => CounterType::Time,
-        "age" => CounterType::Age,
-        other => parse_parameterized_or_named_counter_type(other),
-    }
+    try_parse_counter_type(trimmed).unwrap_or_else(|| CounterType::Generic(trimmed.to_lowercase()))
 }
 
-fn parse_parameterized_or_named_counter_type(other: &str) -> CounterType {
-    if let Some((power, toughness)) = parse_power_toughness_counter(other) {
-        return CounterType::PowerToughness { power, toughness };
+/// CR 122.1: Parse a counter *type word* only when it is genuinely recognized —
+/// an explicit named type, a +N/+N parameterized type, a keyword counter, or a
+/// single bare word (a custom `Generic` counter such as "charge"/"page"/"oil").
+/// Returns `None` for an empty or multi-word remainder, so callers that slice
+/// the type out of a larger phrase (e.g. trigger counter-placement parsing) can
+/// reject leftover subject/verb text instead of manufacturing a bogus
+/// `Generic("…")` filter that matches no real counter. `parse_counter_type`
+/// keeps its total behavior by falling back to `Generic` for the `None` case.
+pub fn try_parse_counter_type(text: &str) -> Option<CounterType> {
+    let trimmed = text.trim().trim_end_matches(" counter").trim();
+    if trimmed.is_empty() {
+        return None;
     }
-
-    let lower = other.to_lowercase();
+    match trimmed {
+        "P1P1" | "+1/+1" | "plus1plus1" => return Some(CounterType::Plus1Plus1),
+        "M1M1" | "-1/-1" | "minus1minus1" => return Some(CounterType::Minus1Minus1),
+        "LOYALTY" | "loyalty" => return Some(CounterType::Loyalty),
+        "defense" | "DEFENSE" => return Some(CounterType::Defense),
+        "stun" => return Some(CounterType::Stun),
+        "lore" | "LORE" => return Some(CounterType::Lore),
+        "time" | "TIME" => return Some(CounterType::Time),
+        "age" => return Some(CounterType::Age),
+        _ => {}
+    }
+    if let Some((power, toughness)) = parse_power_toughness_counter(trimmed) {
+        return Some(CounterType::PowerToughness { power, toughness });
+    }
+    let lower = trimmed.to_lowercase();
     if let Some((_, kind)) = KEYWORD_COUNTERS.iter().find(|(name, _)| *name == lower) {
-        CounterType::Keyword(*kind)
-    } else {
-        // Normalize generic counter names to lowercase so that sources that
-        // emit different cases (e.g. replacement parser emits "MINING", cost
-        // parser emits "mining") resolve to the same HashMap key at runtime.
-        CounterType::Generic(lower)
+        return Some(CounterType::Keyword(*kind));
     }
+    // A bare single-word remainder is a custom counter name; a multi-word
+    // remainder is leftover non-type text and is rejected.
+    if lower.split_whitespace().count() == 1 {
+        return Some(CounterType::Generic(lower));
+    }
+    None
+}
+
+/// CR 122.1: Parse the type-word slot of cost text — the word that fills the
+/// `<type>` in "remove a `<type>` counter" / "remove N `<type>` counters" /
+/// "remove all `<type>` counters". The bare noun (no type word, just
+/// "counter"/"counters") parses to `CounterMatch::Any`, capturing the "any
+/// kind on the chosen permanent" semantics that the cost field is designed
+/// for. A real type word parses through `parse_counter_type` and wraps in
+/// `CounterMatch::OfType`. This is the single normalization site every cost
+/// parser should call when emitting `AbilityCost::RemoveCounter::counter_type`.
+pub fn parse_counter_match(text: &str) -> CounterMatch {
+    let trimmed = text.trim();
+    if trimmed.eq_ignore_ascii_case("counter") || trimmed.eq_ignore_ascii_case("counters") {
+        return CounterMatch::Any;
+    }
+    CounterMatch::OfType(parse_counter_type(text))
 }
 
 fn parse_power_toughness_counter(text: &str) -> Option<(i32, i32)> {

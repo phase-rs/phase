@@ -581,7 +581,10 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("player").parse(after_target) {
             return (TargetFilter::Player, &text[lower.len() - rest.len()..]);
         }
-        // "target" + type phrase (generic)
+        // "target" + type phrase (generic). CR 903.3 + CR 108.3: "commander[s]"
+        // is recognized as a typed-phrase prefix inside `parse_type_phrase_with_ctx`
+        // — it pushes `IsCommander` and composes uniformly with the existing
+        // suffix machinery (ownership, control, counters, "with X", etc.).
         let (filter, rest) = parse_type_phrase_with_ctx(&text[target_offset..], ctx);
         let consumed_end = lower.len() - rest.len();
         return (
@@ -1057,27 +1060,13 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         }
     }
 
-    // Bare commander reference with a controller suffix ("commander they
-    // control", "commanders target player controls"). This is the non-possessive
-    // companion to the commander reference above and must not synthesize a
-    // Commander subtype.
-    if let Ok((after_commander, _)) =
-        alt((tag::<_, _, OracleError<'_>>("commanders"), tag("commander"))).parse(lower.as_str())
-    {
-        if let Some((ctrl, ctrl_len)) = parse_controller_suffix(after_commander, ctx) {
-            let consumed = lower.len() - after_commander.len() + ctrl_len;
-            return (
-                TargetFilter::Typed(TypedFilter {
-                    controller: Some(ctrl),
-                    properties: vec![FilterProp::IsCommander],
-                    ..Default::default()
-                }),
-                &text[consumed..],
-            );
-        }
-    }
-
     // Bare type phrase fallback: try parse_type_phrase before giving up.
+    // Handles "commander[s] you own / they control" (non-possessive — the
+    // possessive form is matched above), bare "commander" (Witch's Clinic
+    // class), and combinations like "commander creature you control"
+    // (Drillworks Mole class). The commander recognition itself lives in
+    // `parse_type_phrase_with_ctx` so it composes with the full suffix grammar
+    // (ownership, control, counter, "with X", etc.) — CR 903.3 + CR 108.3.
     // Handles "other nonland permanents you own and control" after quantifier stripping.
     let (filter, rest) = parse_type_phrase_with_ctx(text, ctx);
     if target_filter_has_meaningful_content(&filter) {
@@ -1307,6 +1296,37 @@ pub fn parse_type_phrase_with_ctx<'a>(
         if starts_with_type_phrase_lead(rest) {
             properties.push(FilterProp::Historic);
             pos += lower[pos..].len() - rest.len();
+        }
+    }
+
+    // CR 903.3 + CR 108.3: "commander[s]" is a class identified by the
+    // `IsCommander` flag, not by a card type or subtype. Treat the bare word
+    // as a typed-phrase atom so the subsequent grammar (ownership/control
+    // suffix, counter suffix, "with X", combinator separators) composes
+    // uniformly. Three shapes:
+    //   - bare "commander" / "commanders" (Witch's Clinic, Sanctum of Eternity)
+    //   - "commander[s] <suffix>" (you own / they control / target player controls)
+    //   - "commander <type-word>" (Drillworks Mole: "commander creature you control")
+    // For the first two, no type word follows — the prefix sets `IsCommander`
+    // and downstream suffix machinery does the rest. For the third, advance
+    // past "commander " and let the normal color/subtype/core-type loop
+    // consume the trailing type word.
+    if let Ok((after_commander_word, _)) = alt((
+        tag::<_, _, OracleError<'_>>("commanders "),
+        tag("commander "),
+    ))
+    .parse(&lower[pos..])
+    {
+        properties.push(FilterProp::IsCommander);
+        pos += lower[pos..].len() - after_commander_word.len();
+    } else if let Ok((after_commander_word, _)) =
+        alt((tag::<_, _, OracleError<'_>>("commanders"), tag("commander"))).parse(&lower[pos..])
+    {
+        // Bare end-of-phrase "commander" with no trailing space (e.g.,
+        // "target commander." or "target commander").
+        if after_commander_word.is_empty() || after_commander_word.starts_with([',', '.']) {
+            properties.push(FilterProp::IsCommander);
+            pos += lower[pos..].len() - after_commander_word.len();
         }
     }
 
@@ -3598,6 +3618,10 @@ pub(crate) fn parse_that_clause_suffix(text: &str) -> Option<(Vec<FilterProp>, u
         return Some(parsed);
     }
 
+    if let Some(parsed) = parse_supertype_relative_clause_suffix(trimmed, leading_ws) {
+        return Some(parsed);
+    }
+
     if let Ok((rest, prop)) = parse_shared_quality_clause(trimmed) {
         let consumed = trimmed.len() - rest.len();
         return Some((vec![prop], leading_ws + consumed));
@@ -3693,6 +3717,61 @@ fn parse_color_relative_clause_suffix(
         }]
     };
     Some((props, consumed))
+}
+
+/// CR 205.4a: "that's / that is / that are <supertype>" → `HasSupertype`;
+/// "that aren't / that isn't / that's not / that are not / that is not
+/// <supertype>" → `NotSupertype`. Supertypes are legendary/basic/snow
+/// (CR 205.4). Mirrors `parse_color_relative_clause_suffix` and delegates the
+/// supertype word to the shared `nom_target::parse_supertype_word` building
+/// block. Negation intros are matched before the positive forms
+/// (longest-match-first so "that are not" / "that's not" are not partially
+/// eaten by "that are " / "that's "). Covers "Exile all nonland permanents that
+/// aren't legendary" (Urza's Ruinous Blast) and the legendary/nonlegendary
+/// trailing-clause mass-filter class.
+fn parse_supertype_relative_clause_suffix(
+    trimmed: &str,
+    leading_ws: usize,
+) -> Option<(Vec<FilterProp>, usize)> {
+    let (after_intro, intro_len, negated) =
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that aren't ").parse(trimmed) {
+            (rest, "that aren't ".len(), true)
+        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that isn't ").parse(trimmed) {
+            (rest, "that isn't ".len(), true)
+        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that's not ").parse(trimmed) {
+            (rest, "that's not ".len(), true)
+        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that are not ").parse(trimmed) {
+            (rest, "that are not ".len(), true)
+        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that is not ").parse(trimmed) {
+            (rest, "that is not ".len(), true)
+        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that's ").parse(trimmed) {
+            (rest, "that's ".len(), false)
+        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that is ").parse(trimmed) {
+            (rest, "that is ".len(), false)
+        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that are ").parse(trimmed) {
+            (rest, "that are ".len(), false)
+        } else {
+            return None;
+        };
+
+    let (rest, supertype) = nom_target::parse_supertype_word(after_intro).ok()?;
+    // Word-boundary check: the supertype word must terminate so we don't
+    // false-match e.g. "that's basically free" (basic + "ally free").
+    let next_char_is_boundary = rest
+        .chars()
+        .next()
+        .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+    if !next_char_is_boundary {
+        return None;
+    }
+
+    let consumed = leading_ws + intro_len + after_intro.len() - rest.len();
+    let prop = if negated {
+        FilterProp::NotSupertype { value: supertype }
+    } else {
+        FilterProp::HasSupertype { value: supertype }
+    };
+    Some((vec![prop], consumed))
 }
 
 fn parse_color_disjunction(
@@ -4497,15 +4576,114 @@ mod tests {
         };
         let (f, rest) =
             parse_target_with_ctx("commander they control from the battlefield", &mut ctx);
+        // CR 903.3: a commander is targeted on the battlefield. Routing through
+        // `parse_type_phrase_with_ctx` (instead of the former bare-commander
+        // branch) means the explicit "from the battlefield" zone suffix is
+        // consumed into `FilterProp::InZone` like any other typed target, so
+        // the remainder is empty.
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::TargetPlayer),
+                properties: vec![
+                    FilterProp::IsCommander,
+                    FilterProp::InZone {
+                        zone: Zone::Battlefield,
+                    },
+                ],
+                ..Default::default()
+            })
+        );
+        assert_eq!(rest, "");
+    }
+
+    /// CR 903.3 + CR 108.3: Sanctum of Eternity and the broader bare-"commander"
+    /// class (Witch's Clinic, Drillworks Mole, etc.). Commander is recognized
+    /// as a typed-phrase prefix that pushes `IsCommander` and lets the existing
+    /// suffix machinery (ownership, control, type-word, etc.) compose uniformly.
+    /// Before #608 the parser had no path to attach `IsCommander` outside
+    /// possessive contexts, so every bare/owned "target commander" fell through
+    /// to an empty Typed filter that matched any permanent.
+    #[test]
+    fn target_commander_class_lowers_with_is_commander_property() {
+        // Sanctum of Eternity — ownership suffix, distinct from control.
+        // CR 903.3: a targetable commander resides on the battlefield. The
+        // explicit "from the battlefield" zone suffix is consumed into
+        // `FilterProp::InZone` by `parse_type_phrase_with_ctx`, leaving an
+        // empty remainder.
+        let bf = FilterProp::InZone {
+            zone: Zone::Battlefield,
+        };
+        let (f, rest) = parse_target("target commander you own from the battlefield");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter {
+                controller: None,
+                properties: vec![
+                    FilterProp::IsCommander,
+                    FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    },
+                    bf,
+                ],
+                ..Default::default()
+            }),
+            "'target commander you own' must lower to Typed{{IsCommander, Owned{{You}}, InZone{{BF}}}}"
+        );
+        assert_eq!(rest, "");
+
+        // Witch's Clinic — bare "target commander" with no zone suffix. No
+        // explicit zone is consumed, so (like every bare type phrase, e.g.
+        // "target creature") no `InZone` property is attached.
+        let (f, _) = parse_target("target commander");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter {
+                controller: None,
+                properties: vec![FilterProp::IsCommander],
+                ..Default::default()
+            }),
+            "bare 'target commander' must still carry IsCommander, not an empty filter"
+        );
+
+        // Controller suffix — "they control" with relative-player scope. No
+        // zone suffix, so no `InZone` property.
+        let mut ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::TargetPlayer),
+            ..Default::default()
+        };
+        let (f, _) = parse_target_with_ctx("target commander they control", &mut ctx);
         assert_eq!(
             f,
             TargetFilter::Typed(TypedFilter {
                 controller: Some(ControllerRef::TargetPlayer),
                 properties: vec![FilterProp::IsCommander],
                 ..Default::default()
-            })
+            }),
+            "'target commander they control' must lower to Typed{{IsCommander, controller=TargetPlayer}}"
         );
-        assert_eq!(rest, " from the battlefield");
+
+        // Drillworks Mole class — "commander creature" (commander as adjective
+        // attached to a creature type) with control suffix.
+        let (f, _) = parse_target("target commander creature you control");
+        match f {
+            TargetFilter::Typed(tf) => {
+                assert!(
+                    tf.properties.contains(&FilterProp::IsCommander),
+                    "expected IsCommander, got properties {:?}",
+                    tf.properties
+                );
+                assert!(
+                    tf.type_filters
+                        .iter()
+                        .any(|t| matches!(t, TypeFilter::Creature)),
+                    "expected Creature type, got {:?}",
+                    tf.type_filters
+                );
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            }
+            other => panic!("expected Typed filter, got {other:?}"),
+        }
     }
 
     #[test]
@@ -7737,6 +7915,59 @@ mod tests {
                     },
                 ],
             }]
+        );
+    }
+
+    /// #641 (Urza's Ruinous Blast — "Exile all nonland permanents that aren't
+    /// legendary"): the "that aren't legendary" relative clause was dropped, so
+    /// the filter exiled every nonland permanent (legendary included). The
+    /// plural "that aren't" negation form was missing AND supertypes were not
+    /// handled in any relative-clause parser. Regression guard for the negation.
+    #[test]
+    fn that_arent_legendary_emits_not_supertype() {
+        let result = parse_that_clause_suffix(" that aren't legendary");
+        let (props, consumed) = result.expect("should parse");
+        assert_eq!(consumed, " that aren't legendary".len());
+        assert_eq!(
+            props,
+            vec![FilterProp::NotSupertype {
+                value: Supertype::Legendary,
+            }]
+        );
+    }
+
+    /// CR 205.4a: sibling positive form — "that's legendary" → `HasSupertype`.
+    /// Confirms the building block covers both polarities, not just the
+    /// reported negation.
+    #[test]
+    fn thats_legendary_emits_has_supertype() {
+        let result = parse_that_clause_suffix(" that's legendary");
+        let (props, consumed) = result.expect("should parse");
+        assert_eq!(consumed, " that's legendary".len());
+        assert_eq!(
+            props,
+            vec![FilterProp::HasSupertype {
+                value: Supertype::Legendary,
+            }]
+        );
+    }
+
+    /// #641 end-to-end: the full Urza's Ruinous Blast target phrase must carry
+    /// the `NotSupertype(Legendary)` property alongside the nonland-permanent
+    /// type filters, so the mass-exile excludes legendary permanents.
+    #[test]
+    fn nonland_permanents_that_arent_legendary_full_target() {
+        let (filter, rest) = parse_target("all nonland permanents that aren't legendary");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.properties.contains(&FilterProp::NotSupertype {
+                value: Supertype::Legendary,
+            }),
+            "must exclude legendary permanents, got {:?}",
+            tf.properties
         );
     }
 

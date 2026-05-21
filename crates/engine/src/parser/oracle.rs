@@ -674,6 +674,25 @@ fn starts_with_until_duration(line: &str) -> bool {
     .is_some()
 }
 
+fn ends_with_quoted_activated_ability(line: &str) -> bool {
+    let trimmed = line.trim_end();
+    if !matches!(trimmed.chars().next_back(), Some('"')) {
+        return false;
+    }
+
+    let mut quote_positions = trimmed
+        .char_indices()
+        .filter_map(|(idx, ch)| (ch == '"').then_some(idx))
+        .rev();
+    let Some(close_quote) = quote_positions.next() else {
+        return false;
+    };
+    let Some(open_quote) = quote_positions.next() else {
+        return false;
+    };
+    find_activated_colon(&trimmed[open_quote + 1..close_quote]).is_some()
+}
+
 fn is_standalone_spell_keyword_action_line(line: &str) -> bool {
     let lower = line.to_lowercase();
     let parsed = all_consuming(value(
@@ -2484,6 +2503,7 @@ pub(crate) fn parse_oracle_ir(
 
                 if next_prepared.has_ability_word_prefix
                     || starts_with_until_duration(&next_prepared.effect_text)
+                    || ends_with_quoted_activated_ability(&prepared_line.effect_text)
                     || is_self_exile_cleanup_line(&next_prepared.effect_text, card_name)
                     || is_standalone_spell_keyword_action_line(&prepared_line.effect_text)
                     || !is_spell_resolution_instruction_line(
@@ -5654,6 +5674,55 @@ mod tests {
         );
         assert!(r.abilities.is_empty());
         assert_eq!(r.statics.len(), 1);
+    }
+
+    #[test]
+    fn quoted_spell_grant_does_not_absorb_next_line_delayed_trigger() {
+        let r = parse(
+            "Until end of turn, target creature gains haste and \"{0}: Untap this creature. Activate only once.\"\nDraw a card at the beginning of the next turn's upkeep.",
+            "Touch of Vitae",
+            &[],
+            &["Instant"],
+            &[],
+        );
+
+        assert!(
+            r.parse_warnings
+                .iter()
+                .all(|warning| !matches!(warning, OracleDiagnostic::CascadeLoss { .. })),
+            "unexpected cascade-loss warning: {:?}",
+            r.parse_warnings
+        );
+        assert_eq!(r.abilities.len(), 2);
+
+        let first = &r.abilities[0];
+        assert_eq!(
+            first.duration,
+            Some(crate::types::ability::Duration::UntilEndOfTurn)
+        );
+        let Effect::GenericEffect {
+            static_abilities,
+            target,
+            ..
+        } = &*first.effect
+        else {
+            panic!("expected immediate GenericEffect, got {:?}", first.effect);
+        };
+        assert!(matches!(target, Some(TargetFilter::Typed(_))));
+        assert!(static_abilities.iter().any(|static_def| {
+            static_def.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::GrantAbility { definition }
+                        if matches!(&*definition.effect, Effect::Untap { .. })
+                )
+            })
+        }));
+
+        assert!(matches!(
+            *r.abilities[1].effect,
+            Effect::CreateDelayedTrigger { .. }
+        ));
     }
 
     #[test]
@@ -10221,6 +10290,74 @@ mod tests {
         );
     }
 
+    // CR 305.1 + CR 602.1 + CR 611.1 + CR 611.2c + CR 701.21a:
+    // Pardic Miner — "Sacrifice this creature: Target player can't play lands
+    // this turn." The activated ability resolves to a `GenericEffect` carrying
+    // a `CantPlayLand` static with a `TargetFilter::Player` target slot and
+    // `Duration::UntilEndOfTurn`. At resolution the runtime registers a
+    // transient continuous effect bound to `SpecificPlayer { id }` (the chosen
+    // target), and `player_has_static_other(state, target, "CantPlayLand")`
+    // returns true through the new TCE scan in `check_static_other_by_name`.
+    //
+    // This is the class of "target player can't [verb] this turn" effects —
+    // proves the parser routes the player-scoped restriction through
+    // `parse_restriction_modes` and emits the canonical `GenericEffect` shape.
+    #[test]
+    fn activated_target_player_cant_play_lands_pardic_miner() {
+        use crate::types::statics::StaticMode;
+        let r = parse(
+            "Sacrifice this creature: Target player can't play lands this turn.",
+            "Pardic Miner",
+            &[],
+            &["Creature"],
+            &["Dwarf"],
+        );
+        assert_eq!(
+            r.abilities.len(),
+            1,
+            "Pardic Miner has exactly one activated ability"
+        );
+        let ab = &r.abilities[0];
+        assert_eq!(ab.kind, AbilityKind::Activated);
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } = &*ab.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", ab.effect);
+        };
+        assert_eq!(
+            *duration,
+            Some(crate::types::ability::Duration::UntilEndOfTurn),
+            "duration must be UntilEndOfTurn for 'this turn'"
+        );
+        assert_eq!(
+            target.as_ref(),
+            Some(&TargetFilter::Player),
+            "target slot must be TargetFilter::Player for 'Target player'"
+        );
+        assert_eq!(static_abilities.len(), 1, "single CantPlayLand static");
+        let def = &static_abilities[0];
+        assert_eq!(
+            def.mode,
+            StaticMode::Other("CantPlayLand".to_string()),
+            "mode must be CantPlayLand"
+        );
+        // CR 305.1 + CR 611.2c: AddStaticMode is required so the TCE carries
+        // the mode into runtime queries (player_has_static_other). Without it
+        // the transient effect has empty modifications and the prohibition
+        // never reaches the play-land gate.
+        assert!(
+            def.modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddStaticMode { mode: StaticMode::Other(name) } if name == "CantPlayLand"
+            )),
+            "modifications must include AddStaticMode {{ Other(\"CantPlayLand\") }}, got {:?}",
+            def.modifications
+        );
+    }
+
     #[test]
     fn spell_restriction_then_damage_skullcrack() {
         // Skullcrack: "Players can't gain life this turn. Damage can't be prevented this turn.
@@ -10369,7 +10506,10 @@ mod tests {
         assert!(matches!(
             *r.abilities[1].effect,
             Effect::AddRestriction {
-                restriction: crate::types::ability::GameRestriction::CastOnlyFromZones { .. }
+                restriction: crate::types::ability::GameRestriction::ProhibitActivity {
+                    activity: crate::types::ability::ProhibitedActivity::CastOnlyFromZones { .. },
+                    ..
+                }
             }
         ));
         assert_eq!(
@@ -11120,10 +11260,9 @@ mod tests {
         // Standalone exert line produces no output (trigger is separate)
         assert!(r.abilities.is_empty());
         assert_eq!(r.triggers.len(), 1);
-        assert_eq!(
-            r.triggers[0].mode,
-            TriggerMode::Unknown("Whenever you exert a creature".to_string())
-        );
+        assert_eq!(r.triggers[0].mode, TriggerMode::Exerted);
+        assert_eq!(r.triggers[0].valid_target, Some(TargetFilter::Controller));
+        assert!(r.triggers[0].valid_card.is_some());
     }
 
     #[test]
@@ -12134,6 +12273,7 @@ mod tests {
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::EventContextAmount
                 },
+                face_down: false,
             }
         ));
     }

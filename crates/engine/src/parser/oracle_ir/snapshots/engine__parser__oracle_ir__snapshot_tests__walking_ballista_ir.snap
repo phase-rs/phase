@@ -1,5 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 584
 expression: "&ir"
 ---
 {
@@ -53,7 +54,10 @@ expression: "&ir"
         "cost": {
           "type": "RemoveCounter",
           "count": 1,
-          "counter_type": "P1P1",
+          "counter_type": {
+            "type": "OfType",
+            "data": "P1P1"
+          },
           "target": null
         },
         "sub_ability": null,

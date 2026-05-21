@@ -216,6 +216,38 @@ pub(crate) fn apply_counter_removal(
     }
 }
 
+/// CR 601.2h: Resolve a `CounterMatch` cost intent against the counters
+/// currently on `object_id`, returning the concrete `CounterType` that the
+/// cost will actually remove. `OfType(t)` passes through unchanged; `Any`
+/// picks the type with the largest current count from the object's counter
+/// map (so the cost is satisfiable iff at least one counter is present). The
+/// largest-count heuristic is rules-correct for single-type permanents (Loch
+/// Mare's -1/-1 only) and deterministic-enough for multi-type fallbacks
+/// pending a NeedsChoice prompt for the player paying the cost to choose
+/// (CR 601.2h: the player makes the choices required to pay — follow-up work).
+///
+/// Returns `None` when `Any` is requested but the object has no counters.
+/// Callers should treat that as "skip the removal step" — the payability
+/// gate (`cost_payability::counter_on_object`) already prevents activation in
+/// that case, so this is defense-in-depth.
+pub fn resolve_counter_match_for_removal(
+    state: &GameState,
+    object_id: ObjectId,
+    counter_type: &crate::types::counter::CounterMatch,
+) -> Option<CounterType> {
+    match counter_type {
+        crate::types::counter::CounterMatch::OfType(t) => Some(t.clone()),
+        crate::types::counter::CounterMatch::Any => state
+            .objects
+            .get(&object_id)?
+            .counters
+            .iter()
+            .filter(|(_, &n)| n > 0)
+            .max_by_key(|(_, &n)| n)
+            .map(|(ty, _)| ty.clone()),
+    }
+}
+
 /// CR 614.1: Remove counters from an object through the replacement pipeline.
 ///
 /// Single authority for counter removal, mirroring `add_counter_with_replacement`.
@@ -1781,6 +1813,251 @@ mod tests {
             obj.loyalty,
             Some(6),
             "obj.loyalty must mirror the doubled counter count"
+        );
+    }
+
+    /// CR 614.6 + CR 614.7 + CR 122.1: Melira's Keepers class — a permanent
+    /// carrying a self-targeted `AddCounter` replacement with
+    /// `QuantityModification::Prevent` must fully suppress incoming
+    /// counter-placement events. The replaced event "never happens"
+    /// (CR 614.6); no counters land, no `CounterAdded` event fires.
+    ///
+    /// Helper for the suite of Melira's Keepers tests: installs the
+    /// counter-prohibition replacement on `target_id`. Returns nothing — the
+    /// caller exercises `add_counter_with_replacement` directly to drive the
+    /// pipeline.
+    fn install_no_counters_replacement(state: &mut GameState, target_id: ObjectId) {
+        use crate::types::ability::{QuantityModification, ReplacementDefinition};
+        use crate::types::replacements::ReplacementEvent;
+        let mut repl = ReplacementDefinition::new(ReplacementEvent::AddCounter);
+        repl.valid_card = Some(TargetFilter::SelfRef);
+        repl.quantity_modification = Some(QuantityModification::Prevent);
+        repl.description = Some("~ can't have counters put on it.".to_string());
+        state
+            .objects
+            .get_mut(&target_id)
+            .unwrap()
+            .replacement_definitions
+            .push(repl);
+    }
+
+    #[test]
+    fn meliras_keepers_prevents_plus1_plus1_counter_placement() {
+        // CR 122.1a + CR 614.6: A +1/+1 counter is a counter (CR 122.1) — the
+        // replacement must apply to ANY counter type, including +1/+1.
+        let mut state = GameState::new_two_player(42);
+        let keepers_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Melira's Keepers".to_string(),
+            Zone::Battlefield,
+        );
+        install_no_counters_replacement(&mut state, keepers_id);
+
+        let mut events = Vec::new();
+        add_counter_with_replacement(
+            &mut state,
+            PlayerId(0),
+            keepers_id,
+            CounterType::Plus1Plus1,
+            3,
+            &mut events,
+        );
+
+        assert!(
+            state.objects[&keepers_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0)
+                == 0,
+            "no +1/+1 counters may land on Melira's Keepers"
+        );
+    }
+
+    #[test]
+    fn meliras_keepers_prevents_minus1_minus1_counter_placement() {
+        // CR 122.1a + CR 614.6: -1/-1 counters are also counters; the
+        // replacement is counter-type-agnostic, so it suppresses these too.
+        let mut state = GameState::new_two_player(42);
+        let keepers_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Melira's Keepers".to_string(),
+            Zone::Battlefield,
+        );
+        install_no_counters_replacement(&mut state, keepers_id);
+
+        let mut events = Vec::new();
+        add_counter_with_replacement(
+            &mut state,
+            PlayerId(0),
+            keepers_id,
+            CounterType::Minus1Minus1,
+            2,
+            &mut events,
+        );
+
+        assert!(
+            state.objects[&keepers_id]
+                .counters
+                .get(&CounterType::Minus1Minus1)
+                .copied()
+                .unwrap_or(0)
+                == 0,
+            "no -1/-1 counters may land on Melira's Keepers"
+        );
+    }
+
+    #[test]
+    fn meliras_keepers_prevents_arbitrary_counter_types() {
+        // CR 122.1 + CR 614.6: counter-agnostic — every CounterType variant
+        // routes through the same `AddCounter` proposed event, so the
+        // replacement suppresses charge / poison / generic counters identically.
+        let mut state = GameState::new_two_player(42);
+        let keepers_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Melira's Keepers".to_string(),
+            Zone::Battlefield,
+        );
+        install_no_counters_replacement(&mut state, keepers_id);
+
+        let mut events = Vec::new();
+        // Charge counter — generic named counter, not P/T-affecting.
+        add_counter_with_replacement(
+            &mut state,
+            PlayerId(0),
+            keepers_id,
+            CounterType::Generic("charge".to_string()),
+            1,
+            &mut events,
+        );
+
+        assert!(
+            state.objects[&keepers_id].counters.is_empty(),
+            "no counters of any type may land on Melira's Keepers"
+        );
+    }
+
+    #[test]
+    fn meliras_keepers_does_not_affect_other_creatures() {
+        // CR 614.1a + TargetFilter::SelfRef: the replacement is scoped to the
+        // source object only. Other creatures the same controller controls
+        // receive counters normally.
+        let mut state = GameState::new_two_player(42);
+        let keepers_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Melira's Keepers".to_string(),
+            Zone::Battlefield,
+        );
+        install_no_counters_replacement(&mut state, keepers_id);
+
+        let bystander_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bystander".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut events = Vec::new();
+        add_counter_with_replacement(
+            &mut state,
+            PlayerId(0),
+            bystander_id,
+            CounterType::Plus1Plus1,
+            2,
+            &mut events,
+        );
+
+        assert_eq!(
+            state.objects[&bystander_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(2),
+            "the bystander must receive +1/+1 counters normally; the replacement is self-scoped"
+        );
+        assert!(
+            state.objects[&keepers_id].counters.is_empty(),
+            "Melira's Keepers must not have any counters from a placement targeting another object"
+        );
+    }
+
+    #[test]
+    fn meliras_keepers_replacement_filtered_when_source_off_battlefield() {
+        // CR 113.6 + CR 614.1: A replacement provided by a permanent functions
+        // only while that permanent is on the battlefield (or in another
+        // zone-of-function that opted in via `active_zones`). When the source
+        // moves to a non-battlefield zone, `find_applicable_replacements`
+        // filters it out via its `zones_to_scan` gate (currently Battlefield
+        // and Command) — counter placement on that very object (now in the
+        // graveyard, unreachable as a counter target in practice) is no
+        // longer suppressed by the SelfRef-scoped replacement.
+        //
+        // We exercise this by setting the source's zone to Graveyard and then
+        // proposing an AddCounter event directly against the now-off-battlefield
+        // object id. The applier path must skip the replacement (zone gate)
+        // and the count must land.
+        //
+        // CR 122.2 normally erases counters on zone change, but for the
+        // purpose of verifying the replacement gate we route the event
+        // through the same `add_counter_with_replacement` entrypoint.
+        let mut state = GameState::new_two_player(42);
+        let keepers_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Melira's Keepers".to_string(),
+            Zone::Battlefield,
+        );
+        install_no_counters_replacement(&mut state, keepers_id);
+
+        // Sanity: while on the battlefield, counters are prevented.
+        {
+            let mut events = Vec::new();
+            add_counter_with_replacement(
+                &mut state,
+                PlayerId(0),
+                keepers_id,
+                CounterType::Plus1Plus1,
+                1,
+                &mut events,
+            );
+            assert!(
+                state.objects[&keepers_id].counters.is_empty(),
+                "battlefield-resident Keepers must suppress counters (sanity check)"
+            );
+        }
+
+        // Move the source out of the battlefield — the zone gate in
+        // `find_applicable_replacements` (`zones_to_scan` = Battlefield +
+        // Command) must now filter the replacement out.
+        state.objects.get_mut(&keepers_id).unwrap().zone = Zone::Graveyard;
+
+        let mut events = Vec::new();
+        add_counter_with_replacement(
+            &mut state,
+            PlayerId(0),
+            keepers_id,
+            CounterType::Plus1Plus1,
+            1,
+            &mut events,
+        );
+
+        assert_eq!(
+            state.objects[&keepers_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(1),
+            "off-battlefield source's SelfRef replacement must not fire"
         );
     }
 }

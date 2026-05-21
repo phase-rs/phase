@@ -14,6 +14,7 @@ import { DraftProgress } from "../components/draft/DraftProgress";
 import { LimitedDeckBuilder } from "../components/draft/LimitedDeckBuilder";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { menuButtonClass } from "../components/menu/buttonStyles";
+import { fetchCubeList } from "../services/cubeCobra";
 import { runLimits } from "../services/quickDraftPersistence";
 import type { DraftRunFormat, DraftRunState } from "../services/quickDraftPersistence";
 import type { CubeDraftSettings } from "../adapter/draft-adapter";
@@ -72,9 +73,7 @@ function CubeSetupPanel() {
     setLoading(true);
     setError(null);
     try {
-      const resp = await fetch(cubeUrl.trim());
-      if (!resp.ok) throw new Error(`Fetch failed: ${resp.status}`);
-      setCubeText(await resp.text());
+      setCubeText(await fetchCubeList(cubeUrl));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to fetch cube list");
     } finally {

@@ -594,7 +594,7 @@ fn parse_pay_life_as_colored_mana(text: &str) -> Option<StaticDefinition> {
     let (_, color) = parser_result.ok()?;
     Some(
         StaticDefinition::new(StaticMode::PayLifeAsColoredMana { color })
-            .affected(TargetFilter::Player)
+            .affected(TargetFilter::Controller)
             .description(text.to_string()),
     )
 }
@@ -20399,7 +20399,7 @@ mod snapshot_tests {
                 color: crate::types::mana::ManaColor::Black,
             },
         );
-        assert!(matches!(def.affected, Some(TargetFilter::Player)));
+        assert!(matches!(def.affected, Some(TargetFilter::Controller)));
     }
 
     /// The combinator must reject other colors only by routing the wrong

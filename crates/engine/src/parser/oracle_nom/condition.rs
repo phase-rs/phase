@@ -4415,6 +4415,13 @@ fn parse_opponent_comparison_conditions(input: &str) -> OracleResult<'_, StaticC
     // activation restriction and See Double's "you may choose both instead"
     // both read this. The opponent graveyard is aggregated with `Max` so the
     // condition holds when ANY opponent meets the threshold (CR 102.2).
+    //
+    // CR 119 + CR 102.2: "an opponent has N or less life" / "an opponent has N
+    // or more life" → `LifeTotal[Opponent { aggregate }] CMP N`. The aggregate
+    // is coupled to the comparator (existential): LE/LT → `Min` so the
+    // condition holds iff ANY opponent's life ≤ N; GE/GT → `Max` so it holds
+    // iff ANY opponent's life ≥ N. Bloodghast's haste gate
+    // ("as long as an opponent has 10 or less life") is the canonical card.
     if let Ok((rest2, _)) = tag::<_, _, OracleError<'_>>("has ").parse(rest) {
         if let Ok((rest3, n)) = parse_number(rest2) {
             if let Ok((rest4, _)) =
@@ -4428,6 +4435,31 @@ fn parse_opponent_comparison_conditions(input: &str) -> OracleResult<'_, StaticC
                                 aggregate: AggregateFunction::Max,
                             },
                         },
+                        n,
+                    ),
+                ));
+            }
+            if let Ok((rest4, comparator)) = alt((
+                value(
+                    Comparator::LE,
+                    tag::<_, _, OracleError<'_>>(" or less life"),
+                ),
+                value(
+                    Comparator::GE,
+                    tag::<_, _, OracleError<'_>>(" or more life"),
+                ),
+            ))
+            .parse(rest3)
+            {
+                return Ok((
+                    rest4,
+                    make_quantity_comparison(
+                        QuantityRef::LifeTotal {
+                            player: PlayerScope::Opponent {
+                                aggregate: existential_aggregate(comparator),
+                            },
+                        },
+                        comparator,
                         n,
                     ),
                 ));
@@ -6656,6 +6688,60 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 8 },
             } => {}
             other => panic!("expected opponent GraveyardSize GE 8, got {other:?}"),
+        }
+    }
+
+    /// CR 119 + CR 102.2: #659 Bloodghast — "an opponent has 10 or less life"
+    /// must lower to `LifeTotal[Opponent { Min }] LE 10`. `Min` is the
+    /// existential aggregate for LE: ANY opponent at ≤10 satisfies the
+    /// condition. Covers Bloodghast's haste gate plus the class of
+    /// opponent-life-threshold static abilities.
+    #[test]
+    fn test_opponent_has_n_or_less_life() {
+        let (rest, c) = parse_inner_condition("an opponent has 10 or less life").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::LifeTotal {
+                                player:
+                                    PlayerScope::Opponent {
+                                        aggregate: AggregateFunction::Min,
+                                    },
+                            },
+                    },
+                comparator: Comparator::LE,
+                rhs: QuantityExpr::Fixed { value: 10 },
+            } => {}
+            other => panic!("expected opponent LifeTotal LE 10 with Min aggregate, got {other:?}"),
+        }
+    }
+
+    /// Symmetric mirror of the LE variant: "an opponent has N or more life"
+    /// must aggregate with `Max` so the condition holds when ANY opponent's
+    /// life ≥ N. Same combinator branch as the LE case.
+    #[test]
+    fn test_opponent_has_n_or_more_life() {
+        let (rest, c) = parse_inner_condition("an opponent has 20 or more life").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::LifeTotal {
+                                player:
+                                    PlayerScope::Opponent {
+                                        aggregate: AggregateFunction::Max,
+                                    },
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 20 },
+            } => {}
+            other => panic!("expected opponent LifeTotal GE 20 with Max aggregate, got {other:?}"),
         }
     }
 

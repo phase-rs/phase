@@ -424,16 +424,23 @@ fn filter_implies_battlefield_permanent(filter: &TargetFilter) -> bool {
     }
 }
 
+/// CR 122.1 + CR 118.3: Count counters on `id` matching `kind`. `Any` sums
+/// across every counter type currently on the object (Loch Mare's untyped
+/// "remove a counter" cost — CR 118.3: the ability is payable iff the object
+/// has at least one counter of any kind); `OfType(t)` reads the specific
+/// entry. CR 122.1: counters of the same kind are interchangeable.
 fn counter_on_object(
     state: &GameState,
     id: ObjectId,
-    kind: &crate::types::counter::CounterType,
+    kind: &crate::types::counter::CounterMatch,
 ) -> u32 {
-    state
-        .objects
-        .get(&id)
-        .map(|obj| obj.counters.get(kind).copied().unwrap_or(0))
-        .unwrap_or(0)
+    let Some(obj) = state.objects.get(&id) else {
+        return 0;
+    };
+    match kind {
+        crate::types::counter::CounterMatch::Any => obj.counters.values().copied().sum(),
+        crate::types::counter::CounterMatch::OfType(t) => obj.counters.get(t).copied().unwrap_or(0),
+    }
 }
 
 #[cfg(test)]
@@ -602,5 +609,46 @@ mod tests {
         let state = new_state();
         assert!(AbilityCost::Mill { count: 5 }.is_payable(&state, P0, ObjectId(0)));
         assert!(AbilityCost::Exert.is_payable(&state, P0, ObjectId(0)));
+    }
+
+    /// CR 118.3: #542 Loch Mare — `RemoveCounter` with `CounterMatch::Any`
+    /// (the untyped "remove a counter" form) must be payable iff the object
+    /// has at least one counter of ANY type. Without summing across kinds,
+    /// Loch Mare's `{1}{U}, Remove a counter from ~: Draw a card.` reads zero
+    /// counters and the activation is forever grayed out.
+    #[test]
+    fn remove_counter_untyped_any_sums_all_kinds() {
+        use crate::types::counter::CounterType;
+        let mut scenario = GameScenario::new();
+        let src = scenario.add_creature(P0, "Loch Mare", 0, 0).id();
+        scenario
+            .state
+            .objects
+            .get_mut(&src)
+            .unwrap()
+            .counters
+            .insert(CounterType::Minus1Minus1, 3);
+        let cost = AbilityCost::RemoveCounter {
+            count: 1,
+            counter_type: crate::types::counter::CounterMatch::Any,
+            target: None,
+        };
+        assert!(
+            cost.is_payable(&scenario.state, P0, src),
+            "untyped 'remove a counter' must be payable when the object has -1/-1 counters",
+        );
+
+        // With no counters at all, the cost must be unpayable.
+        scenario
+            .state
+            .objects
+            .get_mut(&src)
+            .unwrap()
+            .counters
+            .clear();
+        assert!(
+            !cost.is_payable(&scenario.state, P0, src),
+            "untyped 'remove a counter' must be unpayable when no counters of any kind are present",
+        );
     }
 }

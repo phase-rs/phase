@@ -893,7 +893,14 @@ fn resolve_keyword_action(
                         && t.card_types.core_types.contains(&CoreType::Creature)
                 });
             if still_valid {
-                effects::attach::attach_to(state, equipment_id, target_creature_id);
+                if let Some(old_target) =
+                    effects::attach::attach_to(state, equipment_id, target_creature_id)
+                {
+                    events.push(GameEvent::Unattached {
+                        attachment_id: equipment_id,
+                        old_target,
+                    });
+                }
             }
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Equip,

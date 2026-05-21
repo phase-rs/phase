@@ -3,7 +3,7 @@ use crate::types::ability::{
     ResolvedAbility, TargetFilter,
 };
 #[cfg(test)]
-use crate::types::counter::CounterType;
+use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     GameState, ManaAbilityResume, ManaChoice, ManaChoiceContext, ManaChoicePrompt,
@@ -1458,20 +1458,27 @@ where
                     // CR 122.1 + CR 601.2b: RemoveCounter-on-self as part of a
                     // composite mana-ability cost (e.g. Gemstone Mine: `{T}, Remove
                     // a mining counter from this land: Add one mana of any color`).
-                    // Delegates to the same replacement-aware helper used by
-                    // casting.rs so replacement effects on counter removal apply.
+                    // Resolves `CounterMatch::Any` (untyped "remove a counter")
+                    // to the concrete counter type currently present on the
+                    // source via `resolve_counter_match_for_removal`, then
+                    // delegates to the replacement-aware helper so replacement
+                    // effects on counter removal apply.
                     AbilityCost::RemoveCounter {
                         count,
                         counter_type,
                         target: None,
                     } => {
-                        super::effects::counters::remove_counter_with_replacement(
-                            state,
-                            source_id,
-                            counter_type.clone(),
-                            *count,
-                            events,
-                        );
+                        if let Some(resolved) =
+                            super::effects::counters::resolve_counter_match_for_removal(
+                                state,
+                                source_id,
+                                counter_type,
+                            )
+                        {
+                            super::effects::counters::remove_counter_with_replacement(
+                                state, source_id, resolved, *count, events,
+                            );
+                        }
                     }
                     // CR 605.3a + CR 601.2h + CR 107.4e: Mana sub-cost inside a
                     // Composite mana-ability cost (filter lands' `{W/U}, {T}`).
@@ -5191,7 +5198,7 @@ mod tests {
                 AbilityCost::Tap,
                 AbilityCost::RemoveCounter {
                     count: 1,
-                    counter_type: CounterType::Generic("mining".to_string()),
+                    counter_type: CounterMatch::OfType(CounterType::Generic("mining".to_string())),
                     target: None,
                 },
             ],

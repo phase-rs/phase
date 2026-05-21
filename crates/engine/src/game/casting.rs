@@ -1,7 +1,7 @@
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, CardPlayMode,
     CastTimingPermission, CastingPermission, ChoiceType, ContinuousModification, Duration, Effect,
-    GameRestriction, ModalSelectionCondition, QuantityExpr, ResolvedAbility,
+    GameRestriction, ModalSelectionCondition, ProhibitedActivity, QuantityExpr, ResolvedAbility,
     RestrictionPlayerScope, StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::card::LayoutKind;
@@ -184,6 +184,51 @@ fn append_to_ability_def_sub_chain(ability: &mut AbilityDefinition, next: Abilit
 
 /// CR 101.2 + CR 601.2a: Temporary restrictions can limit which zones affected
 /// players may cast spells from.
+fn restriction_scope_matches_player(
+    source_controller: Option<PlayerId>,
+    affected_players: &RestrictionPlayerScope,
+    caster: PlayerId,
+) -> bool {
+    // CR 101.2: Restriction scope defines who is affected by the prohibition.
+    match affected_players {
+        RestrictionPlayerScope::AllPlayers => true,
+        RestrictionPlayerScope::SpecificPlayer(player) => *player == caster,
+        RestrictionPlayerScope::TargetedPlayer => {
+            debug_assert!(
+                false,
+                "TargetedPlayer should be resolved by add_restriction"
+            );
+            false
+        }
+        RestrictionPlayerScope::ParentTargetedPlayer => {
+            debug_assert!(
+                false,
+                "ParentTargetedPlayer should be resolved by add_restriction"
+            );
+            false
+        }
+        RestrictionPlayerScope::OpponentsOfSourceController => {
+            source_controller.is_some_and(|controller| controller != caster)
+        }
+    }
+}
+
+/// CR 601.2a: Build the spell-record projection used by prohibition filters.
+fn spell_record_for_restrictions(spell_obj: &super::game_object::GameObject) -> SpellCastRecord {
+    SpellCastRecord {
+        name: spell_obj.name.clone(),
+        core_types: spell_obj.card_types.core_types.clone(),
+        supertypes: spell_obj.card_types.supertypes.clone(),
+        subtypes: spell_obj.card_types.subtypes.clone(),
+        keywords: spell_obj.keywords.clone(),
+        colors: spell_obj.color.clone(),
+        mana_value: spell_obj.mana_cost.mana_value(),
+        has_x_in_cost: super::casting_costs::cost_has_x(&spell_obj.mana_cost),
+        from_zone: spell_obj.zone,
+        cast_variant: crate::types::game_state::CastingVariant::Normal,
+    }
+}
+
 fn is_blocked_by_cast_only_from_zones(
     state: &GameState,
     obj: &crate::game::game_object::GameObject,
@@ -193,37 +238,38 @@ fn is_blocked_by_cast_only_from_zones(
         .restrictions
         .iter()
         .any(|restriction| match restriction {
-            GameRestriction::CastOnlyFromZones {
+            GameRestriction::ProhibitActivity {
                 source,
                 affected_players,
-                allowed_zones,
+                activity: ProhibitedActivity::CastOnlyFromZones { allowed_zones },
                 ..
             } => {
                 let source_controller = state
                     .objects
                     .get(source)
                     .map(|source_obj| source_obj.controller);
-                let caster_affected = match affected_players {
-                    RestrictionPlayerScope::AllPlayers => true,
-                    RestrictionPlayerScope::SpecificPlayer(player) => *player == caster,
-                    RestrictionPlayerScope::OpponentsOfSourceController => {
-                        source_controller.is_some_and(|controller| controller != caster)
-                    }
-                };
+                let caster_affected =
+                    restriction_scope_matches_player(source_controller, affected_players, caster);
                 caster_affected && !allowed_zones.contains(&obj.zone)
             }
-            GameRestriction::DamagePreventionDisabled { .. } => false,
-            GameRestriction::CantCastSpells { .. } => false,
+            _ => false,
         })
 }
 
 /// CR 101.2: Check if a CantCastSpells restriction prevents the given player
 /// from casting any spells. E.g., Silence: "Your opponents can't cast spells this turn."
-fn is_blocked_by_cant_cast_spells(state: &GameState, caster: PlayerId) -> bool {
+fn is_blocked_by_cant_cast_spells(
+    state: &GameState,
+    caster: PlayerId,
+    spell_obj: Option<&super::game_object::GameObject>,
+) -> bool {
+    let spell_record = spell_obj.map(spell_record_for_restrictions);
+
     state.restrictions.iter().any(|restriction| {
-        let GameRestriction::CantCastSpells {
+        let GameRestriction::ProhibitActivity {
             source,
             affected_players,
+            activity: ProhibitedActivity::CastSpells { spell_filter },
             ..
         } = restriction
         else {
@@ -233,11 +279,56 @@ fn is_blocked_by_cant_cast_spells(state: &GameState, caster: PlayerId) -> bool {
             .objects
             .get(source)
             .map(|source_obj| source_obj.controller);
-        match affected_players {
-            RestrictionPlayerScope::AllPlayers => true,
-            RestrictionPlayerScope::SpecificPlayer(player) => *player == caster,
-            RestrictionPlayerScope::OpponentsOfSourceController => {
-                source_controller.is_some_and(|controller| controller != caster)
+        let caster_affected =
+            restriction_scope_matches_player(source_controller, affected_players, caster);
+
+        // CR 101.2: Once scope matches, filter-matching spells are prohibited.
+        caster_affected
+            && match spell_filter {
+                Some(filter) => spell_record.as_ref().is_some_and(|record| {
+                    super::filter::spell_record_matches_filter(
+                        record,
+                        filter,
+                        source_controller.unwrap_or(caster),
+                        &state.all_creature_types,
+                    )
+                }),
+                None => true,
+            }
+    })
+}
+
+/// CR 602.5 + CR 605.1a: Temporary game restrictions can prohibit activating
+/// abilities, optionally exempting mana abilities via the single classifier.
+fn is_blocked_by_cant_activate_abilities(
+    state: &GameState,
+    caster: PlayerId,
+    activating_ability: &AbilityDefinition,
+) -> bool {
+    state.restrictions.iter().any(|restriction| {
+        let GameRestriction::ProhibitActivity {
+            source,
+            affected_players,
+            activity: ProhibitedActivity::ActivateAbilities { exemption },
+            ..
+        } = restriction
+        else {
+            return false;
+        };
+        let source_controller = state
+            .objects
+            .get(source)
+            .map(|source_obj| source_obj.controller);
+        let caster_affected =
+            restriction_scope_matches_player(source_controller, affected_players, caster);
+        if !caster_affected {
+            return false;
+        }
+        match exemption {
+            ActivationExemption::None => true,
+            ActivationExemption::ManaAbilities => {
+                // CR 605.1a: Mana abilities are exempt from this prohibition.
+                !super::mana_abilities::is_mana_ability(activating_ability)
             }
         }
     })
@@ -331,18 +422,13 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
         }
     }
 
-    // CR 101.2: If a CantCastSpells restriction blocks this player, no spells are available.
-    if is_blocked_by_cant_cast_spells(state, player) {
-        return vec![];
-    }
-
     objects
         .into_iter()
         .filter(|obj_id| {
-            state
-                .objects
-                .get(obj_id)
-                .is_some_and(|obj| !is_blocked_by_cast_only_from_zones(state, obj, player))
+            state.objects.get(obj_id).is_some_and(|obj| {
+                !is_blocked_by_cast_only_from_zones(state, obj, player)
+                    && !is_blocked_by_cant_cast_spells(state, player, Some(obj))
+            })
         })
         .collect()
 }
@@ -1659,7 +1745,7 @@ fn prepare_spell_cast_with_variant_override_inner(
 
     // CR 101.2: Temporary blanket prohibition — "can't cast spells this turn."
     // E.g., Silence: "Your opponents can't cast spells this turn."
-    if mode == CastingMode::Actual && is_blocked_by_cant_cast_spells(state, player) {
+    if mode == CastingMode::Actual && is_blocked_by_cant_cast_spells(state, player, Some(obj)) {
         return Err(EngineError::ActionNotAllowed(
             "A temporary effect prevents you from casting spells this turn".to_string(),
         ));
@@ -6050,7 +6136,12 @@ pub fn pay_ability_cost(
                     "Cannot unattach: source is not attached".to_string(),
                 ));
             }
-            super::effects::attach::unattach(state, source_id);
+            if let Some(old_target) = super::effects::attach::unattach(state, source_id) {
+                events.push(GameEvent::Unattached {
+                    attachment_id: source_id,
+                    old_target,
+                });
+            }
         }
         // CR 606.4: Loyalty abilities use loyalty counter adjustment as their cost.
         // Called after target selection when the ability was initiated interactively.
@@ -6096,13 +6187,19 @@ pub fn pay_ability_cost(
             counter_type,
             target: None,
         } => {
-            super::effects::counters::remove_counter_with_replacement(
+            // CR 601.2h: Resolve `CounterMatch::Any` to the concrete counter
+            // type currently present on the source before the replacement
+            // pipeline sees it — `remove_counter_with_replacement` operates on
+            // a single concrete kind. `OfType(t)` passes through unchanged.
+            if let Some(resolved) = super::effects::counters::resolve_counter_match_for_removal(
                 state,
                 source_id,
-                counter_type.clone(),
-                *count,
-                events,
-            );
+                counter_type,
+            ) {
+                super::effects::counters::remove_counter_with_replacement(
+                    state, source_id, resolved, *count, events,
+                );
+            }
         }
         // Targeted remove-counter costs ("remove a counter from target X") would
         // need an interactive WaitingFor flow to let the player pick the permanent.
@@ -6656,6 +6753,9 @@ pub fn can_activate_ability_now(
     if is_blocked_by_cant_be_activated(state, player, source_id, &ability_def) {
         return false;
     }
+    if is_blocked_by_cant_activate_abilities(state, player, &ability_def) {
+        return false;
+    }
     if restrictions::check_activation_restrictions(
         state,
         player,
@@ -6774,6 +6874,11 @@ pub fn handle_activate_ability(
     if is_blocked_by_cant_be_activated(state, player, source_id, &ability_def) {
         return Err(EngineError::ActionNotAllowed(
             "Activated abilities of this permanent can't be activated (CR 602.5)".to_string(),
+        ));
+    }
+    if is_blocked_by_cant_activate_abilities(state, player, &ability_def) {
+        return Err(EngineError::ActionNotAllowed(
+            "A temporary effect prevents activating this ability".to_string(),
         ));
     }
 
@@ -7683,9 +7788,10 @@ mod tests {
         CastVariantPaid, CastingPermission, ChosenAttribute, ChosenSubtypeKind, Comparator,
         ContinuousModification, ControllerRef, CostCategory, FilterProp, GainLifePlayer,
         GameRestriction, KickerVariant, ManaContribution, ManaProduction, ManaSpendPermission,
-        ManaSpendRestriction, ModalSelectionCondition, ModalSelectionConstraint, QuantityExpr,
-        RestrictionExpiry, RestrictionPlayerScope, SearchSelectionConstraint, StaticCondition,
-        StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+        ManaSpendRestriction, ModalSelectionCondition, ModalSelectionConstraint,
+        ProhibitedActivity, QuantityExpr, RestrictionExpiry, RestrictionPlayerScope,
+        SearchSelectionConstraint, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
+        TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CoreType, Supertype};
@@ -8550,6 +8656,93 @@ mod tests {
             };
         }
         obj_id
+    }
+
+    #[test]
+    fn prohibit_activity_cast_spells_filter_blocks_only_matching_spell_types() {
+        // CR 101.2 + CR 601.2a: Abeyance-style restrictions can prohibit only
+        // the matching spell class while leaving other spell types castable.
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(0xA8E1),
+            PlayerId(1),
+            "Abeyance Source".to_string(),
+            Zone::Exile,
+        );
+        state.restrictions.push(GameRestriction::ProhibitActivity {
+            source,
+            affected_players: RestrictionPlayerScope::SpecificPlayer(PlayerId(0)),
+            expiry: RestrictionExpiry::EndOfTurn,
+            activity: ProhibitedActivity::CastSpells {
+                spell_filter: Some(TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                    ],
+                }),
+            },
+        });
+
+        let instant = create_instant_in_hand(&mut state, PlayerId(0));
+        let sorcery = create_sorcery_in_hand(&mut state, PlayerId(0));
+        let creature = create_creature_spell_in_hand(&mut state, PlayerId(0));
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 8);
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 8);
+
+        assert!(!can_cast_object_now(&state, PlayerId(0), instant));
+        assert!(!can_cast_object_now(&state, PlayerId(0), sorcery));
+        assert!(can_cast_object_now(&state, PlayerId(0), creature));
+    }
+
+    #[test]
+    fn prohibit_activity_activate_abilities_blocks_non_mana_but_exempts_mana() {
+        // CR 602.5 + CR 605.1a: Abeyance prohibits non-mana activated abilities
+        // while leaving mana abilities available.
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(0xA8E2),
+            PlayerId(1),
+            "Abeyance Source".to_string(),
+            Zone::Exile,
+        );
+        state.restrictions.push(GameRestriction::ProhibitActivity {
+            source,
+            affected_players: RestrictionPlayerScope::SpecificPlayer(PlayerId(0)),
+            expiry: RestrictionExpiry::EndOfTurn,
+            activity: ProhibitedActivity::ActivateAbilities {
+                exemption: ActivationExemption::ManaAbilities,
+            },
+        });
+
+        let non_mana_source = add_artifact_with_activated_ability(&mut state, PlayerId(0));
+        let mana_source = create_object(
+            &mut state,
+            CardId(0xA8E3),
+            PlayerId(0),
+            "Mana Rock".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&mana_source).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.entered_battlefield_turn = Some(0);
+            Arc::make_mut(&mut obj.abilities).push(make_tap_for_green_mana_ability());
+        }
+
+        assert!(!can_activate_ability_now(
+            &state,
+            PlayerId(0),
+            non_mana_source,
+            0
+        ));
+        assert!(can_activate_ability_now(
+            &state,
+            PlayerId(0),
+            mana_source,
+            0
+        ));
     }
 
     fn create_gloomlake_verge(state: &mut GameState, player: PlayerId) -> ObjectId {
@@ -16087,11 +16280,13 @@ mod tests {
             "Restriction Source".to_string(),
             Zone::Exile,
         );
-        state.restrictions.push(GameRestriction::CastOnlyFromZones {
+        state.restrictions.push(GameRestriction::ProhibitActivity {
             source,
             affected_players,
-            allowed_zones: vec![Zone::Hand],
             expiry: RestrictionExpiry::UntilPlayerNextTurn { player: controller },
+            activity: ProhibitedActivity::CastOnlyFromZones {
+                allowed_zones: vec![Zone::Hand],
+            },
         });
         source
     }
@@ -20064,7 +20259,7 @@ mod tests {
                 StaticDefinition::new(StaticMode::PayLifeAsColoredMana {
                     color: ManaColor::Black,
                 })
-                .affected(TargetFilter::Player),
+                .affected(TargetFilter::Controller),
             );
             id
         }
@@ -20130,6 +20325,45 @@ mod tests {
             assert!(
                 state.stack.iter().any(|s| s.source_id == spell),
                 "CR 601.2a: successful cast must push the spell onto the stack"
+            );
+        }
+
+        /// CR 107.4f: K'rrik's "you may" permission applies only to K'rrik's
+        /// controller. A battlefield K'rrik must not make an opponent's normal
+        /// `{B}` costs payable as though they were Phyrexian mana.
+        #[test]
+        fn krrik_life_payment_permission_affects_only_controller() {
+            use crate::types::mana::ManaColor;
+
+            let mut state = setup_game_at_main_phase();
+            add_krrik_static(&mut state, PlayerId(0));
+            state.players[0].life = 20;
+            state.players[1].life = 20;
+
+            assert!(
+                crate::game::static_abilities::player_life_payment_colors(&state, PlayerId(0))
+                    .contains(ManaColor::Black),
+                "CR 107.4f: K'rrik's controller gets the black life-payment permission"
+            );
+            assert!(
+                !crate::game::static_abilities::player_life_payment_colors(&state, PlayerId(1))
+                    .contains(ManaColor::Black),
+                "CR 107.4f: opponents must not get K'rrik's black life-payment permission"
+            );
+
+            let opponent_spell =
+                create_instant_with_cost(&mut state, PlayerId(1), vec![ManaCostShard::Black], 0);
+            assert!(
+                !can_pay_cost_after_auto_tap(
+                    &state,
+                    PlayerId(1),
+                    opponent_spell,
+                    &ManaCost::Cost {
+                        shards: vec![ManaCostShard::Black],
+                        generic: 0,
+                    },
+                ),
+                "CR 107.4f: opponent's ordinary {{B}} cost must not be payable via K'rrik life"
             );
         }
 
@@ -20497,7 +20731,7 @@ mod tests {
     // any activated ability whose cost is "Remove N {type} counters from ~".
     mod remove_counter_cost {
         use super::*;
-        use crate::types::counter::CounterType;
+        use crate::types::counter::{CounterMatch, CounterType};
 
         fn source_with_counters(
             state: &mut GameState,
@@ -20528,7 +20762,7 @@ mod tests {
             let source = source_with_counters(&mut state, CounterType::Plus1Plus1, 2);
             let cost = AbilityCost::RemoveCounter {
                 count: 2,
-                counter_type: CounterType::Plus1Plus1,
+                counter_type: CounterMatch::OfType(CounterType::Plus1Plus1),
                 target: None,
             };
             let mut events = Vec::new();
@@ -20565,7 +20799,7 @@ mod tests {
             let source = source_with_counters(&mut state, CounterType::Plus1Plus1, 0);
             let cost = AbilityCost::RemoveCounter {
                 count: 1,
-                counter_type: CounterType::Plus1Plus1,
+                counter_type: CounterMatch::OfType(CounterType::Plus1Plus1),
                 target: None,
             };
             assert!(
@@ -20584,7 +20818,7 @@ mod tests {
             let source = source_with_counters(&mut state, CounterType::Plus1Plus1, 1);
             let cost = AbilityCost::RemoveCounter {
                 count: 2,
-                counter_type: CounterType::Plus1Plus1,
+                counter_type: CounterMatch::OfType(CounterType::Plus1Plus1),
                 target: None,
             };
             assert!(
@@ -20604,7 +20838,7 @@ mod tests {
             let source = source_with_counters(&mut state, CounterType::Plus1Plus1, 3);
             let cost = AbilityCost::RemoveCounter {
                 count: 1,
-                counter_type: CounterType::Plus1Plus1,
+                counter_type: CounterMatch::OfType(CounterType::Plus1Plus1),
                 target: None,
             };
             let mut events = Vec::new();

@@ -18,7 +18,7 @@ use super::mana::{ManaColor, ManaCost, ManaType};
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
 use super::replacements::ReplacementEvent;
-use super::statics::{CastFrequency, StaticMode};
+use super::statics::{ActivationExemption, CastFrequency, StaticMode};
 use super::triggers::TriggerMode;
 use super::zones::Zone;
 use crate::types::events::PlayerActionKind;
@@ -791,25 +791,23 @@ impl<'de> serde::Deserialize<'de> for DevotionColors {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type")]
 pub enum ManaProduction {
-    /// Produce an explicit fixed sequence of colored mana symbols (e.g. `{W}{U}`).
+    /// Produce one or more specific colors.
     Fixed {
         #[serde(default)]
         colors: Vec<ManaColor>,
-        /// CR 605.1a: Whether this is base or additional (e.g. Wild Growth,
-        /// Verdant Haven) mana.
+        /// CR 605.1a: Whether this is base or additional (e.g. Fertile Ground) mana.
         #[serde(
             default = "default_mana_contribution",
             skip_serializing_if = "is_default_mana_contribution"
         )]
         contribution: ManaContribution,
     },
-    /// Produce N colorless mana (e.g. `{C}`, `{C}{C}`).
+    /// Produce strictly colorless mana (e.g. "Add {C}").
     Colorless {
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
     },
-    /// CR 106.1: Produce a mix of colorless and colored mana (e.g. `{C}{W}`, `{C}{C}{R}`).
-    /// Used by Ravnica bounce lands (Karoo, Azorius Chancery) and similar.
+    /// Produce a mixed bundle of fixed colorless + colored mana (e.g. "Add {C}{R}").
     Mixed {
         colorless_count: u32,
         colors: Vec<ManaColor>,
@@ -1183,21 +1181,29 @@ pub enum GameRestriction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scope: Option<RestrictionScope>,
     },
-    /// CR 101.2 + CR 601.2a: A temporary effect restricts affected players to casting
-    /// spells only from the listed zones until the restriction expires.
-    CastOnlyFromZones {
-        source: ObjectId,
-        affected_players: RestrictionPlayerScope,
-        allowed_zones: Vec<Zone>,
-        expiry: RestrictionExpiry,
-    },
-    /// CR 101.2: A temporary effect prevents affected players from casting any spell
-    /// until the restriction expires. E.g., Silence: "Your opponents can't cast spells this turn."
-    CantCastSpells {
+    /// CR 101.2 + CR 601.2a + CR 602.5: A temporary effect prohibits one activity
+    /// axis for affected players until expiry.
+    ProhibitActivity {
         source: ObjectId,
         affected_players: RestrictionPlayerScope,
         expiry: RestrictionExpiry,
+        activity: ProhibitedActivity,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ProhibitedActivity {
+    /// CR 101.2 + CR 601.2a: Restrict casting to the listed zones.
+    CastOnlyFromZones { allowed_zones: Vec<Zone> },
+    /// CR 101.2: Prevent casting matching spells.
+    CastSpells {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spell_filter: Option<TargetFilter>,
+    },
+    /// CR 101.2 + CR 602.5 + CR 605.1a: Prevent activating abilities, optionally
+    /// exempting mana abilities.
+    ActivateAbilities { exemption: ActivationExemption },
 }
 
 /// When a game restriction expires.
@@ -1224,6 +1230,14 @@ pub enum RestrictionScope {
 pub enum RestrictionPlayerScope {
     AllPlayers,
     SpecificPlayer(PlayerId),
+    /// Placeholder used by parser lowering for effects that target a player.
+    /// Resolved to `SpecificPlayer` by `add_restriction` at resolution time.
+    TargetedPlayer,
+    /// CR 608.2c: Anaphoric "that player" in a sub-ability reuses a player
+    /// target already chosen for an earlier instruction in the same chain.
+    /// Resolved to `SpecificPlayer` by `add_restriction` after parent target
+    /// propagation, without declaring a second target slot.
+    ParentTargetedPlayer,
     OpponentsOfSourceController,
 }
 
@@ -3987,9 +4001,16 @@ pub enum AbilityCost {
         count: u32,
         filter: TargetFilter,
     },
+    /// CR 122.1 + CR 601.2h: Remove `count` counters matching `counter_type`
+    /// as an additional cost. `CounterMatch::Any` is the untyped "remove a
+    /// counter" form (Loch Mare's `{1}{U}, Remove a counter from ~`); the
+    /// payment path sums across every counter type on the chosen permanent
+    /// and resolves to a concrete kind at payment time. `CounterMatch::OfType`
+    /// is the typed form ("remove a +1/+1 counter", "remove a charge counter"),
+    /// scoped to a single counter kind.
     RemoveCounter {
         count: u32,
-        counter_type: CounterType,
+        counter_type: CounterMatch,
         #[serde(default)]
         target: Option<TargetFilter>,
     },
@@ -5416,6 +5437,18 @@ pub enum Effect {
         /// Number of cards to exile.
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
+        /// CR 406.3: When true the exiled cards enter Exile face down and
+        /// must not be examinable by any player (the resolver flips the
+        /// moved object's `face_down` flag, and `visibility.rs` redacts the
+        /// card unless a separate effect grants look permission). Covers the
+        /// Necropotence / Bomat Courier / Asmodeus the Archfiend /
+        /// Knowledge Vault class — every card
+        /// whose Oracle text says "exile the top card of your library face
+        /// down". Skipped from serialization when false so JSON snapshots
+        /// and stored card-data for face-up `ExileTop` effects are
+        /// unchanged.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        face_down: bool,
     },
     /// No-op effect that only establishes targeting for sub-abilities in the chain.
     /// Produced by Oracle text like "Choose target creature" where the sentence exists
@@ -5682,8 +5715,8 @@ pub enum Effect {
     VentureInto {
         dungeon: crate::game::dungeon::DungeonId,
     },
-    /// CR 725.2: Take the initiative. Grants initiative designation and triggers
-    /// venture into the Undercity.
+    /// CR 726.1 + CR 726.2: Take the initiative. Grants the initiative
+    /// designation and triggers venture into Undercity.
     TakeTheInitiative,
     /// CR 728.1: Process rad counters — mill cards equal to rad counter count,
     /// lose 1 life and remove one rad counter per nonland card milled.
@@ -9450,6 +9483,26 @@ pub enum QuantityModification {
     Plus { value: u32 },
     /// count.saturating_sub(value) — Vizier of Remedies (-1)
     Minus { value: u32 },
+    /// CR 113.6i + CR 614.17 + CR 614.6 + CR 614.7 + CR 122.1: Fully replace the
+    /// quantity event with nothing — the proposed `AddCounter` / `CreateToken`
+    /// event "never happens" (CR 614.6).
+    ///
+    /// CR 113.6i is the *authorizing* rule for permanent-scoped counter
+    /// prohibitions ("an object's ability that states counters can't be put on
+    /// that object functions as that object is entering the battlefield in
+    /// addition to functioning while that object is on the battlefield").
+    /// CR 614.17 is the framework for "can't" effects — they aren't replacement
+    /// effects but follow similar rules — which is why we model the prohibition
+    /// through the replacement pipeline. CR 122.1 ("a counter is a marker
+    /// placed on an object or player") identifies the placement event the
+    /// prohibition suppresses; CR 614.6/614.7 govern the resulting "event
+    /// never happens" outcome.
+    ///
+    /// Used by self-targeted counter-prohibition replacements ("~ can't have
+    /// counters put on it." — Melira's Keepers). Composes with `valid_card:
+    /// SelfRef` for permanent-scoped protection and with player-scope filters
+    /// for the future Solemnity-class global variant.
+    Prevent,
 }
 
 /// CR 106.3 + CR 614.1a: Mana-production replacement payload.
@@ -11734,7 +11787,7 @@ mod tests {
         fn remove_counter() {
             let cost = AbilityCost::RemoveCounter {
                 count: 1,
-                counter_type: CounterType::Plus1Plus1,
+                counter_type: CounterMatch::OfType(CounterType::Plus1Plus1),
                 target: None,
             };
             assert_eq!(cost.categories(), vec![CostCategory::RemovesCounters]);

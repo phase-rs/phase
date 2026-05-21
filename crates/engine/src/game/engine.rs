@@ -6151,6 +6151,58 @@ mod tests {
     }
 
     #[test]
+    fn apply_play_land_rejects_under_cant_play_land_transient_effect() {
+        // CR 305.2 + CR 611.1 + CR 611.2c: An activated ability that creates a
+        // continuous effect with "until end of turn" duration (Pardic Miner:
+        // "Sacrifice this creature: Target player can't play lands this turn.")
+        // registers a transient continuous effect bound to
+        // `TargetFilter::SpecificPlayer { id }`. The play-land gate must
+        // observe this TCE the same way it observes the printed-static form,
+        // because the source object has already left the battlefield (sacrifice
+        // cost) by the time the effect resolves.
+        use crate::types::ability::{ContinuousModification, Duration};
+        use crate::types::statics::StaticMode;
+
+        let mut state = setup_game_at_main_phase();
+
+        let land_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Hand,
+        );
+
+        // Register a SpecificPlayer-bound TCE granting CantPlayLand to P0,
+        // mirroring what `effect.rs::register_transient_effect` would emit
+        // when Pardic Miner's activated ability resolves with P0 chosen as
+        // the target.
+        state.add_transient_continuous_effect(
+            ObjectId(99),
+            PlayerId(1),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificPlayer { id: PlayerId(0) },
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::Other("CantPlayLand".to_string()),
+            }],
+            None,
+        );
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::PlayLand {
+                object_id: land_id,
+                card_id: CardId(1),
+            },
+        );
+
+        assert!(
+            result.is_err(),
+            "PlayLand must be rejected under transient CantPlayLand effect (Pardic Miner class)"
+        );
+    }
+
+    #[test]
     fn new_game_creates_two_player_state() {
         let state = new_game(42);
         assert_eq!(state.players.len(), 2);
