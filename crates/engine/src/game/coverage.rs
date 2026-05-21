@@ -68,6 +68,9 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // CR 107.4f: PayLifeAsColoredMana carries the `ManaColor` axis
             // (K'rrik = Black; future printings any other color).
             | StaticMode::PayLifeAsColoredMana { .. }
+            // CR 120.6: CantDraw carries `who` (controller vs all_players) —
+            // runtime enforcement is in game/effects/draw.rs::draw_cards.
+            | StaticMode::CantDraw { .. }
     )
 }
 
@@ -9193,6 +9196,62 @@ mod tests {
             support,
             FeatureSupport::Handled,
             "StaticCondition::UnlessPay is resolved by combat-tax payment handling",
+        );
+    }
+
+    /// CR 120.6: `CantDraw { who: AllPlayers }` must be recognised by
+    /// `is_data_carrying_static` so that cards like Maralen of the Mornsong
+    /// and Omen Machine are marked as supported.
+    #[test]
+    fn cant_draw_all_players_static_does_not_count_as_silent_drop() {
+        use crate::types::statics::ProhibitionScope;
+        let mut face = make_face();
+        let oracle = "Players can't draw cards.";
+        face.oracle_text = Some(oracle.to_string());
+        face.static_abilities.push(StaticDefinition {
+            mode: StaticMode::CantDraw {
+                who: ProhibitionScope::AllPlayers,
+            },
+            affected: Some(TargetFilter::SelfRef),
+            modifications: vec![],
+            condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            active_zones: vec![],
+            characteristic_defining: false,
+            description: Some("Players can't draw cards.".to_string()),
+        });
+
+        assert!(
+            audit_card_lines(oracle, &face).is_empty(),
+            "'Players can\'t draw cards.' should be covered by CantDraw(all_players) static"
+        );
+    }
+
+    /// Regression: `CantDraw { who: Controller }` must also be recognised.
+    #[test]
+    fn cant_draw_controller_static_does_not_count_as_silent_drop() {
+        use crate::types::statics::ProhibitionScope;
+        let mut face = make_face();
+        let oracle = "You can't draw cards.";
+        face.oracle_text = Some(oracle.to_string());
+        face.static_abilities.push(StaticDefinition {
+            mode: StaticMode::CantDraw {
+                who: ProhibitionScope::Controller,
+            },
+            affected: Some(TargetFilter::SelfRef),
+            modifications: vec![],
+            condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            active_zones: vec![],
+            characteristic_defining: false,
+            description: Some("You can't draw cards.".to_string()),
+        });
+
+        assert!(
+            audit_card_lines(oracle, &face).is_empty(),
+            "'You can\'t draw cards.' should be covered by CantDraw(controller) static"
         );
     }
 }
