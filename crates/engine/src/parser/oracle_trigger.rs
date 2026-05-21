@@ -4486,7 +4486,6 @@ fn try_parse_event(
             // a player exerts a creature they control. The canonical form is
             // "Whenever you exert a creature" (Trueheart Twins, Battlefield Scavenger,
             // Rohirrim Chargers, Vizier of the True, Resolute Survivors).
-            value(SimpleEvent::Exerts, tag("exerts a creature")),
             value(SimpleEvent::Exerts, tag("exerts")),
         )))
         .parse(input)
@@ -4582,12 +4581,6 @@ fn try_parse_event(
                 def.valid_card = Some(subject.clone());
             }
             SimpleEvent::Exerts => {
-                // CR 701.43a: "Whenever you exert a creature" — actor-side exert
-                // trigger. `valid_card` is the subject (the player's creature being
-                // exerted). The trigger fires when any creature the controller
-                // exerts resolves its exert declaration during the declare-attackers
-                // step (CR 701.43b). The runtime matcher `TriggerMode::Exerted`
-                // checks the event source against `valid_card`.
                 def.mode = TriggerMode::Exerted;
                 def.valid_card = Some(subject.clone());
             }
@@ -5902,6 +5895,30 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             TypedFilter::default().properties(vec![FilterProp::Another]),
         ));
         return Some((TriggerMode::CycledOrDiscarded, def));
+    }
+    // CR 701.43a: "Whenever you exert a creature" — actor-side exert trigger.
+    // The trigger fires when any creature the controller exerts resolves its
+    // exert declaration during the declare-attackers step (CR 701.43b).
+    if let Ok((_, (who, _))) = nom_primitives::split_once_on(lower, " exert ") {
+        let mut def = make_base();
+        def.mode = TriggerMode::Exerted;
+        if scan_contains(who, "opponent") {
+            def.valid_target = Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent),
+            ));
+        } else if scan_contains(who, "you") {
+            def.valid_target = Some(TargetFilter::Controller);
+        }
+        let after_exert = &lower[who.len() + " exert ".len()..].trim_start();
+        let (filter, _) = parse_type_phrase(after_exert);
+        if let TargetFilter::Typed(tf) = &filter {
+            if tf.has_meaningful_type_constraint() {
+                def.valid_card = Some(filter);
+            }
+        } else if !matches!(filter, TargetFilter::Any) {
+            def.valid_card = Some(filter);
+        }
+        return Some((TriggerMode::Exerted, def));
     }
 
     if matches!(
