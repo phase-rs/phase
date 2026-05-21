@@ -4431,6 +4431,8 @@ fn try_parse_event(
         SaddlesOrCrews,
         Crews,
         Saddles,
+        /// CR 701.3d: Equipment/Aura becomes unattached from a permanent.
+        BecomesUnattached,
     }
     fn parse_simple_event(input: &str) -> OracleResult<'_, SimpleEvent> {
         alt((
@@ -4480,6 +4482,17 @@ fn try_parse_event(
             // CR 702.171c: Actor-side saddle trigger (reserved — no cards today without
             // the compound, but the arm is ready for future printings).
             value(SimpleEvent::Saddles, tag("saddles a mount")),
+            // CR 701.3d: Equipment/Aura becomes unattached from a permanent.
+            // Covers "becomes unattached from a permanent" (Grafted Exoskeleton,
+            // Stitcher's Graft, Grafted Wargear) and the shorter form
+            // "becomes unattached" (future-proofing).
+            value(
+                SimpleEvent::BecomesUnattached,
+                alt((
+                    tag("becomes unattached from a permanent"),
+                    tag("becomes unattached"),
+                )),
+            ),
         )))
         .parse(input)
     }
@@ -4571,6 +4584,15 @@ fn try_parse_event(
                 // CR 702.122 + CR 702.171c: Compound actor-side trigger. Fires on
                 // either saddling a Mount or crewing a Vehicle.
                 def.mode = TriggerMode::SaddlesOrCrews;
+                def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::BecomesUnattached => {
+                // CR 701.3d: Equipment/Aura becomes unattached from a permanent.
+                // `valid_card` records the Equipment/Aura filter (the subject).
+                // `match_unattach` in trigger_matchers.rs fires when the
+                // attached-to permanent leaves the battlefield, or when the
+                // Equipment is moved to a new host via equip/attach.
+                def.mode = TriggerMode::Unattach;
                 def.valid_card = Some(subject.clone());
             }
         }
@@ -17875,5 +17897,57 @@ mod snapshot_tests {
                 "chain link {i} should be TriggeringSource, got {t:?}",
             );
         }
+    }
+
+    // CR 701.3d: "Whenever ~ becomes unattached from a permanent" trigger
+    // Covers Grafted Exoskeleton, Stitcher's Graft, Grafted Wargear, etc.
+    #[test]
+    fn trigger_becomes_unattached_from_permanent() {
+        let def = parse_trigger_line(
+            "Whenever this Equipment becomes unattached from a permanent, sacrifice that permanent.",
+            "Grafted Exoskeleton",
+        );
+        assert_eq!(
+            def.mode,
+            TriggerMode::Unattach,
+            "Expected TriggerMode::Unattach, got {:?}",
+            def.mode
+        );
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::SelfRef),
+            "Expected valid_card = SelfRef (Equipment self-reference), got {:?}",
+            def.valid_card
+        );
+    }
+
+    // CR 701.3d: shorter form "becomes unattached" (future-proofing)
+    #[test]
+    fn trigger_becomes_unattached_short_form() {
+        let def = parse_trigger_line(
+            "Whenever ~ becomes unattached, sacrifice the permanent it was attached to.",
+            "Test Equipment",
+        );
+        assert_eq!(
+            def.mode,
+            TriggerMode::Unattach,
+            "Expected TriggerMode::Unattach for short form, got {:?}",
+            def.mode
+        );
+    }
+
+    // Regression: "Whenever ~ becomes unattached from a permanent, sacrifice that permanent."
+    // should NOT be parsed as TriggerMode::Unknown.
+    #[test]
+    fn trigger_becomes_unattached_not_unknown() {
+        let def = parse_trigger_line(
+            "Whenever this Equipment becomes unattached from a permanent, sacrifice that permanent.",
+            "Stitcher's Graft",
+        );
+        assert!(
+            !matches!(def.mode, TriggerMode::Unknown(_)),
+            "Trigger should not fall through to Unknown; got {:?}",
+            def.mode
+        );
     }
 }
