@@ -189,22 +189,31 @@ pub(crate) fn parse_quantity_ref_with_context(
                 filter: PlayerFilter::Opponent,
             });
         }
-        // CR 120.1 + CR 510.1: "opponents that were dealt combat damage this turn".
-        // Singular/plural and "who/that" variants compose through one nom alt so the
-        // partner-quality "for each opponent that was dealt combat damage this turn"
-        // class (Tymna the Weaver) routes to the dedicated PlayerFilter rather than
-        // falling through to the type-phrase fallback below.
-        if let Ok((after, _)) = (
+        // CR 120.1 + CR 510.1: "opponents that were dealt combat damage [this turn]".
+        // Singular/plural and "who/that" / "were/was" variants compose through
+        // nested alt() blocks. The trailing " this turn" suffix is optional
+        // because upstream callers (e.g., draw-count parsing through
+        // `strip_trailing_duration`) strip the duration before this parser
+        // sees the phrase. PlayerCount{OpponentDealtCombatDamage} is
+        // inherently scoped to this turn (queries
+        // `state.damage_dealt_this_turn`), so the suffix is informational
+        // here, not semantic.
+        if let Ok((after_verb, _)) = (
             alt((tag::<_, _, OracleError<'_>>("opponents "), tag("opponent "))),
             alt((
-                tag::<_, _, OracleError<'_>>("that were dealt combat damage this turn"),
-                tag("that was dealt combat damage this turn"),
-                tag("who were dealt combat damage this turn"),
-                tag("who was dealt combat damage this turn"),
+                tag::<_, _, OracleError<'_>>("that were"),
+                tag("that was"),
+                tag("who were"),
+                tag("who was"),
             )),
+            tag(" dealt combat damage"),
         )
             .parse(rest)
         {
+            let after = tag::<_, _, OracleError<'_>>(" this turn")
+                .parse(after_verb)
+                .map(|(rest, _)| rest)
+                .unwrap_or(after_verb);
             if after.trim().is_empty() {
                 return Some(QuantityRef::PlayerCount {
                     filter: PlayerFilter::OpponentDealtCombatDamage,
@@ -498,12 +507,26 @@ pub(crate) fn parse_cda_quantity_with_context(
 pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
     let lower = text.to_lowercase();
     let lower = lower.trim();
-    // CR 609.3: "the life/damage lost/dealt this way" — numeric result from preceding effect.
-    // Must check before "that much" to avoid false match on "this way" vs. "this turn".
+    // CR 609.3: "the X <verb>ed/<verb> this way" — numeric result from the
+    // preceding effect (or trigger event) in the same resolution. Must check
+    // before "that much" to avoid false match on "this way" vs. "this turn".
+    // Verb-phrase substrings cover:
+    //   - life-payment/loss: "life lost", "life paid"
+    //   - combat-damage triggers: "damage dealt" (active voice),
+    //     "dealt damage" (passive voice — e.g. Hordewing Skaab's
+    //     "opponents dealt damage this way")
+    //   - counter-removal chains: "counters removed", "counter removed"
+    //     (Sensational Spider-Man's "stun counters removed this way";
+    //     `state.last_effect_amount` is stamped by the preceding RemoveCounter).
+    // PreviousEffectAmount reads `state.last_effect_amount`, which the
+    // upstream effect (damage / counter removal / life loss) stamps.
     if lower.ends_with("this way")
-        && (lower.contains("life lost")
-            || lower.contains("damage dealt")
-            || lower.contains("life paid"))
+        && (nom_primitives::scan_contains(lower, "life lost")
+            || nom_primitives::scan_contains(lower, "damage dealt")
+            || nom_primitives::scan_contains(lower, "dealt damage")
+            || nom_primitives::scan_contains(lower, "life paid")
+            || nom_primitives::scan_contains(lower, "counters removed")
+            || nom_primitives::scan_contains(lower, "counter removed"))
     {
         return Some(QuantityExpr::Ref {
             qty: QuantityRef::PreviousEffectAmount,
@@ -1790,6 +1813,37 @@ mod tests {
                 }
             }
         );
+    }
+
+    /// CR 120.1 + CR 510.1: Upstream `strip_trailing_duration` removes the
+    /// "this turn" suffix before the draw-count parser path reaches
+    /// `parse_quantity_ref`. The phrase must still resolve to
+    /// `PlayerFilter::OpponentDealtCombatDamage` without the suffix —
+    /// otherwise cards like Moonshae Pixie ("draw cards equal to the number
+    /// of opponents who were dealt combat damage this turn") regress to
+    /// `Effect::Unimplemented`. The "this turn" tail is informational at
+    /// this layer: `PlayerCount{OpponentDealtCombatDamage}` already queries
+    /// `state.damage_dealt_this_turn`.
+    #[test]
+    fn cda_quantity_opponents_dealt_combat_damage_strip_suffix() {
+        for phrase in [
+            "the number of opponents who were dealt combat damage",
+            "the number of opponents that were dealt combat damage",
+            "the number of opponent who was dealt combat damage",
+            "the number of opponent that was dealt combat damage",
+        ] {
+            let qty = parse_cda_quantity(phrase)
+                .unwrap_or_else(|| panic!("phrase {phrase:?} must parse to PlayerCount"));
+            assert_eq!(
+                qty,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::PlayerCount {
+                        filter: PlayerFilter::OpponentDealtCombatDamage,
+                    }
+                },
+                "phrase {phrase:?} must route to OpponentDealtCombatDamage",
+            );
+        }
     }
 
     /// CR 109.1: Defense-in-depth — when `parse_type_phrase` returns an
