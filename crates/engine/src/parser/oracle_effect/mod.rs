@@ -22520,6 +22520,80 @@ mod tests {
         }
     }
 
+    /// CR 701.6 + CR 603.7 + CR 202.3: Full parse tree for Mana Drain.
+    /// Verifies that prefix-position "At the beginning of your next main
+    /// phase, …" wraps the inner effect in CreateDelayedTrigger, and that
+    /// "that spell's mana value" parses to `ObjectManaValue{CostPaidObject}`
+    /// (the existing event-context anaphor; the runtime snapshot walker
+    /// resolves this against the parent ability's targets[0]).
+    ///
+    /// Asserts:
+    /// - primary effect is `Counter` targeting stack spell,
+    /// - sub_ability's effect is `CreateDelayedTrigger` with
+    ///   `AtNextPhaseForPlayer { PreCombatMain, PlayerId(0) /* placeholder */ }`,
+    /// - delayed trigger's inner effect is `Mana { Colorless { count:
+    ///   Ref(ObjectManaValue{CostPaidObject}) } }`.
+    #[test]
+    fn mana_drain_full_parse_tree() {
+        let def = parse_effect_chain(
+            "Counter target spell. At the beginning of your next main phase, add an amount of {C} equal to that spell's mana value.",
+            AbilityKind::Spell,
+        );
+
+        // Primary effect: Counter.
+        assert!(
+            matches!(*def.effect, Effect::Counter { .. }),
+            "Expected Counter primary effect, got {:?}",
+            def.effect
+        );
+
+        // Sub_ability effect: CreateDelayedTrigger at PreCombatMain.
+        let sub = def.sub_ability.as_ref().expect("sub_ability must exist");
+        let Effect::CreateDelayedTrigger {
+            condition: delayed_cond,
+            effect: delayed_effect_def,
+            ..
+        } = &*sub.effect
+        else {
+            panic!(
+                "expected CreateDelayedTrigger on sub_ability, got {:?}",
+                sub.effect
+            );
+        };
+        assert!(
+            matches!(
+                delayed_cond,
+                DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::PreCombatMain,
+                    ..
+                }
+            ),
+            "expected AtNextPhaseForPlayer(PreCombatMain), got {delayed_cond:?}"
+        );
+
+        // Inner delayed effect: Mana(Colorless, Ref(ObjectManaValue{CostPaidObject})).
+        let Effect::Mana { produced, .. } = &*delayed_effect_def.effect else {
+            panic!(
+                "expected Mana effect on delayed trigger, got {:?}",
+                delayed_effect_def.effect
+            );
+        };
+        match produced {
+            ManaProduction::Colorless { count } => {
+                assert_eq!(
+                    *count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: crate::types::ability::ObjectScope::CostPaidObject,
+                        }
+                    },
+                    "Colorless count must reference parent target's mana value via ObjectManaValue{{CostPaidObject}}"
+                );
+            }
+            other => panic!("expected Colorless mana production, got {other:?}"),
+        }
+    }
+
     /// CR 608.2c regression guard: a delayed-trigger effect chain WITHOUT an
     /// inner condition must still parse correctly after the condition-lift.
     /// The outer `CreateDelayedTrigger`-carrying `AbilityDefinition` has
