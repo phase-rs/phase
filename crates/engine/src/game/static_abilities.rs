@@ -865,6 +865,17 @@ pub fn player_protection_from(
 /// for a static whose mode is `Other(s)` with `s == name`, whose `affected`
 /// filter matches the given context, and whose `condition` (if any) is true.
 ///
+/// Also scans `state.transient_continuous_effects` for player-scoped
+/// transients whose modifications include `AddStaticMode { mode: Other(name) }`
+/// — this is the spell/activated-ability-applied form of the same prohibition
+/// (Pardic Miner's "Target player can't play lands this turn" registers a
+/// `SpecificPlayer { id }`-bound TCE; the static form scanned above lives on
+/// a battlefield permanent's `static_definitions`). Mirrors the dual scan
+/// pattern in `player_has_protection_from_everything` (CR 702.16j) — both
+/// scopes must be consulted because the source object of a sacrifice-cost
+/// activated ability has left the battlefield by resolution and so cannot
+/// be found by `game_functioning_statics`.
+///
 /// Used for the prohibition-family statics (`CantBeSacrificed`, etc.) where
 /// constructing `StaticMode::Other(name.to_string())` on every call would
 /// allocate in potentially hot paths (damage resolution, sacrifice loops).
@@ -891,6 +902,68 @@ fn check_static_other_by_name(state: &GameState, name: &str, context: &StaticChe
             continue;
         }
         return true;
+    }
+    transient_grants_other_static_to_context(state, name, context)
+}
+
+/// CR 611.1 + CR 611.2c: Scan `state.transient_continuous_effects` for an effect
+/// whose `affected` filter pins the context's player or object and whose
+/// modifications grant `StaticMode::Other(name)` via `AddStaticMode`.
+///
+/// This is the spell/ability-applied counterpart to the
+/// `game_functioning_statics` scan in `check_static_other_by_name`. A
+/// transient continuous effect created by an activated ability (Pardic Miner)
+/// or instant survives the source object's zone change (CR 400.7), so it must
+/// be queried from the state-level TCE table rather than the per-object
+/// `static_definitions`. Mirrors the dual-scan pattern in
+/// `player_has_protection_from_everything` (CR 702.16j).
+fn transient_grants_other_static_to_context(
+    state: &GameState,
+    name: &str,
+    context: &StaticCheckContext,
+) -> bool {
+    for tce in &state.transient_continuous_effects {
+        // CR 611.2c: The set of objects/players a transient continuous effect
+        // affects is determined at registration; here we just confirm the bound
+        // filter pins the context. The typical shape is a `SpecificObject` /
+        // `SpecificPlayer` registration (player-scoped registration via
+        // `register_transient_effect` fans `TargetFilter::Player` broadcasts
+        // out into one per-player `SpecificPlayer` TCE), but the broadcast
+        // `Player` variant is also matched defensively here so any call site
+        // that registers a raw all-players TCE without fan-out (e.g. future
+        // "Players can't play lands this turn" instants) is still observable
+        // to player-scoped runtime queries.
+        let pins_context = match (&tce.affected, context.target_id, context.player_id) {
+            (TargetFilter::SpecificObject { id }, Some(target), _) => *id == target,
+            (TargetFilter::SpecificPlayer { id }, _, Some(player)) => *id == player,
+            (TargetFilter::Player, _, Some(_)) => true,
+            _ => continue,
+        };
+        if !pins_context {
+            continue;
+        }
+        // CR 611.2b: ForAsLongAs durations re-evaluate their condition each cycle.
+        if let Duration::ForAsLongAs { ref condition } = tce.duration {
+            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
+                continue;
+            }
+        }
+        if let Some(ref condition) = tce.condition {
+            if !evaluate_condition(state, condition, tce.controller, tce.source_id) {
+                continue;
+            }
+        }
+        let grants_named_other = tce.modifications.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::AddStaticMode {
+                    mode: StaticMode::Other(s),
+                } if s == name
+            )
+        });
+        if grants_named_other {
+            return true;
+        }
     }
     false
 }
@@ -1647,6 +1720,40 @@ mod tests {
             !player_has_protection_from_everything(&state, PlayerId(1)),
             "PlayerId(1) must not be protected — per-player scoping"
         );
+    }
+
+    /// CR 611.1 + CR 611.2c: A raw player-broadcast transient that grants a
+    /// named player-scoped static is visible to each player query. Most current
+    /// registration paths fan broadcasts out to `SpecificPlayer`, but the query
+    /// accepts `TargetFilter::Player` so all-player one-shot restrictions remain
+    /// observable if registered directly.
+    #[test]
+    fn player_static_other_query_matches_broadcast_transient() {
+        use crate::types::ability::{ContinuousModification, Duration};
+
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Broadcast Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        state.add_transient_continuous_effect(
+            source,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::Player,
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::Other("CantPlayLand".to_string()),
+            }],
+            None,
+        );
+
+        assert!(player_has_static_other(&state, PlayerId(0), "CantPlayLand"));
+        assert!(player_has_static_other(&state, PlayerId(1), "CantPlayLand"));
+        assert!(!player_has_static_other(&state, PlayerId(0), "CantShuffle"));
     }
 
     /// CR 702.16j: Only `Protection(Everything)` triggers the query. Other

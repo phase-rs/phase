@@ -1637,20 +1637,56 @@ pub(super) fn match_exiled(
 /// Attached: fires when source becomes attached to a permanent.
 pub(super) fn match_attached(
     event: &GameEvent,
-    _trigger: &TriggerDefinition,
+    trigger: &TriggerDefinition,
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
     match event {
         GameEvent::EffectResolved {
-            kind: EffectKind::Attach | EffectKind::AttachAll,
-            ..
-        } => state
-            .objects
-            .get(&source_id)
-            .map(|obj| obj.attached_to.is_some())
-            .unwrap_or(false),
+            kind: EffectKind::Attach | EffectKind::AttachAll | EffectKind::Equip,
+            source_id: event_source_id,
+        } => {
+            if !matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::AttachAll,
+                    ..
+                }
+            ) && *event_source_id != source_id
+            {
+                return false;
+            }
+            if !valid_card_matches(trigger, state, source_id, source_id) {
+                return false;
+            }
+            attached_host_matches(trigger, state, source_id)
+        }
         _ => false,
+    }
+}
+
+fn attached_host_matches(
+    trigger: &TriggerDefinition,
+    state: &GameState,
+    source_id: ObjectId,
+) -> bool {
+    let Some(host) = state
+        .objects
+        .get(&source_id)
+        .and_then(|obj| obj.attached_to)
+    else {
+        return false;
+    };
+    let Some(filter) = trigger.valid_target.as_ref() else {
+        return true;
+    };
+    match host {
+        crate::game::game_object::AttachTarget::Object(object_id) => {
+            target_filter_matches_object(state, object_id, filter, source_id)
+        }
+        crate::game::game_object::AttachTarget::Player(player_id) => {
+            player_matches_filter(filter, state, player_id, source_id)
+        }
     }
 }
 
@@ -2712,6 +2748,122 @@ mod tests {
     /// Helper to create a minimal TriggerDefinition with typed fields.
     fn make_trigger(mode: TriggerMode) -> TriggerDefinition {
         TriggerDefinition::new(mode)
+    }
+
+    #[test]
+    fn attached_trigger_matches_equipped_source_and_host_filter() {
+        let mut state = setup();
+        let equipment = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Inchblade Companion".to_string(),
+            Zone::Battlefield,
+        );
+        let creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state.objects.get_mut(&equipment).unwrap().attached_to = Some(creature.into());
+
+        let mut trigger = make_trigger(TriggerMode::Attached);
+        trigger.valid_card = Some(TargetFilter::SelfRef);
+        trigger.valid_target = Some(TargetFilter::Typed(TypedFilter::creature()));
+        let event = GameEvent::EffectResolved {
+            kind: EffectKind::Equip,
+            source_id: equipment,
+        };
+
+        assert!(match_attached(&event, &trigger, equipment, &state));
+    }
+
+    #[test]
+    fn attached_trigger_rejects_wrong_host_filter() {
+        let mut state = setup();
+        let equipment = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Assimilation Aegis".to_string(),
+            Zone::Battlefield,
+        );
+        let land = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        state.objects.get_mut(&equipment).unwrap().attached_to = Some(land.into());
+
+        let mut trigger = make_trigger(TriggerMode::Attached);
+        trigger.valid_card = Some(TargetFilter::SelfRef);
+        trigger.valid_target = Some(TargetFilter::Typed(TypedFilter::creature()));
+        let event = GameEvent::EffectResolved {
+            kind: EffectKind::Equip,
+            source_id: equipment,
+        };
+
+        assert!(!match_attached(&event, &trigger, equipment, &state));
+    }
+
+    #[test]
+    fn attached_trigger_rejects_unrelated_equip_resolution() {
+        let mut state = setup();
+        let equipment = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Enormous Energy Blade".to_string(),
+            Zone::Battlefield,
+        );
+        let other_equipment = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Other Equipment".to_string(),
+            Zone::Battlefield,
+        );
+        let creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state.objects.get_mut(&equipment).unwrap().attached_to = Some(creature.into());
+
+        let trigger = make_trigger(TriggerMode::Attached);
+        let event = GameEvent::EffectResolved {
+            kind: EffectKind::Equip,
+            source_id: other_equipment,
+        };
+
+        assert!(!match_attached(&event, &trigger, equipment, &state));
     }
 
     #[test]

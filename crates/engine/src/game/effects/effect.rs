@@ -113,19 +113,30 @@ fn register_transient_effect(
         return;
     }
 
-    // Targeted effects: register one transient effect per target object
+    // CR 611.1 + CR 611.2c + CR 115.1: Targeted effects — register one transient
+    // continuous effect per target. `TargetRef::Object` binds to
+    // `SpecificObject { id }`; `TargetRef::Player` binds to
+    // `SpecificPlayer { id }`. The player branch mirrors the object branch and
+    // makes the player-scoped restriction family (CR 305.1 land-play, CR 119.7
+    // life-gain, CR 119.8 life-loss, CR 104.2b/3b game-loss/win) reachable from
+    // one-shot targeted abilities — e.g. Pardic Miner's "Target player can't
+    // play lands this turn". The resulting TCE is read by player-scoped runtime
+    // queries (`player_has_static_other`, `player_has_cant_gain_life`, etc.)
+    // that scan `state.transient_continuous_effects` directly.
     if !ability.targets.is_empty() {
         for target in &ability.targets {
-            if let TargetRef::Object(obj_id) = target {
-                state.add_transient_continuous_effect(
-                    ability.source_id,
-                    ability.controller,
-                    duration.clone(),
-                    TargetFilter::SpecificObject { id: *obj_id },
-                    modifications.clone(),
-                    static_def.condition.clone(),
-                );
-            }
+            let bound_filter = match target {
+                TargetRef::Object(obj_id) => TargetFilter::SpecificObject { id: *obj_id },
+                TargetRef::Player(player_id) => TargetFilter::SpecificPlayer { id: *player_id },
+            };
+            state.add_transient_continuous_effect(
+                ability.source_id,
+                ability.controller,
+                duration.clone(),
+                bound_filter,
+                modifications.clone(),
+                static_def.condition.clone(),
+            );
         }
         return;
     }
@@ -548,6 +559,87 @@ mod tests {
             TargetFilter::SpecificObject {
                 id: target_creature
             }
+        );
+    }
+
+    // CR 305.1 + CR 611.1 + CR 611.2c + CR 115.1: A `GenericEffect` whose target
+    // slot resolves to a player (Pardic Miner: "Target player can't play lands
+    // this turn") must register a transient continuous effect bound to
+    // `SpecificPlayer { id }` for the chosen player. Mirrors the
+    // `generic_effect_binds_targeted_object_to_specific_object` test for the
+    // object-target branch — proves the player branch in
+    // `register_transient_effect` fires symmetrically.
+    #[test]
+    fn generic_effect_binds_targeted_player_to_specific_player() {
+        use crate::types::statics::StaticMode;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Pardic Miner".to_string(),
+            Zone::Battlefield,
+        );
+
+        let static_def = StaticDefinition::new(StaticMode::Other("CantPlayLand".to_string()))
+            .affected(TargetFilter::ParentTarget)
+            .modifications(vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::Other("CantPlayLand".to_string()),
+            }]);
+
+        let target_player = PlayerId(1);
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![static_def],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: Some(TargetFilter::Player),
+            },
+            vec![TargetRef::Player(target_player)],
+            source,
+            PlayerId(0),
+        )
+        .duration(Duration::UntilEndOfTurn);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.transient_continuous_effects.len(),
+            1,
+            "single TCE bound to the chosen target player"
+        );
+        let tce = &state.transient_continuous_effects[0];
+        assert_eq!(
+            tce.affected,
+            TargetFilter::SpecificPlayer { id: target_player },
+            "TCE must bind to SpecificPlayer for the chosen target"
+        );
+        assert_eq!(tce.duration, Duration::UntilEndOfTurn);
+        assert_eq!(
+            tce.modifications,
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::Other("CantPlayLand".to_string()),
+            }]
+        );
+
+        // End-to-end check: player_has_static_other must now see the prohibition.
+        assert!(
+            crate::game::static_abilities::player_has_static_other(
+                &state,
+                target_player,
+                "CantPlayLand"
+            ),
+            "player_has_static_other must observe the TCE-installed CantPlayLand"
+        );
+        // The activating player must NOT be affected.
+        assert!(
+            !crate::game::static_abilities::player_has_static_other(
+                &state,
+                PlayerId(0),
+                "CantPlayLand"
+            ),
+            "non-targeted player must not be under CantPlayLand"
         );
     }
 

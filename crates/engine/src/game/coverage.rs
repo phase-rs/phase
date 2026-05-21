@@ -1384,9 +1384,16 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("player".into(), fmt_target(player)));
             }
         }
-        Effect::ExileTop { player, count } => {
+        Effect::ExileTop {
+            player,
+            count,
+            face_down,
+        } => {
             d.push(("player".into(), fmt_target(player)));
             d.push(("count".into(), fmt_quantity(count)));
+            if *face_down {
+                d.push(("face_down".into(), "true".into()));
+            }
         }
         Effect::Pump {
             power,
