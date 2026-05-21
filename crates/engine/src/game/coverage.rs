@@ -74,7 +74,7 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // is_data_carrying_static() because the variant is parameterized
             // and the registry uses exact-key lookup.
             | StaticMode::SkipStep { .. }
-            // CR 614.1b + CR 614.10: RevealTopOfLibrary carries `all_players`.
+            // CR 401.4: RevealTopOfLibrary carries `all_players`.
             // Runtime enforcement is in casting.rs::top_of_library_permission_source()
             // and turns.rs::should_skip_draw(). Coverage support via
             // is_data_carrying_static() because the variant is parameterized.
@@ -6297,7 +6297,7 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             // CR 614.1b + CR 614.10: "Skip your [step] step" — replacement effect.
             // Matches any "skip your ... step" Oracle line.
             StaticMode::SkipStep { .. } => {
-                effective_lower.contains("skip your ") && effective_lower.contains(" step")
+                effective_lower.starts_with("skip your ") && effective_lower.ends_with(" step.")
             }
             _ => false,
         });
