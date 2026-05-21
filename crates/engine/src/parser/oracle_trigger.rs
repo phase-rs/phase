@@ -4486,17 +4486,15 @@ fn try_parse_event(
         .or(alt((
             // CR 701.3a: "becomes attached to [a creature / a permanent / …]" —
             // Equipment/Aura attach trigger. The trailing target phrase ("to a
-            // creature", "to a permanent") is consumed by the caller's `rest`
-            // variable and does not need to be parsed here; match_attached
-            // already filters on source_id.attached_to.is_some().
-            value(SimpleEvent::BecomesAttached, tag("becomes attached to")),
+            // creature", "to a permanent") is parsed to populate `valid_target`.
+            value(SimpleEvent::BecomesAttached, tag("becomes attached to ")),
             // Short form: "becomes attached" without a trailing target phrase
             // (future-proofing; no current Oracle cards use this form).
             value(SimpleEvent::BecomesAttached, tag("becomes attached")),
         )))
         .parse(input)
     }
-    if let Ok((_, event)) = parse_simple_event.parse(rest) {
+    if let Ok((remaining, event)) = parse_simple_event.parse(rest) {
         let mut def = make_base();
         match event {
             SimpleEvent::BecomesBlocked => {
@@ -4594,6 +4592,10 @@ fn try_parse_event(
                 // source.attached_to.is_some() after the EffectKind::Attach event.
                 def.mode = TriggerMode::Attached;
                 def.valid_card = Some(subject.clone());
+                if !remaining.is_empty() {
+                    let (filter, _) = parse_type_phrase(remaining);
+                    def.valid_target = Some(filter);
+                }
             }
         }
         return Some((def.mode.clone(), def));
