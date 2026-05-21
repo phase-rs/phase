@@ -163,6 +163,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         GameEvent::TokenCreated { .. } | GameEvent::ObjectConjured { .. } => LogCategory::Token,
 
         GameEvent::EffectResolved { .. }
+        | GameEvent::Unattached { .. }
         | GameEvent::BecomesTarget { .. }
         | GameEvent::ReplacementApplied { .. }
         | GameEvent::CrimeCommitted { .. }
@@ -312,6 +313,21 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(" counters "),
             card_seg(state, *object_id),
         ],
+
+        GameEvent::Unattached {
+            attachment_id,
+            old_target,
+        } => {
+            let mut segments = vec![
+                card_seg(state, *attachment_id),
+                text(" becomes unattached from "),
+            ];
+            match old_target {
+                TargetRef::Object(object_id) => segments.push(card_seg(state, *object_id)),
+                TargetRef::Player(player_id) => segments.push(player_seg(state, *player_id)),
+            }
+            segments
+        }
 
         // CR 111.1 + CR 603.6a: `from: None` indicates token creation (no prior
         // zone). Render without a source zone to avoid "moves from None to

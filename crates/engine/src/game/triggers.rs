@@ -11258,6 +11258,180 @@ pub mod tests {
         );
     }
 
+    /// Issue #610 — Kratos, Stoic Father. A YouAttack trigger carrying a
+    /// `valid_card` attacker-type filter (`Subtype "God"`) must fire iff at least
+    /// one *God* attacks (CR 508.1 + CR 506.2 + CR 603.2c). Drives the real
+    /// `declare_attackers` path end-to-end (not hand-constructed combat state):
+    /// declaring only a non-God attacker must NOT fire; declaring a God attacker
+    /// MUST fire. This is the discriminating test for the matcher's new
+    /// `valid_card` gate — pre-fix the matcher ignored `valid_card` and fired on
+    /// any attacker.
+    #[test]
+    fn issue_610_you_attack_with_god_filter_fires_only_for_god() {
+        use crate::game::combat::AttackTarget;
+
+        // Build the typed YouAttack trigger once: fires on "you attack with one
+        // or more Gods", granting an experience counter.
+        let god_attack_trigger = || {
+            let mut def = TriggerDefinition::new(TriggerMode::YouAttack);
+            def.batched = true;
+            def.valid_target = Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            ));
+            def.valid_card = Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Subtype(
+                "God".to_string(),
+            ))));
+            def.execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::GivePlayerCounter {
+                    counter_kind: crate::types::player::PlayerCounterKind::Experience,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ))
+        };
+
+        // Helper: run declare_attackers with the named attacker, return whether
+        // the YouAttack trigger reached the stack.
+        let trigger_fires = |attacker_is_god: bool| -> bool {
+            let mut state = setup();
+            state.turn_number = 2;
+            state.phase = Phase::DeclareAttackers;
+            state.active_player = PlayerId(0);
+            state.priority_player = PlayerId(0);
+            state.waiting_for = WaitingFor::DeclareAttackers {
+                player: PlayerId(0),
+                valid_attacker_ids: vec![],
+                valid_attack_targets: vec![],
+            };
+
+            // The Kratos-like commander carries the trigger but does not attack.
+            let kratos = make_creature(&mut state, PlayerId(0), "Kratos, Stoic Father", 4, 4);
+            {
+                let obj = state.objects.get_mut(&kratos).unwrap();
+                obj.card_types.subtypes.push("God".to_string());
+                obj.base_card_types = obj.card_types.clone();
+                obj.entered_battlefield_turn = Some(1);
+                obj.trigger_definitions.push(god_attack_trigger());
+                std::sync::Arc::make_mut(&mut obj.base_trigger_definitions)
+                    .push(god_attack_trigger());
+            }
+
+            // The attacker: a God or a plain creature depending on the case.
+            let attacker = make_creature(&mut state, PlayerId(0), "Attacker", 2, 2);
+            {
+                let obj = state.objects.get_mut(&attacker).unwrap();
+                if attacker_is_god {
+                    obj.card_types.subtypes.push("God".to_string());
+                    obj.base_card_types = obj.card_types.clone();
+                }
+                obj.entered_battlefield_turn = Some(1);
+            }
+
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::DeclareAttackers {
+                    attacks: vec![(attacker, AttackTarget::Player(PlayerId(1)))],
+                },
+            )
+            .expect("declare attackers");
+
+            // The GivePlayerCounter trigger has no target slot, so a fired trigger
+            // lands directly on the stack (no interactive prompt).
+            !state.stack.is_empty()
+        };
+
+        assert!(
+            !trigger_fires(false),
+            "YouAttack God-filter trigger must NOT fire when only a non-God attacks"
+        );
+        assert!(
+            trigger_fires(true),
+            "YouAttack God-filter trigger MUST fire when a God attacks"
+        );
+    }
+
+    /// Issue #610 (subject-led regression / silent-bug repair) — Killian-class
+    /// "Whenever one or more <TYPE> attack". The subject-led parser path already
+    /// populated `valid_card` for count==1, but the matcher ignored it, so these
+    /// fired on ANY attacker. The matcher fix (NOT a parser edit) repairs them:
+    /// the trigger must now fire only on the typed attacker. Drives the real
+    /// `declare_attackers` path.
+    #[test]
+    fn issue_610_subject_led_one_or_more_gods_attack_honors_filter() {
+        use crate::game::combat::AttackTarget;
+
+        // Subject-led shape: valid_card = God, valid_target = None (controller
+        // gate falls through to "source controller == attacking player").
+        let subject_led_trigger = || {
+            let mut def = TriggerDefinition::new(TriggerMode::YouAttack);
+            def.batched = true;
+            def.valid_card = Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Subtype(
+                "God".to_string(),
+            ))));
+            def.execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::GivePlayerCounter {
+                    counter_kind: crate::types::player::PlayerCounterKind::Experience,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ))
+        };
+
+        let trigger_fires = |attacker_is_god: bool| -> bool {
+            let mut state = setup();
+            state.turn_number = 2;
+            state.phase = Phase::DeclareAttackers;
+            state.active_player = PlayerId(0);
+            state.priority_player = PlayerId(0);
+            state.waiting_for = WaitingFor::DeclareAttackers {
+                player: PlayerId(0),
+                valid_attacker_ids: vec![],
+                valid_attack_targets: vec![],
+            };
+
+            let source = make_creature(&mut state, PlayerId(0), "Subject Source", 1, 1);
+            {
+                let obj = state.objects.get_mut(&source).unwrap();
+                obj.entered_battlefield_turn = Some(1);
+                obj.trigger_definitions.push(subject_led_trigger());
+                std::sync::Arc::make_mut(&mut obj.base_trigger_definitions)
+                    .push(subject_led_trigger());
+            }
+
+            let attacker = make_creature(&mut state, PlayerId(0), "Attacker", 2, 2);
+            {
+                let obj = state.objects.get_mut(&attacker).unwrap();
+                if attacker_is_god {
+                    obj.card_types.subtypes.push("God".to_string());
+                    obj.base_card_types = obj.card_types.clone();
+                }
+                obj.entered_battlefield_turn = Some(1);
+            }
+
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::DeclareAttackers {
+                    attacks: vec![(attacker, AttackTarget::Player(PlayerId(1)))],
+                },
+            )
+            .expect("declare attackers");
+
+            !state.stack.is_empty()
+        };
+
+        assert!(
+            !trigger_fires(false),
+            "subject-led God-filter trigger must NOT fire when only a non-God attacks \
+             (silent-bug repair)"
+        );
+        assert!(
+            trigger_fires(true),
+            "subject-led God-filter trigger MUST fire when a God attacks"
+        );
+    }
+
     /// Issue #501 (class coverage): The Tenth Doctor's `Allons-y!` attack
     /// trigger exiles cards until a nonland is exiled, puts three time counters
     /// on it, and grants it Suspend — the same runtime-granted-Suspend pattern

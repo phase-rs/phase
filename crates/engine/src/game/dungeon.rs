@@ -334,6 +334,7 @@ pub fn room_effects(
                 Effect::ExileTop {
                     player: TargetFilter::Controller,
                     count: fixed(2),
+                    face_down: false,
                 },
                 source_id,
                 controller,
