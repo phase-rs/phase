@@ -60,6 +60,8 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::MaximumHandSize { .. }
             | StaticMode::StepEndUnspentMana { .. }
             | StaticMode::CantBeBlockedBy { .. }
+            // CR 509.1b: CantBeBlockedExceptBy carries `kind`.
+            | StaticMode::CantBeBlockedExceptBy { .. }
             // CR 602.5 + CR 603.2a: CantBeActivated carries `who` + `source_filter`.
             | StaticMode::CantBeActivated { .. }
             // CR 701.23 + CR 609.3: CantSearchLibrary carries `cause`.
@@ -71,6 +73,9 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // CR 107.4f: PayLifeAsColoredMana carries the `ManaColor` axis
             // (K'rrik = Black; future printings any other color).
             | StaticMode::PayLifeAsColoredMana { .. }
+            // CR 121.6: CantDraw carries `who` (controller vs all_players) —
+            // runtime enforcement is in game/effects/draw.rs::allowed_draw_count.
+            | StaticMode::CantDraw { .. }
             // CR 614.1b + CR 614.10: SkipStep carries the `Phase` discriminant
             // (Draw, Untap, Upkeep, etc.). Runtime enforcement is in
             // turns.rs::should_skip_step_static(). Coverage support is via
@@ -7859,6 +7864,7 @@ mod tests {
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::replacements::ReplacementEvent;
+    use crate::types::statics::{BlockExceptionKind, ProhibitionScope};
     use crate::types::zones::Zone;
 
     fn make_obj() -> GameObject {
@@ -9281,6 +9287,101 @@ mod tests {
         assert!(
             !oracle_line_matches_skip_step("skip your draw step.", Phase::Untap),
             "'Skip your draw step.' must not be covered by SkipStep(Untap)"
+        );
+    }
+
+    /// CR 121.6: `CantDraw { who: AllPlayers }` must be recognised by
+    /// `is_data_carrying_static` so that cards like Maralen of the Mornsong
+    /// and Omen Machine are marked as supported.
+    #[test]
+    fn cant_draw_all_players_static_does_not_count_as_silent_drop() {
+        let mut face = make_face();
+        let oracle = "Players can't draw cards.";
+        face.oracle_text = Some(oracle.to_string());
+        face.static_abilities.push(StaticDefinition {
+            mode: StaticMode::CantDraw {
+                who: ProhibitionScope::AllPlayers,
+            },
+            affected: Some(TargetFilter::SelfRef),
+            modifications: vec![],
+            condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            active_zones: vec![],
+            characteristic_defining: false,
+            description: Some("Players can't draw cards.".to_string()),
+        });
+
+        let gaps = card_face_gaps(&face);
+        assert!(
+            gaps.is_empty(),
+            "'Players can't draw cards.' should be fully supported by CantDraw(all_players), but got gaps: {:?}",
+            gaps
+        );
+    }
+
+    /// Regression: `CantDraw { who: Controller }` must also be recognised.
+    #[test]
+    fn cant_draw_controller_static_does_not_count_as_silent_drop() {
+        let mut face = make_face();
+        let oracle = "You can't draw cards.";
+        face.oracle_text = Some(oracle.to_string());
+        face.static_abilities.push(StaticDefinition {
+            mode: StaticMode::CantDraw {
+                who: ProhibitionScope::Controller,
+            },
+            affected: Some(TargetFilter::SelfRef),
+            modifications: vec![],
+            condition: None,
+            affected_zone: None,
+            effect_zone: None,
+            active_zones: vec![],
+            characteristic_defining: false,
+            description: Some("You can't draw cards.".to_string()),
+        });
+
+        let gaps = card_face_gaps(&face);
+        assert!(
+            gaps.is_empty(),
+            "'You can't draw cards.' should be fully supported by CantDraw(controller), but got gaps: {:?}",
+            gaps
+        );
+    }
+
+    /// CR 509.1b: `CantBeBlockedExceptBy` carries the blocking exception kind
+    /// and is enforced by the combat restriction handler rather than exact
+    /// registry-key lookup.
+    #[test]
+    fn cant_be_blocked_except_by_statics_have_no_coverage_gap() {
+        let mut face = make_face();
+        for (kind, description) in [
+            (
+                BlockExceptionKind::Quality(TargetFilter::Typed(TypedFilter::default())),
+                "This creature can't be blocked except by creatures with flying.",
+            ),
+            (
+                BlockExceptionKind::MinBlockers { min: 2 },
+                "This creature can't be blocked except by two or more creatures.",
+            ),
+        ] {
+            face.static_abilities.push(StaticDefinition {
+                mode: StaticMode::CantBeBlockedExceptBy { kind },
+                affected: Some(TargetFilter::SelfRef),
+                modifications: vec![],
+                condition: None,
+                affected_zone: None,
+                effect_zone: None,
+                active_zones: vec![],
+                characteristic_defining: false,
+                description: Some(description.to_string()),
+            });
+        }
+
+        let gaps = card_face_gaps(&face);
+        assert!(
+            gaps.is_empty(),
+            "CantBeBlockedExceptBy variants should be fully supported, but got gaps: {:?}",
+            gaps
         );
     }
 }
