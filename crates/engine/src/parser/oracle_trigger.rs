@@ -4431,6 +4431,8 @@ fn try_parse_event(
         SaddlesOrCrews,
         Crews,
         Saddles,
+        // CR 701.3a: Equipment/Aura becomes attached to a permanent.
+        BecomesAttached,
     }
     fn parse_simple_event(input: &str) -> OracleResult<'_, SimpleEvent> {
         alt((
@@ -4480,6 +4482,17 @@ fn try_parse_event(
             // CR 702.171c: Actor-side saddle trigger (reserved — no cards today without
             // the compound, but the arm is ready for future printings).
             value(SimpleEvent::Saddles, tag("saddles a mount")),
+        )))
+        .or(alt((
+            // CR 701.3a: "becomes attached to [a creature / a permanent / …]" —
+            // Equipment/Aura attach trigger. The trailing target phrase ("to a
+            // creature", "to a permanent") is consumed by the caller's `rest`
+            // variable and does not need to be parsed here; match_attached
+            // already filters on source_id.attached_to.is_some().
+            value(SimpleEvent::BecomesAttached, tag("becomes attached to")),
+            // Short form: "becomes attached" without a trailing target phrase
+            // (future-proofing; no current Oracle cards use this form).
+            value(SimpleEvent::BecomesAttached, tag("becomes attached")),
         )))
         .parse(input)
     }
@@ -4571,6 +4584,15 @@ fn try_parse_event(
                 // CR 702.122 + CR 702.171c: Compound actor-side trigger. Fires on
                 // either saddling a Mount or crewing a Vehicle.
                 def.mode = TriggerMode::SaddlesOrCrews;
+                def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::BecomesAttached => {
+                // CR 701.3a: "Whenever [this Equipment/Aura] becomes attached to
+                // [a creature / a permanent]" — fires when an Attach or AttachAll
+                // effect resolves and the source is now attached to something.
+                // match_attached (trigger_matchers.rs) checks
+                // source.attached_to.is_some() after the EffectKind::Attach event.
+                def.mode = TriggerMode::Attached;
                 def.valid_card = Some(subject.clone());
             }
         }
@@ -17875,5 +17897,56 @@ mod snapshot_tests {
                 "chain link {i} should be TriggeringSource, got {t:?}",
             );
         }
+    }
+
+    // CR 701.3a: "Whenever ~ becomes attached to a creature" trigger
+    // Covers Inchblade Companion, Assimilation Aegis, Enormous Energy Blade, Killer Cosplay.
+    #[test]
+    fn trigger_becomes_attached_to_a_creature() {
+        let def = parse_trigger_line(
+            "Whenever ~ becomes attached to a creature, that creature gets +1/+1 until end of turn.",
+            "Inchblade Companion",
+        );
+        assert_eq!(
+            def.mode,
+            TriggerMode::Attached,
+            "Expected TriggerMode::Attached, got {:?}",
+            def.mode
+        );
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::SelfRef),
+            "Expected valid_card = SelfRef (Equipment self-reference), got {:?}",
+            def.valid_card
+        );
+    }
+
+    // CR 701.3a: "becomes attached to a permanent" variant
+    #[test]
+    fn trigger_becomes_attached_to_a_permanent() {
+        let def = parse_trigger_line(
+            "Whenever ~ becomes attached to a permanent, draw a card.",
+            "Assimilation Aegis",
+        );
+        assert_eq!(
+            def.mode,
+            TriggerMode::Attached,
+            "Expected TriggerMode::Attached for 'attached to a permanent', got {:?}",
+            def.mode
+        );
+    }
+
+    // Regression: "Whenever ~ becomes attached to a creature" should NOT be TriggerMode::Unknown.
+    #[test]
+    fn trigger_becomes_attached_not_unknown() {
+        let def = parse_trigger_line(
+            "Whenever ~ becomes attached to a creature, that creature gets +2/+2 until end of turn.",
+            "Enormous Energy Blade",
+        );
+        assert!(
+            !matches!(def.mode, TriggerMode::Unknown(_)),
+            "Trigger should not fall through to Unknown; got {:?}",
+            def.mode
+        );
     }
 }
