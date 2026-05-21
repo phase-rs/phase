@@ -1334,18 +1334,29 @@ fn parse_object_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 /// CR 117.1 + CR 202.3: Cost-paid object's mana value.
 ///
 /// Composes the prefix grammar
-/// `[the] (sacrificed|exiled) (creature|card|permanent|artifact)'s (mana value|converted mana cost)`
+/// `[the] (sacrificed|exiled|discarded|milled) (creature|card|permanent|artifact)'s (mana value|converted mana cost)`
 /// into a single typed combinator. Each axis is a single `alt()` over
-/// independent variants — adding a new participle (e.g. "discarded"), a new
-/// noun, or the British spelling of "mana value" extends one alt branch
-/// rather than adding a new top-level arm.
+/// independent variants — adding a new participle, a new noun, or the British
+/// spelling of "mana value" extends one alt branch rather than adding a new
+/// top-level arm.
 ///
 /// Used by Food Chain ("1 plus the exiled creature's mana value"),
 /// Burnt Offering / Metamorphosis ("the sacrificed creature's mana value"),
+/// Heed the Mists / Mindshrieker ("the milled card's mana value"),
 /// and the broader cost-paid-by-property class.
+///
+/// CR 701.17a + CR 701.17c: "milled" card refers to the object that moved
+/// from the library to the graveyard; its mana value is read from LKI.
 fn parse_cost_paid_object_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = opt(tag("the ")).parse(input)?;
-    let (rest, _) = alt((tag("sacrificed "), tag("exiled "), tag("discarded "))).parse(rest)?;
+    let (rest, _) = alt((
+        tag("sacrificed "),
+        tag("exiled "),
+        tag("discarded "),
+        // CR 701.17a: "milled" — card moved library → graveyard by the mill action.
+        tag("milled "),
+    ))
+    .parse(rest)?;
     let (rest, _) = alt((
         tag("creature"),
         tag("card"),
@@ -4524,6 +4535,30 @@ mod tests {
                         ],
                     },
                 }
+            );
+        }
+    }
+
+    /// CR 701.17a + CR 701.17c: "the milled card's mana value" routes through
+    /// `parse_cost_paid_object_ref` (participle = "milled") and yields
+    /// `ObjectManaValue { CostPaidObject }`. Covers Heed the Mists and the
+    /// broader class of "milled card's <property>" CDA patterns.
+    #[test]
+    fn test_parse_milled_card_mana_value_ref() {
+        for phrase in [
+            "the milled card's mana value",
+            "the milled card's converted mana cost",
+            "milled card's mana value",
+        ] {
+            let (rest, q) = parse_quantity_ref(phrase)
+                .unwrap_or_else(|_| panic!("parse_quantity_ref({phrase:?}) should succeed"));
+            assert_eq!(rest, "", "phrase {phrase:?} should be fully consumed");
+            assert_eq!(
+                q,
+                QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject,
+                },
+                "phrase {phrase:?} must yield ObjectManaValue{{CostPaidObject}}"
             );
         }
     }

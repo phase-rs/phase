@@ -730,6 +730,11 @@ fn is_event_context_referent(prefix: &str) -> bool {
         "revealed",
         "drawn",
         "copied",
+        // CR 701.17a + CR 701.17c: "milled" is a past-participle event adjective —
+        // the milled card is the object that moved from library to graveyard as a
+        // result of the mill action. Heed the Mists: "draw cards equal to the
+        // milled card's mana value."
+        "milled",
     ];
     if prefix.starts_with("that ") || prefix.starts_with("the ") {
         let rest = prefix.split_once(' ').map_or("", |x| x.1);
@@ -2696,6 +2701,23 @@ mod tests {
         // no partial-credit Sum that would silently undercount.
         let result = parse_for_each_clause_expr("card in your hand and each blorgon you control");
         assert_eq!(result, None);
+    }
+
+    /// CR 701.17a + CR 701.17c: "the milled card's mana value" resolves to
+    /// `ObjectManaValue { CostPaidObject }` — the milled card is the event
+    /// context object whose LKI snapshot provides the mana value.
+    /// Heed the Mists: "draw cards equal to the milled card's mana value."
+    #[test]
+    fn event_context_milled_card_mana_value() {
+        assert_eq!(
+            parse_event_context_quantity("the milled card's mana value"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject,
+                },
+            }),
+            "milled card's mana value must resolve to ObjectManaValue{{CostPaidObject}}"
+        );
     }
 
     /// CR 119.3 + CR 700.1: "for each of your opponents who lost life this

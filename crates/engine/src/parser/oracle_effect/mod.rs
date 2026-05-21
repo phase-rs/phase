@@ -24082,6 +24082,49 @@ mod tests {
         ));
     }
 
+    /// CR 701.17a + CR 701.17c + CR 608.2c: "Mill a card, then draw cards equal
+    /// to the milled card's mana value." — Heed the Mists.
+    ///
+    /// The `Mill` effect must chain (via `sub_ability`) to a `Draw` effect
+    /// whose count is `QuantityExpr::Ref { ObjectManaValue { CostPaidObject } }`.
+    /// `CostPaidObject` is correct because the milled card is the event-context
+    /// object whose LKI snapshot is consulted at resolution (CR 608.2h).
+    #[test]
+    fn mill_then_draw_equal_to_milled_card_mana_value() {
+        let def = parse_effect_chain(
+            "Mill a card, then draw cards equal to the milled card's mana value.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(&*def.effect, Effect::Mill { .. }),
+            "outer effect must be Mill, got {:?}",
+            def.effect
+        );
+        let draw = def
+            .sub_ability
+            .as_deref()
+            .expect("Mill must chain to a Draw sub_ability");
+        match &*draw.effect {
+            Effect::Draw { count, target } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::Controller,
+                    "Draw target must be Controller"
+                );
+                assert_eq!(
+                    *count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::CostPaidObject,
+                        },
+                    },
+                    "Draw count must be ObjectManaValue{{CostPaidObject}}"
+                );
+            }
+            other => panic!("expected Draw sub_ability, got {other:?}"),
+        }
+    }
+
     #[test]
     fn parse_play_from_exile_while_exiled_with_any_mana_permission() {
         let def = parse_effect_chain(
