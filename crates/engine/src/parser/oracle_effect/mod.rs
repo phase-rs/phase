@@ -14463,14 +14463,16 @@ fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<ParsedEffect
         .ok()?;
     let (count_expr, rest_lower) = super::oracle_util::parse_count_expr(after_lower)?;
 
-    let type_end = rest_lower
-        .find(|c: char| c.is_whitespace())
-        .unwrap_or(rest_lower.len());
-    let raw_type = &rest_lower[..type_end];
-    let counter_type = counter::normalize_counter_type(raw_type);
+    // CR 122.1 + CR 122.1b: shared counter-type combinator handles multi-word
+    // keyword counter names. Keyword counters aren't a printed distribute
+    // target today (CR 122.1b keyword counters are placed singly), but the
+    // shared combinator costs nothing and future-proofs the parser.
+    let (after_type_raw, counter_type) =
+        nom_primitives::parse_counter_type_typed(rest_lower).ok()?;
+    let type_end = rest_lower.len() - after_type_raw.len();
 
     // Require "counter(s)" immediately after the counter type word.
-    let after_type = rest_lower[type_end..].trim_start();
+    let after_type = after_type_raw.trim_start();
     let counter_word_len = if tag::<_, _, OracleError<'_>>("counters")
         .parse(after_type)
         .is_ok()
@@ -14515,6 +14517,7 @@ fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<ParsedEffect
     }
     let _ = counter_word_len; // used above
 
+    let counter_name = counter_type.as_str().into_owned();
     Some(ParsedEffectClause {
         effect: Effect::PutCounter {
             counter_type,
@@ -14523,7 +14526,7 @@ fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<ParsedEffect
         },
         duration: None,
         sub_ability: None,
-        distribute: Some(DistributionUnit::Counters(raw_type.to_string())),
+        distribute: Some(DistributionUnit::Counters(counter_name)),
         multi_target,
         condition: None,
         optional: false,

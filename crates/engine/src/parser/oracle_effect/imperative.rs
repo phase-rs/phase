@@ -3085,13 +3085,15 @@ fn try_parse_that_many_counters(lower: &str, ctx: &mut ParseContext) -> Option<E
     let (rest, _) = tag::<_, _, OracleError<'_>>("put that many ")
         .parse(lower)
         .ok()?;
-    // Next word(s) are counter type: "+1/+1", "charge", "loyalty", etc.
-    let type_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
-    let raw_type = &rest[..type_end];
-    let counter_type = super::counter::normalize_counter_type(raw_type);
+    // Counter type (e.g. "+1/+1", "charge", "loyalty", "double strike").
+    // CR 122.1 + CR 122.1b: route through the shared `parse_counter_type_typed`
+    // combinator so multi-word keyword counter names ("first strike", "double
+    // strike") canonicalize to `CounterType::Keyword(...)` instead of being
+    // truncated at the first whitespace.
+    let (after_type, counter_type) = nom_primitives::parse_counter_type_typed(rest).ok()?;
 
     // Skip "counter" or "counters" keyword
-    let after_type = rest[type_end..].trim_start();
+    let after_type = after_type.trim_start();
     let after_counter = alt((tag::<_, _, OracleError<'_>>("counters"), tag("counter")))
         .parse(after_type)
         .map(|(r, _)| r)
@@ -8587,5 +8589,43 @@ mod tests {
             try_parse_gain_quoted_ability("gain flying until end of turn").is_none(),
             "no quote marks → not a quoted-ability candidate"
         );
+    }
+
+    /// CR 122.1b: "put that many <keyword> counter(s) on <target>" must
+    /// canonicalize multi-word keyword counter names ("double strike", "first
+    /// strike") to `CounterType::Keyword(...)`. The previous
+    /// `.find(whitespace)` slicing truncated at the first space, mapping
+    /// "double strike" → `CounterType::Generic("double")`.
+    #[test]
+    fn that_many_counters_multi_word_keyword() {
+        use crate::types::counter::CounterType;
+        use crate::types::keywords::KeywordKind;
+        let mut ctx = ParseContext::default();
+        let effect =
+            try_parse_that_many_counters("put that many double strike counters on it", &mut ctx)
+                .expect("clause should parse");
+        match effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                ..
+            } => {
+                assert_eq!(
+                    counter_type,
+                    CounterType::Keyword(KeywordKind::DoubleStrike),
+                    "multi-word keyword counter must canonicalize to Keyword(DoubleStrike)"
+                );
+                assert!(
+                    matches!(
+                        count,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::EventContextAmount
+                        }
+                    ),
+                    "'that many' must resolve to event-context amount, got {count:?}"
+                );
+            }
+            other => panic!("expected Effect::PutCounter, got {other:?}"),
+        }
     }
 }

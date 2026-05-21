@@ -328,7 +328,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // CR 702.110a: Exploit trigger matcher
     r.insert(TriggerMode::Exploited, match_exploited);
 
-    // CR 701.37a: "When ~ becomes monstrous" — self-trigger on Monstrosity resolution.
+    // CR 701.37b: "When ~ becomes monstrous" — self-trigger on Monstrosity resolution.
     r.insert(TriggerMode::BecomeMonstrous, match_become_monstrous);
 
     // CR 700.14: Expend trigger — cumulative mana spent on spells
@@ -1949,7 +1949,7 @@ pub(super) fn match_exploited(
     )
 }
 
-/// CR 701.37a: "When ~ becomes monstrous" — self-trigger only.
+/// CR 701.37b: "When ~ becomes monstrous" — self-trigger only.
 /// Fires when EffectResolved::Monstrosity is emitted for this source.
 pub(super) fn match_become_monstrous(
     event: &GameEvent,

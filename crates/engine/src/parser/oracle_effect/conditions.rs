@@ -14,7 +14,6 @@ use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity::{canonicalize_quantity_ref, parse_cda_quantity};
 use super::super::oracle_target::parse_type_phrase;
 use super::super::oracle_util::{parse_comparison_suffix, parse_subtype, TextPair};
-use super::counter::normalize_counter_type;
 use super::{parse_effect_chain, scan_contains_phrase, ParseContext};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
@@ -911,10 +910,10 @@ fn parse_counter_threshold(text: &str) -> Option<(Comparator, i32, CounterType, 
     }
 
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("no ").parse(text) {
-        let type_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
-        let raw_type = &rest[..type_end];
-        let counter_type = normalize_counter_type(raw_type);
-        let after_type = rest[type_end..].trim_start();
+        // CR 122.1 + CR 122.1b: shared counter-type combinator handles
+        // multi-word keyword counter names.
+        let (after_type, counter_type) = nom_primitives::parse_counter_type_typed(rest).ok()?;
+        let after_type = after_type.trim_start();
         let after_on = parse_counter_on_suffix(after_type)?;
         let consumed = original_len - after_on.len();
         return Some((Comparator::EQ, 0, counter_type, consumed));
@@ -930,10 +929,10 @@ fn parse_counter_threshold(text: &str) -> Option<(Comparator, i32, CounterType, 
     .parse(rest)
     .ok()?;
 
-    let type_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
-    let raw_type = &rest[..type_end];
-    let counter_type = normalize_counter_type(raw_type);
-    let after_type = rest[type_end..].trim_start();
+    // CR 122.1 + CR 122.1b: shared counter-type combinator handles multi-word
+    // keyword counter names (e.g. "double strike").
+    let (after_type, counter_type) = nom_primitives::parse_counter_type_typed(rest).ok()?;
+    let after_type = after_type.trim_start();
     let after_on = parse_counter_on_suffix(after_type)?;
     let consumed = original_len - after_on.len();
     Some((comparator, threshold as i32, counter_type, consumed))
