@@ -14250,10 +14250,12 @@ fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<ParsedEffect
     // keyword counter names. Keyword counters aren't a printed distribute
     // target today (CR 122.1b keyword counters are placed singly), but the
     // shared combinator costs nothing and future-proofs the parser.
-    let (after_type, counter_type) = nom_primitives::parse_counter_type_typed(rest_lower).ok()?;
+    let (after_type_raw, counter_type) =
+        nom_primitives::parse_counter_type_typed(rest_lower).ok()?;
+    let type_end = rest_lower.len() - after_type_raw.len();
 
     // Require "counter(s)" immediately after the counter type word.
-    let after_type = after_type.trim_start();
+    let after_type = after_type_raw.trim_start();
     let counter_word_len = if tag::<_, _, OracleError<'_>>("counters")
         .parse(after_type)
         .is_ok()
@@ -14306,7 +14308,7 @@ fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<ParsedEffect
         },
         duration: None,
         sub_ability: None,
-        distribute: Some(DistributionUnit::Counters(raw_type.to_string())),
+        distribute: Some(DistributionUnit::Counters(counter_type.as_str().into_owned())),
         multi_target,
         condition: None,
         optional: false,
