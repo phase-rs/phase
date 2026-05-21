@@ -3531,7 +3531,7 @@ fn parse_conjure_zone(lower: &str) -> Option<(Zone, &str)> {
     .map(|(rest, zone)| (zone, rest))
 }
 
-/// CR 611.2b: Parse "have [subject] [predicate]" subject redirection.
+/// CR 611.2: Parse "have [subject] [predicate]" subject redirection.
 ///
 /// In imperative Oracle text, "have" followed by a target reference or anaphoric pronoun
 /// means "cause [subject] to [predicate]". Examples:
