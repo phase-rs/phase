@@ -23,7 +23,7 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
-use crate::types::statics::StaticMode;
+use crate::types::statics::{BlockExceptionKind, StaticMode};
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 use serde::{Deserialize, Serialize};
@@ -57,6 +57,14 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::MaximumHandSize { .. }
             | StaticMode::StepEndUnspentMana { .. }
             | StaticMode::CantBeBlockedBy { .. }
+            // CR 509.1b: CantBeBlockedExceptBy with a Quality filter carries an open-value
+            // `TargetFilter` (e.g. Subtype("Wall"), Flying, artifact creatures) whose
+            // runtime enforcement lives in combat.rs::validate_blockers.
+            // The MinBlockers variant is handled by the Menace-style registry path;
+            // only Quality variants are data-carrying in the open-value sense.
+            | StaticMode::CantBeBlockedExceptBy {
+                kind: BlockExceptionKind::Quality(_),
+            }
             // CR 602.5 + CR 603.2a: CantBeActivated carries `who` + `source_filter`.
             | StaticMode::CantBeActivated { .. }
             // CR 701.23 + CR 609.3: CantSearchLibrary carries `cause`.
@@ -9193,6 +9201,46 @@ mod tests {
             support,
             FeatureSupport::Handled,
             "StaticCondition::UnlessPay is resolved by combat-tax payment handling",
+        );
+    }
+
+    /// CR 509.1b: `CantBeBlockedExceptBy { kind: Quality(..) }` is a data-carrying
+    /// static whose runtime enforcement lives in `combat.rs::validate_blockers`.
+    /// Coverage must classify it as supported so that Prowler's Helm, Invisibility,
+    /// Seeker, and Canopy Cover are not incorrectly marked as unsupported.
+    #[test]
+    fn cant_be_blocked_except_by_quality_is_data_carrying() {
+        use crate::types::statics::BlockExceptionKind;
+
+        let wall_filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Subtype("Wall".into())],
+            controller: None,
+            properties: vec![],
+        });
+        let mode = StaticMode::CantBeBlockedExceptBy {
+            kind: BlockExceptionKind::Quality(wall_filter),
+        };
+        assert!(
+            is_data_carrying_static(&mode),
+            "CantBeBlockedExceptBy:Quality(Wall) must be recognised as data-carrying \
+             so that Prowler's Helm / Invisibility are marked supported",
+        );
+    }
+
+    /// Regression: the MinBlockers variant of `CantBeBlockedExceptBy` is NOT
+    /// data-carrying — it is handled through the Menace-style static registry
+    /// path.  This test guards against accidentally widening the `..` arm.
+    #[test]
+    fn cant_be_blocked_except_by_min_blockers_is_not_data_carrying() {
+        use crate::types::statics::BlockExceptionKind;
+
+        let mode = StaticMode::CantBeBlockedExceptBy {
+            kind: BlockExceptionKind::MinBlockers { min: 3 },
+        };
+        assert!(
+            !is_data_carrying_static(&mode),
+            "CantBeBlockedExceptBy:MinBlockers must NOT be data-carrying; \
+             it is registered in the static registry via Menace-style handling",
         );
     }
 }
