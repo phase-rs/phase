@@ -1274,9 +1274,20 @@ mod tests {
         assert_eq!(rest, " counters");
     }
 
+    /// CR 122.1b: an unrecognized single-word counter type ("hunger", "page",
+    /// "oil", etc.) is open-ended Oracle text and falls through to
+    /// `CounterType::Generic`. This matches the legacy
+    /// `find(whitespace)` + `normalize_counter_type` behavior the combinator
+    /// replaces. The combinator only fails on empty input or input starting
+    /// with whitespace, since no arm can consume zero characters.
     #[test]
-    fn test_parse_counter_type_failure() {
-        assert!(parse_counter_type_typed("unknown_counter").is_err());
+    fn test_parse_counter_type_unknown_falls_back_to_generic() {
+        let (rest, ct) = parse_counter_type_typed("hunger counters").unwrap();
+        assert_eq!(ct, CounterType::Generic("hunger".to_string()));
+        assert_eq!(rest, " counters");
+
+        // Empty input has no token to consume — combinator fails.
+        assert!(parse_counter_type_typed("").is_err());
     }
 
     /// CR 122.1b: every entry in `KEYWORD_COUNTERS` must be recognized by
