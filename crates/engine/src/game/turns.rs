@@ -583,7 +583,8 @@ pub fn execute_untap_with_choices(
 
         match restriction {
             GameRestriction::CastOnlyFromZones { expiry, .. }
-            | GameRestriction::CantCastSpells { expiry, .. } => {
+            | GameRestriction::CantCastSpells { expiry, .. }
+            | GameRestriction::CantActivateAbilities { expiry, .. } => {
                 !matches!(expiry, RestrictionExpiry::UntilPlayerNextTurn { player } if *player == active)
             }
             GameRestriction::DamagePreventionDisabled { .. } => true,
@@ -945,7 +946,8 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
         match r {
             GameRestriction::DamagePreventionDisabled { expiry, .. }
             | GameRestriction::CastOnlyFromZones { expiry, .. }
-            | GameRestriction::CantCastSpells { expiry, .. } => {
+            | GameRestriction::CantCastSpells { expiry, .. }
+            | GameRestriction::CantActivateAbilities { expiry, .. } => {
                 !matches!(expiry, RestrictionExpiry::EndOfTurn)
             }
         }

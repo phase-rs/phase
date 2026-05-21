@@ -18,7 +18,7 @@ use super::mana::{ManaColor, ManaCost, ManaType};
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
 use super::replacements::ReplacementEvent;
-use super::statics::{CastFrequency, StaticMode};
+use super::statics::{ActivationExemption, CastFrequency, StaticMode};
 use super::triggers::TriggerMode;
 use super::zones::Zone;
 use crate::types::events::PlayerActionKind;
@@ -1196,6 +1196,16 @@ pub enum GameRestriction {
     CantCastSpells {
         source: ObjectId,
         affected_players: RestrictionPlayerScope,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spell_filter: Option<TargetFilter>,
+        expiry: RestrictionExpiry,
+    },
+    /// CR 101.2 + CR 602.5: A temporary effect prevents affected players from
+    /// activating abilities, optionally exempting mana abilities.
+    CantActivateAbilities {
+        source: ObjectId,
+        affected_players: RestrictionPlayerScope,
+        exemption: ActivationExemption,
         expiry: RestrictionExpiry,
     },
 }
@@ -1224,6 +1234,9 @@ pub enum RestrictionScope {
 pub enum RestrictionPlayerScope {
     AllPlayers,
     SpecificPlayer(PlayerId),
+    /// Placeholder used by parser lowering for effects that target a player.
+    /// Resolved to `SpecificPlayer` by `add_restriction` at resolution time.
+    TargetedPlayer,
     OpponentsOfSourceController,
 }
 

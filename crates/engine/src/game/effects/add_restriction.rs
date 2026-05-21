@@ -32,14 +32,40 @@ fn fill_runtime_fields(restriction: &mut GameRestriction, ability: &ResolvedAbil
     match restriction {
         GameRestriction::DamagePreventionDisabled { source, .. }
         | GameRestriction::CastOnlyFromZones { source, .. }
-        | GameRestriction::CantCastSpells { source, .. } => {
+        | GameRestriction::CantCastSpells { source, .. }
+        | GameRestriction::CantActivateAbilities { source, .. } => {
             *source = ability.source_id;
         }
     }
 
+    let resolved_target_player = ability.target_player();
+
+    match restriction {
+        GameRestriction::CastOnlyFromZones {
+            affected_players, ..
+        }
+        | GameRestriction::CantCastSpells {
+            affected_players, ..
+        }
+        | GameRestriction::CantActivateAbilities {
+            affected_players, ..
+        } => {
+            if matches!(
+                affected_players,
+                crate::types::ability::RestrictionPlayerScope::TargetedPlayer
+            ) {
+                *affected_players = crate::types::ability::RestrictionPlayerScope::SpecificPlayer(
+                    resolved_target_player,
+                );
+            }
+        }
+        GameRestriction::DamagePreventionDisabled { .. } => {}
+    }
+
     match restriction {
         GameRestriction::CastOnlyFromZones { expiry, .. }
-        | GameRestriction::CantCastSpells { expiry, .. } => {
+        | GameRestriction::CantCastSpells { expiry, .. }
+        | GameRestriction::CantActivateAbilities { expiry, .. } => {
             if let Some(crate::types::ability::Duration::UntilNextTurnOf {
                 player: crate::types::ability::PlayerScope::Controller,
             }) = ability.duration.as_ref()
@@ -57,7 +83,7 @@ fn fill_runtime_fields(restriction: &mut GameRestriction, ability: &ResolvedAbil
 mod tests {
     use super::*;
     use crate::types::ability::{
-        Duration, GameRestriction, RestrictionExpiry, RestrictionPlayerScope,
+        Duration, GameRestriction, RestrictionExpiry, RestrictionPlayerScope, TargetRef,
     };
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
@@ -137,6 +163,37 @@ mod tests {
                 allowed_zones,
                 expiry: RestrictionExpiry::UntilPlayerNextTurn { player: PlayerId(1) },
             } if allowed_zones == &vec![Zone::Hand]
+        ));
+    }
+
+    #[test]
+    fn targeted_player_scope_is_resolved_on_restrictions() {
+        let mut state = GameState::new_two_player(42);
+
+        let ability = ResolvedAbility::new(
+            Effect::AddRestriction {
+                restriction: GameRestriction::CantActivateAbilities {
+                    source: ObjectId(0),
+                    affected_players: RestrictionPlayerScope::TargetedPlayer,
+                    exemption: crate::types::statics::ActivationExemption::ManaAbilities,
+                    expiry: RestrictionExpiry::EndOfTurn,
+                },
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(7),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(matches!(
+            &state.restrictions[0],
+            GameRestriction::CantActivateAbilities {
+                source: ObjectId(7),
+                affected_players: RestrictionPlayerScope::SpecificPlayer(PlayerId(1)),
+                ..
+            }
         ));
     }
 }

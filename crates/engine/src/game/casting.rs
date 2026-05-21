@@ -206,6 +206,10 @@ fn is_blocked_by_cast_only_from_zones(
                 let caster_affected = match affected_players {
                     RestrictionPlayerScope::AllPlayers => true,
                     RestrictionPlayerScope::SpecificPlayer(player) => *player == caster,
+                    RestrictionPlayerScope::TargetedPlayer => {
+                        debug_assert!(false, "TargetedPlayer should be resolved by add_restriction");
+                        false
+                    }
                     RestrictionPlayerScope::OpponentsOfSourceController => {
                         source_controller.is_some_and(|controller| controller != caster)
                     }
@@ -214,16 +218,22 @@ fn is_blocked_by_cast_only_from_zones(
             }
             GameRestriction::DamagePreventionDisabled { .. } => false,
             GameRestriction::CantCastSpells { .. } => false,
+            GameRestriction::CantActivateAbilities { .. } => false,
         })
 }
 
 /// CR 101.2: Check if a CantCastSpells restriction prevents the given player
 /// from casting any spells. E.g., Silence: "Your opponents can't cast spells this turn."
-fn is_blocked_by_cant_cast_spells(state: &GameState, caster: PlayerId) -> bool {
+fn is_blocked_by_cant_cast_spells(
+    state: &GameState,
+    caster: PlayerId,
+    spell_obj: Option<&super::game_object::GameObject>,
+) -> bool {
     state.restrictions.iter().any(|restriction| {
         let GameRestriction::CantCastSpells {
             source,
             affected_players,
+            spell_filter,
             ..
         } = restriction
         else {
@@ -233,11 +243,92 @@ fn is_blocked_by_cant_cast_spells(state: &GameState, caster: PlayerId) -> bool {
             .objects
             .get(source)
             .map(|source_obj| source_obj.controller);
-        match affected_players {
+        let caster_affected = match affected_players {
             RestrictionPlayerScope::AllPlayers => true,
             RestrictionPlayerScope::SpecificPlayer(player) => *player == caster,
+            RestrictionPlayerScope::TargetedPlayer => {
+                debug_assert!(
+                    false,
+                    "TargetedPlayer should be resolved by add_restriction"
+                );
+                false
+            }
             RestrictionPlayerScope::OpponentsOfSourceController => {
                 source_controller.is_some_and(|controller| controller != caster)
+            }
+        };
+        caster_affected && {
+            if let Some(filter) = spell_filter {
+                let Some(spell_obj) = spell_obj else {
+                    return false;
+                };
+                let spell_record = SpellCastRecord {
+                    name: spell_obj.name.clone(),
+                    core_types: spell_obj.card_types.core_types.clone(),
+                    supertypes: spell_obj.card_types.supertypes.clone(),
+                    subtypes: spell_obj.card_types.subtypes.clone(),
+                    keywords: spell_obj.keywords.clone(),
+                    colors: spell_obj.color.clone(),
+                    mana_value: spell_obj.mana_cost.mana_value(),
+                    has_x_in_cost: super::casting_costs::cost_has_x(&spell_obj.mana_cost),
+                    from_zone: spell_obj.zone,
+                    cast_variant: crate::types::game_state::CastingVariant::Normal,
+                };
+                super::filter::spell_record_matches_filter(
+                    &spell_record,
+                    filter,
+                    source_controller.unwrap_or(caster),
+                    &state.all_creature_types,
+                )
+            } else {
+                true
+            }
+        }
+    })
+}
+
+/// CR 602.5 + CR 605.1a: Temporary game restrictions can prohibit activating
+/// abilities, optionally exempting mana abilities via the single classifier.
+fn is_blocked_by_cant_activate_abilities(
+    state: &GameState,
+    caster: PlayerId,
+    activating_ability: &AbilityDefinition,
+) -> bool {
+    state.restrictions.iter().any(|restriction| {
+        let GameRestriction::CantActivateAbilities {
+            source,
+            affected_players,
+            exemption,
+            ..
+        } = restriction
+        else {
+            return false;
+        };
+        let source_controller = state
+            .objects
+            .get(source)
+            .map(|source_obj| source_obj.controller);
+        let caster_affected = match affected_players {
+            RestrictionPlayerScope::AllPlayers => true,
+            RestrictionPlayerScope::SpecificPlayer(player) => *player == caster,
+            RestrictionPlayerScope::TargetedPlayer => {
+                debug_assert!(
+                    false,
+                    "TargetedPlayer should be resolved by add_restriction"
+                );
+                false
+            }
+            RestrictionPlayerScope::OpponentsOfSourceController => {
+                source_controller.is_some_and(|controller| controller != caster)
+            }
+        };
+        if !caster_affected {
+            return false;
+        }
+        match exemption {
+            ActivationExemption::None => true,
+            ActivationExemption::ManaAbilities => {
+                !super::mana_abilities::is_mana_ability(activating_ability)
             }
         }
     })
@@ -331,18 +422,13 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
         }
     }
 
-    // CR 101.2: If a CantCastSpells restriction blocks this player, no spells are available.
-    if is_blocked_by_cant_cast_spells(state, player) {
-        return vec![];
-    }
-
     objects
         .into_iter()
         .filter(|obj_id| {
-            state
-                .objects
-                .get(obj_id)
-                .is_some_and(|obj| !is_blocked_by_cast_only_from_zones(state, obj, player))
+            state.objects.get(obj_id).is_some_and(|obj| {
+                !is_blocked_by_cast_only_from_zones(state, obj, player)
+                    && !is_blocked_by_cant_cast_spells(state, player, Some(obj))
+            })
         })
         .collect()
 }
@@ -1659,7 +1745,7 @@ fn prepare_spell_cast_with_variant_override_inner(
 
     // CR 101.2: Temporary blanket prohibition — "can't cast spells this turn."
     // E.g., Silence: "Your opponents can't cast spells this turn."
-    if mode == CastingMode::Actual && is_blocked_by_cant_cast_spells(state, player) {
+    if mode == CastingMode::Actual && is_blocked_by_cant_cast_spells(state, player, Some(obj)) {
         return Err(EngineError::ActionNotAllowed(
             "A temporary effect prevents you from casting spells this turn".to_string(),
         ));
@@ -6662,6 +6748,9 @@ pub fn can_activate_ability_now(
     if is_blocked_by_cant_be_activated(state, player, source_id, &ability_def) {
         return false;
     }
+    if is_blocked_by_cant_activate_abilities(state, player, &ability_def) {
+        return false;
+    }
     if restrictions::check_activation_restrictions(
         state,
         player,
@@ -6780,6 +6869,11 @@ pub fn handle_activate_ability(
     if is_blocked_by_cant_be_activated(state, player, source_id, &ability_def) {
         return Err(EngineError::ActionNotAllowed(
             "Activated abilities of this permanent can't be activated (CR 602.5)".to_string(),
+        ));
+    }
+    if is_blocked_by_cant_activate_abilities(state, player, &ability_def) {
+        return Err(EngineError::ActionNotAllowed(
+            "A temporary effect prevents activating this ability".to_string(),
         ));
     }
 
