@@ -1,6 +1,6 @@
 use crate::types::ability::{
-    DelayedTriggerCondition, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter,
-    TargetRef,
+    DelayedTriggerCondition, Effect, EffectError, EffectKind, QuantityExpr, QuantityRef,
+    ResolvedAbility, TargetFilter, TargetRef,
 };
 #[cfg(test)]
 use crate::types::counter::CounterType;
@@ -76,6 +76,11 @@ pub fn resolve(
     } else {
         vec![]
     };
+
+    // CR 603.7 + CR 608.2k: Snapshot parent-resolution-dependent
+    // quantity refs to Fixed before the delayed trigger gets stashed.
+    // After this call, `delayed_effect` holds no parent context refs.
+    snapshot_parent_dependent_quantities(&mut delayed_effect, state, ability);
 
     let delayed_ability = ResolvedAbility::new(
         delayed_effect,
@@ -224,6 +229,122 @@ fn bind_tracked_set_to_condition(condition: &mut DelayedTriggerCondition, real_i
     }
 }
 
+/// CR 603.7 + CR 202.3 + CR 608.2k: Snapshot QuantityRef leaves in the
+/// delayed trigger's inner effect that depend on parent-resolution
+/// context (the countered spell on the stack, the cast-time mana
+/// snapshot, etc.). After this walker runs, the delayed trigger holds
+/// no references to parent context — it fires self-contained at
+/// `AtNextPhaseForPlayer` time with `Fixed` values everywhere.
+///
+/// Handles two scopes that the parser emits for "that spell" anaphors:
+/// - `ObjectManaValue { CostPaidObject }` from "that spell's mana value"
+/// - `ObjectManaValue { Target }` (treated identically)
+///
+/// Both resolve via the parent ability's `targets[0]` rather than the
+/// standard resolver chain (which keys off `cost_paid_object` /
+/// `current_trigger_event`, neither of which is set during a spell-card
+/// resolution like Mana Drain or Mana Sculpt).
+fn snapshot_parent_dependent_quantities(
+    effect: &mut Effect,
+    state: &GameState,
+    ability: &ResolvedAbility,
+) {
+    use crate::types::ability::ManaProduction;
+    match effect {
+        Effect::Mana {
+            produced: ManaProduction::Colorless { count },
+            ..
+        } => {
+            snapshot_quantity_expr(count, state, ability);
+        }
+        Effect::DealDamage { amount, .. }
+        | Effect::DamageAll { amount, .. }
+        | Effect::DamageEachPlayer { amount, .. }
+        | Effect::GainLife { amount, .. }
+        | Effect::LoseLife { amount, .. } => {
+            snapshot_quantity_expr(amount, state, ability);
+        }
+        Effect::Draw { count: amount, .. }
+        | Effect::Mill { count: amount, .. }
+        | Effect::PutCounter { count: amount, .. } => {
+            snapshot_quantity_expr(amount, state, ability);
+        }
+        _ => {}
+    }
+}
+
+/// Recursively walks a QuantityExpr tree, snapshotting any snapshottable
+/// leaf to `Fixed { value }`. Non-snapshottable leaves pass through.
+fn snapshot_quantity_expr(expr: &mut QuantityExpr, state: &GameState, ability: &ResolvedAbility) {
+    match expr {
+        QuantityExpr::Ref { qty } => {
+            if let Some(value) = snapshot_quantity_ref(qty, state, ability) {
+                *expr = QuantityExpr::Fixed { value };
+            }
+        }
+        QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::DivideRounded { inner, .. } => {
+            snapshot_quantity_expr(inner, state, ability);
+        }
+        QuantityExpr::Sum { exprs } => {
+            for e in exprs.iter_mut() {
+                snapshot_quantity_expr(e, state, ability);
+            }
+        }
+        QuantityExpr::Difference { left, right } => {
+            snapshot_quantity_expr(left, state, ability);
+            snapshot_quantity_expr(right, state, ability);
+        }
+        QuantityExpr::UpTo { max } => {
+            snapshot_quantity_expr(max, state, ability);
+        }
+        QuantityExpr::Power { exponent, .. } => {
+            snapshot_quantity_expr(exponent, state, ability);
+        }
+        QuantityExpr::Fixed { .. } => {}
+    }
+}
+
+/// Resolve a single snapshottable QuantityRef leaf to a concrete value,
+/// or return None if the ref is not snapshottable (caller leaves it
+/// unchanged). Reads the parent ability's `targets[0]` for the spell
+/// reference.
+fn snapshot_quantity_ref(
+    qty: &QuantityRef,
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<i32> {
+    use crate::types::ability::ObjectScope;
+    let target_object_id = ability.targets.iter().find_map(|t| match t {
+        TargetRef::Object(id) => Some(*id),
+        _ => None,
+    })?;
+    match qty {
+        QuantityRef::ObjectManaValue {
+            scope: ObjectScope::CostPaidObject,
+        }
+        | QuantityRef::ObjectManaValue {
+            scope: ObjectScope::Target,
+        } => {
+            // Read live state first, LKI as fallback, 0 if neither.
+            let value = state
+                .objects
+                .get(&target_object_id)
+                .map(|obj| obj.mana_cost.mana_value() as i32)
+                .or_else(|| {
+                    state
+                        .lki_cache
+                        .get(&target_object_id)
+                        .map(|lki| lki.mana_value as i32)
+                })
+                .unwrap_or(0);
+            Some(value)
+        }
+        _ => None,
+    }
+}
+
 /// Bind a tracked set to an effect's target filter, resolve origin zone,
 /// and upgrade ChangeZone → ChangeZoneAll if needed.
 ///
@@ -266,14 +387,44 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::GameObject;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, DamageKindFilter, DelayedTriggerCondition, Effect,
-        QuantityExpr, TriggerDefinition,
+        ManaProduction, ObjectScope, QuantityExpr, QuantityRef, TriggerDefinition,
     };
-    use crate::types::identifiers::ObjectId;
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::mana::ManaCost;
     use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
     use crate::types::triggers::TriggerMode;
+
+    /// Construct a synthetic GameObject with a known mana value and insert
+    /// it into state.objects under the given ObjectId. Used by walker tests
+    /// that need a stand-in for a countered spell.
+    fn inject_spell_with_mana_value(state: &mut GameState, spell_id: ObjectId, mana_value: u32) {
+        let mut obj = GameObject::new(
+            spell_id,
+            CardId(0),
+            PlayerId(1),
+            "Test Spell".to_string(),
+            crate::types::zones::Zone::Graveyard,
+        );
+        obj.mana_cost = ManaCost::generic(mana_value);
+        state.objects.insert(spell_id, obj);
+    }
+
+    /// Build an `Effect::Mana { Colorless { count } }` with all fields
+    /// of the Mana variant populated. Used by walker tests to construct the
+    /// inner effect of a delayed trigger.
+    fn mana_colorless_effect(count: QuantityExpr) -> Effect {
+        Effect::Mana {
+            produced: ManaProduction::Colorless { count },
+            restrictions: Vec::new(),
+            grants: Vec::new(),
+            expiry: None,
+            target: None,
+        }
+    }
 
     #[test]
     fn creates_delayed_trigger_on_state() {
@@ -643,5 +794,61 @@ mod tests {
             vec![TargetRef::Object(vehicle_id)],
             "delayed ParentTarget effects must remember the object from the parent resolution"
         );
+    }
+
+    /// CR 603.7 + CR 202.3: A delayed trigger whose inner effect references
+    /// `ObjectManaValue { CostPaidObject }` (the parser-emitted anaphor for
+    /// "that spell's mana value") must have that leaf snapshotted to a
+    /// `Fixed` value at creation time. The snapshot reads the parent
+    /// ability's targets[0] mana value directly, bypassing the standard
+    /// CostPaidObject resolver chain (which is wrong for spell-card
+    /// contexts where `cost_paid_object` is unset).
+    #[test]
+    fn snapshot_object_mana_value_cost_paid_object_baked_to_fixed() {
+        let mut state = GameState::new_two_player(42);
+        let spell_id = ObjectId(42);
+        inject_spell_with_mana_value(&mut state, spell_id, 3);
+
+        let delayed_inner = AbilityDefinition::new(
+            AbilityKind::Spell,
+            mana_colorless_effect(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject,
+                },
+            }),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::PreCombatMain,
+                    player: PlayerId(0),
+                },
+                effect: Box::new(delayed_inner),
+                uses_tracked_set: false,
+            },
+            vec![TargetRef::Object(spell_id)],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).expect("resolve must succeed");
+
+        // After resolve, the delayed trigger's effect must have its
+        // ObjectManaValue{CostPaidObject} leaf rewritten to Fixed{3}.
+        let delayed = &state.delayed_triggers[0];
+        match &delayed.ability.effect {
+            Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                ..
+            } => {
+                assert_eq!(
+                    *count,
+                    QuantityExpr::Fixed { value: 3 },
+                    "delayed trigger's mana count must be snapshotted to Fixed{{3}}"
+                );
+            }
+            other => panic!("expected Mana{{Colorless}}, got {other:?}"),
+        }
     }
 }
