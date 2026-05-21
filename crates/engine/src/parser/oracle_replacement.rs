@@ -4,8 +4,8 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::char;
-use nom::combinator::{opt, peek, value};
-use nom::sequence::{pair, preceded};
+use nom::combinator::{all_consuming, opt, peek, value};
+use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
 use super::oracle_effect::become_copy_except::parse_except_clause;
@@ -3808,20 +3808,21 @@ fn parse_no_counters_replacement(
     // The parser receives normalized text where "this creature" / "this
     // permanent" etc. have already been replaced by `~` (engine-internal
     // self-reference convention; CR 201.5 governs the underlying "object
-    // refers to itself by name" semantics). The combinator matches the
-    // entire line as a single shape so adjacent text (e.g., an "as long as
-    // ~ is tapped" prefix) is correctly rejected — those compose via the
-    // outer dispatch in `parse_replacement_line_inner`, not here.
-    let trimmed = norm_lower.trim().trim_end_matches('.');
-    let mut combinator = (
-        tag::<_, _, OracleError<'_>>("~ can't have counters put on "),
-        alt((tag("it"), tag("them"))),
-    )
-        .map(|(_, _): (&str, &str)| ());
-    let (rest, ()) = combinator.parse(trimmed).ok()?;
-    if !rest.trim().is_empty() {
-        return None;
-    }
+    // refers to itself by name" semantics). `all_consuming` enforces that
+    // the combinator matches the entire line as a single shape so adjacent
+    // text (e.g., an "as long as ~ is tapped" prefix) is correctly
+    // rejected — those compose via the outer dispatch in
+    // `parse_replacement_line_inner`, not here. `terminated(.., opt(tag(".")))`
+    // absorbs the optional trailing period inside the combinator, keeping
+    // the entire dispatch in idiomatic nom.
+    let mut combinator = all_consuming(terminated(
+        (
+            tag::<_, _, OracleError<'_>>("~ can't have counters put on "),
+            alt((tag("it"), tag("them"))),
+        ),
+        opt(tag(".")),
+    ));
+    combinator.parse(norm_lower.trim()).ok()?;
 
     Some(
         ReplacementDefinition::new(ReplacementEvent::AddCounter)
