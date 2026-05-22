@@ -2427,13 +2427,12 @@ fn parse_player_counter_kind(input: &str) -> OracleResult<'_, PlayerCounterKind>
 }
 
 /// CR 122.1 + CR 109.5: Typed possessor alt mapping to `CountScope`. Each arm
-/// emits the scope variant directly. Targeted-player phrasings ("target
-/// opponent has", "that player has") are intentionally not represented
-/// because no current card requires them; extending here is a typed
-/// addition, not a string-match retrofit.
+/// emits the scope variant directly. New possessor phrases extend this typed
+/// alt rather than adding full phrase permutations.
 fn parse_player_counter_possessor(input: &str) -> OracleResult<'_, CountScope> {
     alt((
         value(CountScope::Controller, tag("you have")),
+        value(CountScope::ScopedPlayer, tag("that player has")),
         value(CountScope::Opponents, tag("each opponent has")),
         value(CountScope::Opponents, tag("your opponents have")),
         value(CountScope::All, tag("each player has")),
@@ -4441,6 +4440,16 @@ mod tests {
                 "the number of poison counters each player has",
                 PlayerCounterKind::Poison,
                 CountScope::All,
+            ),
+            (
+                "the number of poison counters that player has",
+                PlayerCounterKind::Poison,
+                CountScope::ScopedPlayer,
+            ),
+            (
+                "the number of rad counters that player has",
+                PlayerCounterKind::Rad,
+                CountScope::ScopedPlayer,
             ),
         ];
         for (phrase, kind, scope) in cases {

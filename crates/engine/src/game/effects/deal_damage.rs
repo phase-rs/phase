@@ -824,6 +824,15 @@ fn collect_matching_players(
                     PlayerFilter::OpponentGainedLife => {
                         p.id != source_controller && p.life_gained_this_turn > 0
                     }
+                    // CR 120.1 + CR 510.1: Each opponent who was dealt combat
+                    // damage this turn (`damage_dealt_this_turn` ledger).
+                    PlayerFilter::OpponentDealtCombatDamage => {
+                        p.id != source_controller
+                            && state.damage_dealt_this_turn.iter().any(|r| {
+                                r.is_combat
+                                    && matches!(r.target, TargetRef::Player(pid) if pid == p.id)
+                            })
+                    }
                     PlayerFilter::HighestSpeed => {
                         let highest_speed = state
                             .players
@@ -941,6 +950,15 @@ pub fn resolve_each_player(
                     }
                     PlayerFilter::OpponentGainedLife => {
                         p.id != ability.controller && p.life_gained_this_turn > 0
+                    }
+                    // CR 120.1 + CR 510.1: Each opponent who was dealt combat
+                    // damage this turn (`damage_dealt_this_turn` ledger).
+                    PlayerFilter::OpponentDealtCombatDamage => {
+                        p.id != ability.controller
+                            && state.damage_dealt_this_turn.iter().any(|r| {
+                                r.is_combat
+                                    && matches!(r.target, TargetRef::Player(pid) if pid == p.id)
+                            })
                     }
                     PlayerFilter::HighestSpeed => {
                         let highest_speed = state
