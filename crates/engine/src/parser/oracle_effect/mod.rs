@@ -22520,12 +22520,14 @@ mod tests {
         }
     }
 
-    /// CR 701.6 + CR 603.7 + CR 202.3: Full parse tree for Mana Drain.
-    /// Verifies that prefix-position "At the beginning of your next main
-    /// phase, …" wraps the inner effect in CreateDelayedTrigger, and that
-    /// "that spell's mana value" parses to `ObjectManaValue{CostPaidObject}`
-    /// (the existing event-context anaphor; the runtime snapshot walker
-    /// resolves this against the parent ability's targets[0]).
+    /// CR 701.6 + CR 603.7 + CR 202.3 + CR 608.2c: Full parse tree for Mana
+    /// Drain. Verifies that prefix-position "At the beginning of your next
+    /// main phase, …" wraps the inner effect in CreateDelayedTrigger, and
+    /// that "that spell's mana value" parses to
+    /// `ObjectManaValue{Anaphoric}` — the bare-anaphoric-possessive class
+    /// (CR 608.2c instruction-order referent), routed by
+    /// `classify_possessive_referent` to the runtime arm that consults
+    /// `effect_context_object` (the counter-target spell snapshot) first.
     ///
     /// Asserts:
     /// - primary effect is `Counter` targeting stack spell,
@@ -22571,7 +22573,18 @@ mod tests {
             "expected AtNextPhaseForPlayer(PreCombatMain), got {delayed_cond:?}"
         );
 
-        // Inner delayed effect: Mana(Colorless, Ref(ObjectManaValue{CostPaidObject})).
+        // Inner delayed effect: Mana(Colorless, Ref(ObjectManaValue{Anaphoric})).
+        //
+        // CR 608.2c — "that spell" in the delayed-trigger clause is a bare
+        // anaphoric pronoun: it points at the spell introduced by the
+        // earlier-instruction `Counter target spell`. `classify_possessive_referent`
+        // emits `ObjectScope::Anaphoric` whose runtime resolver (in
+        // `game/quantity.rs`) consults `effect_context_object` (the
+        // captured-on-counter spell snapshot stamped by the parent chain)
+        // before falling back to the trigger-event source / cost_paid_object.
+        // The integration test `mana_drain_refund.rs` exercises the runtime
+        // end-to-end; this parser assertion just freezes the parse-time
+        // scope.
         let Effect::Mana { produced, .. } = &*delayed_effect_def.effect else {
             panic!(
                 "expected Mana effect on delayed trigger, got {:?}",
@@ -22584,10 +22597,12 @@ mod tests {
                     *count,
                     QuantityExpr::Ref {
                         qty: QuantityRef::ObjectManaValue {
-                            scope: crate::types::ability::ObjectScope::CostPaidObject,
+                            scope: crate::types::ability::ObjectScope::Anaphoric,
                         }
                     },
-                    "Colorless count must reference parent target's mana value via ObjectManaValue{{CostPaidObject}}"
+                    "Colorless count must reference the counter-target spell's \
+                     mana value via ObjectManaValue{{Anaphoric}} (CR 608.2c \
+                     instruction-order referent)"
                 );
             }
             other => panic!("expected Colorless mana production, got {other:?}"),
