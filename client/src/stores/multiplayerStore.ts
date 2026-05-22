@@ -15,9 +15,11 @@ import {
   resolveGuestOver,
   subscribeLobbyOver,
   type BrokerClient,
+  type LookupJoinTargetOptions,
   type LookupJoinTargetResult,
   type RegisterHostRequest,
   type ResolveResult,
+  type ResolveGuestOptions,
 } from "../services/brokerClient";
 import {
   HandshakeError,
@@ -126,6 +128,7 @@ export interface HostingSettings {
   formatConfig: FormatConfig;
   matchType: MatchType;
   aiSeats: AiSeatConfig[];
+  startWhenFull: boolean;
   /** Optional per-match label shown in the lobby, distinct from `displayName`
    * (the player's global identity). `null` means "use the player's name". */
   roomName: string | null;
@@ -273,7 +276,11 @@ interface MultiplayerActions {
    * alive. Does NOT navigate — the caller inspects the result and handles
    * password retry, build mismatch, etc. before navigation.
    */
-  resolveGuest: (code: string, password?: string) => Promise<ResolveResult>;
+  resolveGuest: (
+    code: string,
+    password?: string,
+    opts?: Pick<ResolveGuestOptions, "reservationToken">,
+  ) => Promise<ResolveResult>;
   /**
    * Read-only typed-code lookup. Returns format/routing metadata without
    * consuming a seat.
@@ -281,6 +288,10 @@ interface MultiplayerActions {
   lookupJoinTarget: (
     code: string,
     password?: string,
+    opts?: Pick<
+      LookupJoinTargetOptions,
+      "reserve" | "displayName" | "releaseReservationToken"
+    >,
   ) => Promise<LookupJoinTargetResult>;
   /**
    * Subscribe to lobby-list updates over the subscription socket. Returns
@@ -310,6 +321,23 @@ interface MultiplayerActions {
     serverUrl: string,
     settings: CreateDraftSettings,
   ) => Promise<void>;
+}
+
+async function startActiveP2PHostGame(
+  setState: (partial: Partial<MultiplayerState>) => void,
+): Promise<void> {
+  const adapter = activeP2PHostAdapter;
+  if (!adapter) return;
+
+  await adapter.startPregameGame();
+  const gameId = activeP2PHostGameId ?? crypto.randomUUID();
+  saveActiveGame({ id: gameId, mode: "p2p-host", difficulty: "" });
+  useGameStore.setState({ gameId });
+  setState({
+    pendingGameRoute: `/game/${gameId}?mode=p2p-host`,
+    hostGameCode: null,
+    hostingStatus: "idle",
+  });
 }
 
 /**
@@ -668,6 +696,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               format_config: settings.formatConfig,
               ai_seats: settings.aiSeats,
               room_name: settings.roomName,
+              start_when_full: settings.startWhenFull,
             },
           }),
           attemptHostReconnect,
@@ -773,6 +802,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               aiSeats: [],
               roomName: opts.roomName ?? null,
               draftMetadata: null,
+              startWhenFull: settings.startWhenFull,
             });
             brokerGameCode = registered.gameCode;
             activeBroker = broker;
@@ -811,7 +841,13 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           if (event.type === "playerSlotsUpdated" || event.type === "lobbyProgress") {
             set({ playerSlots: adapter.getPlayerSlots() });
           } else if (event.type === "roomFull") {
-            get().showToast("Room full — ready to start!");
+            if (settings.startWhenFull) {
+              void startActiveP2PHostGame(set).catch((err) => {
+                get().showToast(err instanceof Error ? err.message : String(err));
+              });
+            } else {
+              get().showToast("Room full — ready to start!");
+            }
           } else if (event.type === "error") {
             get().showToast(event.message);
           }
@@ -846,15 +882,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         if (activeP2PHostAdapter) {
           void (async () => {
             if (mutation.type === "Start") {
-              await activeP2PHostAdapter.startPregameGame();
-              const gameId = activeP2PHostGameId ?? crypto.randomUUID();
-              saveActiveGame({ id: gameId, mode: "p2p-host", difficulty: "" });
-              useGameStore.setState({ gameId });
-              set({
-                pendingGameRoute: `/game/${gameId}?mode=p2p-host`,
-                hostGameCode: null,
-                hostingStatus: "idle",
-              });
+              await startActiveP2PHostGame(set);
             } else {
               await activeP2PHostAdapter.applySeatMutation(mutation);
               set({ playerSlots: activeP2PHostAdapter.getPlayerSlots() });
@@ -974,7 +1002,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         subscriptionReconnect = null;
       },
 
-      resolveGuest: async (code, password) => {
+      resolveGuest: async (code, password, opts) => {
         const socket = await get().ensureSubscriptionSocket();
         if (!socket) {
           return {
@@ -991,13 +1019,14 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         try {
           return await resolveGuestOver(socket, code, password, {
             signal: ac.signal,
+            reservationToken: opts?.reservationToken,
           });
         } finally {
           pendingJoinRpcAborts.delete(ac);
         }
       },
 
-      lookupJoinTarget: async (code, password) => {
+      lookupJoinTarget: async (code, password, opts) => {
         const socket = await get().ensureSubscriptionSocket();
         if (!socket) {
           return {
@@ -1011,6 +1040,9 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         try {
           return await lookupJoinTargetOver(socket, code, password, {
             signal: ac.signal,
+            reserve: opts?.reserve,
+            displayName: opts?.displayName,
+            releaseReservationToken: opts?.releaseReservationToken,
           });
         } finally {
           pendingJoinRpcAborts.delete(ac);
@@ -1085,4 +1117,3 @@ export function getOpponentDisplayName(playerId: number): string {
   if (name) return name;
   return `Opp ${playerId + 1}`;
 }
-

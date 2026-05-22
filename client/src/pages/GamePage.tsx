@@ -2130,6 +2130,8 @@ function AbilityChoiceModal() {
   // CR 702.190a: When every pending action is a Sneak cast, reframe the
   // modal's subtitle — the user is choosing which attacker to return as the
   // cost-payment creature, not activating an ability.
+  const onlyPreparedCopy =
+    pending.actions.length === 1 && pending.actions[0]?.type === "CastPreparedCopy";
   const allSneak = pending.actions.every((a) => a.type === "CastSpellAsSneak");
   const allPlayOrCast = pending.actions.every((a) =>
     a.type === "CastSpell"
@@ -2138,6 +2140,7 @@ function AbilityChoiceModal() {
     || a.type === "CastSpellAsMadness"
     || a.type === "CastSpellAsSneak"
     || a.type === "CastSpellAsWebSlinging"
+    || a.type === "CastPreparedCopy"
     || a.type === "PlayLand"
   );
   // #506: a single pending action is a confirmation, not a choice — the modal
@@ -2145,11 +2148,13 @@ function AbilityChoiceModal() {
   // explicitly opts in rather than auto-firing it.
   const subtitle = allSneak
     ? "Choose which attacker to return (Sneak cost)"
-    : pending.actions.length === 1
-      ? "Activate this ability?"
-      : allPlayOrCast
-        ? "Choose how to play this card"
-        : "Choose an ability to activate";
+    : onlyPreparedCopy
+      ? "Cast the prepared spell?"
+      : pending.actions.length === 1
+        ? "Activate this ability?"
+        : allPlayOrCast
+          ? "Choose how to play this card"
+          : "Choose an ability to activate";
 
   return (
     <ChoiceModal

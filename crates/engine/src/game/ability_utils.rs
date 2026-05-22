@@ -2952,6 +2952,7 @@ mod tests {
                         reveal: false,
                         target_player: None,
                         selection_constraint: SearchSelectionConstraint::None,
+                        split: None,
                     },
                 )
                 .cost(AbilityCost::Composite {
@@ -3527,6 +3528,7 @@ mod tests {
                 reveal: false,
                 target_player: Some(TargetFilter::Player),
                 selection_constraint: SearchSelectionConstraint::None,
+                split: None,
             },
             vec![],
             source,
