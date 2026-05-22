@@ -1505,22 +1505,6 @@ pub(crate) fn parse_oracle_ir(
             }
         }
 
-        // CR 702.xxx: Prepare (Strixhaven) — `~ enters prepared.` is a self-ETB
-        // rider shorthand (analogous to `enters tapped` / `enters transformed`)
-        // that synthesizes a self-ETB trigger whose effect is BecomePrepared.
-        // Delegated to the oracle_trigger combinator; nom-composed detection.
-        // Normalize self-refs first so lines like "Lluwen enters prepared." (where
-        // the short card name is still the subject) reach the `~`-gated combinator.
-        let prepared_normalized = normalize_self_refs_for_static(&line, card_name);
-        if let Some(mut trigger) =
-            super::oracle_trigger::try_parse_enters_prepared_rider(&prepared_normalized)
-        {
-            trigger.description = Some(line.clone());
-            result.triggers.push(trigger);
-            i += 1;
-            continue;
-        }
-
         // Priority 1: Modal block (standard "Choose one —" + modes, or Spree + modes).
         // Must run before keyword extraction so "Spree" header + follow-on `+` lines
         // are consumed as a modal block, not swallowed as a keyword-only line.
@@ -10085,6 +10069,40 @@ mod tests {
             matches!(*def.effect, Effect::Draw { .. }),
             "inner effect should be Draw, got {:?}",
             def.effect,
+        );
+    }
+
+    #[test]
+    fn each_player_discards_their_hand_binds_count_to_scoped_player() {
+        // #781 Wheel of Fortune: "Each player discards their hand, then draws
+        // seven cards." The "their hand" count must bind to the iterated player
+        // (ScopedPlayer), not the caster (Controller). Pre-fix it parsed to
+        // HandSize{Controller}, so under player_scope iteration only the caster's
+        // (already-emptied) hand size drove every player's discard count and
+        // opponents kept their hands.
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::{PlayerFilter, PlayerScope, QuantityExpr, QuantityRef};
+        let def = parse_effect_chain(
+            "Each player discards their hand, then draws seven cards.",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        assert_eq!(
+            def.player_scope,
+            Some(PlayerFilter::All),
+            "player_scope should be All for 'each player'"
+        );
+        let count = match &*def.effect {
+            Effect::Discard { count, .. } => count,
+            other => panic!("expected Discard, got {other:?}"),
+        };
+        assert_eq!(
+            *count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::ScopedPlayer,
+                },
+            },
+            "discard count must bind 'their hand' to ScopedPlayer (#781)"
         );
     }
 
