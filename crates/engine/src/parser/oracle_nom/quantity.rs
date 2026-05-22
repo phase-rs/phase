@@ -1421,6 +1421,22 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
             },
             tag("that spell's mana value"),
         ),
+        // CR 608.2c: "that creature card's [property]" — anaphoric reference to
+        // a creature card chosen during resolution (e.g., revealed from a hand
+        // and selected by the active player). The card is the object chosen by
+        // the preceding instruction in the same effect resolution sequence.
+        value(
+            QuantityRef::Power {
+                scope: ObjectScope::Target,
+            },
+            tag("that creature card's power"),
+        ),
+        value(
+            QuantityRef::Toughness {
+                scope: ObjectScope::Target,
+            },
+            tag("that creature card's toughness"),
+        ),
     ))
     .parse(input)
 }

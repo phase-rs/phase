@@ -49,15 +49,6 @@ pub(crate) fn parse_quantity_ref_with_context(
 ) -> Option<QuantityRef> {
     let trimmed = text.trim().trim_end_matches('.');
 
-    // CR 608.2c: Reveal-choice continuations forward the chosen revealed card as
-    // the continuation target, so Talara's Bane's "that creature card's
-    // toughness" reads from that chosen card.
-    if trimmed == "that creature card's toughness" {
-        return Some(QuantityRef::Toughness {
-            scope: ObjectScope::Target,
-        });
-    }
-
     // Try nom combinator first for simple exact-match patterns.
     if let Ok((rest, qty)) = nom_quantity::parse_quantity_ref.parse(trimmed) {
         if rest.is_empty() {
