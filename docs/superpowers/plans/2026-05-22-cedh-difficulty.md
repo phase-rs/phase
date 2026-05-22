@@ -522,8 +522,8 @@ Append to the test module in `crates/phase-ai/src/features/mod.rs`:
         use engine::game::bracket_estimate::CommanderBracketTier;
         for tier in [
             CommanderBracketTier::Exhibition,
-            CommanderBracketTier::CoreCommander,
-            CommanderBracketTier::UpgradedCommander,
+            CommanderBracketTier::Core,
+            CommanderBracketTier::Upgraded,
             CommanderBracketTier::Optimized,
         ] {
             let f = DeckFeatures::analyze(&[], tier);
@@ -657,12 +657,12 @@ mod cedh_bracket_tests {
     #[test]
     fn validate_rejects_a_non_cedh_deck() {
         let a = make_deck("a", CommanderBracketTier::Cedh);
-        let b = make_deck("b", CommanderBracketTier::UpgradedCommander);
+        let b = make_deck("b", CommanderBracketTier::Upgraded);
         let err = validate_cedh_bracket(&[&a, &b]).unwrap_err();
         match err {
             BracketViolation::DeckNotCedh { deck_name, actual_tier } => {
                 assert_eq!(deck_name, "b");
-                assert_eq!(actual_tier, CommanderBracketTier::UpgradedCommander);
+                assert_eq!(actual_tier, CommanderBracketTier::Upgraded);
             }
         }
     }
@@ -737,7 +737,7 @@ pub fn validate_cedh_bracket(decks: &[&crate::types::deck::Deck]) -> Result<(), 
 }
 ```
 
-(If `Deck` doesn't currently store a `bracket_tier`, add the field on `Deck` in this same task: read the existing struct, add `bracket_tier: CommanderBracketTier` with a default of `CoreCommander`, expose `bracket_tier()`/`set_bracket_tier()` accessors. Verify against existing usage — there may already be a tier field under a different name.)
+(If `Deck` doesn't currently store a `bracket_tier`, add the field on `Deck` in this same task: read the existing struct, add `bracket_tier: CommanderBracketTier` with a default of `Core`, expose `bracket_tier()`/`set_bracket_tier()` accessors. Verify against existing usage — there may already be a tier field under a different name.)
 
 - [ ] **Step 5: Run verification pattern**
 
@@ -1921,8 +1921,8 @@ describe('cedhLock', () => {
   it('isDeckCedhLegal returns true only for tier Cedh', () => {
     expect(isDeckCedhLegal(makeDeck('Cedh'))).toBe(true);
     expect(isDeckCedhLegal(makeDeck('Optimized'))).toBe(false);
-    expect(isDeckCedhLegal(makeDeck('UpgradedCommander'))).toBe(false);
-    expect(isDeckCedhLegal(makeDeck('CoreCommander'))).toBe(false);
+    expect(isDeckCedhLegal(makeDeck('Upgraded'))).toBe(false);
+    expect(isDeckCedhLegal(makeDeck('Core'))).toBe(false);
     expect(isDeckCedhLegal(makeDeck('Exhibition'))).toBe(false);
   });
 });
@@ -2187,7 +2187,7 @@ import { filterByBracket } from '../aiDeckCatalog';
 import type { Deck } from '../../adapter/types';
 
 const decks: Deck[] = [
-  { name: 'casual', tier: 'CoreCommander' } as Deck,
+  { name: 'casual', tier: 'Core' } as Deck,
   { name: 'optimized', tier: 'Optimized' } as Deck,
   { name: 'turbo', tier: 'Cedh' } as Deck,
 ];
@@ -2216,8 +2216,8 @@ import type { Deck } from '../adapter/types';
 
 export type CommanderBracketTier =
   | 'Exhibition'
-  | 'CoreCommander'
-  | 'UpgradedCommander'
+  | 'Core'
+  | 'Upgraded'
   | 'Optimized'
   | 'Cedh';
 
@@ -2274,7 +2274,7 @@ import { GameSetupPage } from '../GameSetupPage';
 describe('GameSetupPage — cEDH warning chip', () => {
   it('shows warning chip when human deck is non-cEDH and any AI is cEDH', () => {
     // Set up the gameSetupStore / preferencesStore (or whatever GameSetupPage reads)
-    // with humanDeck.tier = 'CoreCommander' and one AI opponent at 'CEDH'.
+    // with humanDeck.tier = 'Core' and one AI opponent at 'CEDH'.
     // ... store setup ...
 
     render(<GameSetupPage />);
@@ -2289,7 +2289,7 @@ describe('GameSetupPage — cEDH warning chip', () => {
   });
 
   it('does not show the chip when no AI is cEDH', () => {
-    // ... store setup with humanDeck.tier = 'CoreCommander' and AI = 'Hard' ...
+    // ... store setup with humanDeck.tier = 'Core' and AI = 'Hard' ...
 
     render(<GameSetupPage />);
     expect(screen.queryByText(/Your deck is bracket .* vs\. a cEDH AI/i)).not.toBeInTheDocument();
