@@ -19,12 +19,7 @@ export function TargetingOverlay() {
   const isTargetSelection = waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection";
   const isCopyTargetChoice = waitingFor?.type === "CopyTargetChoice";
   const isCopyRetarget = waitingFor?.type === "CopyRetarget";
-  const canKeepCurrentTargets = isCopyRetarget && waitingFor.data.target_slots.every((slot) =>
-    slot.legal_alternatives.some((alt) =>
-      ("Object" in alt && "Object" in slot.current && alt.Object === slot.current.Object) ||
-      ("Player" in alt && "Player" in slot.current && alt.Player === slot.current.Player),
-    ),
-  );
+  const canKeepCurrentTargets = isCopyRetarget && waitingFor.data.target_slots.every((slot) => slot.current != null);
   const isExploreChoice = waitingFor?.type === "ExploreChoice";
   const isTapCreatureChoice = waitingFor?.type === "TapCreaturesForManaAbility" || waitingFor?.type === "TapCreaturesForSpellCost";
   const targetSlots = isTargetSelection ? waitingFor.data.target_slots : [];
@@ -110,9 +105,10 @@ export function TargetingOverlay() {
               : isCopyRetarget
                 ? (() => {
                     const slots = waitingFor.data.target_slots;
+                    const hasCurrent = slots.every((slot) => slot.current != null);
                     return slots.length > 1
-                      ? `Retarget copy: slot ${Math.min(currentTargetSlot + 1, slots.length)} of ${slots.length}`
-                      : "Choose new target for copy";
+                      ? `${hasCurrent ? "Retarget" : "Choose target for"} copy: slot ${Math.min(currentTargetSlot + 1, slots.length)} of ${slots.length}`
+                      : hasCurrent ? "Choose new target for copy" : "Choose target for copy";
                   })()
               : isExploreChoice
                 ? "Choose which creature explores next"

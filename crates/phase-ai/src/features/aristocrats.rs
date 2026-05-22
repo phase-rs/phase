@@ -486,6 +486,7 @@ mod tests {
             reveal: false,
             target_player: None,
             selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
+            split: None,
         };
         let mut ability = AbilityDefinition::new(AbilityKind::Activated, search);
         ability.cost = Some(AbilityCost::Composite {
@@ -523,6 +524,7 @@ mod tests {
             reveal: false,
             target_player: None,
             selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
+            split: None,
         };
         let mut ability = AbilityDefinition::new(AbilityKind::Activated, search);
         ability.cost = Some(AbilityCost::Sacrifice {
