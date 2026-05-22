@@ -11918,10 +11918,7 @@ mod tests {
             "if it wasn't the first land you played this turn, ~ deals 1 damage to you.",
         );
         assert!(cond.is_some(), "condition must be extracted");
-        assert!(
-            !cleaned.contains("wasn't the first land"),
-            "if-clause must be stripped from effect text, got: {cleaned}"
-        );
+        assert_eq!("~ deals 1 damage to you", cleaned);
     }
 
     #[test]
