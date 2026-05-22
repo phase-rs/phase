@@ -13211,6 +13211,20 @@ fn split_difference_repeat_suffix(text: &str) -> Option<&str> {
 /// CR 609.3: Strip "for each [X], " prefix from effect text.
 /// Returns the QuantityExpr for the iteration count and the remaining text.
 /// "For as long as" is NOT matched (different construct — duration, not iteration).
+/// CR 606.3: Recognize The Chain Veil's printed second-ability pattern,
+/// "for each planeswalker you control, you may activate one of its loyalty
+/// abilities once this turn as though none of its loyalty abilities have been
+/// activated this turn." This belongs to `strip_for_each_prefix` solely to
+/// bail out — the grant is a single per-controller cap raise, not a per-iteration
+/// repeat. The actual `Effect::GrantExtraLoyaltyActivations` mapping lives in
+/// `imperative::parse_grant_extra_loyalty_activations`.
+fn is_chain_veil_for_each_grant(lower: &str) -> bool {
+    nom_primitives::scan_contains(
+        lower,
+        "for each planeswalker you control, you may activate one of its loyalty abilities once this turn",
+    )
+}
+
 fn strip_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String) {
     let lower = text.to_lowercase();
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("for each ")).parse(i)) {
@@ -13232,6 +13246,16 @@ fn strip_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String) {
                     return (None, text.to_string());
                 }
                 if parse_for_each_object_copy_parts(text, &lower).is_some() {
+                    return (None, text.to_string());
+                }
+                // CR 606.3: The Chain Veil's "For each planeswalker you control,
+                // you may activate one of its loyalty abilities once this turn..."
+                // is parsed as a single Effect::GrantExtraLoyaltyActivations —
+                // the "for each planeswalker" preamble names the beneficiaries
+                // (every planeswalker the controller controls gets +1 cap), not
+                // a repeat count. Bailing out keeps the residual text intact so
+                // the imperative dispatch can recognize the full pattern.
+                if is_chain_veil_for_each_grant(&lower) {
                     return (None, text.to_string());
                 }
                 let offset = text.len() - remainder.len();

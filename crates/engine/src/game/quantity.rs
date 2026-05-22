@@ -1452,6 +1452,20 @@ fn resolve_ref(
                 0
             }
         }
+        // CR 606.1 + CR 603.4: Per-player loyalty-ability activation count for
+        // the current turn. Reads from `GameState::loyalty_abilities_activated_this_turn`,
+        // a player-id-keyed counter populated in
+        // `planeswalker::record_loyalty_activation`.
+        QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player: scope } => {
+            resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| {
+                state
+                    .loyalty_abilities_activated_this_turn
+                    .get(&p.id)
+                    .copied()
+                    .map(u32_to_i32_saturating)
+                    .unwrap_or(0)
+            })
+        }
         // CR 117.1: Total spells cast last turn (by any player).
         QuantityRef::SpellsCastLastTurn => state.spells_cast_last_turn.map_or(0, i32::from),
         // CR 117.1 + CR 601.2: Number of spells cast this game by the scoped

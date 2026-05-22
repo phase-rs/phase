@@ -506,6 +506,77 @@ fn try_parse_half_life_amount(lower: &str) -> Option<QuantityExpr> {
     Some(expr)
 }
 
+/// CR 606.3: Recognize the printed Chain Veil class — a single ability that
+/// raises the per-permanent CR 606.3 loyalty-activation cap by N for every
+/// planeswalker the controller controls. Two surface forms are accepted:
+///
+///   - "for each planeswalker you control, you may activate one of its loyalty
+///     abilities once this turn as though none of its loyalty abilities have
+///     been activated this turn." — the printed Chain Veil wording. The
+///     "for each planeswalker you control" preamble identifies the beneficiaries
+///     (each planeswalker gets +1 cap), not a repeat count;
+///     `strip_for_each_prefix` bails out on this pattern so the imperative
+///     dispatch sees the full text here.
+///   - "activate each planeswalker's loyalty ability an additional time this
+///     turn" / "an additional N times this turn" — future-proof generalization
+///     after the outer "you may " has been stripped by
+///     `strip_optional_effect_prefix`. Numeric variant supports cards that grant
+///     more than one extra activation in a single resolution.
+fn parse_grant_extra_loyalty_activations(lower: &str) -> Option<QuantityExpr> {
+    if let Ok((_, amount)) = parse_chain_veil_for_each_form(lower) {
+        return Some(amount);
+    }
+    parse_each_planeswalker_additional_form(lower)
+        .map(|(_, amount)| amount)
+        .ok()
+}
+
+/// CR 606.3: "For each planeswalker you control, you may activate one of its
+/// loyalty abilities once this turn as though none of its loyalty abilities
+/// have been activated this turn." — printed Chain Veil text. Always grants
+/// +1 per planeswalker (the printed wording has no numeric variant).
+fn parse_chain_veil_for_each_form(
+    lower: &str,
+) -> nom::IResult<&str, QuantityExpr, OracleError<'_>> {
+    let (rest, _) =
+        tag("for each planeswalker you control, you may activate one of its loyalty abilities once this turn")
+            .parse(lower)?;
+    // The "as though none of its loyalty abilities have been activated this turn"
+    // tail is the printed mechanism — accepting it is structural, not semantic.
+    let (rest, _) = opt(tag(
+        " as though none of its loyalty abilities have been activated this turn",
+    ))
+    .parse(rest)?;
+    let (rest, _) = opt(tag(".")).parse(rest)?;
+    Ok((rest, QuantityExpr::Fixed { value: 1 }))
+}
+
+/// CR 606.3: "activate each planeswalker's loyalty ability an additional time
+/// this turn" / "an additional N times this turn" — generalization after
+/// `strip_optional_effect_prefix` has consumed the outer "you may ".
+fn parse_each_planeswalker_additional_form(
+    lower: &str,
+) -> nom::IResult<&str, QuantityExpr, OracleError<'_>> {
+    let (rest, _) = tag("activate each planeswalker's loyalty ability ").parse(lower)?;
+    alt((
+        // "an additional N times this turn" → +N
+        map(
+            (
+                tag::<_, _, OracleError<'_>>("an additional "),
+                nom_primitives::parse_number,
+                tag(" times this turn"),
+            ),
+            |(_, n, _)| QuantityExpr::Fixed { value: n as i32 },
+        ),
+        // "an additional time this turn" → +1
+        value(
+            QuantityExpr::Fixed { value: 1 },
+            tag::<_, _, OracleError<'_>>("an additional time this turn"),
+        ),
+    ))
+    .parse(rest)
+}
+
 pub(super) fn lower_numeric_imperative_ast(ast: NumericImperativeAst) -> Effect {
     match ast {
         // CR 121.1: Default `target: TargetFilter::Controller` — the imperative
@@ -4469,6 +4540,26 @@ pub(super) fn parse_imperative_family_ast(
             after: Phase::Upkeep,
             followed_by: vec![],
         }));
+    }
+
+    // CR 606.3: "activate each planeswalker's loyalty ability an additional
+    // time this turn" — The Chain Veil class. The outer "you may" is
+    // stripped by `strip_optional_effect_prefix`, leaving the imperative
+    // "activate ..." form here. The grant raises the per-permanent CR 606.3
+    // activation cap by `amount` for the rest of the turn (the resolver lives
+    // in `effects::grant_extra_loyalty_activations`).
+    //
+    // Quantity axes accepted:
+    //   - "an additional time"        → +1
+    //   - "an additional <number> times" → +N (future-proofs cards that grant
+    //     more than one additional activation in a single ability).
+    if let Some(amount) = parse_grant_extra_loyalty_activations(lower) {
+        return Some(ImperativeFamilyAst::GainKeyword(
+            Effect::GrantExtraLoyaltyActivations {
+                amount,
+                target: TargetFilter::Controller,
+            },
+        ));
     }
 
     // CR 722.1: "You control target player during that player's next turn"

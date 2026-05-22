@@ -2809,6 +2809,14 @@ pub enum QuantityRef {
     AttackedThisTurn,
     /// CR 603.4: Whether the controller descended this turn (permanent card entered graveyard).
     DescendedThisTurn,
+    /// CR 606.1 + CR 603.4: Number of loyalty abilities the scoped player has
+    /// activated this turn (counts per CR 606.3 activations, summed across every
+    /// planeswalker they controlled at activation time). Used for "if you
+    /// activated a loyalty ability of a planeswalker this turn" intervening-if
+    /// triggers (The Chain Veil class). Backed by
+    /// `GameState::loyalty_abilities_activated_this_turn` and incremented in
+    /// `finalize_loyalty_activation`.
+    LoyaltyAbilitiesActivatedThisTurn { player: PlayerScope },
     /// CR 117.1: Number of spells cast last turn (by any player).
     /// Used for werewolf transform conditions.
     SpellsCastLastTurn,
@@ -5995,6 +6003,22 @@ pub enum Effect {
         #[serde(default = "default_target_filter_controller")]
         target: TargetFilter,
     },
+    /// CR 606.3: Grant the resolved target player the right to activate each of
+    /// their planeswalkers' loyalty abilities `amount` additional times this
+    /// turn. Class lift of The Chain Veil's "{4}, {T}: You may activate each
+    /// planeswalker's loyalty ability an additional time this turn." Stored as
+    /// a per-player counter on `GameState::extra_loyalty_activations_this_turn`,
+    /// read by `planeswalker::can_activate_loyalty_ability` as a +N bump to the
+    /// per-permanent CR 606.3 cap. The counter is cleared at turn start.
+    /// `target` defaults to `Controller` (printed wording is "you may
+    /// activate..."); parameterized for future cards that grant the bonus to a
+    /// different player.
+    GrantExtraLoyaltyActivations {
+        #[serde(default = "default_quantity_one")]
+        amount: QuantityExpr,
+        #[serde(default = "default_target_filter_controller")]
+        target: TargetFilter,
+    },
     /// CR 614.10: "Skip your next turn." — the affected player's next N turns are skipped.
     /// Stored as a per-player counter in `GameState.turns_to_skip`; decremented during turn
     /// transition in `start_next_turn`. The target determines who skips (usually Controller).
@@ -6747,6 +6771,7 @@ impl Effect {
             | Effect::Goad { target, .. }
             | Effect::Detain { target, .. }
             | Effect::ExtraTurn { target, .. }
+            | Effect::GrantExtraLoyaltyActivations { target, .. }
             | Effect::SkipNextTurn { target, .. }
             | Effect::SkipNextStep { target, .. }
             | Effect::AdditionalPhase { target, .. }
@@ -7057,6 +7082,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Manifest { .. } => "Manifest",
         Effect::ManifestDread => "ManifestDread",
         Effect::ExtraTurn { .. } => "ExtraTurn",
+        Effect::GrantExtraLoyaltyActivations { .. } => "GrantExtraLoyaltyActivations",
         Effect::SkipNextTurn { .. } => "SkipNextTurn",
         Effect::SkipNextStep { .. } => "SkipNextStep",
         Effect::AdditionalPhase { .. } => "AdditionalPhase",
@@ -7228,6 +7254,7 @@ pub enum EffectKind {
     Manifest,
     ManifestDread,
     ExtraTurn,
+    GrantExtraLoyaltyActivations,
     SkipNextTurn,
     SkipNextStep,
     AdditionalPhase,
@@ -7404,6 +7431,7 @@ impl From<&Effect> for EffectKind {
             Effect::Manifest { .. } => EffectKind::Manifest,
             Effect::ManifestDread => EffectKind::ManifestDread,
             Effect::ExtraTurn { .. } => EffectKind::ExtraTurn,
+            Effect::GrantExtraLoyaltyActivations { .. } => EffectKind::GrantExtraLoyaltyActivations,
             Effect::SkipNextTurn { .. } => EffectKind::SkipNextTurn,
             Effect::SkipNextStep { .. } => EffectKind::SkipNextStep,
             Effect::AdditionalPhase { .. } => EffectKind::AdditionalPhase,
