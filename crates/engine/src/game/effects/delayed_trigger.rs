@@ -42,6 +42,10 @@ pub fn resolve(
     if let DelayedTriggerCondition::AtNextPhaseForPlayer { player, .. } = &mut condition {
         *player = ability.controller;
     }
+    // Same binding for WheneverEventUntilTurnOf: parser emits PlayerId(0) as placeholder.
+    if let DelayedTriggerCondition::WheneverEventUntilTurnOf { player, .. } = &mut condition {
+        *player = ability.controller;
+    }
 
     // Build the delayed trigger's resolved ability from the definition
     let mut delayed_effect = *effect_def.effect.clone();
@@ -90,10 +94,11 @@ pub fn resolve(
     );
 
     // CR 603.7c: Most delayed triggers fire once and are removed.
-    // WheneverEvent triggers fire each time and persist until end-of-turn cleanup.
+    // WheneverEvent / WheneverEventUntilTurnOf triggers fire each time until expiry.
     let one_shot = !matches!(
         condition,
         crate::types::ability::DelayedTriggerCondition::WheneverEvent { .. }
+            | crate::types::ability::DelayedTriggerCondition::WheneverEventUntilTurnOf { .. }
     );
     state.delayed_triggers.push(DelayedTrigger {
         condition,
@@ -146,7 +151,8 @@ fn bind_contextual_filter_to_condition(
             bind_parent_target_filter(filter, parent_targets);
         }
         DelayedTriggerCondition::WheneverEvent { trigger }
-        | DelayedTriggerCondition::WhenNextEvent { trigger } => {
+        | DelayedTriggerCondition::WhenNextEvent { trigger }
+        | DelayedTriggerCondition::WheneverEventUntilTurnOf { trigger, .. } => {
             for filter in [
                 &mut trigger.valid_card,
                 &mut trigger.valid_source,

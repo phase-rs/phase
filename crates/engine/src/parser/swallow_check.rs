@@ -251,6 +251,12 @@ fn detect_duration_until_eot(
     ) {
         return;
     }
+    // CR 603.7c: "Until end of turn, whenever [condition], [effect]." creates a
+    // WheneverEvent delayed trigger whose "until end of turn" scope is implicit
+    // in the condition type (WheneverEvent expires at cleanup per CR 513.2).
+    if json_has_any(ast_json, &["\"WheneverEvent\""]) {
+        return;
+    }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
         detector: "Duration_UntilEndOfTurn".into(),
         description: truncate(original, 140).into(),

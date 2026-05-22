@@ -480,6 +480,70 @@ fn try_parse_whenever_this_turn(tp: TextPair) -> Option<ParsedEffectClause> {
     })
 }
 
+/// CR 603.7c: Parse "until [duration], whenever [condition], [effect]." delayed triggers.
+/// Handles:
+///   "until end of turn, whenever [condition], [effect]" → WheneverEvent (expires at EOT)
+///   "until your next turn, whenever [condition], [effect]" → WheneverEventUntilTurnOf (expires at start of next turn)
+fn try_parse_until_duration_whenever(tp: TextPair) -> Option<ParsedEffectClause> {
+    let (duration_prefix_len, until_next_turn) = if tp
+        .lower
+        .starts_with("until end of turn, whenever ")
+    {
+        ("until end of turn, whenever ".len(), false)
+    } else if tp.lower.starts_with("until your next turn, whenever ") {
+        ("until your next turn, whenever ".len(), true)
+    } else {
+        return None;
+    };
+
+    // Text after "until [duration], whenever ": "condition, effect."
+    let after_whenever = &tp.lower[duration_prefix_len..];
+
+    // Split at the first ", " to separate condition from effect.
+    let comma_pos = after_whenever.find(", ")?;
+    let condition_lower = &after_whenever[..comma_pos];
+
+    // Reconstruct with "whenever " for parse_trigger_condition to match special-case paths.
+    let full_condition = format!("whenever {condition_lower}");
+    let effect_start = duration_prefix_len + comma_pos + 2; // skip ", "
+    let effect_text = &tp.original[effect_start..];
+
+    let mut inner_ctx = ParseContext::default();
+    let (_, mut trigger_def) = crate::parser::oracle_trigger::parse_trigger_condition(
+        &full_condition,
+        &mut inner_ctx,
+    );
+    trigger_def.execute = None;
+
+    let condition = if until_next_turn {
+        DelayedTriggerCondition::WheneverEventUntilTurnOf {
+            trigger: Box::new(trigger_def),
+            player: crate::types::player::PlayerId(0), // bound to controller at resolve time
+        }
+    } else {
+        DelayedTriggerCondition::WheneverEvent {
+            trigger: Box::new(trigger_def),
+        }
+    };
+
+    let inner = parse_effect_chain(effect_text, AbilityKind::Spell);
+
+    Some(ParsedEffectClause {
+        effect: Effect::CreateDelayedTrigger {
+            condition,
+            effect: Box::new(inner),
+            uses_tracked_set: false,
+        },
+        duration: None,
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
 /// Decompose the spell qualifier from `"when you next cast a <payload> this turn, ..."`
 /// into a combined `TargetFilter`.
 ///
@@ -610,7 +674,9 @@ pub(crate) fn try_parse_temporal_delayed_trigger_ability(
 ) -> Option<AbilityDefinition> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
-    let clause = try_parse_whenever_this_turn(tp).or_else(|| try_parse_when_next_event(tp))?;
+    let clause = try_parse_until_duration_whenever(tp)
+        .or_else(|| try_parse_whenever_this_turn(tp))
+        .or_else(|| try_parse_when_next_event(tp))?;
     Some(ability_definition_from_clause(kind, clause))
 }
 
@@ -3132,6 +3198,12 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
                 }
             }
         }
+    }
+
+    // CR 603.7c: "Until [duration], whenever X, Y" — delayed trigger lasting until
+    // end of turn or beginning of controller's next turn.
+    if let Some(clause) = try_parse_until_duration_whenever(tp) {
+        return clause;
     }
 
     // CR 603.7c: "Whenever X this turn, Y" — multi-fire delayed trigger creation.
@@ -34931,5 +35003,64 @@ mod snapshot_tests {
                 )),
             "no ScopedPlayer ref may survive in the chain, got {tf:?}"
         );
+    }
+
+    /// High Tide: "Until end of turn, whenever a player taps an Island for mana,
+    /// that player adds an additional {U}."
+    /// Parses as a CreateDelayedTrigger with WheneverEvent { TapsForMana } condition.
+    #[test]
+    fn until_eot_whenever_taps_for_mana_parses_as_delayed_trigger() {
+        let def = parse_effect_chain(
+            "Until end of turn, whenever a player taps an Island for mana, \
+             that player adds an additional {U}.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            def.sub_ability.is_none(),
+            "High Tide must parse as a single node, got chained sub_ability"
+        );
+        match def.effect.as_ref() {
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WheneverEvent { trigger },
+                ..
+            } => {
+                assert_eq!(
+                    trigger.mode,
+                    TriggerMode::TapsForMana,
+                    "trigger mode must be TapsForMana"
+                );
+            }
+            other => panic!("expected CreateDelayedTrigger(WheneverEvent), got {other:?}"),
+        }
+    }
+
+    /// Don't Move: "Until your next turn, whenever a creature becomes tapped, destroy it."
+    /// Parses as a CreateDelayedTrigger with WheneverEventUntilTurnOf { Taps } condition.
+    #[test]
+    fn until_next_turn_whenever_becomes_tapped_parses_as_until_turn_of() {
+        let def = parse_effect_chain(
+            "Until your next turn, whenever a creature becomes tapped, destroy it.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            def.sub_ability.is_none(),
+            "Don't Move must parse as a single node, got chained sub_ability"
+        );
+        match def.effect.as_ref() {
+            Effect::CreateDelayedTrigger {
+                condition:
+                    DelayedTriggerCondition::WheneverEventUntilTurnOf { trigger, .. },
+                ..
+            } => {
+                assert_eq!(
+                    trigger.mode,
+                    TriggerMode::Taps,
+                    "trigger mode must be Taps"
+                );
+            }
+            other => panic!(
+                "expected CreateDelayedTrigger(WheneverEventUntilTurnOf), got {other:?}"
+            ),
+        }
     }
 }

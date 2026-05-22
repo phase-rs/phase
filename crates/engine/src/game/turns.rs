@@ -414,6 +414,17 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         }
     }
 
+    // CR 603.7c: Remove "until your next turn" WheneverEvent triggers that expire
+    // at the beginning of the new active player's turn.
+    let new_active = state.active_player;
+    state.delayed_triggers.retain(|dt| {
+        !matches!(
+            &dt.condition,
+            crate::types::ability::DelayedTriggerCondition::WheneverEventUntilTurnOf { player, .. }
+                if *player == new_active
+        )
+    });
+
     // CR 500: Track per-player turn count for "your Nth turn of the game" conditions.
     state.players[state.active_player.0 as usize].turns_taken += 1;
 
@@ -956,7 +967,15 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
     // Per CR 513.2 an unfired `AtNextPhase{End}` delayed trigger is NOT a
     // "this turn" trigger: the end step "doesn't back up", so it legitimately
     // persists to the next turn's end step — it must survive this retain.
+    // WheneverEventUntilTurnOf (multi-fire) triggers survive this cleanup:
+    // they expire at the beginning of the specified player's next turn instead.
     state.delayed_triggers.retain(|dt| {
+        if matches!(
+            dt.condition,
+            crate::types::ability::DelayedTriggerCondition::WheneverEventUntilTurnOf { .. }
+        ) {
+            return true; // survives cleanup; expires in start_next_turn
+        }
         dt.one_shot
             && !matches!(
                 dt.condition,

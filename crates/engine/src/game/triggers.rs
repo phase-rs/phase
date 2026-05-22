@@ -2556,7 +2556,8 @@ fn delayed_trigger_event(
             .cloned(),
         // CR 603.7c: "Whenever [event] this turn" — delegate to trigger matcher registry.
         DelayedTriggerCondition::WheneverEvent { trigger }
-        | DelayedTriggerCondition::WhenNextEvent { trigger } => {
+        | DelayedTriggerCondition::WhenNextEvent { trigger }
+        | DelayedTriggerCondition::WheneverEventUntilTurnOf { trigger, .. } => {
             if let Some(matcher) = super::trigger_matchers::trigger_matcher(trigger.mode.clone()) {
                 events
                     .iter()

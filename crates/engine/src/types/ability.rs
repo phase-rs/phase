@@ -1468,6 +1468,14 @@ pub enum DelayedTriggerCondition {
     /// event, then is removed. One-shot variant of `WheneverEvent`.
     /// Uses existing trigger matching infrastructure to detect the event.
     WhenNextEvent { trigger: Box<TriggerDefinition> },
+    /// CR 603.7c: "Until your next turn, whenever [event]" — fires each time the
+    /// event occurs until the beginning of `player`'s next turn. Like `WheneverEvent`
+    /// but persists past the current cleanup step. `player` is bound to the ability
+    /// controller at resolve time (parser emits `PlayerId(0)` as placeholder).
+    WheneverEventUntilTurnOf {
+        trigger: Box<TriggerDefinition>,
+        player: PlayerId,
+    },
 }
 
 /// Specifies variable-count targeting for "any number of" effects.
