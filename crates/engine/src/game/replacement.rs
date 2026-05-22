@@ -430,8 +430,9 @@ fn damage_done_applier(
                 // CR 614.1a: Flat override — replace event amount with `value`.
                 DamageModification::SetTo { value } => value,
                 // CR 614.1a + CR 120.3a: Damage to a player causes life loss;
-                // cap that damage so the player's life total cannot fall below
-                // the specified floor.
+                // cap damage that would cross the floor from at or above it.
+                // If the player is already below the floor, the damage reduces
+                // life further as normal.
                 DamageModification::SetPlayerLifeFloor { floor } => {
                     if let TargetRef::Player(player_id) = target {
                         let life = state
@@ -440,7 +441,11 @@ fn damage_done_applier(
                             .find(|player| player.id == player_id)
                             .map(|player| player.life)
                             .unwrap_or(0);
-                        amount.min(life.saturating_sub(floor).max(0) as u32)
+                        if life < floor {
+                            amount
+                        } else {
+                            amount.min(life.saturating_sub(floor) as u32)
+                        }
                     } else {
                         amount
                     }
@@ -5985,6 +5990,66 @@ mod tests {
         match result {
             ApplyResult::Modified(ProposedEvent::Damage { amount, .. }) => {
                 assert_eq!(amount, 0);
+            }
+            other => panic!("Expected Modified Damage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn damage_applier_life_floor_does_not_increase_damage() {
+        let repl = damage_repl(DamageModification::SetPlayerLifeFloor { floor: 1 });
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+        state.players[1].life = 10;
+        let mut events = Vec::new();
+        let rid = ReplacementId {
+            source: ObjectId(10),
+            index: 0,
+        };
+
+        let result = damage_done_applier(damage_event(2), rid, &mut state, &mut events);
+        match result {
+            ApplyResult::Modified(ProposedEvent::Damage { amount, .. }) => {
+                assert_eq!(amount, 2);
+            }
+            other => panic!("Expected Modified Damage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn damage_applier_life_floor_caps_damage_that_would_go_below_floor() {
+        let repl = damage_repl(DamageModification::SetPlayerLifeFloor { floor: 1 });
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+        state.players[1].life = 5;
+        let mut events = Vec::new();
+        let rid = ReplacementId {
+            source: ObjectId(10),
+            index: 0,
+        };
+
+        let result = damage_done_applier(damage_event(10), rid, &mut state, &mut events);
+        match result {
+            ApplyResult::Modified(ProposedEvent::Damage { amount, .. }) => {
+                assert_eq!(amount, 4);
+            }
+            other => panic!("Expected Modified Damage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn damage_applier_life_floor_does_not_apply_when_already_below_floor() {
+        let repl = damage_repl(DamageModification::SetPlayerLifeFloor { floor: 1 });
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+        state.players[1].life = 0;
+        let mut events = Vec::new();
+        let rid = ReplacementId {
+            source: ObjectId(10),
+            index: 0,
+        };
+
+        let result = damage_done_applier(damage_event(3), rid, &mut state, &mut events);
+        match result {
+            ApplyResult::Modified(ProposedEvent::Damage { amount, .. }) => {
+                assert_eq!(amount, 3);
             }
             other => panic!("Expected Modified Damage, got {other:?}"),
         }

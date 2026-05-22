@@ -9505,8 +9505,8 @@ pub enum DamageModification {
     /// `SetToSourcePower` (dynamic) — this is a flat override of the
     /// event's amount with `value`.
     SetTo { value: u32 },
-    /// CR 614.1a + CR 120.3a: Damage to a player is reduced so that the
-    /// resulting life loss cannot bring that player below `floor`.
+    /// CR 614.1a + CR 120.3a: Damage to a player is reduced when it would
+    /// cross `floor` from at or above it.
     /// Used by Worship-class effects.
     SetPlayerLifeFloor { floor: i32 },
 }
