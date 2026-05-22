@@ -2763,6 +2763,10 @@ pub enum QuantityRef {
     /// "you've drawn two or more cards this turn" and "an opponent has drawn
     /// four or more cards this turn" reuse the existing per-player aggregate axis.
     CardsDrawnThisTurn { player: PlayerScope },
+    /// CR 305.2a + CR 603.4: Count of lands played by the scoped player this turn.
+    /// Backed by `Player::lands_played_this_turn`. Used for intervening-if conditions
+    /// like "if it wasn't the first land you played this turn" (Fastbond).
+    LandsPlayedThisTurn { player: PlayerScope },
     /// CR 500: Number of turns this player has taken so far in the game.
     /// Resolved against the controller/scope player.
     TurnsTaken,

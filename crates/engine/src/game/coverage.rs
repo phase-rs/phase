@@ -1005,6 +1005,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::CardsDrawnThisTurn { player } => {
             format!("cards drawn this turn ({})", fmt_player_scope(player))
         }
+        QuantityRef::LandsPlayedThisTurn { player } => {
+            format!("lands played this turn ({})", fmt_player_scope(player))
+        }
         QuantityRef::ZoneChangeCountThisTurn { from, to, filter } => {
             format!(
                 "{} zone changes this turn ({from:?}->{to:?})",
@@ -5043,6 +5046,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::CrimesCommittedThisTurn => ("CrimesCommittedThisTurn", Handled),
         QuantityRef::LifeGainedThisTurn { .. } => ("LifeGainedThisTurn", Handled),
         QuantityRef::CardsDrawnThisTurn { .. } => ("CardsDrawnThisTurn", Handled),
+        QuantityRef::LandsPlayedThisTurn { .. } => ("LandsPlayedThisTurn", Handled),
         QuantityRef::ZoneChangeCountThisTurn { .. } => ("ZoneChangeCountThisTurn", Handled),
         QuantityRef::DamageDealtThisTurn { .. } => ("DamageDealtThisTurn", Handled),
         QuantityRef::TurnsTaken => ("TurnsTaken", Unhandled),
