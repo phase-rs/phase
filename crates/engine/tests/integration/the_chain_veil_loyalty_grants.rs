@@ -22,12 +22,14 @@
 //! activation-gate behavior.
 
 use engine::game::effects;
+use engine::game::engine::apply;
 use engine::game::planeswalker;
 use engine::game::zones::create_object;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, ResolvedAbility,
-    SubAbilityLink, TargetFilter, TargetSelectionMode,
+    SubAbilityLink, TargetFilter, TargetRef, TargetSelectionMode,
 };
+use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{GameState, WaitingFor};
@@ -60,6 +62,21 @@ fn make_loyalty_ability(loyalty_amount: i32) -> AbilityDefinition {
         Effect::Draw {
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Controller,
+        },
+    )
+    .cost(AbilityCost::Loyalty {
+        amount: loyalty_amount,
+    })
+    .sorcery_speed()
+}
+
+fn make_targeted_loyalty_ability(loyalty_amount: i32) -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Player,
+            damage_source: None,
         },
     )
     .cost(AbilityCost::Loyalty {
@@ -191,6 +208,45 @@ fn chain_veil_grant_raises_per_planeswalker_cap() {
     assert!(
         !planeswalker::can_activate_loyalty_ability(&state, pw, PlayerId(0), 0),
         "third activation denied: cap = 1 + 1 grant = 2"
+    );
+}
+
+/// CR 606.3 + CR 601.2c: A targeted loyalty ability is announced, waits for
+/// target choice, then pays its loyalty cost and records exactly one loyalty
+/// activation when the ability is pushed to the stack.
+#[test]
+fn targeted_loyalty_activation_records_once_after_target_selection() {
+    let mut state = setup_main_phase();
+    let pw = create_planeswalker(&mut state, PlayerId(0), "Jace", 3);
+    {
+        let obj = state.objects.get_mut(&pw).unwrap();
+        obj.abilities = Arc::new(vec![make_targeted_loyalty_ability(1)]);
+    }
+
+    let mut events = Vec::new();
+    let waiting =
+        planeswalker::handle_activate_loyalty(&mut state, PlayerId(0), pw, 0, &mut events).unwrap();
+    assert!(matches!(waiting, WaitingFor::TargetSelection { .. }));
+    assert_eq!(state.objects[&pw].loyalty_activations_this_turn, 0);
+    assert!(state.loyalty_abilities_activated_this_turn.is_empty());
+
+    state.waiting_for = waiting;
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SelectTargets {
+            targets: vec![TargetRef::Player(PlayerId(1))],
+        },
+    )
+    .unwrap();
+
+    assert_eq!(state.objects[&pw].loyalty_activations_this_turn, 1);
+    assert_eq!(
+        state
+            .loyalty_abilities_activated_this_turn
+            .get(&PlayerId(0))
+            .copied(),
+        Some(1)
     );
 }
 

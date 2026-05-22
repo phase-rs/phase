@@ -538,17 +538,31 @@ fn parse_grant_extra_loyalty_activations(lower: &str) -> Option<QuantityExpr> {
 fn parse_chain_veil_for_each_form(
     lower: &str,
 ) -> nom::IResult<&str, QuantityExpr, OracleError<'_>> {
-    let (rest, _) =
-        tag("for each planeswalker you control, you may activate one of its loyalty abilities once this turn")
-            .parse(lower)?;
-    // The "as though none of its loyalty abilities have been activated this turn"
-    // tail is the printed mechanism — accepting it is structural, not semantic.
-    let (rest, _) = opt(tag(
-        " as though none of its loyalty abilities have been activated this turn",
-    ))
-    .parse(rest)?;
+    let (rest, _) = (
+        tag("for each "),
+        tag("planeswalker"),
+        tag(" you control, "),
+        parse_single_loyalty_permission,
+    )
+        .parse(lower)?;
     let (rest, _) = opt(tag(".")).parse(rest)?;
     Ok((rest, QuantityExpr::Fixed { value: 1 }))
+}
+
+fn parse_single_loyalty_permission(lower: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    let (rest, _) = (
+        tag("you may activate one of its "),
+        tag("loyalty abilities"),
+        tag(" once this turn"),
+    )
+        .parse(lower)?;
+    let (rest, _) = opt((
+        tag(" as though none of its "),
+        tag("loyalty abilities"),
+        tag(" have been activated this turn"),
+    ))
+    .parse(rest)?;
+    Ok((rest, ()))
 }
 
 /// CR 606.3: "activate each planeswalker's loyalty ability an additional time
@@ -557,7 +571,13 @@ fn parse_chain_veil_for_each_form(
 fn parse_each_planeswalker_additional_form(
     lower: &str,
 ) -> nom::IResult<&str, QuantityExpr, OracleError<'_>> {
-    let (rest, _) = tag("activate each planeswalker's loyalty ability ").parse(lower)?;
+    let (rest, _) = (
+        tag("activate "),
+        tag("each planeswalker"),
+        tag("'s "),
+        tag("loyalty ability "),
+    )
+        .parse(lower)?;
     alt((
         // "an additional N times this turn" → +N
         map(

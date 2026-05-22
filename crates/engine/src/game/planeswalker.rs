@@ -172,10 +172,6 @@ pub fn handle_activate_loyalty(
             ));
         }
 
-        // CR 606.3: Mark activated this turn at announcement time to prevent re-activation.
-        // Only needed here — finalize_loyalty_activation handles the auto-select and
-        // non-targeted paths.
-        record_loyalty_activation(state, pw_id, player);
         state.lands_tapped_for_mana.remove(&player);
 
         let selection = begin_target_selection_for_ability(state, &resolved, &target_slots, &[])?;
@@ -216,14 +212,15 @@ pub fn handle_activate_loyalty(
 /// control changes (it's a property of the permanent, not the activator).
 /// CR 603.4: The per-player counter is keyed by the player who activated —
 /// "you activated a loyalty ability" reads as the *activator's* history.
-fn record_loyalty_activation(state: &mut GameState, pw_id: ObjectId, player: PlayerId) {
+pub(super) fn record_loyalty_activation(state: &mut GameState, pw_id: ObjectId, player: PlayerId) {
     if let Some(obj) = state.objects.get_mut(&pw_id) {
         obj.loyalty_activations_this_turn = obj.loyalty_activations_this_turn.saturating_add(1);
     }
     *state
         .loyalty_abilities_activated_this_turn
         .entry(player)
-        .or_insert(0) += 1;
+        .and_modify(|count| *count = count.saturating_add(1))
+        .or_insert(1);
 }
 
 /// Extract the loyalty cost from a typed ability definition.
