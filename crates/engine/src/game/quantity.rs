@@ -1389,7 +1389,7 @@ fn resolve_ref(
         // CR 305.2a + CR 603.4: Lands played this turn by the scoped player.
         QuantityRef::LandsPlayedThisTurn { player } => {
             resolve_per_player_scalar(state, player, controller, ctx, targets, ability, |p| {
-                i32::from(p.lands_played_this_turn)
+                u32_to_i32_saturating(u32::from(p.lands_played_this_turn))
             })
         }
         // CR 400.7 + CR 700.4: Count zone-change snapshots from this turn
