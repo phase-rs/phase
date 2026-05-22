@@ -179,6 +179,11 @@ fn compute_options(
             .collect(),
         ChoiceType::TwoColors => two_color_options(),
         ChoiceType::Word | ChoiceType::Artist => Vec::new(),
+        // CR 608.2d: "Choose an ability the target has, then remove it" —
+        // option labels come from the typed `Keyword` list emitted by the
+        // converter. Empty option lists are legal (the choice resolves with
+        // no options, and the dependent effect is a no-op).
+        ChoiceType::Keyword { options } => options.iter().map(|kw| kw.to_string()).collect(),
     }
 }
 
@@ -543,6 +548,29 @@ mod tests {
                 assert_eq!(options.len(), 10);
                 assert!(options.contains(&"White, Blue".to_string()));
                 assert!(options.contains(&"Red, Green".to_string()));
+            }
+            other => panic!("Expected NamedChoice, got {:?}", other),
+        }
+    }
+
+    // CR 608.2d: Urborg's "target creature loses first strike or swampwalk"
+    // surfaces a two-option `ChoiceType::Keyword` prompt. Each option label
+    // comes from `Keyword`'s `Display` impl (typed match — no string concat
+    // over Debug names).
+    #[test]
+    fn choose_keyword_offers_typed_keyword_labels() {
+        use crate::types::keywords::Keyword;
+        let mut state = GameState::new_two_player(42);
+        let ability = make_choose_ability(ChoiceType::Keyword {
+            options: vec![Keyword::FirstStrike, Keyword::Landwalk("Swamp".to_string())],
+        });
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        match &state.waiting_for {
+            WaitingFor::NamedChoice { options, .. } => {
+                assert_eq!(options.len(), 2);
+                assert!(options.contains(&"First Strike".to_string()));
+                assert!(options.contains(&"Swampwalk".to_string()));
             }
             other => panic!("Expected NamedChoice, got {:?}", other),
         }
