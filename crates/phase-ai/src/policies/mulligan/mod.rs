@@ -30,6 +30,7 @@ use crate::policies::registry::{PolicyId, PolicyReason};
 
 pub mod aggro_keepables;
 pub mod aristocrats_keepables;
+pub mod cedh_keepables;
 pub mod keepables_by_land_count;
 pub mod landfall_keepables;
 pub mod plus_one_counters_keepables;
@@ -40,6 +41,7 @@ pub mod tribal_density;
 
 pub use aggro_keepables::AggroKeepablesMulligan;
 pub use aristocrats_keepables::AristocratsKeepablesMulligan;
+pub use cedh_keepables::CedhKeepablesMulligan;
 pub use keepables_by_land_count::KeepablesByLandCount;
 pub use landfall_keepables::LandfallKeepablesMulligan;
 pub use plus_one_counters_keepables::PlusOneCountersMulligan;
@@ -110,6 +112,7 @@ impl Default for MulliganRegistry {
                 Box::new(TokensWideKeepablesMulligan),
                 Box::new(PlusOneCountersMulligan),
                 Box::new(SpellslingerKeepablesMulligan),
+                Box::new(CedhKeepablesMulligan),
             ],
         }
     }
@@ -163,5 +166,26 @@ pub fn turn_order_for(state: &GameState, player: PlayerId) -> TurnOrder {
         TurnOrder::OnPlay
     } else {
         TurnOrder::OnDraw
+    }
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod cedh_registration_tests {
+    use super::*;
+    use crate::policies::registry::PolicyId;
+
+    #[test]
+    fn default_registry_contains_cedh_keepables() {
+        let reg = MulliganRegistry::default();
+        let has = reg
+            .policies
+            .iter()
+            .any(|p| p.id() == PolicyId::CedhKeepablesMulligan);
+        assert!(
+            has,
+            "MulliganRegistry::default() must register CedhKeepablesMulligan"
+        );
     }
 }
