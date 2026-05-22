@@ -15,38 +15,22 @@ use engine::game::DeckEntry;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 
-use crate::deck_profile::{ArchetypeClassification, DeckProfile};
-use crate::features::{
-    aggro_pressure, aristocrats, control, landfall, mana_ramp, plus_one_counters,
-    spellslinger_prowess, tokens_wide, tribal, DeckFeatures,
-};
+use crate::features::DeckFeatures;
 use crate::plan::{derive_snapshot, PlanSnapshot};
 use crate::planner::quick_state_hash;
 use crate::policies::registry::PolicyId;
 use crate::projection::{project_to, BailReason, Projection, ProjectionHorizon, ProjectionKey};
-use crate::strategy_profile::StrategyProfile;
 use crate::synergy::SynergyGraph;
 
 fn features_for(deck: &[DeckEntry]) -> DeckFeatures {
-    let profile = DeckProfile::analyze(deck);
-    let archetype = match &profile.classification {
-        ArchetypeClassification::Pure(arch) => *arch,
-        ArchetypeClassification::Hybrid { primary, .. } => *primary,
-    };
-    let strategy = StrategyProfile::for_profile(&profile);
-    DeckFeatures {
-        archetype,
-        strategy,
-        landfall: landfall::detect(deck),
-        mana_ramp: mana_ramp::detect(deck),
-        tribal: tribal::detect(deck),
-        control: control::detect(deck),
-        aristocrats: aristocrats::detect(deck),
-        aggro_pressure: aggro_pressure::detect(deck),
-        tokens_wide: tokens_wide::detect(deck),
-        plus_one_counters: plus_one_counters::detect(deck),
-        spellslinger_prowess: spellslinger_prowess::detect(deck),
-    }
+    // Tier is not yet available in `PlayerDeckPool`; default to `Core` so
+    // `is_cedh` is `false` for all structurally-detected decks. When the deck
+    // metadata layer exposes the declared bracket tier, callers should switch
+    // to passing it directly via `DeckFeatures::analyze(deck, tier)`.
+    DeckFeatures::analyze(
+        deck,
+        engine::game::bracket_estimate::CommanderBracketTier::Core,
+    )
 }
 
 /// Per-game cache shared by all decisions.

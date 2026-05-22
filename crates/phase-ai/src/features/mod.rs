@@ -51,4 +51,83 @@ pub struct DeckFeatures {
     pub tokens_wide: TokensWideFeature,
     pub plus_one_counters: PlusOneCountersFeature,
     pub spellslinger_prowess: SpellslingerProwessFeature,
+    /// Declaration-derived: `true` iff the deck's declared bracket tier is
+    /// `CommanderBracketTier::Cedh`. Unlike the other fields here, this is
+    /// not structurally detected from card text — it is a per-deck
+    /// declaration set at deck-analysis time from deck metadata. Used by
+    /// `ComboLinePolicy::activation()` and `CedhKeepablesMulligan` as a
+    /// gating signal.
+    pub is_cedh: bool,
+}
+
+impl DeckFeatures {
+    /// Construct `DeckFeatures` from a deck. Walks each per-class detector
+    /// (`landfall::detect`, `mana_ramp::detect`, ...) and sets `is_cedh`
+    /// from the declared bracket tier.
+    ///
+    /// Per-class detectors are pure functions over `&[DeckEntry]`. The tier
+    /// argument flows in from deck metadata at the AI-setup boundary.
+    pub fn analyze(
+        deck: &[engine::game::DeckEntry],
+        tier: engine::game::bracket_estimate::CommanderBracketTier,
+    ) -> Self {
+        use engine::game::bracket_estimate::CommanderBracketTier;
+        let profile = crate::deck_profile::DeckProfile::analyze(deck);
+        let archetype = match &profile.classification {
+            crate::deck_profile::ArchetypeClassification::Pure(arch) => *arch,
+            crate::deck_profile::ArchetypeClassification::Hybrid { primary, .. } => *primary,
+        };
+        let strategy = crate::strategy_profile::StrategyProfile::for_profile(&profile);
+        Self {
+            archetype,
+            strategy,
+            landfall: landfall::detect(deck),
+            mana_ramp: mana_ramp::detect(deck),
+            tribal: tribal::detect(deck),
+            control: control::detect(deck),
+            aristocrats: aristocrats::detect(deck),
+            aggro_pressure: aggro_pressure::detect(deck),
+            tokens_wide: tokens_wide::detect(deck),
+            plus_one_counters: plus_one_counters::detect(deck),
+            spellslinger_prowess: spellslinger_prowess::detect(deck),
+            is_cedh: tier == CommanderBracketTier::Cedh,
+        }
+    }
+}
+
+#[cfg(test)]
+mod cedh_field_tests {
+    use super::*;
+
+    #[test]
+    fn default_features_is_not_cedh() {
+        let f = DeckFeatures::default();
+        assert!(!f.is_cedh);
+    }
+
+    #[test]
+    fn analyze_with_cedh_tier_sets_is_cedh() {
+        use engine::game::bracket_estimate::CommanderBracketTier;
+        // Use an empty deck — structural features default to zero; is_cedh
+        // should follow only the tier argument.
+        let f = DeckFeatures::analyze(&[], CommanderBracketTier::Cedh);
+        assert!(f.is_cedh, "Cedh tier must set is_cedh = true");
+    }
+
+    #[test]
+    fn analyze_with_non_cedh_tier_leaves_is_cedh_false() {
+        use engine::game::bracket_estimate::CommanderBracketTier;
+        for tier in [
+            CommanderBracketTier::Exhibition,
+            CommanderBracketTier::Core,
+            CommanderBracketTier::Upgraded,
+            CommanderBracketTier::Optimized,
+        ] {
+            let f = DeckFeatures::analyze(&[], tier);
+            assert!(
+                !f.is_cedh,
+                "non-Cedh tier ({tier:?}) must leave is_cedh = false"
+            );
+        }
+    }
 }
