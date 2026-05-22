@@ -189,6 +189,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         reveal,
         up_to,
         ref constraint,
+        ref split,
     } = state.waiting_for
     {
         if !can_view_private_for_player(player) {
@@ -199,6 +200,32 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 reveal,
                 up_to,
                 constraint: constraint.clone(),
+                split: split.clone(),
+            };
+        }
+    }
+
+    // CR 701.23a: The cultivate-class partition pick exposes the found set only
+    // to the searcher; opponents see opaque ids (mirrors SearchChoice above).
+    if let WaitingFor::SearchPartitionChoice {
+        player,
+        ref cards,
+        primary_destination,
+        primary_count,
+        primary_enter_tapped,
+        rest_destination,
+        source_id,
+    } = state.waiting_for
+    {
+        if !can_view_private_for_player(player) {
+            filtered.waiting_for = WaitingFor::SearchPartitionChoice {
+                player,
+                cards: cards.iter().map(|_| ObjectId(0)).collect(),
+                primary_destination,
+                primary_count,
+                primary_enter_tapped,
+                rest_destination,
+                source_id,
             };
         }
     }
@@ -518,6 +545,7 @@ mod tests {
             reveal: false,
             up_to: false,
             constraint: crate::types::ability::SearchSelectionConstraint::None,
+            split: None,
         };
 
         let filtered = filter_state_for_viewer(&state, PlayerId(0));
@@ -584,6 +612,7 @@ mod tests {
             reveal: false,
             up_to: false,
             constraint: crate::types::ability::SearchSelectionConstraint::None,
+            split: None,
         };
 
         let filtered = filter_state_for_viewer(&state, PlayerId(2));
