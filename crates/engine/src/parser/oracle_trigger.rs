@@ -33,9 +33,9 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, AttachmentKind, CastVariantPaid, Comparator,
     ControllerRef, CounterTriggerFilter, DamageKindFilter, Effect, FilterProp, OriginConstraint,
-    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TriggerCondition,
-    TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
-    ZoneChangeClause,
+    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, StaticCondition, TargetFilter,
+    TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessPayModifier, ZoneChangeClause,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::parse_counter_type;
@@ -4886,13 +4886,8 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
         }
     }
 
-    if matches!(
-        lower,
-        "whenever you commit a crime" | "when you commit a crime"
-    ) {
-        let mut def = make_base();
-        def.mode = TriggerMode::CommitCrime;
-        return Some((TriggerMode::CommitCrime, def));
+    if let Some(result) = try_parse_commit_crime(lower) {
+        return Some(result);
     }
 
     if matches!(
@@ -8096,6 +8091,72 @@ fn parse_turn_constraint(phase_text: &str) -> Option<TriggerConstraint> {
             .map_or("", |i| remaining[i + 1..].trim_start());
     }
     None
+}
+
+/// CR 700.13: "Whenever [subject] commits a crime" — scoped crime trigger parser.
+///
+/// Handles three subject forms (trailing space bundled into each tag for precision):
+/// - "you commit a crime" → `valid_target = Controller`
+/// - "an opponent commits a crime" → `valid_target = Typed(Opponent)`
+/// - "a player commits a crime" → `valid_target = Player` (any player)
+///
+/// Also recognizes the optional " during your turn" suffix, which adds
+/// `TriggerConstraint::OnlyDuringYourTurn` (Overzealous Muscle and similar).
+fn try_parse_commit_crime(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
+    // Strip "whenever " / "when " prefix.
+    let (after_prefix, ()) = alt((
+        value((), tag::<_, _, OracleError<'_>>("whenever ")),
+        value((), tag("when ")),
+    ))
+    .parse(lower)
+    .ok()?;
+
+    // Subject axis — trailing space bundled in tag to avoid prefix-loose ambiguity.
+    fn parse_crime_actor(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
+        alt((
+            value(Some(TargetFilter::Controller), tag("you ")),
+            value(
+                Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                )),
+                tag("an opponent "),
+            ),
+            value(Some(TargetFilter::Player), tag("a player ")),
+        ))
+        .parse(input)
+    }
+    let (after_subject, valid_target) = parse_crime_actor.parse(after_prefix).ok()?;
+
+    // Verb axis — "commits" before "commit" so the longer string wins (nom is greedy).
+    let (after_verb, ()) = alt((
+        value((), tag::<_, _, OracleError<'_>>("commits")),
+        value((), tag("commit")),
+    ))
+    .parse(after_subject)
+    .ok()?;
+
+    // " a crime"
+    let (after_crime, ()) = value((), tag::<_, _, OracleError<'_>>(" a crime"))
+        .parse(after_verb)
+        .ok()?;
+
+    // Optional " during your turn" constraint suffix.
+    let (remainder, during_your_turn) = opt(tag::<_, _, OracleError<'_>>(" during your turn"))
+        .parse(after_crime)
+        .ok()?;
+
+    // Nothing else allowed — this is a complete trigger condition clause.
+    if !remainder.trim().is_empty() {
+        return None;
+    }
+
+    let mut def = make_base();
+    def.mode = TriggerMode::CommitCrime;
+    def.valid_target = valid_target;
+    if during_your_turn.is_some() {
+        def.constraint = Some(TriggerConstraint::OnlyDuringYourTurn);
+    }
+    Some((TriggerMode::CommitCrime, def))
 }
 
 /// CR 603.8: Parse the filter from "you control no [filter]" state trigger conditions.
@@ -11932,7 +11993,10 @@ mod tests {
         );
         assert_eq!(t.mode, TriggerMode::LandPlayed);
         assert_eq!(t.valid_target, Some(TargetFilter::Controller));
-        assert!(t.condition.is_some(), "intervening-if condition must be extracted");
+        assert!(
+            t.condition.is_some(),
+            "intervening-if condition must be extracted"
+        );
         assert!(
             matches!(
                 t.condition.as_ref().unwrap(),
@@ -13125,8 +13189,51 @@ mod tests {
 
     #[test]
     fn trigger_commit_crime_mode() {
+        // CR 700.13: "you commit a crime" scopes the trigger to the controller.
         let def = parse_trigger_line("Whenever you commit a crime, draw a card.", "At Knifepoint");
         assert_eq!(def.mode, TriggerMode::CommitCrime);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_commit_crime_opponent_scope() {
+        // CR 700.13: "an opponent commits a crime" → Patrolling Peacemaker / similar.
+        let def = parse_trigger_line(
+            "Whenever an opponent commits a crime, proliferate.",
+            "Patrolling Peacemaker",
+        );
+        assert_eq!(def.mode, TriggerMode::CommitCrime);
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+        assert_eq!(def.constraint, None);
+    }
+
+    #[test]
+    fn trigger_commit_crime_any_player_scope() {
+        // CR 700.13: "a player commits a crime" → fires for any player (Tarnation / similar).
+        let def = parse_trigger_line(
+            "Whenever a player commits a crime, they may draw a card.",
+            "Tarnation",
+        );
+        assert_eq!(def.mode, TriggerMode::CommitCrime);
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+        assert_eq!(def.constraint, None);
+    }
+
+    #[test]
+    fn trigger_commit_crime_during_your_turn() {
+        // CR 700.13 + CR 500.6: "during your turn" restricts the trigger to the controller's turn.
+        let def = parse_trigger_line(
+            "Whenever you commit a crime during your turn, this creature gains indestructible until end of turn.",
+            "Overzealous Muscle",
+        );
+        assert_eq!(def.mode, TriggerMode::CommitCrime);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
     }
 
     // CR 701.62: "Whenever you manifest dread" — actor-side Manifest Dread
