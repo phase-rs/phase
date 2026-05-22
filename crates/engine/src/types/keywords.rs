@@ -1,4 +1,5 @@
 use std::convert::Infallible;
+use std::fmt;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
@@ -1332,6 +1333,64 @@ fn parse_bloodthirst_value(s: &str) -> BloodthirstValue {
         BloodthirstValue::X
     } else {
         BloodthirstValue::Fixed(s.trim().parse().unwrap_or(1))
+    }
+}
+
+/// CR 608.2d: User-facing label for a `Keyword` option in a
+/// `ChoiceType::Keyword` prompt, and the canonical Display rendering for any
+/// engine-side string format that surfaces a keyword to the player.
+///
+/// Typed match per the workspace's "no string-matching dispatch" rule; the
+/// engine owns this rendering because the frontend must not derive game
+/// text from raw enum names. Only the keyword shapes that today's
+/// `Action::ChooseACheckableAbility` emission can produce are enumerated
+/// explicitly; every other variant falls through to the catch-all
+/// `Debug`-derived form below. That fallback is unambiguous (no two
+/// `Keyword` variants share Debug output) but not necessarily pretty —
+/// new variants surfaced through a choice prompt or any other Display
+/// site should get an explicit arm here so the rendered label matches
+/// the canonical Oracle spelling.
+impl fmt::Display for Keyword {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Keyword::FirstStrike => write!(f, "First Strike"),
+            Keyword::DoubleStrike => write!(f, "Double Strike"),
+            Keyword::Landwalk(subtype) => match subtype.as_str() {
+                "Plains" => write!(f, "Plainswalk"),
+                "Island" => write!(f, "Islandwalk"),
+                "Swamp" => write!(f, "Swampwalk"),
+                "Mountain" => write!(f, "Mountainwalk"),
+                "Forest" => write!(f, "Forestwalk"),
+                "Legendary" => write!(f, "Legendary landwalk"),
+                "Nonbasic" => write!(f, "Nonbasic landwalk"),
+                "Snow" => write!(f, "Snow landwalk"),
+                other => write!(f, "{other} landwalk"),
+            },
+            Keyword::Flying => write!(f, "Flying"),
+            Keyword::Trample => write!(f, "Trample"),
+            Keyword::Vigilance => write!(f, "Vigilance"),
+            Keyword::Haste => write!(f, "Haste"),
+            Keyword::Lifelink => write!(f, "Lifelink"),
+            Keyword::Deathtouch => write!(f, "Deathtouch"),
+            Keyword::Reach => write!(f, "Reach"),
+            Keyword::Menace => write!(f, "Menace"),
+            Keyword::Defender => write!(f, "Defender"),
+            Keyword::Flash => write!(f, "Flash"),
+            Keyword::Hexproof => write!(f, "Hexproof"),
+            Keyword::Indestructible => write!(f, "Indestructible"),
+            Keyword::Shroud => write!(f, "Shroud"),
+            Keyword::Skulk => write!(f, "Skulk"),
+            Keyword::Shadow => write!(f, "Shadow"),
+            Keyword::Fear => write!(f, "Fear"),
+            Keyword::Horsemanship => write!(f, "Horsemanship"),
+            Keyword::Infect => write!(f, "Infect"),
+            // Debug-fallback for variants that don't have an explicit
+            // user-facing label yet. Unambiguous (no two `Keyword`
+            // variants share Debug output) but not necessarily pretty —
+            // add an explicit arm above when a new variant surfaces
+            // through a Display site (choice prompt, log line, etc.).
+            _ => write!(f, "{self:?}"),
+        }
     }
 }
 
