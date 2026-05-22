@@ -1511,10 +1511,16 @@ pub(super) fn match_land_played(
 ) -> bool {
     if let GameEvent::LandPlayed {
         object_id,
+        player_id,
         from_zone,
-        ..
     } = event
     {
+        // CR 305.1 + CR 603.2: Scope the trigger to the acting player.
+        // "whenever you play a land" → valid_target = Controller;
+        // "whenever an opponent plays a land" → valid_target = Opponent filter.
+        if !valid_player_matches(trigger, state, *player_id, source_id) {
+            return false;
+        }
         match &trigger.valid_card {
             None => true,
             Some(filter) => state.objects.get(object_id).is_some_and(|obj| {
