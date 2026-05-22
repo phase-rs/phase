@@ -317,12 +317,9 @@ mod tests {
     /// propagation, `resolve_ability_chain` mod.rs:2494).
     ///
     /// The shuffle must hit the *targeted* player's library, not the caster's.
-    /// With the buggy `ParentTarget` filter (a context-ref),
-    /// `resolve_player_for_context_ref` skips the inherited `TargetRef::Player`
-    /// and falls through to `ability.controller` (the caster) — wrong library.
-    /// `TargetFilter::Player` (non-context-ref) correctly inherits the parent
-    /// player target. This test FAILS with the buggy `ParentTarget` arm and
-    /// PASSES once the parser emits `TargetFilter::Player`.
+    /// `TargetFilter::ParentTarget` must inherit a parent player target here;
+    /// otherwise it falls through to `ability.controller` (the caster) and
+    /// shuffles the wrong library.
     #[test]
     fn visions_shuffle_resolves_to_targeted_player_not_caster() {
         use crate::parser::oracle::parse_oracle_text;

@@ -3266,37 +3266,11 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
         return None;
     }
 
-    // "shuffle {possessive} library" — extract the possessive word to determine the target.
-    // Only matches the exact form "shuffle your library" / "shuffle their library" etc.;
-    // compound forms like "shuffle your graveyard into your library" fall through.
-    if let Some(possessive) = tag::<_, _, OracleError<'_>>("shuffle ")
-        .parse(lower)
-        .ok()
-        .map(|(rest, _)| rest)
-        .and_then(|s| s.strip_suffix(" library"))
-    {
-        let target = match possessive {
-            "your" => Some(TargetFilter::Controller),
-            // CR 608.2c: "shuffle that library" — anaphoric reference
-            // resolved by reading the whole instruction per the rules of
-            // English: "that library" refers back to a player target bound
-            // earlier in the same instruction (Visions: "Look at the top
-            // five cards of target
-            // player's library. You may then have that player shuffle that
-            // library."). "that library" is "that player's library" with the
-            // player elided; it resolves to the parent ability's targeted
-            // player. `TargetFilter::Player` is the non-context-ref variant
-            // that inherits the parent's `TargetRef::Player` via
-            // `resolve_player_for_context_ref` (effects/mod.rs:1673) — the same
-            // proven path the sibling `"that player's"` arm uses. A context-ref
-            // filter (`ParentTarget`) would skip that branch and wrongly fall
-            // through to `ability.controller` (the caster).
-            "that" | "their" | "its owner's" | "that player's" => Some(TargetFilter::Player),
-            _ => None,
-        };
-        if let Some(target) = target {
-            return Some(ShuffleImperativeAst::ShuffleLibrary { target });
-        }
+    // CR 608.2c + CR 701.24a: "shuffle {possessive} library" — exact
+    // library-shuffle forms only. Compound forms like "shuffle your graveyard
+    // into your library" fall through to the zone-change parser below.
+    if let Ok((_, target)) = parse_shuffle_library_target(lower) {
+        return Some(ShuffleImperativeAst::ShuffleLibrary { target });
     }
     // CR 701.24a + CR 400.3: "shuffle <pronoun> into <possessive> library" —
     // covers "shuffle it into its owner's library" (Cavalier cycle), "shuffle
@@ -3401,6 +3375,33 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
     Some(ShuffleImperativeAst::Unimplemented {
         text: text.to_string(),
     })
+}
+
+fn parse_shuffle_library_target(
+    input: &str,
+) -> crate::parser::oracle_nom::error::OracleResult<'_, TargetFilter> {
+    let (input, _) = tag("shuffle ").parse(input)?;
+    let (input, target) = alt((
+        value(TargetFilter::Controller, tag("your")),
+        value(
+            TargetFilter::Owner,
+            alt((tag("his or her owner's"), tag("its owner's"))),
+        ),
+        value(
+            TargetFilter::ParentTarget,
+            alt((
+                tag("that player's"),
+                tag("his or her"),
+                tag("their"),
+                tag("that"),
+            )),
+        ),
+    ))
+    .parse(input)?;
+    let (input, _) = tag(" library").parse(input)?;
+    let (input, _) = eof(input)?;
+
+    Ok((input, target))
 }
 
 /// CR 701.24a: Lower a shuffle AST into a `ParsedEffectClause`.
@@ -8430,21 +8431,35 @@ mod tests {
     }
 
     /// CR 608.2c: "shuffle that library" — anaphoric reference to the
-    /// player target bound earlier in the same instruction (Visions). The
-    /// shuffle parser's possessive match resolves `"that"` to
-    /// `TargetFilter::Player` — the non-context-ref variant that inherits the
-    /// parent ability's `TargetRef::Player` at resolution time (the same path
-    /// the sibling `"that player's"` arm uses). A context-ref filter would
-    /// wrongly fall through to the caster.
+    /// player target bound earlier in the same instruction (Visions).
     #[test]
-    fn parse_shuffle_that_library_resolves_to_player() {
+    fn parse_shuffle_that_library_resolves_to_parent_target() {
         let text = "shuffle that library";
         let result = parse_shuffle_ast(text, text);
         match result {
             Some(ShuffleImperativeAst::ShuffleLibrary { target }) => {
-                assert_eq!(target, TargetFilter::Player);
+                assert_eq!(target, TargetFilter::ParentTarget);
             }
-            other => panic!("Expected ShuffleLibrary {{ Player }}, got {other:?}"),
+            other => panic!("Expected ShuffleLibrary {{ ParentTarget }}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_shuffle_possessive_library_siblings() {
+        for text in [
+            "shuffle that player's library",
+            "shuffle their library",
+            "shuffle his or her library",
+        ] {
+            let result = parse_shuffle_ast(text, text);
+            match result {
+                Some(ShuffleImperativeAst::ShuffleLibrary { target }) => {
+                    assert_eq!(target, TargetFilter::ParentTarget);
+                }
+                other => {
+                    panic!("Expected ShuffleLibrary {{ ParentTarget }} for {text}, got {other:?}")
+                }
+            }
         }
     }
 

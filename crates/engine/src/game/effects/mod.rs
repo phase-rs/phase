@@ -1688,6 +1688,18 @@ pub(crate) fn resolve_player_for_context_ref(
             return player;
         }
     }
+    // CR 608.2c: A chained player anaphor can use `ParentTarget` when the
+    // parent target was itself a player ("that library" after "target player's
+    // library"). Object-target uses of `ParentTarget` continue through the
+    // object/controller resolution paths below.
+    if matches!(target_filter, TargetFilter::ParentTarget) {
+        if let Some(player) = ability.targets.iter().find_map(|target| match target {
+            TargetRef::Player(player) => Some(*player),
+            _ => None,
+        }) {
+            return player;
+        }
+    }
     if let Some(target_ref) = crate::game::targeting::resolve_event_context_target(
         state,
         target_filter,

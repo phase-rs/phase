@@ -10928,9 +10928,10 @@ mod tests {
     ///
     /// End-to-end verification of the wrapper chain: the primary effect is a
     /// `Dig` (look-at) keyed on a player target, with a `may`-gated sub-ability
-    /// emitting `Effect::Shuffle { target: Player }` that resolves at runtime
-    /// against the parent's inherited `TargetRef::Player`. The `"shuffle that
-    /// library"` anaphor is the new arm added in `parse_shuffle_ast`.
+    /// emitting `Effect::Shuffle { target: ParentTarget }` that resolves at
+    /// runtime against the parent's inherited `TargetRef::Player`. The
+    /// `"shuffle that library"` anaphor is the new arm added in
+    /// `parse_shuffle_ast`.
     #[test]
     fn visions_look_then_have_target_player_shuffle() {
         let result = parse(
@@ -10956,7 +10957,7 @@ mod tests {
             ),
         }
         // Sub-ability: "you may then have that player shuffle that library"
-        // → `may`-gated `Effect::Shuffle { target: Player }`.
+        // → `may`-gated `Effect::Shuffle { target: ParentTarget }`.
         let sub = ability
             .sub_ability
             .as_ref()
@@ -10968,8 +10969,8 @@ mod tests {
             Effect::Shuffle { target, .. } => {
                 assert_eq!(
                     target,
-                    &TargetFilter::Player,
-                    "shuffle target should be the non-context-ref Player filter so it \
+                    &TargetFilter::ParentTarget,
+                    "shuffle target should be the context-ref ParentTarget filter so it \
                      inherits the parent ability's targeted player at resolution",
                 );
             }
