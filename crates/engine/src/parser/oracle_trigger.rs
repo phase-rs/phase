@@ -1293,12 +1293,9 @@ fn parse_unless_alt_cost(after_unless: &str) -> Option<AbilityCost> {
         return parse_unless_return_to_hand(rest);
     }
 
-    // CR 118.12 + CR 701.20a: "you tap an untapped [filter] you control" —
-    // tapping a permanent as an alternative cost. The filter is extracted via
-    // `parse_target` so the full type hierarchy is supported (creature, permanent,
-    // artifact, etc.). Cards: Koskun Falls (creature), Command Bridge (permanent).
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you tap an untapped ").parse(after_unless)
-    {
+    // CR 118.12 + CR 701.20a: "you tap [count] untapped [filter] you control".
+    // The tail parser extracts count and filter via shared target parsing.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you tap ").parse(after_unless) {
         if let Some(cost) = parse_unless_tap_untapped_cost(rest) {
             return Some(cost);
         }
@@ -1315,31 +1312,55 @@ fn parse_unless_alt_cost(after_unless: &str) -> Option<AbilityCost> {
     None
 }
 
-/// CR 118.12 + CR 701.20a: Parse "an untapped [filter] you control[.]" tail for
-/// "you tap an untapped ..." unless costs. Returns `TapCreatures { count: 1, filter }`.
+/// CR 118.12 + CR 701.20a: Parse the tail of "you tap ..." unless costs.
+/// Supports articles and numeric counts before delegating the filter phrase to
+/// the shared target parser.
 fn parse_unless_tap_untapped_cost(rest: &str) -> Option<AbilityCost> {
-    let rest = rest.trim().trim_end_matches('.');
-    let target_phrase = format!("target {rest}");
-    let (filter, remainder) = super::oracle_target::parse_target(&target_phrase);
-    if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
-        return None;
-    }
-    Some(AbilityCost::TapCreatures { count: 1, filter })
+    let (count, filter) = parse_unless_counted_target_filter(rest)?;
+    Some(AbilityCost::TapCreatures { count, filter })
 }
 
 /// CR 118.12 + CR 701.7: Parse the tail of "you exile ..." unless costs.
-/// Recognises "a card from your graveyard" → `Exile { count: 1, zone: Graveyard }`.
+/// Supports articles and numeric counts before delegating the filter phrase to
+/// the shared target parser.
 fn parse_unless_exile_cost(rest: &str) -> Option<AbilityCost> {
-    let rest = rest.trim().trim_end_matches('.');
-    // "a card from your graveyard"
-    if let Ok((_, _)) = tag::<_, _, OracleError<'_>>("a card from your graveyard").parse(rest) {
-        return Some(AbilityCost::Exile {
-            count: 1,
-            zone: Some(Zone::Graveyard),
-            filter: None,
-        });
+    let (count, filter) = parse_unless_counted_target_filter(rest)?;
+    Some(AbilityCost::Exile {
+        count,
+        zone: filter.extract_in_zone(),
+        filter: Some(filter),
+    })
+}
+
+fn parse_unless_counted_target_filter(rest: &str) -> Option<(u32, TargetFilter)> {
+    let trimmed = rest.trim();
+    let (count, filter_text) = if let Some((n, after_num)) = parse_number(trimmed) {
+        (n, after_num.trim().to_string())
+    } else {
+        let stripped = alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))
+            .parse(trimmed)
+            .map(|(rest, _)| rest)
+            .unwrap_or(trimmed);
+        (1u32, stripped.to_string())
+    };
+
+    if filter_text.is_empty() {
+        return None;
     }
-    None
+
+    let target_phrase = format!("target {filter_text}");
+    let (filter, remainder) = super::oracle_target::parse_target(&target_phrase);
+    if matches!(filter, TargetFilter::Any) {
+        return None;
+    }
+    let (_, _) = all_consuming((
+        opt(tag::<_, _, OracleError<'_>>(".")),
+        eof::<_, OracleError<'_>>,
+    ))
+    .parse(remainder.trim())
+    .ok()?;
+
+    Some((count, filter))
 }
 
 /// CR 118.12 + CR 118.12a: Parse a chain of "they"-pronoun alternative
@@ -12708,6 +12729,33 @@ mod tests {
     }
 
     #[test]
+    fn trigger_unless_you_tap_two_untapped_creatures() {
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, sacrifice this enchantment unless you tap two untapped creatures you control.",
+            "Test Card",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        match &unless_pay.cost {
+            AbilityCost::TapCreatures { count, filter } => {
+                assert_eq!(*count, 2);
+                let has_creature = match filter {
+                    TargetFilter::Typed(tf) => tf.type_filters.contains(&TypeFilter::Creature),
+                    TargetFilter::And { filters } => filters.iter().any(|f| {
+                        matches!(f, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Creature))
+                    }),
+                    _ => false,
+                };
+                assert!(
+                    has_creature,
+                    "filter should include Creature, got {:?}",
+                    filter
+                );
+            }
+            other => panic!("cost should be TapCreatures, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn trigger_unless_you_exile_card_from_graveyard() {
         // CR 118.12 + CR 701.7: Rotting Giant — "sacrifice it unless you
         // exile a card from your graveyard."
@@ -12724,7 +12772,7 @@ mod tests {
             } => {
                 assert_eq!(*count, 1);
                 assert_eq!(*zone, Some(crate::types::zones::Zone::Graveyard));
-                assert!(filter.is_none(), "filter should be None, got {:?}", filter);
+                assert!(filter.is_some(), "filter should be present");
             }
             other => panic!("cost should be Exile, got {:?}", other),
         }
@@ -12733,6 +12781,22 @@ mod tests {
             TargetFilter::Controller,
             "payer should be Controller"
         );
+    }
+
+    #[test]
+    fn trigger_unless_you_exile_two_cards_from_graveyard() {
+        let def = parse_trigger_line(
+            "Whenever this creature attacks, sacrifice it unless you exile two cards from your graveyard.",
+            "Test Card",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        match &unless_pay.cost {
+            AbilityCost::Exile { count, zone, .. } => {
+                assert_eq!(*count, 2);
+                assert_eq!(*zone, Some(crate::types::zones::Zone::Graveyard));
+            }
+            other => panic!("cost should be Exile, got {:?}", other),
+        }
     }
 
     #[test]
