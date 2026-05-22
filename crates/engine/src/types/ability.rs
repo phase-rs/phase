@@ -98,6 +98,28 @@ pub enum SearchSelectionConstraint {
     MatchEachFilter { filters: Vec<TargetFilter> },
 }
 
+/// CR 701.23a + CR 608.2c: A search whose found set is partitioned between two
+/// destinations — e.g. Cultivate ("put one onto the battlefield tapped and the
+/// other into your hand"). `primary_count` cards go to `primary_destination`
+/// (the searcher's choice when more than `primary_count` are found); the rest go
+/// to `rest_destination`. `primary_destination` is `Battlefield` for the A/B/C
+/// cluster, where `primary_enter_tapped` routes the entry through the ETB
+/// pipeline so the permanent enters tapped (CR 614.1 / CR 110.5b).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchDestinationSplit {
+    /// Where the chosen primary cards go (Battlefield for cultivate-class).
+    pub primary_destination: Zone,
+    /// How many of the found cards go to `primary_destination` (literal N from
+    /// "put N ..."). Mirrors `Effect::Dig.keep_count`.
+    pub primary_count: u32,
+    /// CR 614.1 / CR 110.5b: When true, primary cards enter the battlefield
+    /// tapped. Mirrors `Effect::ChangeZone.enter_tapped`.
+    pub primary_enter_tapped: bool,
+    /// Where the remaining found cards go ("the rest"/"the other" — Hand for
+    /// cultivate-class).
+    pub rest_destination: Zone,
+}
+
 /// CR 608.2d: Who may choose to perform an optional effect during resolution.
 /// Used with `AbilityDefinition::optional_for` to route the "you may" prompt to opponents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -3030,6 +3052,12 @@ pub enum PlayerFilter {
     OpponentLostLife,
     /// Each opponent who gained life this turn (life_gained_this_turn > 0).
     OpponentGainedLife,
+    /// CR 120.1 + CR 510.1: Each opponent who was dealt combat damage this turn.
+    /// Resolved against `state.damage_dealt_this_turn` records whose
+    /// `is_combat = true` and `target = Player(p.id)`. Used by partner-quality
+    /// "for each opponent that was dealt combat damage this turn" cards
+    /// (Tymna the Weaver).
+    OpponentDealtCombatDamage,
     /// All players.
     All,
     /// CR 702.179f: Each player whose speed is tied for the highest speed among players.
@@ -5371,6 +5399,13 @@ pub enum Effect {
             skip_serializing_if = "is_default_search_selection_constraint"
         )]
         selection_constraint: SearchSelectionConstraint,
+        /// CR 701.23a + CR 608.2c: When set, the found set is partitioned across
+        /// two destinations (cultivate-class "put one onto the battlefield
+        /// tapped and the other into your hand"). `None` preserves the existing
+        /// single-zone search behavior (destination handled by the sub_ability
+        /// ChangeZone chain).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        split: Option<SearchDestinationSplit>,
     },
     /// CR 400.11/400.11a + CR 701.23j: Choose card(s) the player owns from
     /// outside the game. For tournament-style play, the bounded accessible set

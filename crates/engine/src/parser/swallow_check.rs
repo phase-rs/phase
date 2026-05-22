@@ -1823,6 +1823,7 @@ fn detect_duration_this_turn(
         "CardsDrawnThisTurn",
         "PlayerActionsThisTurn",
         "OpponentLostLife",
+        "OpponentDealtCombatDamage",
         // CR 611.3: a condition slot serialized as the typed `Unrecognized`
         // marker means the parser routed the "as long as ... this turn" clause
         // INTO a condition slot (and explicitly recorded that it could not

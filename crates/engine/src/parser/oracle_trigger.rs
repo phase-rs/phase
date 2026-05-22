@@ -8114,61 +8114,6 @@ fn parse_control_none_filter(text: &str) -> Option<TargetFilter> {
     }
 }
 
-/// CR 702.xxx: Prepare (Strixhaven) — ETB-rider combinator for the
-/// `"<self> enters prepared"` shorthand. Structurally analogous to other
-/// enters-rider shorthand (`enters tapped`, `enters transformed`), except
-/// prepared is a triggered-ability shorthand rather than a replacement effect:
-/// it synthesizes a self-ETB trigger whose effect is
-/// `BecomePrepared { target: SelfRef }`.
-///
-/// Accepts three self-subject forms: `"~ enters prepared"`,
-/// `"this creature enters prepared"`, and `"it enters prepared"` — composed
-/// as a nom `alt` over the subject prefix, followed by the shared
-/// `" enters prepared"` tail and an optional trailing period. Returns
-/// `Some(def)` only when the line is exactly this shorthand, so normal
-/// trigger parsing handles `"When ~ enters, ..."` forms unchanged. Assign
-/// when WotC publishes SOS CR update.
-pub fn try_parse_enters_prepared_rider(line: &str) -> Option<TriggerDefinition> {
-    use crate::types::ability::{AbilityDefinition, Effect};
-    use nom::combinator::{eof, opt};
-    use nom::sequence::{preceded, terminated};
-
-    let lower = line.to_lowercase();
-    // Compose from nom primitives: subject-prefix alt + shared suffix + eof.
-    let parser_fn = |input| -> OracleResult<'_, ()> {
-        value(
-            (),
-            terminated(
-                preceded(
-                    alt((
-                        tag::<_, _, OracleError<'_>>("~"),
-                        tag("this creature"),
-                        tag("it"),
-                    )),
-                    (tag(" enters prepared"), opt(tag("."))),
-                ),
-                eof,
-            ),
-        )
-        .parse(input)
-    };
-    parser_fn(lower.trim()).ok()?;
-
-    let effect_def = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::BecomePrepared {
-            target: TargetFilter::SelfRef,
-        },
-    );
-    let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
-        .destination(Zone::Battlefield)
-        .valid_card(TargetFilter::SelfRef)
-        .trigger_zones(vec![Zone::Battlefield])
-        .execute(effect_def)
-        .description(line.to_string());
-    Some(trigger)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8595,90 +8540,6 @@ mod tests {
             parse_enters_tapped_state_rider("s tapped,"),
             Some(TriggerCondition::ZoneChangeObjectIsTapped)
         );
-    }
-
-    // B1: ETB-rider combinator for "~ enters prepared.". Must synthesize the
-    // same TriggerDefinition the old verbatim-match block produced; must NOT
-    // match when extra trailing content is present (so normal trigger parsing
-    // still handles "When ~ enters, ...").
-    #[test]
-    fn enters_prepared_rider_builds_self_etb_trigger() {
-        let def =
-            try_parse_enters_prepared_rider("~ enters prepared.").expect("rider should match");
-        assert_eq!(def.mode, TriggerMode::ChangesZone);
-        assert_eq!(def.destination, Some(Zone::Battlefield));
-        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
-        let exec = def.execute.as_deref().expect("execute set");
-        assert!(matches!(
-            exec.effect.as_ref(),
-            Effect::BecomePrepared {
-                target: TargetFilter::SelfRef
-            }
-        ));
-    }
-
-    #[test]
-    fn enters_prepared_rider_tolerates_missing_period() {
-        assert!(try_parse_enters_prepared_rider("~ enters prepared").is_some());
-        // Whitespace is trimmed before dispatch.
-        assert!(try_parse_enters_prepared_rider("  ~ enters prepared.  ").is_some());
-    }
-
-    #[test]
-    fn enters_prepared_rider_accepts_all_subject_forms() {
-        // Raw Oracle text uses "This creature enters prepared." (Adventurous
-        // Eater); the ETB-rider combinator must accept this without relying
-        // on `normalize_self_refs` having run first (the dispatch site in
-        // `oracle.rs` operates on pre-normalized lines).
-        assert!(try_parse_enters_prepared_rider("This creature enters prepared.").is_some());
-        assert!(try_parse_enters_prepared_rider("It enters prepared.").is_some());
-        assert!(try_parse_enters_prepared_rider("~ enters prepared.").is_some());
-    }
-
-    #[test]
-    fn enters_prepared_rider_rejects_non_rider_shapes() {
-        assert!(try_parse_enters_prepared_rider("when ~ enters, draw a card.").is_none());
-        assert!(try_parse_enters_prepared_rider("~ enters tapped.").is_none());
-        assert!(try_parse_enters_prepared_rider("~ enters prepared and tapped.").is_none());
-    }
-
-    // Dispatch-level regression: the rider combinator only accepts `~`,
-    // `this creature`, or `it` as the subject — but Oracle text ships with
-    // the card's short name (e.g. "Lluwen enters prepared."). The parser
-    // entry must normalize self-refs before dispatching, so the short-name
-    // form must synthesize the same ETB trigger as `~ enters prepared.`.
-    #[test]
-    fn enters_prepared_rider_dispatch_normalizes_short_name_subject() {
-        use crate::parser::oracle::parse_oracle_text;
-
-        let parsed = parse_oracle_text(
-            "Lluwen enters prepared.",
-            "Lluwen, Exchange Student",
-            &[],
-            &["Creature".to_string()],
-            &[],
-        );
-        assert_eq!(
-            parsed.triggers.len(),
-            1,
-            "one trigger should be synthesized"
-        );
-        let trigger = &parsed.triggers[0];
-        assert_eq!(trigger.mode, TriggerMode::ChangesZone);
-        assert_eq!(trigger.destination, Some(Zone::Battlefield));
-        assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
-        let exec = trigger.execute.as_ref().expect("execute should be set");
-        assert!(matches!(
-            *exec.effect,
-            crate::types::ability::Effect::BecomePrepared {
-                target: TargetFilter::SelfRef
-            }
-        ));
-        // Description is set from the normalized line — `parse_oracle_text`
-        // pre-normalizes self-refs at the single entry point, so descriptions
-        // uniformly use `~` for the card's self-reference (matching the
-        // codebase-wide trigger description convention).
-        assert_eq!(trigger.description.as_deref(), Some("~ enters prepared."));
     }
 
     #[test]
@@ -14849,6 +14710,61 @@ mod tests {
         assert_eq!(def.constraint, None);
     }
 
+    /// CR 107.3i + CR 120.1 + CR 510.1: Tymna the Weaver — the trigger body
+    /// must bind `X` from the trailing "where X is …" clause across BOTH the
+    /// "pay X life" cost AND the "draw X cards" sub-ability. The bound
+    /// expression must resolve to
+    /// `PlayerCount { OpponentDealtCombatDamage }`, not to an empty-shaped
+    /// `ObjectCount` (which previously matched every battlefield permanent
+    /// and made Tymna draw all 12 of the player's permanents instead of 1).
+    #[test]
+    fn trigger_tymna_the_weaver_pays_and_draws_bound_x() {
+        use crate::types::ability::{Effect, PaymentCost, PlayerFilter, QuantityExpr, QuantityRef};
+
+        let def = parse_trigger_line(
+            "At the beginning of each of your postcombat main phases, you may pay X life, \
+             where X is the number of opponents that were dealt combat damage this turn. \
+             If you do, draw X cards.",
+            "Tymna the Weaver",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::PostCombatMain));
+        assert!(def.optional, "trigger should be optional ('you may')");
+
+        let bound_qty = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::OpponentDealtCombatDamage,
+            },
+        };
+
+        let execute = def
+            .execute
+            .as_ref()
+            .expect("trigger must have an execute body");
+
+        // CR 118.8 + CR 107.3i: pay-life cost amount carries the bound X.
+        match execute.effect.as_ref() {
+            Effect::PayCost {
+                cost: PaymentCost::Life { amount },
+                ..
+            } => assert_eq!(*amount, bound_qty, "pay-life cost amount must be bound X"),
+            other => panic!("expected PayCost::Life, got {:?}", other),
+        }
+
+        // CR 121.1 + CR 107.3i: the conditional "if you do, draw X cards"
+        // sub-ability count carries the SAME bound X.
+        let sub = execute
+            .sub_ability
+            .as_ref()
+            .expect("trigger must have draw sub-ability");
+        match sub.effect.as_ref() {
+            Effect::Draw { count, .. } => {
+                assert_eq!(*count, bound_qty, "draw count must be bound X");
+            }
+            other => panic!("expected Effect::Draw, got {:?}", other),
+        }
+    }
+
     #[test]
     fn trigger_first_main_phase() {
         // CR 505.1: "first main phase" is an alias for precombat main phase.
@@ -14877,7 +14793,7 @@ mod tests {
     /// 3. CR 122.1: "remove all charge counters from ~" →
     ///    `Effect::RemoveCounter { counter_type: "charge", count: -1, target:
     ///    SelfRef }` (count=-1 is the "remove all" sentinel).
-    /// 4. CR 609.3 + CR 106.1 + CR 122.1: "If you do, add one mana of any
+    /// 4. CR 608.2c + CR 106.1 + CR 122.1: "If you do, add one mana of any
     ///    color for each charge counter removed this way" →
     ///    sub_ability with `condition: Some(IfYouDo)` and effect
     ///    `Effect::Mana { produced: AnyOneColor { count:

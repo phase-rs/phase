@@ -1593,6 +1593,7 @@ mod tests {
             reveal: false,
             up_to: true,
             constraint: SearchSelectionConstraint::None,
+            split: None,
         };
 
         assert!(!cheap_reject_candidate(
@@ -1630,6 +1631,7 @@ mod tests {
             reveal: false,
             up_to: false,
             constraint: SearchSelectionConstraint::None,
+            split: None,
         };
 
         assert!(cheap_reject_candidate(
