@@ -28,6 +28,7 @@ type DigChoice = Extract<WaitingFor, { type: "DigChoice" }>;
 type SurveilChoice = Extract<WaitingFor, { type: "SurveilChoice" }>;
 type RevealChoice = Extract<WaitingFor, { type: "RevealChoice" }>;
 type SearchChoice = Extract<WaitingFor, { type: "SearchChoice" }>;
+type SearchPartitionChoice = Extract<WaitingFor, { type: "SearchPartitionChoice" }>;
 type OutsideGameChoice = Extract<WaitingFor, { type: "OutsideGameChoice" }>;
 type ChooseFromZoneChoice = Extract<WaitingFor, { type: "ChooseFromZoneChoice" }>;
 type EffectZoneChoice = Extract<WaitingFor, { type: "EffectZoneChoice" }>;
@@ -178,6 +179,9 @@ export function CardChoiceModal() {
     case "SearchChoice":
       if (!canActForWaitingState) return null;
       return <SearchModal data={waitingFor.data} />;
+    case "SearchPartitionChoice":
+      if (!canActForWaitingState) return null;
+      return <SearchPartitionModal data={waitingFor.data} />;
     case "OutsideGameChoice":
       if (!canActForWaitingState) return null;
       return <OutsideGameModal key={outsideGameChoiceKey(waitingFor.data)} data={waitingFor.data} />;
@@ -847,6 +851,91 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
                 <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-emerald-500/20">
                   <span className="rounded-full bg-emerald-500/90 px-3 py-1 text-xs font-bold text-white">
                     Choose
+                  </span>
+                </div>
+              )}
+            </motion.button>
+          );
+        })}
+      </ScrollableCardStrip>
+    </ChoiceOverlay>
+  );
+}
+
+function SearchPartitionModal({ data }: { data: SearchPartitionChoice["data"] }) {
+  const dispatch = useGameDispatch();
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const hoverProps = useInspectHoverProps();
+  const [selectedSet, setSelectedSet] = useState<Set<ObjectId>>(new Set());
+  const countValid = selectedSet.size === data.primary_count;
+  const cardText = `card${data.primary_count > 1 ? "s" : ""}`;
+  const tappedText = data.primary_enter_tapped ? " tapped" : "";
+
+  useEffect(() => {
+    setSelectedSet(new Set());
+  }, [data]);
+
+  const toggleSelect = useCallback(
+    (id: ObjectId) => {
+      setSelectedSet((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) {
+          next.delete(id);
+        } else if (next.size < data.primary_count) {
+          next.add(id);
+        }
+        return next;
+      });
+    },
+    [data.primary_count],
+  );
+
+  const handleConfirm = useCallback(() => {
+    if (countValid) {
+      dispatch({
+        type: "SelectCards",
+        data: { cards: Array.from(selectedSet) },
+      });
+    }
+  }, [countValid, dispatch, selectedSet]);
+
+  if (!objects) return null;
+
+  return (
+    <ChoiceOverlay
+      title="Choose Cards for the Battlefield"
+      subtitle={`Choose ${data.primary_count} ${cardText} to put onto the battlefield${tappedText}; the rest go to your hand`}
+      footer={<ConfirmButton onClick={handleConfirm} disabled={!countValid} />}
+    >
+      <ScrollableCardStrip>
+        {data.cards.map((id, index) => {
+          const obj = objects[id];
+          if (!obj) return null;
+          const isSelected = selectedSet.has(id);
+          return (
+            <motion.button
+              key={id}
+              className={`relative shrink-0 rounded-lg transition ${
+                isSelected
+                  ? "z-10 ring-2 ring-emerald-400/80"
+                  : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
+              }`}
+              initial={{ opacity: 0, y: 60, scale: 0.85 }}
+              animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
+              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
+              whileHover={{ scale: 1.05, y: -6 }}
+              onClick={() => toggleSelect(id)}
+              {...hoverProps(id)}
+            >
+              <CardImage
+                {...objectImageProps(obj)}
+                size="normal"
+                className={CHOICE_CARD_IMAGE_CLASS}
+              />
+              {isSelected && (
+                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-emerald-500/20">
+                  <span className="rounded-full bg-emerald-500/90 px-3 py-1 text-xs font-bold text-white">
+                    Battlefield
                   </span>
                 </div>
               )}
