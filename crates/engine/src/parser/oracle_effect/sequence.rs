@@ -516,6 +516,18 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                     ))
                     .parse(before_lower.trim_start())
                     .is_ok();
+                    // CR 613.1d + CR 613.4b: "have base power and toughness N/N"
+                    // is a layer-7b continuous modification, never an imperative
+                    // clause starter. Suppress the split so
+                    // `parse_continuous_modifications` can handle the compound
+                    // (e.g. "lose all abilities and have base power and toughness
+                    // 1/1 until end of turn") as a single GenericEffect with the
+                    // correct `affected` filter inherited from the subject.
+                    let remainder_lower = remainder_trimmed.to_ascii_lowercase();
+                    let have_base_pt_continuation =
+                        tag::<_, _, OracleError<'_>>("have base power and toughness ")
+                            .parse(remainder_lower.as_str())
+                            .is_ok();
                     let suppress = nom_primitives::scan_contains(&before_lower, "from among")
                         || is_inside_temporal_prefix(&before_lower)
                         || targeted_compound_continuation
@@ -524,7 +536,8 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         || inside_except_clause
                         || choice_partition_remainder
                         || compound_subject_each
-                        || inside_otherwise_body;
+                        || inside_otherwise_body
+                        || have_base_pt_continuation;
                     if !suppress && starts_bare_and_clause(remainder_trimmed) {
                         push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
                         current.clear();
@@ -3171,6 +3184,24 @@ mod tests {
         assert_eq!(
             chunks,
             vec!["power and toughness each equal to the number of cards"]
+        );
+    }
+
+    /// CR 613.1d + CR 613.4b: Vedalken Humiliator — "lose all abilities and
+    /// have base power and toughness 1/1 until end of turn" must stay as one
+    /// chunk so `parse_continuous_modifications` produces a single GenericEffect
+    /// with both RemoveAllAbilities and SetPower/SetToughness modifications on
+    /// the same affected filter (opponents' creatures).
+    #[test]
+    fn bare_and_does_not_split_lose_abilities_and_have_base_pt() {
+        let chunks = clause_texts(
+            "creatures your opponents control lose all abilities and have base power and toughness 1/1 until end of turn",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "creatures your opponents control lose all abilities and have base power and toughness 1/1 until end of turn"
+            ]
         );
     }
 

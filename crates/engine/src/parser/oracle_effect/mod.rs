@@ -21252,6 +21252,53 @@ mod tests {
         }
     }
 
+    /// CR 613.1d + CR 613.4b: Vedalken Humiliator — "lose all abilities and
+    /// have base power and toughness 1/1 until end of turn" must parse as a
+    /// single GenericEffect with RemoveAllAbilities + SetPower(1) + SetToughness(1)
+    /// on the same StaticDefinition. The sequence splitter must NOT split at
+    /// " and have base power and toughness" because the base-PT phrase is a
+    /// layer-7b continuous modification, not an imperative clause starter.
+    #[test]
+    fn lose_abilities_and_have_base_pt_parses_as_single_generic_effect() {
+        let def = parse_effect_chain(
+            "creatures your opponents control lose all abilities and have base power and toughness 1/1 until end of turn",
+            AbilityKind::Spell,
+        );
+        assert!(
+            def.sub_ability.is_none(),
+            "must parse as a single clause, not split into sub_ability"
+        );
+        match &*def.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                ..
+            } => {
+                assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+                let mods: Vec<_> = static_abilities
+                    .iter()
+                    .flat_map(|s| s.modifications.iter())
+                    .collect();
+                assert!(
+                    mods.iter()
+                        .any(|m| matches!(m, ContinuousModification::RemoveAllAbilities)),
+                    "must contain RemoveAllAbilities"
+                );
+                assert!(
+                    mods.iter()
+                        .any(|m| matches!(m, ContinuousModification::SetPower { value: 1 })),
+                    "must contain SetPower(1)"
+                );
+                assert!(
+                    mods.iter()
+                        .any(|m| matches!(m, ContinuousModification::SetToughness { value: 1 })),
+                    "must contain SetToughness(1)"
+                );
+            }
+            other => panic!("expected single GenericEffect, got {other:?}"),
+        }
+    }
+
     /// Regression: a gain-keyword clause with no combat-requirement conjunct
     /// still parses as one `GenericEffect` with the duration recovered.
     #[test]
