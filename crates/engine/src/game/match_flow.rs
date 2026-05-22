@@ -89,6 +89,21 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
     // the Arc then deep-clone so the payload owns its own vec.
     // Propagate `bracket_tier` so the pool rebuilt by `load_deck_into_state`
     // in the next game carries the same declared tier as the current game.
+    //
+    // Seats >= 2 are AI players (e.g., cEDH 4-player Bo3). Collect their pools
+    // so `bracket_tier = Cedh` is not silently dropped between games.
+    let ai_decks = state
+        .deck_pools
+        .iter()
+        .filter(|p| p.player != PlayerId(0) && p.player != PlayerId(1))
+        .map(|p| PlayerDeckPayload {
+            main_deck: (*p.current_main).clone(),
+            sideboard: (*p.current_sideboard).clone(),
+            commander: (*p.current_commander).clone(),
+            bracket_tier: p.bracket_tier,
+        })
+        .collect();
+
     Ok(DeckPayload {
         player: PlayerDeckPayload {
             main_deck: (*p0.current_main).clone(),
@@ -102,7 +117,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
             commander: (*p1.current_commander).clone(),
             bracket_tier: p1.bracket_tier,
         },
-        ai_decks: vec![],
+        ai_decks,
     })
 }
 
@@ -541,5 +556,59 @@ mod tests {
         assert!(!state.players[0].hand.is_empty());
         assert!(!state.players[1].hand.is_empty());
         assert!(!matches!(choose.waiting_for, WaitingFor::GameOver { .. }));
+    }
+
+    #[test]
+    fn deck_payload_from_current_pools_propagates_ai_seat_bracket_tier() {
+        use crate::game::bracket_estimate::CommanderBracketTier;
+        use crate::types::game_state::PlayerDeckPool;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Seed deck pools for seats 0, 1, and 2 (AI seat).
+        state.deck_pools = vec![
+            PlayerDeckPool {
+                player: PlayerId(0),
+                bracket_tier: CommanderBracketTier::Core,
+                current_main: std::sync::Arc::new(vec![entry("P0", 1)]),
+                ..Default::default()
+            },
+            PlayerDeckPool {
+                player: PlayerId(1),
+                bracket_tier: CommanderBracketTier::Optimized,
+                current_main: std::sync::Arc::new(vec![entry("P1", 1)]),
+                ..Default::default()
+            },
+            PlayerDeckPool {
+                player: PlayerId(2),
+                bracket_tier: CommanderBracketTier::Cedh,
+                current_main: std::sync::Arc::new(vec![entry("AI", 1)]),
+                ..Default::default()
+            },
+        ];
+
+        let payload = deck_payload_from_current_pools(&state)
+            .expect("deck_payload_from_current_pools must succeed with three pools");
+
+        assert_eq!(
+            payload.player.bracket_tier,
+            CommanderBracketTier::Core,
+            "player seat bracket_tier must round-trip"
+        );
+        assert_eq!(
+            payload.opponent.bracket_tier,
+            CommanderBracketTier::Optimized,
+            "opponent seat bracket_tier must round-trip"
+        );
+        assert_eq!(
+            payload.ai_decks.len(),
+            1,
+            "AI seat at index >= 2 must be collected into ai_decks"
+        );
+        assert_eq!(
+            payload.ai_decks[0].bracket_tier,
+            CommanderBracketTier::Cedh,
+            "AI seat bracket_tier (Cedh) must be propagated — not silently dropped"
+        );
     }
 }

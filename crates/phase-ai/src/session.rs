@@ -22,13 +22,6 @@ use crate::policies::registry::PolicyId;
 use crate::projection::{project_to, BailReason, Projection, ProjectionHorizon, ProjectionKey};
 use crate::synergy::SynergyGraph;
 
-fn features_for(
-    deck: &[DeckEntry],
-    tier: engine::game::bracket_estimate::CommanderBracketTier,
-) -> DeckFeatures {
-    DeckFeatures::analyze(deck, tier)
-}
-
 /// Per-game cache shared by all decisions.
 #[derive(Debug, Clone, Default)]
 pub struct AiSession {
@@ -58,7 +51,7 @@ impl AiSession {
 
         for pool in &state.deck_pools {
             let deck: &[DeckEntry] = &pool.current_main;
-            let player_features = features_for(deck, pool.bracket_tier);
+            let player_features = DeckFeatures::analyze(deck, pool.bracket_tier);
             let snapshot = derive_snapshot(&player_features);
             let graph = SynergyGraph::build(deck);
             features.insert(pool.player, player_features);
@@ -85,7 +78,7 @@ impl AiSession {
         tier: engine::game::bracket_estimate::CommanderBracketTier,
     ) -> Self {
         let mut session = Self::default();
-        let player_features = features_for(deck, tier);
+        let player_features = DeckFeatures::analyze(deck, tier);
         let snapshot = derive_snapshot(&player_features);
         let graph = SynergyGraph::build(deck);
         session.features.insert(player, player_features);
@@ -123,7 +116,7 @@ impl AiSession {
         if self.features.contains_key(&player) || deck.is_empty() {
             return;
         }
-        let features = features_for(deck, tier);
+        let features = DeckFeatures::analyze(deck, tier);
         let snapshot = derive_snapshot(&features);
         self.features.insert(player, features);
         self.plan.insert(player, snapshot);
