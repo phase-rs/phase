@@ -7973,15 +7973,28 @@ fn parse_bare_becomes_type_replacement_modifications(
     else {
         return Vec::new();
     };
-    if take_until::<_, _, VE>(" in addition to")
-        .parse(after_article_lower)
-        .is_ok()
+    let (descriptor_lower, retained_core_type) =
+        if let Some((descriptor_lower, retained_core_type)) =
+            split_type_retention_clause(after_article_lower)
+        {
+            (descriptor_lower, Some(retained_core_type))
+        } else {
+            (after_article_lower, None)
+        };
+    if retained_core_type.is_none()
+        && take_until::<_, _, VE>(" in addition to")
+            .parse(descriptor_lower)
+            .is_ok()
     {
         return Vec::new();
     }
 
-    let descriptor_lower = after_article_lower.trim().trim_end_matches('.');
-    let (descriptor_lower, _) = strip_trailing_duration(descriptor_lower);
+    let Ok::<_, nom::Err<VE<'_>>>((_, descriptor_lower)) =
+        parse_clause_before_optional_period(descriptor_lower)
+    else {
+        return Vec::new();
+    };
+    let (descriptor_lower, _) = strip_trailing_duration(descriptor_lower.trim());
     let descriptor_lower = descriptor_lower.trim();
     if descriptor_lower.is_empty() {
         return Vec::new();
@@ -7997,6 +8010,14 @@ fn parse_bare_becomes_type_replacement_modifications(
         return Vec::new();
     };
     let animation_modifications = super::oracle_effect::animation::animation_modifications(&spec);
+    if let Some(core_type) = retained_core_type {
+        let mut modifications = animation_modifications;
+        if !modifications.contains(&ContinuousModification::AddType { core_type }) {
+            modifications.push(ContinuousModification::AddType { core_type });
+        }
+        return modifications;
+    }
+
     let core_types: Vec<CoreType> = animation_modifications
         .iter()
         .filter_map(|modification| match modification {
@@ -8034,6 +8055,49 @@ fn parse_bare_becomes_type_replacement_modifications(
         modifications.push(modification);
     }
     modifications
+}
+
+fn parse_clause_before_optional_period(input: &str) -> OracleResult<'_, &str> {
+    terminated(alt((take_until("."), rest)), opt(tag("."))).parse(input)
+}
+
+fn split_type_retention_clause(input: &str) -> Option<(&str, CoreType)> {
+    let (descriptor, retention_clause) = nom_primitives::scan_split_at_phrase(input, |i| {
+        parse_type_retention_clause(i)
+    })?;
+    let (_, retained_core_type) = parse_type_retention_clause(retention_clause).ok()?;
+    Some((descriptor, retained_core_type))
+}
+
+fn parse_type_retention_clause(input: &str) -> OracleResult<'_, CoreType> {
+    let (input, is_plural) = alt((
+        value(false, alt((tag("it's still "), tag("that's still ")))),
+        value(true, tag("they're still ")),
+    ))
+    .parse(input)?;
+
+    let (input, _) = if is_plural {
+        (input, None)
+    } else {
+        let (input, article) = opt(nom_primitives::parse_article).parse(input)?;
+        (input, article)
+    };
+
+    alt((
+        value(CoreType::Artifact, alt((tag("artifact"), tag("artifacts")))),
+        value(CoreType::Battle, alt((tag("battle"), tag("battles")))),
+        value(CoreType::Creature, alt((tag("creature"), tag("creatures")))),
+        value(CoreType::Enchantment, alt((tag("enchantment"), tag("enchantments")))),
+        value(CoreType::Instant, alt((tag("instant"), tag("instants")))),
+        value(CoreType::Kindred, alt((tag("kindred"), tag("kindreds")))),
+        value(CoreType::Land, alt((tag("land"), tag("lands")))),
+        value(
+            CoreType::Planeswalker,
+            alt((tag("planeswalker"), tag("planeswalkers"))),
+        ),
+        value(CoreType::Sorcery, alt((tag("sorcery"), tag("sorceries")))),
+    ))
+    .parse(input)
 }
 
 fn parse_base_pt_mod(text: &str) -> Option<(i32, i32)> {
@@ -10415,6 +10479,34 @@ mod tests {
                     ContinuousModification::SetCardTypes { .. }
                 )),
             "artifact creature exception must retain previous card types: {mods:?}"
+        );
+    }
+
+    #[test]
+    fn continuous_mods_preserve_still_type_retention_clause() {
+        let mods = parse_continuous_modifications(
+            "becomes a 0/0 Elemental creature with vigilance and haste that's still a land",
+        );
+        assert!(mods.contains(&ContinuousModification::SetPower { value: 0 }));
+        assert!(mods.contains(&ContinuousModification::SetToughness { value: 0 }));
+        assert!(mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Elemental".to_string(),
+        }));
+        assert!(mods.contains(&ContinuousModification::AddType {
+            core_type: CoreType::Creature,
+        }));
+        assert!(mods.contains(&ContinuousModification::AddType {
+            core_type: CoreType::Land,
+        }));
+        assert!(
+            !mods
+                .iter()
+                .any(|modification| matches!(
+                    modification,
+                    ContinuousModification::SetCardTypes { .. }
+                        | ContinuousModification::RemoveAllSubtypes { .. }
+                )),
+            "still-retained types must stay additive under CR 205.1b: {mods:?}"
         );
     }
 

@@ -34,9 +34,17 @@ struct ActiveCombatAssignmentRuleEffect {
     condition: Option<StaticCondition>,
 }
 
-fn subtype_matches_core_types(subtype: &str, core_types: &[CoreType], state: &GameState) -> bool {
+// CR 205.3c: Each subtype is correlated to its appropriate card type.
+fn subtype_matches_core_types(
+    subtype: &str,
+    core_types: &[CoreType],
+    all_creature_types: &[String],
+) -> bool {
     if core_types.contains(&CoreType::Creature) || core_types.contains(&CoreType::Kindred) {
-        if state.all_creature_types.iter().any(|creature_type| creature_type == subtype) {
+        if all_creature_types
+            .iter()
+            .any(|creature_type| creature_type == subtype)
+        {
             return true;
         }
     }
@@ -1935,6 +1943,7 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
     } else {
         None
     };
+    let all_creature_types = state.all_creature_types.clone();
 
     for id in affected_ids {
         // CR 613.4c: When the dynamic modification's QuantityExpr depends on
@@ -2102,7 +2111,9 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
                 obj.card_types.core_types = core_types.clone();
                 obj.card_types
                     .subtypes
-                    .retain(|subtype| subtype_matches_core_types(subtype, core_types, state));
+                    .retain(|subtype| {
+                        subtype_matches_core_types(subtype, core_types, &all_creature_types)
+                    });
             }
             // CR 205.1a + CR 613.1d: Remove every subtype belonging to the
             // named subtype set. Membership for the `Creature` set is resolved
@@ -2113,7 +2124,7 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
                     SubtypeSet::Creature => {
                         obj.card_types
                             .subtypes
-                            .retain(|s| !state.all_creature_types.iter().any(|c| c == s));
+                            .retain(|s| !all_creature_types.iter().any(|c| c == s));
                     }
                     SubtypeSet::Land => {
                         // CR 205.3i: land-type membership via the basic/non-basic
