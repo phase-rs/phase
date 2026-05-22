@@ -40,13 +40,12 @@ fn subtype_matches_core_types(
     core_types: &[CoreType],
     all_creature_types: &[String],
 ) -> bool {
-    if core_types.contains(&CoreType::Creature) || core_types.contains(&CoreType::Kindred) {
-        if all_creature_types
+    if (core_types.contains(&CoreType::Creature) || core_types.contains(&CoreType::Kindred))
+        && all_creature_types
             .iter()
             .any(|creature_type| creature_type == subtype)
-        {
-            return true;
-        }
+    {
+        return true;
     }
 
     let Some(set) = noncreature_subtype_set(subtype) else {
