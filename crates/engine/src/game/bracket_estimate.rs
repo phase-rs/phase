@@ -36,6 +36,19 @@ impl Default for CommanderBracketTier {
     }
 }
 
+impl std::fmt::Display for CommanderBracketTier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::Exhibition => "Exhibition",
+            Self::Core => "Core",
+            Self::Upgraded => "Upgraded",
+            Self::Optimized => "Optimized",
+            Self::Cedh => "Cedh",
+        };
+        write!(f, "{name}")
+    }
+}
+
 impl CommanderBracketTier {
     /// Numeric bracket level (B1..=B5 → 1..=5). Used for ordered
     /// comparisons (e.g., sorting violations by tier).

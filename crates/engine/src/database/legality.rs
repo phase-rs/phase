@@ -2,6 +2,9 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
+use crate::game::bracket_estimate::CommanderBracketTier;
+use crate::game::deck_loading::PlayerDeckPayload;
+
 pub type CardLegalities = HashMap<LegalityFormat, LegalityStatus>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -154,9 +157,6 @@ fn normalize_key(raw: &str) -> String {
 // cEDH bracket validation
 // ---------------------------------------------------------------------------
 
-use crate::game::bracket_estimate::CommanderBracketTier;
-use crate::game::deck_loading::PlayerDeckPayload;
-
 /// Error returned when one or more decks in a cEDH table are not declared as
 /// `CommanderBracketTier::Cedh`.
 ///
@@ -164,11 +164,16 @@ use crate::game::deck_loading::PlayerDeckPayload;
 /// returns `Cedh` algorithmically (see `bracket_estimate.rs:18-27` and the
 /// `estimator_never_returns_cedh` test). Validation is therefore a simple tag
 /// check — every deck at a cEDH table must carry the explicit declaration.
+///
+/// Kept as an enum (rather than a struct) to accommodate anticipated future
+/// variants once Phase 8 wires this validation into the game-init boundary —
+/// e.g., `AllDecksUnconfigured` (table has no bracket declarations at all) or
+/// `TableSizeMismatch` (seat count doesn't match expected player count).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CedhBracketError {
     /// The deck at `seat_index` was not declared as `Cedh`.
     DeckNotCedh {
-        seat_index: usize,
+        seat_index: u8,
         actual_tier: CommanderBracketTier,
     },
 }
@@ -181,7 +186,7 @@ impl std::fmt::Display for CedhBracketError {
                 actual_tier,
             } => write!(
                 f,
-                "seat {seat_index} is not declared cEDH (actual tier: {actual_tier:?})"
+                "seat {seat_index} is not declared cEDH (actual tier: {actual_tier})"
             ),
         }
     }
@@ -200,10 +205,11 @@ impl std::error::Error for CedhBracketError {}
 /// algorithmically, so the declaration must come from the player at deck
 /// submission time.
 pub fn validate_cedh_bracket(decks: &[&PlayerDeckPayload]) -> Result<(), CedhBracketError> {
-    for (seat_index, deck) in decks.iter().enumerate() {
+    for (idx, deck) in decks.iter().enumerate() {
         if deck.bracket_tier != CommanderBracketTier::Cedh {
             return Err(CedhBracketError::DeckNotCedh {
-                seat_index,
+                // Commander has at most 4 seats; cast is always safe.
+                seat_index: idx as u8,
                 actual_tier: deck.bracket_tier,
             });
         }
@@ -324,7 +330,7 @@ mod cedh_bracket_tests {
     }
 
     #[test]
-    fn validate_rejects_empty_input() {
+    fn validate_accepts_empty_input() {
         // Vacuously true: no decks means no violations.
         let result = validate_cedh_bracket(&[]);
         assert_eq!(result, Ok(()));
