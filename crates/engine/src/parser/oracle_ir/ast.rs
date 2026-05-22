@@ -4,8 +4,8 @@ use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ActivationRestriction, CastingPermission, Duration,
     Effect, LibraryPosition, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint,
-    PaymentCost, PlayerFilter, PtValue, QuantityExpr, SearchSelectionConstraint, StaticDefinition,
-    TargetFilter,
+    PaymentCost, PlayerFilter, PtValue, QuantityExpr, SearchDestinationSplit,
+    SearchSelectionConstraint, StaticDefinition, TargetFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::DistributionUnit;
@@ -116,6 +116,10 @@ pub(crate) struct SearchLibraryDetails {
     /// CR 701.23a: Whether the interleaved `ChangeZone`s in a multi-filter
     /// chain should enter tapped ("put them onto the battlefield tapped").
     pub(crate) multi_enter_tapped: bool,
+    /// CR 701.23a + CR 608.2c: When set, the found set is partitioned across two
+    /// destinations (cultivate-class "put one onto the battlefield tapped and
+    /// the other into your hand"). Lowered to `Effect::SearchLibrary.split`.
+    pub(crate) split: Option<SearchDestinationSplit>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -676,6 +680,10 @@ pub(crate) enum SearchCreationImperativeAst {
         /// CR 701.23a: "put them onto the battlefield tapped" — enters-tapped
         /// flag for multi-filter chains. Ignored when `extra_filters` is empty.
         multi_enter_tapped: bool,
+        /// CR 701.23a + CR 608.2c: cultivate-class split destination ("put one
+        /// onto the battlefield tapped and the other into your hand"). Lowered
+        /// to `Effect::SearchLibrary.split`.
+        split: Option<SearchDestinationSplit>,
     },
     SearchOutsideGame {
         filter: TargetFilter,

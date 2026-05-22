@@ -155,6 +155,7 @@ export interface PeerInfo {
   match_config: MatchConfig;
   player_count: number;
   filled_seats: number;
+  reservation_token?: string | null;
 }
 
 /**
@@ -169,6 +170,8 @@ export interface JoinTargetInfo {
   match_config: MatchConfig;
   player_count: number;
   filled_seats: number;
+  reservation_token?: string | null;
+  reservation_expires_at_ms?: number | null;
 }
 
 // ── Match / Series ───────────────────────────────────────────────────────
@@ -548,6 +551,15 @@ export type SearchSelectionConstraint =
   | { type: "TotalManaValue"; comparator: string; value: number }
   | { type: "MatchEachFilter"; filters: TargetFilter[] };
 
+// CR 701.23a + CR 608.2c: Cultivate-class split destination metadata mirrored
+// from Rust `SearchDestinationSplit`.
+export type SearchDestinationSplit = {
+  primary_destination: Zone;
+  primary_count: number;
+  primary_enter_tapped: boolean;
+  rest_destination: Zone;
+};
+
 // ── Game Object ──────────────────────────────────────────────────────────
 
 /**
@@ -728,7 +740,7 @@ export type TargetRef =
   | { Object: ObjectId }
   | { Player: PlayerId };
 
-export type CopyTargetSlot = { current: TargetRef; legal_alternatives: TargetRef[] };
+export type CopyTargetSlot = { current?: TargetRef | null; legal_alternatives: TargetRef[] };
 
 // ── Combat ───────────────────────────────────────────────────────────────
 
@@ -914,7 +926,8 @@ export type WaitingFor =
   | { type: "DigChoice"; data: { player: PlayerId; cards: ObjectId[]; keep_count: number; up_to?: boolean; selectable_cards?: ObjectId[]; kept_destination?: Zone | null; rest_destination?: Zone | null } }
   | { type: "SurveilChoice"; data: { player: PlayerId; cards: ObjectId[] } }
   | { type: "RevealChoice"; data: { player: PlayerId; cards: ObjectId[]; filter: unknown; optional?: boolean } }
-  | { type: "SearchChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; reveal?: boolean; up_to?: boolean; constraint?: SearchSelectionConstraint } }
+  | { type: "SearchChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; reveal?: boolean; up_to?: boolean; constraint?: SearchSelectionConstraint; split?: SearchDestinationSplit | null } }
+  | { type: "SearchPartitionChoice"; data: { player: PlayerId; cards: ObjectId[]; primary_destination: Zone; primary_count: number; primary_enter_tapped: boolean; rest_destination: Zone; source_id: ObjectId } }
   | { type: "OutsideGameChoice"; data: { player: PlayerId; choices: OutsideGameChoiceEntry[]; count: number; reveal?: boolean; up_to?: boolean; destination: Zone } }
   | { type: "ChooseOneOfBranch"; data: { player: PlayerId; controller: PlayerId; source_id: ObjectId; branches: unknown[]; branch_descriptions?: string[]; parent_targets?: TargetRef[]; context?: unknown; remaining_players?: PlayerId[] } }
   | { type: "TriggerTargetSelection"; data: { player: PlayerId; target_slots: TargetSelectionSlot[]; target_constraints?: TargetSelectionConstraint[]; selection: TargetSelectionProgress; source_id?: ObjectId; description?: string } }

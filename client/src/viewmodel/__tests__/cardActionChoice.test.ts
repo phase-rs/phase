@@ -201,6 +201,13 @@ describe("requiresConfirmation", () => {
     ).toBe(false);
   });
 
+  it("flags CastPreparedCopy so the prepared spell is explicitly offered", () => {
+    const object = makeGameObject();
+    expect(
+      requiresConfirmation({ type: "CastPreparedCopy", data: { source: 1 } }, object),
+    ).toBe(true);
+  });
+
   it("does not flag when the object is undefined", () => {
     expect(
       requiresConfirmation(
@@ -252,6 +259,11 @@ describe("resolveSingleActionDispatch", () => {
     });
     expect(resolveSingleActionDispatch([cyclingAction], object)).toBe(cyclingAction);
   });
+
+  it("returns null for a lone CastPreparedCopy", () => {
+    const preparedAction: GameAction = { type: "CastPreparedCopy", data: { source: 1 } };
+    expect(resolveSingleActionDispatch([preparedAction], makeGameObject())).toBeNull();
+  });
 });
 
 describe("abilityChoiceLabel", () => {
@@ -286,6 +298,29 @@ describe("abilityChoiceLabel", () => {
         object,
       ),
     ).toEqual({ label: "Cast Bala Ged Recovery" });
+  });
+
+  it("labels a prepared copy cast with the prepare spell face name", () => {
+    const object = makeGameObject({
+      name: "Elite Interceptor",
+      back_face: {
+        name: "Rejoinder",
+        power: null,
+        toughness: null,
+        card_types: { supertypes: [], core_types: ["Sorcery"], subtypes: [] },
+        mana_cost: { type: "Cost", shards: ["White"], generic: 1 },
+        keywords: [],
+        abilities: [],
+        color: ["White"],
+      },
+    });
+
+    expect(
+      abilityChoiceLabel({ type: "CastPreparedCopy", data: { source: 1 } }, object),
+    ).toEqual({
+      label: "Cast Rejoinder",
+      description: "Cast a copy of Rejoinder. Elite Interceptor becomes unprepared.",
+    });
   });
 
   it("labels the land play action with the land face name for spell-land MDFCs", () => {
