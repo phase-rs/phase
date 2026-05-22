@@ -230,20 +230,17 @@ pub fn noncreature_subtype_set(s: &str) -> Option<SubtypeSet> {
         // CR 205.3q: Battle subtypes.
         "Siege" => Some(SubtypeSet::Battle),
         // CR 205.3j: Planeswalker subtypes.
-        "Ajani" | "Aminatou" | "Angrath" | "Arlinn" | "Ashiok" | "Bahamut" | "Basri"
-        | "Bolas" | "Calix" | "Chandra" | "Comet" | "Dack" | "Dakkon" | "Daretti"
-        | "Davriel" | "Dellian" | "Dihada" | "Domri" | "Dovin" | "Ellywick" | "Elminster"
-        | "Elspeth" | "Estrid" | "Freyalise" | "Garruk" | "Gideon" | "Grist" | "Guff"
-        | "Huatli" | "Jace" | "Jared" | "Jaya" | "Jeska" | "Kaito" | "Karn" | "Kasmina"
-        | "Kaya" | "Kiora" | "Koth" | "Liliana" | "Lolth" | "Lukka" | "Minsc"
-        | "Mordenkainen" | "Nahiri" | "Narset" | "Niko" | "Nissa" | "Nixilis" | "Oko"
-        | "Quintorius" | "Ral" | "Rowan" | "Saheeli" | "Samut" | "Sarkhan" | "Serra"
-        | "Sivitri" | "Sorin" | "Szat" | "Tamiyo" | "Tasha" | "Teferi" | "Teyo"
-        | "Tezzeret" | "Tibalt" | "Tyvar" | "Ugin" | "Urza" | "Venser" | "Vivien"
-        | "Vraska" | "Vronos" | "Will" | "Windgrace" | "Wrenn" | "Xenagos" | "Yanggu"
-        | "Yanling" | "Zariel" => {
-            Some(SubtypeSet::Planeswalker)
-        }
+        "Ajani" | "Aminatou" | "Angrath" | "Arlinn" | "Ashiok" | "Bahamut" | "Basri" | "Bolas"
+        | "Calix" | "Chandra" | "Comet" | "Dack" | "Dakkon" | "Daretti" | "Davriel" | "Dellian"
+        | "Dihada" | "Domri" | "Dovin" | "Ellywick" | "Elminster" | "Elspeth" | "Estrid"
+        | "Freyalise" | "Garruk" | "Gideon" | "Grist" | "Guff" | "Huatli" | "Jace" | "Jared"
+        | "Jaya" | "Jeska" | "Kaito" | "Karn" | "Kasmina" | "Kaya" | "Kiora" | "Koth"
+        | "Liliana" | "Lolth" | "Lukka" | "Minsc" | "Mordenkainen" | "Nahiri" | "Narset"
+        | "Niko" | "Nissa" | "Nixilis" | "Oko" | "Quintorius" | "Ral" | "Rowan" | "Saheeli"
+        | "Samut" | "Sarkhan" | "Serra" | "Sivitri" | "Sorin" | "Szat" | "Tamiyo" | "Tasha"
+        | "Teferi" | "Teyo" | "Tezzeret" | "Tibalt" | "Tyvar" | "Ugin" | "Urza" | "Venser"
+        | "Vivien" | "Vraska" | "Vronos" | "Will" | "Windgrace" | "Wrenn" | "Xenagos"
+        | "Yanggu" | "Yanling" | "Zariel" => Some(SubtypeSet::Planeswalker),
         _ => None,
     }
 }

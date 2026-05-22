@@ -10476,12 +10476,10 @@ mod tests {
             core_type: CoreType::Creature,
         }));
         assert!(
-            !mods
-                .iter()
-                .any(|modification| matches!(
-                    modification,
-                    ContinuousModification::SetCardTypes { .. }
-                )),
+            !mods.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::SetCardTypes { .. }
+            )),
             "artifact creature exception must retain previous card types: {mods:?}"
         );
     }
@@ -10503,13 +10501,11 @@ mod tests {
             core_type: CoreType::Land,
         }));
         assert!(
-            !mods
-                .iter()
-                .any(|modification| matches!(
-                    modification,
-                    ContinuousModification::SetCardTypes { .. }
-                        | ContinuousModification::RemoveAllSubtypes { .. }
-                )),
+            !mods.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::SetCardTypes { .. }
+                    | ContinuousModification::RemoveAllSubtypes { .. }
+            )),
             "still-retained types must stay additive under CR 205.1b: {mods:?}"
         );
     }
