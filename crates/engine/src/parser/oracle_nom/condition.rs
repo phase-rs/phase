@@ -6,8 +6,9 @@
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::bytes::complete::take_until;
+use nom::character::complete::multispace1;
 use nom::combinator::{map, opt, value};
-use nom::sequence::preceded;
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::error::{OracleError, OracleResult};
@@ -506,49 +507,63 @@ struct AttachedConditionSubject {
     attachment_prop: FilterProp,
 }
 
-fn parse_attached_condition_subject(input: &str) -> OracleResult<'_, AttachedConditionSubject> {
+fn parse_attached_condition_subject_core(
+    input: &str,
+) -> OracleResult<'_, AttachedConditionSubject> {
     alt((
         value(
             AttachedConditionSubject {
                 type_filter: TypeFilter::Permanent,
                 attachment_prop: FilterProp::EnchantedBy,
             },
-            tag("enchanted permanent "),
+            tag("enchanted permanent"),
         ),
         value(
             AttachedConditionSubject {
                 type_filter: TypeFilter::Creature,
                 attachment_prop: FilterProp::EnchantedBy,
             },
-            tag("enchanted creature "),
+            tag("enchanted creature"),
         ),
         value(
             AttachedConditionSubject {
                 type_filter: TypeFilter::Artifact,
                 attachment_prop: FilterProp::EnchantedBy,
             },
-            tag("enchanted artifact "),
+            tag("enchanted artifact"),
         ),
         value(
             AttachedConditionSubject {
                 type_filter: TypeFilter::Land,
                 attachment_prop: FilterProp::EnchantedBy,
             },
-            tag("enchanted land "),
+            tag("enchanted land"),
         ),
         value(
             AttachedConditionSubject {
                 type_filter: TypeFilter::Creature,
                 attachment_prop: FilterProp::EquippedBy,
             },
-            tag("equipped creature "),
+            tag("equipped creature"),
         ),
     ))
     .parse(input)
 }
 
+fn parse_attached_condition_subject(input: &str) -> OracleResult<'_, AttachedConditionSubject> {
+    terminated(parse_attached_condition_subject_core, multispace1).parse(input)
+}
+
 fn attached_subject_typed_filter(subject: &AttachedConditionSubject) -> TypedFilter {
     TypedFilter::new(subject.type_filter.clone()).properties(vec![subject.attachment_prop.clone()])
+}
+
+pub(crate) fn parse_attached_subject_target_filter(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (rest, subject) = parse_attached_condition_subject_core(input)?;
+    Ok((
+        rest,
+        TargetFilter::Typed(attached_subject_typed_filter(&subject)),
+    ))
 }
 
 fn merge_attached_predicate_filter(

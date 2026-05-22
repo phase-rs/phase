@@ -3,8 +3,8 @@ use std::str::FromStr;
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::char;
-use nom::combinator::{all_consuming, opt, peek, value};
+use nom::character::complete::{char, multispace1};
+use nom::combinator::{all_consuming, eof, opt, peek, value};
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
@@ -15,7 +15,7 @@ use super::oracle_effect::{
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::replacement::ReplacementIr;
 use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
-use super::oracle_nom::condition::parse_inner_condition;
+use super::oracle_nom::condition::{parse_attached_subject_target_filter, parse_inner_condition};
 use super::oracle_nom::duration::parse_duration;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_quantity::capitalize_first;
@@ -4139,17 +4139,16 @@ fn parse_damage_prevention_replacement(
     // any target, which was the Multiclass Baldric / Inviolability / Artifact Ward
     // class of bug.
     let valid_card_filter: Option<TargetFilter> =
-        if nom_primitives::scan_contains(working_lower, "dealt to equipped creature") {
-            Some(TargetFilter::Typed(
-                TypedFilter::creature().properties(vec![FilterProp::EquippedBy]),
-            ))
-        } else if nom_primitives::scan_contains(working_lower, "dealt to enchanted creature") {
-            Some(TargetFilter::Typed(
-                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
-            ))
-        } else {
-            None
-        };
+        nom_primitives::scan_at_word_boundaries(working_lower, |input| {
+            preceded(
+                tag::<_, _, OracleError<'_>>("dealt to "),
+                terminated(
+                    parse_attached_subject_target_filter,
+                    alt((value((), eof), value((), multispace1), value((), tag(".")))),
+                ),
+            )
+            .parse(input)
+        });
 
     // --- 4. Extract damage source filter ---
     let damage_source_filter = parse_damage_source_filter(working_lower);
@@ -5285,6 +5284,33 @@ mod tests {
                 TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])
             ))
         );
+    }
+
+    #[test]
+    fn replacement_prevent_damage_to_enchanted_permanent_subjects_scope_via_valid_card() {
+        for (text, type_filter) in [
+            (
+                "Prevent all damage that would be dealt to enchanted permanent.",
+                TypeFilter::Permanent,
+            ),
+            (
+                "Prevent all damage that would be dealt to enchanted artifact.",
+                TypeFilter::Artifact,
+            ),
+            (
+                "Prevent all damage that would be dealt to enchanted land.",
+                TypeFilter::Land,
+            ),
+        ] {
+            let def = parse_replacement_line(text, "Attachment Prevention").unwrap();
+            assert_eq!(
+                def.valid_card,
+                Some(TargetFilter::Typed(
+                    TypedFilter::new(type_filter).properties(vec![FilterProp::EnchantedBy])
+                )),
+                "expected attached-object scope for {text}"
+            );
+        }
     }
 
     #[test]
