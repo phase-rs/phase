@@ -440,7 +440,7 @@ fn damage_done_applier(
                             .find(|player| player.id == player_id)
                             .map(|player| player.life)
                             .unwrap_or(0);
-                        life.saturating_sub(*floor).max(0) as u32
+                        amount.min(life.saturating_sub(floor).max(0) as u32)
                     } else {
                         amount
                     }

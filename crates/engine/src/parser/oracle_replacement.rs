@@ -114,18 +114,16 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
-    // --- Worship: damage that would reduce your life below 1 reduces it to 1 instead ---
-    // CR 614.1a + CR 120.3a: This is a damage replacement, gated by controlling
-    // a creature, that caps damage-to-life-loss at current life minus one.
-    if norm_lower
-        == "if you control a creature, damage that would reduce your life total to less than 1 reduces it to 1 instead."
-    {
+    // --- CR 614.1a + CR 120.3a: Damage floor replacement ---
+    // "If you control a creature, damage that would reduce your life total to
+    // less than N reduces it to N instead." (Worship and variants)
+    if let Some(floor) = try_parse_life_floor_damage(&norm_lower) {
         return Some(
             ReplacementDefinition::new(ReplacementEvent::DamageDone)
                 .damage_target_filter(DamageTargetFilter::Player {
                     player: DamageTargetPlayerScope::You,
                 })
-                .damage_modification(DamageModification::SetPlayerLifeFloor { floor: 1 })
+                .damage_modification(DamageModification::SetPlayerLifeFloor { floor })
                 .condition(ReplacementCondition::OnlyIfQuantity {
                     lhs: QuantityExpr::Ref {
                         qty: QuantityRef::ObjectCount {
@@ -4511,6 +4509,33 @@ fn parse_turn_of_game_condition(norm_lower: &str) -> Option<ReplacementCondition
 
 /// Catch-all: extract the text after "unless" as an Unrecognized condition.
 /// CR 614.1d — Ensures the card is counted as having a parsed replacement for coverage.
+/// CR 614.1a + CR 120.3a: Parse "if you control a creature, damage that would
+/// reduce your life total to less than N reduces it to N instead." into its
+/// floor value N. Covers Worship and any future variant with a different floor.
+fn try_parse_life_floor_damage(input: &str) -> Option<i32> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>(
+        "if you control a creature, damage that would reduce your life total to less than ",
+    )
+    .parse(input)
+    .ok()?;
+    let (rest, floor) = nom_primitives::parse_number(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" reduces it to ")
+        .parse(rest)
+        .ok()?;
+    let (rest, floor2) = nom_primitives::parse_number(rest).ok()?;
+    if floor != floor2 {
+        return None;
+    }
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(" instead"))
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
+    if !rest.is_empty() {
+        return None;
+    }
+    Some(floor as i32)
+}
+
 fn parse_generic_unless_condition(
     norm_lower: &str,
     original_text: &str,
