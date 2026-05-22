@@ -155,6 +155,13 @@ fn is_interaction_card(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use engine::game::zones::create_object;
+    use engine::types::card_type::{CardType, CoreType};
+    use engine::types::identifiers::CardId;
+    use engine::types::mana::ManaCost;
+    use engine::types::player::PlayerId;
+    use engine::types::zones::Zone;
+
     use super::*;
     use crate::plan::PlanSnapshot;
 
@@ -167,6 +174,31 @@ mod tests {
             is_cedh,
             ..DeckFeatures::default()
         }
+    }
+
+    /// Add a card to the given state in `Zone::Hand` for player 0.
+    /// Returns the `ObjectId` of the newly created object.
+    fn add_hand_card(
+        state: &mut GameState,
+        idx: u64,
+        name: &str,
+        core_types: Vec<CoreType>,
+    ) -> ObjectId {
+        let oid = create_object(
+            state,
+            CardId(3000 + idx),
+            PlayerId(0),
+            name.to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&oid).expect("just created");
+        obj.card_types = CardType {
+            supertypes: Vec::new(),
+            core_types,
+            subtypes: Vec::new(),
+        };
+        obj.mana_cost = ManaCost::NoCost;
+        oid
     }
 
     #[test]
@@ -201,5 +233,116 @@ mod tests {
             matches!(score, MulliganScore::ForceMulligan { .. }),
             "empty cEDH hand must be a ForceMulligan (< 2 lands), got {score:?}"
         );
+    }
+
+    /// Third ForceMulligan branch: 2-4 lands, but no fast-mana, no tutor, no
+    /// interaction. Even though the land count is legal, the hand is untenable
+    /// at a cEDH table without any clock or disruption piece.
+    #[test]
+    fn cedh_hand_with_no_acceleration_tutor_or_interaction_force_mulligans() {
+        let policy = CedhKeepablesMulligan;
+        let mut state = GameState::new_two_player(42);
+        state.players[0].hand.clear();
+
+        // 3 plain lands, none of which match any fast-mana / tutor / interaction name.
+        let mut hand = Vec::new();
+        for i in 0..3 {
+            hand.push(add_hand_card(
+                &mut state,
+                i,
+                &format!("Forest {i}"),
+                vec![CoreType::Land],
+            ));
+        }
+        // A filler non-staple spell (no match on any staple list).
+        hand.push(add_hand_card(
+            &mut state,
+            10,
+            "Grizzly Bears",
+            vec![CoreType::Creature],
+        ));
+
+        let score = policy.evaluate(
+            &hand,
+            &state,
+            &features_cedh(true),
+            &PlanSnapshot::default(),
+            TurnOrder::OnPlay,
+            0,
+        );
+
+        match score {
+            MulliganScore::ForceMulligan { reason } => {
+                assert_eq!(
+                    reason.kind,
+                    "cedh_keepables_no_acceleration_tutor_or_interaction",
+                    "unexpected reason kind: {}",
+                    reason.kind
+                );
+            }
+            _ => panic!(
+                "expected ForceMulligan(cedh_keepables_no_acceleration_tutor_or_interaction), got {score:?}"
+            ),
+        }
+    }
+
+    /// Baseline-keep path: 2-4 lands AND at least one fast-mana card
+    /// (Sol Ring) passes the gate and yields a positive Score.
+    #[test]
+    fn cedh_hand_with_fast_mana_baseline_keeps() {
+        let policy = CedhKeepablesMulligan;
+        let mut state = GameState::new_two_player(42);
+        state.players[0].hand.clear();
+
+        let mut hand = Vec::new();
+        // 2 lands.
+        for i in 0..2 {
+            hand.push(add_hand_card(
+                &mut state,
+                i,
+                &format!("Island {i}"),
+                vec![CoreType::Land],
+            ));
+        }
+        // Sol Ring is a canonical fast-mana staple — must trigger the keep path.
+        hand.push(add_hand_card(
+            &mut state,
+            20,
+            "Sol Ring",
+            vec![CoreType::Artifact],
+        ));
+        // Some filler.
+        for i in 0..3 {
+            hand.push(add_hand_card(
+                &mut state,
+                30 + i,
+                &format!("Filler {i}"),
+                vec![CoreType::Instant],
+            ));
+        }
+
+        let score = policy.evaluate(
+            &hand,
+            &state,
+            &features_cedh(true),
+            &PlanSnapshot::default(),
+            TurnOrder::OnPlay,
+            0,
+        );
+
+        match score {
+            MulliganScore::Score { delta, reason } => {
+                assert!(
+                    (delta - 1.0).abs() < f64::EPSILON,
+                    "expected delta 1.0, got {delta}"
+                );
+                assert_eq!(
+                    reason.kind, "cedh_keepables_baseline_keep",
+                    "unexpected reason kind: {}",
+                    reason.kind
+                );
+            }
+            _ => panic!("expected baseline-keep Score, got {score:?}"),
+        }
     }
 }
