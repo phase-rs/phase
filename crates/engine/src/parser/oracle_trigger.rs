@@ -31,11 +31,11 @@ use super::oracle_util::{
 };
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, AttachmentKind, CastVariantPaid, Comparator,
-    ControllerRef, CounterTriggerFilter, DamageKindFilter, Effect, FilterProp, OriginConstraint,
-    PlayerFilter, QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TriggerCondition,
-    TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
-    ZoneChangeClause,
+    AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AttachmentKind, CastVariantPaid,
+    Comparator, ControllerRef, CounterTriggerFilter, DamageKindFilter, Effect, FilterProp,
+    OriginConstraint, PlayerFilter, QuantityExpr, QuantityRef, StaticCondition, TargetFilter,
+    TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessPayModifier, ZoneChangeClause,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::parse_counter_type;
@@ -2575,26 +2575,37 @@ fn try_parse_keyword_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
             .is_ok()
         {
             let mut def = make_base();
-            def.mode = TriggerMode::BoastAbilityActivated;
-            return Some((TriggerMode::BoastAbilityActivated, def));
+            def.mode = TriggerMode::KeywordAbilityActivated(AbilityTag::Boast);
+            return Some((TriggerMode::KeywordAbilityActivated(AbilityTag::Boast), def));
         }
-        // CR 702.107a: Match "~'s outlast ability" — "this creature" is normalized to ~
-        // before trigger parsing, so the condition arrives as "~'s outlast ability".
-        if tag::<_, _, OracleError<'_>>("~'s outlast ability")
-            .parse(rest)
-            .is_ok()
+        // CR 702.107a: Match "~'s outlast ability" or "an outlast ability".
+        // "this creature" normalizes to ~ before trigger parsing, so the self-ref form
+        // arrives as "~'s outlast ability". The "an outlast ability" variant covers
+        // generic activation references.
+        if alt((
+            tag::<_, _, OracleError<'_>>("~'s outlast ability"),
+            tag("an outlast ability"),
+        ))
+        .parse(rest)
+        .is_ok()
         {
             let mut def = make_base();
-            def.mode = TriggerMode::OutlastAbilityActivated;
-            return Some((TriggerMode::OutlastAbilityActivated, def));
+            def.mode = TriggerMode::KeywordAbilityActivated(AbilityTag::Outlast);
+            return Some((
+                TriggerMode::KeywordAbilityActivated(AbilityTag::Outlast),
+                def,
+            ));
         }
         if all_consuming(tag::<_, _, OracleError<'_>>("an exhaust ability"))
             .parse(rest)
             .is_ok()
         {
             let mut def = make_base();
-            def.mode = TriggerMode::ExhaustAbilityActivated;
-            return Some((TriggerMode::ExhaustAbilityActivated, def));
+            def.mode = TriggerMode::KeywordAbilityActivated(AbilityTag::Exhaust);
+            return Some((
+                TriggerMode::KeywordAbilityActivated(AbilityTag::Exhaust),
+                def,
+            ));
         }
         if all_consuming(tag::<_, _, OracleError<'_>>(
             "an exhaust ability that isn't a mana ability",
@@ -2603,9 +2614,12 @@ fn try_parse_keyword_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
         .is_ok()
         {
             let mut def = make_base();
-            def.mode = TriggerMode::ExhaustAbilityActivated;
+            def.mode = TriggerMode::KeywordAbilityActivated(AbilityTag::Exhaust);
             def.condition = Some(TriggerCondition::ActivatedAbilityIsNonMana);
-            return Some((TriggerMode::ExhaustAbilityActivated, def));
+            return Some((
+                TriggerMode::KeywordAbilityActivated(AbilityTag::Exhaust),
+                def,
+            ));
         }
     }
     None
@@ -14278,7 +14292,10 @@ mod tests {
             "Whenever you activate an exhaust ability, draw a card.",
             "Rangers' Aetherhive",
         );
-        assert_eq!(def.mode, TriggerMode::ExhaustAbilityActivated);
+        assert_eq!(
+            def.mode,
+            TriggerMode::KeywordAbilityActivated(AbilityTag::Exhaust)
+        );
         assert_eq!(def.condition, None);
     }
 
@@ -14288,7 +14305,10 @@ mod tests {
             "Whenever you activate an exhaust ability that isn't a mana ability, draw a card.",
             "Sala, Deck Boss",
         );
-        assert_eq!(def.mode, TriggerMode::ExhaustAbilityActivated);
+        assert_eq!(
+            def.mode,
+            TriggerMode::KeywordAbilityActivated(AbilityTag::Exhaust)
+        );
         assert_eq!(
             def.condition,
             Some(TriggerCondition::ActivatedAbilityIsNonMana)

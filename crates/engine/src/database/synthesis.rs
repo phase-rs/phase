@@ -1110,10 +1110,7 @@ pub fn synthesize_outlast(face: &mut CardFace) {
             };
             // CR 702.107a: Composite cost — pay mana, then tap this creature.
             let composite_cost = AbilityCost::Composite {
-                costs: vec![
-                    AbilityCost::Mana { cost: cost.clone() },
-                    AbilityCost::Tap,
-                ],
+                costs: vec![AbilityCost::Mana { cost: cost.clone() }, AbilityCost::Tap],
             };
             // CR 702.107a: "Put a +1/+1 counter on this creature."
             let effect = Effect::PutCounter {

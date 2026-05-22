@@ -2847,7 +2847,7 @@ pub(crate) fn check_trigger_condition(
             .map(|obj| obj.cast_variant_paid == Some((*variant, state.turn_number)))
             .unwrap_or(false),
         TriggerCondition::ActivatedAbilityIsNonMana => match trigger_event {
-            Some(GameEvent::ExhaustAbilityActivated {
+            Some(GameEvent::KeywordAbilityActivated {
                 is_mana_ability, ..
             }) => !*is_mana_ability,
             _ => false,

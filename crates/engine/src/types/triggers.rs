@@ -4,6 +4,8 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use crate::types::ability::AbilityTag;
+
 /// CR 508.3a: Filter for attack target type in "attacks [a target]" triggers.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AttackTargetFilter {
@@ -197,12 +199,10 @@ pub enum TriggerMode {
     CycledOrDiscarded,
     /// CR 702.49a: Triggers when a player activates a ninjutsu-family ability.
     NinjutsuActivated,
-    /// CR 702.142b: Triggers when a player activates a boast ability.
-    BoastAbilityActivated,
-    /// CR 702.177a: Triggers when a player activates an exhaust ability.
-    ExhaustAbilityActivated,
-    /// CR 702.107a: Triggers when a player activates this creature's outlast ability.
-    OutlastAbilityActivated,
+    /// CR 702.107a + CR 702.142b + CR 702.177a: Triggers when a player activates a keyword
+    /// ability tagged by `AbilityTag`. Parameterized to avoid per-keyword sibling proliferation:
+    /// `AbilityTag::Boast`, `AbilityTag::Exhaust`, `AbilityTag::Outlast` are the current values.
+    KeywordAbilityActivated(AbilityTag),
     /// CR 702.100: Evolve trigger — when a creature enters with greater power/toughness.
     Evolved,
     /// CR 701.44: Triggers when a creature explores.
@@ -453,9 +453,9 @@ impl FromStr for TriggerMode {
             "Mutates" => TriggerMode::Mutates,
             "NewGame" => TriggerMode::NewGame,
             "NinjutsuActivated" => TriggerMode::NinjutsuActivated,
-            "BoastAbilityActivated" => TriggerMode::BoastAbilityActivated,
-            "ExhaustAbilityActivated" => TriggerMode::ExhaustAbilityActivated,
-            "OutlastAbilityActivated" => TriggerMode::OutlastAbilityActivated,
+            "BoastAbilityActivated" => TriggerMode::KeywordAbilityActivated(AbilityTag::Boast),
+            "ExhaustAbilityActivated" => TriggerMode::KeywordAbilityActivated(AbilityTag::Exhaust),
+            "OutlastAbilityActivated" => TriggerMode::KeywordAbilityActivated(AbilityTag::Outlast),
             "PayCumulativeUpkeep" => TriggerMode::PayCumulativeUpkeep,
             "PayEcho" => TriggerMode::PayEcho,
             "PayLife" => TriggerMode::PayLife,
@@ -718,6 +718,7 @@ mod tests {
             "BoastAbilityActivated",
             "ExhaustAbilityActivated",
             "OutlastAbilityActivated",
+            // These three deserialize into KeywordAbilityActivated(tag) — all are valid
             "PayCumulativeUpkeep",
             "PayEcho",
             "PayLife",
