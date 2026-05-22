@@ -2109,11 +2109,9 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             // CR 205.1a + CR 613.1d: Replace the entire core card-type set.
             ContinuousModification::SetCardTypes { ref core_types } => {
                 obj.card_types.core_types = core_types.clone();
-                obj.card_types
-                    .subtypes
-                    .retain(|subtype| {
-                        subtype_matches_core_types(subtype, core_types, &all_creature_types)
-                    });
+                obj.card_types.subtypes.retain(|subtype| {
+                    subtype_matches_core_types(subtype, core_types, &all_creature_types)
+                });
             }
             // CR 205.1a + CR 613.1d: Remove every subtype belonging to the
             // named subtype set. Membership for the `Creature` set is resolved
@@ -2546,27 +2544,27 @@ mod tests {
         assert!(subtype_matches_core_types(
             "Bear",
             &[CoreType::Creature],
-            &state
+            &state.all_creature_types
         ));
         assert!(!subtype_matches_core_types(
             "Equipment",
             &[CoreType::Creature],
-            &state
+            &state.all_creature_types
         ));
         assert!(!subtype_matches_core_types(
             "Mountain",
             &[CoreType::Creature],
-            &state
+            &state.all_creature_types
         ));
         assert!(subtype_matches_core_types(
             "Equipment",
             &[CoreType::Artifact, CoreType::Creature],
-            &state
+            &state.all_creature_types
         ));
         assert!(subtype_matches_core_types(
             "Siege",
             &[CoreType::Battle],
-            &state
+            &state.all_creature_types
         ));
     }
 

@@ -7733,7 +7733,9 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     // into one AddType/AddSubtype modification per token (not a single
     // whole-phrase AddSubtype string).
     modifications.extend(parse_becomes_type_addition_modifications(&unquoted_tp));
-    modifications.extend(parse_bare_becomes_type_replacement_modifications(&unquoted_tp));
+    modifications.extend(parse_bare_becomes_type_replacement_modifications(
+        &unquoted_tp,
+    ));
 
     modifications
 }
@@ -8062,9 +8064,8 @@ fn parse_clause_before_optional_period(input: &str) -> OracleResult<'_, &str> {
 }
 
 fn split_type_retention_clause(input: &str) -> Option<(&str, CoreType)> {
-    let (descriptor, retention_clause) = nom_primitives::scan_split_at_phrase(input, |i| {
-        parse_type_retention_clause(i)
-    })?;
+    let (descriptor, retention_clause) =
+        nom_primitives::scan_split_at_phrase(input, |i| parse_type_retention_clause(i))?;
     let (_, retained_core_type) = parse_type_retention_clause(retention_clause).ok()?;
     Some((descriptor, retained_core_type))
 }
@@ -8087,7 +8088,10 @@ fn parse_type_retention_clause(input: &str) -> OracleResult<'_, CoreType> {
         value(CoreType::Artifact, alt((tag("artifact"), tag("artifacts")))),
         value(CoreType::Battle, alt((tag("battle"), tag("battles")))),
         value(CoreType::Creature, alt((tag("creature"), tag("creatures")))),
-        value(CoreType::Enchantment, alt((tag("enchantment"), tag("enchantments")))),
+        value(
+            CoreType::Enchantment,
+            alt((tag("enchantment"), tag("enchantments"))),
+        ),
         value(CoreType::Instant, alt((tag("instant"), tag("instants")))),
         value(CoreType::Kindred, alt((tag("kindred"), tag("kindreds")))),
         value(CoreType::Land, alt((tag("land"), tag("lands")))),
