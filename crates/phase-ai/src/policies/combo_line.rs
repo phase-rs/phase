@@ -67,6 +67,11 @@ impl TacticalPolicy for ComboLinePolicy {
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
+        // TODO(cedh-perf): cache reachable_lines() by (quick_state_hash(state), ai_player)
+        // — verdict() runs per candidate, and CastSpell/ActivateAbility/SelectTarget
+        // can each carry many candidates. The query is repeated for sibling search
+        // nodes at the same game position. Defer until real combo lines populate
+        // the registry (current skeleton uses one stub line — O(1) per call).
         let reachable = self.registry.reachable_lines(ctx.state, ctx.ai_player);
         for (_id, reachability) in &reachable {
             match reachability {
@@ -76,7 +81,7 @@ impl TacticalPolicy for ComboLinePolicy {
                     let bonus = ctx.config.policy_penalties.combo_progress_this_turn_bonus;
                     return PolicyVerdict::Score {
                         delta: bonus,
-                        reason: PolicyReason::new("combo_this_turn"),
+                        reason: PolicyReason::new("combo_line_this_turn"),
                     };
                 }
                 ComboReachability::ReachableNextTurn { .. }
@@ -85,7 +90,7 @@ impl TacticalPolicy for ComboLinePolicy {
                     let bonus = ctx.config.policy_penalties.combo_progress_next_turn_bonus;
                     return PolicyVerdict::Score {
                         delta: bonus,
-                        reason: PolicyReason::new("combo_next_turn"),
+                        reason: PolicyReason::new("combo_line_next_turn"),
                     };
                 }
                 _ => {}
@@ -93,7 +98,7 @@ impl TacticalPolicy for ComboLinePolicy {
         }
         PolicyVerdict::Score {
             delta: 0.0,
-            reason: PolicyReason::new("combo_no_match"),
+            reason: PolicyReason::new("combo_line_no_match"),
         }
     }
 }

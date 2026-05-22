@@ -88,7 +88,6 @@ pub enum PolicyId {
     CombatTaxPayment,
     ReactiveSelfProtection,
     ComboLineProgress,
-    CedhKeepablesMulligan,
 }
 
 /// Coarse routing kind for a candidate decision. Each policy declares which
