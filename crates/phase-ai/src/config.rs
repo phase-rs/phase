@@ -570,11 +570,18 @@ pub fn create_config_for_players(
     match player_count {
         0..=2 => {} // No scaling needed
         3..=4 => {
-            // Paranoid search: cap depth at 2, reduce budget
-            config.search.max_depth = config.search.max_depth.min(2);
-            config.search.max_nodes = config.search.max_nodes * 2 / 3;
-            config.search.max_branching = config.search.max_branching.min(4);
-            config.search.rollout_depth = config.search.rollout_depth.min(1);
+            if difficulty == AiDifficulty::CEDH {
+                // cEDH is calibrated for 4-player tables. The generic
+                // paranoid cap (depth 2, nodes * 2/3, branching 4, rollout 1)
+                // would cripple it. The cEDH preset already accounts for
+                // the table size — no-op here.
+            } else {
+                // Paranoid search: cap depth at 2, reduce budget
+                config.search.max_depth = config.search.max_depth.min(2);
+                config.search.max_nodes = config.search.max_nodes * 2 / 3;
+                config.search.max_branching = config.search.max_branching.min(4);
+                config.search.rollout_depth = config.search.rollout_depth.min(1);
+            }
         }
         _ => {
             // 5-6+ players: heuristic-only or minimal search
@@ -797,5 +804,30 @@ mod tests {
         assert_eq!(config.search.max_depth, 2); // capped from 3
         assert_eq!(config.search.max_nodes, 64); // 96 * 2/3
         assert_eq!(config.search.rollout_depth, 2);
+    }
+
+    #[test]
+    fn cedh_skips_paranoid_scaling_at_4p() {
+        let cfg = create_config_for_players(AiDifficulty::CEDH, Platform::Native, 4);
+        assert_eq!(
+            cfg.search.max_depth, 3,
+            "cEDH must not be downgraded to depth 2 by paranoid scaling at 4p"
+        );
+        assert_eq!(
+            cfg.search.max_nodes, 96,
+            "cEDH must keep its native node budget at 4p"
+        );
+        assert_eq!(cfg.search.max_branching, 5);
+        assert_eq!(cfg.search.rollout_depth, 2);
+    }
+
+    #[test]
+    fn veryhard_still_gets_paranoid_scaling_at_4p() {
+        // Sanity: the scaling skip is cEDH-specific and doesn't affect VeryHard.
+        let cfg = create_config_for_players(AiDifficulty::VeryHard, Platform::Native, 4);
+        assert_eq!(
+            cfg.search.max_depth, 2,
+            "VeryHard should still be capped at 4p"
+        );
     }
 }
