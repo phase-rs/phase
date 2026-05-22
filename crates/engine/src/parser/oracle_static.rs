@@ -687,6 +687,20 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         return Some(def);
     }
 
+    if tp.lower == "no more than one creature can attack each combat." {
+        return Some(
+            StaticDefinition::new(StaticMode::MaxAttackersEachCombat { max: 1 })
+                .description(text.to_string()),
+        );
+    }
+
+    if tp.lower == "no more than one creature can block each combat." {
+        return Some(
+            StaticDefinition::new(StaticMode::MaxBlockersEachCombat { max: 1 })
+                .description(text.to_string()),
+        );
+    }
+
     if let Some(defs) = parse_cost_payment_prohibition_statics(&tp, &text) {
         return defs.into_iter().next();
     }
@@ -14944,6 +14958,18 @@ mod tests {
         let def = parse_static_line("This creature must attack each combat if able.").unwrap();
         assert_eq!(def.mode, StaticMode::MustAttack);
         assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn static_no_more_than_one_creature_can_attack_each_combat() {
+        let def = parse_static_line("No more than one creature can attack each combat.").unwrap();
+        assert_eq!(def.mode, StaticMode::MaxAttackersEachCombat { max: 1 });
+    }
+
+    #[test]
+    fn static_no_more_than_one_creature_can_block_each_combat() {
+        let def = parse_static_line("No more than one creature can block each combat.").unwrap();
+        assert_eq!(def.mode, StaticMode::MaxBlockersEachCombat { max: 1 });
     }
 
     #[test]

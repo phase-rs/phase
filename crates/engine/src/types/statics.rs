@@ -351,6 +351,12 @@ pub enum StaticMode {
     CantAttack,
     CantBlock,
     CantAttackOrBlock,
+    /// CR 508.1d: No more than `max` creatures can be declared as attackers
+    /// each combat.
+    MaxAttackersEachCombat { max: u32 },
+    /// CR 509.1c: No more than `max` creatures can be declared as blockers
+    /// each combat.
+    MaxBlockersEachCombat { max: u32 },
     CantBeTargeted,
     /// CR 101.2: Blanket casting prohibition — prevents the scoped player(s) from casting spells.
     /// E.g., Steel Golem: "You can't cast creature spells." (Controller scope + creature filter)
@@ -832,6 +838,8 @@ impl Hash for StaticMode {
                 cost_category.hash(state);
             }
             StaticMode::ExtraBlockers { count } => count.hash(state),
+            StaticMode::MaxAttackersEachCombat { max }
+            | StaticMode::MaxBlockersEachCombat { max } => max.hash(state),
             StaticMode::RevealTopOfLibrary { all_players } => all_players.hash(state),
             StaticMode::CantBeBlockedExceptBy { kind } => match kind {
                 // TargetFilter does not implement Hash; discriminant only.
@@ -894,6 +902,12 @@ impl fmt::Display for StaticMode {
             StaticMode::CantAttack => write!(f, "CantAttack"),
             StaticMode::CantBlock => write!(f, "CantBlock"),
             StaticMode::CantAttackOrBlock => write!(f, "CantAttackOrBlock"),
+            StaticMode::MaxAttackersEachCombat { max } => {
+                write!(f, "MaxAttackersEachCombat({max})")
+            }
+            StaticMode::MaxBlockersEachCombat { max } => {
+                write!(f, "MaxBlockersEachCombat({max})")
+            }
             StaticMode::CantBeTargeted => write!(f, "CantBeTargeted"),
             StaticMode::CantBeCast { who } => write!(f, "CantBeCast({who})"),
             StaticMode::CantBeActivated { who, .. } => write!(f, "CantBeActivated({who})"),
@@ -1079,6 +1093,8 @@ impl FromStr for StaticMode {
             "CantAttack" => StaticMode::CantAttack,
             "CantBlock" => StaticMode::CantBlock,
             "CantAttackOrBlock" => StaticMode::CantAttackOrBlock,
+            "MaxAttackersEachCombat" => StaticMode::MaxAttackersEachCombat { max: 1 },
+            "MaxBlockersEachCombat" => StaticMode::MaxBlockersEachCombat { max: 1 },
             "CantBeTargeted" => StaticMode::CantBeTargeted,
             "CantBeCast" => StaticMode::CantBeCast {
                 who: ProhibitionScope::Controller,

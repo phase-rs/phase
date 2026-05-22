@@ -240,6 +240,15 @@ pub fn place_attacking_alongside(
 pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Result<(), String> {
     let active = state.active_player;
 
+    if let Some(max) = max_attackers_each_combat(state) {
+        if attacker_ids.len() as u32 > max {
+            return Err(format!(
+                "No more than {} creature(s) can attack each combat",
+                max
+            ));
+        }
+    }
+
     for &id in attacker_ids {
         let obj = state
             .objects
@@ -309,6 +318,15 @@ pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Resul
     }
 
     Ok(())
+}
+
+fn max_attackers_each_combat(state: &GameState) -> Option<u32> {
+    super::functioning_abilities::battlefield_active_statics(state)
+        .filter_map(|(_, def)| match def.mode {
+            StaticMode::MaxAttackersEachCombat { max } => Some(max),
+            _ => None,
+        })
+        .min()
 }
 
 /// Iterate every battlefield `StaticDefinition` whose mode is a block-restriction
@@ -382,6 +400,15 @@ pub fn validate_blockers_for_player(
     player: PlayerId,
     assignments: &[(ObjectId, ObjectId)],
 ) -> Result<(), String> {
+    if let Some(max) = max_blockers_each_combat(state) {
+        if assignments.len() as u32 > max {
+            return Err(format!(
+                "No more than {} creature(s) can block each combat",
+                max
+            ));
+        }
+    }
+
     // Detect duplicate (blocker, attacker) pairs — the Vec-based blocker_to_attacker
     // no longer prevents this implicitly like the old HashMap<ObjectId, ObjectId> did.
     {
@@ -1567,6 +1594,15 @@ pub fn declare_blockers_for_player(
     events.push(event);
 
     Ok(())
+}
+
+fn max_blockers_each_combat(state: &GameState) -> Option<u32> {
+    super::functioning_abilities::battlefield_active_statics(state)
+        .filter_map(|(_, def)| match def.mode {
+            StaticMode::MaxBlockersEachCombat { max } => Some(max),
+            _ => None,
+        })
+        .min()
 }
 
 /// CR 509.1h + CR 702.49a: Returns ObjectIds of attackers that were never blocked.
