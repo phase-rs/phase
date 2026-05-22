@@ -24715,6 +24715,34 @@ mod tests {
     }
 
     #[test]
+    fn exile_all_creatures_and_spacecraft_lowers_to_mass_zone_change() {
+        let def = parse_effect_chain("Exile all creatures and Spacecraft.", AbilityKind::Spell);
+        match &*def.effect {
+            Effect::ChangeZoneAll {
+                destination,
+                target,
+                ..
+            } => {
+                assert_eq!(*destination, Zone::Exile);
+                match target {
+                    TargetFilter::Or { filters } => {
+                        assert_eq!(filters.len(), 2);
+                        assert_eq!(filters[0], TargetFilter::Typed(TypedFilter::creature()));
+                        assert_eq!(
+                            filters[1],
+                            TargetFilter::Typed(
+                                TypedFilter::default().subtype("Spacecraft".to_string())
+                            )
+                        );
+                    }
+                    other => panic!("expected Creature/Spacecraft Or filter, got {other:?}"),
+                }
+            }
+            other => panic!("expected ChangeZoneAll, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_put_on_top_or_bottom_possessive() {
         // "Target creature's owner puts it on their choice of the top or bottom of their library."
         let def = parse_effect_chain(

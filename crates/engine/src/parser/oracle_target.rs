@@ -7074,6 +7074,32 @@ mod tests {
     }
 
     #[test]
+    fn spacecraft_artifact_subtype() {
+        let (f, _) = parse_type_phrase("Spacecraft");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::default().subtype("Spacecraft".to_string()))
+        );
+    }
+
+    #[test]
+    fn creatures_and_spacecraft_type_union() {
+        let (f, rest) = parse_type_phrase("creatures and Spacecraft");
+        match f {
+            TargetFilter::Or { ref filters } => {
+                assert_eq!(filters.len(), 2);
+                assert_eq!(filters[0], TargetFilter::Typed(TypedFilter::creature()));
+                assert_eq!(
+                    filters[1],
+                    TargetFilter::Typed(TypedFilter::default().subtype("Spacecraft".to_string()))
+                );
+            }
+            other => panic!("Expected Or filter, got {:?}", other),
+        }
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
     fn forest_land_subtype() {
         let (f, _) = parse_type_phrase("forest");
         match f {

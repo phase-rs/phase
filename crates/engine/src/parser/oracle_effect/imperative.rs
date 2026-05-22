@@ -6520,6 +6520,30 @@ mod tests {
     }
 
     #[test]
+    fn parse_exile_all_creatures_and_spacecraft() {
+        let input = "exile all creatures and Spacecraft";
+        let lower = input.to_lowercase();
+        let result = parse_zone_counter_ast(input, &lower, &mut ParseContext::default());
+        let Some(ZoneCounterImperativeAst::Exile {
+            origin: None,
+            target: TargetFilter::Or { filters },
+            all: true,
+            enter_with_counters,
+        }) = result
+        else {
+            panic!("{input}: expected mass exile type union, got {result:?}");
+        };
+
+        assert!(enter_with_counters.is_empty());
+        assert_eq!(filters.len(), 2);
+        assert_eq!(filters[0], TargetFilter::Typed(TypedFilter::creature()));
+        assert_eq!(
+            filters[1],
+            TargetFilter::Typed(TypedFilter::default().subtype("Spacecraft".to_string()))
+        );
+    }
+
+    #[test]
     fn parse_exile_from_your_hand_handles_article_variants() {
         for (input, expected_type) in [
             ("exile an instant card from your hand", TypeFilter::Instant),

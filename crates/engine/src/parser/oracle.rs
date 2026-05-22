@@ -6551,6 +6551,46 @@ mod tests {
     }
 
     #[test]
+    fn end_to_end_beyond_the_quiet_no_spacecraft_gap() {
+        let r = parse(
+            "Exile all creatures and Spacecraft.",
+            "Beyond the Quiet",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        assert!(
+            !has_unimplemented(&r.abilities[0]),
+            "Beyond the Quiet should not produce Unimplemented effects: {:?}",
+            r.abilities[0]
+        );
+        match &*r.abilities[0].effect {
+            Effect::ChangeZoneAll {
+                destination,
+                target,
+                ..
+            } => {
+                assert_eq!(*destination, Zone::Exile);
+                match target {
+                    TargetFilter::Or { filters } => {
+                        assert_eq!(filters.len(), 2);
+                        assert_eq!(filters[0], TargetFilter::Typed(TypedFilter::creature()));
+                        assert_eq!(
+                            filters[1],
+                            TargetFilter::Typed(
+                                TypedFilter::default().subtype("Spacecraft".to_string())
+                            )
+                        );
+                    }
+                    other => panic!("expected Creature/Spacecraft Or filter, got {other:?}"),
+                }
+            }
+            other => panic!("expected ChangeZoneAll, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn end_to_end_suspend_sorcery_no_unimplemented() {
         // CR 702.62a: "Suspend N—{cost}" on a sorcery must not produce Unimplemented.
         // Ancestral Vision: "Suspend 4—{U}\nTarget player draws three cards."
