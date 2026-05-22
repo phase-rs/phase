@@ -20466,7 +20466,25 @@ mod tests {
             AbilityKind::Spell,
         );
         assert_eq!(def.player_scope, Some(PlayerFilter::All));
-        assert!(matches!(&*def.effect, Effect::Discard { .. }));
+        // CR 109.5 + CR 115.10: "their hand" under `player_scope: All` must
+        // resolve the count against the iterating player, not the caster.
+        // Regression for the Windfall bug where opponents drew without
+        // discarding because `HandSize { Controller }` survived the rebind.
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::Discard {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::ScopedPlayer,
+                        },
+                    },
+                    ..
+                }
+            ),
+            "expected HandSize {{ ScopedPlayer }}, got {:?}",
+            def.effect
+        );
         let sub = def
             .sub_ability
             .as_ref()

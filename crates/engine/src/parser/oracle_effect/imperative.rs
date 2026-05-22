@@ -922,20 +922,35 @@ pub(super) fn parse_targeted_action_ast(
         .parse(after_discard)
         .map(|(rest, _)| rest)
         .unwrap_or(after_discard);
-        // Detect whole-hand discard patterns before falling through to count parsing.
+        // CR 109.5 + CR 115.10: Whole-hand discard. The possessive pronoun
+        // disambiguates the hand-size owner:
+        //   - "your hand" → `PlayerScope::Controller` ("you" = printed
+        //     ability controller; survives `player_scope` iteration via
+        //     `original_controller` preservation in
+        //     `resolve_quantity_with_targets`).
+        //   - "their hand" / "his or her hand" → `PlayerScope::ScopedPlayer`
+        //     (the possessive refers to the subject of the imperative — the
+        //     each-player iterating player under `player_scope`, or the
+        //     ability controller as a non-iterating fallback).
+        // Wrong scope here broke Windfall: "Each player discards their hand,
+        // then draws cards…" — opponents drew without discarding because
+        // `Controller` resolved to the caster across iteration, not the
+        // iterating player.
         // Uses tag prefix (not contains) to avoid matching "discard a card from your hand".
-        if alt((
-            tag::<_, _, OracleError<'_>>("your hand"),
-            tag("their hand"),
-            tag("his or her hand"),
+        if let Ok((_, hand_owner_scope)) = alt((
+            value(
+                PlayerScope::Controller,
+                tag::<_, _, OracleError<'_>>("your hand"),
+            ),
+            value(PlayerScope::ScopedPlayer, tag("their hand")),
+            value(PlayerScope::ScopedPlayer, tag("his or her hand")),
         ))
         .parse(after_discard)
-        .is_ok()
         {
             return Some(TargetedImperativeAst::Discard {
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::HandSize {
-                        player: PlayerScope::Controller,
+                        player: hand_owner_scope,
                     },
                 },
                 random,
@@ -7598,6 +7613,16 @@ mod tests {
 
     #[test]
     fn parse_discard_their_hand() {
+        // CR 109.5 + CR 115.10: "their" in a discard imperative refers to the
+        // subject of the each-player wrapper (or to the target player) — NOT
+        // the printed ability controller. Under `player_scope` iteration the
+        // count must read the iterating player's hand size, not the caster's.
+        // `PlayerScope::ScopedPlayer` resolves to the iterating player and
+        // falls back to the controller outside iteration, so non-scoped sites
+        // still resolve correctly. Regression: Windfall ("Each player discards
+        // their hand, then draws cards equal to the greatest number of cards a
+        // player discarded this way.") — opponents previously drew without
+        // discarding because `Controller` survived the per-iteration rebind.
         let text = "discard their hand";
         let lower = text.to_lowercase();
         let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
@@ -7608,7 +7633,7 @@ mod tests {
                         count,
                         QuantityExpr::Ref {
                             qty: QuantityRef::HandSize {
-                                player: PlayerScope::Controller
+                                player: PlayerScope::ScopedPlayer
                             }
                         }
                     ),
