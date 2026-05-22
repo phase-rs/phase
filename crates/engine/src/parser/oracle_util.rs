@@ -7,6 +7,7 @@ use super::oracle_nom::primitives as nom_primitives;
 use crate::types::ability::{Comparator, QuantityExpr, QuantityRef, TargetFilter};
 use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaColor, ManaCost};
+use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::space1;
 use nom::combinator::{eof, opt};
@@ -655,13 +656,36 @@ pub fn contains_object_pronoun(text: &str, prefix: &str, suffix: &str) -> bool {
 /// cycle, Nexus of Fate). The downstream classifier still distinguishes the two,
 /// so this only widens the gate, not the semantics.
 pub fn contains_self_or_object_pronoun(text: &str, prefix: &str, suffix: &str) -> bool {
-    match_phrase_variants(
-        text,
-        prefix,
-        suffix,
-        SELF_AND_OBJECT_PRONOUNS,
-        |hay, needle| hay.contains(needle),
-    )
+    nom_primitives::scan_at_word_boundaries(text, |input| {
+        let input = if prefix.is_empty() {
+            input
+        } else {
+            let (input, _) = tag::<_, _, OracleError<'_>>(prefix).parse(input)?;
+            let (input, _) = space1(input)?;
+            input
+        };
+        let (input, _) = parse_self_or_object_pronoun(input)?;
+        let input = if suffix.is_empty() {
+            input
+        } else {
+            let (input, _) = space1(input)?;
+            let (input, _) = tag(suffix).parse(input)?;
+            input
+        };
+        Ok((input, ()))
+    })
+    .is_some()
+}
+
+fn parse_self_or_object_pronoun(input: &str) -> OracleResult<'_, &str> {
+    alt((
+        tag("that card"),
+        tag("those cards"),
+        tag("them"),
+        tag("it"),
+        tag("~"),
+    ))
+    .parse(input)
 }
 
 /// Parse mana production symbols like `{G}` into Vec<ManaColor>.
