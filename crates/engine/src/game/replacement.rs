@@ -429,6 +429,22 @@ fn damage_done_applier(
                 }
                 // CR 614.1a: Flat override — replace event amount with `value`.
                 DamageModification::SetTo { value } => value,
+                // CR 614.1a + CR 120.3a: Damage to a player causes life loss;
+                // cap that damage so the player's life total cannot fall below
+                // the specified floor.
+                DamageModification::SetPlayerLifeFloor { floor } => {
+                    if let TargetRef::Player(player_id) = target {
+                        let life = state
+                            .players
+                            .iter()
+                            .find(|player| player.id == player_id)
+                            .map(|player| player.life)
+                            .unwrap_or(0);
+                        life.saturating_sub(*floor).max(0) as u32
+                    } else {
+                        amount
+                    }
+                }
             };
             return ApplyResult::Modified(ProposedEvent::Damage {
                 source_id,
@@ -2073,6 +2089,7 @@ fn matches_damage_target_filter(
     ) -> bool {
         match scope {
             DamageTargetPlayerScope::Any => true,
+            DamageTargetPlayerScope::You => player == repl_controller,
             DamageTargetPlayerScope::Opponent => player != repl_controller,
             DamageTargetPlayerScope::Specific(specific) => player == *specific,
         }

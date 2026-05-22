@@ -114,6 +114,34 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    // --- Worship: damage that would reduce your life below 1 reduces it to 1 instead ---
+    // CR 614.1a + CR 120.3a: This is a damage replacement, gated by controlling
+    // a creature, that caps damage-to-life-loss at current life minus one.
+    if norm_lower
+        == "if you control a creature, damage that would reduce your life total to less than 1 reduces it to 1 instead."
+    {
+        return Some(
+            ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                .damage_target_filter(DamageTargetFilter::Player {
+                    player: DamageTargetPlayerScope::You,
+                })
+                .damage_modification(DamageModification::SetPlayerLifeFloor { floor: 1 })
+                .condition(ReplacementCondition::OnlyIfQuantity {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(
+                                TypedFilter::creature().controller(ControllerRef::You),
+                            ),
+                        },
+                    },
+                    comparator: Comparator::GT,
+                    rhs: QuantityExpr::Fixed { value: 0 },
+                    active_player_req: None,
+                })
+                .description(text.to_string()),
+        );
+    }
+
     // --- "[Type] you control enter untapped" (external replacement) ---
     if let Some(def) = parse_external_enters_untapped(&norm_lower, &text) {
         return Some(def);
@@ -7041,6 +7069,30 @@ mod tests {
         assert_eq!(def.damage_source_filter, None); // any source
         assert_eq!(def.damage_target_filter, None); // any target
         assert_eq!(def.combat_scope, None); // all damage
+    }
+
+    #[test]
+    fn damage_worship_life_floor() {
+        let def = parse_replacement_line(
+            "If you control a creature, damage that would reduce your life total to less than 1 reduces it to 1 instead.",
+            "Worship",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert_eq!(
+            def.damage_target_filter,
+            Some(DamageTargetFilter::Player {
+                player: DamageTargetPlayerScope::You
+            })
+        );
+        assert_eq!(
+            def.damage_modification,
+            Some(DamageModification::SetPlayerLifeFloor { floor: 1 })
+        );
+        assert!(matches!(
+            def.condition,
+            Some(ReplacementCondition::OnlyIfQuantity { .. })
+        ));
     }
 
     #[test]

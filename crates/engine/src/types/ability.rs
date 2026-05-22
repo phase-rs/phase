@@ -9476,6 +9476,10 @@ pub enum DamageModification {
     /// `SetToSourcePower` (dynamic) — this is a flat override of the
     /// event's amount with `value`.
     SetTo { value: u32 },
+    /// CR 614.1a + CR 120.3a: Damage to a player is reduced so that the
+    /// resulting life loss cannot bring that player below `floor`.
+    /// Used by Worship-class effects.
+    SetPlayerLifeFloor { floor: i32 },
 }
 
 /// CR 614.1a: Quantity modification for replacement effects (tokens, counters).
@@ -9547,6 +9551,7 @@ impl ManaReplacementScope {
 #[serde(tag = "type", content = "data")]
 pub enum DamageTargetPlayerScope {
     Any,
+    You,
     Opponent,
     Specific(PlayerId),
 }
