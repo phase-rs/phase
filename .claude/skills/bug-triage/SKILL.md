@@ -250,22 +250,44 @@ gh issue close <N> --repo phase-rs/phase --comment "Verified in gameplay. Closin
 gh issue edit <N> --repo phase-rs/phase --remove-label "status:needs-runtime-verify" --add-label "status:verified"
 ```
 
-### Mandatory Pre-Implementation Plan Review Gate — Two Independent Reviewers
+### Mandatory Pre-Implementation Plan Review Gate — Independent Review ROUNDS Until Clean
 
-Before any code is written for a triage item, the implementation plan must pass **two independent plan-review agents** applying `.claude/commands/review-engine-plan.md`. This gate runs *before* the post-fix gate below — plan review catches design errors (wrong CR section, special-case instead of building-block, missing sibling coverage) when they cost a plan revision instead of a full re-implementation.
+Before any code is written for a triage item, the implementation plan must pass an **independent plan-review LOOP** applying `.claude/commands/review-engine-plan.md`: review → planner revises every gap → **fresh re-review of the revised plan** → repeat until a whole round returns clean. The gate is a *fixpoint* ("review until stable"), not a single pass and not "two reviewers, done." It runs *before* the post-fix gate — plan review catches design errors (wrong CR section, special-case instead of building-block, missing sibling coverage, blast-radius/registration gaps) when they cost a plan revision instead of a full re-implementation.
 
 How to apply:
 
 ```
-# After engine-planner produces a plan:
-#   - Spawn TWO isolated reviewer agents (NOT the planner), in parallel.
-#   - Each applies the /review-engine-plan charter with fresh context.
-#   - A single reviewer is NOT sufficient — two independent reviewers catch
-#     disjoint classes of error (one finds CR mis-cites, the other finds
-#     architecture/parameterization smells).
+# After engine-planner produces a plan, run independent ROUNDS. NOTE: the
+# engine-planner's own internal "architectural analysis" section does NOT
+# count — run independent reviewers AFTER it finalizes.
+#
+# Each round:
+#   - Spawn fresh-context reviewer(s) (NOT the planner). Two with complementary
+#     emphases (one CR/rules-correctness, one architecture/parameterization)
+#     surface disjoint error classes well in round 1; a single rigorous
+#     reviewer is fine for later rounds.
+#   - Send EVERY gap (consolidated) back to the planner; it revises the plan.
+#   - RE-REVIEW THE WHOLE REVISED PLAN with fresh context — NOT just the
+#     changed sections. Revisions routinely INTRODUCE new gaps in
+#     untouched-looking areas: closing one exhaustive-match site reveals a
+#     5th/6th; a spec rewrite inverts a recompute path; a "verbatim reuse"
+#     turns out to need new capability. Targeted-only re-review misses these.
+#   - Repeat until a FULL round returns clean (no BLOCKER).
 ```
 
-If either reviewer returns REVISE: the planner revises, then a **targeted re-review** runs on the revised sections only. Repeat until both reviewers are APPROVE. Do NOT start implementation — do not spawn the `engine-implementer` — until the plan is clean. Plans should commit to a building-block fix, carry grep-verified CR cites, and (for runtime bugs) be discriminator-first where practical (write the failing test first; let the failing checkpoint localize the bug).
+Do NOT start implementation — do not spawn the `engine-implementer` — until a full round is clean. Real plans this codebase has needed took 4–6 rounds; each round caught a genuine compile-break or rules-correctness defect. Plans should commit to a building-block fix, carry grep-verified CR cites, enumerate the new-variant/new-field blast radius (see below), and (for runtime bugs) be discriminator-first where practical (write the failing test first; let the failing checkpoint localize the bug).
+
+### New-Variant / New-Field Blast Radius — Enumerate in the Plan, Verify in Review
+
+Adding a new enum variant or a new field to a struct-variant has compile-time blast radius across the WHOLE workspace. This was the single most common gap class across multi-round plan reviews — make it an explicit plan section and a mandatory reviewer check.
+
+- **New field on a struct-variant** (e.g. `split` on `Effect::SearchLibrary`): `#[serde(default)]` does NOT make it optional for Rust *literals*. Every `Effect::Variant { … }` construction across ALL crates (engine, phase-ai, mtgish-import, tests) must set it; every non-`..` destructure must bind it or add `..`. Enumerate with `grep -rn "Effect::Variant {" crates/` — treat the grep, not a hand-list, as authoritative.
+- **New `WaitingFor` / enum variant**: breaks every EXHAUSTIVE `match` (no wildcard). Enumerate ALL sites by grepping a recently-added sibling variant (`rg "WaitingFor::SomeRecentVariant"`), then classify each match as exhaustive (needs an arm) vs `_`/`..`/`if let`/`matches!` (doesn't). Span engine + phase-ai + server-core. One `WaitingFor` variant typically needs ~5 arms (e.g. `acting_player`, `ai_support/candidates`, `phase-ai/decision_kind::classify`, `phase-ai/search::fallback_action`, `game/scenario::waiting_for_kind`).
+- **THE SILENT KILLER — `matches!` dispatch gates**: a handler reachable only if its variant is listed in a `matches!` guard (e.g. `engine_resolution_choices::handles`) is NOT compile-checked. Omit it and the handler is silent dead code — the action falls through to InvalidAction; clippy and the type system say nothing. Grep for `matches!`/membership predicates that gate dispatch and add the variant; add a test asserting the action is *handled* (not InvalidAction).
+
+### Cosmetic-AST Fix Is a Non-Fix — Trace the Runtime Consumer
+
+A misparse fix can flip the AST to *look* right while the runtime driver ignores the change. (Documented: routing "for each opponent" through `player_scope` made the AST read `ScopedPlayer`, but the `repeat_for` driver never binds `scoped_player`, so it collapsed back to the caster — zero behavioral change; and a `TargetPlayer` object spec read fine in the AST but enumerated EMPTY on the recompute path because that path only honors `controller: You`.) The planner MUST trace the effect HANDLER end-to-end, not just the parser/driver, and the discriminating test MUST be RUNTIME (drive `apply()` and observe state), never AST-only. An AST snapshot proves the parse didn't regress — not that the bug is fixed.
 
 ### Mandatory Post-Fix Review Gate — Isolated Reviewer Required
 
@@ -444,6 +466,29 @@ If a `git add <file>` collision happens anyway:
 3. SendMessage the other agent so it knows part of its work landed in your commit and to trust `git diff HEAD` for what remains to commit
 
 Documented collision from 2026-05-11: a small Fabricate-timing comment annotation (#358) staged via `git add crates/engine/src/database/synthesis.rs` swept the #353 Undying/Persist agent's in-progress synthesis scaffold into the same commit. Recovery: amended commit message to honestly describe both changes; agent finished its remaining work (tests + registration) in a follow-up commit.
+
+### Committing From a Shared Multi-Agent Checkout — Classify Every File
+
+The hunk-collision case above is for small overlaps. When an engine-implementer runs for a long time on shared `main`, the working tree becomes a SOUP of your feature's files plus *other agents' whole files* (e.g. an hour-long run produced ~45 modified files spanning your fix and 3 other agents' work). Isolate at the FILE level before committing:
+
+1. Classify every modified file: `git diff -- <f> | grep -qE "<your feature identifiers + blast-radius marker, e.g. 'SearchPartition|split: None'>"`. Files containing a marker are yours (including blast-radius `field: None` edits); files without are foreign.
+2. Spot-confirm the "blast-radius" files contain ONLY the field addition (every added line matches the marker — no foreign hunks rode along).
+3. `git add <explicit file list>` (NEVER `-A`). Then assert isolation: `git diff --cached --name-only` — every staged file must carry a feature marker; zero foreign. Print the unstaged leftovers and confirm they are *exactly* the foreign set you identified.
+4. **Commit via `git commit -F <msgfile>`**, never `-m` with a message containing embedded double-quotes — the shell breaks the quote and git mis-reads the words as pathspecs ("pathspec '…' did not match"). Write the message to a temp file first.
+5. After commit: verify HEAD is attached to a branch (`git symbolic-ref --short HEAD`) and the foreign files remain dirty/uncommitted (you didn't sweep them).
+
+### Implementer Crash / Sub-Agent Overload — Tilt Is the Source of Truth
+
+If an engine-implementer crashes (API `529 Overloaded`) or returns no final report, do NOT blindly relaunch — it ran on the shared `main` checkout and its edits are already in the working tree. Recover by assessment, not re-execution:
+
+1. `git status --short` + `git diff --stat` to see what landed.
+2. Tilt resources are ground truth for completeness: `test-engine` / `card-data` / `check-frontend` green ⇒ the implementation compiles and its tests pass, regardless of whether the agent reported. A dead agent can't lie about test status; the green resource can't be faked. (You can then do the post-fix review yourself from the diff — you are the orchestrator, a legitimate non-implementer reviewer — when spawning a fresh reviewer also fails to overload.)
+3. Read the LATEST Tilt build only — `tilt logs <r> --since Nm` mixes many churned builds; intermediate "could not compile" lines from while files were mid-edit are noise. Use `tilt get uiresource <r> -o jsonpath='{.status.updateStatus}'` for current status; diagnose only after `updateStatus == error` with no in-flight build.
+4. **Foreign red doesn't block you**: if clippy/test errors are all in files/crates you didn't touch (e.g. pre-existing `phase-server/main.rs` lints), they're another agent's. Proceed on your-crate-green + dependency-order reasoning (clippy reaching a downstream crate proves the upstream crates it depends on passed). Don't fix foreign red; don't get stuck on it. Confirm a suspected-foreign file is unmodified-by-you with `git diff --stat HEAD -- <file>`.
+
+### Sequential Implementation for Overlapping Plans
+
+Two approved plans whose file sets overlap (shared `ability_utils.rs`, `oracle_effect/mod.rs`, `types/*`, phase-ai builders) must be implemented SEQUENTIALLY — commit the first before launching the second — to avoid edit collisions and doubled Tilt build contention. Only run implementers in parallel when their file sets are provably disjoint.
 
 ### GitHub Comment Standard
 

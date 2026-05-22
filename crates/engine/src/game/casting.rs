@@ -13045,6 +13045,7 @@ mod tests {
                         reveal: false,
                         target_player: None,
                         selection_constraint: SearchSelectionConstraint::None,
+                        split: None,
                     },
                 )
                 .cost(AbilityCost::ReturnToHand {
@@ -22524,6 +22525,7 @@ mod tests {
                     reveal: true,
                     target_player: None,
                     selection_constraint: SearchSelectionConstraint::None,
+                    split: None,
                 },
             )
             .cost(AbilityCost::Composite {

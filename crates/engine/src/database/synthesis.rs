@@ -1019,6 +1019,7 @@ pub fn synthesize_cycling(face: &mut CardFace) {
                         reveal: true,
                         target_player: None,
                         selection_constraint: SearchSelectionConstraint::None,
+                        split: None,
                     },
                 )
                 .cost(composite_cost);

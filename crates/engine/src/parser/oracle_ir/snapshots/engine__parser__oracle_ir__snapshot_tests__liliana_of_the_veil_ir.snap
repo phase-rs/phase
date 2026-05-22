@@ -50,7 +50,7 @@ expression: "&ir"
             "type_filters": [
               "Creature"
             ],
-            "controller": null,
+            "controller": "TargetPlayer",
             "properties": []
           },
           "count": {

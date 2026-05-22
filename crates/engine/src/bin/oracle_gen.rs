@@ -50,6 +50,22 @@ fn is_clean_signals(sig: &BracketSignals) -> bool {
     sig.is_clean()
 }
 
+fn hidden_multiface_key(key: &str, entry: &CardExportEntry) -> Option<String> {
+    let oracle_id = entry.face.scryfall_oracle_id.as_ref()?;
+    entry.layout.as_ref()?;
+    Some(format!("{key} [{oracle_id}]"))
+}
+
+fn insert_hidden_multiface(
+    face_index: &mut BTreeMap<String, CardExportEntry>,
+    key: &str,
+    entry: CardExportEntry,
+) {
+    if let Some(hidden_key) = hidden_multiface_key(key, &entry) {
+        face_index.entry(hidden_key).or_insert(entry);
+    }
+}
+
 fn bracket_signals_for_face(
     lists: &BracketLists,
     face: &CardFace,
@@ -104,18 +120,21 @@ fn insert_face(
     let new_printings = entry.printings.len();
 
     if new_wins {
+        let existing = existing.clone();
         tracing::debug!(
             "Face collision on '{key}': replacing prior entry ({existing_oracle:?}, \
              {existing_printings} printings) with entry from MTGJSON key '{mtgjson_key}' \
              ({new_oracle:?}, {new_printings} printings)"
         );
-        face_index.insert(key, entry);
+        face_index.insert(key.clone(), entry);
+        insert_hidden_multiface(face_index, &key, existing);
     } else {
         tracing::debug!(
             "Face collision on '{key}': keeping prior entry ({existing_oracle:?}, \
              {existing_printings} printings) over entry from MTGJSON key '{mtgjson_key}' \
              ({new_oracle:?}, {new_printings} printings)"
         );
+        insert_hidden_multiface(face_index, &key, entry);
     }
 }
 
@@ -1133,6 +1152,40 @@ mod tests {
             rarities: BTreeSet::new(),
             bracket_signals: BracketSignals::default(),
         }
+    }
+
+    #[test]
+    fn insert_face_preserves_losing_multiface_entry_under_hidden_key() {
+        let mut map = BTreeMap::new();
+        insert_face(
+            &mut map,
+            "Emeritus of Truce // Swords to Plowshares",
+            "swords to plowshares".to_string(),
+            make_entry("sos-oracle", &["SOS"], Some("prepare")),
+        );
+        insert_face(
+            &mut map,
+            "Swords to Plowshares",
+            "swords to plowshares".to_string(),
+            make_entry("paper-oracle", &["2ED", "ICE", "MMA"], None),
+        );
+
+        assert_eq!(
+            map["swords to plowshares"]
+                .face
+                .scryfall_oracle_id
+                .as_deref(),
+            Some("paper-oracle"),
+            "canonical face-name lookup still prefers the standalone card"
+        );
+        assert_eq!(
+            map["swords to plowshares [sos-oracle]"]
+                .face
+                .scryfall_oracle_id
+                .as_deref(),
+            Some("sos-oracle"),
+            "printed-card rehydration must retain the prepare back face"
+        );
     }
 
     #[test]
