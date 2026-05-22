@@ -22671,6 +22671,38 @@ mod tests {
     }
 
     #[test]
+    fn self_pump_and_bare_becomes_subtypes_stays_one_continuous_effect() {
+        let def = parse_effect_chain(
+            "This creature gets +3/+3 and becomes a Bear Berserker until end of turn. Activate only once each turn.",
+            AbilityKind::Activated,
+        );
+        let Effect::GenericEffect {
+            static_abilities,
+            duration: Some(Duration::UntilEndOfTurn),
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", def.effect);
+        };
+        assert!(
+            def.sub_ability.is_none(),
+            "becomes subtype replacement should be absorbed into the pump effect"
+        );
+        let mods = &static_abilities[0].modifications;
+        assert!(mods.contains(&ContinuousModification::AddPower { value: 3 }));
+        assert!(mods.contains(&ContinuousModification::AddToughness { value: 3 }));
+        assert!(mods.contains(&ContinuousModification::RemoveAllSubtypes {
+            set: crate::types::card_type::SubtypeSet::Creature,
+        }));
+        assert!(mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Bear".to_string(),
+        }));
+        assert!(mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Berserker".to_string(),
+        }));
+    }
+
+    #[test]
     fn any_number_of_target_creatures_phase_out() {
         let clause = parse_effect_clause(
             "any number of target creatures you control phase out",
