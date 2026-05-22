@@ -1,6 +1,6 @@
-//! Combo reachability assessment over a `GameState`. The default detector
-//! is structural: walks `ComboLine::pieces`, matches them against the AI
-//! player's zones, and computes mana shortfall.
+//! Combo reachability assessment over a `GameState`. The structural detector
+//! walks `ComboLine::pieces`, matches them against the AI player's zones,
+//! and computes mana shortfall.
 
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
@@ -13,15 +13,15 @@ pub trait ComboDetector: Send + Sync {
     fn assess(&self, state: &GameState, line: &ComboLine, ai: PlayerId) -> ComboReachability;
 }
 
-/// Default structural detector. Reuses existing zone-iteration helpers:
+/// Structural detector. Reuses existing zone-iteration helpers:
 /// - `state.players[ai.0 as usize].hand` / `.graveyard` / `.library` for
 ///   off-battlefield pieces.
 /// - `state.battlefield` filtered by `controller == ai` for on-board pieces.
 /// - `crate::zone_eval::available_mana(state, ai)` for mana shortfall.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct DefaultComboDetector;
+pub struct StructuralComboDetector;
 
-impl ComboDetector for DefaultComboDetector {
+impl ComboDetector for StructuralComboDetector {
     fn assess(&self, state: &GameState, line: &ComboLine, ai: PlayerId) -> ComboReachability {
         let mut missing: Vec<ComboPiece> = Vec::new();
         for piece in &line.pieces {
@@ -35,17 +35,10 @@ impl ComboDetector for DefaultComboDetector {
             let available = crate::zone_eval::available_mana(state, ai);
             let required = mana_cost_total(&line.mana_cost);
             let shortfall = required.saturating_sub(available as i32);
-            if shortfall == 0 {
-                ComboReachability::ReachableThisTurn {
-                    missing_mana: 0,
-                    // Phase 5 wires action_sequence -> required_actions
-                    required_actions: Vec::new(),
-                }
-            } else {
-                ComboReachability::ReachableThisTurn {
-                    missing_mana: shortfall as u8,
-                    required_actions: Vec::new(),
-                }
+            ComboReachability::ReachableThisTurn {
+                missing_mana: shortfall as u8,
+                // Phase 5 wires action_sequence -> required_actions
+                required_actions: Vec::new(),
             }
         } else if missing
             .iter()
@@ -135,7 +128,7 @@ mod tests {
     fn empty_state_yields_not_reachable() {
         let s = empty_state();
         let line = one_piece_line();
-        let r = DefaultComboDetector.assess(&s, &line, PlayerId(0));
+        let r = StructuralComboDetector.assess(&s, &line, PlayerId(0));
         assert!(matches!(r, ComboReachability::NotReachable));
     }
 }

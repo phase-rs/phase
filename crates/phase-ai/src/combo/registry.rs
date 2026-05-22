@@ -13,7 +13,7 @@ use engine::types::game_state::GameState;
 use engine::types::mana::ManaCost;
 use engine::types::player::PlayerId;
 
-use crate::combo::detection::{ComboDetector, DefaultComboDetector};
+use crate::combo::detection::{ComboDetector, StructuralComboDetector};
 use crate::combo::line::{
     CardPredicate, ComboLine, ComboLineId, ComboPiece, ComboReachability, WinKind,
 };
@@ -27,7 +27,7 @@ impl Default for ComboRegistry {
     fn default() -> Self {
         Self {
             lines: vec![stub_line()],
-            detector: Box::new(DefaultComboDetector),
+            detector: Box::new(StructuralComboDetector),
         }
     }
 }

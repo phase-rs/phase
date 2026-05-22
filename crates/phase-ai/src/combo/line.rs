@@ -58,7 +58,8 @@ pub enum ComboStep {
 pub enum WinKind {
     /// CR 104.2 explicit win/loss effect (Thoracle / Laboratory Maniac).
     ImmediateLoss,
-    /// CR 726 infinite combat / mill / damage loop.
+    /// Unbounded repetition (e.g., infinite combat, draw, or damage loop)
+    /// achieving a win through an in-game condition.
     InfiniteLoop,
     /// Lethal damage or commander damage from the combo's resolution.
     LethalDamage,
@@ -95,7 +96,7 @@ mod tests {
     }
 
     #[test]
-    fn combo_piece_equality_is_structural() {
+    fn combo_piece_eq_respects_zone() {
         assert_eq!(
             ComboPiece::InHand(CardPredicate::NameEquals("Kiki-Jiki, Mirror Breaker")),
             ComboPiece::InHand(CardPredicate::NameEquals("Kiki-Jiki, Mirror Breaker")),
