@@ -441,8 +441,12 @@ fn damage_done_applier(
                             .find(|p| p.id == pid)
                             .map(|p| p.life)
                             .unwrap_or(0);
-                        let max_damage = (life - minimum).max(0) as u32;
-                        amount.min(max_damage)
+                        if life < minimum {
+                            amount
+                        } else {
+                            let max_damage = life.saturating_sub(minimum).max(0) as u32;
+                            amount.min(max_damage)
+                        }
                     } else {
                         amount
                     }
@@ -5996,6 +6000,46 @@ mod tests {
         match result {
             ApplyResult::Modified(ProposedEvent::Damage { amount, .. }) => {
                 assert_eq!(amount, 0);
+            }
+            other => panic!("Expected Modified Damage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn damage_applier_life_floor_caps_damage_that_would_go_below_floor() {
+        let repl = damage_repl(DamageModification::LifeFloor { minimum: 1 });
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+        state.players[1].life = 5;
+        let mut events = Vec::new();
+        let rid = ReplacementId {
+            source: ObjectId(10),
+            index: 0,
+        };
+
+        let result = damage_done_applier(damage_event(10), rid, &mut state, &mut events);
+        match result {
+            ApplyResult::Modified(ProposedEvent::Damage { amount, .. }) => {
+                assert_eq!(amount, 4);
+            }
+            other => panic!("Expected Modified Damage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn damage_applier_life_floor_does_not_apply_when_already_below_floor() {
+        let repl = damage_repl(DamageModification::LifeFloor { minimum: 1 });
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+        state.players[1].life = 0;
+        let mut events = Vec::new();
+        let rid = ReplacementId {
+            source: ObjectId(10),
+            index: 0,
+        };
+
+        let result = damage_done_applier(damage_event(3), rid, &mut state, &mut events);
+        match result {
+            ApplyResult::Modified(ProposedEvent::Damage { amount, .. }) => {
+                assert_eq!(amount, 3);
             }
             other => panic!("Expected Modified Damage, got {other:?}"),
         }

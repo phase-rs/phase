@@ -4549,38 +4549,38 @@ fn parse_generic_unless_condition(
 /// - `damage_modification`: `LifeFloor { minimum: N }`
 /// - `damage_target_filter`: `DamageTargetFilter::Player(Controller)`
 fn parse_life_floor_damage_replacement(norm_lower: &str) -> Option<ReplacementDefinition> {
-    // "if you control " prefix
     let (rest, _) = tag::<_, _, OracleError<'_>>("if you control ")
         .parse(norm_lower)
         .ok()?;
-
-    // Strip leading article ("a "/"an ") to reach the type phrase.
     let (rest, _) = alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))
         .parse(rest)
         .ok()?;
 
-    // Split at ", damage that would reduce your life total to less than ".
-    // `rest` is already lowercase, so split directly.
-    let sep = ", damage that would reduce your life total to less than ";
-    let sep_pos = rest.find(sep)?;
-    let filter_text = rest[..sep_pos].trim();
-    let after_threshold = rest[sep_pos + sep.len()..].trim_start();
+    let (after_threshold, filter_text) = terminated(
+        take_until::<_, _, OracleError<'_>>(
+            ", damage that would reduce your life total to less than ",
+        ),
+        tag::<_, _, OracleError<'_>>(", damage that would reduce your life total to less than "),
+    )
+    .parse(rest)
+    .ok()?;
 
-    // Parse the threshold value and confirm "reduces it to <same value> instead".
-    let (minimum, tail) = parse_number(after_threshold)?;
-    let tail = tail.trim_start();
-    let tail = tail.strip_prefix("reduces it to ")?.trim_start();
-    let (floor_val, tail) = parse_number(tail)?;
+    let (tail, minimum) = nom_primitives::parse_number.parse(after_threshold).ok()?;
+    let (tail, floor_val) = preceded(
+        tag::<_, _, OracleError<'_>>(" reduces it to "),
+        nom_primitives::parse_number,
+    )
+    .parse(tail)
+    .ok()?;
     if floor_val != minimum {
         return None;
     }
-    if !tail
-        .trim_start()
-        .trim_end_matches('.')
-        .eq_ignore_ascii_case("instead")
-    {
-        return None;
-    }
+    let (_, _) = all_consuming((
+        tag::<_, _, OracleError<'_>>(" instead"),
+        opt(tag::<_, _, OracleError<'_>>(".")),
+    ))
+    .parse(tail)
+    .ok()?;
 
     // Build the controller-scoped filter (e.g., "creature you control").
     let (filter, leftover) = parse_type_phrase(filter_text);
