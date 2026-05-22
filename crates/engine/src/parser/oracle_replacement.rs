@@ -80,6 +80,13 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    // --- "~ enters prepared." ---
+    // CR 722.3a: "enters prepared" gives the entering permanent the prepared
+    // designation as part of the entry event, not through a triggered ability.
+    if let Some(def) = parse_enters_prepared(&norm_lower, &text) {
+        return Some(def);
+    }
+
     // --- Reveal-lands: "As ~ enters, you may reveal a [FILTER] card from your hand.
     //     If you don't, ~ enters tapped." (Port Town, Gilt-Leaf Palace, Temple cycle) ---
     // Structurally parallel to shock lands: Mandatory replacement whose execute is
@@ -573,6 +580,34 @@ fn parse_self_enters_pay_cost_replacement(
 /// Case-insensitive replacement of card name and self-referencing phrases with "~".
 fn replace_self_refs(text: &str, card_name: &str) -> String {
     normalize_card_name_refs(text, card_name)
+}
+
+fn parse_enters_prepared(norm_lower: &str, text: &str) -> Option<ReplacementDefinition> {
+    let mut parser = value(
+        (),
+        all_consuming(preceded(
+            alt((
+                tag::<_, _, OracleError<'_>>("~"),
+                tag("this creature"),
+                tag("this permanent"),
+                tag("it"),
+            )),
+            (tag(" enters prepared"), opt(tag("."))),
+        )),
+    );
+    parser.parse(norm_lower.trim()).ok()?;
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::BecomePrepared {
+                    target: TargetFilter::SelfRef,
+                },
+            ))
+            .valid_card(TargetFilter::SelfRef)
+            .description(text.to_string()),
+    )
 }
 
 /// CR 603.6b + CR 701.20a: Parse the reveal-land pattern.
@@ -4501,6 +4536,7 @@ fn parse_generic_unless_condition(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::{
         Comparator, ControllerRef, CountScope, QuantityExpr, QuantityModification, QuantityRef,
         ReplacementCondition, ShieldKind, ZoneRef,
@@ -4995,6 +5031,43 @@ mod tests {
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
             Effect::Tap {
+                target: TargetFilter::SelfRef
+            }
+        ));
+    }
+
+    #[test]
+    fn replacement_enters_prepared() {
+        let def = parse_replacement_line("This creature enters prepared.", "Test Creature")
+            .expect("enters prepared should parse as replacement");
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::BecomePrepared {
+                target: TargetFilter::SelfRef
+            }
+        ));
+    }
+
+    #[test]
+    fn oracle_enters_prepared_is_replacement_not_trigger() {
+        let parsed = parse_oracle_text(
+            "Lluwen enters prepared.",
+            "Lluwen, Exchange Student",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        assert!(parsed.triggers.is_empty());
+        assert_eq!(parsed.replacements.len(), 1);
+        assert!(matches!(
+            *parsed.replacements[0]
+                .execute
+                .as_ref()
+                .expect("execute should be set")
+                .effect,
+            Effect::BecomePrepared {
                 target: TargetFilter::SelfRef
             }
         ));
