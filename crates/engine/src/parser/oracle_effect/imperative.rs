@@ -924,19 +924,27 @@ pub(super) fn parse_targeted_action_ast(
         .unwrap_or(after_discard);
         // Detect whole-hand discard patterns before falling through to count parsing.
         // Uses tag prefix (not contains) to avoid matching "discard a card from your hand".
-        if alt((
-            tag::<_, _, OracleError<'_>>("your hand"),
-            tag("their hand"),
-            tag("his or her hand"),
+        //
+        // CR 109.5: "your hand" is the caster (Controller). "their hand" /
+        // "his or her hand" is the discarding subject's OWN hand — under an
+        // each-player scope ("Each player discards their hand", Wheel of Fortune)
+        // this is the iterated player (ScopedPlayer), so each player discards
+        // their own hand instead of a count fixed to the caster's. ScopedPlayer
+        // falls back to Controller outside iteration, so non-scoped uses are
+        // unaffected. (#781)
+        if let Ok((_, hand_owner)) = alt((
+            value(
+                PlayerScope::Controller,
+                tag::<_, _, OracleError<'_>>("your hand"),
+            ),
+            value(PlayerScope::ScopedPlayer, tag("their hand")),
+            value(PlayerScope::ScopedPlayer, tag("his or her hand")),
         ))
         .parse(after_discard)
-        .is_ok()
         {
             return Some(TargetedImperativeAst::Discard {
                 count: QuantityExpr::Ref {
-                    qty: QuantityRef::HandSize {
-                        player: PlayerScope::Controller,
-                    },
+                    qty: QuantityRef::HandSize { player: hand_owner },
                 },
                 random,
                 up_to,
@@ -1490,6 +1498,7 @@ pub(super) fn parse_search_and_creation_ast(
             extra_filters: details.extra_filters,
             multi_destination: details.multi_destination,
             multi_enter_tapped: details.multi_enter_tapped,
+            split: details.split,
         });
     }
     // CR 701.16a + CR 701.20a: "look at the top N" (private) and "reveal the top N" (public)
@@ -1647,6 +1656,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             extra_filters: _,
             multi_destination: _,
             multi_enter_tapped: _,
+            split,
         } => Effect::SearchLibrary {
             filter,
             // CR 107.1c + CR 701.23d: Lower the AST `up_to: bool` into the
@@ -1659,6 +1669,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             reveal,
             target_player,
             selection_constraint,
+            split,
         },
         SearchCreationImperativeAst::SearchOutsideGame {
             filter,
@@ -3085,13 +3096,15 @@ fn try_parse_that_many_counters(lower: &str, ctx: &mut ParseContext) -> Option<E
     let (rest, _) = tag::<_, _, OracleError<'_>>("put that many ")
         .parse(lower)
         .ok()?;
-    // Next word(s) are counter type: "+1/+1", "charge", "loyalty", etc.
-    let type_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
-    let raw_type = &rest[..type_end];
-    let counter_type = super::counter::normalize_counter_type(raw_type);
+    // Counter type (e.g. "+1/+1", "charge", "loyalty", "double strike").
+    // CR 122.1 + CR 122.1b: route through the shared `parse_counter_type_typed`
+    // combinator so multi-word keyword counter names ("first strike", "double
+    // strike") canonicalize to `CounterType::Keyword(...)` instead of being
+    // truncated at the first whitespace.
+    let (after_type, counter_type) = nom_primitives::parse_counter_type_typed(rest).ok()?;
 
     // Skip "counter" or "counters" keyword
-    let after_type = rest[type_end..].trim_start();
+    let after_type = after_type.trim_start();
     let after_counter = alt((tag::<_, _, OracleError<'_>>("counters"), tag("counter")))
         .parse(after_type)
         .map(|(r, _)| r)
@@ -3534,6 +3547,7 @@ pub(super) fn lower_multi_filter_search_library(
             reveal,
             target_player,
             selection_constraint: SearchSelectionConstraint::MatchEachFilter { filters },
+            split: None,
         });
     }
 
@@ -3574,6 +3588,7 @@ pub(super) fn lower_multi_filter_search_library(
                 reveal,
                 target_player: target_player.clone(),
                 selection_constraint: selection_constraint.clone(),
+                split: None,
             },
         );
         search_def.sub_ability = tail;
@@ -3591,6 +3606,7 @@ pub(super) fn lower_multi_filter_search_library(
         reveal,
         target_player,
         selection_constraint,
+        split: None,
     });
     clause.sub_ability = tail;
     clause
@@ -3655,6 +3671,7 @@ fn lower_target_referenced_search_library(
             reveal,
             target_player,
             selection_constraint,
+            split: None,
         })
     } else {
         lower_multi_filter_search_library(
@@ -3823,6 +3840,12 @@ pub(super) fn parse_exile_ast(
             ("cards of each player's library", TargetFilter::Player),
         ] {
             if let Ok((after_lib, _)) = tag::<_, _, OracleError<'_>>(pattern).parse(remainder) {
+                // CR 406.3: Detect the "face down" suffix Oracle text uses to
+                // mark hidden-information exiles (Necropotence / Bomat Courier
+                // / Asmodeus the Archfiend / Knowledge Vault class). The
+                // resolver propagates this to the moved object's `face_down`
+                // flag so `visibility.rs` redacts the card for non-owners.
+                let (after_lib, face_down) = strip_exile_top_face_down(after_lib);
                 // CR 107.3i: Optional ", where x is <quantity expr>" suffix
                 // overrides the leading `Variable { "X" }` binding with the
                 // dynamic quantity expression. Mirrors the
@@ -3831,7 +3854,11 @@ pub(super) fn parse_exile_ast(
                 // (it's an ETB-triggered ability, not a cast), and the count
                 // would default to 0 at resolution time.
                 let count = resolve_exile_top_where_x_binding(after_lib, initial_count);
-                return Some(ZoneCounterImperativeAst::ExileTop { player, count });
+                return Some(ZoneCounterImperativeAst::ExileTop {
+                    player,
+                    count,
+                    face_down,
+                });
             }
         }
     }
@@ -3985,6 +4012,28 @@ fn that_player_library_filter(ctx: &ParseContext) -> TargetFilter {
         Some(TargetFilter::Player) => TargetFilter::TriggeringPlayer,
         _ => TargetFilter::ParentTarget,
     }
+}
+
+/// CR 406.3: Strip a trailing "face down" suffix from the remainder of an
+/// `exile the top ... library` body. Returns `(remaining_text, face_down)`.
+/// The Oracle text places "face down" immediately after the library clause
+/// and before any subsequent dynamic-count or follow-on phrase (Necropotence,
+/// Bomat Courier, Asmodeus the Archfiend, Knowledge Vault). Matching at this
+/// boundary keeps the downstream `where x is` and "those cards" lowering
+/// paths untouched.
+fn strip_exile_top_face_down(after_lib: &str) -> (&str, bool) {
+    let trimmed = after_lib.trim_start();
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("face down").parse(trimmed) {
+        // Word-boundary check after the nom tag accepted: clause
+        // terminators (EOF, '.', ',') or a separator (' ') keep us from
+        // bleeding into a larger identifier. Not a parser dispatch — the
+        // dispatch was the `tag` above; this is post-tag validation.
+        match rest.chars().next() {
+            None | Some('.') | Some(',') | Some(' ') => return (rest, true),
+            _ => {}
+        }
+    }
+    (after_lib, false)
 }
 
 /// CR 107.3i: Resolve a `", where x is <quantity expr>"` suffix that follows an
@@ -5455,6 +5504,8 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 extra_filters,
                 multi_destination,
                 multi_enter_tapped,
+                // Reference-target searches are not cultivate-class splits.
+                split: _,
             },
         )) => lower_target_referenced_search_library(
             reference_target,
@@ -5485,6 +5536,8 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 extra_filters,
                 multi_destination,
                 multi_enter_tapped,
+                // Multi-filter searches handle destinations per-filter, not via split.
+                split: _,
             },
         )) if !extra_filters.is_empty() => lower_multi_filter_search_library(
             filter,
@@ -5831,7 +5884,15 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                 }
             }
         }
-        ZoneCounterImperativeAst::ExileTop { player, count } => Effect::ExileTop { player, count },
+        ZoneCounterImperativeAst::ExileTop {
+            player,
+            count,
+            face_down,
+        } => Effect::ExileTop {
+            player,
+            count,
+            face_down,
+        },
         ZoneCounterImperativeAst::Counter {
             target,
             source_static,
@@ -7570,6 +7631,12 @@ mod tests {
 
     #[test]
     fn parse_discard_their_hand() {
+        // CR 109.5 (#781): "their hand" is the discarding subject's OWN hand, not
+        // the caster's. Under an each-player scope ("Each player discards their
+        // hand", Wheel of Fortune) this must bind to the iterated player
+        // (ScopedPlayer) so each player discards their own hand; ScopedPlayer
+        // falls back to Controller outside iteration, so singular subjects are
+        // unaffected. Contrast `parse_discard_your_hand` ("your" = Controller).
         let text = "discard their hand";
         let lower = text.to_lowercase();
         let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
@@ -7580,11 +7647,11 @@ mod tests {
                         count,
                         QuantityExpr::Ref {
                             qty: QuantityRef::HandSize {
-                                player: PlayerScope::Controller
+                                player: PlayerScope::ScopedPlayer
                             }
                         }
                     ),
-                    "Expected HandSize ref, got {count:?}"
+                    "Expected HandSize ref scoped to ScopedPlayer, got {count:?}"
                 );
             }
             other => panic!("Expected Discard with HandSize, got {other:?}"),
@@ -8580,5 +8647,43 @@ mod tests {
             try_parse_gain_quoted_ability("gain flying until end of turn").is_none(),
             "no quote marks → not a quoted-ability candidate"
         );
+    }
+
+    /// CR 122.1b: "put that many <keyword> counter(s) on <target>" must
+    /// canonicalize multi-word keyword counter names ("double strike", "first
+    /// strike") to `CounterType::Keyword(...)`. The previous
+    /// `.find(whitespace)` slicing truncated at the first space, mapping
+    /// "double strike" → `CounterType::Generic("double")`.
+    #[test]
+    fn that_many_counters_multi_word_keyword() {
+        use crate::types::counter::CounterType;
+        use crate::types::keywords::KeywordKind;
+        let mut ctx = ParseContext::default();
+        let effect =
+            try_parse_that_many_counters("put that many double strike counters on it", &mut ctx)
+                .expect("clause should parse");
+        match effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                ..
+            } => {
+                assert_eq!(
+                    counter_type,
+                    CounterType::Keyword(KeywordKind::DoubleStrike),
+                    "multi-word keyword counter must canonicalize to Keyword(DoubleStrike)"
+                );
+                assert!(
+                    matches!(
+                        count,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::EventContextAmount
+                        }
+                    ),
+                    "'that many' must resolve to event-context amount, got {count:?}"
+                );
+            }
+            other => panic!("expected Effect::PutCounter, got {other:?}"),
+        }
     }
 }

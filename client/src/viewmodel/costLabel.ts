@@ -291,6 +291,13 @@ export function abilityChoiceLabel(
   if (action.type === "CastSpell") {
     return { label: `Cast ${object.name}` };
   }
+  if (action.type === "CastPreparedCopy") {
+    const spellName = object.back_face?.name ?? "prepared spell";
+    return {
+      label: `Cast ${spellName}`,
+      description: `Cast a copy of ${spellName}. ${object.name} becomes unprepared.`,
+    };
+  }
   if (action.type === "Foretell") {
     const foretellKeyword = object.keywords.find(
       (k): k is { Foretell: ManaCost } => typeof k === "object" && "Foretell" in k,

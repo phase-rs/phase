@@ -18,7 +18,7 @@ use super::mana::{ManaColor, ManaCost, ManaType};
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
 use super::replacements::ReplacementEvent;
-use super::statics::{CastFrequency, StaticMode};
+use super::statics::{ActivationExemption, CastFrequency, StaticMode};
 use super::triggers::TriggerMode;
 use super::zones::Zone;
 use crate::types::events::PlayerActionKind;
@@ -98,6 +98,28 @@ pub enum SearchSelectionConstraint {
     MatchEachFilter { filters: Vec<TargetFilter> },
 }
 
+/// CR 701.23a + CR 608.2c: A search whose found set is partitioned between two
+/// destinations — e.g. Cultivate ("put one onto the battlefield tapped and the
+/// other into your hand"). `primary_count` cards go to `primary_destination`
+/// (the searcher's choice when more than `primary_count` are found); the rest go
+/// to `rest_destination`. `primary_destination` is `Battlefield` for the A/B/C
+/// cluster, where `primary_enter_tapped` routes the entry through the ETB
+/// pipeline so the permanent enters tapped (CR 614.1 / CR 110.5b).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchDestinationSplit {
+    /// Where the chosen primary cards go (Battlefield for cultivate-class).
+    pub primary_destination: Zone,
+    /// How many of the found cards go to `primary_destination` (literal N from
+    /// "put N ..."). Mirrors `Effect::Dig.keep_count`.
+    pub primary_count: u32,
+    /// CR 614.1 / CR 110.5b: When true, primary cards enter the battlefield
+    /// tapped. Mirrors `Effect::ChangeZone.enter_tapped`.
+    pub primary_enter_tapped: bool,
+    /// Where the remaining found cards go ("the rest"/"the other" — Hand for
+    /// cultivate-class).
+    pub rest_destination: Zone,
+}
+
 /// CR 608.2d: Who may choose to perform an optional effect during resolution.
 /// Used with `AbilityDefinition::optional_for` to route the "you may" prompt to opponents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -107,7 +129,7 @@ pub enum OpponentMayScope {
 }
 
 /// What kind of named choice the player must make at resolution time.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChoiceType {
     CreatureType,
     Color {
@@ -142,6 +164,16 @@ pub enum ChoiceType {
     Word,
     /// "Choose an artist" — selects a Magic card artist name.
     Artist,
+    /// CR 608.2d: "Choose [an ability from this list]" — the option set is a
+    /// typed list of `Keyword`s, not free-form strings. Used by Urborg /
+    /// Walking Sponge / Phyrexian Splicer ("target creature loses first strike
+    /// or swampwalk until end of turn"). The chosen keyword persists as
+    /// `ChosenAttribute::Keyword` on the source so a downstream
+    /// `ContinuousModification::RemoveChosenKeyword` (Layer 6) can strip the
+    /// chosen ability at layer-evaluation time.
+    Keyword {
+        options: Vec<Keyword>,
+    },
 }
 
 impl ChoiceType {
@@ -200,6 +232,12 @@ impl Serialize for ChoiceType {
             Self::TwoColors => serializer.serialize_unit_variant("ChoiceType", 11, "TwoColors"),
             Self::Word => serializer.serialize_unit_variant("ChoiceType", 12, "Word"),
             Self::Artist => serializer.serialize_unit_variant("ChoiceType", 13, "Artist"),
+            Self::Keyword { options } => {
+                let mut variant =
+                    serializer.serialize_struct_variant("ChoiceType", 14, "Keyword", 1)?;
+                variant.serialize_field("options", options)?;
+                variant.end()
+            }
         }
     }
 }
@@ -228,6 +266,9 @@ impl<'de> Deserialize<'de> for ChoiceType {
             },
             Labeled {
                 options: Vec<String>,
+            },
+            Keyword {
+                options: Vec<Keyword>,
             },
         }
 
@@ -267,6 +308,7 @@ impl<'de> Deserialize<'de> for ChoiceType {
                 ChoiceTypeData::Color { excluded } => Ok(Self::Color { excluded }),
                 ChoiceTypeData::NumberRange { min, max } => Ok(Self::NumberRange { min, max }),
                 ChoiceTypeData::Labeled { options } => Ok(Self::Labeled { options }),
+                ChoiceTypeData::Keyword { options } => Ok(Self::Keyword { options }),
             },
         }
     }
@@ -462,6 +504,11 @@ pub enum ChosenAttribute {
     /// Tribute ETB replacement paid tribute or declined. Read by the companion
     /// `TriggerCondition::TributeNotPaid` evaluator.
     TributeOutcome(TributeOutcome),
+    /// CR 608.2d: Records the typed keyword chosen from a `ChoiceType::Keyword`
+    /// option list (Urborg / Walking Sponge "choose an ability the target has,
+    /// remove it"). Read by `ContinuousModification::RemoveChosenKeyword` at
+    /// Layer 6 evaluation to strip the chosen keyword from the recipient.
+    Keyword(Keyword),
 }
 
 impl ChosenAttribute {
@@ -485,6 +532,13 @@ impl ChosenAttribute {
             Self::TributeOutcome(_) => ChoiceType::Labeled {
                 options: vec!["Paid".to_string(), "Declined".to_string()],
             },
+            // CR 608.2d: A category template — the concrete option list is
+            // attached to each emission site (Urborg lists FirstStrike +
+            // Swampwalk; another card might list any pair). Mirrors the
+            // `NumberRange { min: 0, max: 20 }` template idiom.
+            Self::Keyword(_) => ChoiceType::Keyword {
+                options: Vec::new(),
+            },
         }
     }
 
@@ -501,6 +555,7 @@ impl ChosenAttribute {
             ChoiceValue::Player(id) => Some(Self::Player(id)),
             ChoiceValue::TwoColors(colors) => Some(Self::TwoColors(colors)),
             ChoiceValue::Number(n) => Some(Self::Number(n)),
+            ChoiceValue::Keyword(keyword) => Some(Self::Keyword(keyword)),
             ChoiceValue::Label(_) | ChoiceValue::LandType(_) => None,
         }
     }
@@ -521,6 +576,11 @@ pub enum ChoiceValue {
     LandType(String),
     Player(PlayerId),
     TwoColors([ManaColor; 2]),
+    /// CR 608.2d: typed-keyword choice from a `ChoiceType::Keyword` option
+    /// list (Urborg / Walking Sponge). Persisted into the source's
+    /// `chosen_attributes` as `ChosenAttribute::Keyword` for later
+    /// `RemoveChosenKeyword` resolution.
+    Keyword(Keyword),
 }
 
 impl ChoiceValue {
@@ -552,6 +612,18 @@ impl ChoiceValue {
                 Some(Self::TwoColors([c1, c2]))
             }
             ChoiceType::Word | ChoiceType::Artist => Some(Self::Label(value.to_string())),
+            // CR 608.2d: match the player's response against the typed option
+            // list by display string. Comparison is case-insensitive so the
+            // frontend can render canonical capitalization while the engine
+            // accepts either form.
+            ChoiceType::Keyword { options } => {
+                let needle = value.to_lowercase();
+                options
+                    .iter()
+                    .find(|k| k.to_string().to_lowercase() == needle)
+                    .cloned()
+                    .map(Self::Keyword)
+            }
         }
     }
 }
@@ -791,25 +863,23 @@ impl<'de> serde::Deserialize<'de> for DevotionColors {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type")]
 pub enum ManaProduction {
-    /// Produce an explicit fixed sequence of colored mana symbols (e.g. `{W}{U}`).
+    /// Produce one or more specific colors.
     Fixed {
         #[serde(default)]
         colors: Vec<ManaColor>,
-        /// CR 605.1a: Whether this is base or additional (e.g. Wild Growth,
-        /// Verdant Haven) mana.
+        /// CR 605.1a: Whether this is base or additional (e.g. Fertile Ground) mana.
         #[serde(
             default = "default_mana_contribution",
             skip_serializing_if = "is_default_mana_contribution"
         )]
         contribution: ManaContribution,
     },
-    /// Produce N colorless mana (e.g. `{C}`, `{C}{C}`).
+    /// Produce strictly colorless mana (e.g. "Add {C}").
     Colorless {
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
     },
-    /// CR 106.1: Produce a mix of colorless and colored mana (e.g. `{C}{W}`, `{C}{C}{R}`).
-    /// Used by Ravnica bounce lands (Karoo, Azorius Chancery) and similar.
+    /// Produce a mixed bundle of fixed colorless + colored mana (e.g. "Add {C}{R}").
     Mixed {
         colorless_count: u32,
         colors: Vec<ManaColor>,
@@ -1183,21 +1253,29 @@ pub enum GameRestriction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scope: Option<RestrictionScope>,
     },
-    /// CR 101.2 + CR 601.2a: A temporary effect restricts affected players to casting
-    /// spells only from the listed zones until the restriction expires.
-    CastOnlyFromZones {
-        source: ObjectId,
-        affected_players: RestrictionPlayerScope,
-        allowed_zones: Vec<Zone>,
-        expiry: RestrictionExpiry,
-    },
-    /// CR 101.2: A temporary effect prevents affected players from casting any spell
-    /// until the restriction expires. E.g., Silence: "Your opponents can't cast spells this turn."
-    CantCastSpells {
+    /// CR 101.2 + CR 601.2a + CR 602.5: A temporary effect prohibits one activity
+    /// axis for affected players until expiry.
+    ProhibitActivity {
         source: ObjectId,
         affected_players: RestrictionPlayerScope,
         expiry: RestrictionExpiry,
+        activity: ProhibitedActivity,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ProhibitedActivity {
+    /// CR 101.2 + CR 601.2a: Restrict casting to the listed zones.
+    CastOnlyFromZones { allowed_zones: Vec<Zone> },
+    /// CR 101.2: Prevent casting matching spells.
+    CastSpells {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spell_filter: Option<TargetFilter>,
+    },
+    /// CR 101.2 + CR 602.5 + CR 605.1a: Prevent activating abilities, optionally
+    /// exempting mana abilities.
+    ActivateAbilities { exemption: ActivationExemption },
 }
 
 /// When a game restriction expires.
@@ -1224,6 +1302,14 @@ pub enum RestrictionScope {
 pub enum RestrictionPlayerScope {
     AllPlayers,
     SpecificPlayer(PlayerId),
+    /// Placeholder used by parser lowering for effects that target a player.
+    /// Resolved to `SpecificPlayer` by `add_restriction` at resolution time.
+    TargetedPlayer,
+    /// CR 608.2c: Anaphoric "that player" in a sub-ability reuses a player
+    /// target already chosen for an earlier instruction in the same chain.
+    /// Resolved to `SpecificPlayer` by `add_restriction` after parent target
+    /// propagation, without declaring a second target slot.
+    ParentTargetedPlayer,
     OpponentsOfSourceController,
 }
 
@@ -3016,6 +3102,12 @@ pub enum PlayerFilter {
     OpponentLostLife,
     /// Each opponent who gained life this turn (life_gained_this_turn > 0).
     OpponentGainedLife,
+    /// CR 120.1 + CR 510.1: Each opponent who was dealt combat damage this turn.
+    /// Resolved against `state.damage_dealt_this_turn` records whose
+    /// `is_combat = true` and `target = Player(p.id)`. Used by partner-quality
+    /// "for each opponent that was dealt combat damage this turn" cards
+    /// (Tymna the Weaver).
+    OpponentDealtCombatDamage,
     /// All players.
     All,
     /// CR 702.179f: Each player whose speed is tied for the highest speed among players.
@@ -5357,6 +5449,13 @@ pub enum Effect {
             skip_serializing_if = "is_default_search_selection_constraint"
         )]
         selection_constraint: SearchSelectionConstraint,
+        /// CR 701.23a + CR 608.2c: When set, the found set is partitioned across
+        /// two destinations (cultivate-class "put one onto the battlefield
+        /// tapped and the other into your hand"). `None` preserves the existing
+        /// single-zone search behavior (destination handled by the sub_ability
+        /// ChangeZone chain).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        split: Option<SearchDestinationSplit>,
     },
     /// CR 400.11/400.11a + CR 701.23j: Choose card(s) the player owns from
     /// outside the game. For tournament-style play, the bounded accessible set
@@ -5423,6 +5522,18 @@ pub enum Effect {
         /// Number of cards to exile.
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
+        /// CR 406.3: When true the exiled cards enter Exile face down and
+        /// must not be examinable by any player (the resolver flips the
+        /// moved object's `face_down` flag, and `visibility.rs` redacts the
+        /// card unless a separate effect grants look permission). Covers the
+        /// Necropotence / Bomat Courier / Asmodeus the Archfiend /
+        /// Knowledge Vault class — every card
+        /// whose Oracle text says "exile the top card of your library face
+        /// down". Skipped from serialization when false so JSON snapshots
+        /// and stored card-data for face-up `ExileTop` effects are
+        /// unchanged.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        face_down: bool,
     },
     /// No-op effect that only establishes targeting for sub-abilities in the chain.
     /// Produced by Oracle text like "Choose target creature" where the sentence exists
@@ -10046,6 +10157,13 @@ pub enum ContinuousModification {
     /// CR 105.3: Set the object's color to the chosen color.
     /// Reads from `chosen_attributes` at layer evaluation time.
     AddChosenColor,
+    /// CR 608.2d + CR 613.1f: Strip the chosen keyword (read from the granting
+    /// source's `chosen_attributes`) from the affected object. Mirrors
+    /// `RemoveKeyword`'s discriminant-based stripping so parameterized
+    /// keywords (e.g., `Landwalk("Swamp")`) lose every variant sharing the
+    /// same discriminant. Used by Urborg / Walking Sponge: "target creature
+    /// loses [chosen ability] until end of turn".
+    RemoveChosenKeyword,
     SetColor {
         colors: Vec<ManaColor>,
     },

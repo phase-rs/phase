@@ -415,10 +415,11 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_life_gained_ref,
         parse_starting_life_ref,
         parse_object_mana_value_ref,
-        // CR 117.1 + CR 202.3: cost-paid object's mana value — must precede
-        // `parse_event_context_refs` so the cost-paid resolver wins over the
-        // generic event-source resolver for sacrificed/exiled possessives
-        // (Food Chain, Burnt Offering, Metamorphosis).
+        // CR 608.2k + CR 400.7j + CR 202.3: previously-referenced object's
+        // mana value — must precede `parse_event_context_refs` so the
+        // cost/effect referent resolver wins over the generic event-source
+        // resolver for sacrificed/exiled/milled possessives (Food Chain, Burnt
+        // Offering, Metamorphosis, Heed the Mists).
         parse_cost_paid_object_ref,
         parse_event_context_refs,
     ))
@@ -1331,21 +1332,33 @@ fn parse_object_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     Ok((rest, QuantityRef::ObjectManaValue { scope }))
 }
 
-/// CR 117.1 + CR 202.3: Cost-paid object's mana value.
+/// CR 608.2k + CR 400.7j + CR 202.3: Previously-referenced object's mana value.
 ///
 /// Composes the prefix grammar
-/// `[the] (sacrificed|exiled) (creature|card|permanent|artifact)'s (mana value|converted mana cost)`
+/// `[the] (sacrificed|exiled|discarded|milled) (creature|card|permanent|artifact|enchantment|planeswalker|land)'s (mana value|converted mana cost|power|toughness)`
 /// into a single typed combinator. Each axis is a single `alt()` over
-/// independent variants — adding a new participle (e.g. "discarded"), a new
-/// noun, or the British spelling of "mana value" extends one alt branch
-/// rather than adding a new top-level arm.
+/// independent variants — adding a new participle, a new noun, or the British
+/// spelling of "mana value" extends one alt branch rather than adding a new
+/// top-level arm.
 ///
 /// Used by Food Chain ("1 plus the exiled creature's mana value"),
 /// Burnt Offering / Metamorphosis ("the sacrificed creature's mana value"),
+/// Heed the Mists ("the milled card's mana value"),
 /// and the broader cost-paid-by-property class.
+///
+/// CR 701.17a + CR 701.17c + CR 400.7j: "milled" card refers to the
+/// object that moved from the library to the graveyard; its mana value is read
+/// from that public-zone object or LKI as needed.
 fn parse_cost_paid_object_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = opt(tag("the ")).parse(input)?;
-    let (rest, _) = alt((tag("sacrificed "), tag("exiled "), tag("discarded "))).parse(rest)?;
+    let (rest, _) = alt((
+        tag("sacrificed "),
+        tag("exiled "),
+        tag("discarded "),
+        // CR 701.17a: "milled" — card moved library → graveyard by the mill action.
+        tag("milled "),
+    ))
+    .parse(rest)?;
     let (rest, _) = alt((
         tag("creature"),
         tag("card"),
@@ -2414,13 +2427,12 @@ fn parse_player_counter_kind(input: &str) -> OracleResult<'_, PlayerCounterKind>
 }
 
 /// CR 122.1 + CR 109.5: Typed possessor alt mapping to `CountScope`. Each arm
-/// emits the scope variant directly. Targeted-player phrasings ("target
-/// opponent has", "that player has") are intentionally not represented
-/// because no current card requires them; extending here is a typed
-/// addition, not a string-match retrofit.
+/// emits the scope variant directly. New possessor phrases extend this typed
+/// alt rather than adding full phrase permutations.
 fn parse_player_counter_possessor(input: &str) -> OracleResult<'_, CountScope> {
     alt((
         value(CountScope::Controller, tag("you have")),
+        value(CountScope::ScopedPlayer, tag("that player has")),
         value(CountScope::Opponents, tag("each opponent has")),
         value(CountScope::Opponents, tag("your opponents have")),
         value(CountScope::All, tag("each player has")),
@@ -4429,6 +4441,16 @@ mod tests {
                 PlayerCounterKind::Poison,
                 CountScope::All,
             ),
+            (
+                "the number of poison counters that player has",
+                PlayerCounterKind::Poison,
+                CountScope::ScopedPlayer,
+            ),
+            (
+                "the number of rad counters that player has",
+                PlayerCounterKind::Rad,
+                CountScope::ScopedPlayer,
+            ),
         ];
         for (phrase, kind, scope) in cases {
             let (rest, q) = parse_quantity_ref(phrase).unwrap_or_else(|e| {
@@ -4524,6 +4546,30 @@ mod tests {
                         ],
                     },
                 }
+            );
+        }
+    }
+
+    /// CR 701.17a + CR 701.17c: "the milled card's mana value" routes through
+    /// `parse_cost_paid_object_ref` (participle = "milled") and yields
+    /// `ObjectManaValue { CostPaidObject }`. Covers Heed the Mists and the
+    /// broader class of "milled card's <property>" CDA patterns.
+    #[test]
+    fn test_parse_milled_card_mana_value_ref() {
+        for phrase in [
+            "the milled card's mana value",
+            "the milled card's converted mana cost",
+            "milled card's mana value",
+        ] {
+            let (rest, q) = parse_quantity_ref(phrase)
+                .unwrap_or_else(|_| panic!("parse_quantity_ref({phrase:?}) should succeed"));
+            assert_eq!(rest, "", "phrase {phrase:?} should be fully consumed");
+            assert_eq!(
+                q,
+                QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject,
+                },
+                "phrase {phrase:?} must yield ObjectManaValue{{CostPaidObject}}"
             );
         }
     }

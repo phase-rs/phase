@@ -306,13 +306,15 @@ pub(super) fn try_parse_put_counter<'a>(
             (qty, rest, false)
         };
 
-    // Next word is counter type (e.g. "+1/+1", "loyalty", "charge")
-    let type_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
-    let raw_type = &rest[..type_end];
-    let counter_type = normalize_counter_type(raw_type);
+    // Counter type (e.g. "+1/+1", "loyalty", "charge", "double strike").
+    // CR 122.1 + CR 122.1b: route through the shared `parse_counter_type_typed`
+    // combinator so multi-word keyword counter names ("first strike", "double
+    // strike") canonicalize to `CounterType::Keyword(...)` instead of being
+    // truncated at the first whitespace.
+    let (after_type, counter_type) = nom_primitives::parse_counter_type_typed(rest).ok()?;
 
     // Skip "counter" or "counters" keyword, then parse target after "on"
-    let after_type = rest[type_end..].trim_start();
+    let after_type = after_type.trim_start();
     let after_counter_word = nom_on_lower(after_type, after_type, |i| {
         value((), alt((tag("counters"), tag("counter")))).parse(i)
     })
@@ -458,10 +460,10 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
         }) {
         (None, after_cw)
     } else {
-        let type_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
-        let raw_type = &rest[..type_end];
-        let counter_type = normalize_counter_type(raw_type);
-        let after_type = rest[type_end..].trim_start();
+        // CR 122.1 + CR 122.1b: shared counter-type combinator handles
+        // multi-word keyword counter names (e.g. "first strike").
+        let (after_type, counter_type) = nom_primitives::parse_counter_type_typed(rest).ok()?;
+        let after_type = after_type.trim_start();
         let ((), after_cw) = nom_on_lower(after_type, after_type, |i| {
             value((), alt((tag("counters"), tag("counter")))).parse(i)
         })?;
@@ -626,10 +628,10 @@ pub(super) fn try_parse_move_counters_from(lower: &str, ctx: &mut ParseContext) 
         }) {
         (None, after_cw)
     } else {
-        let type_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
-        let raw_type = &rest[..type_end];
-        let ct = normalize_counter_type(raw_type);
-        let after_type = rest[type_end..].trim_start();
+        // CR 122.1 + CR 122.1b: shared counter-type combinator handles
+        // multi-word keyword counter names (e.g. "double strike").
+        let (after_type, ct) = nom_primitives::parse_counter_type_typed(rest).ok()?;
+        let after_type = after_type.trim_start();
         let ((), after_cw) = nom_on_lower(after_type, after_type, |i| {
             value((), alt((tag("counters"), tag("counter")))).parse(i)
         })?;
@@ -673,13 +675,12 @@ pub(super) fn try_parse_multiply_counter(lower: &str, ctx: &mut ParseContext) ->
     let ((), rest) = nom_on_lower(lower, lower, |i| {
         value((), tag("double the number of ")).parse(i)
     })?;
-    // Parse counter type — next word(s) before "counter(s)"
-    let type_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
-    let raw_type = &rest[..type_end];
-    let counter_type = normalize_counter_type(raw_type);
+    // Parse counter type — shared combinator handles multi-word keyword
+    // counter names (e.g. "first strike") per CR 122.1 + CR 122.1b.
+    let (after_type, counter_type) = nom_primitives::parse_counter_type_typed(rest).ok()?;
 
     // Skip counter type + "counter(s) on "
-    let after_type = rest[type_end..].trim_start();
+    let after_type = after_type.trim_start();
     let ((), after_counter_word) = nom_on_lower(after_type, after_type, |i| {
         value((), alt((tag("counters"), tag("counter")))).parse(i)
     })?;
@@ -1381,5 +1382,75 @@ mod tests {
             }
             other => panic!("expected typed creature target, got {other:?}"),
         }
+    }
+
+    /// CR 122.1b: Avenging Huntbonder (NCC) attack trigger places a `double
+    /// strike` keyword counter. Pre-fix, `try_parse_put_counter` sliced the
+    /// counter type at the first whitespace and produced
+    /// `CounterType::Generic("double")`, which then failed to consume the
+    /// trailing `strike counter` text — dropping the whole effect.
+    #[test]
+    fn put_counter_double_strike_keyword_target() {
+        use crate::types::ability::FilterProp;
+        use crate::types::keywords::KeywordKind;
+        let input = "put a double strike counter on another target attacking creature";
+        let (effect, _rem, _multi) =
+            try_parse_put_counter(input, input, &mut default_ctx()).expect("parse");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = effect
+        else {
+            panic!("expected PutCounter, got {effect:?}");
+        };
+        assert_eq!(
+            counter_type,
+            CounterType::Keyword(KeywordKind::DoubleStrike)
+        );
+        assert_eq!(count, QuantityExpr::Fixed { value: 1 });
+        let TargetFilter::Typed(tf) = target else {
+            panic!("expected Typed filter, got {target:?}");
+        };
+        assert!(tf
+            .type_filters
+            .iter()
+            .any(|t| matches!(t, crate::types::ability::TypeFilter::Creature)));
+        assert!(
+            tf.properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::Attacking)),
+            "target should be Attacking, got {:?}",
+            tf.properties
+        );
+        assert!(
+            tf.properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::Another)),
+            "target should carry FilterProp::Another (CR 109.5), got {:?}",
+            tf.properties
+        );
+    }
+
+    /// CR 122.1b: companion case for the other multi-word keyword counter
+    /// name. Sibling cards in the corpus place `first strike` counters via the
+    /// same single-counter path (e.g. Heightened Reflexes-class effects).
+    #[test]
+    fn put_counter_first_strike_keyword_target() {
+        use crate::types::keywords::KeywordKind;
+        let input = "put a first strike counter on target creature";
+        let (effect, _rem, _multi) =
+            try_parse_put_counter(input, input, &mut default_ctx()).expect("parse");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = effect
+        else {
+            panic!("expected PutCounter, got {effect:?}");
+        };
+        assert_eq!(counter_type, CounterType::Keyword(KeywordKind::FirstStrike));
+        assert_eq!(count, QuantityExpr::Fixed { value: 1 });
+        assert!(matches!(target, TargetFilter::Typed { .. }));
     }
 }

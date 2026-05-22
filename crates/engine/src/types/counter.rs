@@ -50,22 +50,22 @@ pub enum CounterType {
 /// with their canonical Oracle-text name. Single source of truth for the
 /// string↔`KeywordKind` mapping at the parser/serialization boundary —
 /// runtime dispatch works on the typed `CounterType::Keyword(kind)` directly.
-const KEYWORD_COUNTERS: &[(&str, KeywordKind)] = &[
-    ("flying", KeywordKind::Flying),
-    ("first strike", KeywordKind::FirstStrike),
+pub(crate) const KEYWORD_COUNTERS: &[(&str, KeywordKind)] = &[
+    ("indestructible", KeywordKind::Indestructible),
     ("double strike", KeywordKind::DoubleStrike),
+    ("first strike", KeywordKind::FirstStrike),
     ("deathtouch", KeywordKind::Deathtouch),
+    ("vigilance", KeywordKind::Vigilance),
+    ("hexproof", KeywordKind::Hexproof),
+    ("lifelink", KeywordKind::Lifelink),
     ("decayed", KeywordKind::Decayed),
     ("exalted", KeywordKind::Exalted),
-    ("haste", KeywordKind::Haste),
-    ("hexproof", KeywordKind::Hexproof),
-    ("indestructible", KeywordKind::Indestructible),
-    ("lifelink", KeywordKind::Lifelink),
-    ("menace", KeywordKind::Menace),
-    ("reach", KeywordKind::Reach),
-    ("shadow", KeywordKind::Shadow),
     ("trample", KeywordKind::Trample),
-    ("vigilance", KeywordKind::Vigilance),
+    ("flying", KeywordKind::Flying),
+    ("menace", KeywordKind::Menace),
+    ("shadow", KeywordKind::Shadow),
+    ("haste", KeywordKind::Haste),
+    ("reach", KeywordKind::Reach),
 ];
 
 impl CounterType {

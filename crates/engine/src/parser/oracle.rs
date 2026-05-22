@@ -1505,22 +1505,6 @@ pub(crate) fn parse_oracle_ir(
             }
         }
 
-        // CR 702.xxx: Prepare (Strixhaven) — `~ enters prepared.` is a self-ETB
-        // rider shorthand (analogous to `enters tapped` / `enters transformed`)
-        // that synthesizes a self-ETB trigger whose effect is BecomePrepared.
-        // Delegated to the oracle_trigger combinator; nom-composed detection.
-        // Normalize self-refs first so lines like "Lluwen enters prepared." (where
-        // the short card name is still the subject) reach the `~`-gated combinator.
-        let prepared_normalized = normalize_self_refs_for_static(&line, card_name);
-        if let Some(mut trigger) =
-            super::oracle_trigger::try_parse_enters_prepared_rider(&prepared_normalized)
-        {
-            trigger.description = Some(line.clone());
-            result.triggers.push(trigger);
-            i += 1;
-            continue;
-        }
-
         // Priority 1: Modal block (standard "Choose one —" + modes, or Spree + modes).
         // Must run before keyword extraction so "Spree" header + follow-on `+` lines
         // are consumed as a modal block, not swallowed as a keyword-only line.
@@ -10089,6 +10073,40 @@ mod tests {
     }
 
     #[test]
+    fn each_player_discards_their_hand_binds_count_to_scoped_player() {
+        // #781 Wheel of Fortune: "Each player discards their hand, then draws
+        // seven cards." The "their hand" count must bind to the iterated player
+        // (ScopedPlayer), not the caster (Controller). Pre-fix it parsed to
+        // HandSize{Controller}, so under player_scope iteration only the caster's
+        // (already-emptied) hand size drove every player's discard count and
+        // opponents kept their hands.
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::{PlayerFilter, PlayerScope, QuantityExpr, QuantityRef};
+        let def = parse_effect_chain(
+            "Each player discards their hand, then draws seven cards.",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        assert_eq!(
+            def.player_scope,
+            Some(PlayerFilter::All),
+            "player_scope should be All for 'each player'"
+        );
+        let count = match &*def.effect {
+            Effect::Discard { count, .. } => count,
+            other => panic!("expected Discard, got {other:?}"),
+        };
+        assert_eq!(
+            *count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::ScopedPlayer,
+                },
+            },
+            "discard count must bind 'their hand' to ScopedPlayer (#781)"
+        );
+    }
+
+    #[test]
     fn each_opponent_loses_life_produces_player_scope() {
         use crate::parser::oracle_effect::parse_effect_chain;
         use crate::types::ability::PlayerFilter;
@@ -10290,6 +10308,74 @@ mod tests {
         );
     }
 
+    // CR 305.1 + CR 602.1 + CR 611.1 + CR 611.2c + CR 701.21a:
+    // Pardic Miner — "Sacrifice this creature: Target player can't play lands
+    // this turn." The activated ability resolves to a `GenericEffect` carrying
+    // a `CantPlayLand` static with a `TargetFilter::Player` target slot and
+    // `Duration::UntilEndOfTurn`. At resolution the runtime registers a
+    // transient continuous effect bound to `SpecificPlayer { id }` (the chosen
+    // target), and `player_has_static_other(state, target, "CantPlayLand")`
+    // returns true through the new TCE scan in `check_static_other_by_name`.
+    //
+    // This is the class of "target player can't [verb] this turn" effects —
+    // proves the parser routes the player-scoped restriction through
+    // `parse_restriction_modes` and emits the canonical `GenericEffect` shape.
+    #[test]
+    fn activated_target_player_cant_play_lands_pardic_miner() {
+        use crate::types::statics::StaticMode;
+        let r = parse(
+            "Sacrifice this creature: Target player can't play lands this turn.",
+            "Pardic Miner",
+            &[],
+            &["Creature"],
+            &["Dwarf"],
+        );
+        assert_eq!(
+            r.abilities.len(),
+            1,
+            "Pardic Miner has exactly one activated ability"
+        );
+        let ab = &r.abilities[0];
+        assert_eq!(ab.kind, AbilityKind::Activated);
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } = &*ab.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", ab.effect);
+        };
+        assert_eq!(
+            *duration,
+            Some(crate::types::ability::Duration::UntilEndOfTurn),
+            "duration must be UntilEndOfTurn for 'this turn'"
+        );
+        assert_eq!(
+            target.as_ref(),
+            Some(&TargetFilter::Player),
+            "target slot must be TargetFilter::Player for 'Target player'"
+        );
+        assert_eq!(static_abilities.len(), 1, "single CantPlayLand static");
+        let def = &static_abilities[0];
+        assert_eq!(
+            def.mode,
+            StaticMode::Other("CantPlayLand".to_string()),
+            "mode must be CantPlayLand"
+        );
+        // CR 305.1 + CR 611.2c: AddStaticMode is required so the TCE carries
+        // the mode into runtime queries (player_has_static_other). Without it
+        // the transient effect has empty modifications and the prohibition
+        // never reaches the play-land gate.
+        assert!(
+            def.modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddStaticMode { mode: StaticMode::Other(name) } if name == "CantPlayLand"
+            )),
+            "modifications must include AddStaticMode {{ Other(\"CantPlayLand\") }}, got {:?}",
+            def.modifications
+        );
+    }
+
     #[test]
     fn spell_restriction_then_damage_skullcrack() {
         // Skullcrack: "Players can't gain life this turn. Damage can't be prevented this turn.
@@ -10438,7 +10524,10 @@ mod tests {
         assert!(matches!(
             *r.abilities[1].effect,
             Effect::AddRestriction {
-                restriction: crate::types::ability::GameRestriction::CastOnlyFromZones { .. }
+                restriction: crate::types::ability::GameRestriction::ProhibitActivity {
+                    activity: crate::types::ability::ProhibitedActivity::CastOnlyFromZones { .. },
+                    ..
+                }
             }
         ));
         assert_eq!(
@@ -12259,6 +12348,7 @@ mod tests {
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::EventContextAmount
                 },
+                face_down: false,
             }
         ));
     }

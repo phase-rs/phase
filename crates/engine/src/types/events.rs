@@ -329,6 +329,12 @@ pub enum GameEvent {
         kind: EffectKind,
         source_id: ObjectId,
     },
+    /// CR 701.3d: An Aura, Equipment, or Fortification became unattached from
+    /// the object or player it was attached to.
+    Unattached {
+        attachment_id: ObjectId,
+        old_target: TargetRef,
+    },
     AttackersDeclared {
         attacker_ids: Vec<ObjectId>,
         defending_player: PlayerId,
