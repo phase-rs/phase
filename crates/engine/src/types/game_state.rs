@@ -27,6 +27,7 @@ use super::player::{Player, PlayerId};
 use super::proposed_event::{ProposedEvent, ReplacementId};
 use super::zones::{ExileCostSourceZone, Zone};
 
+use crate::game::bracket_estimate::CommanderBracketTier;
 use crate::game::combat::{AttackTarget, CombatState};
 use crate::game::deck_loading::DeckEntry;
 
@@ -1126,6 +1127,12 @@ pub struct PlayerDeckPool {
     pub registered_commander: std::sync::Arc<Vec<DeckEntry>>,
     #[serde(default)]
     pub current_commander: std::sync::Arc<Vec<DeckEntry>>,
+    /// The declared bracket tier for this player's deck. Used by the AI to
+    /// determine whether cEDH-specific policies apply (Phase 5 `ComboLinePolicy`,
+    /// Phase 6 `CedhKeepablesMulligan`). Defaults to `Core` for backward
+    /// compatibility with saved states and test fixtures that omit the field.
+    #[serde(default)]
+    pub bracket_tier: CommanderBracketTier,
 }
 
 /// CR 400.11/400.11a/400.11b: Tracks sideboard cards brought into this game

@@ -335,7 +335,11 @@ pub fn classify_deck_js(names_js: JsValue) -> Result<JsValue, JsValue> {
             sideboard: Vec::new(),
             commander: Vec::new(),
         };
-        let payload = resolve_player_deck_list(db, &list);
+        let payload = resolve_player_deck_list(
+            db,
+            &list,
+            engine::game::bracket_estimate::CommanderBracketTier::Core,
+        );
         let profile = DeckProfile::analyze(&payload.main_deck);
         Ok(to_js(&DeckProfileResult::from(&profile)))
     })
@@ -1253,6 +1257,7 @@ pub fn apply_seat_mutation(state_json: &str, mutation_json: &str) -> Result<JsVa
                         sideboard: deck_data.sideboard,
                         commander: deck_data.commander,
                     },
+                    engine::game::bracket_estimate::CommanderBracketTier::Core,
                 ))
             })
         }

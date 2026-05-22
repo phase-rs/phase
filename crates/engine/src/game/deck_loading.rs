@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::database::CardDatabase;
+use crate::game::bracket_estimate::CommanderBracketTier;
 use crate::types::card::CardFace;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::CardId;
@@ -18,13 +19,19 @@ pub struct DeckEntry {
     pub count: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlayerDeckPayload {
+    #[serde(default)]
     pub main_deck: Vec<DeckEntry>,
     #[serde(default)]
     pub sideboard: Vec<DeckEntry>,
     #[serde(default)]
     pub commander: Vec<DeckEntry>,
+    /// The declared bracket tier for this player's deck. Defaults to `Core`
+    /// so that existing serialized payloads and test fixtures that omit the
+    /// field continue to deserialize correctly.
+    #[serde(default)]
+    pub bracket_tier: CommanderBracketTier,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,27 +82,39 @@ fn resolve_names(db: &CardDatabase, names: &[String]) -> Vec<DeckEntry> {
 
 /// Resolve a single player's deck list (name-only) into a `PlayerDeckPayload`
 /// using a `CardDatabase` for lookup. Unresolvable names are silently skipped.
-pub fn resolve_player_deck_list(db: &CardDatabase, list: &PlayerDeckList) -> PlayerDeckPayload {
+/// `bracket_tier` is passed through from the caller; `PlayerDeckList` itself
+/// carries no tier declaration.
+pub fn resolve_player_deck_list(
+    db: &CardDatabase,
+    list: &PlayerDeckList,
+    bracket_tier: CommanderBracketTier,
+) -> PlayerDeckPayload {
     PlayerDeckPayload {
         main_deck: resolve_names(db, &list.main_deck),
         sideboard: resolve_names(db, &list.sideboard),
         commander: resolve_names(db, &list.commander),
+        bracket_tier,
     }
 }
 
 /// Resolve a DeckList (name-only) into a DeckPayload (full CardFace objects)
 /// using a CardDatabase for lookup. Unresolvable names are silently skipped.
+/// `DeckList` carries no tier declarations; all resolved payloads inherit the
+/// default `CommanderBracketTier::Core`. Use `DeckPayload` directly when a
+/// tier is known at construction time.
 pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
     DeckPayload {
         player: PlayerDeckPayload {
             main_deck: resolve_names(db, &list.player.main_deck),
             sideboard: resolve_names(db, &list.player.sideboard),
             commander: resolve_names(db, &list.player.commander),
+            bracket_tier: CommanderBracketTier::Core,
         },
         opponent: PlayerDeckPayload {
             main_deck: resolve_names(db, &list.opponent.main_deck),
             sideboard: resolve_names(db, &list.opponent.sideboard),
             commander: resolve_names(db, &list.opponent.commander),
+            bracket_tier: CommanderBracketTier::Core,
         },
         ai_decks: list
             .ai_decks
@@ -104,6 +123,7 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
                 main_deck: resolve_names(db, &deck.main_deck),
                 sideboard: resolve_names(db, &deck.sideboard),
                 commander: resolve_names(db, &deck.commander),
+                bracket_tier: CommanderBracketTier::Core,
             })
             .collect(),
     }
@@ -161,6 +181,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             current_sideboard: p0_side,
             registered_commander: std::sync::Arc::clone(&p0_cmdr),
             current_commander: p0_cmdr,
+            bracket_tier: payload.player.bracket_tier,
         });
     let p1_main = std::sync::Arc::new(payload.opponent.main_deck.clone());
     let p1_side = std::sync::Arc::new(payload.opponent.sideboard.clone());
@@ -175,6 +196,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             current_sideboard: p1_side,
             registered_commander: std::sync::Arc::clone(&p1_cmdr),
             current_commander: p1_cmdr,
+            bracket_tier: payload.opponent.bracket_tier,
         });
     for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
         let player_id = PlayerId((2 + i) as u8);
@@ -191,6 +213,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
                 current_sideboard: side,
                 registered_commander: std::sync::Arc::clone(&cmdr),
                 current_commander: cmdr,
+                bracket_tier: ai_deck.bracket_tier,
             });
     }
 
@@ -510,16 +533,14 @@ mod tests {
                         count: 2,
                     },
                 ],
-                sideboard: vec![],
-                commander: vec![],
+                ..Default::default()
             },
             opponent: PlayerDeckPayload {
                 main_deck: vec![DeckEntry {
                     card: make_creature_face(),
                     count: 3,
                 }],
-                sideboard: vec![],
-                commander: vec![],
+                ..Default::default()
             },
             ai_decks: vec![],
         };
@@ -551,15 +572,14 @@ mod tests {
                     card: make_instant_face(),
                     count: 1,
                 }],
-                commander: vec![],
+                ..Default::default()
             },
             opponent: PlayerDeckPayload {
                 main_deck: vec![DeckEntry {
                     card: make_creature_face(),
                     count: 1,
                 }],
-                sideboard: vec![],
-                commander: vec![],
+                ..Default::default()
             },
             ai_decks: vec![],
         };
@@ -587,14 +607,9 @@ mod tests {
         let payload = DeckPayload {
             player: PlayerDeckPayload {
                 main_deck: entries,
-                sideboard: vec![],
-                commander: vec![],
+                ..Default::default()
             },
-            opponent: PlayerDeckPayload {
-                main_deck: vec![],
-                sideboard: vec![],
-                commander: vec![],
-            },
+            opponent: PlayerDeckPayload::default(),
             ai_decks: vec![],
         };
         load_deck_into_state(&mut state, &payload);
@@ -708,14 +723,9 @@ mod tests {
                     card: make_creature_face(),
                     count: 4,
                 }],
-                sideboard: vec![],
-                commander: vec![],
+                ..Default::default()
             },
-            opponent: PlayerDeckPayload {
-                main_deck: vec![],
-                sideboard: vec![],
-                commander: vec![],
-            },
+            opponent: PlayerDeckPayload::default(),
             ai_decks: vec![],
         };
         let json = serde_json::to_string(&payload).unwrap();
@@ -744,19 +754,18 @@ mod tests {
                     card: make_creature_face(),
                     count: 3,
                 }],
-                sideboard: vec![],
                 commander: vec![DeckEntry {
                     card: commander_face,
                     count: 1,
                 }],
+                ..Default::default()
             },
             opponent: PlayerDeckPayload {
                 main_deck: vec![DeckEntry {
                     card: make_creature_face(),
                     count: 3,
                 }],
-                sideboard: vec![],
-                commander: vec![],
+                ..Default::default()
             },
             ai_decks: vec![],
         };
@@ -849,18 +858,13 @@ mod tests {
 
         let payload = DeckPayload {
             player: PlayerDeckPayload {
-                main_deck: vec![],
-                sideboard: vec![],
                 commander: vec![DeckEntry {
                     card: commander_face,
                     count: 1,
                 }],
+                ..Default::default()
             },
-            opponent: PlayerDeckPayload {
-                main_deck: vec![],
-                sideboard: vec![],
-                commander: vec![],
-            },
+            opponent: PlayerDeckPayload::default(),
             ai_decks: vec![],
         };
 

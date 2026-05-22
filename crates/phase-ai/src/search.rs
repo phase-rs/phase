@@ -1024,7 +1024,7 @@ fn build_ai_context(state: &GameState, player: PlayerId, config: &AiConfig) -> A
     let session = std::sync::Arc::make_mut(&mut ctx.session);
     for pool in &state.deck_pools {
         if pool.player != player {
-            session.ensure_player_features(pool.player, &pool.current_main);
+            session.ensure_player_features(pool.player, &pool.current_main, pool.bracket_tier);
         }
     }
 

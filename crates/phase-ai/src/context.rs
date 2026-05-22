@@ -77,7 +77,15 @@ impl AiContext {
             late: deck_profile.adjust_weights_with(multipliers, &base_weights.late),
         };
         let strategy = StrategyProfile::for_profile(&deck_profile);
-        let session = Arc::new(AiSession::from_single_deck(player, deck));
+        // Analysis paths (deck evaluation, draft AI, test contexts) that call
+        // `analyze_for_player` don't carry a declared bracket tier — default to
+        // `Core`. The production path (`AiSession::from_game`) reads the real
+        // tier from `PlayerDeckPool::bracket_tier`.
+        let session = Arc::new(AiSession::from_single_deck(
+            player,
+            deck,
+            engine::game::bracket_estimate::CommanderBracketTier::Core,
+        ));
         Self {
             deck_profile,
             adjusted_weights,

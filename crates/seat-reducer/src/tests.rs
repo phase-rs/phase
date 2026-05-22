@@ -7,11 +7,7 @@ use crate::types::*;
 struct NoOpResolver;
 impl DeckResolver for NoOpResolver {
     fn resolve(&self, _choice: &DeckChoice) -> Result<PlayerDeckPayload, String> {
-        Ok(PlayerDeckPayload {
-            main_deck: vec![],
-            sideboard: vec![],
-            commander: vec![],
-        })
+        Ok(PlayerDeckPayload::default())
     }
 }
 

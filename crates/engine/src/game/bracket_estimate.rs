@@ -27,6 +27,15 @@ pub enum CommanderBracketTier {
     Cedh,       // B5 (manual-declaration only; estimator never returns this)
 }
 
+impl Default for CommanderBracketTier {
+    /// Default to `Core` (B2) — the most common casual tier and the
+    /// value used by all legacy construction sites that predate the
+    /// `bracket_tier` field on `PlayerDeckPool`.
+    fn default() -> Self {
+        Self::Core
+    }
+}
+
 impl CommanderBracketTier {
     /// Numeric bracket level (B1..=B5 → 1..=5). Used for ordered
     /// comparisons (e.g., sorting violations by tier).

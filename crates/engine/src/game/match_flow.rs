@@ -87,16 +87,20 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
 
     // `PlayerDeckPayload`'s deck fields are plain `Vec<DeckEntry>` — deref
     // the Arc then deep-clone so the payload owns its own vec.
+    // Propagate `bracket_tier` so the pool rebuilt by `load_deck_into_state`
+    // in the next game carries the same declared tier as the current game.
     Ok(DeckPayload {
         player: PlayerDeckPayload {
             main_deck: (*p0.current_main).clone(),
             sideboard: (*p0.current_sideboard).clone(),
             commander: (*p0.current_commander).clone(),
+            bracket_tier: p0.bracket_tier,
         },
         opponent: PlayerDeckPayload {
             main_deck: (*p1.current_main).clone(),
             sideboard: (*p1.current_sideboard).clone(),
             commander: (*p1.current_commander).clone(),
+            bracket_tier: p1.bracket_tier,
         },
         ai_decks: vec![],
     })
@@ -447,11 +451,13 @@ mod tests {
                 main_deck: vec![entry("P0", 7)],
                 sideboard: vec![entry("P0SB", 1)],
                 commander: vec![],
+                ..Default::default()
             },
             opponent: PlayerDeckPayload {
                 main_deck: vec![entry("P1", 7)],
                 sideboard: vec![entry("P1SB", 1)],
                 commander: vec![],
+                ..Default::default()
             },
             ai_decks: vec![],
         };

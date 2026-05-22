@@ -375,25 +375,11 @@ impl GameSession {
     }
 
     pub fn start_game(&mut self, db: &CardDatabase) {
-        let player_deck = self.decks[0].clone().unwrap_or(PlayerDeckPayload {
-            main_deck: Vec::new(),
-            sideboard: Vec::new(),
-            commander: Vec::new(),
-        });
-        let opponent_deck = self.decks[1].clone().unwrap_or(PlayerDeckPayload {
-            main_deck: Vec::new(),
-            sideboard: Vec::new(),
-            commander: Vec::new(),
-        });
+        let player_deck = self.decks[0].clone().unwrap_or_default();
+        let opponent_deck = self.decks[1].clone().unwrap_or_default();
         let ai_decks: Vec<PlayerDeckPayload> = self.decks[2..]
             .iter()
-            .map(|deck| {
-                deck.clone().unwrap_or(PlayerDeckPayload {
-                    main_deck: Vec::new(),
-                    sideboard: Vec::new(),
-                    commander: Vec::new(),
-                })
-            })
+            .map(|deck| deck.clone().unwrap_or_default())
             .collect();
 
         self.rebuild_pregame_state(self.player_count);
@@ -1183,6 +1169,7 @@ mod tests {
             }],
             sideboard: Vec::new(),
             commander: Vec::new(),
+            ..Default::default()
         }
     }
 
