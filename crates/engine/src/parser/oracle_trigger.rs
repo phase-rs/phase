@@ -33,7 +33,7 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, AttachmentKind, CastVariantPaid, Comparator,
     ControllerRef, CounterTriggerFilter, DamageKindFilter, Effect, FilterProp, OriginConstraint,
-    PlayerFilter, QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TriggerCondition,
+    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TriggerCondition,
     TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
     ZoneChangeClause,
 };
@@ -2287,6 +2287,27 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
                 );
             }
         }
+    }
+
+    // CR 305.2a + CR 603.4: "if it wasn't the first land you played this turn" —
+    // Fastbond's intervening-if. Evaluates to lands_played_this_turn >= 2
+    // (the counter is incremented before the LandPlayed event fires, so at
+    // detection/resolution time the 2nd land shows count == 2).
+    let first_land_pos = tp.find("if it wasn't the first land you played this turn"); // allow-noncombinator: anchor for strip_condition_clause — structural if-clause excision, not parse dispatch
+    if let Some(pos) = first_land_pos {
+        let pattern = "if it wasn't the first land you played this turn";
+        return (
+            strip_condition_clause(text, pos, pattern.len()),
+            Some(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LandsPlayedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 2 },
+            }),
+        );
     }
 
     // CR 603.4: A leading `if` immediately follows the trigger condition and
@@ -5973,24 +5994,37 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some((TriggerMode::Cycled, def));
     }
 
-    // CR 305.1 + CR 603.2 + CR 701.18a: "whenever a player plays a land
-    // [from <zone>]" fires on the CR 305 special action. The optional
+    // CR 305.1 + CR 603.2 + CR 701.18a: "whenever [X] plays/play a land
+    // [from <zone>]" fires on the CR 305 special action. Handles both the
+    // third-person "plays a land" form (a player, an opponent) and the
+    // second-person "play a land" form (you — e.g. Fastbond). The optional
     // from-zone tail rides through `parse_type_phrase`, matching the existing
     // cast-spell trigger shape used by Rocco, Street Chef.
-    if let Ok((_, (who, _))) = nom_primitives::split_once_on(lower, " plays a land") {
+    if let Some((who, after_land_play)) = nom_primitives::split_once_on(lower, " plays a land")
+        .ok()
+        .or_else(|| nom_primitives::split_once_on(lower, " play a land").ok())
+        .map(|(_, result)| result)
+    {
         let mut def = make_base();
         def.mode = TriggerMode::LandPlayed;
 
-        if scan_contains(who, "opponent") {
+        // "whenever you play a land" scopes to controller; "opponent" scopes to
+        // opponents; "a player" / "each player" has no valid_target restriction.
+        if scan_contains(who, "you")
+            && !scan_contains(who, "opponent")
+            && !scan_contains(who, "player")
+        {
+            def.valid_target = Some(TargetFilter::Controller);
+        } else if scan_contains(who, "opponent") {
             def.valid_target = Some(TargetFilter::Typed(
                 TypedFilter::default().controller(ControllerRef::Opponent),
             ));
         }
 
-        let after_plays = &lower[who.len() + " plays a land".len()..].trim_start();
-        let clause = nom_primitives::split_once_on(after_plays, ", ")
+        let after_land_play = after_land_play.trim_start();
+        let clause = nom_primitives::split_once_on(after_land_play, ", ")
             .map(|(_, (before, _))| before)
-            .unwrap_or(after_plays);
+            .unwrap_or(after_land_play);
         let (filter, _) = parse_type_phrase(clause);
         if !matches!(filter, TargetFilter::Any) {
             def.valid_card = Some(filter);
@@ -11884,6 +11918,48 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn fastbond_trigger_parses_land_played_with_controller_scope() {
+        // CR 305.1 + CR 603.2 + CR 305.3 + CR 603.4: "whenever you play a land"
+        // uses the second-person form — must map to LandPlayed scoped to Controller.
+        // The intervening-if condition "if it wasn't the first land you played this
+        // turn" must be hoisted as a QuantityComparison (lands_played_this_turn >= 2).
+        let t = parse_trigger_line(
+            "Whenever you play a land, if it wasn't the first land you played this turn, ~ deals 1 damage to you.",
+            "Fastbond",
+        );
+        assert_eq!(t.mode, TriggerMode::LandPlayed);
+        assert_eq!(t.valid_target, Some(TargetFilter::Controller));
+        assert!(t.condition.is_some(), "intervening-if condition must be extracted");
+        assert!(
+            matches!(
+                t.condition.as_ref().unwrap(),
+                TriggerCondition::QuantityComparison { .. }
+            ),
+            "condition must be QuantityComparison, got {:?}",
+            t.condition
+        );
+        let execute = t.execute.expect("trigger must have an execute effect");
+        assert!(
+            matches!(*execute.effect, Effect::DealDamage { .. }),
+            "expected DealDamage effect, got {:?}",
+            execute.effect
+        );
+    }
+
+    #[test]
+    fn extract_if_condition_first_land_pattern() {
+        // CR 305.3 + CR 603.4: Verify the condition is stripped from the effect text.
+        let (cleaned, cond) = super::extract_if_condition(
+            "if it wasn't the first land you played this turn, ~ deals 1 damage to you.",
+        );
+        assert!(cond.is_some(), "condition must be extracted");
+        assert!(
+            !cleaned.contains("wasn't the first land"),
+            "if-clause must be stripped from effect text, got: {cleaned}"
+        );
     }
 
     #[test]
