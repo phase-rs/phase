@@ -345,4 +345,53 @@ mod tests {
             _ => panic!("expected baseline-keep Score, got {score:?}"),
         }
     }
+
+    /// Second ForceMulligan branch: > 4 lands. Too land-heavy for a cEDH list;
+    /// threat/combo density is diluted.
+    #[test]
+    fn cedh_hand_too_many_lands_force_mulligans() {
+        let policy = CedhKeepablesMulligan;
+        let mut state = GameState::new_two_player(42);
+        state.players[0].hand.clear();
+
+        let mut hand = Vec::new();
+        // 5 lands — over the high threshold.
+        for i in 0..5 {
+            hand.push(add_hand_card(
+                &mut state,
+                i,
+                &format!("Forest {i}"),
+                vec![CoreType::Land],
+            ));
+        }
+        // Some filler non-land cards.
+        for i in 0..2 {
+            hand.push(add_hand_card(
+                &mut state,
+                10 + i,
+                &format!("Filler {i}"),
+                vec![CoreType::Creature],
+            ));
+        }
+
+        let score = policy.evaluate(
+            &hand,
+            &state,
+            &features_cedh(true),
+            &PlanSnapshot::default(),
+            TurnOrder::OnPlay,
+            0,
+        );
+
+        match score {
+            MulliganScore::ForceMulligan { reason } => {
+                assert_eq!(
+                    reason.kind, "cedh_keepables_too_many_lands",
+                    "unexpected reason kind: {}",
+                    reason.kind
+                );
+            }
+            _ => panic!("expected ForceMulligan(cedh_keepables_too_many_lands), got {score:?}"),
+        }
+    }
 }
