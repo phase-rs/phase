@@ -6550,6 +6550,7 @@ mod tests {
         );
     }
 
+    // CR 205.3g: Spacecraft is an artifact subtype that can appear in subtype filters.
     #[test]
     fn end_to_end_beyond_the_quiet_no_spacecraft_gap() {
         let r = parse(
