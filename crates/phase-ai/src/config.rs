@@ -248,6 +248,14 @@ pub struct PolicyPenalties {
     /// Penalty multiplier for overextending when opponent likely has board wipe.
     #[serde(default = "default_threat_wipe_overextend_penalty")]
     pub threat_wipe_overextend_penalty: f64,
+    /// Bonus prior when a candidate action progresses a combo line that is
+    /// reachable this turn. Consumed by `ComboLinePolicy`.
+    #[serde(default = "default_combo_progress_this_turn_bonus")]
+    pub combo_progress_this_turn_bonus: f64,
+    /// Bonus prior when a candidate action (tutor / draw / ramp) progresses a
+    /// combo line that is reachable next turn. Consumed by `ComboLinePolicy`.
+    #[serde(default = "default_combo_progress_next_turn_bonus")]
+    pub combo_progress_next_turn_bonus: f64,
 }
 
 impl Default for PolicyPenalties {
@@ -286,6 +294,8 @@ impl Default for PolicyPenalties {
             synergy_casting_bonus: default_synergy_casting_bonus(),
             threat_counter_tapout_penalty: default_threat_counter_tapout_penalty(),
             threat_wipe_overextend_penalty: default_threat_wipe_overextend_penalty(),
+            combo_progress_this_turn_bonus: default_combo_progress_this_turn_bonus(),
+            combo_progress_next_turn_bonus: default_combo_progress_next_turn_bonus(),
         }
     }
 }
@@ -337,6 +347,12 @@ fn default_threat_counter_tapout_penalty() -> f64 {
 }
 fn default_threat_wipe_overextend_penalty() -> f64 {
     -0.6
+}
+fn default_combo_progress_this_turn_bonus() -> f64 {
+    15.0
+}
+fn default_combo_progress_next_turn_bonus() -> f64 {
+    5.0
 }
 
 /// Full AI configuration combining difficulty, search, and evaluation settings.
@@ -829,5 +845,12 @@ mod tests {
             cfg.search.max_depth, 2,
             "VeryHard should still be capped at 4p"
         );
+    }
+
+    #[test]
+    fn policy_penalties_default_combo_progress_bonuses() {
+        let p = PolicyPenalties::default();
+        assert_eq!(p.combo_progress_this_turn_bonus, 15.0);
+        assert_eq!(p.combo_progress_next_turn_bonus, 5.0);
     }
 }
