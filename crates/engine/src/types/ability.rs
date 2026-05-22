@@ -9024,6 +9024,12 @@ pub enum ReplacementCondition {
     /// step, AND the player has not yet drawn a card during this step
     /// (`cards_drawn_this_step == 0`); otherwise `true` (apply replacement).
     ExceptFirstDrawInDrawStep,
+    /// CR 614.1d: "if you control a [filter]" — replacement applies only while
+    /// the controller has at least one permanent matching `filter` on the
+    /// battlefield. Positive form of `UnlessControlsMatching`. Used by
+    /// Worship ("if you control a creature, damage that would reduce your
+    /// life total to less than 1 reduces it to 1 instead").
+    IfControlsMatching { filter: TargetFilter },
     /// "unless you revealed a [type] card" / "unless you paid {mana}"
     /// CR 614.1d — Generic condition text that the engine does not yet decompose further.
     /// Using this variant lets the replacement be recognized for coverage while deferring
@@ -9476,6 +9482,12 @@ pub enum DamageModification {
     /// `SetToSourcePower` (dynamic) — this is a flat override of the
     /// event's amount with `value`.
     SetTo { value: u32 },
+    /// CR 614.1a: Cap damage so the target player's life total cannot fall
+    /// below `minimum`. Applied only when the damage target is a player.
+    /// Computed at resolution time as `amount = max(0, life_total - minimum)`.
+    /// Used by Worship: "damage that would reduce your life total to less
+    /// than 1 reduces it to 1 instead."
+    LifeFloor { minimum: i32 },
 }
 
 /// CR 614.1a: Quantity modification for replacement effects (tokens, counters).
@@ -9548,6 +9560,9 @@ impl ManaReplacementScope {
 pub enum DamageTargetPlayerScope {
     Any,
     Opponent,
+    /// The controller of the replacement source. Used by Worship: "damage
+    /// that would reduce *your* life total to less than 1".
+    Controller,
     Specific(PlayerId),
 }
 
