@@ -3959,44 +3959,90 @@ fn parse_damage_to_player_instead_followup(
     )
 }
 
+/// CR 614.1a: Strip a leading "as long as <condition>, " gate from a damage
+/// prevention replacement's normalized lowercase text and lift it to a typed
+/// `ReplacementCondition`. Returns the trimmed slice plus the gate (or the
+/// untouched input and `None` when no parseable gate is present).
+///
+/// Shares `replacement_condition_from_static` with `parse_source_state_external_entry`
+/// so any condition shape the static-condition lifter supports — quantity
+/// comparisons (party-size, opponents-count, life), `SourceIsTapped`,
+/// `Not(SourceIsTapped)` — flows through unchanged.
+///
+/// When the prefix is present but the body fails to parse or doesn't lift to a
+/// supported `ReplacementCondition`, the function returns the untouched input
+/// and `None`. The caller continues with the original text rather than failing
+/// — preserving prior coverage for prevention lines whose gate the typed
+/// surface can't yet carry (still applies the description-based shield, same
+/// as before this gate-extraction was added).
+fn strip_as_long_as_prefix_for_prevention(
+    norm_lower: &str,
+) -> (&str, Option<ReplacementCondition>) {
+    let parsed = (|| -> Option<(&str, ReplacementCondition)> {
+        let (rest, _) = tag::<_, _, OracleError<'_>>("as long as ")
+            .parse(norm_lower)
+            .ok()?;
+        let (rest, static_cond) = parse_inner_condition(rest).ok()?;
+        let (rest, _) = tag::<_, _, OracleError<'_>>(", ").parse(rest).ok()?;
+        let rc = replacement_condition_from_static(static_cond)?;
+        Some((rest, rc))
+    })();
+    match parsed {
+        Some((rest, rc)) => (rest, Some(rc)),
+        None => (norm_lower, None),
+    }
+}
+
 /// CR 615: Parse damage prevention replacement effects.
 /// Handles:
 /// - "prevent all combat damage that would be dealt [this turn]" (Fog, Moments Peace)
 /// - "prevent all damage that would be dealt to you [this turn]" (Hallow)
 /// - "prevent the next N damage that would be dealt to [target] this turn" (Mending Hands)
 /// - "prevent all damage that would be dealt to and dealt by [creature]" (Stonehorn Dignitary)
+/// - "prevent all damage that would be dealt to enchanted/equipped creature" — scoped via
+///   `valid_card` with `EnchantedBy`/`EquippedBy` so only damage to the attached creature
+///   is prevented (Inviolability, General's Kabuto, Magebane Armor, Artifact Ward, Multiclass Baldric).
+/// - Optional leading "as long as <condition>, " gate (CR 614.1a) — Multiclass Baldric's
+///   "As long as you have a full party, prevent all damage that would be dealt to equipped creature."
 fn parse_damage_prevention_replacement(
     norm_lower: &str,
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
+    // CR 614.1a: An "as long as <cond>, " prefix on a prevention replacement gates
+    // the shield itself, not its post-replacement followup. Strip the gate first
+    // and lift it to a typed `ReplacementCondition` so the rest of the parser
+    // operates on the bare prevention clause. Shares `replacement_condition_from_static`
+    // with `parse_source_state_external_entry` and other "as long as" callers.
+    let (working_lower, prefix_condition) = strip_as_long_as_prefix_for_prevention(norm_lower);
+
     // Must contain "prevent" and "damage" to be a prevention pattern
-    if !nom_primitives::scan_contains(norm_lower, "prevent")
-        || !nom_primitives::scan_contains(norm_lower, "damage")
+    if !nom_primitives::scan_contains(working_lower, "prevent")
+        || !nom_primitives::scan_contains(working_lower, "damage")
     {
         return None;
     }
 
     // "damage can't be prevented" is NOT a prevention replacement -- it's a restriction.
-    if nom_primitives::scan_contains(norm_lower, "can't be prevented") {
+    if nom_primitives::scan_contains(working_lower, "can't be prevented") {
         return None;
     }
 
     // CR 615: "sources of the color of your choice" requires interactive color choice —
     // handled as a Choose → PreventDamage spell effect chain, not a passive replacement.
-    if nom_primitives::scan_contains(norm_lower, "color of your choice") {
+    if nom_primitives::scan_contains(working_lower, "color of your choice") {
         return None;
     }
 
     // Redirection patterns ("prevent that damage. ~ deals that much damage to") are handled
     // by parse_damage_redirection_replacement — don't intercept them here.
-    if nom_primitives::scan_contains(norm_lower, "prevent that damage")
-        && nom_primitives::scan_contains(norm_lower, "deals that much damage")
+    if nom_primitives::scan_contains(working_lower, "prevent that damage")
+        && nom_primitives::scan_contains(working_lower, "deals that much damage")
     {
         return None;
     }
     // "is dealt to ~ instead" patterns are also redirections, not pure prevention
-    if nom_primitives::scan_contains(norm_lower, "is dealt to")
-        && nom_primitives::scan_contains(norm_lower, "instead")
+    if nom_primitives::scan_contains(working_lower, "is dealt to")
+        && nom_primitives::scan_contains(working_lower, "instead")
     {
         return None;
     }
@@ -4004,14 +4050,14 @@ fn parse_damage_prevention_replacement(
     // --- 1. Extract prevention amount ---
     // CR 615.7: "prevent the next N damage" → specific shield amount
     // CR 615.1a: "prevent all damage" → prevent everything
-    let amount = if nom_primitives::scan_contains(norm_lower, "prevent all") {
+    let amount = if nom_primitives::scan_contains(working_lower, "prevent all") {
         PreventionAmount::All
-    } else if let Some(rest) = strip_after(norm_lower, "prevent the next ") {
+    } else if let Some(rest) = strip_after(working_lower, "prevent the next ") {
         // Uses oracle_util::parse_number (not nom directly) because it handles "X" → 0
         // for cards like Temper, Acolyte's Reward, etc.
         let (n, _) = parse_number(rest)?;
         PreventionAmount::Next(n)
-    } else if nom_primitives::scan_contains(norm_lower, "prevent that damage") {
+    } else if nom_primitives::scan_contains(working_lower, "prevent that damage") {
         // "prevent that damage" in redirection context — redirect handled separately
         PreventionAmount::All
     } else {
@@ -4022,9 +4068,9 @@ fn parse_damage_prevention_replacement(
     // CR 615: "combat damage" restricts to combat damage only.
     // Longest-match-first: "noncombat damage" before "combat damage" because
     // "noncombat" contains the substring "combat".
-    let combat_scope = if nom_primitives::scan_contains(norm_lower, "noncombat damage") {
+    let combat_scope = if nom_primitives::scan_contains(working_lower, "noncombat damage") {
         Some(CombatDamageScope::NoncombatOnly)
-    } else if nom_primitives::scan_contains(norm_lower, "combat damage") {
+    } else if nom_primitives::scan_contains(working_lower, "combat damage") {
         Some(CombatDamageScope::CombatOnly)
     } else {
         None
@@ -4032,13 +4078,13 @@ fn parse_damage_prevention_replacement(
 
     // --- 3. Extract damage target filter ---
     // "to you" → player only, "to target creature" → creature only
-    let damage_target_filter = if nom_primitives::scan_contains(norm_lower, "dealt to you")
-        || nom_primitives::scan_contains(norm_lower, "deal to you")
+    let damage_target_filter = if nom_primitives::scan_contains(working_lower, "dealt to you")
+        || nom_primitives::scan_contains(working_lower, "deal to you")
     {
         Some(damage_target_any_player())
-    } else if nom_primitives::scan_contains(norm_lower, "dealt to target creature")
-        || nom_primitives::scan_contains(norm_lower, "dealt to ~")
-        || nom_primitives::scan_contains(norm_lower, "dealt to and dealt by ~")
+    } else if nom_primitives::scan_contains(working_lower, "dealt to target creature")
+        || nom_primitives::scan_contains(working_lower, "dealt to ~")
+        || nom_primitives::scan_contains(working_lower, "dealt to and dealt by ~")
     {
         Some(DamageTargetFilter::CreatureOnly)
     } else {
@@ -4046,8 +4092,32 @@ fn parse_damage_prevention_replacement(
         None
     };
 
+    // CR 301.5 + CR 303.4 + CR 614.1a: Damage prevention scoped to the source's
+    // attached creature ("equipped creature" / "enchanted creature"). The dedicated
+    // `DamageTargetFilter` enum can't express attachment relationships (it covers
+    // only player/creature type axes per CR 614.1a), so route through `valid_card`
+    // — the runtime resolves `EquippedBy`/`EnchantedBy` against the source's own
+    // `attached_to` (see `game/filter.rs` `FilterProp::EquippedBy`), correctly
+    // scoping the shield to only the attached creature regardless of how many
+    // other creatures are on the battlefield. Without this, the falls-through to
+    // `damage_target_filter = None` caused the shield to prevent ALL damage to
+    // any target, which was the Multiclass Baldric / Inviolability / Artifact Ward
+    // class of bug.
+    let valid_card_filter: Option<TargetFilter> =
+        if nom_primitives::scan_contains(working_lower, "dealt to equipped creature") {
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EquippedBy]),
+            ))
+        } else if nom_primitives::scan_contains(working_lower, "dealt to enchanted creature") {
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+            ))
+        } else {
+            None
+        };
+
     // --- 4. Extract damage source filter ---
-    let damage_source_filter = parse_damage_source_filter(norm_lower);
+    let damage_source_filter = parse_damage_source_filter(working_lower);
 
     // --- 5. Build the replacement definition ---
     let mut def = ReplacementDefinition::new(ReplacementEvent::DamageDone)
@@ -4062,6 +4132,12 @@ fn parse_damage_prevention_replacement(
     }
     if let Some(sf) = damage_source_filter {
         def = def.damage_source_filter(sf);
+    }
+    if let Some(vc) = valid_card_filter {
+        def = def.valid_card(vc);
+    }
+    if let Some(cond) = prefix_condition {
+        def = def.condition(cond);
     }
 
     // CR 615.5: A prevention effect may include an additional effect referring to
@@ -5073,6 +5149,144 @@ mod tests {
         ));
         assert!(def.combat_scope.is_none()); // all damage, not just combat
         assert_eq!(def.damage_target_filter, Some(damage_target_any_player()));
+    }
+
+    #[test]
+    fn replacement_prevent_damage_to_equipped_creature_scopes_via_valid_card() {
+        // General's Kabuto: prevention is scoped to the equipped creature, not "any creature".
+        // Before the fix, the parser left `valid_card = None`, so the shield would prevent
+        // damage to every creature on the battlefield once Kabuto was on the field.
+        let def = parse_replacement_line(
+            "Prevent all combat damage that would be dealt to equipped creature.",
+            "General's Kabuto",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert!(matches!(
+            def.shield_kind,
+            ShieldKind::Prevention {
+                amount: PreventionAmount::All
+            }
+        ));
+        assert_eq!(def.combat_scope, Some(CombatDamageScope::CombatOnly));
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EquippedBy])
+            ))
+        );
+        // No type-based filter — the scoping comes from valid_card alone.
+        assert!(def.damage_target_filter.is_none());
+        assert!(def.condition.is_none());
+    }
+
+    #[test]
+    fn replacement_prevent_noncombat_damage_to_equipped_creature() {
+        // Magebane Armor: noncombat-only variant of the same scoping pattern.
+        let def = parse_replacement_line(
+            "Prevent all noncombat damage that would be dealt to equipped creature.",
+            "Magebane Armor",
+        )
+        .unwrap();
+        assert_eq!(def.combat_scope, Some(CombatDamageScope::NoncombatOnly));
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EquippedBy])
+            ))
+        );
+    }
+
+    #[test]
+    fn replacement_prevent_damage_to_enchanted_creature_scopes_via_valid_card() {
+        // Inviolability: aura variant of the same building block.
+        let def = parse_replacement_line(
+            "Prevent all damage that would be dealt to enchanted creature.",
+            "Inviolability",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])
+            ))
+        );
+    }
+
+    #[test]
+    fn replacement_multiclass_baldric_full_party_gates_equipped_prevention() {
+        // CR 700.8c + CR 614.1a + CR 615: "As long as you have a full party,
+        // prevent all damage that would be dealt to equipped creature."
+        // Both the gate (full party) AND the target scope (equipped creature)
+        // must be encoded so the shield only fires when both hold. Before the
+        // fix, neither was — so the shield prevented all damage everywhere
+        // whenever Multiclass Baldric was on the battlefield.
+        let def = parse_replacement_line(
+            "As long as you have a full party, prevent all damage that would be dealt to equipped creature.",
+            "Multiclass Baldric",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert!(matches!(
+            def.shield_kind,
+            ShieldKind::Prevention {
+                amount: PreventionAmount::All
+            }
+        ));
+        // Gate: only applies while party size >= 4 (CR 700.8c full party).
+        match def.condition {
+            Some(ReplacementCondition::OnlyIfQuantity {
+                ref lhs,
+                comparator,
+                ref rhs,
+                active_player_req,
+            }) => {
+                assert_eq!(comparator, Comparator::GE);
+                assert_eq!(active_player_req, None);
+                assert!(matches!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::PartySize {
+                            player: crate::types::ability::PlayerScope::Controller
+                        }
+                    }
+                ));
+                assert!(matches!(rhs, QuantityExpr::Fixed { value: 4 }));
+            }
+            other => panic!("expected OnlyIfQuantity gate, got {:?}", other),
+        }
+        // Target scope: only damage to the equipped creature is prevented.
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EquippedBy])
+            ))
+        );
+    }
+
+    #[test]
+    fn strip_as_long_as_prefix_returns_input_unchanged_when_absent() {
+        // No "as long as" prefix: function leaves the slice untouched and reports no gate.
+        let (rest, cond) = strip_as_long_as_prefix_for_prevention(
+            "prevent all damage that would be dealt to equipped creature.",
+        );
+        assert_eq!(
+            rest,
+            "prevent all damage that would be dealt to equipped creature."
+        );
+        assert!(cond.is_none());
+    }
+
+    #[test]
+    fn strip_as_long_as_prefix_leaves_input_intact_when_body_unparseable() {
+        // Prefix is present but the body doesn't lift to a typed ReplacementCondition.
+        // Function leaves the slice untouched so the rest of the parser can still
+        // produce a description-only replacement (no regression vs. pre-fix behavior).
+        let input = "as long as ~ has flying, prevent all damage that would be dealt to it.";
+        let (rest, cond) = strip_as_long_as_prefix_for_prevention(input);
+        assert_eq!(rest, input);
+        assert!(cond.is_none());
     }
 
     #[test]
