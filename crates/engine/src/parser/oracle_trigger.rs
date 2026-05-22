@@ -2293,11 +2293,18 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     // Fastbond's intervening-if. Evaluates to lands_played_this_turn >= 2
     // (the counter is incremented before the LandPlayed event fires, so at
     // detection/resolution time the 2nd land shows count == 2).
-    let first_land_pos = tp.find("if it wasn't the first land you played this turn"); // allow-noncombinator: anchor for strip_condition_clause — structural if-clause excision, not parse dispatch
-    if let Some(pos) = first_land_pos {
-        let pattern = "if it wasn't the first land you played this turn";
+    fn first_land_played_condition(input: &str) -> OracleResult<'_, ()> {
+        value(
+            (),
+            tag::<_, _, OracleError<'_>>("if it wasn't the first land you played this turn"),
+        )
+        .parse(input)
+    }
+    if let Some((before, _, _)) = scan_preceded(&lower, first_land_played_condition) {
+        let pos = before.len();
+        let pattern_len = "if it wasn't the first land you played this turn".len();
         return (
-            strip_condition_clause(text, pos, pattern.len()),
+            strip_condition_clause(text, pos, pattern_len),
             Some(TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::LandsPlayedThisTurn {
@@ -5995,31 +6002,19 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     // second-person "play a land" form (you — e.g. Fastbond). The optional
     // from-zone tail rides through `parse_type_phrase`, matching the existing
     // cast-spell trigger shape used by Rocco, Street Chef.
-    if let Some((who, after_land_play)) = nom_primitives::split_once_on(lower, " plays a land")
-        .ok()
-        .or_else(|| nom_primitives::split_once_on(lower, " play a land").ok())
-        .map(|(_, result)| result)
-    {
+    if let Some((valid_target, after_land_play)) = parse_land_play_trigger_subject(lower) {
         let mut def = make_base();
         def.mode = TriggerMode::LandPlayed;
-
-        // "whenever you play a land" scopes to controller; "opponent" scopes to
-        // opponents; "a player" / "each player" has no valid_target restriction.
-        if scan_contains(who, "you")
-            && !scan_contains(who, "opponent")
-            && !scan_contains(who, "player")
-        {
-            def.valid_target = Some(TargetFilter::Controller);
-        } else if scan_contains(who, "opponent") {
-            def.valid_target = Some(TargetFilter::Typed(
-                TypedFilter::default().controller(ControllerRef::Opponent),
-            ));
-        }
+        def.valid_target = valid_target;
 
         let after_land_play = after_land_play.trim_start();
-        let clause = nom_primitives::split_once_on(after_land_play, ", ")
-            .map(|(_, (before, _))| before)
-            .unwrap_or(after_land_play);
+        let clause = terminated(
+            take_until::<_, _, OracleError<'_>>(", "),
+            tag::<_, _, OracleError<'_>>(", "),
+        )
+        .parse(after_land_play)
+        .map(|(_, before)| before)
+        .unwrap_or(after_land_play);
         let (filter, _) = parse_type_phrase(clause);
         if !matches!(filter, TargetFilter::Any) {
             def.valid_card = Some(filter);
@@ -8091,6 +8086,40 @@ fn parse_turn_constraint(phase_text: &str) -> Option<TriggerConstraint> {
             .map_or("", |i| remaining[i + 1..].trim_start());
     }
     None
+}
+
+/// CR 305.1 + CR 603.2: Parse the subject and land-play verb from
+/// "whenever/when [subject] plays/play a land".
+fn parse_land_play_trigger_subject(lower: &str) -> Option<(Option<TargetFilter>, &str)> {
+    let (after_prefix, _) = alt((
+        tag::<_, _, OracleError<'_>>("whenever "),
+        tag::<_, _, OracleError<'_>>("when "),
+    ))
+    .parse(lower)
+    .ok()?;
+    let (after_subject, valid_target) = alt((
+        value(
+            Some(TargetFilter::Controller),
+            tag::<_, _, OracleError<'_>>("you "),
+        ),
+        value(
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent),
+            )),
+            tag::<_, _, OracleError<'_>>("an opponent "),
+        ),
+        value(None, tag::<_, _, OracleError<'_>>("a player ")),
+        value(None, tag::<_, _, OracleError<'_>>("each player ")),
+    ))
+    .parse(after_prefix)
+    .ok()?;
+    let (after_land, _) = alt((
+        tag::<_, _, OracleError<'_>>("plays a land"),
+        tag("play a land"),
+    ))
+    .parse(after_subject)
+    .ok()?;
+    Some((valid_target, after_land))
 }
 
 /// CR 700.13: "Whenever [subject] commits a crime" — scoped crime trigger parser.
@@ -11875,16 +11904,29 @@ mod tests {
     }
 
     #[test]
+    fn opponent_land_play_trigger_scopes_to_opponent() {
+        let t = parse_trigger_line(
+            "Whenever an opponent plays a land, draw a card.",
+            "Test Card",
+        );
+        assert_eq!(t.mode, TriggerMode::LandPlayed);
+        assert!(matches!(
+            t.valid_target,
+            Some(TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::Opponent),
+                ..
+            }))
+        ));
+    }
+
+    #[test]
     fn extract_if_condition_first_land_pattern() {
         // CR 305.3 + CR 603.4: Verify the condition is stripped from the effect text.
         let (cleaned, cond) = super::extract_if_condition(
             "if it wasn't the first land you played this turn, ~ deals 1 damage to you.",
         );
         assert!(cond.is_some(), "condition must be extracted");
-        assert!(
-            !cleaned.contains("wasn't the first land"),
-            "if-clause must be stripped from effect text, got: {cleaned}"
-        );
+        assert_eq!(cleaned, "~ deals 1 damage to you.");
     }
 
     #[test]
