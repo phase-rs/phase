@@ -953,6 +953,71 @@ mod tests {
         assert_eq!(state.players[1].life, 20);
     }
 
+    // VALIDATION repro for Discord #766/#767: a creature buffed by a transient
+    // +1/+1 (Thoughtweft Lieutenant's ETB pump, Blossoming Defense, etc.) must
+    // have lethal combat damage measured against its MODIFIED toughness, not its
+    // base toughness. CR 510.1c + CR 704.5g: a creature is destroyed only when
+    // damage marked on it is >= its current toughness.
+    #[test]
+    fn buffed_attacker_survives_lethal_against_base_stat_blocker() {
+        use crate::types::ability::{ContinuousModification, Duration, TargetFilter};
+        use crate::types::game_state::TransientContinuousEffect;
+
+        let mut state = setup();
+
+        // Attacker: printed 2/2, buffed +1/+1 → effective 3/3.
+        let attacker = create_creature(&mut state, PlayerId(0), "Kithkin", 2, 2);
+        {
+            let obj = state.objects.get_mut(&attacker).unwrap();
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+        }
+        let ts = state.next_timestamp();
+        state
+            .transient_continuous_effects
+            .push_back(TransientContinuousEffect {
+                id: 1,
+                source_id: attacker,
+                controller: PlayerId(0),
+                timestamp: ts,
+                duration: Duration::UntilEndOfTurn,
+                affected: TargetFilter::SelfRef,
+                modifications: vec![
+                    ContinuousModification::AddPower { value: 1 },
+                    ContinuousModification::AddToughness { value: 1 },
+                ],
+                condition: None,
+                source_name: String::new(),
+            });
+
+        crate::game::layers::evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects[&attacker].toughness,
+            Some(3),
+            "buff must apply: 2/2 + 1/+1 = 3/3"
+        );
+
+        // Blocker equal to the attacker's BASE stats (2/2).
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+        assert_eq!(
+            state.objects[&attacker].damage_marked, 2,
+            "blocker deals 2 to attacker"
+        );
+
+        sba::check_state_based_actions(&mut state, &mut events);
+
+        // The buffed 3/3 took only 2 damage → it must SURVIVE.
+        assert_eq!(
+            state.objects[&attacker].zone,
+            Zone::Battlefield,
+            "buffed 3/3 must survive 2 damage from a 2/2 blocker (#766/#767)"
+        );
+    }
+
     #[test]
     fn blocked_attacker_with_unblocked_option_waits_for_assignment_choice() {
         let mut state = setup();

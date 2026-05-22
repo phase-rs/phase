@@ -173,6 +173,20 @@ pub(crate) fn deliver_replaced_zone_change(
                 });
             }
         }
+        // CR 614.12a: Drain mandatory replacement post-effects after the zone
+        // change completes. This shared delivery path covers effect-driven moves
+        // (`ChangeZone`) in the same way stack resolution and land play already
+        // do, so as-enters work such as "enters prepared" or persisted choices
+        // applies before triggers and priority.
+        if state.post_replacement_continuation.is_some() {
+            let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+                state,
+                Some(object_id),
+                None,
+                Some(crate::types::replacements::ReplacementEvent::Moved),
+                events,
+            );
+        }
     }
 }
 
