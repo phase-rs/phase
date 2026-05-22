@@ -74,31 +74,31 @@ impl CardDatabase {
         let mut bracket_signals_by_name: HashMap<String, BracketSignals> =
             HashMap::with_capacity(entries.len());
 
-        for (_name, entry) in entries {
-            let key = entry.face.name.to_lowercase();
+        for (export_key, entry) in entries {
+            let storage_key = export_key.to_lowercase();
             if let Some(oracle_id) = entry.face.scryfall_oracle_id.clone() {
                 oracle_id_index
                     .entry(oracle_id.clone())
                     .or_default()
-                    .push(key.clone());
+                    .push(storage_key.clone());
                 if let Some(layout_kind) = entry.layout.as_deref().and_then(map_layout_str) {
                     layout_index.entry(oracle_id).or_insert(layout_kind);
                 }
             }
-            face_index.insert(key.clone(), entry.face);
-            bracket_signals_by_name.insert(key.clone(), entry.bracket_signals);
+            face_index.insert(storage_key.clone(), entry.face);
+            bracket_signals_by_name.insert(storage_key.clone(), entry.bracket_signals);
 
             if !entry.printings.is_empty() {
-                printings_index.insert(key.clone(), entry.printings);
+                printings_index.insert(storage_key.clone(), entry.printings);
             }
 
             if !entry.rulings.is_empty() {
-                rulings_index.insert(key.clone(), entry.rulings);
+                rulings_index.insert(storage_key.clone(), entry.rulings);
             }
 
             let normalized = normalize_legalities(&entry.legalities);
             if !normalized.is_empty() {
-                legalities.insert(key, normalized);
+                legalities.insert(storage_key.clone(), normalized);
             }
         }
         let name_alias_index = build_name_alias_index(face_index.keys());
@@ -190,6 +190,19 @@ impl CardDatabase {
         self.layout_index.get(oracle_id).copied()
     }
 
+    pub fn export_integrity_errors(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        for (oracle_id, layout_kind) in &self.layout_index {
+            let face_count = self.oracle_id_index.get(oracle_id).map_or(0, Vec::len);
+            if layout_kind_requires_multiple_faces(*layout_kind) && face_count < 2 {
+                errors.push(format!(
+                    "oracle_id {oracle_id} has layout {layout_kind:?} but only {face_count} exported face(s)"
+                ));
+            }
+        }
+        errors
+    }
+
     pub fn errors(&self) -> &[(PathBuf, String)] {
         &self.errors
     }
@@ -210,6 +223,7 @@ impl CardDatabase {
             .map(|face| face.name.clone())
             .collect();
         names.sort();
+        names.dedup();
         names
     }
 
@@ -361,6 +375,20 @@ struct CardExportEntry {
     /// exported before Task 4 will deserialize to all-false `BracketSignals::default()`.
     #[serde(default)]
     bracket_signals: BracketSignals,
+}
+
+fn layout_kind_requires_multiple_faces(layout_kind: LayoutKind) -> bool {
+    matches!(
+        layout_kind,
+        LayoutKind::Split
+            | LayoutKind::Flip
+            | LayoutKind::Transform
+            | LayoutKind::Meld
+            | LayoutKind::Adventure
+            | LayoutKind::Modal
+            | LayoutKind::Omen
+            | LayoutKind::Prepare
+    )
 }
 
 /// Convert MTGJSON layout string to runtime `LayoutKind`.

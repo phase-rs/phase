@@ -227,6 +227,18 @@ describe("PermanentCard attachments", () => {
     });
   });
 
+  it("renders action affordance highlights above the card face", () => {
+    const { container } = renderPermanent(new Set([1]));
+    const highlight = container.querySelector(
+      '[data-card-affordance-highlight="true"]',
+    );
+
+    expect(highlight).toBeTruthy();
+    expect(highlight?.className).toContain("absolute");
+    expect(highlight?.className).toContain("z-30");
+    expect(highlight?.className).toContain("pointer-events-none");
+  });
+
   it("opens the ability picker when a land has mana actions plus a non-mana activated ability", () => {
     const kessig = makeObject({
       id: 39,
