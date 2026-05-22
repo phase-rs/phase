@@ -2066,32 +2066,31 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     // --- "[Enchanted/Equipped] [type]'s activated abilities cost {N} less to activate" ---
     // CR 303.4 + CR 602.1 + CR 601.2f: Aura/Equipment-granted activated ability
     // cost reduction for the attached object (Power Artifact).
-    if let Some(rest) = nom_tag_lower(tp.lower, tp.lower, "enchanted ") {
-        if let Ok((_, (filter_part, after_cost))) =
-            nom_primitives::split_once_on(rest, "'s activated abilities cost ")
-        {
-            if nom_primitives::scan_contains(after_cost, "less to activate") {
-                let amount = nom_primitives::split_once_on(after_cost, " less")
-                    .ok()
-                    .and_then(|(_, (mana_str, _))| {
-                        let stripped = mana_str.trim().trim_matches('{').trim_matches('}');
-                        stripped.parse::<u32>().ok()
-                    })
-                    .unwrap_or(1);
-                let filter_text = format!("enchanted {}", filter_part.trim());
-                let (affected, _rest) = parse_type_phrase(&filter_text);
-                return Some(
-                    StaticDefinition::new(StaticMode::ReduceAbilityCost {
-                        keyword: "activated".to_string(),
-                        amount,
-                        minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
-                        dynamic_count: None,
-                    })
-                    .affected(affected)
-                    .description(text.to_string()),
-                );
-            }
-        }
+    if let Some(((prefix, filter_part, amount), _)) = nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, prefix) = alt((
+            value("enchanted ", tag::<_, _, OracleError<'_>>("enchanted ")),
+            value("equipped ", tag::<_, _, OracleError<'_>>("equipped ")),
+        ))
+        .parse(i)?;
+        let (i, filter_part) = take_until("'s activated abilities cost ").parse(i)?;
+        let (i, _) = tag("'s activated abilities cost ").parse(i)?;
+        let (i, amount) =
+            nom::sequence::delimited(tag("{"), nom_primitives::parse_number, tag("}")).parse(i)?;
+        let (i, _) = tag(" less to activate").parse(i)?;
+        Ok((i, (prefix, filter_part.to_string(), amount)))
+    }) {
+        let filter_text = format!("{prefix}{filter_part}");
+        let (affected, _rest) = parse_type_phrase(&filter_text);
+        return Some(
+            StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                keyword: "activated".to_string(),
+                amount,
+                minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
+                dynamic_count: None,
+            })
+            .affected(affected)
+            .description(text.to_string()),
+        );
     }
 
     // --- "Activated abilities of [filter] cost {N} less to activate" ---
@@ -17646,6 +17645,27 @@ mod tests {
     fn static_reduce_activated_ability_cost_enchanted_artifact_with_minimum() {
         let def = parse_static_line(
             "Enchanted artifact's activated abilities cost {2} less to activate. This effect can't reduce the mana in that cost to less than one mana.",
+        )
+        .unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::ReduceAbilityCost {
+                keyword: "activated".to_string(),
+                amount: 2,
+                minimum_mana: Some(1),
+                dynamic_count: None,
+            }
+        );
+        assert!(matches!(
+            def.affected,
+            Some(TargetFilter::Typed(TypedFilter { .. }))
+        ));
+    }
+
+    #[test]
+    fn static_reduce_activated_ability_cost_equipped_artifact_with_minimum() {
+        let def = parse_static_line(
+            "Equipped artifact's activated abilities cost {2} less to activate. This effect can't reduce the mana in that cost to less than one mana.",
         )
         .unwrap();
         assert_eq!(
