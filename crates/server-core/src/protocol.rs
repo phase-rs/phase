@@ -120,6 +120,10 @@ pub struct PlayerSlotInfo {
     pub player_id: u8,
     pub name: String,
     pub kind: SeatKind,
+    #[serde(default)]
+    pub reserved: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reservation_expires_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,18 +181,31 @@ pub enum ClientMessage {
         /// as a draft pod instead of a constructed-play room.
         #[serde(default)]
         draft_metadata: Option<DraftLobbyMetadata>,
+        /// When true, the server/host starts the game as soon as every seat is
+        /// occupied. Defaulted so older clients keep the new intended behavior
+        /// without requiring a protocol-version bump.
+        #[serde(default = "default_true")]
+        start_when_full: bool,
     },
     JoinGameWithPassword {
         game_code: String,
         deck: DeckData,
         display_name: String,
         password: Option<String>,
+        #[serde(default)]
+        reservation_token: Option<String>,
     },
     /// Read-only lookup used by typed-code joins before deck selection.
     /// Returns room metadata (`JoinTargetInfo`) without consuming a seat.
     LookupJoinTarget {
         game_code: String,
         password: Option<String>,
+        #[serde(default)]
+        reserve: bool,
+        #[serde(default)]
+        display_name: Option<String>,
+        #[serde(default)]
+        release_reservation_token: Option<String>,
     },
     Concede,
     Emote {
@@ -208,6 +225,8 @@ pub enum ClientMessage {
         game_code: String,
         current_players: u8,
         max_players: u8,
+        #[serde(default)]
+        consumed_reservation_tokens: Vec<String>,
     },
     SeatMutate {
         mutation: SeatMutation,
@@ -252,6 +271,10 @@ pub enum ClientMessage {
 
 fn default_player_count() -> u8 {
     2
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -375,6 +398,10 @@ pub enum ServerMessage {
         match_config: MatchConfig,
         player_count: u8,
         filled_seats: u8,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reservation_token: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reservation_expires_at_ms: Option<u64>,
     },
     PlayerSlotsUpdate {
         slots: Vec<PlayerSlotInfo>,
@@ -407,6 +434,8 @@ pub enum ServerMessage {
         match_config: MatchConfig,
         player_count: u8,
         filled_seats: u8,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reservation_token: Option<String>,
     },
     DraftCreated {
         draft_code: String,
@@ -586,6 +615,7 @@ mod tests {
             room_name: Some("Friday Night Commander".to_string()),
             host_peer_id: None,
             draft_metadata: None,
+            start_when_full: true,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -645,6 +675,7 @@ mod tests {
             },
             display_name: "Bob".to_string(),
             password: None,
+            reservation_token: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -668,6 +699,9 @@ mod tests {
         let msg = ClientMessage::LookupJoinTarget {
             game_code: "ABC123".to_string(),
             password: Some("pw".to_string()),
+            reserve: false,
+            display_name: None,
+            release_reservation_token: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -675,9 +709,15 @@ mod tests {
             ClientMessage::LookupJoinTarget {
                 game_code,
                 password,
+                reserve,
+                display_name,
+                release_reservation_token,
             } => {
                 assert_eq!(game_code, "ABC123");
                 assert_eq!(password, Some("pw".to_string()));
+                assert!(!reserve);
+                assert_eq!(display_name, None);
+                assert_eq!(release_reservation_token, None);
             }
             _ => panic!("wrong variant"),
         }
@@ -1008,6 +1048,7 @@ mod tests {
             room_name: None,
             host_peer_id: None,
             draft_metadata: None,
+            start_when_full: true,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -1183,6 +1224,7 @@ mod tests {
             match_config: MatchConfig::default(),
             player_count: 4,
             filled_seats: 2,
+            reservation_token: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -1212,6 +1254,8 @@ mod tests {
             match_config: MatchConfig::default(),
             player_count: 4,
             filled_seats: 2,
+            reservation_token: None,
+            reservation_expires_at_ms: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -1268,6 +1312,7 @@ mod tests {
             room_name: None,
             host_peer_id: Some("peer-host-abc".to_string()),
             draft_metadata: None,
+            start_when_full: true,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();

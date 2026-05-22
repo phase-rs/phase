@@ -514,7 +514,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
 
       {/* Main card — art crop or full card based on preference */}
       {useArtCrop ? (
-        <div className={`relative z-10 rounded-lg ${glowClass}`}>
+        <div className="relative z-10 rounded-lg">
           <ArtCropCard objectId={objectId} />
           {/* CR 702.26: phased-out tint overlay — sky-blue mix-blend-screen
               matches the player-area treatment (PlayerArea.tsx 4d6cfb506). */}
@@ -527,7 +527,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
         </div>
       ) : (
         <>
-          <div className={`relative z-10 rounded-lg overflow-hidden ${glowClass}`}>
+          <div className="relative z-10 rounded-lg overflow-hidden">
             <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined} oracleText={obj.display_source === "Token" ? obj.token_rules_text : undefined} faceDown={obj.face_down} />
             {/* Keyword strip overlay — inside the card image wrapper so absolute positioning works */}
             {showKeywordStrip && obj.keywords.length > 0 && !obj.face_down && (
@@ -612,6 +612,14 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
           )}
 
         </>
+      )}
+
+      {glowClass && (
+        <div
+          aria-hidden
+          data-card-affordance-highlight="true"
+          className={`pointer-events-none absolute inset-[-3px] z-30 rounded-xl ${glowClass}`}
+        />
       )}
 
       {/* Debug-panel preview highlight — fuchsia neon ring + animated pulse.

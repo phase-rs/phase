@@ -526,12 +526,17 @@ export class P2PHostAdapter implements EngineAdapter {
     this.emit({ type: "playerSlotsUpdated", slots: this.getPlayerSlots() });
   }
 
-  private syncLobbyMetadata(): void {
+  private syncLobbyMetadata(consumedReservationTokens: string[] = []): void {
     const currentPlayers = occupiedSeatCount(this.pregameSeatState);
     const maxPlayers = this.pregameSeatState.seats.length;
     this.emit({ type: "lobbyProgress", joined: currentPlayers, total: maxPlayers });
     if (this.broker && this.brokerGameCode) {
-      this.broker.updateMetadata(this.brokerGameCode, currentPlayers, maxPlayers);
+      this.broker.updateMetadata(
+        this.brokerGameCode,
+        currentPlayers,
+        maxPlayers,
+        consumedReservationTokens,
+      );
     }
   }
 
@@ -715,7 +720,7 @@ export class P2PHostAdapter implements EngineAdapter {
         this.handleReconnect(session, msg.playerToken);
       } else if (msg.type === "guest_deck") {
         traceAdapter("Host", "first-message", { type: msg.type });
-        this.handleNewGuest(session, msg.deckData, msg.displayName);
+        this.handleNewGuest(session, msg.deckData, msg.displayName, msg.reservationToken);
       } else {
         traceAdapter("Host", "first-message", { type: msg.type });
         // Unexpected first message — reject.
@@ -728,7 +733,12 @@ export class P2PHostAdapter implements EngineAdapter {
     });
   }
 
-  private handleNewGuest(session: PeerSession, deckData: unknown, displayName?: string): void {
+  private handleNewGuest(
+    session: PeerSession,
+    deckData: unknown,
+    displayName?: string,
+    reservationToken?: string,
+  ): void {
     if (this.gameStarted) {
       session.send({ type: "kick", reason: "Game already in progress" });
       session.close("Game in progress");
@@ -755,7 +765,7 @@ export class P2PHostAdapter implements EngineAdapter {
     session.onMessage((msg) => this.handleGuestMessage(pid, msg));
 
     this.broadcastSeatSnapshot();
-    this.syncLobbyMetadata();
+    this.syncLobbyMetadata(reservationToken ? [reservationToken] : []);
 
     if (this.formatConfig) {
       void this.validateGuestDeck(pid, guestDeck);
@@ -1465,6 +1475,7 @@ export class P2PGuestAdapter implements EngineAdapter {
     private readonly initialConn: DataConnection,
     existingPlayerToken?: string,
     private readonly displayName?: string,
+    private readonly reservationToken?: string,
   ) {
     if (existingPlayerToken) {
       this.playerToken = existingPlayerToken;
@@ -1496,7 +1507,12 @@ export class P2PGuestAdapter implements EngineAdapter {
       this.session!.send({ type: "reconnect", playerToken: this.playerToken });
     } else {
       traceAdapter("Guest", "send-guest-deck", { hostPeerId: this.hostPeerId });
-      this.session!.send({ type: "guest_deck", deckData: this.deckData, displayName: this.displayName });
+      this.session!.send({
+        type: "guest_deck",
+        deckData: this.deckData,
+        displayName: this.displayName,
+        reservationToken: this.reservationToken,
+      });
     }
   }
 

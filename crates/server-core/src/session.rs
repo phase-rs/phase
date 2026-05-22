@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use engine::ai_support::{auto_pass_recommended, legal_actions_full as engine_legal_actions_full};
 use engine::database::CardDatabase;
@@ -42,6 +42,23 @@ pub type ActionResult = (
     HashMap<ObjectId, Vec<GameAction>>,
 );
 
+pub const PUBLIC_SEAT_RESERVATION_MS: u64 = 120_000;
+
+#[derive(Debug, Clone)]
+pub struct SeatReservation {
+    pub token: String,
+    pub display_name: String,
+    pub seat_index: usize,
+    pub expires_at_ms: Option<u64>,
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 /// Returns the player who must act for the given WaitingFor, or None if the game is over.
 pub fn acting_player(state: &GameState) -> Option<PlayerId> {
     engine::game::turn_control::authorized_submitter(state)
@@ -73,6 +90,10 @@ pub struct GameSession {
     pub connected: Vec<bool>,
     pub decks: Vec<Option<PlayerDeckPayload>>,
     pub display_names: Vec<String>,
+    /// Pre-deck seat reservations keyed by reservation token. Reservations
+    /// are in-memory only; stale public reservations expire, and private-room
+    /// reservations are released by socket cleanup.
+    pub reservations: HashMap<String, SeatReservation>,
     pub timer_seconds: Option<u32>,
     /// Number of human player seats in this game.
     pub player_count: u8,
@@ -88,6 +109,9 @@ pub struct GameSession {
     /// send `SeatMutation::Start` to begin. Set by the existing auto-start
     /// paths in `join_game_with_name` and `create_game_with_ai`.
     pub game_started: bool,
+    /// Host preference: start automatically when every configured seat is
+    /// occupied by a joined human or AI.
+    pub start_when_full: bool,
 }
 
 impl GameSession {
@@ -102,13 +126,16 @@ impl GameSession {
     /// Returns the first unclaimed human seat index, if any.
     /// AI seats are skipped — humans cannot join an AI-controlled seat.
     pub fn first_open_seat(&self) -> Option<usize> {
-        self.player_tokens
-            .iter()
-            .enumerate()
-            .position(|(i, t)| t.is_empty() && !self.ai_seats.contains(&PlayerId(i as u8)))
+        self.player_tokens.iter().enumerate().position(|(i, t)| {
+            t.is_empty()
+                && !self.ai_seats.contains(&PlayerId(i as u8))
+                && !self.reservations.values().any(|r| r.seat_index == i)
+        })
     }
 
-    /// Returns true if all seats are claimed (by humans or AI).
+    /// Returns true if all seats are actually occupied by joined humans or AI.
+    /// Reservations hold capacity for lobby UX but do not make a game ready
+    /// to start because the reserved player has not submitted a deck yet.
     pub fn is_full(&self) -> bool {
         self.player_tokens
             .iter()
@@ -117,15 +144,27 @@ impl GameSession {
     }
 
     /// Count of occupied seats — humans who have joined plus configured AI
-    /// seats. Matches `is_full()` semantics: a full game has
-    /// `current_player_count() == player_count`. Published on the public
-    /// `LobbyGame` entry so browsers can see how close a game is to starting.
+    /// seats and active reservations. Published on the public `LobbyGame`
+    /// entry so browsers can see held seats as unavailable.
     pub fn current_player_count(&self) -> u32 {
         (0..self.player_count as usize)
             .filter(|i| {
-                !self.player_tokens[*i].is_empty() || self.ai_seats.contains(&PlayerId(*i as u8))
+                !self.player_tokens[*i].is_empty()
+                    || self.ai_seats.contains(&PlayerId(*i as u8))
+                    || self.reservations.values().any(|r| r.seat_index == *i)
             })
             .count() as u32
+    }
+
+    pub fn cleanup_expired_reservations(&mut self) -> bool {
+        let before = self.reservations.len();
+        let now = now_ms();
+        self.reservations.retain(|_, reservation| {
+            reservation
+                .expires_at_ms
+                .is_none_or(|expires| expires > now)
+        });
+        before != self.reservations.len()
     }
 
     /// Returns true if the game hasn't started yet (mutations are still legal).
@@ -140,6 +179,10 @@ impl GameSession {
                 let pid = PlayerId(i as u8);
                 let is_ai = self.ai_seats.contains(&pid);
                 let claimed = !self.player_tokens[i].is_empty();
+                let reservation = self
+                    .reservations
+                    .values()
+                    .find(|reservation| reservation.seat_index == i);
 
                 let kind = if i == 0 {
                     SeatKind::HostHuman
@@ -163,10 +206,14 @@ impl GameSession {
                     player_id: pid.0,
                     name: if claimed || is_ai {
                         self.display_names[i].clone()
+                    } else if let Some(reservation) = reservation {
+                        reservation.display_name.clone()
                     } else {
                         String::new()
                     },
                     kind,
+                    reserved: reservation.is_some(),
+                    reservation_expires_at_ms: reservation.and_then(|r| r.expires_at_ms),
                 }
             })
             .collect()
@@ -235,6 +282,7 @@ impl GameSession {
         let mut next_connected = vec![false; new_player_count as usize];
         let mut next_decks = vec![None; new_player_count as usize];
         let mut next_names = vec![String::new(); new_player_count as usize];
+        let mut next_reservations = HashMap::new();
 
         for (old_idx, maybe_new_idx) in old_to_new
             .iter()
@@ -250,11 +298,24 @@ impl GameSession {
             next_names[new_idx] = self.display_names[old_idx].clone();
         }
 
+        for reservation in self.reservations.values() {
+            let Some(new_idx) = old_to_new
+                .get(reservation.seat_index)
+                .and_then(|maybe| *maybe)
+            else {
+                continue;
+            };
+            let mut reservation = reservation.clone();
+            reservation.seat_index = new_idx;
+            next_reservations.insert(reservation.token.clone(), reservation);
+        }
+
         self.player_count = new_player_count;
         self.player_tokens = next_tokens;
         self.connected = next_connected;
         self.decks = next_decks;
         self.display_names = next_names;
+        self.reservations = next_reservations;
         self.ai_seats.clear();
 
         let mut next_ai_configs = HashMap::new();
@@ -265,6 +326,8 @@ impl GameSession {
                     self.player_tokens[seat_idx].clear();
                     self.connected[seat_idx] = false;
                     self.decks[seat_idx] = None;
+                    self.reservations
+                        .retain(|_, reservation| reservation.seat_index != seat_idx);
                     if seat_idx != 0 {
                         self.display_names[seat_idx].clear();
                     }
@@ -275,6 +338,8 @@ impl GameSession {
                     self.player_tokens[seat_idx].clear();
                     self.connected[seat_idx] = true;
                     self.display_names[seat_idx] = format!("AI ({difficulty:?})");
+                    self.reservations
+                        .retain(|_, reservation| reservation.seat_index != seat_idx);
                     let config = phase_ai::config::create_config_for_players(
                         *difficulty,
                         Platform::Native,
@@ -373,10 +438,10 @@ impl GameSession {
         ai_results
             .into_iter()
             .map(|r| {
-                let (legal, spell_costs, by_object) = engine_legal_actions_full(&self.state);
-                let auto_pass = auto_pass_recommended(&self.state, &legal);
+                let (legal, spell_costs, by_object) = engine_legal_actions_full(&r.state);
+                let auto_pass = auto_pass_recommended(&r.state, &legal);
                 (
-                    self.state.clone(),
+                    r.state,
                     r.events,
                     legal,
                     r.log_entries,
@@ -406,6 +471,7 @@ impl GameSession {
             ai_seats: self.ai_seats.iter().map(|pid| pid.0).collect(),
             ai_difficulties,
             game_started: self.game_started,
+            start_when_full: self.start_when_full,
             lobby_meta: self.lobby_meta.clone(),
         }
     }
@@ -457,12 +523,14 @@ impl GameSession {
             connected: vec![false; pc],
             decks: vec![None; pc],
             display_names: ps.display_names,
+            reservations: HashMap::new(),
             timer_seconds: ps.timer_seconds,
             player_count: ps.player_count,
             ai_seats,
             ai_configs,
             lobby_meta: ps.lobby_meta,
             game_started: ps.game_started,
+            start_when_full: ps.start_when_full,
         }
     }
 }
@@ -557,12 +625,14 @@ impl SessionManager {
             connected,
             decks,
             display_names,
+            reservations: HashMap::new(),
             timer_seconds,
             player_count,
             ai_seats: HashSet::new(),
             ai_configs: HashMap::new(),
             lobby_meta: None,
             game_started: false,
+            start_when_full: true,
         };
 
         self.token_to_game
@@ -591,21 +661,101 @@ impl SessionManager {
         deck: PlayerDeckPayload,
         display_name: String,
     ) -> Result<(String, GameState), String> {
+        self.join_game_with_name_and_reservation(game_code, deck, display_name, None)
+    }
+
+    pub fn reserve_seat(
+        &mut self,
+        game_code: &str,
+        display_name: String,
+        password_protected: bool,
+    ) -> Result<SeatReservation, String> {
+        let session = self
+            .sessions
+            .get_mut(game_code)
+            .ok_or_else(|| format!("Game not found: {}", game_code))?;
+        session.cleanup_expired_reservations();
+        if session.game_started {
+            return Err("Game has already started".to_string());
+        }
+
+        let seat = session
+            .first_open_seat()
+            .ok_or_else(|| "Game is already full".to_string())?;
+        let token = generate_player_token();
+        let expires_at_ms = if password_protected {
+            None
+        } else {
+            Some(now_ms() + PUBLIC_SEAT_RESERVATION_MS)
+        };
+        let reservation = SeatReservation {
+            token: token.clone(),
+            display_name,
+            seat_index: seat,
+            expires_at_ms,
+        };
+        session.reservations.insert(token, reservation.clone());
+        Ok(reservation)
+    }
+
+    pub fn release_reservation(&mut self, game_code: &str, reservation_token: &str) -> bool {
+        self.sessions
+            .get_mut(game_code)
+            .and_then(|session| session.reservations.remove(reservation_token))
+            .is_some()
+    }
+
+    pub fn release_reservations(&mut self, reservations: &[(String, String)]) -> bool {
+        let mut changed = false;
+        for (game_code, token) in reservations {
+            changed |= self.release_reservation(game_code, token);
+        }
+        changed
+    }
+
+    pub fn join_game_with_name_and_reservation(
+        &mut self,
+        game_code: &str,
+        deck: PlayerDeckPayload,
+        display_name: String,
+        reservation_token: Option<String>,
+    ) -> Result<(String, GameState), String> {
         let session = self
             .sessions
             .get_mut(game_code)
             .ok_or_else(|| format!("Game not found: {}", game_code))?;
 
-        let seat = session
-            .first_open_seat()
-            .ok_or_else(|| "Game is already full".to_string())?;
+        session.cleanup_expired_reservations();
+        let reservation = match reservation_token.as_deref() {
+            Some(token) => Some(
+                session
+                    .reservations
+                    .remove(token)
+                    .ok_or_else(|| "Seat reservation expired or was released".to_string())?,
+            ),
+            None => None,
+        };
+        let seat = if let Some(reservation) = &reservation {
+            reservation.seat_index
+        } else {
+            session
+                .first_open_seat()
+                .ok_or_else(|| "Game is already full".to_string())?
+        };
 
         let player_token = generate_player_token();
         let player_id = PlayerId(seat as u8);
         session.player_tokens[seat] = player_token.clone();
         session.connected[seat] = true;
         session.decks[seat] = Some(deck);
-        session.display_names[seat] = display_name;
+        session.display_names[seat] = if display_name.is_empty() {
+            reservation
+                .as_ref()
+                .map(|reservation| reservation.display_name.clone())
+                .unwrap_or_default()
+        } else {
+            display_name
+        };
 
         self.token_to_game
             .insert(player_token.clone(), game_code.to_string());
@@ -938,7 +1088,7 @@ impl SessionManager {
     pub fn open_games(&self) -> Vec<String> {
         self.sessions
             .values()
-            .filter(|s| !s.is_full())
+            .filter(|s| s.first_open_seat().is_some())
             .map(|s| s.game_code.clone())
             .collect()
     }
