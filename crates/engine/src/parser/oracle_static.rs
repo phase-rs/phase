@@ -3546,8 +3546,10 @@ pub(crate) fn parse_additive_type_clause_modifications(
     let (after_suffix_lower, type_words_lower) = terminated(
         take_until::<_, _, VE>(" in addition to "),
         alt((
+            tag::<_, _, VE>(" in addition to its other creature types"),
             tag::<_, _, VE>(" in addition to its other types"),
             tag::<_, _, VE>(" in addition to its other land types"),
+            tag::<_, _, VE>(" in addition to their other creature types"),
             tag::<_, _, VE>(" in addition to their other types"),
             tag::<_, _, VE>(" in addition to their other land types"),
         )),
@@ -17128,6 +17130,27 @@ mod tests {
             .contains(&ContinuousModification::AddSubtype {
                 subtype: "Bear".to_string(),
             }));
+    }
+
+    #[test]
+    fn static_hivestone_adds_sliver_subtype_to_creatures_you_control() {
+        let def = parse_static_line(
+            "Creatures you control are Slivers in addition to their other creature types.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
+        );
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::AddSubtype {
+                subtype: "Sliver".to_string(),
+            }]
+        );
     }
 
     #[test]
