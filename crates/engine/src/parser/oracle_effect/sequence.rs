@@ -1,6 +1,6 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_until};
+use nom::bytes::complete::{tag, tag_no_case, take_until};
 use nom::character::complete::multispace1;
 use nom::combinator::{all_consuming, eof, opt, value};
 use nom::Parser;
@@ -80,6 +80,26 @@ fn parse_choose_count_from_text(lower: &str) -> u32 {
 fn parse_choice_partition_destinations(lower: &str) -> Option<(Zone, Zone)> {
     parse_put_choice_partition_destinations(lower)
         .or_else(|| parse_shuffle_choice_partition_destinations(lower))
+}
+
+fn starts_have_base_power_toughness(input: &str) -> bool {
+    value(
+        (),
+        (
+            tag_no_case::<_, _, OracleError<'_>>("have"),
+            multispace1,
+            tag_no_case("base"),
+            multispace1,
+            tag_no_case("power"),
+            multispace1,
+            tag_no_case("and"),
+            multispace1,
+            tag_no_case("toughness"),
+            multispace1,
+        ),
+    )
+    .parse(input)
+    .is_ok()
 }
 
 fn parse_put_chosen_cards_at_library_position(lower: &str) -> Option<LibraryPosition> {
@@ -529,11 +549,8 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                     // (e.g. "lose all abilities and have base power and toughness
                     // 1/1 until end of turn") as a single GenericEffect with the
                     // correct `affected` filter inherited from the subject.
-                    let remainder_lower = remainder_trimmed.to_ascii_lowercase();
                     let have_base_pt_continuation =
-                        tag::<_, _, OracleError<'_>>("have base power and toughness ")
-                            .parse(remainder_lower.as_str())
-                            .is_ok();
+                        starts_have_base_power_toughness(remainder_trimmed);
                     let suppress = nom_primitives::scan_contains(&before_lower, "from among")
                         || is_inside_temporal_prefix(&before_lower)
                         || targeted_compound_continuation
