@@ -40,6 +40,7 @@ mod gimbal_gremlin_prodigy;
 mod gluntch_choose_player_chain;
 mod gran_gran_integration;
 mod greater_good_activation;
+mod green_suns_zenith_regression;
 mod harrow_regression;
 mod hunters_insight_combat_draw;
 mod integration_adventure;

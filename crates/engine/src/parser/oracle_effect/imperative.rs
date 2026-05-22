@@ -40,7 +40,7 @@ use super::super::oracle_target::{
     parse_target, parse_target_with_ctx, parse_type_phrase, resolve_pronoun_target,
 };
 use super::super::oracle_util::{
-    contains_object_pronoun, contains_possessive, parse_count_expr, parse_mana_symbols,
+    contains_possessive, contains_self_or_object_pronoun, parse_count_expr, parse_mana_symbols,
     parse_ordinal, split_around, starts_with_possessive, strip_after, TextPair,
 };
 
@@ -3198,7 +3198,7 @@ fn parse_shuffle_origin_zones(input: &str) -> nom::IResult<&str, Vec<Zone>, Orac
 /// Parse "shuffle [the cards {from|in}] {possessive} {zone-list} into
 /// {possessive} library" and return the origin zones.
 ///
-/// CR 400.6 + CR 701.24a: Recognizes whole-zone bulk moves like Whirlpool Drake's
+/// CR 400.6 + CR 701.24c: Recognizes whole-zone bulk moves like Whirlpool Drake's
 /// "shuffle the cards from your hand into your library" and Midnight Clock's
 /// "shuffle your hand and graveyard into your library". The origin-zone phrase
 /// names every card in each listed zone — no targeting or filtering — so the
@@ -3273,25 +3273,33 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
             return Some(ShuffleImperativeAst::ShuffleLibrary { target });
         }
     }
-    // CR 701.24a + CR 400.3: "shuffle <pronoun> into <possessive> library" —
+    // CR 701.24c + CR 400.3: "shuffle <pronoun> into <possessive> library" —
     // covers "shuffle it into its owner's library" (Cavalier cycle), "shuffle
-    // ~ into your library", "shuffle that card into its owner's library"
-    // (search-then-shuffle tutors), "shuffle them into their owners' libraries"
-    // (compound subject). Both pronoun (it/them/that card/those cards/~) and
-    // possessive (its owner's / their owner's / their owners' / your) are
-    // classified via nom combinators so the lowered `ChangeZone` carries the
-    // correct `target` (SelfRef vs ParentTarget) and `owner_library` flag.
-    if contains_object_pronoun(lower, "shuffle", "into")
-        || contains_object_pronoun(lower, "shuffles", "into")
+    // ~ into its owner's library" (Green Sun's Zenith, Beacon cycle, Nexus of
+    // Fate — self-referential tutors that shuffle themselves back), "shuffle
+    // that card into its owner's library" (search-then-shuffle tutors),
+    // "shuffle them into their owners' libraries" (compound subject). Both
+    // pronoun (it/them/that card/those cards/~) and possessive (its owner's /
+    // their owner's / their owners' / your) are classified via nom combinators
+    // so the lowered `ChangeZone` carries the correct `target` (SelfRef vs
+    // ParentTarget) and `owner_library` flag. The `~` token is produced by
+    // `normalize_card_name_refs` for self-references; it is handled by
+    // `contains_self_or_object_pronoun` here (not `contains_object_pronoun`)
+    // because the anaphoric/self-reference distinction matters at other call
+    // sites (compound action splitting in `try_split_targeted_compound`).
+    if contains_self_or_object_pronoun(lower, "shuffle", "into")
+        || contains_self_or_object_pronoun(lower, "shuffles", "into")
     {
         // Pronoun classification. Walk word-boundaries, peel "shuffle"/
-        // "shuffles" + " ", then alt() over the four object-pronoun variants.
-        // "it" / "~" → SelfRef (singular, anaphoric to the source object);
+        // "shuffles" + " ", then alt() over the five recognized references.
+        // "it" / "~" → SelfRef (singular, anaphoric to the source object;
+        // "~" is the self-reference token from `normalize_card_name_refs`);
         // "them" / "that card" / "those cards" → ParentTarget (refers to a
         // previously-bound target). The fall-through "SelfRef" arm only
-        // engages when the outer `contains_object_pronoun` guard somehow
-        // matched a pronoun the inner combinator didn't recognize — defensive
-        // and also matches the existing "shuffle this creature into …" form.
+        // engages when the outer `contains_self_or_object_pronoun` guard
+        // somehow matched a pronoun the inner combinator didn't recognize —
+        // defensive and also matches the existing "shuffle this creature
+        // into …" form.
         let target = nom_primitives::scan_at_word_boundaries(lower, |input| {
             let (rest, _) =
                 alt((tag::<_, _, OracleError<'_>>("shuffle "), tag("shuffles "))).parse(input)?;
@@ -3331,7 +3339,7 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
             owner_library,
         });
     }
-    // CR 701.24a + CR 400.6: "shuffle the cards from {possessive} {zone} into
+    // CR 701.24c + CR 400.6: "shuffle the cards from {possessive} {zone} into
     // {possessive} library" and "shuffle {possessive} hand and graveyard into
     // {possessive} library" — whole-zone mass move(s) + implicit shuffle.
     // Must run before the generic targeted-shuffle path below, which would otherwise
@@ -3349,7 +3357,7 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
             origins: vec![Zone::Hand],
         });
     }
-    // CR 701.24a: "shuffle target card from your graveyard into your library" —
+    // CR 701.24c: "shuffle target card from your graveyard into your library" —
     // targeted zone change (origin → library) + implicit shuffle.
     // Placed after possessive checks to avoid matching "shuffle your graveyard into library".
     if let Some((_, after_shuffle)) =
@@ -3390,7 +3398,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
             target,
             owner_library,
         } => {
-            // CR 701.24a + CR 400.3: `target` and `owner_library` are
+            // CR 701.24c + CR 400.3: `target` and `owner_library` are
             // populated by `parse_shuffle_ast`'s combinator-based pronoun /
             // possessive classification. See the construction site for the
             // detection grammar and the TODO on the `Shuffle` sub-target.
@@ -8343,7 +8351,7 @@ mod tests {
         assert!(!is_standalone_combat_requirement("draw a card"));
     }
 
-    /// CR 400.6 + CR 701.24a: "shuffle the cards from your hand into your
+    /// CR 400.6 + CR 701.24c: "shuffle the cards from your hand into your
     /// library" — Whirlpool Drake class. The phrase names every card in the
     /// hand, so the lowered AST must be ChangeZoneAllToLibrary (mass move),
     /// not a TargetedChangeZoneToLibrary where "the cards" would be read as
@@ -8442,6 +8450,48 @@ mod tests {
             }
         ));
         assert!(shuffle.sub_ability.is_none());
+    }
+
+    /// CR 701.24c + CR 400.3: "shuffle ~ into its owner's library" — the
+    /// self-referential tail of Green Sun's Zenith, the Beacon cycle, Nexus
+    /// of Fate, etc. The `~` token is produced by `normalize_card_name_refs`
+    /// for the source card's own name; the AST must classify it as
+    /// `TargetFilter::SelfRef` with `owner_library: true`, NOT
+    /// `Unimplemented`. This is the building-block assertion that unlocks
+    /// the entire self-shuffle class.
+    #[test]
+    fn parse_shuffle_self_ref_into_owners_library() {
+        let text = "shuffle ~ into its owner's library";
+        let result = parse_shuffle_ast(text, text);
+        match result {
+            Some(ShuffleImperativeAst::ChangeZoneToLibrary {
+                target,
+                owner_library,
+            }) => {
+                assert_eq!(target, TargetFilter::SelfRef);
+                assert!(owner_library);
+            }
+            other => panic!("Expected ChangeZoneToLibrary SelfRef+owner_library, got {other:?}"),
+        }
+    }
+
+    /// Sibling coverage: "shuffle ~ into your library" — same self-reference
+    /// shape but possessive resolves to controller (`owner_library: false`),
+    /// matching the variant cycle that names "your library" explicitly.
+    #[test]
+    fn parse_shuffle_self_ref_into_your_library() {
+        let text = "shuffle ~ into your library";
+        let result = parse_shuffle_ast(text, text);
+        match result {
+            Some(ShuffleImperativeAst::ChangeZoneToLibrary {
+                target,
+                owner_library,
+            }) => {
+                assert_eq!(target, TargetFilter::SelfRef);
+                assert!(!owner_library);
+            }
+            other => panic!("Expected ChangeZoneToLibrary SelfRef+!owner_library, got {other:?}"),
+        }
     }
 
     /// CR 400.7 + CR 701.23: Multi-zone same-name exile combinator covers
