@@ -13889,6 +13889,16 @@ fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerCondition>) 
                 },
                 tag("at the beginning of your next end step, "),
             ),
+            // CR 505.1 + CR 603.7a: "your next main phase" → PreCombatMain.
+            // PlayerId(0) rewritten to ability.controller at resolve time
+            // in effects::delayed_trigger::resolve.
+            value(
+                DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::PreCombatMain,
+                    player: crate::types::player::PlayerId(0),
+                },
+                tag("at the beginning of your next main phase, "),
+            ),
             // CR 500.8 + CR 603.7a: "at the beginning of that combat" refers to an
             // additional combat phase just scheduled by the parent effect
             // (e.g., Moraug, Fury of Akoum's landfall trigger). The additional
@@ -15391,6 +15401,25 @@ fn apply_where_x_effect_expression(effect: &mut Effect, where_x_expression: Opti
                 *amount_dynamic = parse_where_x_quantity_expression(expr);
             }
         }
+        // CR 107.3i + CR 118.1: Resolution-time cost amounts (Life / Speed /
+        // Energy / per-object scaled mana) reference the same X as the
+        // surrounding ability. Tymna the Weaver's "you may pay X life, where X
+        // is the number of opponents that were dealt combat damage this turn"
+        // requires the PayCost amount to track the where-X binding alongside
+        // the sub-ability's "draw X cards"; without this arm the cost amount
+        // stayed as the bare `Variable("X")` and decoupled from the resolved
+        // expression.
+        Effect::PayCost { cost, .. } => match cost {
+            PaymentCost::Life { amount }
+            | PaymentCost::Speed { amount }
+            | PaymentCost::Energy { amount } => {
+                *amount = apply_where_x_quantity_expression(amount.clone(), where_x_expression);
+            }
+            PaymentCost::ScaledMana { times, .. } => {
+                *times = apply_where_x_quantity_expression(times.clone(), where_x_expression);
+            }
+            PaymentCost::Mana { .. } | PaymentCost::AbilityCost { .. } => {}
+        },
         _ => {}
     }
 }
@@ -22339,6 +22368,27 @@ mod tests {
         );
     }
 
+    /// CR 505.1 + CR 603.7a: "At the beginning of your next main phase, …"
+    /// prefix-position form used by Mana Drain. Mirrors the suffix-position
+    /// arm in `strip_temporal_suffix`.
+    #[test]
+    fn strip_temporal_prefix_your_next_main_phase() {
+        let (text, cond) = strip_temporal_prefix(
+            "at the beginning of your next main phase, add an amount of {C} equal to that spell's mana value",
+        );
+        assert_eq!(
+            text,
+            "add an amount of {C} equal to that spell's mana value"
+        );
+        assert_eq!(
+            cond,
+            Some(DelayedTriggerCondition::AtNextPhaseForPlayer {
+                phase: Phase::PreCombatMain,
+                player: crate::types::player::PlayerId(0),
+            })
+        );
+    }
+
     #[test]
     fn temporal_prefix_in_effect_chain() {
         // Teferi, Hero of Dominaria +1 pattern
@@ -22464,6 +22514,80 @@ mod tests {
                         }
                     },
                     "Colorless count must reference mana spent on triggering spell"
+                );
+            }
+            other => panic!("expected Colorless mana production, got {other:?}"),
+        }
+    }
+
+    /// CR 701.6 + CR 603.7 + CR 202.3: Full parse tree for Mana Drain.
+    /// Verifies that prefix-position "At the beginning of your next main
+    /// phase, …" wraps the inner effect in CreateDelayedTrigger, and that
+    /// "that spell's mana value" parses to `ObjectManaValue{CostPaidObject}`
+    /// (the existing event-context anaphor; the runtime snapshot walker
+    /// resolves this against the parent ability's targets[0]).
+    ///
+    /// Asserts:
+    /// - primary effect is `Counter` targeting stack spell,
+    /// - sub_ability's effect is `CreateDelayedTrigger` with
+    ///   `AtNextPhaseForPlayer { PreCombatMain, PlayerId(0) /* placeholder */ }`,
+    /// - delayed trigger's inner effect is `Mana { Colorless { count:
+    ///   Ref(ObjectManaValue{CostPaidObject}) } }`.
+    #[test]
+    fn mana_drain_full_parse_tree() {
+        let def = parse_effect_chain(
+            "Counter target spell. At the beginning of your next main phase, add an amount of {C} equal to that spell's mana value.",
+            AbilityKind::Spell,
+        );
+
+        // Primary effect: Counter.
+        assert!(
+            matches!(*def.effect, Effect::Counter { .. }),
+            "Expected Counter primary effect, got {:?}",
+            def.effect
+        );
+
+        // Sub_ability effect: CreateDelayedTrigger at PreCombatMain.
+        let sub = def.sub_ability.as_ref().expect("sub_ability must exist");
+        let Effect::CreateDelayedTrigger {
+            condition: delayed_cond,
+            effect: delayed_effect_def,
+            ..
+        } = &*sub.effect
+        else {
+            panic!(
+                "expected CreateDelayedTrigger on sub_ability, got {:?}",
+                sub.effect
+            );
+        };
+        assert!(
+            matches!(
+                delayed_cond,
+                DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::PreCombatMain,
+                    ..
+                }
+            ),
+            "expected AtNextPhaseForPlayer(PreCombatMain), got {delayed_cond:?}"
+        );
+
+        // Inner delayed effect: Mana(Colorless, Ref(ObjectManaValue{CostPaidObject})).
+        let Effect::Mana { produced, .. } = &*delayed_effect_def.effect else {
+            panic!(
+                "expected Mana effect on delayed trigger, got {:?}",
+                delayed_effect_def.effect
+            );
+        };
+        match produced {
+            ManaProduction::Colorless { count } => {
+                assert_eq!(
+                    *count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: crate::types::ability::ObjectScope::CostPaidObject,
+                        }
+                    },
+                    "Colorless count must reference parent target's mana value via ObjectManaValue{{CostPaidObject}}"
                 );
             }
             other => panic!("expected Colorless mana production, got {other:?}"),

@@ -3030,6 +3030,12 @@ pub enum PlayerFilter {
     OpponentLostLife,
     /// Each opponent who gained life this turn (life_gained_this_turn > 0).
     OpponentGainedLife,
+    /// CR 120.1 + CR 510.1: Each opponent who was dealt combat damage this turn.
+    /// Resolved against `state.damage_dealt_this_turn` records whose
+    /// `is_combat = true` and `target = Player(p.id)`. Used by partner-quality
+    /// "for each opponent that was dealt combat damage this turn" cards
+    /// (Tymna the Weaver).
+    OpponentDealtCombatDamage,
     /// All players.
     All,
     /// CR 702.179f: Each player whose speed is tied for the highest speed among players.

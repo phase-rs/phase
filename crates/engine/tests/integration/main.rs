@@ -51,6 +51,7 @@ mod leyline_taps_for_mana_repro;
 mod louisoix_sacrifice_counter;
 mod madame_null_integration;
 mod magnetic_mountain_choose_and_pay;
+mod mana_drain_refund;
 mod master_of_ceremonies;
 mod mystic_forge_regression;
 mod oracle_parser;
