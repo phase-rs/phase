@@ -8444,6 +8444,46 @@ mod tests {
         assert!(shuffle.sub_ability.is_none());
     }
 
+    /// CR 201.5 + CR 701.24a: "shuffle ~ into its owner's library" — the `~`
+    /// placeholder (card's own name) is an object pronoun that routes to
+    /// `ChangeZoneToLibrary { target: SelfRef, owner_library: true }`.
+    /// Covers the Zenith cycle (Black/White/Green/Red/Blue Sun's Zenith),
+    /// Fblthp the Lost, and any other card that shuffles itself into a library.
+    #[test]
+    fn parse_shuffle_tilde_into_owners_library() {
+        let text = "shuffle ~ into its owner's library";
+        let result = parse_shuffle_ast(text, text);
+        match result {
+            Some(ShuffleImperativeAst::ChangeZoneToLibrary {
+                target,
+                owner_library,
+            }) => {
+                assert_eq!(target, TargetFilter::SelfRef, "~ resolves to SelfRef");
+                assert!(owner_library, "owner's library must set owner_library=true");
+            }
+            other => panic!("Expected ChangeZoneToLibrary(SelfRef, owner=true), got {other:?}"),
+        }
+    }
+
+    /// CR 201.5 + CR 701.24a: "shuffle ~ into your library" — the card shuffles
+    /// itself into the controller's library (owner_library=false).
+    /// Covers Guan Yu, Sainted Warrior.
+    #[test]
+    fn parse_shuffle_tilde_into_your_library() {
+        let text = "shuffle ~ into your library";
+        let result = parse_shuffle_ast(text, text);
+        match result {
+            Some(ShuffleImperativeAst::ChangeZoneToLibrary {
+                target,
+                owner_library,
+            }) => {
+                assert_eq!(target, TargetFilter::SelfRef, "~ resolves to SelfRef");
+                assert!(!owner_library, "your library must set owner_library=false");
+            }
+            other => panic!("Expected ChangeZoneToLibrary(SelfRef, owner=false), got {other:?}"),
+        }
+    }
+
     /// CR 400.7 + CR 701.23: Multi-zone same-name exile combinator covers
     /// the whole sibling class (Deadly Cover-Up, Lost Legacy, Cranial
     /// Extraction, Memoricide, Surgical Extraction). Both "with that name"
