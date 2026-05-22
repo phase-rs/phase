@@ -1735,7 +1735,7 @@ fn scoped_players<'a>(
         .or_else(|| triggering_event_player(state))
         .unwrap_or(controller);
     state.players.iter().filter(move |p| match scope {
-        CountScope::Controller => p.id == controller,
+        CountScope::Controller | CountScope::Owner => p.id == controller,
         CountScope::ScopedPlayer => p.id == scoped_player,
         CountScope::All => true,
         CountScope::Opponents => p.id != controller,
@@ -1752,7 +1752,7 @@ fn count_scope_owner_matches(
     owner: PlayerId,
 ) -> bool {
     match scope {
-        CountScope::Controller => owner == controller,
+        CountScope::Controller | CountScope::Owner => owner == controller,
         CountScope::ScopedPlayer => owner == ctx.scoped_player.unwrap_or(controller),
         CountScope::All => true,
         CountScope::Opponents => owner != controller,
@@ -1766,7 +1766,7 @@ fn counter_added_actor_matches(
     actor: PlayerId,
 ) -> bool {
     match scope {
-        CountScope::Controller => actor == controller,
+        CountScope::Controller | CountScope::Owner => actor == controller,
         CountScope::ScopedPlayer => actor == ctx.scoped_player.unwrap_or(controller),
         CountScope::All => true,
         CountScope::Opponents => actor != controller,

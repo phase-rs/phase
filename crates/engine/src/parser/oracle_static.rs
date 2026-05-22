@@ -12131,14 +12131,14 @@ mod tests {
                     qty: QuantityRef::ZoneCardCount {
                         zone: ZoneRef::Exile,
                         card_types: vec![TypeFilter::Instant, TypeFilter::Sorcery],
-                        scope: CountScope::Controller,
+                        scope: CountScope::Owner,
                     },
                 },
                 QuantityExpr::Ref {
                     qty: QuantityRef::ZoneCardCount {
                         zone: ZoneRef::Graveyard,
                         card_types: vec![TypeFilter::Instant, TypeFilter::Sorcery],
-                        scope: CountScope::Controller,
+                        scope: CountScope::Owner,
                     },
                 },
             ],

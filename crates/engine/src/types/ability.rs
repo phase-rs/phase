@@ -579,6 +579,9 @@ pub enum ChosenSubtypeKind {
 pub enum CountScope {
     /// CR 109.5: The printed ability's controller — "you" / "your" semantics.
     Controller,
+    /// CR 108.3 + CR 404.2: The printed ability controller as owner for
+    /// player-scoped queries over non-battlefield zones.
+    Owner,
     /// CR 608.2 + CR 109.5: The currently iterated player during a
     /// `player_scope` resolution — "they" / "their" semantics relative to the
     /// iteration. Issue #310: distinguishes "their library" (per-iteration)

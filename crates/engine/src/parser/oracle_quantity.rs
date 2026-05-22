@@ -498,6 +498,9 @@ pub(crate) fn parse_cda_quantity_with_context(
     None
 }
 
+// CR 604.3: Characteristic-defining abilities can define power/toughness using
+// card-count quantities.
+// CR 404.2: Cards in graveyards and exile are scoped by owner, not controller.
 fn parse_owned_cards_in_zones_quantity(
     input: &str,
 ) -> nom::IResult<&str, QuantityExpr, OracleError<'_>> {
@@ -518,7 +521,7 @@ fn parse_owned_cards_in_zones_quantity(
             qty: QuantityRef::ZoneCardCount {
                 zone,
                 card_types: card_types.clone(),
-                scope: CountScope::Controller,
+                scope: CountScope::Owner,
             },
         })
         .collect();
@@ -2708,10 +2711,8 @@ mod tests {
             panic!("expected summed zone counts, got {result:?}");
         };
         assert_eq!(exprs.len(), 2);
-        for (expr, expected_zone) in [
-            (&exprs[0], ZoneRef::Exile),
-            (&exprs[1], ZoneRef::Graveyard),
-        ] {
+        for (expr, expected_zone) in [(&exprs[0], ZoneRef::Exile), (&exprs[1], ZoneRef::Graveyard)]
+        {
             match expr {
                 QuantityExpr::Ref {
                     qty:
@@ -2723,7 +2724,7 @@ mod tests {
                 } => {
                     assert_eq!(*zone, expected_zone);
                     assert_eq!(card_types, &vec![TypeFilter::Instant, TypeFilter::Sorcery]);
-                    assert_eq!(*scope, CountScope::Controller);
+                    assert_eq!(*scope, CountScope::Owner);
                 }
                 other => panic!("expected ZoneCardCount segment, got {other:?}"),
             }
