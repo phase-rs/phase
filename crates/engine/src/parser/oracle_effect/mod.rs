@@ -11414,14 +11414,39 @@ pub(crate) fn parse_effect_chain_ir(
 
         let (text_no_temporal, delayed_condition) = strip_temporal_suffix(&text);
         let (text_no_qty, multi_target) = strip_any_number_quantifier(text_no_temporal);
-        let (suffix_repeat_for, stripped_text_no_qty) = strip_for_each_repeat_suffix(&text_no_qty);
-        let stripped_clause = parse_effect_clause(&stripped_text_no_qty, ctx);
-        let (clause, repeat_for) = if suffix_repeat_for.is_some()
-            && matches!(stripped_clause.effect, Effect::CopySpell { .. })
-        {
-            (stripped_clause, repeat_for.or(suffix_repeat_for))
+        // CR 121.1 + CR 609.3: "draw cards equal to the difference" — anaphoric draw
+        // count. When a leading QuantityCheck condition establishes two operands (e.g.
+        // "if you have fewer than seven cards in hand"), "the difference" draws the
+        // unsigned gap between them. Resolved here, in scope of both operands, to
+        // QuantityExpr::Difference { left, right }. Cards: Kozilek the Great Distortion,
+        // Iymrith Desert Doom, Damia Sage of Stone, Slithermuse, Balance of Power.
+        let difference_draw = condition.as_ref().and_then(|cond| {
+            let lower = text_no_qty.to_lowercase();
+            let clean = lower.trim().trim_end_matches('.');
+            if clean == "draw cards equal to the difference" {
+                conditions::difference_expr(cond).map(|diff| {
+                    parsed_clause(Effect::Draw {
+                        count: diff,
+                        target: TargetFilter::Controller,
+                    })
+                })
+            } else {
+                None
+            }
+        });
+        let (clause, repeat_for) = if let Some(draw) = difference_draw {
+            (draw, repeat_for)
         } else {
-            (parse_effect_clause(&text_no_qty, ctx), repeat_for)
+            let (suffix_repeat_for, stripped_text_no_qty) =
+                strip_for_each_repeat_suffix(&text_no_qty);
+            let stripped_clause = parse_effect_clause(&stripped_text_no_qty, ctx);
+            if suffix_repeat_for.is_some()
+                && matches!(stripped_clause.effect, Effect::CopySpell { .. })
+            {
+                (stripped_clause, repeat_for.or(suffix_repeat_for))
+            } else {
+                (parse_effect_clause(&text_no_qty, ctx), repeat_for)
+            }
         };
 
         // CR 608.2c + CR 109.4: After a `Choose(Player)` clause is finalized,
@@ -20038,6 +20063,95 @@ mod tests {
                 right: Box::new(QuantityExpr::Fixed { value: 2 }),
             }),
         );
+    }
+
+    /// CR 121.1 + CR 402: "if you have fewer than N cards in hand, draw cards equal to
+    /// the difference" — the draw count is `Difference(Fixed(N), HandSize(Controller))`.
+    /// Anchor card: Kozilek, the Great Distortion. Same infrastructure fixes Iymrith
+    /// Desert Doom (N=3), Damia Sage of Stone (N=7).
+    #[test]
+    fn draw_cards_equal_to_hand_difference_from_limit() {
+        let def = parse_effect_chain(
+            "If you have fewer than seven cards in hand, draw cards equal to the difference.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::Draw {
+                    target: TargetFilter::Controller,
+                    ..
+                }
+            ),
+            "expected Draw(Controller), got {:?}",
+            def.effect
+        );
+        assert_eq!(
+            def.condition,
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                comparator: Comparator::LT,
+                rhs: QuantityExpr::Fixed { value: 7 },
+            }),
+            "condition must be HandSize(Controller) LT 7"
+        );
+        if let Effect::Draw { ref count, .. } = *def.effect {
+            assert_eq!(
+                *count,
+                QuantityExpr::Difference {
+                    left: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::Controller,
+                        },
+                    }),
+                    right: Box::new(QuantityExpr::Fixed { value: 7 }),
+                },
+                "draw count must be Difference(HandSize(Controller), Fixed(7))"
+            );
+        }
+    }
+
+    /// CR 121.1 + CR 402: "if that player has more cards in hand than you, draw cards
+    /// equal to the difference" — cross-player difference. Anchor: Slithermuse.
+    #[test]
+    fn draw_cards_equal_to_cross_player_hand_difference() {
+        let def = parse_effect_chain(
+            "If that player has more cards in hand than you, draw cards equal to the difference.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::Draw {
+                    target: TargetFilter::Controller,
+                    ..
+                }
+            ),
+            "expected Draw(Controller), got {:?}",
+            def.effect
+        );
+        if let Effect::Draw { ref count, .. } = *def.effect {
+            assert_eq!(
+                *count,
+                QuantityExpr::Difference {
+                    left: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::ScopedPlayer,
+                        },
+                    }),
+                    right: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::Controller,
+                        },
+                    }),
+                },
+                "draw count must be Difference(HandSize(ScopedPlayer), HandSize(Controller))"
+            );
+        }
     }
 
     #[test]
