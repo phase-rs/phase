@@ -11,8 +11,9 @@ use std::str::FromStr;
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{all_consuming, opt, value};
-use nom::sequence::{pair, terminated};
+use nom::combinator::{all_consuming, eof, opt, value};
+use nom::multi::separated_list1;
+use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
 use super::oracle_ir::context::ParseContext;
@@ -428,6 +429,12 @@ pub(crate) fn parse_cda_quantity_with_context(
         }
     }
 
+    if let Ok((rest, expr)) = parse_owned_cards_in_zones_quantity(text) {
+        if rest.is_empty() {
+            return Some(expr);
+        }
+    }
+
     // "the number of card types among cards in all graveyards"
     // "the number of cards in your opponents' graveyards" / "cards in opponents' graveyards"
     if text.contains("cards in your opponents' graveyards")
@@ -489,6 +496,39 @@ pub(crate) fn parse_cda_quantity_with_context(
     }
 
     None
+}
+
+fn parse_owned_cards_in_zones_quantity(
+    input: &str,
+) -> nom::IResult<&str, QuantityExpr, OracleError<'_>> {
+    let (rest, _) = alt((tag("the total number of "), tag("the number of "))).parse(input)?;
+    let (rest, card_types) = nom_quantity::parse_type_filter_list(rest)?;
+    let (rest, _) = nom_quantity::parse_card_word(rest)?;
+    let (rest, _) = tag(" you own in ").parse(rest)?;
+    let (rest, zones) = separated_list1(
+        alt((tag(" and in "), tag(", and in "), tag(", in "))),
+        preceded(opt(tag("your ")), nom_quantity::parse_zone_ref_singular),
+    )
+    .parse(rest)?;
+    let (rest, _) = eof(rest)?;
+
+    let mut exprs: Vec<QuantityExpr> = zones
+        .into_iter()
+        .map(|zone| QuantityExpr::Ref {
+            qty: QuantityRef::ZoneCardCount {
+                zone,
+                card_types: card_types.clone(),
+                scope: CountScope::Controller,
+            },
+        })
+        .collect();
+
+    let expr = if exprs.len() == 1 {
+        exprs.remove(0)
+    } else {
+        QuantityExpr::Sum { exprs }
+    };
+    Ok((rest, expr))
 }
 
 fn parse_previous_effect_amount_this_way(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
@@ -2656,6 +2696,37 @@ mod tests {
                 assert_eq!(scope, CountScope::Controller);
             }
             other => panic!("Expected ZoneCardCount, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cda_owned_instant_and_sorcery_exile_plus_graveyard_count() {
+        let result = parse_cda_quantity(
+            "the total number of instant and sorcery cards you own in exile and in your graveyard",
+        );
+        let Some(QuantityExpr::Sum { exprs }) = result else {
+            panic!("expected summed zone counts, got {result:?}");
+        };
+        assert_eq!(exprs.len(), 2);
+        for (expr, expected_zone) in [
+            (&exprs[0], ZoneRef::Exile),
+            (&exprs[1], ZoneRef::Graveyard),
+        ] {
+            match expr {
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::ZoneCardCount {
+                            zone,
+                            card_types,
+                            scope,
+                        },
+                } => {
+                    assert_eq!(*zone, expected_zone);
+                    assert_eq!(card_types, &vec![TypeFilter::Instant, TypeFilter::Sorcery]);
+                    assert_eq!(*scope, CountScope::Controller);
+                }
+                other => panic!("expected ZoneCardCount segment, got {other:?}"),
+            }
         }
     }
 

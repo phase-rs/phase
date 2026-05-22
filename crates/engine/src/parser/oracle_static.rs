@@ -12116,6 +12116,40 @@ mod tests {
     }
 
     #[test]
+    fn static_crackling_drake_counts_owned_instant_sorcery_exile_and_graveyard() {
+        let def = parse_static_line(
+            "Crackling Drake's power is equal to the total number of instant and sorcery cards you own in exile and in your graveyard.",
+        )
+        .unwrap();
+
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert!(def.characteristic_defining);
+        let expected = QuantityExpr::Sum {
+            exprs: vec![
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Exile,
+                        card_types: vec![TypeFilter::Instant, TypeFilter::Sorcery],
+                        scope: CountScope::Controller,
+                    },
+                },
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Graveyard,
+                        card_types: vec![TypeFilter::Instant, TypeFilter::Sorcery],
+                        scope: CountScope::Controller,
+                    },
+                },
+            ],
+        };
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::SetDynamicPower { value: expected }]
+        );
+    }
+
+    #[test]
     fn static_multani_cda_total_cards_in_all_players_hands() {
         let qty = QuantityExpr::Ref {
             qty: QuantityRef::HandSize {

@@ -937,7 +937,7 @@ fn parse_creature_in_party_for_each(input: &str) -> OracleResult<'_, QuantityRef
     .parse(input)
 }
 
-fn parse_card_word(input: &str) -> OracleResult<'_, ()> {
+pub(crate) fn parse_card_word(input: &str) -> OracleResult<'_, ()> {
     value(
         (),
         alt((tag(" cards"), tag(" card"), tag("cards"), tag("card"))),
@@ -959,7 +959,7 @@ fn parse_card_word(input: &str) -> OracleResult<'_, ()> {
 /// artifacts"). The longest-prefix-first ordering (`and/or` before `and`) is
 /// load-bearing — without it, `tag(" and ")` would consume the `" and "` head
 /// of `" and/or "` and the `/or` tail would derail `parse_type_filter_word`.
-fn parse_type_filter_list(input: &str) -> OracleResult<'_, Vec<TypeFilter>> {
+pub(crate) fn parse_type_filter_list(input: &str) -> OracleResult<'_, Vec<TypeFilter>> {
     let (mut rest, first) = parse_type_filter_word(input)?;
     let mut filters = vec![first];
     loop {
@@ -977,7 +977,7 @@ fn parse_type_filter_list(input: &str) -> OracleResult<'_, Vec<TypeFilter>> {
     Ok((rest, filters))
 }
 
-fn parse_zone_ref_singular(input: &str) -> OracleResult<'_, ZoneRef> {
+pub(crate) fn parse_zone_ref_singular(input: &str) -> OracleResult<'_, ZoneRef> {
     alt((
         value(ZoneRef::Graveyard, tag("graveyard")),
         value(ZoneRef::Exile, tag("exile")),
