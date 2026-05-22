@@ -4,6 +4,7 @@ pub mod card_advantage;
 pub mod card_hints;
 pub mod cast_facts;
 pub mod combat_ai;
+pub mod combo;
 pub mod config;
 pub mod context;
 pub mod decision_kind;
