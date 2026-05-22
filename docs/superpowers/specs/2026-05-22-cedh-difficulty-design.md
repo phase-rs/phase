@@ -55,10 +55,15 @@ Out of scope for this design is real combo-line content, archetype-specific tuni
                               │
 ┌─ phase-ai (crates/phase-ai/) ┴───────────────────────────────┐
 │  config.rs               AiDifficulty::CEDH variant + preset  │
+│  features/mod.rs         add `is_cedh: bool` to DeckFeatures  │
 │  combo/                  NEW module: line, detection, registry│
-│  policies/combo_line.rs  NEW: TacticalPolicy hook             │
-│  policies/mulligan/cedh.rs  NEW: stub MulliganPolicy          │
-│  policies/registry.rs    register both new policies (gated)   │
+│  policies/combo_line.rs  NEW: TacticalPolicy (gates via       │
+│                          activation() on features.is_cedh)    │
+│  policies/mulligan/cedh_keepables.rs  NEW: MulliganPolicy     │
+│                          (gates via features.is_cedh inside   │
+│                          evaluate())                          │
+│  policies/registry.rs    register ComboLinePolicy             │
+│  policies/mulligan/mod.rs  register CedhKeepablesMulligan     │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -219,24 +224,36 @@ impl ComboRegistry {
 
 ### 5.3 Combo policy (`crates/phase-ai/src/policies/combo_line.rs`)
 
-Implements `TacticalPolicy`. Per-candidate scoring:
+Implements `TacticalPolicy`. The trait has four required methods (verified at `policies/registry.rs:152-165`): `id()`, `decision_kinds()`, `activation(features, state, player) -> Option<f32>`, and `verdict(ctx) -> PolicyVerdict`. **`activation()` is the gating point** — returning `None` opts the policy out for this candidate, paying zero cost.
+
+`activation()` returns `Some(1.0)` only when `features.is_cedh` is true; otherwise `None`. Non-cEDH decks see the policy as a no-op.
+
+`verdict()`:
 
 1. Iterate `ComboRegistry::reachable_lines(state, ai)`. Cache the result keyed by `(quick_state_hash(state), ai)` so sibling search nodes reuse it.
-2. If any line reports `ReachableThisTurn` and the candidate matches the next action in `required_actions`, boost the prior by `policy_penalties.combo_progress_this_turn_bonus` (default `+15.0`).
-3. If `ReachableNextTurn` and the candidate is a tutor / draw / ramp action that fetches a missing piece, boost by `policy_penalties.combo_progress_next_turn_bonus` (default `+5.0`).
-4. Otherwise zero contribution.
+2. If any line reports `ReachableThisTurn` and the candidate matches the next action in `required_actions`, return `PolicyVerdict::Score { delta: combo_progress_this_turn_bonus, reason }` (default `+15.0`).
+3. If `ReachableNextTurn` and the candidate is a tutor / draw / ramp action that fetches a missing piece, return `Score { delta: combo_progress_next_turn_bonus, reason }` (default `+5.0`).
+4. Otherwise `Score { delta: 0.0, reason }`.
 
 Two new fields are added to `PolicyPenalties` (`config.rs`) so the bonuses are tunable through the same path as every other policy weight — no magic literals.
 
-The policy is registered in `policies/registry.rs::default_registry()` but **gated**: only instantiated when `config.difficulty == AiDifficulty::CEDH`. Other difficulties pay zero cost (the policy is not in the registry at all). A test asserts the policy is absent from the registry for `VeryHard` and present for `CEDH`.
+**Registration:** added to `PolicyRegistry::default()` at `policies/registry.rs:174-220` alongside the existing 35 policies. The `PolicyRegistry::shared()` `OnceLock` pattern remains unchanged — `activation()` does the gating, not registration.
 
-### 5.4 cEDH mulligan stub (`crates/phase-ai/src/policies/mulligan/cedh.rs`)
+**`DeckFeatures::is_cedh` field:** added as a new field on `DeckFeatures` at `features/mod.rs:42-54`. Populated from the deck's declared `CommanderBracketTier` at deck-analysis time: `is_cedh = (deck.tier == CommanderBracketTier::Cedh)`. Unlike the existing structural features (`LandfallFeature` etc.) which are detected from card text, `is_cedh` is a declaration-derived feature — this is intentional and documented at the field.
 
-`CedhMulliganPolicy` implements the existing `MulliganPolicy` trait. Replaces the default when `config.difficulty == CEDH`. Stub heuristics (flagged as stub):
+**Tests:** assert `activation()` returns `None` for `DeckFeatures::default()` (which has `is_cedh = false`), and returns `Some(1.0)` when `is_cedh = true`. Assert `verdict()` produces the expected boost on a state with the stub combo reachable.
 
-- Mulligan any 7 with `< 2 lands` or `> 4 lands`.
-- Mulligan any 7 with no mana acceleration **and** no tutor **and** no interaction. Uses existing card-data feature tags (`is_fast_mana`, `is_tutor`, `is_counterspell`, `is_removal` — verify exact tag names at implementation time).
-- Keep otherwise.
+### 5.4 cEDH mulligan stub (`crates/phase-ai/src/policies/mulligan/cedh_keepables.rs`)
+
+`CedhKeepablesMulligan` implements `MulliganPolicy` (trait at `policies/mulligan/mod.rs:80-91`). Follows the existing naming convention (`AggroKeepablesMulligan`, `LandfallKeepablesMulligan`, etc.) and is registered alongside the others in `MulliganRegistry::default()` at `policies/mulligan/mod.rs:100-116`.
+
+**Internal gating:** the mulligan trait has no `activation()` method — every registered policy is evaluated on every hand. So gating happens inside `evaluate()`: when `!features.is_cedh`, return `MulliganScore::Score { delta: 0.0, reason: PolicyReason::NotApplicable }`. Cheap no-op, matches the pattern used by other archetype-specific keepables policies.
+
+**Stub heuristics (flagged as stub) when `features.is_cedh`:**
+
+- `< 2 lands` or `> 4 lands` → `ForceMulligan { reason }`.
+- No mana acceleration **and** no tutor **and** no interaction → `ForceMulligan { reason }`. Detection uses existing card-data feature tags (`is_fast_mana`, `is_tutor`, `is_counterspell`, `is_removal` — verify exact tag names at implementation time and substitute the actual ones).
+- Otherwise `Score { delta: +1.0, reason }` (positive baseline so the cEDH-tagged hand is kept absent forced mulligans from other policies).
 
 Real cEDH mulligan strategy ("keep only hands that win or stop the opponent from winning by turn 4") arrives when combo lines are populated; the mulligan policy can then ask `ComboRegistry::reachable_lines(hand_as_pseudo_state)` and make a real decision.
 
@@ -319,8 +336,9 @@ User clicks "Start Game"
 
 - `config.rs` — cEDH preset values match the table in 5.1; `create_config_for_players(CEDH, Native, 4)` returns `max_depth == 3` (paranoid scaling skipped); WASM caps still apply to cEDH.
 - `combo/detection.rs` — reachability transitions for the stub combo: all pieces present and mana available → `ReachableThisTurn`; one piece missing → `ReachableNextTurn`; nothing on board / hand → `NotReachable`.
-- `policies/combo_line.rs` — prior boost fires for the combo-progressing action, zero for unrelated actions, policy is absent from the registry when difficulty is not cEDH.
-- `policies/mulligan/cedh.rs` — mulligan triggers on each stub heuristic; keeps an otherwise-fine hand.
+- `policies/combo_line.rs` — `activation()` returns `None` when `features.is_cedh == false` and `Some(1.0)` when `true`; `verdict()` produces the expected boost on a state with the stub combo reachable; zero for unrelated actions.
+- `policies/mulligan/cedh_keepables.rs` — `evaluate()` returns `Score { delta: 0.0 }` when `features.is_cedh == false`; triggers `ForceMulligan` on each stub heuristic when cEDH; keeps an otherwise-fine hand.
+- `features/mod.rs` — `is_cedh` field defaults to `false`; populates correctly from `CommanderBracketTier::Cedh` deck metadata.
 - `database/legality.rs` — `validate_cedh_bracket` accepts a B5/cEDH deck, rejects a B1-B4 deck with typed violation.
 
 **Integration tests (Rust):**
