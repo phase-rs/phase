@@ -924,8 +924,17 @@ fn finalize_copy_retarget(
     copy_id: ObjectId,
     slots: &[crate::types::game_state::CopyTargetSlot],
     events: &mut Vec<GameEvent>,
-) {
-    let targets: Vec<_> = slots.iter().map(|s| s.current.clone()).collect();
+) -> Result<(), EngineError> {
+    let targets: Vec<_> = slots
+        .iter()
+        .map(|slot| {
+            slot.current.clone().ok_or_else(|| {
+                EngineError::InvalidAction(
+                    "Copy target selection has an unchosen target slot".to_string(),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     if let Some(entry) = state.stack.iter_mut().find(|e| e.id == copy_id) {
         if let Some(ability) = entry.ability_mut() {
             ability.targets = targets;
@@ -938,6 +947,7 @@ fn finalize_copy_retarget(
     state.waiting_for = WaitingFor::Priority { player };
     state.priority_player = player;
     effects::drain_pending_continuation(state, events);
+    Ok(())
 }
 
 fn apply_action(
@@ -3458,10 +3468,14 @@ fn apply_action(
                         "Target {t:?} not a legal alternative for copy slot {slot_idx}"
                     )));
                 }
+            } else if target_slots[slot_idx].current.is_none() {
+                return Err(EngineError::InvalidAction(format!(
+                    "Copy target slot {slot_idx} has no current target to keep"
+                )));
             }
             let mut updated_slots = target_slots.clone();
             if let Some(t) = target {
-                updated_slots[slot_idx].current = t.clone();
+                updated_slots[slot_idx].current = Some(t.clone());
             }
             let next_slot = slot_idx + 1;
             if next_slot < updated_slots.len() {
@@ -3472,7 +3486,7 @@ fn apply_action(
                     current_slot: next_slot,
                 };
             } else {
-                finalize_copy_retarget(state, p, cid, &updated_slots, &mut events);
+                finalize_copy_retarget(state, p, cid, &updated_slots, &mut events)?;
             }
             state.waiting_for.clone()
         }
@@ -3494,7 +3508,7 @@ fn apply_action(
             let p = *player;
             let cid = *copy_id;
             let slots = target_slots.clone();
-            finalize_copy_retarget(state, p, cid, &slots, &mut events);
+            finalize_copy_retarget(state, p, cid, &slots, &mut events)?;
             state.waiting_for.clone()
         }
         // CR 510.1c/d: Combat damage assignment from attacker to blockers.
@@ -11573,6 +11587,86 @@ mod exile_return_tests {
         assert!(
             state.exile_links.is_empty(),
             "ExileLink should be cleaned up"
+        );
+    }
+
+    // #783: end-to-end integration. Component tests cover link creation and the
+    // return in isolation; this drives the WHOLE flow — exile via the real
+    // change_zone resolver (which must create the UntilSourceLeaves link), then
+    // the host actually leaves the battlefield via move_to_zone, then
+    // check_exile_returns runs on that event batch. The exiled permanent must
+    // return. CR 610.3a.
+    #[test]
+    fn exile_until_host_leaves_returns_card_through_full_pipeline() {
+        use crate::game::effects::change_zone;
+        use crate::game::zones::move_to_zone;
+        use crate::types::ability::{Duration, Effect, ResolvedAbility, TargetFilter, TargetRef};
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Banishing Light".to_string(),
+            Zone::Battlefield,
+        );
+        let victim_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent's Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&victim_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // "exile target nonland permanent ... until this enchantment leaves the
+        // battlefield" — exile resolves and must register the return link.
+        let mut exile = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![TargetRef::Object(victim_id)],
+            source_id,
+            PlayerId(0),
+        );
+        exile.duration = Some(Duration::UntilHostLeavesPlay);
+
+        let mut events = Vec::new();
+        change_zone::resolve(&mut state, &exile, &mut events).unwrap();
+        assert!(state.exile.contains(&victim_id), "victim should be exiled");
+        assert_eq!(state.exile_links.len(), 1, "exile link must be created");
+
+        // Host leaves the battlefield (e.g. destroyed or sacrificed).
+        let mut leave_events = Vec::new();
+        move_to_zone(&mut state, source_id, Zone::Graveyard, &mut leave_events);
+        check_exile_returns(&mut state, &mut leave_events);
+
+        assert!(
+            state.battlefield.contains(&victim_id),
+            "#783: exiled permanent must return when the host leaves the battlefield"
+        );
+        assert!(
+            !state.exile.contains(&victim_id),
+            "returned permanent must no longer be in exile"
         );
     }
 

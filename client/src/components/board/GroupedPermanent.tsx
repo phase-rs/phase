@@ -179,6 +179,12 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
             objectId={group.ids[0]}
             onPrimaryClickOverride={canOpenPicker ? () => setPickerOpen(true) : undefined}
           />
+          {aggregateRingClass && (
+            <div
+              aria-hidden
+              className={`pointer-events-none absolute inset-[-3px] z-30 rounded-xl ${aggregateRingClass}`}
+            />
+          )}
         </div>
         <button
           type="button"

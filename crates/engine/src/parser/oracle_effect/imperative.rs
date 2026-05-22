@@ -924,19 +924,27 @@ pub(super) fn parse_targeted_action_ast(
         .unwrap_or(after_discard);
         // Detect whole-hand discard patterns before falling through to count parsing.
         // Uses tag prefix (not contains) to avoid matching "discard a card from your hand".
-        if alt((
-            tag::<_, _, OracleError<'_>>("your hand"),
-            tag("their hand"),
-            tag("his or her hand"),
+        //
+        // CR 109.5: "your hand" is the caster (Controller). "their hand" /
+        // "his or her hand" is the discarding subject's OWN hand — under an
+        // each-player scope ("Each player discards their hand", Wheel of Fortune)
+        // this is the iterated player (ScopedPlayer), so each player discards
+        // their own hand instead of a count fixed to the caster's. ScopedPlayer
+        // falls back to Controller outside iteration, so non-scoped uses are
+        // unaffected. (#781)
+        if let Ok((_, hand_owner)) = alt((
+            value(
+                PlayerScope::Controller,
+                tag::<_, _, OracleError<'_>>("your hand"),
+            ),
+            value(PlayerScope::ScopedPlayer, tag("their hand")),
+            value(PlayerScope::ScopedPlayer, tag("his or her hand")),
         ))
         .parse(after_discard)
-        .is_ok()
         {
             return Some(TargetedImperativeAst::Discard {
                 count: QuantityExpr::Ref {
-                    qty: QuantityRef::HandSize {
-                        player: PlayerScope::Controller,
-                    },
+                    qty: QuantityRef::HandSize { player: hand_owner },
                 },
                 random,
                 up_to,
@@ -1490,6 +1498,7 @@ pub(super) fn parse_search_and_creation_ast(
             extra_filters: details.extra_filters,
             multi_destination: details.multi_destination,
             multi_enter_tapped: details.multi_enter_tapped,
+            split: details.split,
         });
     }
     // CR 701.16a + CR 701.20a: "look at the top N" (private) and "reveal the top N" (public)
@@ -1647,6 +1656,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             extra_filters: _,
             multi_destination: _,
             multi_enter_tapped: _,
+            split,
         } => Effect::SearchLibrary {
             filter,
             // CR 107.1c + CR 701.23d: Lower the AST `up_to: bool` into the
@@ -1659,6 +1669,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             reveal,
             target_player,
             selection_constraint,
+            split,
         },
         SearchCreationImperativeAst::SearchOutsideGame {
             filter,
@@ -3522,6 +3533,7 @@ pub(super) fn lower_multi_filter_search_library(
             reveal,
             target_player,
             selection_constraint: SearchSelectionConstraint::MatchEachFilter { filters },
+            split: None,
         });
     }
 
@@ -3562,6 +3574,7 @@ pub(super) fn lower_multi_filter_search_library(
                 reveal,
                 target_player: target_player.clone(),
                 selection_constraint: selection_constraint.clone(),
+                split: None,
             },
         );
         search_def.sub_ability = tail;
@@ -3579,6 +3592,7 @@ pub(super) fn lower_multi_filter_search_library(
         reveal,
         target_player,
         selection_constraint,
+        split: None,
     });
     clause.sub_ability = tail;
     clause
@@ -3643,6 +3657,7 @@ fn lower_target_referenced_search_library(
             reveal,
             target_player,
             selection_constraint,
+            split: None,
         })
     } else {
         lower_multi_filter_search_library(
@@ -5475,6 +5490,8 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 extra_filters,
                 multi_destination,
                 multi_enter_tapped,
+                // Reference-target searches are not cultivate-class splits.
+                split: _,
             },
         )) => lower_target_referenced_search_library(
             reference_target,
@@ -5505,6 +5522,8 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 extra_filters,
                 multi_destination,
                 multi_enter_tapped,
+                // Multi-filter searches handle destinations per-filter, not via split.
+                split: _,
             },
         )) if !extra_filters.is_empty() => lower_multi_filter_search_library(
             filter,
@@ -7598,6 +7617,12 @@ mod tests {
 
     #[test]
     fn parse_discard_their_hand() {
+        // CR 109.5 (#781): "their hand" is the discarding subject's OWN hand, not
+        // the caster's. Under an each-player scope ("Each player discards their
+        // hand", Wheel of Fortune) this must bind to the iterated player
+        // (ScopedPlayer) so each player discards their own hand; ScopedPlayer
+        // falls back to Controller outside iteration, so singular subjects are
+        // unaffected. Contrast `parse_discard_your_hand` ("your" = Controller).
         let text = "discard their hand";
         let lower = text.to_lowercase();
         let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
@@ -7608,11 +7633,11 @@ mod tests {
                         count,
                         QuantityExpr::Ref {
                             qty: QuantityRef::HandSize {
-                                player: PlayerScope::Controller
+                                player: PlayerScope::ScopedPlayer
                             }
                         }
                     ),
-                    "Expected HandSize ref, got {count:?}"
+                    "Expected HandSize ref scoped to ScopedPlayer, got {count:?}"
                 );
             }
             other => panic!("Expected Discard with HandSize, got {other:?}"),
