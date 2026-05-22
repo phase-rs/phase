@@ -10834,6 +10834,63 @@ mod tests {
         }
     }
 
+    /// Visions (LEG / 4ED): "Look at the top five cards of target player's
+    /// library. You may then have that player shuffle that library."
+    ///
+    /// End-to-end verification of the wrapper chain: the primary effect is a
+    /// `Dig` (look-at) keyed on a player target, with a `may`-gated sub-ability
+    /// emitting `Effect::Shuffle { target: Player }` that resolves at runtime
+    /// against the parent's inherited `TargetRef::Player`. The `"shuffle that
+    /// library"` anaphor is the new arm added in `parse_shuffle_ast`.
+    #[test]
+    fn visions_look_then_have_target_player_shuffle() {
+        let result = parse(
+            "Look at the top five cards of target player's library. You may then have that player shuffle that library.",
+            "Visions",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert_eq!(result.abilities.len(), 1, "Visions has one ability");
+        let ability = &result.abilities[0];
+        // Primary effect: Look at top 5 cards (Dig with reveal=false, no
+        // keep_count — pure peek). The parent target is the player whose
+        // library we are looking at.
+        match &*ability.effect {
+            Effect::Dig { count, reveal, .. } => {
+                assert_eq!(count, &QuantityExpr::Fixed { value: 5 }, "look at top 5");
+                assert!(!reveal, "look at (private), not reveal (public)");
+            }
+            other => panic!(
+                "Expected Dig effect for sentence 1, got {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+        // Sub-ability: "you may then have that player shuffle that library"
+        // → `may`-gated `Effect::Shuffle { target: Player }`.
+        let sub = ability
+            .sub_ability
+            .as_ref()
+            .expect("Visions should have a sub-ability for the shuffle clause");
+        // CR 608.2d: A spell's resolution-time "you may" choice — the player
+        // announces the optional shuffle while applying the effect.
+        assert!(sub.optional, "sub-ability should be optional ('you may')");
+        match &*sub.effect {
+            Effect::Shuffle { target, .. } => {
+                assert_eq!(
+                    target,
+                    &TargetFilter::Player,
+                    "shuffle target should be the non-context-ref Player filter so it \
+                     inherits the parent ability's targeted player at resolution",
+                );
+            }
+            other => panic!(
+                "Expected Effect::Shuffle in sub-ability, got {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+    }
+
     /// Satyr Wayfinder: "reveal the top four cards" → Dig with reveal=true,
     /// continuation patches keep_count, filter, rest_destination from "you may put a land card
     /// from among them into your hand. Put the rest into your graveyard."

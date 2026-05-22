@@ -3264,7 +3264,21 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
     {
         let target = match possessive {
             "your" => Some(TargetFilter::Controller),
-            "their" | "its owner's" | "that player's" => Some(TargetFilter::Player),
+            // CR 608.2c: "shuffle that library" — anaphoric reference
+            // resolved by reading the whole instruction per the rules of
+            // English: "that library" refers back to a player target bound
+            // earlier in the same instruction (Visions: "Look at the top
+            // five cards of target
+            // player's library. You may then have that player shuffle that
+            // library."). "that library" is "that player's library" with the
+            // player elided; it resolves to the parent ability's targeted
+            // player. `TargetFilter::Player` is the non-context-ref variant
+            // that inherits the parent's `TargetRef::Player` via
+            // `resolve_player_for_context_ref` (effects/mod.rs:1673) — the same
+            // proven path the sibling `"that player's"` arm uses. A context-ref
+            // filter (`ParentTarget`) would skip that branch and wrongly fall
+            // through to `ability.controller` (the caster).
+            "that" | "their" | "its owner's" | "that player's" => Some(TargetFilter::Player),
             _ => None,
         };
         if let Some(target) = target {
@@ -8345,6 +8359,25 @@ mod tests {
                 assert_eq!(origins, vec![Zone::Hand]);
             }
             other => panic!("Expected ChangeZoneAllToLibrary Hand, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2c: "shuffle that library" — anaphoric reference to the
+    /// player target bound earlier in the same instruction (Visions). The
+    /// shuffle parser's possessive match resolves `"that"` to
+    /// `TargetFilter::Player` — the non-context-ref variant that inherits the
+    /// parent ability's `TargetRef::Player` at resolution time (the same path
+    /// the sibling `"that player's"` arm uses). A context-ref filter would
+    /// wrongly fall through to the caster.
+    #[test]
+    fn parse_shuffle_that_library_resolves_to_player() {
+        let text = "shuffle that library";
+        let result = parse_shuffle_ast(text, text);
+        match result {
+            Some(ShuffleImperativeAst::ShuffleLibrary { target }) => {
+                assert_eq!(target, TargetFilter::Player);
+            }
+            other => panic!("Expected ShuffleLibrary {{ Player }}, got {other:?}"),
         }
     }
 
