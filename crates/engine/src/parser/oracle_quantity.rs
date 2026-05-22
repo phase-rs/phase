@@ -8,7 +8,7 @@
 
 use std::str::FromStr;
 
-use crate::parser::oracle_nom::error::OracleError;
+use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::combinator::{all_consuming, opt, value};
@@ -872,40 +872,24 @@ fn classify_possessive_referent(prefix: &str) -> Option<ObjectScope> {
     // trigger-condition object. Each adjective names an earlier cost
     // (sacrifice/exile/discard) or trigger-condition (destroy, counter,
     // return, target, reveal, draw, copy) event in the same ability. The
-    // adjective MUST be followed by a space-delimited type word — otherwise
-    // `tag("targeted")` would also match `"targeted player"` (CR 608.2k
-    // doesn't apply to a player) or any future prefix that begins with one
-    // of these roots. Require a trailing space via `pair(participle, tag(" "))`.
-    let participle_with_boundary = nom::sequence::pair(
-        alt((
-            tag::<_, _, OracleError<'_>>("destroyed"),
-            tag("countered"),
-            tag("returned"),
-            tag("targeted"),
-            tag("revealed"),
-            tag("drawn"),
-            tag("copied"),
-        )),
+    // adjective MUST be followed by a full object type phrase — otherwise
+    // `"the targeted player"` would match the `targeted` participle even
+    // though CR 608.2k object references do not apply to players.
+    if all_consuming((
+        parse_possessive_participle,
         tag(" "),
-    );
-    if value((), participle_with_boundary).parse(rest).is_ok() {
+        parse_possessive_object_type,
+    ))
+    .parse(rest)
+    .is_ok()
+    {
         return Some(ObjectScope::CostPaidObject);
     }
 
     // CR 608.2c: bare anaphoric — "that <type>" / "the <type>" with no
     // participle adjective in between. The type word must be the entire
     // remainder (no trailing modifiers), which `all_consuming` enforces.
-    let bare_type = alt((
-        tag::<_, _, OracleError<'_>>("creature"),
-        tag("spell"),
-        tag("card"),
-        tag("permanent"),
-        tag("artifact"),
-        tag("enchantment"),
-        tag("planeswalker"),
-        tag("land"),
-    ));
-    if nom::combinator::all_consuming(value((), bare_type))
+    if nom::combinator::all_consuming(parse_possessive_object_type)
         .parse(rest)
         .is_ok()
     {
@@ -913,6 +897,43 @@ fn classify_possessive_referent(prefix: &str) -> Option<ObjectScope> {
     }
 
     None
+}
+
+fn parse_possessive_participle(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag("destroyed"),
+            tag("countered"),
+            tag("returned"),
+            tag("targeted"),
+            tag("revealed"),
+            tag("drawn"),
+            tag("copied"),
+            tag("sacrificed"),
+            tag("exiled"),
+            tag("discarded"),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_possessive_object_type(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag("creature"),
+            tag("spell"),
+            tag("card"),
+            tag("permanent"),
+            tag("artifact"),
+            tag("enchantment"),
+            tag("planeswalker"),
+            tag("land"),
+            tag("battle"),
+        )),
+    )
+    .parse(input)
 }
 
 /// CR 400.7 + CR 608.2c: Match "<noun> exiled from <possessive> hand this way"
@@ -2376,6 +2397,20 @@ mod tests {
         );
     }
 
+    /// CR 608.2c — battles are objects and can be referenced by bare
+    /// anaphoric possessives the same way cards, permanents, and spells are.
+    #[test]
+    fn parse_event_context_possessive_that_battle_mana_value_anaphoric() {
+        assert_eq!(
+            parse_event_context_quantity("that battle's mana value"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Anaphoric
+                }
+            })
+        );
+    }
+
     #[test]
     fn parse_event_context_quantity_unrecognized_returns_none() {
         assert_eq!(
@@ -2413,6 +2448,10 @@ mod tests {
         // Concocted to flex the word-boundary guard — the bare phrase has no
         // existing card today, but the failure mode it prevents is real.
         assert_eq!(parse_event_context_quantity("the targeter's power"), None);
+        assert_eq!(
+            parse_event_context_quantity("the targeted player's power"),
+            None
+        );
     }
 
     #[test]
