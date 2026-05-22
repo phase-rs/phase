@@ -1038,7 +1038,7 @@ const SUBTYPES: &[&str] = &[
     "Junk",
     "Map",
     "Powerstone",
-    "Spacecraft",
+    "Spacecraft", // CR 205.3g: Spacecraft is an artifact subtype.
     "Treasure",
     "Vehicle",
     // ── Enchantment subtypes ──
@@ -1263,6 +1263,7 @@ pub fn infer_core_type_for_subtype(subtype: &str) -> Option<CoreType> {
         // Artifact subtypes (CR 205.3g)
         "Treasure" | "Food" | "Clue" | "Blood" | "Gold" | "Map" | "Junk" | "Powerstone"
         | "Equipment" | "Spacecraft" | "Vehicle" | "Fortification" | "Contraption" => {
+            // CR 205.3g: Spacecraft is an artifact subtype.
             Some(CoreType::Artifact)
         }
         // Land subtypes (CR 205.3i)
