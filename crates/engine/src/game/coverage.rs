@@ -1262,6 +1262,17 @@ fn fmt_choice_type(ct: &ChoiceType) -> String {
         ChoiceType::TwoColors => "two colors",
         ChoiceType::Word => "word",
         ChoiceType::Artist => "artist",
+        // CR 608.2d: "choose an ability" — Urborg / Walking Sponge prompt.
+        ChoiceType::Keyword { options } => {
+            return format!(
+                "ability from: {}",
+                options
+                    .iter()
+                    .map(|kw| kw.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
     }
     .into()
 }
@@ -2351,6 +2362,9 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::AddAllBasicLandTypes => "all basic land types".into(),
         ContinuousModification::AddChosenSubtype { .. } => "add chosen subtype".into(),
         ContinuousModification::AddChosenColor => "add chosen color".into(),
+        // CR 608.2d + CR 613.1f: Urborg / Walking Sponge — strip the
+        // keyword chosen at resolution time.
+        ContinuousModification::RemoveChosenKeyword => "remove chosen keyword".into(),
         ContinuousModification::SetColor { colors } => {
             let c: Vec<_> = colors
                 .iter()

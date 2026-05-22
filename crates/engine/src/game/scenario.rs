@@ -1228,6 +1228,7 @@ impl GameRunner {
             WaitingFor::SurveilChoice { .. } => "SurveilChoice",
             WaitingFor::RevealChoice { .. } => "RevealChoice",
             WaitingFor::SearchChoice { .. } => "SearchChoice",
+            WaitingFor::SearchPartitionChoice { .. } => "SearchPartitionChoice",
             WaitingFor::OutsideGameChoice { .. } => "OutsideGameChoice",
             WaitingFor::ChooseFromZoneChoice { .. } => "ChooseFromZoneChoice",
             WaitingFor::ChooseOneOfBranch { .. } => "ChooseOneOfBranch",

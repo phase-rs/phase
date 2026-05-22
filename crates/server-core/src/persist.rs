@@ -26,6 +26,9 @@ pub struct PersistedSession {
     pub ai_difficulties: HashMap<u8, AiDifficulty>,
     /// Whether the game has been started (all seats filled, engine initialized).
     pub game_started: bool,
+    /// Whether the room should auto-start when every configured seat is occupied.
+    #[serde(default = "default_true")]
+    pub start_when_full: bool,
     /// Lobby metadata for games still waiting for players.
     pub lobby_meta: Option<PersistedLobbyMeta>,
 }
@@ -37,6 +40,12 @@ pub struct PersistedLobbyMeta {
     pub public: bool,
     pub password: Option<String>,
     pub timer_seconds: Option<u32>,
+    #[serde(default = "default_true")]
+    pub start_when_full: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Serializable snapshot of a draft session for disk persistence.
