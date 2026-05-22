@@ -6,6 +6,7 @@ use engine::types::match_config::MatchConfig;
 use tracing::{debug, warn};
 
 use crate::protocol::{DraftLobbyMetadata, LobbyGame};
+use crate::session::PUBLIC_SEAT_RESERVATION_MS;
 
 /// Fields a caller supplies when registering a lobby entry. Using a struct
 /// here rather than a long positional argument list means adding a new field
@@ -48,6 +49,15 @@ pub struct JoinTargetInfo {
     pub format_config: Option<FormatConfig>,
     pub match_config: MatchConfig,
     pub is_p2p: bool,
+    pub reservation_token: Option<String>,
+    pub reservation_expires_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LobbyReservation {
+    pub token: String,
+    pub display_name: String,
+    pub expires_at_ms: Option<u64>,
 }
 
 struct LobbyGameMeta {
@@ -66,6 +76,7 @@ struct LobbyGameMeta {
     room_name: Option<String>,
     host_peer_id: String,
     draft_metadata: Option<DraftLobbyMetadata>,
+    reservations: HashMap<String, LobbyReservation>,
 }
 
 pub struct LobbyManager {
@@ -112,8 +123,87 @@ impl LobbyManager {
                 room_name: req.room_name,
                 host_peer_id: req.host_peer_id,
                 draft_metadata: req.draft_metadata,
+                reservations: HashMap::new(),
             },
         );
+    }
+
+    fn now_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+
+    fn cleanup_expired_for(meta: &mut LobbyGameMeta) -> bool {
+        let before = meta.reservations.len();
+        let now = Self::now_ms();
+        meta.reservations.retain(|_, reservation| {
+            reservation
+                .expires_at_ms
+                .is_none_or(|expires| expires > now)
+        });
+        before != meta.reservations.len()
+    }
+
+    pub fn cleanup_expired_reservations(&mut self, game_code: &str) -> bool {
+        self.games
+            .get_mut(game_code)
+            .is_some_and(Self::cleanup_expired_for)
+    }
+
+    pub fn reserve_seat(
+        &mut self,
+        game_code: &str,
+        display_name: String,
+    ) -> Result<LobbyReservation, String> {
+        let meta = self
+            .games
+            .get_mut(game_code)
+            .ok_or_else(|| format!("Game not found in lobby: {}", game_code))?;
+        Self::cleanup_expired_for(meta);
+        let occupied = meta.current_players + meta.reservations.len() as u32;
+        if meta.max_players > 0 && occupied >= meta.max_players {
+            return Err(format!("Game {game_code} is full"));
+        }
+        let token = crate::session::generate_player_token();
+        let reservation = LobbyReservation {
+            token: token.clone(),
+            display_name,
+            expires_at_ms: if meta.has_password {
+                None
+            } else {
+                Some(Self::now_ms() + PUBLIC_SEAT_RESERVATION_MS)
+            },
+        };
+        meta.reservations.insert(token, reservation.clone());
+        Ok(reservation)
+    }
+
+    pub fn release_reservation(&mut self, game_code: &str, token: &str) -> bool {
+        self.games
+            .get_mut(game_code)
+            .and_then(|meta| meta.reservations.remove(token))
+            .is_some()
+    }
+
+    pub fn release_reservations(&mut self, reservations: &[(String, String)]) -> bool {
+        let mut changed = false;
+        for (game_code, token) in reservations {
+            changed |= self.release_reservation(game_code, token);
+        }
+        changed
+    }
+
+    pub fn consume_reservation(&mut self, game_code: &str, token: &str) -> bool {
+        let Some(meta) = self.games.get_mut(game_code) else {
+            return false;
+        };
+        if meta.reservations.remove(token).is_none() {
+            return false;
+        }
+        meta.current_players = (meta.current_players + 1).min(meta.max_players);
+        true
     }
 
     /// Updates the `current_players` count for an existing lobby entry. Called
@@ -121,6 +211,7 @@ impl LobbyManager {
     /// stays accurate. No-op if the game isn't tracked.
     pub fn set_current_players(&mut self, game_code: &str, current_players: u32) {
         if let Some(meta) = self.games.get_mut(game_code) {
+            Self::cleanup_expired_for(meta);
             meta.current_players = current_players;
         }
     }
@@ -198,7 +289,8 @@ impl LobbyManager {
             has_password: meta.has_password,
             host_version: meta.host_version.clone(),
             host_build_commit: meta.host_build_commit.clone(),
-            current_players: meta.current_players,
+            current_players: (meta.current_players + meta.reservations.len() as u32)
+                .min(meta.max_players),
             max_players: meta.max_players,
             format: meta.format_config.as_ref().map(|fc| fc.format),
             room_name: meta.room_name.clone(),
@@ -235,10 +327,13 @@ impl LobbyManager {
         Some(JoinTargetInfo {
             host_peer_id: meta.host_peer_id.clone(),
             max_players: meta.max_players,
-            current_players: meta.current_players,
+            current_players: (meta.current_players + meta.reservations.len() as u32)
+                .min(meta.max_players),
             format_config: meta.format_config.clone(),
             match_config: meta.match_config,
             is_p2p,
+            reservation_token: None,
+            reservation_expires_at_ms: None,
         })
     }
 
@@ -610,6 +705,8 @@ mod tests {
                 format_config: Some(FormatConfig::commander()),
                 match_config: MatchConfig::default(),
                 is_p2p: true,
+                reservation_token: None,
+                reservation_expires_at_ms: None,
             })
         );
     }
@@ -641,6 +738,8 @@ mod tests {
                 format_config: Some(FormatConfig::standard()),
                 match_config: MatchConfig::default(),
                 is_p2p: false,
+                reservation_token: None,
+                reservation_expires_at_ms: None,
             })
         );
         assert!(lobby.has_game("GAME01"));

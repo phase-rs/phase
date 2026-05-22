@@ -8020,6 +8020,16 @@ fn player_filter_as_controller_ref(filter: &TargetFilter) -> Option<ControllerRe
         {
             tf.controller.clone()
         }
+        // CR 115.1 + CR 701.21a: A bare "target player" subject ("target player
+        // sacrifices a creature" — Diabolic Edict, Chainer's Edict, Geth's
+        // Verdict, Liliana of the Veil −2) is a player target. "target opponent"
+        // lowers to a typed filter with `controller: Opponent` (matched above),
+        // but "target player" lowers to the unit `TargetFilter::Player`, which
+        // otherwise fell through to `None` and dropped the controller scope. The
+        // Sacrifice injection arm promotes this to `TargetPlayer` so the engine
+        // surfaces a player target slot and `resolve_sacrifice_scope` reads the
+        // chosen player at resolution — identical to the "target opponent" path.
+        TargetFilter::Player => Some(ControllerRef::TargetPlayer),
         _ => None,
     }
 }
@@ -30461,6 +30471,33 @@ mod tests {
                 );
             }
             other => panic!("expected CopyTokenOf, got: {other:?}"),
+        }
+    }
+
+    /// CR 115.1 + CR 701.21a: Edict parity — "target player sacrifices a
+    /// creature" must scope the sacrificed-creature filter to
+    /// `ControllerRef::TargetPlayer`, identical to "target opponent sacrifices".
+    /// Regression guard for the dropped-controller misparse (#552 / Diabolic
+    /// Edict / Chainer's Edict / Geth's Verdict): "target player" lowers to the
+    /// unit `TargetFilter::Player`, which `player_filter_as_controller_ref`
+    /// previously did not recognize, leaving `controller: None`.
+    #[test]
+    fn target_player_sacrifices_scopes_controller_to_target_player() {
+        for text in [
+            "target player sacrifices a creature",
+            "target opponent sacrifices a creature",
+        ] {
+            let clause = parse_effect_clause(text, &mut ParseContext::default());
+            match &clause.effect {
+                Effect::Sacrifice { target, .. } => {
+                    assert_eq!(
+                        target_filter_controller_ref(target),
+                        Some(ControllerRef::TargetPlayer),
+                        "{text:?} must scope the sacrificed filter to TargetPlayer, got {target:?}"
+                    );
+                }
+                other => panic!("expected Sacrifice for {text:?}, got: {other:?}"),
+            }
         }
     }
 

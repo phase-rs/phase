@@ -98,6 +98,28 @@ pub enum SearchSelectionConstraint {
     MatchEachFilter { filters: Vec<TargetFilter> },
 }
 
+/// CR 701.23a + CR 608.2c: A search whose found set is partitioned between two
+/// destinations — e.g. Cultivate ("put one onto the battlefield tapped and the
+/// other into your hand"). `primary_count` cards go to `primary_destination`
+/// (the searcher's choice when more than `primary_count` are found); the rest go
+/// to `rest_destination`. `primary_destination` is `Battlefield` for the A/B/C
+/// cluster, where `primary_enter_tapped` routes the entry through the ETB
+/// pipeline so the permanent enters tapped (CR 614.1 / CR 110.5b).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchDestinationSplit {
+    /// Where the chosen primary cards go (Battlefield for cultivate-class).
+    pub primary_destination: Zone,
+    /// How many of the found cards go to `primary_destination` (literal N from
+    /// "put N ..."). Mirrors `Effect::Dig.keep_count`.
+    pub primary_count: u32,
+    /// CR 614.1 / CR 110.5b: When true, primary cards enter the battlefield
+    /// tapped. Mirrors `Effect::ChangeZone.enter_tapped`.
+    pub primary_enter_tapped: bool,
+    /// Where the remaining found cards go ("the rest"/"the other" — Hand for
+    /// cultivate-class).
+    pub rest_destination: Zone,
+}
+
 /// CR 608.2d: Who may choose to perform an optional effect during resolution.
 /// Used with `AbilityDefinition::optional_for` to route the "you may" prompt to opponents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -107,7 +129,7 @@ pub enum OpponentMayScope {
 }
 
 /// What kind of named choice the player must make at resolution time.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChoiceType {
     CreatureType,
     Color {
@@ -142,6 +164,16 @@ pub enum ChoiceType {
     Word,
     /// "Choose an artist" — selects a Magic card artist name.
     Artist,
+    /// CR 608.2d: "Choose [an ability from this list]" — the option set is a
+    /// typed list of `Keyword`s, not free-form strings. Used by Urborg /
+    /// Walking Sponge / Phyrexian Splicer ("target creature loses first strike
+    /// or swampwalk until end of turn"). The chosen keyword persists as
+    /// `ChosenAttribute::Keyword` on the source so a downstream
+    /// `ContinuousModification::RemoveChosenKeyword` (Layer 6) can strip the
+    /// chosen ability at layer-evaluation time.
+    Keyword {
+        options: Vec<Keyword>,
+    },
 }
 
 impl ChoiceType {
@@ -200,6 +232,12 @@ impl Serialize for ChoiceType {
             Self::TwoColors => serializer.serialize_unit_variant("ChoiceType", 11, "TwoColors"),
             Self::Word => serializer.serialize_unit_variant("ChoiceType", 12, "Word"),
             Self::Artist => serializer.serialize_unit_variant("ChoiceType", 13, "Artist"),
+            Self::Keyword { options } => {
+                let mut variant =
+                    serializer.serialize_struct_variant("ChoiceType", 14, "Keyword", 1)?;
+                variant.serialize_field("options", options)?;
+                variant.end()
+            }
         }
     }
 }
@@ -228,6 +266,9 @@ impl<'de> Deserialize<'de> for ChoiceType {
             },
             Labeled {
                 options: Vec<String>,
+            },
+            Keyword {
+                options: Vec<Keyword>,
             },
         }
 
@@ -267,6 +308,7 @@ impl<'de> Deserialize<'de> for ChoiceType {
                 ChoiceTypeData::Color { excluded } => Ok(Self::Color { excluded }),
                 ChoiceTypeData::NumberRange { min, max } => Ok(Self::NumberRange { min, max }),
                 ChoiceTypeData::Labeled { options } => Ok(Self::Labeled { options }),
+                ChoiceTypeData::Keyword { options } => Ok(Self::Keyword { options }),
             },
         }
     }
@@ -462,6 +504,11 @@ pub enum ChosenAttribute {
     /// Tribute ETB replacement paid tribute or declined. Read by the companion
     /// `TriggerCondition::TributeNotPaid` evaluator.
     TributeOutcome(TributeOutcome),
+    /// CR 608.2d: Records the typed keyword chosen from a `ChoiceType::Keyword`
+    /// option list (Urborg / Walking Sponge "choose an ability the target has,
+    /// remove it"). Read by `ContinuousModification::RemoveChosenKeyword` at
+    /// Layer 6 evaluation to strip the chosen keyword from the recipient.
+    Keyword(Keyword),
 }
 
 impl ChosenAttribute {
@@ -485,6 +532,13 @@ impl ChosenAttribute {
             Self::TributeOutcome(_) => ChoiceType::Labeled {
                 options: vec!["Paid".to_string(), "Declined".to_string()],
             },
+            // CR 608.2d: A category template — the concrete option list is
+            // attached to each emission site (Urborg lists FirstStrike +
+            // Swampwalk; another card might list any pair). Mirrors the
+            // `NumberRange { min: 0, max: 20 }` template idiom.
+            Self::Keyword(_) => ChoiceType::Keyword {
+                options: Vec::new(),
+            },
         }
     }
 
@@ -501,6 +555,7 @@ impl ChosenAttribute {
             ChoiceValue::Player(id) => Some(Self::Player(id)),
             ChoiceValue::TwoColors(colors) => Some(Self::TwoColors(colors)),
             ChoiceValue::Number(n) => Some(Self::Number(n)),
+            ChoiceValue::Keyword(keyword) => Some(Self::Keyword(keyword)),
             ChoiceValue::Label(_) | ChoiceValue::LandType(_) => None,
         }
     }
@@ -521,6 +576,11 @@ pub enum ChoiceValue {
     LandType(String),
     Player(PlayerId),
     TwoColors([ManaColor; 2]),
+    /// CR 608.2d: typed-keyword choice from a `ChoiceType::Keyword` option
+    /// list (Urborg / Walking Sponge). Persisted into the source's
+    /// `chosen_attributes` as `ChosenAttribute::Keyword` for later
+    /// `RemoveChosenKeyword` resolution.
+    Keyword(Keyword),
 }
 
 impl ChoiceValue {
@@ -552,6 +612,18 @@ impl ChoiceValue {
                 Some(Self::TwoColors([c1, c2]))
             }
             ChoiceType::Word | ChoiceType::Artist => Some(Self::Label(value.to_string())),
+            // CR 608.2d: match the player's response against the typed option
+            // list by display string. Comparison is case-insensitive so the
+            // frontend can render canonical capitalization while the engine
+            // accepts either form.
+            ChoiceType::Keyword { options } => {
+                let needle = value.to_lowercase();
+                options
+                    .iter()
+                    .find(|k| k.to_string().to_lowercase() == needle)
+                    .cloned()
+                    .map(Self::Keyword)
+            }
         }
     }
 }
@@ -5377,6 +5449,13 @@ pub enum Effect {
             skip_serializing_if = "is_default_search_selection_constraint"
         )]
         selection_constraint: SearchSelectionConstraint,
+        /// CR 701.23a + CR 608.2c: When set, the found set is partitioned across
+        /// two destinations (cultivate-class "put one onto the battlefield
+        /// tapped and the other into your hand"). `None` preserves the existing
+        /// single-zone search behavior (destination handled by the sub_ability
+        /// ChangeZone chain).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        split: Option<SearchDestinationSplit>,
     },
     /// CR 400.11/400.11a + CR 701.23j: Choose card(s) the player owns from
     /// outside the game. For tournament-style play, the bounded accessible set
@@ -10080,6 +10159,13 @@ pub enum ContinuousModification {
     /// CR 105.3: Set the object's color to the chosen color.
     /// Reads from `chosen_attributes` at layer evaluation time.
     AddChosenColor,
+    /// CR 608.2d + CR 613.1f: Strip the chosen keyword (read from the granting
+    /// source's `chosen_attributes`) from the affected object. Mirrors
+    /// `RemoveKeyword`'s discriminant-based stripping so parameterized
+    /// keywords (e.g., `Landwalk("Swamp")`) lose every variant sharing the
+    /// same discriminant. Used by Urborg / Walking Sponge: "target creature
+    /// loses [chosen ability] until end of turn".
+    RemoveChosenKeyword,
     SetColor {
         colors: Vec<ManaColor>,
     },
