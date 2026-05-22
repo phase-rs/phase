@@ -3038,7 +3038,13 @@ pub(crate) fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
         // counter of any type. Distinct from typed "with a +1/+1 counter on it".
         // Must precede the typed-counter branch so the empty-counter-type guard
         // there doesn't fire.
-        for prefix in ["a counter on it", "a counter on them", "any counter on it"] {
+        for prefix in [
+            "counters on it",
+            "counters on them",
+            "a counter on it",
+            "a counter on them",
+            "any counter on it",
+        ] {
             if let Ok((after, _)) = tag_e::<_, _, OracleError<'_>>(prefix).parse(rest) {
                 let consumed = leading_ws + lead_len + (rest.len() - after.len());
                 return Some((

@@ -13104,6 +13104,44 @@ mod tests {
     }
 
     #[test]
+    fn static_other_creatures_with_any_counters_have_flying_and_haste() {
+        let def =
+            parse_static_line("Other creatures you control with counters on them have flying and haste.")
+                .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        match &def.affected {
+            Some(TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::You),
+                properties,
+                type_filters,
+                ..
+            })) => {
+                assert!(type_filters.contains(&TypeFilter::Creature));
+                assert!(properties.contains(&FilterProp::Another));
+                assert!(properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Counters {
+                        counters: CounterMatch::Any,
+                        comparator: Comparator::GE,
+                        count: QuantityExpr::Fixed { value: 1 },
+                    }
+                )));
+            }
+            other => panic!("Expected typed creature filter, got {other:?}"),
+        }
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying
+            }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste
+            }));
+    }
+
+    #[test]
     fn static_creatures_with_counter_get_pump() {
         let def = parse_static_line("Creatures you control with a +1/+1 counter on it gets +2/+2.")
             .unwrap();
