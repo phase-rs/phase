@@ -380,7 +380,7 @@ impl Default for AiConfig {
 
 /// Create an AI configuration for the given difficulty and platform.
 ///
-/// Five presets scale from random play (VeryEasy) to deterministic best-move (VeryHard).
+/// Six presets scale from random play (VeryEasy) to competitive Commander (CEDH).
 /// WASM platform reduces search budgets to fit within browser constraints.
 pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
     let (temperature, profile, play_lookahead, combat_lookahead, search) = match difficulty {
@@ -525,6 +525,8 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
                 deterministic: false,
                 threat_awareness: ThreatAwareness::Full,
+                // == AI_SEARCH_TIME_BUDGET_MS: projections only at turn start,
+                // before nodes consume the budget
                 projection_min_budget_ms: 1500,
             },
         ),
@@ -586,12 +588,9 @@ pub fn create_config_for_players(
     match player_count {
         0..=2 => {} // No scaling needed
         3..=4 => {
-            if difficulty == AiDifficulty::CEDH {
-                // cEDH is calibrated for 4-player tables. The generic
-                // paranoid cap (depth 2, nodes * 2/3, branching 4, rollout 1)
-                // would cripple it. The cEDH preset already accounts for
-                // the table size — no-op here.
-            } else {
+            // cEDH: no scaling needed — the preset is calibrated for 4-player tables.
+            // All other difficulties get the paranoid cap.
+            if difficulty != AiDifficulty::CEDH {
                 // Paranoid search: cap depth at 2, reduce budget
                 config.search.max_depth = config.search.max_depth.min(2);
                 config.search.max_nodes = config.search.max_nodes * 2 / 3;
@@ -833,6 +832,18 @@ mod tests {
             cfg.search.max_nodes, 96,
             "cEDH must keep its native node budget at 4p"
         );
+        assert_eq!(cfg.search.max_branching, 5);
+        assert_eq!(cfg.search.rollout_depth, 2);
+    }
+
+    #[test]
+    fn cedh_skips_paranoid_scaling_at_3p() {
+        let cfg = create_config_for_players(AiDifficulty::CEDH, Platform::Native, 3);
+        assert_eq!(
+            cfg.search.max_depth, 3,
+            "cEDH must not be downgraded at 3p any more than at 4p"
+        );
+        assert_eq!(cfg.search.max_nodes, 96);
         assert_eq!(cfg.search.max_branching, 5);
         assert_eq!(cfg.search.rollout_depth, 2);
     }
