@@ -1369,13 +1369,7 @@ fn parse_cost_paid_object_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         tag("land"),
     ))
     .parse(rest)?;
-    let (rest, property) = alt((
-        value(ObjectProperty::ManaValue, tag("'s mana value")),
-        value(ObjectProperty::ManaValue, tag("'s converted mana cost")),
-        value(ObjectProperty::Power, tag("'s power")),
-        value(ObjectProperty::Toughness, tag("'s toughness")),
-    ))
-    .parse(rest)?;
+    let (rest, property) = parse_object_property_possessive_suffix(rest)?;
     let qty = match property {
         ObjectProperty::Power => QuantityRef::Power {
             scope: ObjectScope::CostPaidObject,
@@ -1386,6 +1380,48 @@ fn parse_cost_paid_object_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         ObjectProperty::ManaValue => QuantityRef::ObjectManaValue {
             scope: ObjectScope::CostPaidObject,
         },
+    };
+    Ok((rest, qty))
+}
+
+fn parse_object_property_possessive_suffix(input: &str) -> OracleResult<'_, ObjectProperty> {
+    alt((
+        value(ObjectProperty::ManaValue, tag("'s mana value")),
+        value(ObjectProperty::ManaValue, tag("'s converted mana cost")),
+        value(ObjectProperty::Power, tag("'s power")),
+        value(ObjectProperty::Toughness, tag("'s toughness")),
+    ))
+    .parse(input)
+}
+
+fn parse_anaphoric_target_card_property_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("that ").parse(input)?;
+    let (rest, has_power_toughness) = alt((
+        value(true, tag("creature card")),
+        value(false, tag("artifact card")),
+        value(false, tag("enchantment card")),
+        value(false, tag("planeswalker card")),
+        value(false, tag("land card")),
+        value(false, tag("card")),
+    ))
+    .parse(rest)?;
+    let (rest, property) = parse_object_property_possessive_suffix(rest)?;
+    let qty = match property {
+        ObjectProperty::Power if has_power_toughness => QuantityRef::Power {
+            scope: ObjectScope::Target,
+        },
+        ObjectProperty::Toughness if has_power_toughness => QuantityRef::Toughness {
+            scope: ObjectScope::Target,
+        },
+        ObjectProperty::ManaValue => QuantityRef::ObjectManaValue {
+            scope: ObjectScope::Target,
+        },
+        ObjectProperty::Power | ObjectProperty::Toughness => {
+            return Err(nom::Err::Error(OracleError::new(
+                input,
+                nom::error::ErrorKind::Tag,
+            )));
+        }
     };
     Ok((rest, qty))
 }
@@ -1421,22 +1457,10 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
             },
             tag("that spell's mana value"),
         ),
-        // CR 608.2c: "that creature card's [property]" — anaphoric reference to
-        // a creature card chosen during resolution (e.g., revealed from a hand
-        // and selected by the active player). The card is the object chosen by
-        // the preceding instruction in the same effect resolution sequence.
-        value(
-            QuantityRef::Power {
-                scope: ObjectScope::Target,
-            },
-            tag("that creature card's power"),
-        ),
-        value(
-            QuantityRef::Toughness {
-                scope: ObjectScope::Target,
-            },
-            tag("that creature card's toughness"),
-        ),
+        // CR 109.2a + CR 608.2c: "that [type] card's [property]" — anaphoric
+        // reference to a card selected by an earlier instruction in the same
+        // resolution sequence.
+        parse_anaphoric_target_card_property_ref,
     ))
     .parse(input)
 }
@@ -3607,6 +3631,36 @@ mod tests {
             }
         );
         assert_eq!(rest2, "");
+    }
+
+    #[test]
+    fn test_parse_anaphoric_target_card_property_refs() {
+        let cases = [
+            (
+                "that creature card's power",
+                QuantityRef::Power {
+                    scope: ObjectScope::Target,
+                },
+            ),
+            (
+                "that creature card's toughness",
+                QuantityRef::Toughness {
+                    scope: ObjectScope::Target,
+                },
+            ),
+            (
+                "that artifact card's mana value",
+                QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Target,
+                },
+            ),
+        ];
+
+        for (input, expected) in cases {
+            let (rest, qty) = parse_quantity_ref(input).unwrap();
+            assert_eq!(qty, expected);
+            assert_eq!(rest, "");
+        }
     }
 
     /// CR 603.7c: Dusty Parlor — the SpellCast event's source object is the
