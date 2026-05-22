@@ -1148,9 +1148,7 @@ fn parse_hand_size_predicate(rest: &str, player: PlayerScope) -> Option<(&str, S
             rest,
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::HandSize {
-                        player: player.clone(),
-                    },
+                    qty: QuantityRef::HandSize { player },
                 },
                 comparator: Comparator::GT,
                 rhs: QuantityExpr::Ref {
@@ -1568,27 +1566,23 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
 /// patterns; life-total / graveyard variants will compose in here as more
 /// cards exercise them.
 fn parse_that_player_has_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
-    // "that player" / "that opponent" → ScopedPlayer (the iteration-bound player).
-    // "target player" / "target opponent" → Target (the first player target of the ability).
+    // CR 115.1 + CR 603.4: "that/target player/opponent has" decomposes the
+    // reference axis ("that" vs. "target") from the subject noun
+    // ("player" vs. "opponent"). "That" binds to the scoped event/iteration
+    // player; "target" binds to the first player target of the ability.
     let (rest, player) = alt((
         value(
             PlayerScope::ScopedPlayer,
-            tag::<_, _, OracleError<'_>>("that player has "),
+            tag::<_, _, OracleError<'_>>("that "),
         ),
-        value(
-            PlayerScope::ScopedPlayer,
-            tag::<_, _, OracleError<'_>>("that opponent has "),
-        ),
-        value(
-            PlayerScope::Target,
-            tag::<_, _, OracleError<'_>>("target player has "),
-        ),
-        value(
-            PlayerScope::Target,
-            tag::<_, _, OracleError<'_>>("target opponent has "),
-        ),
+        value(PlayerScope::Target, tag::<_, _, OracleError<'_>>("target ")),
     ))
     .parse(input)?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("player has "),
+        tag::<_, _, OracleError<'_>>("opponent has "),
+    ))
+    .parse(rest)?;
 
     if let Some((rest, cond)) = parse_hand_size_predicate(rest, player) {
         return Ok((rest, cond));
