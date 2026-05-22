@@ -923,35 +923,28 @@ pub(super) fn parse_targeted_action_ast(
         .map(|(rest, _)| rest)
         .unwrap_or(after_discard);
         // CR 109.5 + CR 115.10: Whole-hand discard. The possessive pronoun
-        // disambiguates the hand-size owner:
-        //   - "your hand" → `PlayerScope::Controller` ("you" = printed
-        //     ability controller; survives `player_scope` iteration via
-        //     `original_controller` preservation in
-        //     `resolve_quantity_with_targets`).
-        //   - "their hand" / "his or her hand" → `PlayerScope::ScopedPlayer`
-        //     (the possessive refers to the subject of the imperative — the
-        //     each-player iterating player under `player_scope`, or the
-        //     ability controller as a non-iterating fallback).
-        // Wrong scope here broke Windfall: "Each player discards their hand,
-        // then draws cards…" — opponents drew without discarding because
-        // `Controller` resolved to the caster across iteration, not the
-        // iterating player.
-        // Uses tag prefix (not contains) to avoid matching "discard a card from your hand".
-        if let Ok((_, hand_owner_scope)) = alt((
-            value(
-                PlayerScope::Controller,
-                tag::<_, _, OracleError<'_>>("your hand"),
-            ),
-            value(PlayerScope::ScopedPlayer, tag("their hand")),
-            value(PlayerScope::ScopedPlayer, tag("his or her hand")),
-        ))
+        // disambiguates the hand-size owner. "Your hand" is the caster's hand
+        // (`Controller`); "their hand" / "his or her hand" is the subject's
+        // hand, represented here as `Target`. Under an each-player wrapper,
+        // `rewrite_player_scope_refs` rewrites that target-scoped hand-size to
+        // `ScopedPlayer`, so Windfall-style effects bind to the iterating
+        // player instead of the caster.
+        if let Ok((_, hand_owner)) = preceded(
+            alt((
+                value(
+                    PlayerScope::Controller,
+                    tag::<_, _, OracleError<'_>>("your"),
+                ),
+                value(PlayerScope::Target, tag("their")),
+                value(PlayerScope::Target, tag("his or her")),
+            )),
+            tag(" hand"),
+        )
         .parse(after_discard)
         {
             return Some(TargetedImperativeAst::Discard {
                 count: QuantityExpr::Ref {
-                    qty: QuantityRef::HandSize {
-                        player: hand_owner_scope,
-                    },
+                    qty: QuantityRef::HandSize { player: hand_owner },
                 },
                 random,
                 up_to,
@@ -1505,6 +1498,7 @@ pub(super) fn parse_search_and_creation_ast(
             extra_filters: details.extra_filters,
             multi_destination: details.multi_destination,
             multi_enter_tapped: details.multi_enter_tapped,
+            split: details.split,
         });
     }
     // CR 701.16a + CR 701.20a: "look at the top N" (private) and "reveal the top N" (public)
@@ -1662,6 +1656,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             extra_filters: _,
             multi_destination: _,
             multi_enter_tapped: _,
+            split,
         } => Effect::SearchLibrary {
             filter,
             // CR 107.1c + CR 701.23d: Lower the AST `up_to: bool` into the
@@ -1674,6 +1669,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             reveal,
             target_player,
             selection_constraint,
+            split,
         },
         SearchCreationImperativeAst::SearchOutsideGame {
             filter,
@@ -3537,6 +3533,7 @@ pub(super) fn lower_multi_filter_search_library(
             reveal,
             target_player,
             selection_constraint: SearchSelectionConstraint::MatchEachFilter { filters },
+            split: None,
         });
     }
 
@@ -3577,6 +3574,7 @@ pub(super) fn lower_multi_filter_search_library(
                 reveal,
                 target_player: target_player.clone(),
                 selection_constraint: selection_constraint.clone(),
+                split: None,
             },
         );
         search_def.sub_ability = tail;
@@ -3594,6 +3592,7 @@ pub(super) fn lower_multi_filter_search_library(
         reveal,
         target_player,
         selection_constraint,
+        split: None,
     });
     clause.sub_ability = tail;
     clause
@@ -3658,6 +3657,7 @@ fn lower_target_referenced_search_library(
             reveal,
             target_player,
             selection_constraint,
+            split: None,
         })
     } else {
         lower_multi_filter_search_library(
@@ -5490,6 +5490,8 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 extra_filters,
                 multi_destination,
                 multi_enter_tapped,
+                // Reference-target searches are not cultivate-class splits.
+                split: _,
             },
         )) => lower_target_referenced_search_library(
             reference_target,
@@ -5520,6 +5522,8 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 extra_filters,
                 multi_destination,
                 multi_enter_tapped,
+                // Multi-filter searches handle destinations per-filter, not via split.
+                split: _,
             },
         )) if !extra_filters.is_empty() => lower_multi_filter_search_library(
             filter,
@@ -7613,16 +7617,10 @@ mod tests {
 
     #[test]
     fn parse_discard_their_hand() {
-        // CR 109.5 + CR 115.10: "their" in a discard imperative refers to the
-        // subject of the each-player wrapper (or to the target player) — NOT
-        // the printed ability controller. Under `player_scope` iteration the
-        // count must read the iterating player's hand size, not the caster's.
-        // `PlayerScope::ScopedPlayer` resolves to the iterating player and
-        // falls back to the controller outside iteration, so non-scoped sites
-        // still resolve correctly. Regression: Windfall ("Each player discards
-        // their hand, then draws cards equal to the greatest number of cards a
-        // player discarded this way.") — opponents previously drew without
-        // discarding because `Controller` survived the per-iteration rebind.
+        // CR 109.5 + CR 115.10: "their" in a discard imperative refers to
+        // the subject, not the printed ability controller. The local
+        // imperative parser represents that as `Target`; an outer
+        // each-player scope rewrites it to `ScopedPlayer`.
         let text = "discard their hand";
         let lower = text.to_lowercase();
         let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
@@ -7633,11 +7631,11 @@ mod tests {
                         count,
                         QuantityExpr::Ref {
                             qty: QuantityRef::HandSize {
-                                player: PlayerScope::ScopedPlayer
+                                player: PlayerScope::Target
                             }
                         }
                     ),
-                    "Expected HandSize ref, got {count:?}"
+                    "Expected HandSize ref scoped to Target, got {count:?}"
                 );
             }
             other => panic!("Expected Discard with HandSize, got {other:?}"),
