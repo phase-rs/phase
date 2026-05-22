@@ -157,7 +157,7 @@ pub fn resolve(
             .iter()
             .enumerate()
             .map(|(i, t)| CopyTargetSlot {
-                current: t.clone(),
+                current: Some(t.clone()),
                 legal_alternatives: selection_slots
                     .get(i)
                     .map(|s| s.legal_targets.clone())
