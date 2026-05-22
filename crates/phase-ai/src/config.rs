@@ -39,6 +39,9 @@ pub enum AiDifficulty {
     Medium,
     Hard,
     VeryHard,
+    /// Bracket-5 competitive Commander. Bypasses 4-player paranoid scaling;
+    /// activates combo-recognition policies via `DeckFeatures::is_cedh`.
+    CEDH,
 }
 
 /// Platform the AI runs on (affects budget constraints).
@@ -485,6 +488,30 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 projection_min_budget_ms: 2000,
             },
         ),
+        AiDifficulty::CEDH => (
+            0.2,
+            AiProfile {
+                risk_tolerance: 0.4,
+                interaction_patience: 1.0,
+                stabilize_bias: 1.2,
+            },
+            true, // play_lookahead
+            true, // combat_lookahead — cEDH is the first tier to enable this
+            SearchConfig {
+                enabled: true,
+                max_depth: 3,
+                max_nodes: 96,
+                max_branching: 5,
+                planner_mode: PlannerMode::BeamPlusRollout,
+                rollout_depth: 2,
+                rollout_samples: 2,
+                opponent_model: OpponentModel::ThreatWeightedReply,
+                time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
+                deterministic: false,
+                threat_awareness: ThreatAwareness::Full,
+                projection_min_budget_ms: 1500,
+            },
+        ),
     };
 
     let mut config = AiConfig {
@@ -645,6 +672,7 @@ mod tests {
             AiDifficulty::Medium,
             AiDifficulty::Hard,
             AiDifficulty::VeryHard,
+            AiDifficulty::CEDH,
         ];
         for diff in &difficulties {
             let config = create_config(*diff, Platform::Native);
@@ -721,17 +749,53 @@ mod tests {
 
     #[test]
     fn ai_difficulty_serde_roundtrips() {
-        let difficulties = [
+        for diff in [
             AiDifficulty::VeryEasy,
             AiDifficulty::Easy,
             AiDifficulty::Medium,
             AiDifficulty::Hard,
             AiDifficulty::VeryHard,
-        ];
-        for diff in &difficulties {
-            let json = serde_json::to_string(diff).unwrap();
+            AiDifficulty::CEDH,
+        ] {
+            let json = serde_json::to_string(&diff).unwrap();
             let parsed: AiDifficulty = serde_json::from_str(&json).unwrap();
-            assert_eq!(parsed, *diff);
+            assert_eq!(diff, parsed);
         }
+    }
+
+    #[test]
+    fn cedh_preset_values() {
+        let config = create_config(AiDifficulty::CEDH, Platform::Native);
+        assert_eq!(config.difficulty, AiDifficulty::CEDH);
+        assert_eq!(config.temperature, 0.2);
+        assert_eq!(config.profile.risk_tolerance, 0.4);
+        assert_eq!(config.profile.interaction_patience, 1.0);
+        assert_eq!(config.profile.stabilize_bias, 1.2);
+        assert!(config.play_lookahead);
+        assert!(config.combat_lookahead);
+        assert!(config.search.enabled);
+        assert_eq!(config.search.max_depth, 3);
+        assert_eq!(config.search.max_nodes, 96);
+        assert_eq!(config.search.max_branching, 5);
+        assert_eq!(config.search.rollout_depth, 2);
+        assert_eq!(config.search.rollout_samples, 2);
+        assert!(matches!(
+            config.search.opponent_model,
+            OpponentModel::ThreatWeightedReply
+        ));
+        assert!(matches!(
+            config.search.threat_awareness,
+            ThreatAwareness::Full
+        ));
+        assert_eq!(config.search.projection_min_budget_ms, 1500);
+        assert_eq!(config.search.time_budget_ms, AI_SEARCH_TIME_BUDGET_MS);
+    }
+
+    #[test]
+    fn cedh_preset_wasm_caps_apply() {
+        let config = create_config(AiDifficulty::CEDH, Platform::Wasm);
+        assert_eq!(config.search.max_depth, 2); // capped from 3
+        assert_eq!(config.search.max_nodes, 64); // 96 * 2/3
+        assert_eq!(config.search.rollout_depth, 2);
     }
 }
