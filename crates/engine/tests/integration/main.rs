@@ -16,6 +16,7 @@ mod chain_of_smog_copy;
 mod coalition_relic_integration;
 mod council_of_four_nth_per_turn;
 mod cr_annotations;
+mod cultivate_split_destination;
 mod dalkovan_encampment_attack_trigger;
 mod dark_confidant_upkeep;
 mod devour_intellect_treasure_rider;

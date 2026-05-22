@@ -749,6 +749,74 @@ mod tests {
     }
 
     #[test]
+    fn rehydrate_uses_hidden_prepare_face_when_back_face_name_collides() {
+        let front = test_face(
+            "Emeritus of Truce",
+            "prepare-oracle-id",
+            vec![CoreType::Creature],
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 1,
+            },
+        );
+        let prepare_back = test_face(
+            "Swords to Plowshares",
+            "prepare-oracle-id",
+            vec![CoreType::Sorcery],
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 0,
+            },
+        );
+        let standalone = test_face(
+            "Swords to Plowshares",
+            "standalone-oracle-id",
+            vec![CoreType::Instant],
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 0,
+            },
+        );
+
+        let mut front_json = serde_json::to_value(&front).unwrap();
+        front_json["layout"] = serde_json::json!("prepare");
+        let mut prepare_back_json = serde_json::to_value(&prepare_back).unwrap();
+        prepare_back_json["layout"] = serde_json::json!("prepare");
+        let standalone_json = serde_json::to_value(&standalone).unwrap();
+        let export = serde_json::json!({
+            "emeritus of truce": front_json,
+            "swords to plowshares": standalone_json,
+            "swords to plowshares [prepare-oracle-id]": prepare_back_json,
+        })
+        .to_string();
+        let db = CardDatabase::from_json_str(&export).expect("export db should parse");
+        assert_eq!(
+            db.get_face_by_name("Swords to Plowshares")
+                .unwrap()
+                .scryfall_oracle_id
+                .as_deref(),
+            Some("standalone-oracle-id"),
+            "canonical name lookup must keep the standalone card"
+        );
+
+        let mut state = GameState::default();
+        let object_id = create_object_from_card_face(
+            &mut state,
+            db.get_face_by_name("Emeritus of Truce").unwrap(),
+            PlayerId(0),
+        );
+
+        rehydrate_game_from_card_db(&mut state, &db);
+
+        let back_face = state.objects[&object_id]
+            .back_face
+            .as_ref()
+            .expect("rehydrate should attach the hidden prepare spell face");
+        assert_eq!(back_face.name, "Swords to Plowshares");
+        assert_eq!(back_face.layout_kind, Some(LayoutKind::Prepare));
+    }
+
+    #[test]
     fn rehydrate_preserves_face_down_battlefield_public_characteristics() {
         let mut face = test_face(
             "Hidden Sorcery",

@@ -35,7 +35,8 @@
     ],
     "externalBin": ["binaries/phase-server"],
     "resources": {
-      "../public/card-data.json": "data/card-data.json"
+      "../public/card-data.json": "data/card-data.json",
+      "../public/draft-pools.json": "data/draft-pools.json"
     },
     "createUpdaterArtifacts": true
   },

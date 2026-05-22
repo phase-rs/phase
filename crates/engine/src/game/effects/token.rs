@@ -1033,6 +1033,7 @@ fn lander_ability() -> AbilityDefinition {
             reveal: false,
             target_player: None,
             selection_constraint: SearchSelectionConstraint::default(),
+            split: None,
         },
     )
     .sub_ability(

@@ -78,6 +78,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::SurveilChoice { .. }
             | WaitingFor::RevealChoice { .. }
             | WaitingFor::SearchChoice { .. }
+            | WaitingFor::SearchPartitionChoice { .. }
             | WaitingFor::OutsideGameChoice { .. }
             | WaitingFor::ChooseFromZoneChoice { .. }
             | WaitingFor::ChooseOneOfBranch { .. }
@@ -97,6 +98,81 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::CategoryChoice { .. }
             | WaitingFor::PayAmountChoice { .. }
     )
+}
+
+/// CR 701.20e / CR 701.23a + CR 401.4: Move the "rest" partition of an
+/// interactive selection (Dig's unkept cards, a search-split's non-primary
+/// cards) to a concrete destination zone. `Library` routes to the bottom of the
+/// owner's library (CR 401.4); every other zone uses the standard cross-zone
+/// mover. Extracted from the Dig rest-move block so the search-partition handler
+/// reuses the exact same routing.
+fn route_rest_partition(
+    state: &mut GameState,
+    rest_ids: &[ObjectId],
+    rest_zone: Zone,
+    events: &mut Vec<GameEvent>,
+) {
+    match rest_zone {
+        Zone::Library => {
+            for &obj_id in rest_ids {
+                zones::move_to_library_position(state, obj_id, false, events);
+            }
+        }
+        zone => {
+            for &obj_id in rest_ids {
+                zones::move_to_zone(state, obj_id, zone, events);
+            }
+        }
+    }
+}
+
+/// CR 701.23a + CR 614.1 / CR 110.5b: Apply a cultivate-class search-destination
+/// split. `primary_ids` are routed to `primary_destination` through the full
+/// `change_zone::resolve` ETB pipeline (carrying `enter_tapped` so ETB-tapped
+/// REPLACEMENT effects can intercept — "lands you control enter untapped
+/// instead"); `rest_ids` are routed to `rest_destination` via the shared rest
+/// mover. The `Shuffle` continuation drain is the caller's responsibility.
+fn apply_search_partition(
+    state: &mut GameState,
+    primary_ids: &[ObjectId],
+    rest_ids: &[ObjectId],
+    split: &crate::types::ability::SearchDestinationSplit,
+    source_id: ObjectId,
+    controller: crate::types::player::PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    if !primary_ids.is_empty() {
+        // CR 614.1 / CR 110.5b: Synthesize a ChangeZone over the explicit primary
+        // targets and route through the ETB pipeline so the permanent enters
+        // tapped (and ETB-tapped replacements apply), unlike a bare move_to_zone.
+        let primary_targets: Vec<TargetRef> = primary_ids
+            .iter()
+            .map(|&id| TargetRef::Object(id))
+            .collect();
+        let change_zone = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: split.primary_destination,
+                target: crate::types::ability::TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: split.primary_enter_tapped,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: Vec::new(),
+            },
+            primary_targets,
+            source_id,
+            controller,
+        );
+        crate::game::effects::change_zone::resolve(state, &change_zone, events)
+            .map_err(|e| EngineError::InvalidAction(format!("search-split primary move: {e:?}")))?;
+    }
+    // Rest is never Battlefield across the A/B/C cluster; the standard rest mover
+    // (Library => bottom per CR 401.4, else move_to_zone) is correct.
+    route_rest_partition(state, rest_ids, split.rest_destination, events);
+    Ok(())
 }
 
 pub(super) fn handle_resolution_choice(
@@ -813,23 +889,14 @@ pub(super) fn handle_resolution_choice(
                 state.next_tracked_set_id += 1;
                 state.tracked_object_sets.insert(tracked_id, kept.clone());
             }
-            match rest_destination {
-                Some(Zone::Library) => {
-                    for &obj_id in &unkept {
-                        zones::move_to_library_position(state, obj_id, false, events);
-                    }
-                }
-                Some(zone) => {
-                    for &obj_id in &unkept {
-                        zones::move_to_zone(state, obj_id, zone, events);
-                    }
-                }
-                None => {
-                    for &obj_id in &unkept {
-                        zones::move_to_zone(state, obj_id, Zone::Graveyard, events);
-                    }
-                }
-            }
+            // CR 701.20e: None => Graveyard; map to a concrete zone so the rest
+            // mover (shared with the search-split partition) has a single Zone.
+            route_rest_partition(
+                state,
+                &unkept,
+                rest_destination.unwrap_or(Zone::Graveyard),
+                events,
+            );
             if let Some(cont) = state.pending_continuation.as_mut() {
                 cont.chain.targets = kept.iter().map(|&id| TargetRef::Object(id)).collect();
                 cont.chain.context.optional_effect_performed = !kept.is_empty();
@@ -931,6 +998,7 @@ pub(super) fn handle_resolution_choice(
                 reveal,
                 up_to,
                 constraint,
+                split,
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
@@ -983,6 +1051,49 @@ pub(super) fn handle_resolution_choice(
                 state.last_revealed_ids.clear();
             }
 
+            // CR 701.23a + CR 608.2c: Cultivate-class split destination. The
+            // found set was just chosen; now partition it. Up to two prompts
+            // total (CR 609.3): SearchChoice (done) then SearchPartitionChoice
+            // (only when more than primary_count were found).
+            if let Some(split) = split {
+                // The Shuffle continuation always exists for cultivate-class
+                // splits; its `source_id` is the search card. Falls back to the
+                // first chosen card's id only in the degenerate no-continuation
+                // case (used solely as an event source label).
+                let source_id = state
+                    .pending_continuation
+                    .as_ref()
+                    .map(|cont| cont.chain.source_id)
+                    .or_else(|| chosen.first().copied())
+                    .unwrap_or(ObjectId(0));
+                let primary_count = split.primary_count as usize;
+                if chosen.len() > primary_count {
+                    // CR 608.2d: Genuine choice — the searcher picks which
+                    // primary_count cards go to the primary destination.
+                    set_priority(state, player);
+                    state.waiting_for = WaitingFor::SearchPartitionChoice {
+                        player,
+                        cards: chosen.clone(),
+                        primary_destination: split.primary_destination,
+                        primary_count: split.primary_count,
+                        primary_enter_tapped: split.primary_enter_tapped,
+                        rest_destination: split.rest_destination,
+                        source_id,
+                    };
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(
+                        state.waiting_for.clone(),
+                    ));
+                }
+                // CR 609.3 fast-path: found <= primary_count, so ALL chosen go to
+                // the primary destination and the rest is empty. No second prompt.
+                apply_search_partition(state, &chosen, &[], &split, source_id, player, events)?;
+                set_priority(state, player);
+                effects::drain_pending_continuation(state, events);
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    state.waiting_for.clone(),
+                ));
+            }
+
             set_priority(state, player);
             if let Some(cont) = state.pending_continuation.as_mut() {
                 let mut continuation_targets: Vec<_> =
@@ -999,6 +1110,61 @@ pub(super) fn handle_resolution_choice(
                 cont.chain.targets = continuation_targets.clone();
                 propagate_targets_through_search_shuffle(&mut cont.chain, &continuation_targets);
             }
+            effects::drain_pending_continuation(state, events);
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
+        (
+            WaitingFor::SearchPartitionChoice {
+                player,
+                cards,
+                primary_destination,
+                primary_count,
+                primary_enter_tapped,
+                rest_destination,
+                source_id,
+            },
+            GameAction::SelectCards {
+                cards: primary_chosen,
+            },
+        ) => {
+            // CR 608.2d: The searcher must choose exactly primary_count cards for
+            // the primary destination; this branch is only parked when more than
+            // primary_count cards were found.
+            if primary_chosen.len() != primary_count as usize {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must select exactly {} card(s) for the battlefield, got {}",
+                    primary_count,
+                    primary_chosen.len()
+                )));
+            }
+            for card_id in &primary_chosen {
+                if !cards.contains(card_id) {
+                    return Err(EngineError::InvalidAction(
+                        "Selected card not in the found set".to_string(),
+                    ));
+                }
+            }
+            let rest_ids: Vec<ObjectId> = cards
+                .iter()
+                .filter(|id| !primary_chosen.contains(id))
+                .copied()
+                .collect();
+            let split = crate::types::ability::SearchDestinationSplit {
+                primary_destination,
+                primary_count,
+                primary_enter_tapped,
+                rest_destination,
+            };
+            apply_search_partition(
+                state,
+                &primary_chosen,
+                &rest_ids,
+                &split,
+                source_id,
+                player,
+                events,
+            )?;
+            set_priority(state, player);
             effects::drain_pending_continuation(state, events);
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
