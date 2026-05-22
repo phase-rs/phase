@@ -353,10 +353,14 @@ pub enum StaticMode {
     CantAttackOrBlock,
     /// CR 508.1d: No more than `max` creatures can be declared as attackers
     /// each combat.
-    MaxAttackersEachCombat { max: u32 },
+    MaxAttackersEachCombat {
+        max: u32,
+    },
     /// CR 509.1c: No more than `max` creatures can be declared as blockers
     /// each combat.
-    MaxBlockersEachCombat { max: u32 },
+    MaxBlockersEachCombat {
+        max: u32,
+    },
     CantBeTargeted,
     /// CR 101.2: Blanket casting prohibition — prevents the scoped player(s) from casting spells.
     /// E.g., Steel Golem: "You can't cast creature spells." (Controller scope + creature filter)
@@ -1093,8 +1097,16 @@ impl FromStr for StaticMode {
             "CantAttack" => StaticMode::CantAttack,
             "CantBlock" => StaticMode::CantBlock,
             "CantAttackOrBlock" => StaticMode::CantAttackOrBlock,
-            "MaxAttackersEachCombat" => StaticMode::MaxAttackersEachCombat { max: 1 },
-            "MaxBlockersEachCombat" => StaticMode::MaxBlockersEachCombat { max: 1 },
+            s if parse_static_mode_u32_arg(s, "MaxAttackersEachCombat").is_some() => {
+                StaticMode::MaxAttackersEachCombat {
+                    max: parse_static_mode_u32_arg(s, "MaxAttackersEachCombat").unwrap(),
+                }
+            }
+            s if parse_static_mode_u32_arg(s, "MaxBlockersEachCombat").is_some() => {
+                StaticMode::MaxBlockersEachCombat {
+                    max: parse_static_mode_u32_arg(s, "MaxBlockersEachCombat").unwrap(),
+                }
+            }
             "CantBeTargeted" => StaticMode::CantBeTargeted,
             "CantBeCast" => StaticMode::CantBeCast {
                 who: ProhibitionScope::Controller,
@@ -1444,6 +1456,14 @@ impl FromStr for StaticMode {
     }
 }
 
+fn parse_static_mode_u32_arg(s: &str, prefix: &str) -> Option<u32> {
+    s.strip_prefix(prefix)?
+        .strip_prefix('(')?
+        .strip_suffix(')')?
+        .parse()
+        .ok()
+}
+
 /// Forward-compatible deserializer for `StaticMode` fields in persisted JSON
 /// (card-data.json). Handles the common case where a new unit-variant is added
 /// to the engine but an older WASM binary tries to load card data that contains
@@ -1555,6 +1575,8 @@ mod tests {
             StaticMode::CantAttack,
             StaticMode::ExtraBlockers { count: None },
             StaticMode::ExtraBlockers { count: Some(1) },
+            StaticMode::MaxAttackersEachCombat { max: 2 },
+            StaticMode::MaxBlockersEachCombat { max: 3 },
             StaticMode::RevealTopOfLibrary { all_players: false },
             StaticMode::RevealTopOfLibrary { all_players: true },
             // Tier 1: keyword/evasion statics

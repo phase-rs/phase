@@ -687,18 +687,8 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         return Some(def);
     }
 
-    if tp.lower == "no more than one creature can attack each combat." {
-        return Some(
-            StaticDefinition::new(StaticMode::MaxAttackersEachCombat { max: 1 })
-                .description(text.to_string()),
-        );
-    }
-
-    if tp.lower == "no more than one creature can block each combat." {
-        return Some(
-            StaticDefinition::new(StaticMode::MaxBlockersEachCombat { max: 1 })
-                .description(text.to_string()),
-        );
+    if let Some(mode) = parse_max_combat_creatures_static(&lower) {
+        return Some(StaticDefinition::new(mode).description(text.to_string()));
     }
 
     if let Some(defs) = parse_cost_payment_prohibition_statics(&tp, &text) {
@@ -2296,6 +2286,31 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     }
 
     None
+}
+
+fn parse_max_combat_creatures_static(lower: &str) -> Option<StaticMode> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("no more than ")
+        .parse(lower)
+        .ok()?;
+    let (max, rest) = parse_number(rest)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("creature").parse(rest).ok()?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("s")).parse(rest).ok()?;
+    let (rest, mode) = alt((
+        value(
+            StaticMode::MaxAttackersEachCombat { max },
+            tag::<_, _, OracleError<'_>>(" can attack each combat"),
+        ),
+        value(
+            StaticMode::MaxBlockersEachCombat { max },
+            tag(" can block each combat"),
+        ),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (_, _) = all_consuming(opt(tag::<_, _, OracleError<'_>>(".")))
+        .parse(rest)
+        .ok()?;
+    Some(mode)
 }
 
 fn parse_arcane_adaptation_chosen_type_static(
@@ -14964,6 +14979,12 @@ mod tests {
     fn static_no_more_than_one_creature_can_attack_each_combat() {
         let def = parse_static_line("No more than one creature can attack each combat.").unwrap();
         assert_eq!(def.mode, StaticMode::MaxAttackersEachCombat { max: 1 });
+    }
+
+    #[test]
+    fn static_no_more_than_two_creatures_can_attack_each_combat() {
+        let def = parse_static_line("No more than two creatures can attack each combat.").unwrap();
+        assert_eq!(def.mode, StaticMode::MaxAttackersEachCombat { max: 2 });
     }
 
     #[test]
