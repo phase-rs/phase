@@ -965,6 +965,7 @@ fn search_basic_land(source_id: ObjectId, controller: PlayerId) -> ResolvedAbili
             reveal: true,
             target_player: None,
             selection_constraint: SearchSelectionConstraint::None,
+            split: None,
         },
         source_id,
         controller,

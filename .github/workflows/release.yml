@@ -130,8 +130,8 @@ jobs:
 
       - name: Stub phase-server sidecar + bundled resources for tauri-build
         # tauri.conf.json declares `externalBin: ["binaries/phase-server"]`
-        # and `resources: { "../public/card-data.json": "data/card-data.json" }`,
-        # so tauri-build's resource resolver requires both paths to exist
+        # and bundled data resources, so tauri-build's resource resolver
+        # requires those paths to exist
         # at check time. The real sidecar / card-data are produced by the
         # build-tauri matrix; for the preflight we only need the paths to
         # exist (tauri-build validates existence, not content). Empty
@@ -140,6 +140,7 @@ jobs:
           mkdir -p client/src-tauri/binaries client/public
           touch client/src-tauri/binaries/phase-server-x86_64-unknown-linux-gnu
           touch client/public/card-data.json
+          touch client/public/draft-pools.json
 
       - name: cargo check phase-tauri
         # phase-tauri is excluded from the root workspace (client/src-tauri),
@@ -378,6 +379,63 @@ jobs:
           path: client/public/card-data.json
           retention-days: 1
 
+      - name: Upload draft pools artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: draft-pools
+          path: client/public/draft-pools.json
+          retention-days: 1
+
+  build-server-image:
+    name: Build Server Image
+    needs: [resolve-release-ref, build-wasm]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    env:
+      RELEASE_TAG: ${{ needs.resolve-release-ref.outputs.release_tag }}
+      RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
+      IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/phase-server
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+
+      - name: Download card data
+        uses: actions/download-artifact@v4
+        with:
+          name: card-data
+          path: data
+
+      - name: Download draft pools
+        uses: actions/download-artifact@v4
+        with:
+          name: draft-pools
+          path: data
+
+      - name: Verify server data
+        run: |
+          test -s data/card-data.json
+          test -s data/draft-pools.json
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push release image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ env.RELEASE_TAG }}
+            ${{ env.IMAGE_NAME }}:latest
+
   deploy-production:
     name: Deploy Production (Cloudflare Pages)
     needs: [build-wasm, release]
@@ -449,6 +507,12 @@ jobs:
           name: card-data
           path: staging/data
 
+      - name: Download draft pools
+        uses: actions/download-artifact@v4
+        with:
+          name: draft-pools
+          path: staging/data
+
       - name: Package server archive (Unix)
         if: matrix.os != 'windows'
         run: |
@@ -457,7 +521,7 @@ jobs:
           cp "target/${{ matrix.triple }}/server-release/phase-server" staging/
           chmod +x staging/phase-server
           cd staging
-          tar czf ../${{ matrix.artifact }}.tar.gz phase-server data/card-data.json
+          tar czf ../${{ matrix.artifact }}.tar.gz phase-server data/card-data.json data/draft-pools.json
         shell: bash
 
       - name: Package server archive (Windows)
@@ -465,7 +529,7 @@ jobs:
         run: |
           $Tag = $env:RELEASE_TAG
           Copy-Item "target/${{ matrix.triple }}/server-release/phase-server.exe" "staging/"
-          Compress-Archive -Path "staging/phase-server.exe","staging/data/card-data.json" -DestinationPath "${{ matrix.artifact }}.zip"
+          Compress-Archive -Path "staging/phase-server.exe","staging/data/card-data.json","staging/data/draft-pools.json" -DestinationPath "${{ matrix.artifact }}.zip"
         shell: pwsh
 
       - name: Generate checksum (Unix)
@@ -596,6 +660,13 @@ jobs:
           name: card-data
           path: client/public
 
+      - name: Download draft pools
+        if: steps.macos-signing.outputs.skip != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: draft-pools
+          path: client/public
+
       - name: Download Scryfall image lookup data
         if: steps.macos-signing.outputs.skip != 'true'
         uses: actions/download-artifact@v4
@@ -607,6 +678,7 @@ jobs:
         if: steps.macos-signing.outputs.skip != 'true'
         run: |
           test -s client/public/card-data.json
+          test -s client/public/draft-pools.json
           test -s client/public/scryfall-data.json
         shell: bash
 
@@ -682,30 +754,18 @@ jobs:
           retention-days: 90
 
   deploy-server:
-    name: Deploy Server (beebs)
-    needs: [resolve-release-ref, build-server, release]
+    name: Deploy Server (beebs, disabled)
+    needs: [resolve-release-ref, build-server-image, release]
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    if: ${{ always() && needs.build-server.result == 'success' && needs.release.result == 'success' }}
+    if: ${{ false }}
+    permissions:
+      contents: read
+      packages: read
     env:
       RELEASE_TAG: ${{ needs.resolve-release-ref.outputs.release_tag }}
-      RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
+      IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/phase-server
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.RELEASE_SHA }}
-
-      - name: Download server artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: phase-server-linux-x86_64
-          path: artifact
-
-      - name: Extract archive
-        run: |
-          mkdir -p staging
-          tar xzf artifact/phase-server-linux-x86_64.tar.gz -C staging
-
       - name: Set up SSH
         run: |
           mkdir -p ~/.ssh
@@ -714,35 +774,50 @@ jobs:
           ssh-keyscan -p 29292 -H ${{ secrets.DEPLOY_HOST_BEEBS }} >> ~/.ssh/known_hosts
 
       - name: Deploy to beebs
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           SSH="ssh -p 29292 -i ~/.ssh/deploy_key ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST_BEEBS }}"
-          SCP="scp -P 29292 -i ~/.ssh/deploy_key"
+          IMAGE="${IMAGE_NAME}:${RELEASE_TAG}"
 
-          # Upload binary, card data, and service file (service file ensures --lobby-only flag is applied)
-          $SCP staging/phase-server staging/data/card-data.json deploy/phase-server.service ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST_BEEBS }}:/tmp/
+          $SSH "set -euo pipefail \
+            && (sudo systemctl stop phase-server || true) \
+            && (sudo systemctl disable phase-server || true) \
+            && (sudo systemctl mask phase-server || true) \
+            && echo '$GHCR_TOKEN' | sudo docker login ghcr.io -u '${{ github.actor }}' --password-stdin \
+            && sudo docker pull '$IMAGE' \
+            && (sudo docker stop --time 30 phase-server || true) \
+            && (sudo docker rm phase-server || true) \
+            && sudo docker volume create phase-server-data >/dev/null \
+            && sudo docker run -d \
+              --name phase-server \
+              --restart unless-stopped \
+              -p 127.0.0.1:9374:9374 \
+              -v phase-server-data:/var/lib/phase-server \
+              -e PHASE_LOBBY_ONLY=true \
+              -e PHASE_CORS_ORIGIN='*' \
+              -e RUST_LOG=info \
+              '$IMAGE'"
 
-          # Stop, install, start
-          $SSH "sudo systemctl stop phase-server || true \
-            && sudo cp /tmp/phase-server /opt/phase-server/phase-server \
-            && sudo chmod +x /opt/phase-server/phase-server \
-            && sudo cp /tmp/card-data.json /opt/phase-server/data/card-data.json \
-            && sudo cp /tmp/phase-server.service /etc/systemd/system/phase-server.service \
-            && sudo systemctl daemon-reload \
-            && sudo chown -R phase:phase /opt/phase-server \
-            && sudo systemctl start phase-server \
-            && rm -f /tmp/phase-server /tmp/card-data.json /tmp/phase-server.service"
-
-          echo "Deployed phase-server $RELEASE_TAG to beebs"
+          echo "Deployed $IMAGE to beebs"
 
       - name: Verify deployment
         run: |
-          sleep 2
           SSH="ssh -p 29292 -i ~/.ssh/deploy_key ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST_BEEBS }}"
-          $SSH "sudo systemctl is-active phase-server"
+          $SSH "set -euo pipefail \
+            && for attempt in \$(seq 1 30); do \
+              if curl -fsS http://127.0.0.1:9374/health; then \
+                sudo docker ps --filter name=phase-server --filter status=running --format '{{.Names}}' | grep -qx phase-server; \
+                exit 0; \
+              fi; \
+              sleep 1; \
+            done; \
+            sudo docker logs --tail 50 phase-server || true; \
+            exit 1"
 
   release:
     name: Create GitHub Release
-    needs: [resolve-release-ref, build-wasm, build-server, build-tauri]
+    needs: [resolve-release-ref, build-wasm, build-server, build-server-image, build-tauri]
     # CalVer production releases require full Tauri updater output so the
     # stable desktop updater never points at a partial nightly. Legacy v0.*
     # releases keep the older permissive behavior.
@@ -750,6 +825,7 @@ jobs:
       always() &&
       needs.build-wasm.result == 'success' &&
       needs.build-server.result == 'success' &&
+      needs.build-server-image.result == 'success' &&
       (
         needs.build-tauri.result == 'success' ||
         (needs.resolve-release-ref.outputs.is_calver != 'true' && needs.build-tauri.result == 'failure')

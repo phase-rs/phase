@@ -51,7 +51,7 @@ expression: "&lowered"
           "type_filters": [
             "Creature"
           ],
-          "controller": null,
+          "controller": "TargetPlayer",
           "properties": []
         },
         "count": {
