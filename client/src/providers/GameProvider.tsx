@@ -60,7 +60,7 @@ function resolveAiSeatBindings(
 
 let avatarGeneration = 0;
 
-function setupRandomAvatars(playerCount: number, seed: string) {
+function setupRandomAvatars(playerCount: number, seed: string, preservePlayerNames = false) {
   const generation = ++avatarGeneration;
   const avatars = assignRandomAvatars(playerCount, seed);
   const names = new Map<number, string>();
@@ -68,7 +68,9 @@ function setupRandomAvatars(playerCount: number, seed: string) {
   for (let i = 1; i < avatars.length; i++) {
     names.set(i, avatars[i].name);
   }
-  useMultiplayerStore.setState({ playerNames: names, playerAvatars: new Map() });
+  useMultiplayerStore.setState(
+    preservePlayerNames ? { playerAvatars: new Map() } : { playerNames: names, playerAvatars: new Map() },
+  );
   for (let i = 0; i < avatars.length; i++) {
     fetchAvatarArtUrl(avatars[i].cardName).then((url) => {
       if (!url || avatarGeneration !== generation) return;
@@ -79,7 +81,10 @@ function setupRandomAvatars(playerCount: number, seed: string) {
   }
 }
 
-function setupCommanderAvatars(gameState: { objects: Record<number, { name: string; owner: number; is_commander?: boolean }> }) {
+function setupCommanderAvatars(
+  gameState: { objects: Record<number, { name: string; owner: number; is_commander?: boolean }> },
+  preservePlayerNames = false,
+) {
   const generation = ++avatarGeneration;
   const names = new Map<number, string>();
   const commanderNames = new Map<number, string>();
@@ -94,7 +99,9 @@ function setupCommanderAvatars(gameState: { objects: Record<number, { name: stri
     names.set(playerId, cardName.split(",")[0].split(" //")[0]);
   }
 
-  useMultiplayerStore.setState({ playerNames: names, playerAvatars: new Map() });
+  useMultiplayerStore.setState(
+    preservePlayerNames ? { playerAvatars: new Map() } : { playerNames: names, playerAvatars: new Map() },
+  );
 
   for (const [playerId, cardName] of commanderNames) {
     fetchAvatarArtUrl(cardName).then((url) => {
@@ -104,6 +111,14 @@ function setupCommanderAvatars(gameState: { objects: Record<number, { name: stri
       useMultiplayerStore.setState({ playerAvatars: next });
     });
   }
+}
+
+function playerNamesRecordToMap(playerNames: Record<number, string>): Map<number, string> {
+  const names = new Map<number, string>();
+  for (const [playerId, name] of Object.entries(playerNames)) {
+    names.set(Number(playerId), name);
+  }
+  return names;
 }
 
 function parsedDeckToDeckData(deck: ParsedDeck): DeckData {
@@ -347,6 +362,25 @@ export function GameProvider({
   }, [mode, gameId]);
 
   useEffect(() => {
+    if (mode !== "online" && mode !== "p2p-host" && mode !== "p2p-join") return;
+    const state = useGameStore.getState().gameState;
+    const count = state?.players.length ?? playerCount ?? 2;
+    setupRandomAvatars(count, gameId, true);
+    let appliedCommanderAvatars = false;
+    const applyCommanderAvatars = (gameState: typeof state) => {
+      if (!gameState?.format_config?.uses_commander || !gameState.command_zone?.length) return;
+      appliedCommanderAvatars = true;
+      setupCommanderAvatars(gameState, true);
+    };
+    applyCommanderAvatars(state);
+    const unsub = useGameStore.subscribe((next) => {
+      if (appliedCommanderAvatars) return;
+      applyCommanderAvatars(next.gameState);
+    });
+    return unsub;
+  }, [mode, gameId, playerCount]);
+
+  useEffect(() => {
     // A prior cleanup may have deferred a store reset. Cancel it — this mount
     // is about to populate the store via initGame/resumeGame, and a fire from
     // the previous cleanup would null out the state we just wrote.
@@ -413,10 +447,9 @@ export function GameProvider({
           if (event.type === "playerIdentity") {
             useMultiplayerStore.getState().setActivePlayerId(event.playerId);
             if (event.playerNames) {
-              const names = new Map(Object.entries(event.playerNames).map(
-                ([k, v]) => [Number(k), v] as [number, string],
-              ));
-              useMultiplayerStore.setState({ playerNames: names });
+              useMultiplayerStore.setState({
+                playerNames: playerNamesRecordToMap(event.playerNames),
+              });
             }
           }
           if (event.type === "stateChanged") {
@@ -590,6 +623,8 @@ export function GameProvider({
             // their original seat.
             const hostPeerId = `phase-${code}`;
             const existing = await loadP2PSession(hostPeerId);
+            const reservationToken =
+              window.sessionStorage.getItem(`phase-p2p-reservation:${code}`) ?? undefined;
             signal.throwIfAborted();
             const adapter = new P2PGuestAdapter(
               deckList,
@@ -598,6 +633,7 @@ export function GameProvider({
               conn,
               existing?.playerToken,
               useMultiplayerStore.getState().displayName || undefined,
+              reservationToken,
             );
             p2pAdapter = adapter;
             hostPeerHandle = null;
@@ -688,6 +724,9 @@ export function GameProvider({
       const sessionKey = `phase-join-password:${joinCode ?? ""}`;
       let password: string | undefined =
         (joinCode && window.sessionStorage.getItem(sessionKey)) || undefined;
+      const reservationSessionKey = `phase-join-reservation:${joinCode ?? ""}`;
+      const reservationToken: string | undefined =
+        (joinCode && window.sessionStorage.getItem(reservationSessionKey)) || undefined;
       if (!password && urlParams.has("password")) {
         password = urlParams.get("password") ?? undefined;
         if (password && joinCode) {
@@ -714,6 +753,7 @@ export function GameProvider({
           deck,
           wsMode === "join" ? joinCode : undefined,
           wsMode === "join" ? password : undefined,
+          wsMode === "join" ? reservationToken : undefined,
           useMultiplayerStore.getState().displayName || "Player",
         );
 
@@ -721,6 +761,11 @@ export function GameProvider({
           if (event.type === "playerIdentity") {
             useMultiplayerStore.getState().setActivePlayerId(event.playerId);
             useMultiplayerStore.getState().setOpponentDisplayName(event.opponentName);
+            if (event.playerNames) {
+              useMultiplayerStore.setState({
+                playerNames: playerNamesRecordToMap(event.playerNames),
+              });
+            }
           }
           if (event.type === "actionPendingChanged") {
             useMultiplayerStore.getState().setActionPending(event.pending);

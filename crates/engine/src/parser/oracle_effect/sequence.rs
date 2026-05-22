@@ -138,13 +138,19 @@ fn parse_chosen_cards_reference(input: &str) -> Result<(&str, ()), nom::Err<Orac
     .parse(input)
 }
 
-fn parse_rest_cards_reference(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+pub(super) fn parse_rest_cards_reference(
+    input: &str,
+) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
     value(
         (),
         alt((
             tag::<_, _, OracleError<'_>>("the rest"),
             tag("the other cards"),
             tag("the other card"),
+            // CR 608.2c: Bare "the other" ("...and the other into your hand")
+            // appears in cultivate-class splits. Listed LAST so the longer
+            // "the other card(s)" forms above are matched first (no shadowing).
+            tag("the other"),
         )),
     )
     .parse(input)
@@ -201,7 +207,7 @@ fn parse_reveal_until_rest_zone(lower: &str) -> Option<Zone> {
     Some(Zone::Library)
 }
 
-fn parse_choice_partition_destination(
+pub(super) fn parse_choice_partition_destination(
     input: &str,
 ) -> Result<(&str, Zone), nom::Err<OracleError<'_>>> {
     alt((
@@ -1838,7 +1844,16 @@ pub(super) fn parse_intrinsic_continuation_ast(
     full_text: &str,
 ) -> Option<ContinuationAst> {
     match effect {
-        Effect::SearchLibrary { .. } => {
+        Effect::SearchLibrary { split, .. } => {
+            // CR 701.23a + CR 608.2c: When the search carries a split destination
+            // (cultivate-class "put one onto the battlefield tapped and the other
+            // into your hand"), the partition is handled at resolution by the
+            // `SearchPartitionChoice` flow. Suppress the flat default ChangeZone
+            // here so the found set is not collapsed to a single battlefield move
+            // (mirrors the `has_positional_put` suppression below).
+            if split.is_some() {
+                // MUTATION: suppression disabled
+            }
             let full_lower = full_text.to_ascii_lowercase();
             // CR 701.24b: If later clauses contain "put on top", suppress the default
             // ChangeZone(→Hand) — the card stays in the library and a separate
@@ -3027,6 +3042,22 @@ pub(super) fn try_parse_same_is_true_continuation(text: &str) -> Option<Vec<Keyw
 mod tests {
     use super::*;
     use crate::types::ability::QuantityExpr;
+
+    #[test]
+    fn rest_cards_reference_matches_bare_the_other() {
+        // 5a: bare "the other" (cultivate) must parse.
+        let (rest, ()) =
+            parse_rest_cards_reference("the other into your hand").expect("bare 'the other'");
+        assert_eq!(rest, " into your hand");
+        // Ordering guard: "the other cards" must still consume the full phrase
+        // (longer form precedes so it is not shadowed by the bare "the other").
+        let (rest, ()) =
+            parse_rest_cards_reference("the other cards on the bottom").expect("'the other cards'");
+        assert_eq!(rest, " on the bottom");
+        // And "the rest" remains matched.
+        let (rest, ()) = parse_rest_cards_reference("the rest into your hand").expect("'the rest'");
+        assert_eq!(rest, " into your hand");
+    }
 
     /// Helper: extract just the text fields from split_clause_sequence output.
     fn clause_texts(input: &str) -> Vec<String> {
