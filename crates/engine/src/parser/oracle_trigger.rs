@@ -1293,6 +1293,52 @@ fn parse_unless_alt_cost(after_unless: &str) -> Option<AbilityCost> {
         return parse_unless_return_to_hand(rest);
     }
 
+    // CR 118.12 + CR 701.20a: "you tap an untapped [filter] you control" —
+    // tapping a permanent as an alternative cost. The filter is extracted via
+    // `parse_target` so the full type hierarchy is supported (creature, permanent,
+    // artifact, etc.). Cards: Koskun Falls (creature), Command Bridge (permanent).
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you tap an untapped ").parse(after_unless)
+    {
+        if let Some(cost) = parse_unless_tap_untapped_cost(rest) {
+            return Some(cost);
+        }
+    }
+
+    // CR 118.12 + CR 701.7: "you exile a card from your graveyard" — exile one
+    // card from your graveyard as an alternative cost. Card: Rotting Giant.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you exile ").parse(after_unless) {
+        if let Some(cost) = parse_unless_exile_cost(rest) {
+            return Some(cost);
+        }
+    }
+
+    None
+}
+
+/// CR 118.12 + CR 701.20a: Parse "an untapped [filter] you control[.]" tail for
+/// "you tap an untapped ..." unless costs. Returns `TapCreatures { count: 1, filter }`.
+fn parse_unless_tap_untapped_cost(rest: &str) -> Option<AbilityCost> {
+    let rest = rest.trim().trim_end_matches('.');
+    let target_phrase = format!("target {rest}");
+    let (filter, remainder) = super::oracle_target::parse_target(&target_phrase);
+    if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
+        return None;
+    }
+    Some(AbilityCost::TapCreatures { count: 1, filter })
+}
+
+/// CR 118.12 + CR 701.7: Parse the tail of "you exile ..." unless costs.
+/// Recognises "a card from your graveyard" → `Exile { count: 1, zone: Graveyard }`.
+fn parse_unless_exile_cost(rest: &str) -> Option<AbilityCost> {
+    let rest = rest.trim().trim_end_matches('.');
+    // "a card from your graveyard"
+    if let Ok((_, _)) = tag::<_, _, OracleError<'_>>("a card from your graveyard").parse(rest) {
+        return Some(AbilityCost::Exile {
+            count: 1,
+            zone: Some(Zone::Graveyard),
+            filter: None,
+        });
+    }
     None
 }
 
@@ -12740,6 +12786,92 @@ mod tests {
             }
             other => panic!("cost should be ReturnToHand, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn trigger_unless_you_tap_untapped_creature() {
+        // CR 118.12 + CR 701.20a: Koskun Falls — "sacrifice this enchantment
+        // unless you tap an untapped creature you control."
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, sacrifice this enchantment unless you tap an untapped creature you control.",
+            "Koskun Falls",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        match &unless_pay.cost {
+            AbilityCost::TapCreatures { count, filter } => {
+                assert_eq!(*count, 1);
+                let is_creature = match filter {
+                    TargetFilter::Typed(tf) => {
+                        tf.type_filters.contains(&TypeFilter::Creature)
+                    }
+                    TargetFilter::And { filters } => filters.iter().any(|f| {
+                        matches!(f, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Creature))
+                    }),
+                    _ => false,
+                };
+                assert!(
+                    is_creature,
+                    "filter should include Creature, got {:?}",
+                    filter
+                );
+            }
+            other => panic!("cost should be TapCreatures, got {:?}", other),
+        }
+        assert_eq!(
+            unless_pay.payer,
+            TargetFilter::Controller,
+            "payer should be Controller"
+        );
+    }
+
+    #[test]
+    fn trigger_unless_you_tap_untapped_permanent() {
+        // CR 118.12 + CR 701.20a: Command Bridge — "sacrifice it unless you
+        // tap an untapped permanent you control."
+        let def = parse_trigger_line(
+            "When this land enters, sacrifice it unless you tap an untapped permanent you control.",
+            "Command Bridge",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        match &unless_pay.cost {
+            AbilityCost::TapCreatures { count, filter: _ } => {
+                assert_eq!(*count, 1);
+            }
+            other => panic!("cost should be TapCreatures, got {:?}", other),
+        }
+        assert_eq!(
+            unless_pay.payer,
+            TargetFilter::Controller,
+            "payer should be Controller"
+        );
+    }
+
+    #[test]
+    fn trigger_unless_you_exile_card_from_graveyard() {
+        // CR 118.12 + CR 701.7: Rotting Giant — "sacrifice it unless you
+        // exile a card from your graveyard."
+        let def = parse_trigger_line(
+            "Whenever this creature attacks or blocks, sacrifice it unless you exile a card from your graveyard.",
+            "Rotting Giant",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        match &unless_pay.cost {
+            AbilityCost::Exile {
+                count,
+                zone,
+                filter,
+            } => {
+                assert_eq!(*count, 1);
+                assert_eq!(*zone, Some(crate::types::zones::Zone::Graveyard));
+                assert!(filter.is_none(), "filter should be None, got {:?}", filter);
+            }
+            other => panic!("cost should be Exile, got {:?}", other),
+        }
+        assert_eq!(
+            unless_pay.payer,
+            TargetFilter::Controller,
+            "payer should be Controller"
+        );
     }
 
     #[test]
