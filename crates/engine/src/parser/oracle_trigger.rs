@@ -4865,13 +4865,17 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
         }
     }
 
-    // CR 120.3: "whenever/when a source deals damage to ~" — self-damage trigger.
-    // Fires when any source (combat or noncombat) deals damage to this card.
+    fn parse_source_deals_damage_to_self(input: &str) -> OracleResult<'_, ()> {
+        all_consuming(preceded(
+            alt((tag("whenever "), tag("when "))),
+            value((), (tag("a source "), tag("deals damage to "), tag("~"))),
+        ))
+        .parse(input)
+    }
+
+    // CR 120.3: Damage to this card can cause an ability to trigger.
     // "this creature" / card name is normalized to ~ before trigger parsing.
-    if matches!(
-        lower,
-        "whenever a source deals damage to ~" | "when a source deals damage to ~"
-    ) {
+    if parse_source_deals_damage_to_self(lower).is_ok() {
         let mut def = make_base();
         def.mode = TriggerMode::DamageReceived;
         def.valid_card = Some(TargetFilter::SelfRef);
