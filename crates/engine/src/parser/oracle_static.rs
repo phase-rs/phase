@@ -13105,9 +13105,10 @@ mod tests {
 
     #[test]
     fn static_other_creatures_with_any_counters_have_flying_and_haste() {
-        let def =
-            parse_static_line("Other creatures you control with counters on them have flying and haste.")
-                .unwrap();
+        let def = parse_static_line(
+            "Other creatures you control with counters on them have flying and haste.",
+        )
+        .unwrap();
         assert_eq!(def.mode, StaticMode::Continuous);
         match &def.affected {
             Some(TargetFilter::Typed(TypedFilter {
