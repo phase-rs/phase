@@ -3545,14 +3545,16 @@ pub(crate) fn parse_additive_type_clause_modifications(
     let after_verb_original = &clause_original[clause_original.len() - after_verb_lower.len()..];
     let (after_suffix_lower, type_words_lower) = terminated(
         take_until::<_, _, VE>(" in addition to "),
-        alt((
-            tag::<_, _, VE>(" in addition to its other creature types"),
-            tag::<_, _, VE>(" in addition to its other types"),
-            tag::<_, _, VE>(" in addition to its other land types"),
-            tag::<_, _, VE>(" in addition to their other creature types"),
-            tag::<_, _, VE>(" in addition to their other types"),
-            tag::<_, _, VE>(" in addition to their other land types"),
-        )),
+        (
+            tag::<_, _, VE>(" in addition to "),
+            alt((tag::<_, _, VE>("its"), tag::<_, _, VE>("their"))),
+            tag::<_, _, VE>(" other "),
+            alt((
+                tag::<_, _, VE>("creature types"),
+                tag::<_, _, VE>("land types"),
+                tag::<_, _, VE>("types"),
+            )),
+        ),
     )
     .parse(after_verb_lower)
     .ok()?;
