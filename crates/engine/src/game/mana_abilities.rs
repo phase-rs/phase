@@ -3487,6 +3487,7 @@ mod tests {
         // (e.g. `AbilityActivated`) must not route through the inline resolver.
         let ability = mana_producing_resolved();
         let ev = GameEvent::AbilityActivated {
+            player_id: PlayerId(0),
             source_id: ObjectId(1),
         };
         assert!(!is_triggered_mana_ability(&ability, Some(&ev)));

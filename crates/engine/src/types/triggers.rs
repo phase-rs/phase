@@ -203,6 +203,19 @@ pub enum TriggerMode {
     /// ability tagged by `AbilityTag`. Parameterized to avoid per-keyword sibling proliferation:
     /// `AbilityTag::Boast`, `AbilityTag::Exhaust`, `AbilityTag::Outlast` are the current values.
     KeywordAbilityActivated(AbilityTag),
+    /// CR 602.1 + CR 605.1a: Triggers when any activated ability is activated.
+    /// Listens to `GameEvent::AbilityActivated`, which is emitted only for
+    /// stack-using activated abilities — by CR 605.3b, mana abilities resolve
+    /// without using the stack and do not produce this event. The
+    /// "that isn't a mana ability" qualifier on cards like Burning-Tree Shaman
+    /// and Flamescroll Celebrant is thus automatically satisfied by listening
+    /// here, and is additionally preserved in the AST via
+    /// `TriggerCondition::ActivatedAbilityIsNonMana` for future-proofing should
+    /// the event family ever widen. Player scope (`a player` / `an opponent` /
+    /// `you`) lives on `valid_target` (`TargetFilter`); source-object filters
+    /// (e.g., "an ability of an artifact source") live on `valid_card` — both
+    /// reuse existing infrastructure shared with `KeywordAbilityActivated`.
+    AbilityActivated,
     /// CR 702.100: Evolve trigger — when a creature enters with greater power/toughness.
     Evolved,
     /// CR 701.44: Triggers when a creature explores.
@@ -349,6 +362,7 @@ impl FromStr for TriggerMode {
         // Case-sensitive match on Forge trigger mode strings
         let mode = match s {
             "Abandoned" => TriggerMode::Abandoned,
+            "AbilityActivated" => TriggerMode::AbilityActivated,
             "AbilityCast" => TriggerMode::AbilityCast,
             "AbilityResolves" => TriggerMode::AbilityResolves,
             "AbilityTriggered" => TriggerMode::AbilityTriggered,
@@ -612,6 +626,7 @@ mod tests {
     fn trigger_mode_count_at_least_141() {
         let modes = [
             "Abandoned",
+            "AbilityActivated",
             "AbilityCast",
             "AbilityResolves",
             "AbilityTriggered",

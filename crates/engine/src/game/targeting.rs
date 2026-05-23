@@ -576,7 +576,7 @@ pub(crate) fn extract_source_from_event(
         GameEvent::BecomesTarget { source_id, .. } => Some(*source_id),
         GameEvent::SpellCast { object_id, .. } => Some(*object_id),
         GameEvent::DamageDealt { source_id, .. } => Some(*source_id),
-        GameEvent::AbilityActivated { source_id } => Some(*source_id),
+        GameEvent::AbilityActivated { source_id, .. } => Some(*source_id),
         GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
         GameEvent::PermanentTapped { object_id, .. } => Some(*object_id),
         GameEvent::PermanentUntapped { object_id } => Some(*object_id),
@@ -643,6 +643,12 @@ pub(crate) fn extract_player_from_event(
         GameEvent::Discarded { player_id, .. } => Some(*player_id),
         GameEvent::LandPlayed { player_id, .. } => Some(*player_id),
         GameEvent::SpellCast { controller, .. } => Some(*controller),
+        // CR 602.2a: "Its controller is the player who activated the ability."
+        // For "Whenever a player activates an ability, … deals 1 damage to that
+        // player" triggers (Burning-Tree Shaman, Flamescroll Celebrant),
+        // `TriggeringPlayer` / "that player" binds to the activating player
+        // carried on the event.
+        GameEvent::AbilityActivated { player_id, .. } => Some(*player_id),
         GameEvent::PermanentSacrificed { player_id, .. } => Some(*player_id),
         GameEvent::Unattached {
             old_target: TargetRef::Player(player_id),
@@ -2783,5 +2789,23 @@ mod tests {
             result: 7,
         };
         assert_eq!(extract_amount_from_event(&event), Some(7));
+    }
+
+    /// CR 602.2a: For Burning-Tree Shaman / Flamescroll Celebrant's "deals 1
+    /// damage to that player" effect, `TriggeringPlayer` must resolve to the
+    /// player who activated the ability — carried directly on the event, not
+    /// inferred from the source object's controller (which would be wrong
+    /// when an opponent activates a granted ability).
+    #[test]
+    fn extract_player_from_ability_activated_returns_activator() {
+        let (state, _c0, _c1) = setup_with_creatures();
+        let event = crate::types::events::GameEvent::AbilityActivated {
+            player_id: PlayerId(1),
+            source_id: ObjectId(99),
+        };
+        assert_eq!(
+            extract_player_from_event(&event, &state),
+            Some(PlayerId(1))
+        );
     }
 }

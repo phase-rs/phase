@@ -1012,7 +1012,10 @@ fn push_ability_entry(
     // CR 117.1b: Priority permits unbounded activation. `pending_activations`
     // is a per-priority-window AI-guard — see `GameState::pending_activations`.
     state.pending_activations.push((source_id, ability_index));
-    events.push(GameEvent::AbilityActivated { source_id });
+    events.push(GameEvent::AbilityActivated {
+        player_id: player,
+        source_id,
+    });
     // CR 702.142b: Emit additional event when a boast ability is activated.
     super::casting_targets::emit_keyword_ability_event_if_tagged(
         state,

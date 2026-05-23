@@ -2798,6 +2798,79 @@ fn try_parse_keyword_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
     None
 }
 
+/// CR 602.1 + CR 603.2 + CR 605.1a: Parse "Whenever <player_scope> activates
+/// an ability [that isn't a mana ability]" triggers — the generic activated-
+/// ability trigger class covering Burning-Tree Shaman ("a player"),
+/// Flamescroll Celebrant ("an opponent"), and future cards using the same
+/// shape ("you"). Player scope is composed via three independent axes that
+/// each map to a typed value:
+///
+/// - **prefix**: "whenever" / "when" — handled by the outer `alt` (CR 603.1)
+/// - **subject**: `a player` / `an opponent` / `you` → `TargetFilter` for
+///   `valid_target` (CR 602.2a: "Its controller is the player who activated
+///   the ability"). "a player" leaves `valid_target` unset so
+///   `valid_player_matches` accepts every player (Burning-Tree Shaman).
+/// - **non-mana qualifier**: optional " that isn't a mana ability" (CR
+///   605.1a). Sets `TriggerCondition::ActivatedAbilityIsNonMana` so the
+///   qualifier is preserved in the AST even though `GameEvent::AbilityActivated`
+///   already excludes mana abilities (CR 605.3b).
+///
+/// Nesting by prefix dispatch avoids enumerating the 6-way prefix × subject
+/// permutation as separate `tag` arms.
+fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
+    // Pair subject with its verb conjugation: third-person-singular subjects
+    // ("a player", "an opponent") take "activates"; second-person ("you")
+    // takes "activate". Each arm carries the typed `valid_target` filter so
+    // the activating player is matched correctly via `valid_player_matches`.
+    fn parse_subject_and_verb(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
+        alt((
+            // CR 602.2a: "a player" — leave `valid_target` unset so every
+            // player's activation matches (Burning-Tree Shaman).
+            value(None, tag("a player activates ")),
+            value(
+                Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                )),
+                tag("an opponent activates "),
+            ),
+            value(Some(TargetFilter::Controller), tag("you activate ")),
+        ))
+        .parse(input)
+    }
+
+    fn parse_qualifier(input: &str) -> OracleResult<'_, Option<TriggerCondition>> {
+        // CR 605.1a: "that isn't a mana ability" qualifier is optional in
+        // principle (no such printed card exists today without it, but the
+        // grammar admits a bare "activates an ability").
+        alt((
+            value(
+                Some(TriggerCondition::ActivatedAbilityIsNonMana),
+                tag(" that isn't a mana ability"),
+            ),
+            value(None, eof),
+        ))
+        .parse(input)
+    }
+
+    // Next extension axis: source-object filter ("activates an ability **of an
+    // artifact**" / "of a creature or land" / "of a permanent"). The matcher
+    // already consults `def.valid_card` via `valid_card_matches`, so this is
+    // purely a parser extension — add an `opt(preceded(tag(" of "), …))` arm
+    // here to unlock Crackdown Construct, Wizened Mentor, Runic Armasaur,
+    // Ceaseless Searblades, and similar cards.
+    let parse_line = preceded(
+        alt((tag("whenever "), tag("when "))),
+        (parse_subject_and_verb, tag("an ability"), parse_qualifier),
+    );
+
+    let (_, (subject, _, qualifier)) = all_consuming(parse_line).parse(lower).ok()?;
+    let mut def = make_base();
+    def.mode = TriggerMode::AbilityActivated;
+    def.valid_target = subject;
+    def.condition = qualifier;
+    Some((TriggerMode::AbilityActivated, def))
+}
+
 /// CR 702.49: Extract ninjutsu/sneak cost-paid conditions.
 /// Guard: "instead" after the condition means conditional override, not intervening-if.
 fn try_extract_ninjutsu_condition(
@@ -6099,6 +6172,17 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     // CR 702.49a: "whenever you activate a ninjutsu ability" — ninjutsu-family activation trigger.
     // Covers all ninjutsu variants (ninjutsu, commander ninjutsu, sneak).
     if let Some(result) = try_parse_keyword_activation_trigger(lower) {
+        return Some(result);
+    }
+
+    // CR 602.1 + CR 605.1a: "Whenever <player> activates an ability that
+    // isn't a mana ability" — generic activated-ability trigger class.
+    // Covers Burning-Tree Shaman, Flamescroll Celebrant. Ordering is
+    // incidental here: "activates" is not in `parse_player_action_phrase`'s
+    // lookup table, and `try_parse_keyword_activation_trigger` rejects any
+    // shape lacking a keyword name, so the earlier dispatchers correctly
+    // fall through to this one regardless of position.
+    if let Some(result) = try_parse_ability_activation_trigger(lower) {
         return Some(result);
     }
 
@@ -14793,6 +14877,58 @@ mod tests {
             );
             assert_eq!(def.valid_card, valid_card, "{text}");
         }
+    }
+
+    // --- CR 602.1 + CR 605.1a: generic non-mana ability activation trigger ---
+
+    #[test]
+    fn ability_activation_trigger_a_player() {
+        // Burning-Tree Shaman: "Whenever a player activates an ability that
+        // isn't a mana ability, this creature deals 1 damage to that player."
+        let def = parse_trigger_line(
+            "Whenever a player activates an ability that isn't a mana ability, this creature deals 1 damage to that player.",
+            "Burning-Tree Shaman",
+        );
+        assert_eq!(def.mode, TriggerMode::AbilityActivated);
+        // "a player" — every player matches, so no valid_target filter.
+        assert_eq!(def.valid_target, None);
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::ActivatedAbilityIsNonMana)
+        );
+    }
+
+    #[test]
+    fn ability_activation_trigger_an_opponent() {
+        // Flamescroll Celebrant: "Whenever an opponent activates an ability
+        // that isn't a mana ability, this creature deals 1 damage to that
+        // player."
+        let def = parse_trigger_line(
+            "Whenever an opponent activates an ability that isn't a mana ability, this creature deals 1 damage to that player.",
+            "Flamescroll Celebrant",
+        );
+        assert_eq!(def.mode, TriggerMode::AbilityActivated);
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent),
+            ))
+        );
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::ActivatedAbilityIsNonMana)
+        );
+    }
+
+    #[test]
+    fn ability_activation_trigger_you_form() {
+        // Symmetric "you activate" form — verb conjugates to second-person.
+        let def = parse_trigger_line(
+            "Whenever you activate an ability that isn't a mana ability, draw a card.",
+            "Hypothetical You-Activate",
+        );
+        assert_eq!(def.mode, TriggerMode::AbilityActivated);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
     }
 
     // --- CR 115.9c: "that targets only [X]" trigger tests ---

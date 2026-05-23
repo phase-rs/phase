@@ -2846,10 +2846,18 @@ pub(crate) fn check_trigger_condition(
             .and_then(|id| state.objects.get(&id))
             .map(|obj| obj.cast_variant_paid == Some((*variant, state.turn_number)))
             .unwrap_or(false),
+        // CR 605.1a: "that isn't a mana ability" gate on activated-ability
+        // trigger events. `KeywordAbilityActivated` carries the explicit flag
+        // (Exhaust mana abilities still emit this event). `AbilityActivated`
+        // is emitted only by stack-using activations (CR 605.3b: mana
+        // abilities never reach the stack-pushing emission sites), so it
+        // trivially satisfies the qualifier; the explicit arm keeps the
+        // AST-level qualifier honest if the event family ever widens.
         TriggerCondition::ActivatedAbilityIsNonMana => match trigger_event {
             Some(GameEvent::KeywordAbilityActivated {
                 is_mana_ability, ..
             }) => !*is_mana_ability,
+            Some(GameEvent::AbilityActivated { .. }) => true,
             _ => false,
         },
         // CR 700.4 + CR 120.1: True when the dying creature was dealt damage by the
@@ -3582,6 +3590,41 @@ pub mod tests {
             &TriggerCondition::ControlsCommander {
                 ownership: CommanderOwnership::Any,
             },
+            PlayerId(0),
+            None,
+            None,
+        ));
+    }
+
+    /// CR 605.1a + CR 605.3b: `AbilityActivated` is emitted only by stack-using
+    /// activations (mana abilities never reach those emission sites), so the
+    /// "that isn't a mana ability" qualifier on Burning-Tree Shaman /
+    /// Flamescroll Celebrant is trivially satisfied — the explicit arm keeps
+    /// the AST-level gate honest if the event family ever widens.
+    #[test]
+    fn activated_ability_is_non_mana_accepts_ability_activated_event() {
+        let state = setup();
+        let event = GameEvent::AbilityActivated {
+            player_id: PlayerId(0),
+            source_id: ObjectId(1),
+        };
+        assert!(check_trigger_condition(
+            &state,
+            &TriggerCondition::ActivatedAbilityIsNonMana,
+            PlayerId(0),
+            None,
+            Some(&event),
+        ));
+    }
+
+    /// CR 605.1a: With no trigger event present, the non-mana qualifier
+    /// cannot be evaluated — and so must conservatively return false.
+    #[test]
+    fn activated_ability_is_non_mana_rejects_missing_event() {
+        let state = setup();
+        assert!(!check_trigger_condition(
+            &state,
+            &TriggerCondition::ActivatedAbilityIsNonMana,
             PlayerId(0),
             None,
             None,

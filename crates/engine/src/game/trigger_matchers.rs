@@ -114,6 +114,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::SaddlesOrCrews => match_saddles_or_crews,
         TriggerMode::NinjutsuActivated => match_ninjutsu_activated,
         TriggerMode::KeywordAbilityActivated(_) => match_keyword_ability_activated,
+        TriggerMode::AbilityActivated => match_ability_activated,
         TriggerMode::Firebend => match_firebend,
         TriggerMode::Airbend => match_airbend,
         TriggerMode::Earthbend => match_earthbend,
@@ -437,6 +438,9 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
             match_keyword_ability_activated,
         );
     }
+    // CR 602.1 + CR 605.1a: generic non-mana ability activation trigger
+    // (Burning-Tree Shaman, Flamescroll Celebrant).
+    r.insert(TriggerMode::AbilityActivated, match_ability_activated);
 
     // Avatar crossover: bending trigger matchers
     r.insert(TriggerMode::Firebend, match_firebend);
@@ -2425,6 +2429,30 @@ pub(super) fn match_keyword_ability_activated(
     }
 }
 
+/// CR 602.1 + CR 603.2 + CR 605.1a: Matches when any player activates an
+/// activated ability that uses the stack (which by CR 605.3b excludes mana
+/// abilities). Player scope is filtered via `trigger.valid_target` (e.g.
+/// "an opponent" → `ControllerRef::Opponent` filter against the activating
+/// player); when no `valid_target` is set, the trigger fires for every player
+/// (Burning-Tree Shaman). Source-object filtering rides on `valid_card`
+/// (reserved for future patterns like "an ability of an artifact source").
+pub(super) fn match_ability_activated(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    let GameEvent::AbilityActivated {
+        player_id,
+        source_id: activated_id,
+    } = event
+    else {
+        return false;
+    };
+    valid_player_matches(trigger, state, *player_id, source_id)
+        && valid_card_matches(trigger, state, *activated_id, source_id)
+}
+
 pub(super) fn match_unimplemented(
     _event: &GameEvent,
     _trigger: &TriggerDefinition,
@@ -3195,6 +3223,122 @@ mod tests {
                 player_id: PlayerId(0),
                 source_id: other,
                 is_mana_ability: false,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+    }
+
+    // --- CR 602.1 + CR 605.1a: generic non-mana ability activation matcher ---
+
+    #[test]
+    fn ability_activation_a_player_scope_matches_every_player() {
+        // Burning-Tree Shaman: "Whenever a player activates an ability …" —
+        // no valid_target filter, so every player's activation triggers.
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Burning-Tree Shaman".to_string(),
+            Zone::Battlefield,
+        );
+        let activated = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = make_trigger(TriggerMode::AbilityActivated);
+
+        // Opponent's activation fires.
+        assert!(match_ability_activated(
+            &GameEvent::AbilityActivated {
+                player_id: PlayerId(1),
+                source_id: activated,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+        // Own activation also fires.
+        assert!(match_ability_activated(
+            &GameEvent::AbilityActivated {
+                player_id: PlayerId(0),
+                source_id: activated,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+    }
+
+    #[test]
+    fn ability_activation_an_opponent_scope_filters_by_controller() {
+        // Flamescroll Celebrant: "Whenever an opponent activates an ability …"
+        // — valid_target scopes the activator to opponents of the source's
+        // controller.
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Flamescroll Celebrant".to_string(),
+            Zone::Battlefield,
+        );
+        let activated = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::AbilityActivated);
+        trigger.valid_target = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent),
+        ));
+
+        // Opponent activation fires.
+        assert!(match_ability_activated(
+            &GameEvent::AbilityActivated {
+                player_id: PlayerId(1),
+                source_id: activated,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+        // Own activation must NOT fire.
+        assert!(!match_ability_activated(
+            &GameEvent::AbilityActivated {
+                player_id: PlayerId(0),
+                source_id: activated,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+    }
+
+    #[test]
+    fn ability_activation_rejects_unrelated_event() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Burning-Tree Shaman".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = make_trigger(TriggerMode::AbilityActivated);
+        // SpellCast is a different family — must not match.
+        assert!(!match_ability_activated(
+            &GameEvent::SpellCast {
+                card_id: CardId(2),
+                controller: PlayerId(1),
+                object_id: ObjectId(99),
             },
             &trigger,
             source,
