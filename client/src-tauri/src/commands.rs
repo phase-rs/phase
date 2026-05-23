@@ -1,7 +1,10 @@
 use std::sync::Mutex;
 
 use engine::ai_support::{auto_pass_recommended, legal_actions_full};
+use engine::database::legality::validate_cedh_bracket;
 use engine::database::CardDatabase;
+use engine::game::bracket_estimate::CommanderBracketTier;
+use engine::game::deck_loading::PlayerDeckPayload;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
 use std::collections::HashMap;
@@ -39,6 +42,21 @@ pub fn initialize_game(
     game.match_config = match_config.unwrap_or_default();
 
     if let Some(payload) = deck_data {
+        // When any deck is declared cEDH, validate the whole table before
+        // initializing. This mirrors the WASM bridge's validation path so the
+        // cEDH bracket lock is enforced identically on desktop.
+        let any_cedh = payload.player.bracket_tier == CommanderBracketTier::Cedh
+            || payload.opponent.bracket_tier == CommanderBracketTier::Cedh
+            || payload.ai_decks.iter().any(|d| d.bracket_tier == CommanderBracketTier::Cedh);
+        if any_cedh {
+            let all_decks: Vec<&PlayerDeckPayload> =
+                std::iter::once(&payload.player)
+                    .chain(std::iter::once(&payload.opponent))
+                    .chain(payload.ai_decks.iter())
+                    .collect();
+            validate_cedh_bracket(&all_decks).map_err(|e| e.to_string())?;
+        }
+
         // Canonical init sequence shared with WASM + server-core transports.
         // Passes the CardDatabase so `load_and_hydrate_decks` can populate
         // `back_face` on dual-faced cards (Adventure, Omen, MDFC, Transform,

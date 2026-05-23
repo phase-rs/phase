@@ -4096,6 +4096,7 @@ mod mode_gate_tests {
             main_deck: vec!["Forest".into()],
             sideboard: vec![],
             commander: vec![],
+            bracket_tier: Default::default(),
         }
     }
 
@@ -4244,6 +4245,7 @@ mod handshake_tests {
             main_deck: vec!["Forest".into()],
             sideboard: vec![],
             commander: vec![],
+            bracket_tier: Default::default(),
         }
     }
 
