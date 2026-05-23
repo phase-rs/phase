@@ -86,9 +86,11 @@ export type P2PAdapterEvent =
 type P2PAdapterEventListener = (event: P2PAdapterEvent) => void;
 
 interface DeckListPayload {
-  player: { main_deck: string[]; sideboard: string[]; commander: string[] };
-  opponent: { main_deck: string[]; sideboard: string[]; commander: string[] };
-  ai_decks: Array<{ main_deck: string[]; sideboard: string[]; commander: string[] }>;
+  player: { main_deck: string[]; sideboard: string[]; commander: string[]; bracket_tier?: string };
+  opponent: { main_deck: string[]; sideboard: string[]; commander: string[]; bracket_tier?: string };
+  ai_decks: Array<{ main_deck: string[]; sideboard: string[]; commander: string[]; bracket_tier?: string }>;
+  /** AI difficulty strings per seat. See `DeckList.ai_difficulties` in engine. */
+  ai_difficulties?: string[];
 }
 
 /**

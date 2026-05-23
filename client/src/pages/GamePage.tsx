@@ -512,11 +512,13 @@ export function GamePage() {
     setWaitingForOpponent(false);
   }, []);
 
-  const handleNoDeck = useCallback((reason?: string) => {
+  const handleNoDeck = useCallback((reason?: string, bracketViolation?: boolean) => {
     if (reason) {
       // cEDH bracket lock: surface as a blocking modal rather than navigating
       // away, so the user can read the explanation before going back to setup.
-      if (reason.includes("not declared cEDH")) {
+      // Match by the typed flag from GameProvider — not by string substring —
+      // so a reformatted error message can never silently break this modal.
+      if (bracketViolation) {
         setBracketViolationError(reason);
         return;
       }

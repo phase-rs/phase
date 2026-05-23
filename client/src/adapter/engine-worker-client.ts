@@ -14,13 +14,14 @@ import type {
   SubmitResult,
   ViewerSnapshot,
 } from "./types";
+import { AdapterError, AdapterErrorCode } from "./types";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import { debugLog } from "../game/debugLog";
 
 type EngineResponse =
   | { type: "ready" }
   | { type: "result"; id: number; data: unknown }
-  | { type: "error"; id: number; message: string };
+  | { type: "error"; id: number; message: string; bracketViolation?: true };
 
 export class EngineWorkerClient {
   private worker: Worker;
@@ -60,7 +61,12 @@ export class EngineWorkerClient {
           const entry = this.pending.get(msg.id);
           if (entry) {
             this.pending.delete(msg.id);
-            entry.reject(new Error(msg.message));
+            // Bracket violation is a typed rejection so the caller can match
+            // by code rather than by string substring on the error message.
+            const err = msg.bracketViolation
+              ? new AdapterError(AdapterErrorCode.BRACKET_VIOLATION, msg.message, false)
+              : new Error(msg.message);
+            entry.reject(err);
           }
           break;
         }

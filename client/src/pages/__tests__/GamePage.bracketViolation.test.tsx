@@ -1,10 +1,10 @@
 /**
  * GamePage — cEDH bracket-violation blocking modal tests.
  *
- * The modal renders when the engine's `initialize_game` returns an error
- * that contains the sentinel string "not declared cEDH". The error surfaces
- * via `GameProvider`'s `onNoDeck` callback, which is intercepted by
- * `GamePage.handleNoDeck` before a navigation occurs.
+ * The modal renders when GameProvider calls `onNoDeck` with `bracketViolation`
+ * set to `true`. GamePage matches by the typed flag — not by string substring
+ * on the error message — so a reformatted error message cannot silently break
+ * the modal trigger.
  *
  * Heavy sub-components (WASM engine, GameProvider, audio, socket, P2P)
  * are mocked so the suite exercises only the modal render logic and the
@@ -20,9 +20,9 @@ import { GamePage } from "../GamePage";
 // ── Hoisted variables (must be declared before vi.mock hoisting) ─────────────
 
 // Capture `onNoDeck` from GameProvider so tests can fire it.
-let capturedOnNoDeck: ((reason?: string) => void) | undefined;
+let capturedOnNoDeck: ((reason?: string, bracketViolation?: boolean) => void) | undefined;
 
-const { mockMultiplayerState, mockUseMultiplayerStore } = vi.hoisted(() => {
+const { mockMultiplayerState: _mockMultiplayerState, mockUseMultiplayerStore } = vi.hoisted(() => {
   const mockMultiplayerState = {
     serverInfo: null,
     activePlayerId: null,
@@ -61,7 +61,7 @@ vi.mock("../../providers/GameProvider", () => ({
     onNoDeck,
   }: {
     children: React.ReactNode;
-    onNoDeck?: (reason?: string) => void;
+    onNoDeck?: (reason?: string, bracketViolation?: boolean) => void;
   }) => {
     capturedOnNoDeck = onNoDeck;
     return <>{children}</>;
@@ -201,23 +201,39 @@ afterEach(() => {
 });
 
 describe("GamePage — cEDH bracket-violation blocking modal", () => {
-  it("renders the blocking modal when the engine returns a bracket-violation error", async () => {
+  it("renders the blocking modal when bracketViolation flag is true", async () => {
     renderGamePage();
 
-    // Simulate GameProvider calling onNoDeck with the engine's cEDH error string.
+    // Simulate GameProvider calling onNoDeck with bracketViolation=true.
+    // The modal must trigger on the typed flag, not on string substring.
     act(() => {
       capturedOnNoDeck?.(
         "Deck validation failed: seat 0 is not declared cEDH (actual tier: core)",
+        true,
       );
     });
 
     const modal = await screen.findByTestId("bracket-violation-modal");
     expect(modal).toBeTruthy();
-    expect(modal).toHaveTextContent(/not declared cEDH/i);
     expect(modal).toHaveTextContent(/Return to setup/i);
   });
 
-  it("does NOT render the bracket-violation modal for non-cEDH engine errors", () => {
+  it("does NOT render the bracket-violation modal when bracketViolation flag is absent", () => {
+    renderGamePage();
+
+    // Same message text as above but no bracketViolation flag.
+    // The modal must NOT trigger — string substring must not be the gate.
+    act(() => {
+      capturedOnNoDeck?.(
+        "Deck validation failed: seat 0 is not declared cEDH (actual tier: core)",
+        // bracketViolation intentionally omitted
+      );
+    });
+
+    expect(screen.queryByTestId("bracket-violation-modal")).toBeNull();
+  });
+
+  it("does NOT render the bracket-violation modal for unrelated engine errors", () => {
     renderGamePage();
 
     act(() => {
@@ -239,6 +255,7 @@ describe("GamePage — cEDH bracket-violation blocking modal", () => {
     act(() => {
       capturedOnNoDeck?.(
         "Deck validation failed: seat 1 is not declared cEDH (actual tier: optimized)",
+        true,
       );
     });
 
@@ -248,5 +265,24 @@ describe("GamePage — cEDH bracket-violation blocking modal", () => {
     // After clicking, the modal should be gone and /setup rendered.
     expect(screen.queryByTestId("bracket-violation-modal")).toBeNull();
     expect(await screen.findByTestId("setup-page")).toBeTruthy();
+  });
+
+  // ── Regression: bracket-5 human deck vs non-cEDH AI must be allowed ────────
+
+  it("REGRESSION: bracketViolation=false with a bracket-5 message does not show modal", () => {
+    renderGamePage();
+
+    // This is the regression case: a bracket-5 user deck playing against
+    // Easy/Hard AI should never trigger the bracket-violation modal.
+    // GameProvider will pass bracketViolation=false (or omit it), so even
+    // if the error message mentions cEDH, the modal must not fire.
+    act(() => {
+      capturedOnNoDeck?.(
+        "Deck validation failed: some other error",
+        false,
+      );
+    });
+
+    expect(screen.queryByTestId("bracket-violation-modal")).toBeNull();
   });
 });

@@ -1674,6 +1674,8 @@ export const AdapterErrorCode = {
   WASM_ERROR: "WASM_ERROR",
   INVALID_ACTION: "INVALID_ACTION",
   BRACKET_ESTIMATION_UNSUPPORTED: "bracket-estimation/unsupported",
+  /** Engine rejected game init because one or more decks are not bracket 5 at a cEDH table. */
+  BRACKET_VIOLATION: "BRACKET_VIOLATION",
 } as const;
 
 /**

@@ -1,6 +1,7 @@
 import { createContext, useEffect, useRef, type ReactNode } from "react";
 
 import type { FormatConfig, GameAction, MatchConfig, MatchType } from "../adapter/types";
+import { AdapterError, AdapterErrorCode } from "../adapter/types";
 import { P2PHostAdapter, P2PGuestAdapter } from "../adapter/p2p-adapter";
 import type { P2PAdapterEvent } from "../adapter/p2p-adapter";
 import { WasmAdapter, getSharedAdapter } from "../adapter/wasm-adapter";
@@ -163,6 +164,11 @@ type DeckListPayload = {
   player: ExpandedDeckWithTier;
   opponent: ExpandedDeckWithTier;
   ai_decks: ExpandedDeckWithTier[];
+  /** AI difficulty strings per seat (opponent first, then extra AI decks).
+   *  Passed through to the engine's `DeckList.ai_difficulties` field so the
+   *  WASM bridge can gate cEDH bracket validation on AI difficulty rather than
+   *  deck bracket tier. */
+  ai_difficulties: string[];
 };
 
 function candidatePassesFilters(
@@ -205,6 +211,7 @@ function buildPlayerOnlyDeckList(deck: ParsedDeck, playerBracket?: CommanderBrac
     player,
     opponent: { main_deck: [], sideboard: [], commander: [], bracket_tier: "core" },
     ai_decks: [],
+    ai_difficulties: [],
   };
 }
 
@@ -246,10 +253,15 @@ async function buildLocalAiDeckList(
 
   const playerExpanded = expandParsedDeck(deck);
   const playerTier = bracketToEngineTier(playerBracket);
+  // Build ai_difficulties in the same order as the AI seats: opponent first,
+  // then any additional ai_decks. Seat 0 maps to the opponent, seats 1+ map
+  // to ai_decks. Missing seat prefs default to "Medium".
+  const aiDifficulties = picks.map((_, i) => aiSeats[i]?.difficulty ?? "Medium");
   return {
     player: { ...playerExpanded, bracket_tier: playerTier },
     opponent: { ...expandParsedDeck(picks[0].deck), bracket_tier: bracketToEngineTier(picks[0].bracket) },
     ai_decks: picks.slice(1).map((c) => ({ ...expandParsedDeck(c.deck), bracket_tier: bracketToEngineTier(c.bracket) })),
+    ai_difficulties: aiDifficulties,
   };
 }
 
@@ -335,7 +347,11 @@ export interface GameProviderProps {
   onP2PEvent?: (event: P2PAdapterEvent) => void;
   onReady?: () => void;
   onCardDataMissing?: () => void;
-  onNoDeck?: (reason?: string) => void;
+  /** Called when the game cannot start. `bracketViolation` is `true` when the
+   *  engine rejected init because one or more decks are not bracket 5 at a
+   *  cEDH table — lets callers show a typed modal rather than matching by
+   *  string substring on the error message. */
+  onNoDeck?: (reason?: string, bracketViolation?: boolean) => void;
   /** Called when a saved game could not be resumed and a fresh game was started instead. */
   onResumeReset?: (reason: string) => void;
   children: ReactNode;
@@ -1010,7 +1026,15 @@ export function GameProvider({
             audioManager.setContext("battlefield");
           } catch (initErr) {
             console.error("Deck validation failed:", initErr);
-            if (!cancelled) onNoDeckRef.current?.(initErr instanceof Error ? initErr.message : String(initErr));
+            if (!cancelled) {
+              const isBracketViolation =
+                initErr instanceof AdapterError &&
+                initErr.code === AdapterErrorCode.BRACKET_VIOLATION;
+              onNoDeckRef.current?.(
+                initErr instanceof Error ? initErr.message : String(initErr),
+                isBracketViolation,
+              );
+            }
           }
         }
         return;
@@ -1108,7 +1132,15 @@ export function GameProvider({
         audioManager.setContext("battlefield");
       } catch (err) {
         console.error("Deck validation failed:", err);
-        if (!cancelled) onNoDeckRef.current?.(err instanceof Error ? err.message : String(err));
+        if (!cancelled) {
+          const isBracketViolation =
+            err instanceof AdapterError &&
+            err.code === AdapterErrorCode.BRACKET_VIOLATION;
+          onNoDeckRef.current?.(
+            err instanceof Error ? err.message : String(err),
+            isBracketViolation,
+          );
+        }
       }
     };
 
