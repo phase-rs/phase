@@ -1,6 +1,5 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 233
 expression: "&lowered"
 ---
 {
@@ -60,9 +59,6 @@ expression: "&lowered"
       "activation_restrictions": [
         {
           "type": "AsSorcery"
-        },
-        {
-          "type": "OnlyOnceEachTurn"
         }
       ],
       "condition": null,
@@ -129,9 +125,6 @@ expression: "&lowered"
       "activation_restrictions": [
         {
           "type": "AsSorcery"
-        },
-        {
-          "type": "OnlyOnceEachTurn"
         }
       ],
       "condition": null,
@@ -165,9 +158,6 @@ expression: "&lowered"
       "activation_restrictions": [
         {
           "type": "AsSorcery"
-        },
-        {
-          "type": "OnlyOnceEachTurn"
         }
       ],
       "condition": null,
@@ -240,9 +230,6 @@ expression: "&lowered"
       "activation_restrictions": [
         {
           "type": "AsSorcery"
-        },
-        {
-          "type": "OnlyOnceEachTurn"
         }
       ],
       "condition": null,

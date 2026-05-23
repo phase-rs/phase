@@ -308,6 +308,103 @@ mod tests {
         );
     }
 
+    /// CR 608.2c + CR 701.24a: Visions-shape regression — "Look at the top five
+    /// cards of target player's library. You may then have that player shuffle
+    /// that library." This test parses the real Visions Oracle text, extracts
+    /// the `may`-gated shuffle sub-ability's `Effect::Shuffle` filter, then
+    /// resolves it against a two-player `GameState` with the parent `Dig`'s
+    /// `TargetRef::Player` inherited into `ability.targets` (chain target
+    /// propagation, `resolve_ability_chain` mod.rs:2494).
+    ///
+    /// The shuffle must hit the *targeted* player's library, not the caster's.
+    /// `TargetFilter::ParentTarget` must inherit a parent player target here;
+    /// otherwise it falls through to `ability.controller` (the caster) and
+    /// shuffles the wrong library.
+    #[test]
+    fn visions_shuffle_resolves_to_targeted_player_not_caster() {
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::ability::Effect;
+
+        // Parse the real Visions card so the test exercises the parser-emitted
+        // filter, not a hand-written one. The shuffle filter is whatever the
+        // `"shuffle that library"` arm produces.
+        let parsed = parse_oracle_text(
+            "Look at the top five cards of target player's library. You may then have that player shuffle that library.",
+            "Visions",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        let ability = &parsed.abilities[0];
+        let sub = ability
+            .sub_ability
+            .as_ref()
+            .expect("Visions should have a shuffle sub-ability");
+        let shuffle_filter = match &*sub.effect {
+            Effect::Shuffle { target } => target.clone(),
+            other => panic!(
+                "Expected Effect::Shuffle in sub-ability, got {:?}",
+                std::mem::discriminant(other)
+            ),
+        };
+
+        // P0 casts Visions targeting P1. Populate P1's library so the shuffle
+        // is observable.
+        let mut state = GameState::new_two_player(42);
+        for i in 0..6 {
+            create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(1),
+                format!("Opp Card {}", i),
+                Zone::Library,
+            );
+        }
+        let p1_lib_before = state.players[1].library.clone();
+
+        // Build the resolved shuffle ability as the chain would: the parent
+        // Dig's `TargetRef::Player(P1)` is inherited into `ability.targets`,
+        // and `ability.controller` is the caster P0.
+        let resolved_ability = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: shuffle_filter.clone(),
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        // The acting player resolved by the engine must be the *targeted*
+        // opponent (P1), never the caster (P0).
+        let resolved_player = super::super::resolve_player_for_context_ref(
+            &state,
+            &resolved_ability,
+            &shuffle_filter,
+        );
+        assert_eq!(
+            resolved_player,
+            PlayerId(1),
+            "Visions's shuffle must resolve to the targeted opponent, not the caster (filter was {shuffle_filter:?})"
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &resolved_ability, &mut events).unwrap();
+
+        // The opponent's library was the one shuffled (size preserved).
+        assert_eq!(
+            state.players[1].library.len(),
+            p1_lib_before.len(),
+            "opponent's library was shuffled in place"
+        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::EffectResolved {
+                kind: EffectKind::Shuffle,
+                ..
+            }
+        )));
+    }
+
     /// CR 400.3 + CR 701.24: `Effect::Shuffle { target: Owner }` must route to the
     /// owner of `ability.source_id`, NOT the ability's controller. This is the
     /// shuffle-back path for Nexus of Fate / Blightsteel under Mind Control:

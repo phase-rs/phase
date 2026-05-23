@@ -316,6 +316,7 @@ fn redundancy_delta(
         | Effect::Manifest { .. }
         | Effect::ManifestDread
         | Effect::ExtraTurn { .. }
+        | Effect::GrantExtraLoyaltyActivations { .. }
         | Effect::SkipNextTurn { .. }
         | Effect::SkipNextStep { .. }
         | Effect::AdditionalPhase { .. }

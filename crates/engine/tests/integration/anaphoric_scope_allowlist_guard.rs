@@ -10,12 +10,15 @@
 //! correctly-scoped possessive, which is the root cause of Rite of Consumption
 //! dealing no damage.
 //!
-//! After the #495 fix, exactly **160** cards in the exported card data retain a
-//! runtime `ObjectScope::Anaphoric` in a `DealDamage` / `GainLife` / `LoseLife`
-//! (or similar) amount. This test holds that set as a sorted constant and
-//! fails if a card leaks in or out of it — a tripwire, not a snapshot.
+//! After the #495 fix and the bare-anaphoric-possessive classifier fix (Yuriko,
+//! the Tiger's Shadow / Dark Confidant class — `classify_possessive_referent`
+//! in `parser/oracle_quantity.rs`), exactly **244** cards in the exported card
+//! data retain a runtime `ObjectScope::Anaphoric` in a `DealDamage` /
+//! `GainLife` / `LoseLife` (or similar) amount. This test holds that set as a
+//! sorted constant and fails if a card leaks in or out of it — a tripwire,
+//! not a snapshot.
 //!
-//! ## The three categories of retained `Anaphoric`
+//! ## The four categories of retained `Anaphoric`
 //!
 //! 1. **Triggered-ability source anaphora** — e.g. *Conclave Mentor*. The "its"
 //!    in the ability text refers to the trigger source `~` (the permanent with
@@ -38,17 +41,63 @@
 //!    This is also a *genuine pre-existing misparse*: the referent should be
 //!    the target slot, not an anaphoric source marker.
 //!
-//! ## Behavior-neutrality proof
+//! 4. **Bare anaphoric possessive (CR 608.2c reveal/move/effect-sacrifice
+//!    class — Yuriko, the Tiger's Shadow / Dark Confidant / Mana Drain /
+//!    Calibrated Blast / Reanimate / Vendetta / etc.)** — e.g. "...reveal
+//!    the top card of your library... loses life equal to that card's mana
+//!    value" or "counter target spell... add an amount of mana equal to
+//!    that spell's mana value". The bare "that <type>" / "the <type>"
+//!    possessive prefix anchors to the object introduced by an earlier
+//!    instruction in the same ability. `classify_possessive_referent`
+//!    selects `ObjectScope::Anaphoric` so the runtime consults
+//!    `effect_context_object` first (CR 608.2c instruction-order referent)
+//!    rather than the cost-paid object or the trigger source. The 88
+//!    additions break down by anaphor source:
+//!    - **reveal-then-act** (`RevealTop` → instruction reads "that card") —
+//!      Yuriko, Dark Confidant (already category 4 by its pronoun form),
+//!      Calibrated Blast, Erratic Explosion, Explosive Revelation, Riddle
+//!      of Lightning, Sin Prodder, Pain Seer, Ruin Raider, etc.
+//!    - **counter-then-act** (`Counter` → instruction reads "that spell") —
+//!      Mana Drain (delayed mana refund), Overwhelming Intellect, Refuse,
+//!      Scattering Stroke.
+//!    - **effect-sacrifice-then-act** (sub-`Sacrifice` → instruction reads
+//!      "that creature") — Twisted Justice, Tribute to Hunger, Devour
+//!      Flesh, Vendetta, Devour in Shadow, Greven, Predator Captain.
+//!    - **reanimate-then-act** (`ChangeZone` graveyard → battlefield, then
+//!      reads "that creature") — Reanimate, Daxos of Meletis.
+//!    - **mill/discover/explosion chains** with the same "earlier-effect
+//!      object" anaphor shape.
 //!
-//! Every one of the 160 cards below parsed as `CostPaidObject` *before*
-//! `ObjectScope::Anaphoric` existed — verifiable with
-//! `git show HEAD:crates/engine/src/parser/oracle_quantity.rs` against the
-//! pre-#495 commit. Issue #495's runtime resolution arm (`game/quantity.rs`,
-//! `object_for_scope` / `resolve_object_pt` / `resolve_object_mana_value`)
-//! resolves `Anaphoric` *identically* to `CostPaidObject`. Therefore #495
-//! changes the runtime behavior of **zero** cards except Rite of Consumption
-//! itself — `Anaphoric` is a behavior-preserving relabel for these 160, and a
-//! correctness fix for Rite.
+//!    This category went from misparsed (`CostPaidObject`, silently reading
+//!    the trigger source — Yuriko's bug) to correct (`Anaphoric`, slot-1
+//!    `effect_context_object` → revealed/moved/sacrificed object). Each
+//!    subclass relies on the corresponding source in
+//!    `parent_referent_context_from_events` (`game/effects/mod.rs:602`)
+//!    being populated, and on `snapshot_quantity_ref`
+//!    (`game/effects/delayed_trigger.rs:331`) including `Anaphoric` in its
+//!    snapshot-baking match arm (added in lockstep with this categorization).
+//!
+//! ## Behavior-neutrality proof (categories 1-3) and intentional behavior
+//! change (category 4)
+//!
+//! The original 156 entries (categories 1-3) parsed as `CostPaidObject`
+//! *before* `ObjectScope::Anaphoric` existed — verifiable with
+//! `git show <pre-#495>:crates/engine/src/parser/oracle_quantity.rs`. Issue
+//! #495's runtime resolution arm (`game/quantity.rs`, `object_for_scope` /
+//! `resolve_object_pt` / `resolve_object_mana_value`) resolved `Anaphoric`
+//! *identically* to `CostPaidObject` at the time. Therefore #495 was a
+//! behavior-preserving relabel for those 156, and a correctness fix for Rite.
+//!
+//! After Dark Confidant (#511) added the
+//! `effect_context_object`-first slot priority to `Anaphoric`'s runtime arm
+//! (see `resolve_object_mana_value`), the bare-anaphoric-possessive parser
+//! fix (Yuriko, the Tiger's Shadow) routes the category-4 cards (88 entries,
+//! including Yuriko itself) onto that already-extended arm. For those
+//! cards the change is an *intentional* behavior fix: the runtime now reads
+//! the revealed / countered / moved object first, matching CR 608.2c. The
+//! previous `CostPaidObject` parse silently fell through to the trigger
+//! source (Yuriko's Ninja, the casting spell, etc.) and produced the wrong
+//! amount.
 //!
 //! ## Why this guard exists
 //!
@@ -57,15 +106,20 @@
 //!
 //! - **#512** — categories 2 & 3: scope trigger-subject / target-creature
 //!   anaphora to the correct referent instead of `Anaphoric`.
-//! - **#511** — the reveal-referent variant (*Dark Confidant* — "its mana
-//!   value", where "its" = the revealed card).
+//! - **#511** — the bare-pronoun reveal-referent variant (*Dark Confidant*
+//!   — "its mana value", where "its" = the revealed card).
+//!
+//! Category 4 is the explicit-possessive sibling of #511 — same antecedent
+//! shape, just with an explicit type word ("that card's mana value") instead
+//! of the pronoun ("its mana value"). Yuriko, the Tiger's Shadow surfaced the
+//! same bug as Dark Confidant once #511 fixed the pronoun branch.
 //!
 //! This test **freezes** the `Anaphoric` set so it cannot grow silently while
-//! #512 / #511 do the real fixes. A new leak (a new card name, or a count
-//! change) fails this test; a human then decides whether it is a legitimate
-//! new category-1/2/3 case (add it here) or a real regression (fix the parser).
-//! The curation lives at the *category* level — the correct granularity — not
-//! as 160 per-card annotations.
+//! #512 does the remaining category-2/3 fixes. A new leak (a new card name,
+//! or a count change) fails this test; a human then decides whether it is a
+//! legitimate new category-1/2/3/4 case (add it here) or a real regression
+//! (fix the parser). The curation lives at the *category* level — the
+//! correct granularity — not as 244 per-card annotations.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -75,19 +129,23 @@ use serde_json::Value;
 /// Cards whose exported card data retains a runtime `ObjectScope::Anaphoric`.
 ///
 /// Sorted by the export's normalized (lowercase) card key. See the module doc
-/// comment for the three categories and the behavior-neutrality proof. Do not
+/// comment for the four categories and the behavior-neutrality proof. Do not
 /// edit this list to silence a failure without first classifying the new card:
-/// a legitimate category-1/2/3 case may be added; a real regression must be
+/// a legitimate category-1/2/3/4 case may be added; a real regression must be
 /// fixed in the parser instead.
 const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "a-heartfire hero",
+    "abattoir ghoul",
     "ad nauseam",
+    "alchemist's talent",
     "alpha brawl",
     "angelic chorus",
+    "archon of redemption",
     "aspiring champion",
     "augury adept",
     "avatar destiny",
     "backlash",
+    "baneful omen",
     "banewasp affliction",
     "bartz and boko",
     "be'lakor, the dark master",
@@ -95,36 +153,55 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "blood poet",
     "bottle golems",
     "boulderbranch golem",
+    "bounteous kirin",
     "brainstealer dragon",
+    "breeches, the blastmaker",
+    "brightmare",
+    "calibrated blast",
     "champion of the path",
     "champion of wits",
     "chastise",
     "circus of the sun",
+    "cleric class",
     "common black removal",
     "conclave mentor",
     "consume",
     "consuming ferocity",
+    "consuming vapors",
+    "creature bond",
     "crumble",
     "dark confidant",
     "dark tutelage",
     "darkstar augur",
+    "daxos of meletis",
     "dead before sunrise",
     "death",
     "death watch",
     "death's caress",
     "delif's cone",
     "delirium",
+    "devour flesh",
+    "devour in shadow",
+    "dire tactics",
     "divine offering",
     "domri's ambush",
+    "doomgape",
     "durkwood tracker",
     "efteekay, flame of the kav",
     "electrosiphon",
     "electryte",
+    "energy tap",
+    "engulfing slagwurm",
+    "erratic explosion",
     "evereth, viceroy of plunder",
     "exile",
+    "explosive revelation",
+    "feed the swarm",
     "felling blow",
     "feral encounter",
     "fiendlash",
+    "fiery encore",
+    "flamethrower sonata",
     "flaming tyrannosaurus",
     "foot chopper",
     "gargantuan gorilla",
@@ -137,22 +214,37 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "goblin crash pilot",
     "goblin sleigh ride",
     "goblin tinkerer",
+    "golbez, crystal collector",
     "gregor, shrewd magistrate",
+    "greven, predator captain",
     "grim contest",
     "grim feast",
+    "grisly spectacle",
+    "heal the scars",
+    "healing technique",
     "heartfire hero",
+    "hellhole rats",
     "hidetsugu and kairi",
+    "hit",
     "horrid shadowspinner",
     "hotel of fears",
     "hunter's edge",
     "ian the reckless",
+    "ignite memories",
+    "ikra shidiqi, the usurper",
     "immersturm",
+    "imp's mischief",
     "infernal reckoning",
+    "interpret the signs",
     "jenova, ancient calamity",
+    "judge unworthy",
     "judgment of alexander",
+    "kaervek the merciless",
     "kamahl's will",
     "karplusan yeti",
+    "keeper of secrets",
     "kefka, dancing mad",
+    "kindle the carnage",
     "laccolith rig",
     "lagonna-band storyteller",
     "lammastide weave",
@@ -160,46 +252,80 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "living inferno",
     "lorcan, warlock collector",
     "lothlórien blade",
+    "lozhan, dragons' legacy",
     "lukka, coppercoat outcast",
     "lukka, wayward bonder",
     "luminate primordial",
     "madame null, power broker",
     "mage slayer",
     "make yourself useful",
+    "mana drain",
+    "marshland bloodcaster",
     "master of the wild hunt",
+    "mirkwood elk",
     "momentous fall",
     "moonlight hunt",
     "mortis dogs",
+    "narset of the ancient way",
     "neerdiv, devious diver",
+    "niambi, esteemed speaker",
     "nibelheim aflame",
     "nissa's judgment",
     "nissa's revelation",
     "noxious gearhulk",
+    "orchard warden",
+    "orim's thunder",
     "orzhov charm",
     "osseous sticktwister",
+    "overwhelming intellect",
     "packsong pup",
     "pain for all",
+    "pain seer",
     "paladin of atonement",
     "pandemonium",
+    "parallectric feedback",
+    "passionate archaeologist",
+    "phyrexian delver",
+    "planeswalker's fury",
+    "planeswalker's mirth",
     "polukranos, world eater",
     "predatory urge",
     "prime speaker zegana",
+    "proper burial",
+    "protection racket",
+    "pyretic rebirth",
     "pyrotechnic performer",
     "queen's bay paladin",
+    "rage extractor",
     "rapacious guest",
     "rashida scalebane",
     "ravenous gigantotherium",
+    "razor hippogriff",
+    "reanimate",
+    "refuse",
+    "reviving vapors",
+    "riddle of lightning",
+    "righteous valkyrie",
+    "rotfeaster maggot",
+    "ruin raider",
+    "rupture",
     "sapling of colfenor",
     "sarkhan the mad",
+    "scattering stroke",
     "season's beatings",
     "seeds of innocence",
     "seek",
     "selfless exorcist",
     "serene offering",
     "sever soul",
+    "sheltering word",
+    "sheoldred's restoration",
     "showstopping surprise",
     "shriveling rot",
+    "sifter wurm",
     "signature slam",
+    "sin prodder",
+    "singe-mind ogre",
     "sister hospitaller",
     "solitude",
     "sorin the mirthless",
@@ -210,6 +336,7 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "stalking vengeance",
     "steadfast armasaur",
     "stronghold arena",
+    "summon: kujata",
     "sunscourge champion",
     "sylvan smite",
     "syr ginger, the meal ender",
@@ -223,19 +350,34 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "the bears of littjara",
     "the creation of avacyn",
     "the great aerie",
+    "the lord of pain",
     "the mystery raceway",
+    "the provider",
     "the ruinous powers",
     "thorin, mountain-king",
     "thought sponge",
     "thought-string analyst",
     "too greedily, too deep",
     "tracker",
+    "tribute to hunger",
+    "trostani, selesnya's voice",
+    "twisted justice",
+    "undying flames",
+    "vanish into memory",
     "vein drinker",
+    "vendetta",
+    "vengeful rebirth",
+    "verdant sun's avatar",
+    "vial smasher the fierce",
+    "viashino heretic",
     "vivien's invocation",
+    "volcanic vision",
     "vraska's stoneglare",
     "warstorm surge",
+    "weed strangle",
     "willow geist",
     "wolverine riders",
+    "yuriko, the tiger's shadow",
 ];
 
 /// Recursively reports whether a JSON subtree contains an `ObjectScope`
@@ -296,17 +438,19 @@ fn anaphoric_scope_set_is_frozen() {
     // both this and ANAPHORIC_SCOPE_CARDS shrink together.
     assert_eq!(
         observed.len(),
-        156,
-        "Expected exactly 156 cards retaining ObjectScope::Anaphoric (the #495 \
-         behavior-neutral floor, minus four cards unlocked by #607's target-subject \
-         DamageAll source wrapper: Betrayal at the Vault, Chandra's Ignition, \
-         Spinning Wheel Kick, Waltz of Rage); count moved to {}.",
+        244,
+        "Expected exactly 244 cards retaining ObjectScope::Anaphoric (the #495 \
+         behavior-neutral floor of 156, minus four cards unlocked by #607's \
+         target-subject DamageAll source wrapper, plus 88 cards from category 4 \
+         — the Yuriko/Dark Confidant bare-anaphoric-possessive class \
+         routed onto the Anaphoric arm by `classify_possessive_referent`); \
+         count moved to {}.",
         observed.len()
     );
     assert_eq!(
         ANAPHORIC_SCOPE_CARDS.len(),
-        156,
-        "ANAPHORIC_SCOPE_CARDS must list exactly 156 cards."
+        244,
+        "ANAPHORIC_SCOPE_CARDS must list exactly 244 cards."
     );
 }
 

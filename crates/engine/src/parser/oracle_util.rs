@@ -7,6 +7,7 @@ use super::oracle_nom::primitives as nom_primitives;
 use crate::types::ability::{Comparator, QuantityExpr, QuantityRef, TargetFilter};
 use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaColor, ManaCost};
+use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::space1;
 use nom::combinator::{eof, opt};
@@ -525,7 +526,26 @@ const POSSESSIVES: &[&str] = &[
 
 /// Object pronouns in MTG Oracle text that refer to previously-mentioned objects.
 /// Used in anaphoric references like "shuffle it into", "put them onto", "exile that card".
-pub const OBJECT_PRONOUNS: &[&str] = &["it", "them", "that card", "those cards"];
+/// `"~"` is the card-name placeholder (normalized from the card's own name by the Oracle
+/// pre-processor) and acts as an object pronoun in self-shuffle effects like "shuffle ~
+/// into its owner's library" (Zenith cycle, Fblthp, etc.).
+pub const OBJECT_PRONOUNS: &[&str] = &["it", "them", "that card", "those cards", "~"];
+
+/// Object-style references that include both anaphoric pronouns (`OBJECT_PRONOUNS`)
+/// and the self-reference token `~` produced by `normalize_card_name_refs`.
+///
+/// Use this when a guard must accept both "shuffle it into …" (anaphoric, refers to a
+/// previously-bound target) and "shuffle ~ into …" (self-referential, refers to the
+/// source object — Green Sun's Zenith, the Beacon cycle, Nexus of Fate, etc.). The
+/// downstream classifier still distinguishes them: `~` → `TargetFilter::SelfRef`,
+/// `it`/`them`/`that card`/`those cards` → `ParentTarget` or `SelfRef` per the
+/// inner combinator.
+///
+/// Kept separate from `OBJECT_PRONOUNS` because the anaphoric / self-reference
+/// distinction matters at other call sites (compound action splitting in
+/// `try_split_targeted_compound`, etc.), where treating `~` as an anaphoric pronoun
+/// would mis-classify self-referential clauses.
+pub const SELF_AND_OBJECT_PRONOUNS: &[&str] = &["it", "them", "that card", "those cards", "~"];
 
 /// "this \<card_type\>" self-reference phrases in Oracle text.
 ///
@@ -630,6 +650,45 @@ pub fn contains_object_pronoun(text: &str, prefix: &str, suffix: &str) -> bool {
     match_phrase_variants(text, prefix, suffix, OBJECT_PRONOUNS, |hay, needle| {
         hay.contains(needle)
     })
+}
+
+/// Like `contains_object_pronoun` but also matches the self-reference token `~`.
+///
+/// Use this in guards that need to accept both anaphoric references ("shuffle it
+/// into …") and self-references ("shuffle ~ into …" — Green Sun's Zenith, Beacon
+/// cycle, Nexus of Fate). The downstream classifier still distinguishes the two,
+/// so this only widens the gate, not the semantics.
+pub fn contains_self_or_object_pronoun(text: &str, prefix: &str, suffix: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(text, |input| {
+        let input = if prefix.is_empty() {
+            input
+        } else {
+            let (input, _) = tag::<_, _, OracleError<'_>>(prefix).parse(input)?;
+            let (input, _) = space1(input)?;
+            input
+        };
+        let (input, _) = parse_self_or_object_pronoun(input)?;
+        let input = if suffix.is_empty() {
+            input
+        } else {
+            let (input, _) = space1(input)?;
+            let (input, _) = tag(suffix).parse(input)?;
+            input
+        };
+        Ok((input, ()))
+    })
+    .is_some()
+}
+
+fn parse_self_or_object_pronoun(input: &str) -> OracleResult<'_, &str> {
+    alt((
+        tag("that card"),
+        tag("those cards"),
+        tag("them"),
+        tag("it"),
+        tag("~"),
+    ))
+    .parse(input)
 }
 
 /// Parse mana production symbols like `{G}` into Vec<ManaColor>.
@@ -1038,6 +1097,7 @@ const SUBTYPES: &[&str] = &[
     "Junk",
     "Map",
     "Powerstone",
+    "Spacecraft", // CR 205.3g: Spacecraft is an artifact subtype.
     "Treasure",
     "Vehicle",
     // ── Enchantment subtypes ──
@@ -1250,18 +1310,21 @@ pub fn parse_subtype(text: &str) -> Option<(String, usize)> {
 
 /// Infer the core type for a known subtype name.
 ///
-/// Artifact subtypes (Treasure, Food, Clue, Blood, Gold, Map, Equipment, Vehicle)
-/// map to `CoreType::Artifact`. Land subtypes (Forest, Plains, etc.) map to
-/// `CoreType::Land`. Enchantment subtypes (Aura, Saga, etc.) map to
-/// `CoreType::Enchantment`. Returns `None` for creature subtypes (the caller's
-/// existing default) or unknown subtypes.
+/// Artifact subtypes (Treasure, Food, Clue, Blood, Gold, Map, Equipment,
+/// Spacecraft, Vehicle) map to `CoreType::Artifact`. Land subtypes (Forest,
+/// Plains, etc.) map to `CoreType::Land`. Enchantment subtypes (Aura, Saga,
+/// etc.) map to `CoreType::Enchantment`. Returns `None` for creature subtypes
+/// (the caller's existing default) or unknown subtypes.
 ///
 /// Used by lord-pattern parsers to avoid defaulting all subtypes to Creature.
 pub fn infer_core_type_for_subtype(subtype: &str) -> Option<CoreType> {
     match subtype {
         // Artifact subtypes (CR 205.3g)
         "Treasure" | "Food" | "Clue" | "Blood" | "Gold" | "Map" | "Junk" | "Powerstone"
-        | "Equipment" | "Vehicle" | "Fortification" | "Contraption" => Some(CoreType::Artifact),
+        | "Equipment" | "Spacecraft" | "Vehicle" | "Fortification" | "Contraption" => {
+            // CR 205.3g: Spacecraft is an artifact subtype.
+            Some(CoreType::Artifact)
+        }
         // Land subtypes (CR 205.3i)
         "Forest" | "Plains" | "Island" | "Mountain" | "Swamp" | "Desert" | "Gate" | "Locus"
         | "Cave" | "Sphere" | "Mine" | "Tower" | "Power-Plant" => Some(CoreType::Land),
@@ -2433,6 +2496,43 @@ mod tests {
             "shuffle",
             "into"
         ));
+        // CR 201.5: "~" is the card-name placeholder used in self-shuffle effects
+        // (e.g. "shuffle ~ into its owner's library" — Black Sun's Zenith, Zenith cycle).
+        assert!(contains_object_pronoun(
+            "shuffle ~ into its owner's library",
+            "shuffle",
+            "into"
+        ));
+    }
+
+    #[test]
+    fn contains_self_or_object_pronoun_includes_tilde() {
+        // The tilde self-reference token must be accepted in addition to all
+        // four object pronouns. This is the building-block guarantee that
+        // unlocks "shuffle ~ into …" for Green Sun's Zenith and the Beacon
+        // cycle without weakening the anaphoric-only `contains_object_pronoun`
+        // semantics used elsewhere.
+        assert!(contains_self_or_object_pronoun(
+            "shuffle ~ into",
+            "shuffle",
+            "into"
+        ));
+        assert!(contains_self_or_object_pronoun(
+            "shuffle it into",
+            "shuffle",
+            "into"
+        ));
+        assert!(contains_self_or_object_pronoun(
+            "shuffle them into",
+            "shuffle",
+            "into"
+        ));
+        // Negative: tilde must NOT make `contains_object_pronoun` accept self-references.
+        assert!(!contains_object_pronoun(
+            "shuffle ~ into",
+            "shuffle",
+            "into"
+        ));
     }
 
     // ── parse_subtype building block tests ──
@@ -2466,6 +2566,14 @@ mod tests {
             parse_subtype("equipment"),
             Some(("Equipment".to_string(), 9))
         );
+        assert_eq!(
+            parse_subtype("Spacecraft"),
+            Some(("Spacecraft".to_string(), 10))
+        );
+        assert_eq!(
+            parse_subtype("spacecrafts"),
+            Some(("Spacecraft".to_string(), 11))
+        );
         assert_eq!(parse_subtype("forest"), Some(("Forest".to_string(), 6)));
         assert_eq!(parse_subtype("aura"), Some(("Aura".to_string(), 4)));
     }
@@ -2485,6 +2593,14 @@ mod tests {
             Some(("Goblin".to_string(), 6))
         );
         assert_eq!(parse_subtype("goblinking"), None);
+    }
+
+    #[test]
+    fn infer_core_type_for_spacecraft_subtype() {
+        assert_eq!(
+            infer_core_type_for_subtype("Spacecraft"),
+            Some(CoreType::Artifact)
+        );
     }
 
     #[test]

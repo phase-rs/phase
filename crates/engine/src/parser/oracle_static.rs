@@ -687,6 +687,10 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         return Some(def);
     }
 
+    if let Some(mode) = parse_max_combat_creatures_static(&lower) {
+        return Some(StaticDefinition::new(mode).description(text.to_string()));
+    }
+
     if let Some(defs) = parse_cost_payment_prohibition_statics(&tp, &text) {
         return defs.into_iter().next();
     }
@@ -2063,6 +2067,36 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         }
     }
 
+    // --- "[Enchanted/Equipped] [type]'s activated abilities cost {N} less to activate" ---
+    // CR 303.4 + CR 602.1 + CR 601.2f: Aura/Equipment-granted activated ability
+    // cost reduction for the attached object (Power Artifact).
+    if let Some(((prefix, filter_part, amount), _)) = nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, prefix) = alt((
+            value("enchanted ", tag::<_, _, OracleError<'_>>("enchanted ")),
+            value("equipped ", tag::<_, _, OracleError<'_>>("equipped ")),
+        ))
+        .parse(i)?;
+        let (i, filter_part) = take_until("'s activated abilities cost ").parse(i)?;
+        let (i, _) = tag("'s activated abilities cost ").parse(i)?;
+        let (i, amount) =
+            nom::sequence::delimited(tag("{"), nom_primitives::parse_number, tag("}")).parse(i)?;
+        let (i, _) = tag(" less to activate").parse(i)?;
+        Ok((i, (prefix, filter_part.to_string(), amount)))
+    }) {
+        let filter_text = format!("{prefix}{filter_part}");
+        let (affected, _rest) = parse_type_phrase(&filter_text);
+        return Some(
+            StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                keyword: "activated".to_string(),
+                amount,
+                minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
+                dynamic_count: None,
+            })
+            .affected(affected)
+            .description(text.to_string()),
+        );
+    }
+
     // --- "Activated abilities of [filter] cost {N} less to activate" ---
     // CR 602.1 + CR 601.2f: Generic activated ability cost reduction (e.g., Training Grounds).
     if let Some(rest) = nom_tag_lower(tp.lower, tp.lower, "activated abilities of ") {
@@ -2282,6 +2316,31 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     }
 
     None
+}
+
+fn parse_max_combat_creatures_static(lower: &str) -> Option<StaticMode> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("no more than ")
+        .parse(lower)
+        .ok()?;
+    let (max, rest) = parse_number(rest)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("creature").parse(rest).ok()?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("s")).parse(rest).ok()?;
+    let (rest, mode) = alt((
+        value(
+            StaticMode::MaxAttackersEachCombat { max },
+            tag::<_, _, OracleError<'_>>(" can attack each combat"),
+        ),
+        value(
+            StaticMode::MaxBlockersEachCombat { max },
+            tag(" can block each combat"),
+        ),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (_, _) = all_consuming(opt(tag::<_, _, OracleError<'_>>(".")))
+        .parse(rest)
+        .ok()?;
+    Some(mode)
 }
 
 fn parse_arcane_adaptation_chosen_type_static(
@@ -3545,12 +3604,16 @@ pub(crate) fn parse_additive_type_clause_modifications(
     let after_verb_original = &clause_original[clause_original.len() - after_verb_lower.len()..];
     let (after_suffix_lower, type_words_lower) = terminated(
         take_until::<_, _, VE>(" in addition to "),
-        alt((
-            tag::<_, _, VE>(" in addition to its other types"),
-            tag::<_, _, VE>(" in addition to its other land types"),
-            tag::<_, _, VE>(" in addition to their other types"),
-            tag::<_, _, VE>(" in addition to their other land types"),
-        )),
+        (
+            tag::<_, _, VE>(" in addition to "),
+            alt((tag::<_, _, VE>("its"), tag::<_, _, VE>("their"))),
+            tag::<_, _, VE>(" other "),
+            alt((
+                tag::<_, _, VE>("creature types"),
+                tag::<_, _, VE>("land types"),
+                tag::<_, _, VE>("types"),
+            )),
+        ),
     )
     .parse(after_verb_lower)
     .ok()?;
@@ -12370,6 +12433,40 @@ mod tests {
     }
 
     #[test]
+    fn static_crackling_drake_counts_owned_instant_sorcery_exile_and_graveyard() {
+        let def = parse_static_line(
+            "Crackling Drake's power is equal to the total number of instant and sorcery cards you own in exile and in your graveyard.",
+        )
+        .unwrap();
+
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert!(def.characteristic_defining);
+        let expected = QuantityExpr::Sum {
+            exprs: vec![
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Exile,
+                        card_types: vec![TypeFilter::Instant, TypeFilter::Sorcery],
+                        scope: CountScope::Owner,
+                    },
+                },
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Graveyard,
+                        card_types: vec![TypeFilter::Instant, TypeFilter::Sorcery],
+                        scope: CountScope::Owner,
+                    },
+                },
+            ],
+        };
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::SetDynamicPower { value: expected }]
+        );
+    }
+
+    #[test]
     fn static_multani_cda_total_cards_in_all_players_hands() {
         let qty = QuantityExpr::Ref {
             qty: QuantityRef::HandSize {
@@ -13350,6 +13447,45 @@ mod tests {
             }
             other => panic!("Expected Typed creature filter, got {:?}", other),
         }
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste
+            }));
+    }
+
+    #[test]
+    fn static_other_creatures_with_any_counters_have_flying_and_haste() {
+        let def = parse_static_line(
+            "Other creatures you control with counters on them have flying and haste.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        match &def.affected {
+            Some(TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::You),
+                properties,
+                type_filters,
+                ..
+            })) => {
+                assert!(type_filters.contains(&TypeFilter::Creature));
+                assert!(properties.contains(&FilterProp::Another));
+                assert!(properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Counters {
+                        counters: CounterMatch::Any,
+                        comparator: Comparator::GE,
+                        count: QuantityExpr::Fixed { value: 1 },
+                    }
+                )));
+            }
+            other => panic!("Expected typed creature filter, got {other:?}"),
+        }
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying
+            }));
         assert!(def
             .modifications
             .contains(&ContinuousModification::AddKeyword {
@@ -15198,6 +15334,24 @@ mod tests {
         let def = parse_static_line("This creature must attack each combat if able.").unwrap();
         assert_eq!(def.mode, StaticMode::MustAttack);
         assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn static_no_more_than_one_creature_can_attack_each_combat() {
+        let def = parse_static_line("No more than one creature can attack each combat.").unwrap();
+        assert_eq!(def.mode, StaticMode::MaxAttackersEachCombat { max: 1 });
+    }
+
+    #[test]
+    fn static_no_more_than_two_creatures_can_attack_each_combat() {
+        let def = parse_static_line("No more than two creatures can attack each combat.").unwrap();
+        assert_eq!(def.mode, StaticMode::MaxAttackersEachCombat { max: 2 });
+    }
+
+    #[test]
+    fn static_no_more_than_one_creature_can_block_each_combat() {
+        let def = parse_static_line("No more than one creature can block each combat.").unwrap();
+        assert_eq!(def.mode, StaticMode::MaxBlockersEachCombat { max: 1 });
     }
 
     #[test]
@@ -17385,6 +17539,27 @@ mod tests {
     }
 
     #[test]
+    fn static_hivestone_adds_sliver_subtype_to_creatures_you_control() {
+        let def = parse_static_line(
+            "Creatures you control are Slivers in addition to their other creature types.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
+        );
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::AddSubtype {
+                subtype: "Sliver".to_string(),
+            }]
+        );
+    }
+
+    #[test]
     fn static_other_multicolored_creatures_get_plus() {
         // CR 105.2: "Other multicolored creatures you control get +1/+0."
         let def = parse_static_line("Other multicolored creatures you control get +1/+0.").unwrap();
@@ -17863,6 +18038,48 @@ mod tests {
                 dynamic_count: None,
             }
         );
+    }
+
+    #[test]
+    fn static_reduce_activated_ability_cost_enchanted_artifact_with_minimum() {
+        let def = parse_static_line(
+            "Enchanted artifact's activated abilities cost {2} less to activate. This effect can't reduce the mana in that cost to less than one mana.",
+        )
+        .unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::ReduceAbilityCost {
+                keyword: "activated".to_string(),
+                amount: 2,
+                minimum_mana: Some(1),
+                dynamic_count: None,
+            }
+        );
+        assert!(matches!(
+            def.affected,
+            Some(TargetFilter::Typed(TypedFilter { .. }))
+        ));
+    }
+
+    #[test]
+    fn static_reduce_activated_ability_cost_equipped_artifact_with_minimum() {
+        let def = parse_static_line(
+            "Equipped artifact's activated abilities cost {2} less to activate. This effect can't reduce the mana in that cost to less than one mana.",
+        )
+        .unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::ReduceAbilityCost {
+                keyword: "activated".to_string(),
+                amount: 2,
+                minimum_mana: Some(1),
+                dynamic_count: None,
+            }
+        );
+        assert!(matches!(
+            def.affected,
+            Some(TargetFilter::Typed(TypedFilter { .. }))
+        ));
     }
 
     // --- Group C: Spells you cast have keyword ---
