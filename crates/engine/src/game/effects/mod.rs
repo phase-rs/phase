@@ -9139,13 +9139,33 @@ mod tests {
         let mut events = Vec::new();
         resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
 
-        // Shuffle emits no ZoneChanged events; the accumulator must be EMPTY
-        // (cleared at depth=0 entry, not extended by stale state).
+        // Stale state (SearchedLibrary) must be cleared at depth=0 entry.
+        // Shuffle now emits PlayerPerformedAction { ShuffledLibrary } which is
+        // correctly accumulated "this way" — only the pre-polluted stale
+        // actions must be gone.
+        let stale_action = crate::types::events::PlayerActionKind::SearchedLibrary;
         assert!(
-            state.player_actions_this_way.is_empty(),
-            "depth=0 chain entry must clear player_actions_this_way; \
+            !state
+                .player_actions_this_way
+                .contains(&(PlayerId(0), stale_action)),
+            "depth=0 chain entry must clear stale player_actions_this_way; \
              leaking across top-level resolutions would cause spurious counts \
              in 'opponent who [verbed] this way' references on subsequent spells"
+        );
+        assert!(
+            !state
+                .player_actions_this_way
+                .contains(&(PlayerId(1), stale_action)),
+            "stale P1 SearchedLibrary must also be cleared"
+        );
+        // The shuffle action itself IS expected in the accumulator — it
+        // happened "this way" during the current resolution.
+        let shuffle_action = crate::types::events::PlayerActionKind::ShuffledLibrary;
+        assert!(
+            state
+                .player_actions_this_way
+                .contains(&(PlayerId(0), shuffle_action)),
+            "ShuffledLibrary from current resolution must be accumulated"
         );
     }
 
