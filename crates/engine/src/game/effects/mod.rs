@@ -1094,7 +1094,7 @@ pub fn resolve_effect(
         Effect::ChangeZoneAll { .. } => change_zone::resolve_all(state, ability, events),
         Effect::Dig { .. } => dig::resolve(state, ability, events),
         Effect::GainControl { .. } => gain_control::resolve(state, ability, events),
-        Effect::Goad { .. } => goad::resolve(state, ability, events),
+        Effect::Goad { .. } | Effect::GoadAll { .. } => goad::resolve(state, ability, events),
         Effect::Detain { .. } => detain::resolve(state, ability, events),
         Effect::ExchangeControl { .. } => exchange_control::resolve(state, ability, events),
         Effect::Attach { .. } => attach::resolve(state, ability, events),
@@ -1580,6 +1580,38 @@ pub(crate) fn publish_fresh_tracked_set(
 /// covered through the same single path.
 fn effect_refs_parent_target(effect: &Effect) -> bool {
     effect_target_filter(effect).is_some_and(filter_refs_parent_target)
+}
+
+/// True if the effect body references the per-iteration object via a parent
+/// context ref — INCLUDING effect-specific slots that `target_filter()` does not
+/// surface as the stack-push target. `Effect::CopyTokenOf::target_filter()`
+/// surfaces the token *owner*, not the copy *source*, when the source is a
+/// context ref (CR 707.2). So "For each token you control, create a token that's
+/// a copy of that permanent" (Second Harvest) needs its `target` (copy source)
+/// inspected directly — otherwise the loop never rebinds and every iteration
+/// copies the source object (the spell itself) instead of each token.
+///
+/// KNOWN GAP: other effects also hide a parent-target object slot behind
+/// `target_filter()` — `Effect::Token { attach_to }` (surfaces `owner`) and
+/// `Effect::Attach { attachment }` (surfaces `target`). Those per-iteration
+/// "for each [object], create/attach to that object" cases are NOT covered here:
+/// `Token`'s create path does not yet consume `attach_to`, and `Attach` resolves
+/// two object slots sequentially (so `rebind_first_object_target`, which
+/// replaces only the first, is insufficient). They were already broken before
+/// this rebind existed (no regression). Generalizing to an "all iterated
+/// context-ref slots" accessor + multi-slot rebind is tracked as follow-up.
+fn effect_iterates_over_parent_target(effect: &Effect) -> bool {
+    if effect_refs_parent_target(effect) {
+        return true;
+    }
+    matches!(
+        effect,
+        Effect::CopyTokenOf {
+            target,
+            source_filter: None,
+            ..
+        } if filter_refs_parent_target(target)
+    )
 }
 
 /// Recurse into compound filters so a wrapped `ParentTargetController` is
@@ -2817,44 +2849,71 @@ fn resolve_chain_body(
                 source_id: ability.source_id,
             });
         } else {
-            // CR 609.3: Execute the effect N times when repeat_for is set.
+            // CR 603.7 + CR 608.2c + CR 109.5: Per-iteration parent-target
+            // rebinding. When the body references the iterated object via a
+            // context ref (`ParentTarget` / `ParentTargetController`), each
+            // iteration must bind to a distinct member so the per-iteration
+            // subject is the i-th object — not always `effective.targets[0]`.
+            //
+            // Two member sources:
+            //  * `TrackedSetSize` — a set populated by a prior chain effect
+            //    (Winds of Abandon: each exiled creature's controller searches
+            //    their own library).
+            //  * `ObjectCount { filter }` — "For each [object], <verb> that
+            //    object" with no prior set (Second Harvest copies each token you
+            //    control; Cleansing destroys each land; Cut the Tethers bounces
+            //    each token). Snapshot the matching objects at loop start (CR
+            //    608.2) so objects created/affected mid-loop don't enter the
+            //    iteration — e.g., the copies Second Harvest creates are not
+            //    themselves copied.
+            //
+            // The `ObjectCount` member set is resolved against `effective` (the
+            // event-context-resolved ability) and DRIVES the iteration count, so
+            // count and bound objects come from one snapshot and cannot diverge —
+            // including the empty case (0 members ⇒ 0 iterations). The
+            // `TrackedSetSize` path keeps the existing quantity-driven count.
+            let mut member_driven = false;
+            let iter_tracked_members: Vec<crate::types::identifiers::ObjectId> =
+                match &ability.repeat_for {
+                    Some(QuantityExpr::Ref {
+                        qty: QuantityRef::TrackedSetSize,
+                    }) if effect_refs_parent_target(&effective.effect) => state
+                        .chain_tracked_set_id
+                        .and_then(|id| state.tracked_object_sets.get(&id).cloned())
+                        .unwrap_or_default(),
+                    Some(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    }) if effect_iterates_over_parent_target(&effective.effect) => {
+                        member_driven = true;
+                        // Same resolver as `QuantityRef::ObjectCount`'s count, on
+                        // the same `effective` ability, so members and count match
+                        // (including `OtherThanTriggerObject` handling).
+                        let ctx = filter::FilterContext::from_ability(effective);
+                        crate::game::quantity::object_count_matching_ids(
+                            state,
+                            filter,
+                            &ctx,
+                            effective.source_id,
+                        )
+                    }
+                    _ => Vec::new(),
+                };
+
+            // CR 609.3 + CR 608.2: Execute the effect N times when repeat_for is
+            // set. A `member_driven` ObjectCount loop takes its count from the
+            // snapshotted members (resolved against `effective`), keeping count and
+            // bindings in lockstep even when the set is empty.
             // CR 107.3a: Variable("X") must resolve via resolve_quantity_with_targets
             // so that ability.chosen_x (the paid X value) is passed through. The
             // plain resolve_quantity path passes chosen_x=None, causing X to always
             // resolve to 0 and the loop to never execute (Torment of Hailfire bug).
-            let iterations = if let Some(ref qty) = ability.repeat_for {
+            let iterations = if member_driven {
+                iter_tracked_members.len()
+            } else if let Some(ref qty) = ability.repeat_for {
                 crate::game::quantity::resolve_quantity_with_targets(state, qty, ability).max(0)
                     as usize
             } else {
                 1
-            };
-
-            // CR 603.7 + CR 608.2c + CR 109.5: Per-iteration parent-target
-            // rebinding for tracked-set iterations. When `repeat_for ==
-            // TrackedSetSize` and the effect references the parent target via
-            // a context-ref filter (e.g., `ParentTargetController`,
-            // `ParentTarget`), each iteration must bind to a different member
-            // of the tracked set so the per-iteration acting subject is the
-            // i-th tracked object's controller (Winds of Abandon, where each
-            // exiled creature's controller searches their own library).
-            //
-            // Without this rebind, every iteration sees `effective.targets[0]`
-            // — the first exiled creature only — and only that creature's
-            // controller would search.
-            let iter_tracked_members: Vec<crate::types::identifiers::ObjectId> = if matches!(
-                ability.repeat_for,
-                Some(crate::types::ability::QuantityExpr::Ref {
-                    qty: crate::types::ability::QuantityRef::TrackedSetSize
-                })
-            )
-                && effect_refs_parent_target(&effective.effect)
-            {
-                state
-                    .chain_tracked_set_id
-                    .and_then(|id| state.tracked_object_sets.get(&id).cloned())
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
             };
 
             let initial_waiting_for = state.waiting_for.clone();
@@ -3983,7 +4042,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission,
+        AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, Comparator,
         ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration, FilterProp,
         GainLifePlayer, ManaSpendPermission, PermissionGrantee, PlayerFilter, PlayerScope, PtValue,
         QuantityExpr, QuantityRef, SpellContext, StaticDefinition, TargetFilter, TargetRef,
@@ -3994,8 +4053,8 @@ mod tests {
     use crate::types::counter::CounterType;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
-        AutoMayChoice, ExileLink, ExileLinkKind, LinkedExileSnapshot, MayTriggerAutoChoiceKey,
-        MayTriggerOrigin,
+        AutoMayChoice, CastingVariant, ExileLink, ExileLinkKind, LinkedExileSnapshot,
+        MayTriggerAutoChoiceKey, MayTriggerOrigin, StackEntry, StackEntryKind,
     };
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::keywords::Keyword;
@@ -5039,6 +5098,58 @@ mod tests {
         assert_eq!(state.players[1].life, 18);
         // Controller drew a card
         assert_eq!(state.players[0].hand.len(), 1);
+    }
+
+    #[test]
+    fn counter_spell_damage_rider_hits_countered_spell_controller() {
+        let mut state = GameState::new_two_player(42);
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Target Spell".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        let damage = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::ParentTargetController,
+                damage_source: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Counter {
+                target: TargetFilter::StackSpell,
+                source_static: None,
+            },
+            vec![TargetRef::Object(spell)],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(damage);
+        let mut events = Vec::new();
+
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(state.stack.is_empty());
+        assert_eq!(state.players[1].life, 18);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, GameEvent::SpellCountered { object_id, .. } if *object_id == spell)));
     }
 
     #[test]
@@ -7110,6 +7221,95 @@ mod tests {
         assert_eq!(pending.tracked_members, vec![creature_a, creature_b]);
     }
 
+    /// Issue #687 + CR 707.2 + CR 608.2: "For each token you control, create a
+    /// token that's a copy of that permanent" (Second Harvest) copies each
+    /// DISTINCT token you control — not the spell itself. The copy source is
+    /// `ParentTarget` and the loop is `repeat_for: ObjectCount`; each iteration
+    /// must rebind `ParentTarget` to the i-th controlled token. Before the
+    /// ObjectCount rebind, `ParentTarget` was unbound and `CopyTokenOf` fell back
+    /// to the source object, producing degenerate copies of Second Harvest.
+    #[test]
+    fn second_harvest_copies_each_controlled_token_not_the_source() {
+        let mut state = GameState::new_two_player(42);
+
+        let bear = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let wolf = create_object(
+            &mut state,
+            CardId(51),
+            PlayerId(0),
+            "Wolf".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [bear, wolf] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.is_token = true;
+            obj.controller = PlayerId(0);
+            obj.card_types.core_types = vec![CoreType::Creature];
+        }
+
+        // The resolving Second Harvest spell — the (wrong) fallback copy source
+        // the bug produced copies of.
+        let source = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Second Harvest".to_string(),
+            Zone::Stack,
+        );
+
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "For each token you control, create a token that's a copy of that permanent.",
+            AbilityKind::Spell,
+        );
+        let ability =
+            crate::game::ability_utils::build_resolved_from_def(&def, source, PlayerId(0));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // Count tokens on the battlefield by name. `last_created_token_ids` is
+        // overwritten per `CopyTokenOf` call, so inspect the battlefield directly.
+        // CR 608.2: the set is snapshotted before any copy enters, so exactly one
+        // copy is made per pre-existing controlled token (the new copies are not
+        // themselves copied) — leaving 2 Bears + 2 Wolves (each original plus its
+        // copy) and, critically, zero copies of Second Harvest itself.
+        let mut token_names: Vec<String> = state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .filter(|obj| obj.is_token)
+            .map(|obj| obj.name.clone())
+            .collect();
+        token_names.sort();
+        assert_eq!(
+            token_names,
+            vec![
+                "Bear".to_string(),
+                "Bear".to_string(),
+                "Wolf".to_string(),
+                "Wolf".to_string()
+            ],
+            "each controlled token gets one copy; nothing copies Second Harvest itself"
+        );
+
+        // CR 111.2: every resulting token (originals and copies) is under the
+        // caster's control — the copies don't leak to another player.
+        for obj in state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .filter(|obj| obj.is_token)
+        {
+            assert_eq!(obj.controller, PlayerId(0), "copies enter under the caster");
+        }
+    }
+
     /// CR 609.3 + CR 109.5: End-to-end iteration resumption — overloaded Winds
     /// of Abandon shape across two distinct opponent controllers. After the
     /// FIRST iteration's SearchChoice is resolved (P1 picks a basic land), the
@@ -9100,6 +9300,71 @@ mod tests {
         assert_eq!(
             count_none, 0,
             "No opponents in accumulator → count is 0 (controller is excluded)"
+        );
+    }
+
+    #[test]
+    fn per_opponent_cant_discard_consequence_draws_for_zero_count_players() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(2),
+            "Discard Me".to_string(),
+            Zone::Hand,
+        );
+        create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Draw Me".to_string(),
+            Zone::Library,
+        );
+
+        let mut discard = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        discard.player_scope = Some(PlayerFilter::Opponent);
+        let mut draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::OriginalController,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        draw.player_scope = Some(PlayerFilter::Opponent);
+        draw.condition = Some(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            comparator: Comparator::LT,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        });
+        discard.sub_ability = Some(Box::new(draw));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &discard, &mut events, 0).unwrap();
+
+        assert_eq!(
+            state.players[0].hand.len(),
+            1,
+            "P0 draws once for P1, the opponent who could not discard"
+        );
+        assert_eq!(
+            state.players[2].hand.len(),
+            0,
+            "P2 discarded their only card and should not add a draw"
         );
     }
 

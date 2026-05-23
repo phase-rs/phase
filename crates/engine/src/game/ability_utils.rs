@@ -166,7 +166,18 @@ pub fn build_chained_resolved(
     controller: PlayerId,
 ) -> Result<ResolvedAbility, EngineError> {
     if indices.is_empty() {
-        return Err(EngineError::InvalidAction("No modes selected".to_string()));
+        // CR 700.2a: "Choose up to one" permits choosing no modes. The ability
+        // still resolves, but it has no instructions to perform.
+        return Ok(ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: Vec::new(),
+                duration: None,
+                target: None,
+            },
+            Vec::new(),
+            source_id,
+            controller,
+        ));
     }
 
     let mut ordered: Vec<usize> = indices.to_vec();
@@ -248,7 +259,7 @@ pub fn parent_target_controller(ability: &ResolvedAbility, state: &GameState) ->
 pub fn parent_target_owner(ability: &ResolvedAbility, state: &GameState) -> Option<PlayerId> {
     ability.targets.iter().find_map(|t| match t {
         TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.owner),
-        TargetRef::Player(pid) => Some(*pid),
+        TargetRef::Player(_) => None,
     })
 }
 
@@ -653,7 +664,7 @@ pub fn random_select_targets_for_ability(
     // Multi-slot constraints (e.g., DifferentTargetPlayers) — reuse the same
     // validator the controller-choice path uses so random selection respects
     // every constraint declared on the ability.
-    validate_target_constraints(&chosen, constraints)?;
+    validate_target_constraints(Some(state), &chosen, constraints)?;
     Ok(chosen)
 }
 
@@ -719,7 +730,7 @@ fn validate_target_prefix(
         }
     }
 
-    validate_target_constraints(targets, constraints)
+    validate_target_constraints(None, targets, constraints)
 }
 
 pub fn generate_target_assignments(
@@ -1168,6 +1179,22 @@ fn effect_references_target_player(effect: &Effect) -> bool {
             || filter_references_target_player(target);
     }
 
+    if let Effect::GenericEffect {
+        static_abilities,
+        target: None,
+        ..
+    } = effect
+    {
+        if static_abilities.iter().any(|static_def| {
+            static_def
+                .affected
+                .as_ref()
+                .is_some_and(filter_references_target_player)
+        }) {
+            return true;
+        }
+    }
+
     match effect.target_filter() {
         Some(f) if filter_references_target_player(f) => return true,
         _ => {}
@@ -1279,7 +1306,7 @@ fn attach_filter_needs_target_slot(filter: &TargetFilter) -> bool {
 
 /// Tree-walks a `TargetFilter` and returns true if any `TypedFilter` inside
 /// it has `controller == Some(ControllerRef::TargetPlayer)`.
-fn filter_references_target_player(filter: &TargetFilter) -> bool {
+pub(crate) fn filter_references_target_player(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(TypedFilter { controller, .. }) => {
             matches!(controller, Some(ControllerRef::TargetPlayer))
@@ -2278,7 +2305,7 @@ fn validate_selected_slot_prefix(
         }
     }
 
-    validate_target_constraints(&compact_targets, constraints)
+    validate_target_constraints(None, &compact_targets, constraints)
 }
 
 fn validate_target_prefix_for_ability(
@@ -2382,7 +2409,7 @@ fn validate_selected_slots_with_specs(
         }
     }
 
-    validate_target_constraints(&compact_targets, constraints)
+    validate_target_constraints(Some(state), &compact_targets, constraints)
 }
 
 fn assign_targets_recursive(
@@ -2787,6 +2814,7 @@ fn assign_selected_slots_after_deferred_effect(
 
 /// CR 115.3: Validate targeting constraints — e.g., different target players must be distinct.
 fn validate_target_constraints(
+    state: Option<&GameState>,
     targets: &[TargetRef],
     constraints: &[TargetSelectionConstraint],
 ) -> Result<(), EngineError> {
@@ -2808,6 +2836,30 @@ fn validate_target_constraints(
                     return Err(EngineError::InvalidAction(
                         "Selected player targets must be different".to_string(),
                     ));
+                }
+            }
+            TargetSelectionConstraint::DifferentObjectControllers => {
+                let Some(state) = state else {
+                    continue;
+                };
+                let mut controllers = std::collections::HashSet::new();
+                for target in targets {
+                    let TargetRef::Object(object_id) = target else {
+                        continue;
+                    };
+                    let controller = state
+                        .objects
+                        .get(object_id)
+                        .ok_or_else(|| {
+                            EngineError::InvalidAction("Selected object target is missing".into())
+                        })?
+                        .controller;
+                    if !controllers.insert(controller) {
+                        return Err(EngineError::InvalidAction(
+                            "Selected object targets must be controlled by different players"
+                                .to_string(),
+                        ));
+                    }
                 }
             }
         }
@@ -3218,6 +3270,30 @@ mod tests {
             }
             other => panic!("expected Maze's End activated ability on stack, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn build_chained_resolved_allows_empty_up_to_mode_selection() {
+        let abilities = vec![AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Bounce {
+                target: TargetFilter::Any,
+                destination: None,
+            },
+        )];
+
+        let resolved = build_chained_resolved(&abilities, &[], ObjectId(1), PlayerId(0)).unwrap();
+
+        assert!(matches!(
+            resolved.effect,
+            Effect::GenericEffect {
+                ref static_abilities,
+                duration: None,
+                target: None,
+            } if static_abilities.is_empty()
+        ));
+        assert!(resolved.targets.is_empty());
+        assert!(resolved.sub_ability.is_none());
     }
 
     #[test]
@@ -4138,6 +4214,79 @@ mod tests {
     }
 
     #[test]
+    fn target_selection_filters_objects_with_same_controller() {
+        let mut state = GameState::new_two_player(42);
+        let p0_a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "P0 A".to_string(),
+            Zone::Battlefield,
+        );
+        let p0_b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "P0 B".to_string(),
+            Zone::Battlefield,
+        );
+        let p1_a = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "P1 A".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [p0_a, p0_b, p1_a] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            Vec::new(),
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.multi_target = Some(MultiTargetSpec::fixed(2, 2));
+        let slots = build_target_slots(&state, &ability).expect("target slots");
+        let progress = begin_target_selection_for_ability(
+            &state,
+            &ability,
+            &slots,
+            &[TargetSelectionConstraint::DifferentObjectControllers],
+        )
+        .expect("selection starts");
+
+        let TargetSelectionAdvance::InProgress(progress) = choose_target_for_ability(
+            &state,
+            &ability,
+            &slots,
+            &[TargetSelectionConstraint::DifferentObjectControllers],
+            &progress,
+            Some(TargetRef::Object(p0_a)),
+        )
+        .expect("first target accepted") else {
+            panic!("expected second target prompt");
+        };
+
+        assert_eq!(
+            progress.current_legal_targets,
+            vec![TargetRef::Object(p1_a)]
+        );
+        assert!(!progress
+            .current_legal_targets
+            .contains(&TargetRef::Object(p0_b)));
+    }
+
+    #[test]
     fn auto_select_targets_preserves_optional_single_target_choice() {
         let slots = vec![TargetSelectionSlot {
             legal_targets: vec![TargetRef::Player(PlayerId(1))],
@@ -5020,6 +5169,7 @@ mod tests {
                 target: TargetFilter::Player,
                 card_filter: TargetFilter::Any,
                 count: None,
+                random: false,
                 choice_optional: false,
             },
             vec![],
@@ -5144,6 +5294,92 @@ mod tests {
                 chosen.0
             );
         }
+    }
+
+    /// CR 115.1 + CR 611.2c: Continuous effects whose affected set is
+    /// parameterized by "target player" also declare a player target even when
+    /// `GenericEffect.target` itself is absent. Sudden Spoiling is this class:
+    /// "creatures target player controls lose all abilities..."
+    #[test]
+    fn build_target_slots_surfaces_player_slot_for_generic_effect_static_affected_target_player() {
+        let state = GameState::new_two_player(42);
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+            ))
+            .modifications(vec![ContinuousModification::RemoveAllAbilities]);
+        let mut ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![static_def],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+
+        let slots = build_target_slots(&state, &ability).expect("should build");
+        assert_eq!(
+            slots.len(),
+            1,
+            "expected one companion player slot for TargetPlayer affected filter"
+        );
+        assert!(slots[0]
+            .legal_targets
+            .contains(&TargetRef::Player(PlayerId(0))));
+        assert!(slots[0]
+            .legal_targets
+            .contains(&TargetRef::Player(PlayerId(1))));
+
+        assign_targets_in_chain(&state, &mut ability, &[TargetRef::Player(PlayerId(1))])
+            .expect("companion player target should assign to GenericEffect");
+        assert_eq!(ability.targets, vec![TargetRef::Player(PlayerId(1))]);
+    }
+
+    #[test]
+    fn build_target_slots_generic_effect_explicit_target_ignores_target_player_static_affected() {
+        let mut state = GameState::new_two_player(42);
+        let target_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Target Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&target_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+            ))
+            .modifications(vec![ContinuousModification::RemoveAllAbilities]);
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![static_def],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: Some(TargetFilter::Typed(TypedFilter::creature())),
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+
+        let slots = build_target_slots(&state, &ability).expect("should build");
+        assert_eq!(
+            slots.len(),
+            1,
+            "explicit GenericEffect.target owns target-slot surfacing"
+        );
+        assert_eq!(
+            slots[0].legal_targets,
+            vec![TargetRef::Object(target_creature)]
+        );
     }
 
     /// CR 115.1 + CR 404 + CR 406: Nihil Spellbomb / Bojuka Bog / Tormod's
@@ -5973,6 +6209,31 @@ mod tests {
             parent_target_controller(&ability, &state),
             Some(PlayerId(1)),
             "Object target should resolve to that object's controller"
+        );
+    }
+
+    /// CR 108.3 + CR 608.2c: "its owner" refers to an object target's owner,
+    /// not a companion player target that happens to precede it.
+    #[test]
+    fn parent_target_owner_ignores_player_targets() {
+        let mut state = GameState::new_two_player(42);
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Owned Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&creature).unwrap().owner = PlayerId(0);
+        let ability = make_simple_ability(
+            vec![TargetRef::Player(PlayerId(1)), TargetRef::Object(creature)],
+            ObjectId(0),
+        );
+
+        assert_eq!(
+            parent_target_owner(&ability, &state),
+            Some(PlayerId(0)),
+            "ParentTargetOwner must skip player targets and read the object owner"
         );
     }
 

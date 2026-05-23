@@ -39,7 +39,6 @@ interface OpponentHudProps {
 
 export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
   const [kickTarget, setKickTarget] = useState<PlayerId | null>(null);
-  const [manualFollowOverride, setManualFollowOverride] = useState(false);
   const playerId = usePerspectivePlayerId();
   const focusedOpponent = useUiStore((s) => s.focusedOpponent) as PlayerId | null;
   const setFocusedOpponent = useUiStore((s) => s.setFocusedOpponent);
@@ -171,30 +170,24 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
   );
   const handleSelectFocus = useCallback(
     (opId: PlayerId) => {
-      const isManualOverride = followActiveOpponent
-        && (activeFollowedOpponent != null
-          ? opId !== activeFollowedOpponent
-          : opId !== effectiveFocused);
-      if (isManualOverride) {
+      if (
+        followActiveOpponent
+        && activeFollowedOpponent != null
+        && opId !== activeFollowedOpponent
+      ) {
         setFollowActiveOpponent(false);
-        setManualFollowOverride(true);
       }
       setFocusedOpponent(opId);
     },
     [
       activeFollowedOpponent,
-      effectiveFocused,
       followActiveOpponent,
       setFocusedOpponent,
       setFollowActiveOpponent,
     ],
   );
   const handleToggleFollowActiveOpponent = useCallback(() => {
-    const enabled = !followActiveOpponent;
-    setFollowActiveOpponent(enabled);
-    if (enabled) {
-      setManualFollowOverride(false);
-    }
+    setFollowActiveOpponent(!followActiveOpponent);
   }, [followActiveOpponent, setFollowActiveOpponent]);
 
   const disconnectedPlayers = useMultiplayerStore((s) => s.disconnectedPlayers);
@@ -317,7 +310,6 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
       />
       <FollowActiveToggle
         enabled={followActiveOpponent}
-        manualOverride={manualFollowOverride}
         onToggle={handleToggleFollowActiveOpponent}
       />
     </div>
@@ -326,11 +318,9 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
 
 function FollowActiveToggle({
   enabled,
-  manualOverride,
   onToggle,
 }: {
   enabled: boolean;
-  manualOverride: boolean;
   onToggle: () => void;
 }) {
   const tooltipId = useId();
@@ -339,52 +329,40 @@ function FollowActiveToggle({
     : "Follow active opponent. Focus will switch to the opponent whose turn it is.";
 
   return (
-    <div className="flex items-center gap-1">
-      <button
-        type="button"
-        aria-label={tooltip}
-        aria-describedby={tooltipId}
-        aria-pressed={enabled}
-        onClick={onToggle}
-        className={`group relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full border backdrop-blur-xl transition-all duration-200 ${
-          enabled
-            ? "border-amber-300/45 bg-amber-500/18 text-amber-100 shadow-[0_0_18px_rgba(245,158,11,0.24)]"
-            : "border-white/10 bg-slate-950/62 text-slate-300 hover:border-white/20 hover:text-white"
+    <button
+      type="button"
+      aria-label={tooltip}
+      aria-describedby={tooltipId}
+      aria-pressed={enabled}
+      onClick={onToggle}
+      className={`group relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full border backdrop-blur-xl transition-all duration-200 ${
+        enabled
+          ? "border-amber-300/45 bg-amber-500/18 text-amber-100 shadow-[0_0_18px_rgba(245,158,11,0.24)]"
+          : "border-white/10 bg-slate-950/62 text-slate-300 hover:border-white/20 hover:text-white"
+      }`}
+    >
+      <span
+        aria-hidden
+        className={`relative flex h-[18px] w-[18px] items-center justify-center rounded-full border ${
+          enabled ? "border-amber-200" : "border-current"
         }`}
       >
+        <span className="absolute left-1/2 top-0 h-full w-px -translate-x-1/2 bg-current opacity-75" />
+        <span className="absolute left-0 top-1/2 h-px w-full -translate-y-1/2 bg-current opacity-75" />
         <span
-          aria-hidden
-          className={`relative flex h-[18px] w-[18px] items-center justify-center rounded-full border ${
-            enabled ? "border-amber-200" : "border-current"
+          className={`h-1.5 w-1.5 rounded-full ${
+            enabled ? "bg-amber-200 shadow-[0_0_8px_rgba(251,191,36,0.85)]" : "bg-current"
           }`}
-        >
-          <span className="absolute left-1/2 top-0 h-full w-px -translate-x-1/2 bg-current opacity-75" />
-          <span className="absolute left-0 top-1/2 h-px w-full -translate-y-1/2 bg-current opacity-75" />
-          <span
-            className={`h-1.5 w-1.5 rounded-full ${
-              enabled ? "bg-amber-200 shadow-[0_0_8px_rgba(251,191,36,0.85)]" : "bg-current"
-            }`}
-          />
-        </span>
-        <span
-          id={tooltipId}
-          role="tooltip"
-          className="pointer-events-none absolute right-0 bottom-full z-50 mb-2 hidden w-64 rounded-md border border-white/10 bg-slate-950/95 px-3 py-2 text-left text-[11px] leading-snug font-medium text-slate-100 shadow-2xl shadow-black/40 backdrop-blur-xl group-hover:block group-focus-visible:block"
-        >
-          {tooltip}
-        </span>
-      </button>
-      {manualOverride && !enabled && (
-        <span
-          role="status"
-          aria-live="polite"
-          title="Auto-follow disabled by manual opponent selection"
-          className="rounded-full border border-cyan-300/35 bg-cyan-950/45 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-cyan-100"
-        >
-          Follow off
-        </span>
-      )}
-    </div>
+        />
+      </span>
+      <span
+        id={tooltipId}
+        role="tooltip"
+        className="pointer-events-none absolute right-0 bottom-full z-50 mb-2 hidden w-64 rounded-md border border-white/10 bg-slate-950/95 px-3 py-2 text-left text-[11px] leading-snug font-medium text-slate-100 shadow-2xl shadow-black/40 backdrop-blur-xl group-hover:block group-focus-visible:block"
+      >
+        {tooltip}
+      </span>
+    </button>
   );
 }
 

@@ -1684,6 +1684,7 @@ pub(super) fn try_parse_dig_instead_alternative(
     // Gate: previous effect must be a Dig that the alternative can piggy-back on.
     let prev = previous?;
     let Effect::Dig {
+        player: prev_player,
         count: prev_count,
         destination: _,
         keep_count: _,
@@ -1741,6 +1742,7 @@ pub(super) fn try_parse_dig_instead_alternative(
     // preceding Dig's (already-patched or None — a trailing PutRest continuation
     // patches both branches by rewriting into the chain).
     let alt_effect = Effect::Dig {
+        player: prev_player.clone(),
         count: prev_count.clone(),
         destination: alt_destination,
         keep_count: Some(alt_keep_count),

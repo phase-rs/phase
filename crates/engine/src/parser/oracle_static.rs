@@ -2628,8 +2628,8 @@ fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition> {
         return defs;
     }
 
-    // CR 508.1d / CR 509.1c: Cross-mode conjunctions of the form
-    // "<predicate_1> and attack/block each combat if able" combine a
+    // CR 508.1d / CR 509.1c / CR 701.15b: Cross-mode conjunctions of the form
+    // "<predicate_1> and attack/block each combat if able/is goaded" combine a
     // continuous static (usually a keyword grant) with a combat requirement.
     // A single `StaticDefinition` cannot carry both modes, so decompose them.
     if let Some(defs) = try_split_and_must_attack_block(&stripped) {
@@ -2837,6 +2837,10 @@ fn try_split_and_must_attack_block(text: &str) -> Option<Vec<StaticDefinition>> 
                     tag::<_, _, VE>("must be blocked each combat if able"),
                     tag("must be blocked if able"),
                 )),
+            ),
+            value(
+                vec![StaticMode::Goaded],
+                alt((tag::<_, _, VE>("is goaded"), tag("are goaded"))),
             ),
         ))
         .parse(i)
@@ -12653,6 +12657,21 @@ mod tests {
         assert_eq!(defs[2].mode, StaticMode::Goaded);
         assert_eq!(defs[1].affected, defs[0].affected);
         assert_eq!(defs[2].affected, defs[0].affected);
+    }
+
+    #[test]
+    fn static_pump_and_goaded_emits_both_defs() {
+        let defs = parse_static_line_multi("Enchanted creature gets +2/+2 and is goaded.");
+        assert_eq!(defs.len(), 2);
+        assert_eq!(defs[0].mode, StaticMode::Continuous);
+        assert!(defs[0]
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 2 }));
+        assert!(defs[0]
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 2 }));
+        assert_eq!(defs[1].mode, StaticMode::Goaded);
+        assert_eq!(defs[1].affected, defs[0].affected);
     }
 
     #[test]

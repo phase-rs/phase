@@ -35,6 +35,34 @@ pub(crate) struct DamageContext {
     pub(crate) combat_damage_poison: u32,
 }
 
+fn player_context_target(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+) -> Option<TargetRef> {
+    if matches!(
+        target_filter,
+        TargetFilter::Controller
+            | TargetFilter::OriginalController
+            | TargetFilter::ScopedPlayer
+            | TargetFilter::TriggeringSpellController
+            | TargetFilter::TriggeringSpellOwner
+            | TargetFilter::TriggeringPlayer
+            | TargetFilter::DefendingPlayer
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTargetOwner
+            | TargetFilter::PostReplacementSourceController
+    ) {
+        Some(TargetRef::Player(super::resolve_player_for_context_ref(
+            state,
+            ability,
+            target_filter,
+        )))
+    } else {
+        None
+    }
+}
+
 impl DamageContext {
     /// Build context by reading keywords from the source object.
     /// Returns None if source doesn't exist in state.
@@ -586,6 +614,9 @@ pub fn resolve(
     let implicit;
     let effective_targets: &[TargetRef] = if matches!(target_filter, TargetFilter::SelfRef) {
         implicit = vec![TargetRef::Object(ability.source_id)];
+        &implicit
+    } else if let Some(target) = player_context_target(state, ability, target_filter) {
+        implicit = vec![target];
         &implicit
     } else if !ability.targets.is_empty() {
         if matches!(damage_source, Some(DamageSource::Target)) && ability.targets.len() > 1 {

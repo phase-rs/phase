@@ -68,6 +68,35 @@ pub(crate) fn parse_quantity_ref_with_context(
         }
     }
 
+    if all_consuming(pair(
+        tag::<_, _, OracleError<'_>>("the number of"),
+        alt((tag(" counters on ~"), tag(" counters on it"))),
+    ))
+    .parse(trimmed)
+    .is_ok()
+    {
+        return Some(QuantityRef::CountersOn {
+            scope: ObjectScope::Source,
+            counter_type: None,
+        });
+    }
+
+    if all_consuming(pair(
+        tag::<_, _, OracleError<'_>>("the number of"),
+        alt((
+            tag(" counters on that creature"),
+            tag(" counters on that permanent"),
+        )),
+    ))
+    .parse(trimmed)
+    .is_ok()
+    {
+        return Some(QuantityRef::CountersOn {
+            scope: ObjectScope::Target,
+            counter_type: None,
+        });
+    }
+
     // "[counter type] counter(s) on ~" / "[counter type] counter(s) on it"
     // Handles both plural ("counters on ~") and singular ("counter on ~") forms.
     if let Some(rest) = trimmed
@@ -1658,6 +1687,40 @@ mod tests {
                 counter_type: Some(ref counter_type),
             } => assert_eq!(*counter_type, CounterType::Age),
             other => panic!("Expected CountersOn{{Source, age}}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quantity_ref_all_counters_on_normalized_self() {
+        for phrase in [
+            "the number of counters on ~",
+            "the number of counters on it",
+        ] {
+            let qty = parse_quantity_ref(phrase).unwrap();
+            match qty {
+                QuantityRef::CountersOn {
+                    scope: ObjectScope::Source,
+                    counter_type: None,
+                } => {}
+                other => panic!("Expected CountersOn{{Source, any}} for {phrase}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn quantity_ref_all_counters_on_that_object() {
+        for phrase in [
+            "the number of counters on that creature",
+            "the number of counters on that permanent",
+        ] {
+            let qty = parse_quantity_ref(phrase).unwrap();
+            match qty {
+                QuantityRef::CountersOn {
+                    scope: ObjectScope::Target,
+                    counter_type: None,
+                } => {}
+                other => panic!("Expected CountersOn{{Target, any}} for {phrase}, got {other:?}"),
+            }
         }
     }
 

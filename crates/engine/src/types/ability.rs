@@ -11,6 +11,7 @@ use super::counter::{CounterMatch, CounterType};
 use super::events::BendingType;
 use super::game_state::{
     is_zero_usize, DistributionUnit, LKISnapshot, MayTriggerOrigin, RetargetScope,
+    TargetSelectionConstraint,
 };
 use super::identifiers::ObjectId;
 use super::keywords::{Keyword, KeywordKind};
@@ -5011,6 +5012,10 @@ pub enum Effect {
     /// CR 701.20e + CR 608.2c: Look at top N cards (shown only to the looking player),
     /// select some to keep per the effect's instructions, rest go elsewhere.
     Dig {
+        /// Which player's library is inspected. Defaults to the ability controller
+        /// for "your library"; `Player` covers "target player's library".
+        #[serde(default = "default_target_filter_controller")]
+        player: TargetFilter,
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
         /// Kept-card destination override (None = Hand).
@@ -5492,6 +5497,9 @@ pub enum Effect {
         /// None = reveal entire hand. Some = reveal this many cards. CR 701.20a.
         #[serde(default)]
         count: Option<QuantityExpr>,
+        /// CR 701.20a: When true, reveal `count` cards chosen at random from that hand.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        random: bool,
         /// CR 608.2d: "You may choose a [card] from it" makes the post-reveal
         /// card selection optional while the hand reveal itself remains mandatory.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -6032,6 +6040,13 @@ pub enum Effect {
     /// attack a player other than the goading player if able. Duration is until the
     /// goading player's next turn (UntilNextTurnOf).
     Goad {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+    },
+    /// CR 701.15a/b: Goad every creature matching a battlefield filter without
+    /// declaring targets. Mirrors `DestroyAll` / `TapAll` for mass Oracle text
+    /// like "Goad all creatures you don't control."
+    GoadAll {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
@@ -6897,9 +6912,9 @@ impl Effect {
                 }
             }
 
-            Effect::ExileTop { player, .. } | Effect::ExileFromTopUntil { player, .. } => {
-                Some(player)
-            }
+            Effect::Dig { player, .. }
+            | Effect::ExileTop { player, .. }
+            | Effect::ExileFromTopUntil { player, .. } => Some(player),
 
             // CR 111.2 + CR 601.2c: "Target player creates ..." token modes
             // (e.g. Ashling's Command mode 4, Brigid's Command, Prismari Command)
@@ -6933,10 +6948,10 @@ impl Effect {
             | Effect::DestroyAll { .. }
             | Effect::TapAll { .. }
             | Effect::UntapAll { .. }
+            | Effect::GoadAll { .. }
             | Effect::BounceAll { .. }
             | Effect::CounterAll { .. }
             | Effect::ChangeZoneAll { .. }
-            | Effect::Dig { .. }
             | Effect::PutCounterAll { .. }
             | Effect::DoublePTAll { .. }
             | Effect::Explore
@@ -7157,6 +7172,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::PutOnTopOrBottom { .. } => "PutOnTopOrBottom",
         Effect::GiftDelivery { .. } => "GiftDelivery",
         Effect::Goad { .. } => "Goad",
+        Effect::GoadAll { .. } => "GoadAll",
         Effect::Detain { .. } => "Detain",
         Effect::ExchangeControl { .. } => "ExchangeControl",
         Effect::ChangeTargets { .. } => "ChangeTargets",
@@ -7329,6 +7345,7 @@ pub enum EffectKind {
     PutOnTopOrBottom,
     GiftDelivery,
     Goad,
+    GoadAll,
     Detain,
     ExchangeControl,
     ChangeTargets,
@@ -7506,6 +7523,7 @@ impl From<&Effect> for EffectKind {
             Effect::PutOnTopOrBottom { .. } => EffectKind::PutOnTopOrBottom,
             Effect::GiftDelivery { .. } => EffectKind::GiftDelivery,
             Effect::Goad { .. } => EffectKind::Goad,
+            Effect::GoadAll { .. } => EffectKind::GoadAll,
             Effect::Detain { .. } => EffectKind::Detain,
             Effect::ExchangeControl { .. } => EffectKind::ExchangeControl,
             Effect::ChangeTargets { .. } => EffectKind::ChangeTargets,
@@ -7867,6 +7885,9 @@ pub struct AbilityDefinition {
     /// CR 601.2c + CR 115.1d.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_target: Option<MultiTargetSpec>,
+    /// CR 115.1 + CR 601.2c: Additional legality constraints across selected targets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_constraints: Vec<TargetSelectionConstraint>,
     /// CR 601.2c + CR 608.2d: Timing for object/player choices represented by
     /// this ability's target filter. Stack timing is true targeting; resolution
     /// timing is used for non-target instructions such as "return a land card
@@ -7980,6 +8001,8 @@ struct AbilityDefinitionRepr<'a> {
     optional_for: &'a Option<OpponentMayScope>,
     #[serde(skip_serializing_if = "Option::is_none")]
     multi_target: &'a Option<MultiTargetSpec>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    target_constraints: &'a Vec<TargetSelectionConstraint>,
     #[serde(skip_serializing_if = "TargetChoiceTiming::is_stack")]
     target_choice_timing: TargetChoiceTiming,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -8034,6 +8057,7 @@ impl Serialize for AbilityDefinition {
             optional,
             optional_for,
             multi_target,
+            target_constraints,
             target_choice_timing,
             distribute,
             unless_pay,
@@ -8069,6 +8093,7 @@ impl Serialize for AbilityDefinition {
             optional: *optional,
             optional_for,
             multi_target,
+            target_constraints,
             target_choice_timing: *target_choice_timing,
             distribute,
             unless_pay,
@@ -8192,6 +8217,7 @@ impl AbilityDefinition {
             optional: false,
             optional_for: None,
             multi_target: None,
+            target_constraints: Vec::new(),
             target_choice_timing: TargetChoiceTiming::Stack,
             distribute: None,
             unless_pay: None,
@@ -8237,6 +8263,11 @@ impl AbilityDefinition {
 
     pub fn multi_target(mut self, spec: MultiTargetSpec) -> Self {
         self.multi_target = Some(spec);
+        self
+    }
+
+    pub fn target_constraint(mut self, constraint: TargetSelectionConstraint) -> Self {
+        self.target_constraints.push(constraint);
         self
     }
 

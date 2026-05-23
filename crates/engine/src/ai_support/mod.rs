@@ -383,6 +383,12 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             },
             GameAction::SelectCards { cards: chosen },
         ) => selection_mismatch(chosen, cards, Some(*count)),
+        (
+            WaitingFor::RemoveCounterForCost {
+                permanents: cards, ..
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => selection_mismatch(chosen, cards, Some(1)),
         // CR 701.68a: Blight always selects exactly one creature, regardless of N.
         (WaitingFor::BlightChoice { creatures, .. }, GameAction::SelectCards { cards: chosen }) => {
             selection_mismatch(chosen, creatures, Some(1))

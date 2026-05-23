@@ -740,7 +740,12 @@ export function MultiplayerPage() {
 
         {view === "lobby" && (
           <LobbyView
-            key={lobbyRetryKey}
+            // Remount on server change so local lobby state (playerCount,
+            // game list) resets and the subscription effect re-runs against
+            // the freshly-dialed socket — without this, switching servers
+            // left the previous region's PlayerCount on screen. lobbyRetryKey
+            // still drives the "Keep waiting" offline retry.
+            key={`${serverAddress}:${lobbyRetryKey}`}
             onHostGame={() => { setConnectionMode("server"); setView("host-setup"); }}
             onHostP2P={() => { setConnectionMode("p2p"); setView("host-setup"); }}
             onHostDraft={experimentalFeatures ? handleHostDraft : undefined}
