@@ -50,7 +50,7 @@ After a non-zero `tilt-wait.sh` exit, fetch details with `tilt logs <resource> -
 
 - `crates/phase-ai/src/combo/mod.rs` — module entry + `ComboRegistry`
 - `crates/phase-ai/src/combo/line.rs` — `ComboLine`, `ComboPiece`, `ComboStep`, `ComboReachability`, `WinKind`, `ComboLineId`
-- `crates/phase-ai/src/combo/detection.rs` — `ComboDetector` trait + `DefaultComboDetector`
+- `crates/phase-ai/src/combo/detection.rs` — `ComboDetector` trait + `StructuralComboDetector`
 - `crates/phase-ai/src/combo/registry.rs` — registered combo lines (stub initially)
 - `crates/phase-ai/src/policies/combo_line.rs` — `ComboLinePolicy` (`TacticalPolicy`)
 - `crates/phase-ai/src/policies/mulligan/cedh_keepables.rs` — `CedhKeepablesMulligan` (`MulliganPolicy`)
@@ -64,12 +64,12 @@ After a non-zero `tilt-wait.sh` exit, fetch details with `tilt logs <resource> -
 - `crates/phase-ai/src/features/mod.rs` — `is_cedh: bool` field on `DeckFeatures`
 - `crates/phase-ai/src/policies/registry.rs` — `PolicyId::ComboLineProgress` + register `ComboLinePolicy`
 - `crates/phase-ai/src/policies/mulligan/mod.rs` — `pub mod cedh_keepables;` + `PolicyId::CedhKeepablesMulligan` + register
-- `crates/engine/src/database/legality.rs` — `validate_cedh_bracket` + `BracketViolation` error
+- `crates/engine/src/database/legality.rs` — `validate_cedh_bracket` + `CedhBracketError` error
 - `client/src/components/menu/AiDifficultyDropdown.tsx` — cEDH option + B5 badge
 - `client/src/components/menu/AiOpponentConfig.tsx` — cascade-on-cEDH + toast
 - `client/src/services/aiDeckCatalog.ts` — `filterByBracket(decks, tier)`
 - `client/src/pages/GameSetupPage.tsx` — warning chip when human deck not B5 + any AI is cEDH
-- `client/src/pages/GamePage.tsx` — render typed `BracketViolation` error as blocking modal
+- `client/src/pages/GamePage.tsx` — render typed `CedhBracketError` error as blocking modal
 - WASM/Tauri/server game-setup boundaries — call `validate_cedh_bracket` before `initialize_game`
 
 ---
@@ -610,7 +610,7 @@ tier."
 
 `validate_cedh_bracket` is an engine-side tag check (per spec section 5.5). Pure unit-tested.
 
-## Task 3.1: Add `BracketViolation` error + `validate_cedh_bracket` function
+## Task 3.1: Add `CedhBracketError` error + `validate_cedh_bracket` function
 
 **Files:**
 - Modify: `crates/engine/src/database/legality.rs`
@@ -622,7 +622,7 @@ tier."
 cat crates/engine/src/database/legality.rs | head -50
 ```
 
-Find the existing error types and conventions (probably a `LegalityError` enum or similar). Add `BracketViolation` consistently.
+Find the existing error types and conventions (probably a `LegalityError` enum or similar). Add `CedhBracketError` consistently.
 
 - [ ] **Step 2: Write the failing test**
 
@@ -660,7 +660,7 @@ mod cedh_bracket_tests {
         let b = make_deck("b", CommanderBracketTier::Upgraded);
         let err = validate_cedh_bracket(&[&a, &b]).unwrap_err();
         match err {
-            BracketViolation::DeckNotCedh { deck_name, actual_tier } => {
+            CedhBracketError::DeckNotCedh { deck_name, actual_tier } => {
                 assert_eq!(deck_name, "b");
                 assert_eq!(actual_tier, CommanderBracketTier::Upgraded);
             }
@@ -683,7 +683,7 @@ If the actual `Deck` type lacks `empty()` and `set_bracket_tier()` constructors,
 
 - [ ] **Step 3: Run to verify it fails**
 
-`cargo test -p engine cedh_bracket_tests --no-fail-fast` — expect compile errors (missing `BracketViolation`, missing `validate_cedh_bracket`).
+`cargo test -p engine cedh_bracket_tests --no-fail-fast` — expect compile errors (missing `CedhBracketError`, missing `validate_cedh_bracket`).
 
 - [ ] **Step 4: Add the function and error type**
 
@@ -698,14 +698,14 @@ use crate::game::bracket_estimate::CommanderBracketTier;
 /// `crates/engine/src/game/bracket_estimate.rs:22-29` algorithmically returns
 /// only `B1..=B4`, never `Cedh`. Validation is therefore a tag check.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BracketViolation {
+pub enum CedhBracketError {
     DeckNotCedh {
         deck_name: String,
         actual_tier: CommanderBracketTier,
     },
 }
 
-impl std::fmt::Display for BracketViolation {
+impl std::fmt::Display for CedhBracketError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::DeckNotCedh { deck_name, actual_tier } => write!(
@@ -716,18 +716,18 @@ impl std::fmt::Display for BracketViolation {
     }
 }
 
-impl std::error::Error for BracketViolation {}
+impl std::error::Error for CedhBracketError {}
 
 /// Validate that every deck is declared as `CommanderBracketTier::Cedh`.
 /// Called at game-setup time when any AI seat uses `AiDifficulty::CEDH`.
 ///
 /// Returns the **first** non-cEDH deck encountered. If the caller wants the
 /// full list, iterate and collect at the call site.
-pub fn validate_cedh_bracket(decks: &[&crate::types::deck::Deck]) -> Result<(), BracketViolation> {
+pub fn validate_cedh_bracket(decks: &[&crate::types::deck::Deck]) -> Result<(), CedhBracketError> {
     for deck in decks {
         let tier = deck.bracket_tier();  // adjust accessor to match Deck's API
         if tier != CommanderBracketTier::Cedh {
-            return Err(BracketViolation::DeckNotCedh {
+            return Err(CedhBracketError::DeckNotCedh {
                 deck_name: deck.name().to_string(),
                 actual_tier: tier,
             });
@@ -754,7 +754,7 @@ bracket_estimate.rs:22-29 (Cedh is never returned by the
 estimator). validate_cedh_bracket asserts every deck has its
 tier explicitly set to CommanderBracketTier::Cedh.
 
-Returns typed BracketViolation::DeckNotCedh on the first
+Returns typed CedhBracketError::DeckNotCedh on the first
 offender; callers collect across decks if needed."
 ```
 
@@ -897,7 +897,7 @@ pub mod registry;
 pub use line::{
     CardPredicate, ComboLine, ComboLineId, ComboPiece, ComboReachability, ComboStep, WinKind,
 };
-pub use detection::{ComboDetector, DefaultComboDetector};
+pub use detection::{ComboDetector, StructuralComboDetector};
 pub use registry::ComboRegistry;
 ```
 
@@ -958,9 +958,9 @@ pub trait ComboDetector: Send + Sync {
 /// - `state.battlefield` filtered by `controller == ai` for on-board pieces.
 /// - `crate::zone_eval::available_mana(state, ai)` for mana shortfall.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct DefaultComboDetector;
+pub struct StructuralComboDetector;
 
-impl ComboDetector for DefaultComboDetector {
+impl ComboDetector for StructuralComboDetector {
     fn assess(
         &self,
         state: &GameState,
@@ -1048,7 +1048,7 @@ fn mana_cost_total(cost: &engine::types::mana::ManaCost) -> i32 {
         engine::types::mana::ManaCost::Cost { shards, generic } => {
             (shards.len() as i32) + (*generic as i32)
         }
-        engine::types::mana::ManaCost::Free => 0,
+        engine::types::mana::ManaCost::NoCost => 0,
         // Add any other variants the engine exposes; match exhaustively.
         _ => 0,
     }
@@ -1071,7 +1071,7 @@ mod tests {
             id: ComboLineId(999),
             name: "test stub",
             pieces: vec![ComboPiece::InHand(CardPredicate::NameEquals("__test_piece__"))],
-            mana_cost: ManaCost::Free,
+            mana_cost: ManaCost::NoCost,
             action_sequence: Vec::new(),
             win_kind: WinKind::ImmediateLoss,
         }
@@ -1081,7 +1081,7 @@ mod tests {
     fn empty_state_yields_not_reachable() {
         let s = empty_state();
         let line = one_piece_line();
-        let r = DefaultComboDetector.assess(&s, &line, PlayerId(0));
+        let r = StructuralComboDetector.assess(&s, &line, PlayerId(0));
         assert!(matches!(r, ComboReachability::NotReachable));
     }
 }
@@ -1103,7 +1103,7 @@ If `engine::types::mana::ManaCost` has variants beyond `Cost { shards, generic }
 
 ```bash
 git add crates/phase-ai/src/combo/detection.rs
-git commit -m "feat(phase-ai): DefaultComboDetector
+git commit -m "feat(phase-ai): StructuralComboDetector
 
 Walks ComboLine::pieces, matches against AI player's zones,
 computes mana shortfall via zone_eval::available_mana.
@@ -1149,7 +1149,7 @@ use engine::types::game_state::GameState;
 use engine::types::mana::ManaCost;
 use engine::types::player::PlayerId;
 
-use crate::combo::detection::{ComboDetector, DefaultComboDetector};
+use crate::combo::detection::{ComboDetector, StructuralComboDetector};
 use crate::combo::line::{
     CardPredicate, ComboLine, ComboLineId, ComboPiece, ComboReachability, WinKind,
 };
@@ -1163,7 +1163,7 @@ impl Default for ComboRegistry {
     fn default() -> Self {
         Self {
             lines: vec![stub_line()],
-            detector: Box::new(DefaultComboDetector),
+            detector: Box::new(StructuralComboDetector),
         }
     }
 }
@@ -1196,7 +1196,7 @@ fn stub_line() -> ComboLine {
         pieces: vec![ComboPiece::OnBattlefield(CardPredicate::NameEquals(
             "__cedh_stub_test_creature__",
         ))],
-        mana_cost: ManaCost::Free,
+        mana_cost: ManaCost::NoCost,
         action_sequence: Vec::new(),
         win_kind: WinKind::LethalDamage,
     }
@@ -2366,7 +2366,7 @@ grep -rn "initialize_game\|wasm_bindgen" crates/engine-wasm/src/ --include="*.rs
 
 - [ ] **Step 2: Wire the validation**
 
-In the WASM `initialize_game` exposed function, after parsing the deck list and before calling the engine's actual game-init function, check whether any AI seat uses cEDH difficulty. If so, call `validate_cedh_bracket` on the deck list and surface any `BracketViolation` as a JS-returnable error.
+In the WASM `initialize_game` exposed function, after parsing the deck list and before calling the engine's actual game-init function, check whether any AI seat uses cEDH difficulty. If so, call `validate_cedh_bracket` on the deck list and surface any `CedhBracketError` as a JS-returnable error.
 
 ```rust
 use engine::database::legality::validate_cedh_bracket;
@@ -2398,7 +2398,7 @@ git commit -m "feat(engine-wasm): validate cEDH bracket at game init
 
 When any AI seat is AiDifficulty::CEDH, the WASM bridge
 runs validate_cedh_bracket(&decks) before initialize_game.
-Returns the typed BracketViolation::Display() to JS as an
+Returns the typed CedhBracketError::Display() to JS as an
 error string."
 ```
 
@@ -2443,7 +2443,7 @@ phase-server logs the future integration point; multiplayer
 cEDH gating is out of scope for the skeleton."
 ```
 
-## Task 8.3: Render `BracketViolation` as a blocking modal in `GamePage`
+## Task 8.3: Render `CedhBracketError` as a blocking modal in `GamePage`
 
 **Files:**
 - Modify: `client/src/pages/GamePage.tsx`
@@ -2457,8 +2457,8 @@ import { render, screen } from '@testing-library/react';
 import { GamePage } from '../GamePage';
 
 describe('GamePage — bracket violation', () => {
-  it('renders a blocking modal when the engine reports a BracketViolation', () => {
-    // Simulate the engine returning a BracketViolation via the adapter.
+  it('renders a blocking modal when the engine reports a CedhBracketError', () => {
+    // Simulate the engine returning a CedhBracketError via the adapter.
     // Adjust to the project's mocking pattern.
     // ...
 
@@ -2498,7 +2498,7 @@ Expected: the new test passes; existing GamePage tests pass; type-check + lint c
 
 ```bash
 git add client/src/pages/GamePage.tsx client/src/pages/__tests__/GamePage.test.tsx
-git commit -m "feat(client): blocking modal for BracketViolation
+git commit -m "feat(client): blocking modal for CedhBracketError
 
 GamePage surfaces validate_cedh_bracket failures as a
 blocking modal with a Return-to-setup escape hatch. Final
@@ -2664,7 +2664,7 @@ EOF
 
 **Placeholder scan** — No `TBD` / `TODO` / `fill in details`. Each step includes either the actual code, the exact command, or a precise `grep`-then-adjust directive that an agent can execute mechanically.
 
-**Type consistency** — `ComboLine`, `ComboPiece`, `ComboReachability`, `WinKind`, `ComboStep`, `ComboLineId`, `CardPredicate`, `ComboDetector`, `DefaultComboDetector`, `ComboRegistry`, `ComboLinePolicy`, `CedhKeepablesMulligan`, `PolicyId::ComboLineProgress`, `PolicyId::CedhKeepablesMulligan`, `DeckFeatures::is_cedh`, `BracketViolation::DeckNotCedh`, `validate_cedh_bracket`, `anyAiOpponentIsCedh`, `applyCedhCascade`, `isDeckCedhLegal`, `filterByBracket` — all names match across the tasks where they appear.
+**Type consistency** — `ComboLine`, `ComboPiece`, `ComboReachability`, `WinKind`, `ComboStep`, `ComboLineId`, `CardPredicate`, `ComboDetector`, `StructuralComboDetector`, `ComboRegistry`, `ComboLinePolicy`, `CedhKeepablesMulligan`, `PolicyId::ComboLineProgress`, `PolicyId::CedhKeepablesMulligan`, `DeckFeatures::is_cedh`, `CedhBracketError::DeckNotCedh`, `validate_cedh_bracket`, `anyAiOpponentIsCedh`, `applyCedhCascade`, `isDeckCedhLegal`, `filterByBracket` — all names match across the tasks where they appear.
 
 **Frontend type assumptions** — The frontend tasks assume `GameSetupConfig.aiOpponents: { difficulty: AiDifficulty }[]` and `Deck.tier: CommanderBracketTier`. Each task has an inspection step that confirms the real names before writing code. If a name differs, the agent adjusts in the same task without breaking the plan.
 

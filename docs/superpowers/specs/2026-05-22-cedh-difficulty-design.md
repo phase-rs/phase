@@ -196,7 +196,7 @@ pub trait ComboDetector: Send + Sync {
 }
 ```
 
-The default `DefaultComboDetector` walks `line.pieces`, checks zones via existing engine helpers (`zone_object_ids`, `TargetFilter::extract_in_zone`), and computes mana shortfall via `crate::zone_eval::available_mana`. No new engine primitives.
+The default `StructuralComboDetector` walks `line.pieces`, checks zones via existing engine helpers (`zone_object_ids`, `TargetFilter::extract_in_zone`), and computes mana shortfall via `crate::zone_eval::available_mana`. No new engine primitives.
 
 **Registry (`combo/registry.rs`):**
 
@@ -263,18 +263,18 @@ Per CLAUDE.md "the engine owns all logic." Bracket-lock enforcement at game-star
 
 ```rust
 pub fn validate_cedh_bracket(decks: &[&Deck])
-    -> Result<(), BracketViolation>;
+    -> Result<(), CedhBracketError>;
 ```
 
-`BracketViolation` is a typed error reporting the offending deck. Implementation rule (confirmed against `bracket_estimate.rs:18-27` and the `estimator_never_returns_cedh` test at `:457`):
+`CedhBracketError` is a typed error reporting the offending deck. Implementation rule (confirmed against `bracket_estimate.rs:18-27` and the `estimator_never_returns_cedh` test at `:457`):
 
 - `CommanderBracketTier::Cedh` is **manual-declaration only** — the bracket estimator algorithmically returns B1-B4 and never `Cedh`. There is no algorithmic test that promotes a B4 deck to cEDH.
-- Therefore `validate_cedh_bracket` is a **tag check**: every deck in the game must have its tier explicitly set to `CommanderBracketTier::Cedh`. Any deck whose tier is `Exhibition`, `CoreCommander`, `UpgradedCommander`, or `Optimized` is rejected with a `BracketViolation` naming the deck and its declared tier.
+- Therefore `validate_cedh_bracket` is a **tag check**: every deck in the game must have its tier explicitly set to `CommanderBracketTier::Cedh`. Any deck whose tier is `Exhibition`, `CoreCommander`, `UpgradedCommander`, or `Optimized` is rejected with a `CedhBracketError` naming the deck and its declared tier.
 - The user opts a deck into cEDH via the existing deck-builder tier-selection UI (already present per `BracketAuditPanel`/`BracketEstimateChip` tests). Tagging a casual deck as cEDH to bypass the warning chip is allowed — the user has declared intent and accepts the resulting match.
 
 **Where it is called:** in the game-setup boundary right before `initialize_game` is dispatched. The WASM bridge, Tauri bridge, and `phase-server` all funnel through one validation function — no duplication across adapters.
 
-**Failure mode:** typed `BracketViolation` bubbles to the frontend, which renders a blocking modal with the offending deck name and the violating axis/cards. Engine work does not proceed.
+**Failure mode:** typed `CedhBracketError` bubbles to the frontend, which renders a blocking modal with the offending deck name and the violating axis/cards. Engine work does not proceed.
 
 ### 5.6 Frontend integration
 
@@ -319,7 +319,7 @@ User clicks "Start Game"
   │     ↓
   │   engine: validate_cedh_bracket(all_decks)
   │     → Ok(())                → proceed
-  │     → Err(BracketViolation) → typed error → blocking modal
+  │     → Err(CedhBracketError) → typed error → blocking modal
   │
   └─► During play
         PlannerServices uses cEDH config
