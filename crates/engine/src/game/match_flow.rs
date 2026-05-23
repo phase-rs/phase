@@ -118,10 +118,8 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
             bracket_tier: p1.bracket_tier,
         },
         ai_decks,
-        // ai_difficulties is not persisted in player state; the gate check
-        // that re-assembles a DeckPayload for a rematch sources difficulties
-        // from the match config or re-reads the preference store, so an empty
-        // vec here is correct — rematch validation re-evaluates at start time.
+        // cEDH bracket validation ran at game 1 setup; decks haven't
+        // changed between games, so re-validation is unnecessary.
         ai_difficulties: vec![],
     })
 }

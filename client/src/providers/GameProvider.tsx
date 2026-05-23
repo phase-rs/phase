@@ -159,7 +159,7 @@ function bracketToEngineTier(bracket: CommanderBracket | null | undefined): Comm
   }
 }
 
-type ExpandedDeckWithTier = { main_deck: string[]; sideboard: string[]; commander: string[]; bracket_tier: string };
+type ExpandedDeckWithTier = { main_deck: string[]; sideboard: string[]; commander: string[]; bracket_tier: CommanderBracketTier };
 type DeckListPayload = {
   player: ExpandedDeckWithTier;
   opponent: ExpandedDeckWithTier;

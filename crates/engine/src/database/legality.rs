@@ -406,6 +406,12 @@ mod cedh_gate_tests {
         assert!(any_ai_difficulty_is_cedh(&["cedh".to_string()]));
         assert!(any_ai_difficulty_is_cedh(&["CEDH".to_string()]));
         assert!(any_ai_difficulty_is_cedh(&["CeDH".to_string()]));
+        // Partial matches and superstrings must NOT trigger the gate.
+        assert!(!any_ai_difficulty_is_cedh(&[
+            "ceddh".to_string(),
+            "cedh-debug".to_string(),
+            "notcedh".to_string()
+        ]));
     }
 
     #[test]
@@ -439,12 +445,16 @@ mod cedh_gate_tests {
         let ai_deck = deck(CommanderBracketTier::Optimized);
         let ai_difficulties: Vec<String> = vec!["Easy".to_string(), "Hard".to_string()];
 
+        // Pre-condition: confirm the gate is correctly false for non-cEDH AI.
+        assert!(!any_ai_difficulty_is_cedh(&ai_difficulties));
+
         // With the corrected gate, validation is skipped entirely.
         if any_ai_difficulty_is_cedh(&ai_difficulties) {
-            // This branch must NOT be reached; failing here would indicate the
-            // regression is re-introduced.
-            validate_cedh_bracket(&[&human, &ai_deck]).expect("should pass");
+            panic!("regression: gate fired for non-cEDH AI difficulties — the old any_cedh bug was re-introduced");
         }
+        // Suppress unused-variable warning: `human` and `ai_deck` are
+        // intentionally present to document the decks used in the scenario.
+        let _ = (&human, &ai_deck);
         // Gate is false for non-cEDH AI — validate_cedh_bracket is never called.
         // Reaching this point without panicking confirms the fix is correct.
     }

@@ -843,6 +843,7 @@ export class P2PHostAdapter implements EngineAdapter {
 
       const hostDeck = this.hostDeckData as DeckListPayload;
       const orderedOpponents: DeckListPayload["player"][] = [];
+      const orderedDifficulties: string[] = [];
       for (let seat = 1; seat < this.pregameSeatState.seats.length; seat++) {
         const kind = this.pregameSeatState.seats[seat];
         if (kind.type === "JoinedHuman") {
@@ -851,6 +852,7 @@ export class P2PHostAdapter implements EngineAdapter {
             throw new AdapterError("P2P_ERROR", `Seat ${seat} has no submitted deck`, false);
           }
           orderedOpponents.push(deck);
+          orderedDifficulties.push("");
           continue;
         }
         if (kind.type === "Ai") {
@@ -859,6 +861,7 @@ export class P2PHostAdapter implements EngineAdapter {
             throw new AdapterError("P2P_ERROR", `AI seat ${seat} is missing a resolved deck`, false);
           }
           orderedOpponents.push(deck);
+          orderedDifficulties.push(kind.data.difficulty);
         }
       }
       if (orderedOpponents.length === 0) {
@@ -869,6 +872,7 @@ export class P2PHostAdapter implements EngineAdapter {
         player: hostDeck.player,
         opponent: orderedOpponents[0],
         ai_decks: orderedOpponents.slice(1),
+        ai_difficulties: orderedDifficulties,
       };
       const playerCount = allowPartialStart
         ? orderedOpponents.length + 1
