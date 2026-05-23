@@ -13660,4 +13660,68 @@ mod pipeline_snapshot_tests {
             }
         }
     }
+
+    /// CR 608.2c: Compound "destroy X and up to one other target Y" must parse
+    /// both halves as Destroy effects with the verb carried forward to the
+    /// "up to" sub-clause. Cards: Relic Crush, Sword of Sinew and Steel.
+    #[test]
+    fn pipeline_relic_crush_compound_destroy_up_to() {
+        use crate::types::ability::{FilterProp, MultiTargetSpec, QuantityExpr, TargetFilter};
+        let result = pipeline_parse(
+            "Destroy target artifact or enchantment and up to one other target artifact or enchantment.",
+            "Relic Crush",
+            &["Sorcery"],
+            &[],
+        );
+        assert_eq!(
+            result.abilities.len(),
+            1,
+            "expected one spell ability, got {:?}",
+            result.abilities,
+        );
+        let ab = &result.abilities[0];
+        assert!(
+            matches!(*ab.effect, Effect::Destroy { .. }),
+            "primary effect must be Destroy, got {:?}",
+            ab.effect,
+        );
+        let sub = ab.sub_ability.as_deref().expect("must have sub_ability");
+        assert!(
+            matches!(*sub.effect, Effect::Destroy { .. }),
+            "sub-effect must be Destroy, got {:?}",
+            sub.effect,
+        );
+        // CR 115.6: "up to one" cardinality must be preserved on the sub-ability.
+        assert_eq!(
+            sub.multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
+            "sub-ability must carry up-to-one multi_target",
+        );
+        // CR 608.2c: "other" must appear as FilterProp::Another in the sub-effect target.
+        match sub.effect.as_ref() {
+            Effect::Destroy { target, .. } => {
+                // Target may be Typed or Or { filters: [Typed, Typed] } for
+                // "artifact or enchantment".
+                let typed_filters: Vec<_> = match target {
+                    TargetFilter::Typed(tf) => vec![tf],
+                    TargetFilter::Or { filters } => filters
+                        .iter()
+                        .map(|f| match f {
+                            TargetFilter::Typed(tf) => tf,
+                            other => panic!("expected Typed in Or, got {:?}", other),
+                        })
+                        .collect(),
+                    other => panic!("expected Typed or Or target, got {:?}", other),
+                };
+                assert!(
+                    typed_filters
+                        .iter()
+                        .all(|tf| tf.properties.contains(&FilterProp::Another)),
+                    "all sub-clause target filters must have Another property, got {:?}",
+                    typed_filters,
+                );
+            }
+            other => panic!("expected Destroy, got {:?}", other),
+        }
+    }
 }

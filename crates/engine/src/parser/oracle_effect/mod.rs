@@ -6351,6 +6351,31 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
         }
     }
 
+    // CR 608.2c: Verb carry-forward for "up to N [other] target X" clauses in compound actions.
+    // When the sub-text starts with "up to" and parsed as Unimplemented, prepend
+    // the verb from the primary effect and re-parse. Handles "destroy target artifact
+    // or enchantment and up to one other target artifact or enchantment" (Relic Crush)
+    // where "up to one other target ..." lacks a verb.
+    if matches!(sub_clause.effect, Effect::Unimplemented { .. })
+        && tag::<_, _, OracleError<'_>>("up to ")
+            .parse(sub_lower.as_str())
+            .is_ok()
+    {
+        if let Some(verb) = extract_effect_verb(&primary_effect) {
+            let reparsed_text = format!("{verb} {sub_text}");
+            // CR 115.6: Extract "up to N" cardinality before reparsing so it
+            // survives the verb+target pipeline (which discards it internally).
+            let (_, up_to_spec) = strip_any_number_quantifier(&reparsed_text);
+            let reparsed = parse_imperative_effect(&reparsed_text, &mut continuation_ctx);
+            if !matches!(reparsed.effect, Effect::Unimplemented { .. }) {
+                sub_clause = reparsed;
+                if sub_clause.multi_target.is_none() {
+                    sub_clause.multi_target = up_to_spec;
+                }
+            }
+        }
+    }
+
     // CR 608.2c: Possessive zone carry-forward for compound actions.
     // "exiles a creature they control and their graveyard" → sub-text "their graveyard"
     // lacks a verb. Prepend the primary verb so it becomes "exile their graveyard".
@@ -6422,6 +6447,9 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
 
     let mut sub_ability = AbilityDefinition::new(AbilityKind::Spell, sub_clause.effect);
     sub_ability.sub_ability = sub_clause.sub_ability;
+    // CR 115.6: Propagate "up to N" cardinality so the sub-clause target
+    // remains optional (e.g. "up to one other target artifact or enchantment").
+    sub_ability.multi_target = sub_clause.multi_target;
 
     Some(ParsedEffectClause {
         effect: primary_effect,
@@ -16954,6 +16982,63 @@ mod tests {
             "primary clause is single-target — must stay PutCounter, got {:?}",
             clause.effect
         );
+    }
+
+    /// CR 608.2c: Verb carry-forward for "up to N [other] target X" in compound actions.
+    /// Relic Crush: "Destroy target artifact or enchantment and up to one other target
+    /// artifact or enchantment." The sub-clause starts with "up to" — the verb must be
+    /// carried forward from the primary clause.
+    #[test]
+    fn compound_verb_carry_forward_up_to_prefix() {
+        let clause = parse_effect_clause(
+            "Destroy target artifact or enchantment and up to one other target artifact or enchantment",
+            &mut ParseContext::default(),
+        );
+        assert!(
+            matches!(clause.effect, Effect::Destroy { .. }),
+            "primary clause must be Destroy, got {:?}",
+            clause.effect
+        );
+        let sub = clause
+            .sub_ability
+            .expect("must have sub_ability for compound");
+        assert!(
+            matches!(*sub.effect, Effect::Destroy { .. }),
+            "sub-clause must also be Destroy, got {:?}",
+            sub.effect
+        );
+        // CR 115.6: "up to one" must propagate as multi_target on the sub-ability.
+        assert_eq!(
+            sub.multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
+            "sub-ability must carry up-to-one multi_target spec",
+        );
+        // CR 608.2c: "other" must appear as FilterProp::Another in the sub-effect target.
+        match sub.effect.as_ref() {
+            Effect::Destroy { target, .. } => {
+                // Target may be Typed or Or { filters: [Typed, Typed] } for
+                // "artifact or enchantment".
+                let typed_filters: Vec<_> = match target {
+                    TargetFilter::Typed(tf) => vec![tf],
+                    TargetFilter::Or { filters } => filters
+                        .iter()
+                        .map(|f| match f {
+                            TargetFilter::Typed(tf) => tf,
+                            other => panic!("expected Typed in Or, got {:?}", other),
+                        })
+                        .collect(),
+                    other => panic!("expected Typed or Or target, got {:?}", other),
+                };
+                assert!(
+                    typed_filters
+                        .iter()
+                        .all(|tf| tf.properties.contains(&FilterProp::Another)),
+                    "all sub-clause target filters must have Another property, got {:?}",
+                    typed_filters,
+                );
+            }
+            other => panic!("expected Destroy, got {:?}", other),
+        }
     }
 
     /// CR 608.2c: `extract_effect_verb` carries "put" forward for both the
