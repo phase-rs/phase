@@ -993,6 +993,17 @@ impl GameObject {
         })
     }
 
+    /// CR 608.2d: Look up a stored chosen keyword (Urborg / Walking Sponge
+    /// "choose an ability the target has, then remove it"). Read by
+    /// `ContinuousModification::RemoveChosenKeyword` at Layer 6 evaluation
+    /// to strip the chosen keyword from the recipient.
+    pub fn chosen_keyword(&self) -> Option<&Keyword> {
+        self.chosen_attributes.iter().find_map(|a| match a {
+            ChosenAttribute::Keyword(k) => Some(k),
+            _ => None,
+        })
+    }
+
     /// CR 310.8a + CR 310.8e: Return this battle's protector, if any. Derived
     /// from `ChosenAttribute::Player` stored when the Siege's "As ~ enters"
     /// replacement resolved. Non-battle permanents return `None`.
