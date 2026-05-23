@@ -40,7 +40,7 @@ use crate::types::ability::{
     QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
     TypedFilter,
 };
-use crate::types::card_type::{CoreType, Supertype};
+use crate::types::card_type::{noncreature_subtype_set, CoreType, SubtypeSet, Supertype};
 use crate::types::counter::{parse_counter_type, CounterMatch};
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::{ManaColor, ManaCost, ManaType};
@@ -7733,6 +7733,9 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     // into one AddType/AddSubtype modification per token (not a single
     // whole-phrase AddSubtype string).
     modifications.extend(parse_becomes_type_addition_modifications(&unquoted_tp));
+    modifications.extend(parse_bare_becomes_type_replacement_modifications(
+        &unquoted_tp,
+    ));
 
     modifications
 }
@@ -7947,6 +7950,158 @@ fn parse_becomes_type_addition_modifications(tp: &TextPair<'_>) -> Vec<Continuou
     let descriptor_original = &tp.original[start..end];
 
     super::oracle_effect::animation::parse_becomes_type_modifications(descriptor_original)
+}
+
+/// CR 205.1a-b + CR 613.1d: bare "becomes a/an <descriptor>" type-changing
+/// effects are replacement-form changes. Setting core card types replaces the
+/// previous card-type set except for CR 205.1b's artifact-creature exception;
+/// setting creature subtypes replaces the object's previous creature types.
+fn parse_bare_becomes_type_replacement_modifications(
+    tp: &TextPair<'_>,
+) -> Vec<ContinuousModification> {
+    type VE<'a> = OracleError<'a>;
+
+    let Some((_, tail_lower)) = nom_primitives::scan_split_at_phrase(tp.lower, |i| {
+        alt((
+            tag::<_, _, VE>("becomes a "),
+            tag::<_, _, VE>("becomes an "),
+        ))
+        .parse(i)
+    }) else {
+        return Vec::new();
+    };
+    let Ok::<_, nom::Err<VE<'_>>>((after_article_lower, _)) =
+        alt((tag("becomes a "), tag("becomes an "))).parse(tail_lower)
+    else {
+        return Vec::new();
+    };
+    let (descriptor_lower, retained_core_type) =
+        if let Some((descriptor_lower, retained_core_type)) =
+            split_type_retention_clause(after_article_lower)
+        {
+            (descriptor_lower, Some(retained_core_type))
+        } else {
+            (after_article_lower, None)
+        };
+    if retained_core_type.is_none()
+        && take_until::<_, _, VE>(" in addition to")
+            .parse(descriptor_lower)
+            .is_ok()
+    {
+        return Vec::new();
+    }
+
+    let Ok::<_, nom::Err<VE<'_>>>((_, descriptor_lower)) =
+        parse_clause_before_optional_period(descriptor_lower)
+    else {
+        return Vec::new();
+    };
+    let (descriptor_lower, _) = strip_trailing_duration(descriptor_lower.trim());
+    let descriptor_lower = descriptor_lower.trim();
+    if descriptor_lower.is_empty() {
+        return Vec::new();
+    }
+
+    let start = tp.lower.len() - after_article_lower.len();
+    let end = start + descriptor_lower.len();
+    let descriptor_original = &tp.original[start..end];
+    let Some(spec) = super::oracle_effect::animation::parse_animation_spec(
+        descriptor_original,
+        &mut ParseContext::default(),
+    ) else {
+        return Vec::new();
+    };
+    let animation_modifications = super::oracle_effect::animation::animation_modifications(&spec);
+    if let Some(core_type) = retained_core_type {
+        let mut modifications = animation_modifications;
+        if !modifications.contains(&ContinuousModification::AddType { core_type }) {
+            modifications.push(ContinuousModification::AddType { core_type });
+        }
+        return modifications;
+    }
+
+    let core_types: Vec<CoreType> = animation_modifications
+        .iter()
+        .filter_map(|modification| match modification {
+            ContinuousModification::AddType { core_type } => Some(*core_type),
+            _ => None,
+        })
+        .collect();
+    let keep_additive_core_types = core_types.len() == 2
+        && core_types.contains(&CoreType::Artifact)
+        && core_types.contains(&CoreType::Creature);
+
+    let mut modifications = Vec::new();
+    let mut set_core_types = false;
+    let mut removed_subtype_sets = Vec::new();
+    for modification in animation_modifications {
+        if matches!(modification, ContinuousModification::AddType { .. }) {
+            if core_types.is_empty() || keep_additive_core_types {
+                modifications.push(modification);
+            } else if !set_core_types {
+                modifications.push(ContinuousModification::SetCardTypes {
+                    core_types: core_types.clone(),
+                });
+                set_core_types = true;
+            }
+            continue;
+        }
+
+        if let ContinuousModification::AddSubtype { subtype } = &modification {
+            let set = noncreature_subtype_set(subtype).unwrap_or(SubtypeSet::Creature);
+            if !removed_subtype_sets.contains(&set) {
+                modifications.push(ContinuousModification::RemoveAllSubtypes { set });
+                removed_subtype_sets.push(set);
+            }
+        }
+        modifications.push(modification);
+    }
+    modifications
+}
+
+fn parse_clause_before_optional_period(input: &str) -> OracleResult<'_, &str> {
+    terminated(alt((take_until("."), rest)), opt(tag("."))).parse(input)
+}
+
+fn split_type_retention_clause(input: &str) -> Option<(&str, CoreType)> {
+    let (descriptor, retention_clause) =
+        nom_primitives::scan_split_at_phrase(input, |i| parse_type_retention_clause(i))?;
+    let (_, retained_core_type) = parse_type_retention_clause(retention_clause).ok()?;
+    Some((descriptor, retained_core_type))
+}
+
+fn parse_type_retention_clause(input: &str) -> OracleResult<'_, CoreType> {
+    let (input, is_plural) = alt((
+        value(false, alt((tag("it's still "), tag("that's still ")))),
+        value(true, tag("they're still ")),
+    ))
+    .parse(input)?;
+
+    let (input, _) = if is_plural {
+        (input, None)
+    } else {
+        let (input, article) = opt(nom_primitives::parse_article).parse(input)?;
+        (input, article)
+    };
+
+    alt((
+        value(CoreType::Artifact, alt((tag("artifact"), tag("artifacts")))),
+        value(CoreType::Battle, alt((tag("battle"), tag("battles")))),
+        value(CoreType::Creature, alt((tag("creature"), tag("creatures")))),
+        value(
+            CoreType::Enchantment,
+            alt((tag("enchantment"), tag("enchantments"))),
+        ),
+        value(CoreType::Instant, alt((tag("instant"), tag("instants")))),
+        value(CoreType::Kindred, alt((tag("kindred"), tag("kindreds")))),
+        value(CoreType::Land, alt((tag("land"), tag("lands")))),
+        value(
+            CoreType::Planeswalker,
+            alt((tag("planeswalker"), tag("planeswalkers"))),
+        ),
+        value(CoreType::Sorcery, alt((tag("sorcery"), tag("sorceries")))),
+    ))
+    .parse(input)
 }
 
 fn parse_base_pt_mod(text: &str) -> Option<(i32, i32)> {
@@ -10268,6 +10423,105 @@ mod tests {
             }),
             "must not emit whole-phrase AddSubtype"
         );
+    }
+
+    #[test]
+    fn continuous_mods_replace_creature_subtypes_for_bare_becomes_clause() {
+        let mods = parse_continuous_modifications("gets +3/+3 and becomes a Bear Berserker");
+        assert!(mods.contains(&ContinuousModification::AddPower { value: 3 }));
+        assert!(mods.contains(&ContinuousModification::AddToughness { value: 3 }));
+        assert!(mods.contains(&ContinuousModification::RemoveAllSubtypes {
+            set: crate::types::card_type::SubtypeSet::Creature,
+        }));
+        assert!(mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Bear".to_string(),
+        }));
+        assert!(mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Berserker".to_string(),
+        }));
+    }
+
+    #[test]
+    fn continuous_mods_replace_creature_subtypes_with_color_and_core_type_tail() {
+        let mods = parse_continuous_modifications(
+            "becomes a white and green Bear Berserker creature with trample",
+        );
+        assert!(mods.contains(&ContinuousModification::SetColor {
+            colors: vec![ManaColor::White, ManaColor::Green],
+        }));
+        assert!(mods.contains(&ContinuousModification::RemoveAllSubtypes {
+            set: crate::types::card_type::SubtypeSet::Creature,
+        }));
+        assert!(mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Bear".to_string(),
+        }));
+        assert!(mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Berserker".to_string(),
+        }));
+        assert!(mods.contains(&ContinuousModification::SetCardTypes {
+            core_types: vec![CoreType::Creature],
+        }));
+        assert!(mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Trample,
+        }));
+    }
+
+    #[test]
+    fn continuous_mods_preserve_additive_artifact_creature_exception() {
+        let mods = parse_continuous_modifications("becomes an artifact creature");
+        assert!(mods.contains(&ContinuousModification::AddType {
+            core_type: CoreType::Artifact,
+        }));
+        assert!(mods.contains(&ContinuousModification::AddType {
+            core_type: CoreType::Creature,
+        }));
+        assert!(
+            !mods.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::SetCardTypes { .. }
+            )),
+            "artifact creature exception must retain previous card types: {mods:?}"
+        );
+    }
+
+    #[test]
+    fn continuous_mods_preserve_still_type_retention_clause() {
+        let mods = parse_continuous_modifications(
+            "becomes a 0/0 Elemental creature with vigilance and haste that's still a land",
+        );
+        assert!(mods.contains(&ContinuousModification::SetPower { value: 0 }));
+        assert!(mods.contains(&ContinuousModification::SetToughness { value: 0 }));
+        assert!(mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Elemental".to_string(),
+        }));
+        assert!(mods.contains(&ContinuousModification::AddType {
+            core_type: CoreType::Creature,
+        }));
+        assert!(mods.contains(&ContinuousModification::AddType {
+            core_type: CoreType::Land,
+        }));
+        assert!(
+            !mods.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::SetCardTypes { .. }
+                    | ContinuousModification::RemoveAllSubtypes { .. }
+            )),
+            "still-retained types must stay additive under CR 205.1b: {mods:?}"
+        );
+    }
+
+    #[test]
+    fn continuous_mods_replace_noncreature_subtype_set_for_bare_becomes_clause() {
+        let mods = parse_continuous_modifications("becomes a Treasure artifact");
+        assert!(mods.contains(&ContinuousModification::SetCardTypes {
+            core_types: vec![CoreType::Artifact],
+        }));
+        assert!(mods.contains(&ContinuousModification::RemoveAllSubtypes {
+            set: SubtypeSet::Artifact,
+        }));
+        assert!(mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Treasure".to_string(),
+        }));
     }
 
     #[test]
