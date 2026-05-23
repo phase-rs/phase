@@ -384,6 +384,11 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
 
         // Unless payment: decline to pay (let the effect resolve).
         WaitingFor::UnlessPayment { .. } => Some(GameAction::PayUnlessCost { pay: false }),
+
+        // Disjunctive activation costs: default to the first branch.
+        WaitingFor::ActivationCostOneOfChoice { .. } => {
+            Some(GameAction::ChooseActivationCostBranch { index: 0 })
+        }
         // CR 118.12a: Disjunctive unless-cost choice. Fallback is to decline
         // the choice (let the effect resolve), mirroring `UnlessPayment`'s
         // pessimistic-default policy.

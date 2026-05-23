@@ -886,6 +886,7 @@ export type OpeningHandBottomReason = { type: "TinyLeadersMultiCommander" };
 
 export type WaitingFor =
   | { type: "Priority"; data: { player: PlayerId } }
+  | { type: "ActivationCostOneOfChoice"; data: { player: PlayerId; costs: AbilityCost[]; pending_cast: PendingCast } }
   | {
       type: "MulliganDecision";
       data: {
@@ -1208,6 +1209,7 @@ export type DebugAction =
 
 export type GameAction =
   | { type: "PassPriority" }
+  | { type: "ChooseActivationCostBranch"; data: { index: number } }
   | { type: "PlayLand"; data: { object_id: ObjectId; card_id: CardId } }
   | { type: "CastSpell"; data: { object_id: ObjectId; card_id: CardId; targets: ObjectId[] } }
   | { type: "CastSpellWithPaymentMode"; data: { object_id: ObjectId; card_id: CardId; targets: ObjectId[]; payment_mode: CastPaymentMode } }
