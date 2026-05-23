@@ -3927,8 +3927,10 @@ pub(super) fn parse_exile_ast(
         // player_scope iteration binds to the iterating player. The chunk_ctx
         // surfaces this via `relative_player_scope = ScopedPlayer`, which
         // `that_player_library_filter` already maps to `TargetFilter::ScopedPlayer`.
-        // For the third-person "each player's library" alternate phrasing we also
-        // accept that variant directly.
+        // For the third-person "each player's library" alternate phrasing,
+        // return `ScopedPlayer`; effect-chain lowering lifts that sentinel into
+        // `player_scope: All` so the existing scoped resolver exiles from each
+        // player's own library without target selection.
         for (pattern, player) in [
             ("card of your library", TargetFilter::Controller),
             ("cards of your library", TargetFilter::Controller),
@@ -3936,8 +3938,8 @@ pub(super) fn parse_exile_ast(
             ("cards of that player's library", that_player.clone()),
             ("card of their library", that_player.clone()),
             ("cards of their library", that_player.clone()),
-            ("card of each player's library", TargetFilter::Player),
-            ("cards of each player's library", TargetFilter::Player),
+            ("card of each player's library", TargetFilter::ScopedPlayer),
+            ("cards of each player's library", TargetFilter::ScopedPlayer),
         ] {
             if let Ok((after_lib, _)) = tag::<_, _, OracleError<'_>>(pattern).parse(remainder) {
                 // CR 406.3: Detect the "face down" suffix Oracle text uses to

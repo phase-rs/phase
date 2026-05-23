@@ -3994,8 +3994,8 @@ mod tests {
     use crate::types::counter::CounterType;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
-        AutoMayChoice, ExileLink, ExileLinkKind, LinkedExileSnapshot, MayTriggerAutoChoiceKey,
-        MayTriggerOrigin,
+        AutoMayChoice, CastingVariant, ExileLink, ExileLinkKind, LinkedExileSnapshot,
+        MayTriggerAutoChoiceKey, MayTriggerOrigin, StackEntry, StackEntryKind,
     };
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::keywords::Keyword;
@@ -5039,6 +5039,58 @@ mod tests {
         assert_eq!(state.players[1].life, 18);
         // Controller drew a card
         assert_eq!(state.players[0].hand.len(), 1);
+    }
+
+    #[test]
+    fn counter_spell_damage_rider_hits_countered_spell_controller() {
+        let mut state = GameState::new_two_player(42);
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Target Spell".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        let damage = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::ParentTargetController,
+                damage_source: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Counter {
+                target: TargetFilter::StackSpell,
+                source_static: None,
+            },
+            vec![TargetRef::Object(spell)],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(damage);
+        let mut events = Vec::new();
+
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(state.stack.is_empty());
+        assert_eq!(state.players[1].life, 18);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, GameEvent::SpellCountered { object_id, .. } if *object_id == spell)));
     }
 
     #[test]

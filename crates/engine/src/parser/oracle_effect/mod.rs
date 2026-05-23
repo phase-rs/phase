@@ -7360,6 +7360,19 @@ fn has_anaphoric_reference(lower: &str) -> bool {
     false
 }
 
+fn explicit_any_target_clause(effect: &Effect, lower: &str) -> bool {
+    matches!(effect.target_filter(), Some(TargetFilter::Any))
+        && nom_primitives::scan_contains(lower, "any target")
+}
+
+fn rewrite_triggering_spell_controller_to_parent_target_controller(effect: &mut Effect) {
+    each_target_filter_mut(effect, &mut |filter| {
+        if matches!(filter, TargetFilter::TriggeringSpellController) {
+            *filter = TargetFilter::ParentTargetController;
+        }
+    });
+}
+
 /// Replace the target filter on an effect with ParentTarget.
 /// Used for anaphoric "it"/"that creature" references in compound sub-effects.
 fn replace_target_with_parent(effect: &mut Effect) {
@@ -10208,6 +10221,18 @@ fn rewrite_rounding_mode(def: &mut AbilityDefinition, mode: RoundingMode) {
     }
 }
 
+fn lift_each_player_exile_top_scope(effect: &mut Effect, player_scope: &mut Option<PlayerFilter>) {
+    if player_scope.is_some() {
+        return;
+    }
+    if let Effect::ExileTop { player, .. } = effect {
+        if matches!(player, TargetFilter::ScopedPlayer) {
+            *player = TargetFilter::Controller;
+            *player_scope = Some(PlayerFilter::All);
+        }
+    }
+}
+
 fn collapse_ephemeral_color_choice_mana(def: &mut AbilityDefinition) {
     if matches!(
         &*def.effect,
@@ -11572,6 +11597,12 @@ pub(crate) fn parse_effect_chain_ir(
         // carries the caster default (Controller). Per D-04, this is parse-time
         // pronoun resolution that belongs in IR production.
         let mut clause = clause;
+        // CR 608.2: `parse_exile_ast` uses `ScopedPlayer` as the structural
+        // marker for "each player's library". Lower it into the same
+        // player_scope-driven shape used by Evelyn/Jeleva-class effects:
+        // the resolver iterates all players and `Controller` reads the
+        // rebound per-player controller.
+        lift_each_player_exile_top_scope(&mut clause.effect, &mut player_scope);
         // CR 109.5: For a "for each opponent who doesn't" decline body, rebind
         // every recipient-bearing node so "that player" → ScopedPlayer and
         // "you" → OriginalController resolve relative to the per-opponent
@@ -11615,6 +11646,7 @@ pub(crate) fn parse_effect_chain_ir(
             && has_anaphoric_reference(&text_lower)
             && !matches!(if_you_do_anchor, Some(TargetFilter::SelfRef))
             && !typed_trigger_subject
+            && !explicit_any_target_clause(&clause.effect, &text_lower)
             && !replace_fight_subject_with_parent_if_anaphoric_subject(
                 &text_lower,
                 &mut clause.effect,
@@ -11629,6 +11661,7 @@ pub(crate) fn parse_effect_chain_ir(
             })
             && has_anaphoric_reference(&text_lower)
             && !typed_trigger_subject
+            && !explicit_any_target_clause(&clause.effect, &text_lower)
             && !replace_fight_subject_with_parent_if_anaphoric_subject(
                 &text_lower,
                 &mut clause.effect,
@@ -11644,12 +11677,19 @@ pub(crate) fn parse_effect_chain_ir(
             && chain_has_prior_typed_referent(&clauses)
             && has_anaphoric_reference(&text_lower)
             && !typed_trigger_subject
+            && !explicit_any_target_clause(&clause.effect, &text_lower)
             && !replace_fight_subject_with_parent_if_anaphoric_subject(
                 &text_lower,
                 &mut clause.effect,
             )
         {
             replace_target_with_parent(&mut clause.effect);
+        }
+        if clauses
+            .last()
+            .is_some_and(|prev| matches!(&prev.parsed.effect, Effect::Counter { .. }))
+        {
+            rewrite_triggering_spell_controller_to_parent_target_controller(&mut clause.effect);
         }
         // CR 614.1a + CR 701.5 + CR 608.2c: "Exile-after-cast/counter rider"
         // class — Toshiro Umezawa, Dire Fleet Daredevil's chained cousins,
@@ -19058,6 +19098,23 @@ mod tests {
             def.unless_pay.is_none(),
             "plain counter should have no unless_pay modifier"
         );
+    }
+
+    #[test]
+    fn counter_spell_damage_rider_targets_countered_spell_controller() {
+        let def = parse_effect_chain(
+            "Counter target spell. Ionize deals 2 damage to that spell's controller.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(*def.effect, Effect::Counter { .. }));
+        let sub = def.sub_ability.as_ref().expect("damage sub-ability");
+        assert!(matches!(
+            *sub.effect,
+            Effect::DealDamage {
+                target: TargetFilter::ParentTargetController,
+                ..
+            }
+        ));
     }
 
     /// CR 115.1 + CR 118.12 + CR 118.12a: "any target" effects (Rhystic
@@ -34394,6 +34451,19 @@ mod tests {
             "exile the top card of each player's library. Until end of turn, you may play one of those cards. If you cast a spell this way, pay life equal to its mana value rather than paying its mana cost.",
             AbilityKind::Spell,
         );
+        assert_eq!(def.player_scope, Some(PlayerFilter::All));
+        assert!(
+            matches!(
+                def.effect.as_ref(),
+                Effect::ExileTop {
+                    player: TargetFilter::Controller,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    face_down: false,
+                }
+            ),
+            "expected all-player ExileTop to use player_scope + Controller, got {:?}",
+            def.effect
+        );
         // Walk the chain looking for the CastFromZone with alt_ability_cost set.
         fn find_cast(d: &AbilityDefinition) -> Option<&Effect> {
             if matches!(*d.effect, Effect::CastFromZone { .. }) {
@@ -34434,6 +34504,59 @@ mod tests {
             !has_pay_unimpl(&def),
             "rider must NOT leak as Unimplemented{{name:'pay'}} sibling"
         );
+    }
+
+    #[test]
+    fn reflexive_damage_any_target_keeps_explicit_target() {
+        let def = super::parse_effect_chain(
+            "Sacrifice a creature. When you do, Minsc & Boo deals X damage to any target, where X is that creature's power. If the sacrificed creature was a Hamster, draw X cards.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(&*def.effect, Effect::Sacrifice { .. }));
+
+        let damage = def.sub_ability.as_ref().expect("damage sub-ability");
+        assert_eq!(damage.condition, Some(AbilityCondition::WhenYouDo));
+        let Effect::DealDamage {
+            amount:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::Power {
+                            scope: ObjectScope::CostPaidObject,
+                        },
+                },
+            target: TargetFilter::Any,
+            ..
+        } = damage.effect.as_ref()
+        else {
+            panic!(
+                "expected reflexive damage to keep Any target and cost-paid power, got {:?}",
+                damage.effect
+            );
+        };
+
+        let draw = damage
+            .sub_ability
+            .as_ref()
+            .expect("Hamster draw sub-ability");
+        assert!(matches!(
+            &*draw.effect,
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::CostPaidObject
+                    }
+                },
+                ..
+            }
+        ));
+        assert!(matches!(
+            draw.condition,
+            Some(AbilityCondition::CostPaidObjectMatchesFilter {
+                filter: TargetFilter::Typed(TypedFilter { ref type_filters, .. })
+            }) if type_filters.iter().any(|filter| {
+                matches!(filter, TypeFilter::Subtype(subtype) if subtype == "Hamster")
+            })
+        ));
     }
 
     #[test]
