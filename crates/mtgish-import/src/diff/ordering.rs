@@ -157,6 +157,16 @@ pub const ORDERING_MANIFEST: &[((&str, &str), OrderingClass)] = &[
     // Parse warnings are diagnostic strings; not rules-meaningful.
     // Order is set-equivalent for diff purposes.
     (("CardFace", "parse_warnings"), OrderingClass::SetEquivalent),
+    // ----- CardMetadata -----
+    // Display/catalog identifiers generated from sets; only membership matters.
+    (
+        ("CardMetadata", "related_token_ids"),
+        OrderingClass::SetEquivalent,
+    ),
+    (
+        ("CardMetadata", "source_printing_ids"),
+        OrderingClass::SetEquivalent,
+    ),
     // ----- ChooseFromZoneConstraint -----
     // Categories form a multiset of allowed types.
     (

@@ -11,6 +11,7 @@ use super::counter::{CounterMatch, CounterType};
 use super::events::BendingType;
 use super::game_state::{
     is_zero_usize, DistributionUnit, LKISnapshot, MayTriggerOrigin, RetargetScope,
+    TargetSelectionConstraint,
 };
 use super::identifiers::ObjectId;
 use super::keywords::{Keyword, KeywordKind};
@@ -651,6 +652,9 @@ pub enum ChosenSubtypeKind {
 pub enum CountScope {
     /// CR 109.5: The printed ability's controller — "you" / "your" semantics.
     Controller,
+    /// CR 108.3 + CR 404.2: The printed ability controller as owner for
+    /// player-scoped queries over non-battlefield zones.
+    Owner,
     /// CR 608.2 + CR 109.5: The currently iterated player during a
     /// `player_scope` resolution — "they" / "their" semantics relative to the
     /// iteration. Issue #310: distinguishes "their library" (per-iteration)
@@ -2835,6 +2839,10 @@ pub enum QuantityRef {
     /// "you've drawn two or more cards this turn" and "an opponent has drawn
     /// four or more cards this turn" reuse the existing per-player aggregate axis.
     CardsDrawnThisTurn { player: PlayerScope },
+    /// CR 305.2a + CR 603.4: Count of lands played by the scoped player this turn.
+    /// Backed by `Player::lands_played_this_turn`. Used for intervening-if conditions
+    /// like "if it wasn't the first land you played this turn" (Fastbond).
+    LandsPlayedThisTurn { player: PlayerScope },
     /// CR 500: Number of turns this player has taken so far in the game.
     /// Resolved against the controller/scope player.
     TurnsTaken,
@@ -2881,6 +2889,14 @@ pub enum QuantityRef {
     AttackedThisTurn,
     /// CR 603.4: Whether the controller descended this turn (permanent card entered graveyard).
     DescendedThisTurn,
+    /// CR 606.1 + CR 603.4: Number of loyalty abilities the scoped player has
+    /// activated this turn (counts per CR 606.3 activations, summed across every
+    /// planeswalker they controlled at activation time). Used for "if you
+    /// activated a loyalty ability of a planeswalker this turn" intervening-if
+    /// triggers (The Chain Veil class). Backed by
+    /// `GameState::loyalty_abilities_activated_this_turn` and incremented in
+    /// `finalize_loyalty_activation`.
+    LoyaltyAbilitiesActivatedThisTurn { player: PlayerScope },
     /// CR 117.1: Number of spells cast last turn (by any player).
     /// Used for werewolf transform conditions.
     SpellsCastLastTurn,
@@ -4996,6 +5012,10 @@ pub enum Effect {
     /// CR 701.20e + CR 608.2c: Look at top N cards (shown only to the looking player),
     /// select some to keep per the effect's instructions, rest go elsewhere.
     Dig {
+        /// Which player's library is inspected. Defaults to the ability controller
+        /// for "your library"; `Player` covers "target player's library".
+        #[serde(default = "default_target_filter_controller")]
+        player: TargetFilter,
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
         /// Kept-card destination override (None = Hand).
@@ -5477,6 +5497,9 @@ pub enum Effect {
         /// None = reveal entire hand. Some = reveal this many cards. CR 701.20a.
         #[serde(default)]
         count: Option<QuantityExpr>,
+        /// CR 701.20a: When true, reveal `count` cards chosen at random from that hand.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        random: bool,
         /// CR 608.2d: "You may choose a [card] from it" makes the post-reveal
         /// card selection optional while the hand reveal itself remains mandatory.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -6020,6 +6043,13 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
+    /// CR 701.15a/b: Goad every creature matching a battlefield filter without
+    /// declaring targets. Mirrors `DestroyAll` / `TapAll` for mass Oracle text
+    /// like "Goad all creatures you don't control."
+    GoadAll {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+    },
     /// CR 701.35a: Detain target permanent — until the controller's next turn, that
     /// permanent can't attack or block and its activated abilities can't be activated.
     /// Follows the same per-player tracking pattern as Goad (detained_by on GameObject).
@@ -6071,6 +6101,22 @@ pub enum Effect {
     /// takes the extra turn (usually Controller for "take an extra turn").
     /// Extra turns are stored as a LIFO stack — most recently created taken first.
     ExtraTurn {
+        #[serde(default = "default_target_filter_controller")]
+        target: TargetFilter,
+    },
+    /// CR 606.3: Grant the resolved target player the right to activate each of
+    /// their planeswalkers' loyalty abilities `amount` additional times this
+    /// turn. Class lift of The Chain Veil's "{4}, {T}: You may activate each
+    /// planeswalker's loyalty ability an additional time this turn." Stored as
+    /// a per-player counter on `GameState::extra_loyalty_activations_this_turn`,
+    /// read by `planeswalker::can_activate_loyalty_ability` as a +N bump to the
+    /// per-permanent CR 606.3 cap. The counter is cleared at turn start.
+    /// `target` defaults to `Controller` (printed wording is "you may
+    /// activate..."); parameterized for future cards that grant the bonus to a
+    /// different player.
+    GrantExtraLoyaltyActivations {
+        #[serde(default = "default_quantity_one")]
+        amount: QuantityExpr,
         #[serde(default = "default_target_filter_controller")]
         target: TargetFilter,
     },
@@ -6168,7 +6214,9 @@ pub enum Effect {
         #[serde(default = "default_one")]
         amount: u32,
     },
-    /// Endure N — if this creature would die, instead remove N damage from it.
+    /// CR 701.63a: Endure N — the enduring permanent's controller chooses: create an
+    /// N/N white Spirit creature token, or put N +1/+1 counters on that permanent.
+    /// CR 701.63b: Endure 0 does nothing.
     Endure {
         amount: u32,
     },
@@ -6826,6 +6874,7 @@ impl Effect {
             | Effect::Goad { target, .. }
             | Effect::Detain { target, .. }
             | Effect::ExtraTurn { target, .. }
+            | Effect::GrantExtraLoyaltyActivations { target, .. }
             | Effect::SkipNextTurn { target, .. }
             | Effect::SkipNextStep { target, .. }
             | Effect::AdditionalPhase { target, .. }
@@ -6865,16 +6914,30 @@ impl Effect {
                 }
             }
 
-            Effect::ExileTop { player, .. } | Effect::ExileFromTopUntil { player, .. } => {
-                Some(player)
-            }
+            Effect::Dig { player, .. }
+            | Effect::ExileTop { player, .. }
+            | Effect::ExileFromTopUntil { player, .. } => Some(player),
 
+            // CR 115.1a + CR 601.2c: "Create a [Role/Aura] token attached to
+            // target creature" targets its host — surface `attach_to` as the
+            // target slot when it is a real targetable filter. CR 303.4 + the
+            // Asinine Antics ruling: a for-each host (`ParentTarget`, a context
+            // ref) is NOT targeted (hexproof can't stop it); it's bound
+            // per-iteration by the member-driven loop, so `owner` is surfaced and
+            // `attach_to` is reached as a hidden parent-ref slot instead. Mirrors
+            // `CopyTokenOf` (two targetable axes; no real card targets both —
+            // `attach_to` wins and `owner` falls back to the controller at resolve
+            // via `token::resolve_token_owner`).
+            //
             // CR 111.2 + CR 601.2c: "Target player creates ..." token modes
             // (e.g. Ashling's Command mode 4, Brigid's Command, Prismari Command)
             // surface their token-creation target as the `owner` filter — the
             // player who creates the token is its owner. The default
             // `TargetFilter::Controller` preserves "you create ..." semantics.
-            Effect::Token { owner, .. } => Some(owner),
+            Effect::Token { owner, attach_to, .. } => match attach_to {
+                Some(f) if !f.is_context_ref() => Some(f),
+                _ => Some(owner),
+            },
 
             // GenericEffect and LoseLife have Option<TargetFilter>
             Effect::GenericEffect { target, .. } | Effect::LoseLife { target, .. } => {
@@ -6901,10 +6964,10 @@ impl Effect {
             | Effect::DestroyAll { .. }
             | Effect::TapAll { .. }
             | Effect::UntapAll { .. }
+            | Effect::GoadAll { .. }
             | Effect::BounceAll { .. }
             | Effect::CounterAll { .. }
             | Effect::ChangeZoneAll { .. }
-            | Effect::Dig { .. }
             | Effect::PutCounterAll { .. }
             | Effect::DoublePTAll { .. }
             | Effect::Explore
@@ -7125,6 +7188,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::PutOnTopOrBottom { .. } => "PutOnTopOrBottom",
         Effect::GiftDelivery { .. } => "GiftDelivery",
         Effect::Goad { .. } => "Goad",
+        Effect::GoadAll { .. } => "GoadAll",
         Effect::Detain { .. } => "Detain",
         Effect::ExchangeControl { .. } => "ExchangeControl",
         Effect::ChangeTargets { .. } => "ChangeTargets",
@@ -7136,6 +7200,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Manifest { .. } => "Manifest",
         Effect::ManifestDread => "ManifestDread",
         Effect::ExtraTurn { .. } => "ExtraTurn",
+        Effect::GrantExtraLoyaltyActivations { .. } => "GrantExtraLoyaltyActivations",
         Effect::SkipNextTurn { .. } => "SkipNextTurn",
         Effect::SkipNextStep { .. } => "SkipNextStep",
         Effect::AdditionalPhase { .. } => "AdditionalPhase",
@@ -7296,6 +7361,7 @@ pub enum EffectKind {
     PutOnTopOrBottom,
     GiftDelivery,
     Goad,
+    GoadAll,
     Detain,
     ExchangeControl,
     ChangeTargets,
@@ -7307,6 +7373,7 @@ pub enum EffectKind {
     Manifest,
     ManifestDread,
     ExtraTurn,
+    GrantExtraLoyaltyActivations,
     SkipNextTurn,
     SkipNextStep,
     AdditionalPhase,
@@ -7472,6 +7539,7 @@ impl From<&Effect> for EffectKind {
             Effect::PutOnTopOrBottom { .. } => EffectKind::PutOnTopOrBottom,
             Effect::GiftDelivery { .. } => EffectKind::GiftDelivery,
             Effect::Goad { .. } => EffectKind::Goad,
+            Effect::GoadAll { .. } => EffectKind::GoadAll,
             Effect::Detain { .. } => EffectKind::Detain,
             Effect::ExchangeControl { .. } => EffectKind::ExchangeControl,
             Effect::ChangeTargets { .. } => EffectKind::ChangeTargets,
@@ -7483,6 +7551,7 @@ impl From<&Effect> for EffectKind {
             Effect::Manifest { .. } => EffectKind::Manifest,
             Effect::ManifestDread => EffectKind::ManifestDread,
             Effect::ExtraTurn { .. } => EffectKind::ExtraTurn,
+            Effect::GrantExtraLoyaltyActivations { .. } => EffectKind::GrantExtraLoyaltyActivations,
             Effect::SkipNextTurn { .. } => EffectKind::SkipNextTurn,
             Effect::SkipNextStep { .. } => EffectKind::SkipNextStep,
             Effect::AdditionalPhase { .. } => EffectKind::AdditionalPhase,
@@ -7663,6 +7732,8 @@ pub enum AbilityTag {
     Boast,
     /// CR 702.177a: This ability originated from an Exhaust keyword definition.
     Exhaust,
+    /// CR 702.107a: This ability originated from an Outlast keyword definition.
+    Outlast,
 }
 
 /// Structured activation-time restrictions parsed from Oracle text.
@@ -7830,6 +7901,9 @@ pub struct AbilityDefinition {
     /// CR 601.2c + CR 115.1d.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_target: Option<MultiTargetSpec>,
+    /// CR 115.1 + CR 601.2c: Additional legality constraints across selected targets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_constraints: Vec<TargetSelectionConstraint>,
     /// CR 601.2c + CR 608.2d: Timing for object/player choices represented by
     /// this ability's target filter. Stack timing is true targeting; resolution
     /// timing is used for non-target instructions such as "return a land card
@@ -7943,6 +8017,8 @@ struct AbilityDefinitionRepr<'a> {
     optional_for: &'a Option<OpponentMayScope>,
     #[serde(skip_serializing_if = "Option::is_none")]
     multi_target: &'a Option<MultiTargetSpec>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    target_constraints: &'a Vec<TargetSelectionConstraint>,
     #[serde(skip_serializing_if = "TargetChoiceTiming::is_stack")]
     target_choice_timing: TargetChoiceTiming,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -7997,6 +8073,7 @@ impl Serialize for AbilityDefinition {
             optional,
             optional_for,
             multi_target,
+            target_constraints,
             target_choice_timing,
             distribute,
             unless_pay,
@@ -8032,6 +8109,7 @@ impl Serialize for AbilityDefinition {
             optional: *optional,
             optional_for,
             multi_target,
+            target_constraints,
             target_choice_timing: *target_choice_timing,
             distribute,
             unless_pay,
@@ -8155,6 +8233,7 @@ impl AbilityDefinition {
             optional: false,
             optional_for: None,
             multi_target: None,
+            target_constraints: Vec::new(),
             target_choice_timing: TargetChoiceTiming::Stack,
             distribute: None,
             unless_pay: None,
@@ -8200,6 +8279,11 @@ impl AbilityDefinition {
 
     pub fn multi_target(mut self, spec: MultiTargetSpec) -> Self {
         self.multi_target = Some(spec);
+        self
+    }
+
+    pub fn target_constraint(mut self, constraint: TargetSelectionConstraint) -> Self {
+        self.target_constraints.push(constraint);
         self
     }
 
@@ -9103,6 +9187,12 @@ pub enum ReplacementCondition {
     /// step, AND the player has not yet drawn a card during this step
     /// (`cards_drawn_this_step == 0`); otherwise `true` (apply replacement).
     ExceptFirstDrawInDrawStep,
+    /// CR 614.1d: "if you control a [filter]" — replacement applies only while
+    /// the controller has at least one permanent matching `filter` on the
+    /// battlefield. Positive form of `UnlessControlsMatching`. Used by
+    /// Worship ("if you control a creature, damage that would reduce your
+    /// life total to less than 1 reduces it to 1 instead").
+    IfControlsMatching { filter: TargetFilter },
     /// "unless you revealed a [type] card" / "unless you paid {mana}"
     /// CR 614.1d — Generic condition text that the engine does not yet decompose further.
     /// Using this variant lets the replacement be recognized for coverage while deferring
@@ -9555,6 +9645,12 @@ pub enum DamageModification {
     /// `SetToSourcePower` (dynamic) — this is a flat override of the
     /// event's amount with `value`.
     SetTo { value: u32 },
+    /// CR 614.1a: Cap damage so the target player's life total cannot fall
+    /// below `minimum`. Applied only when the damage target is a player.
+    /// Computed at resolution time as `amount = max(0, life_total - minimum)`.
+    /// Used by Worship: "damage that would reduce your life total to less
+    /// than 1 reduces it to 1 instead."
+    LifeFloor { minimum: i32 },
 }
 
 /// CR 614.1a: Quantity modification for replacement effects (tokens, counters).
@@ -9627,6 +9723,9 @@ impl ManaReplacementScope {
 pub enum DamageTargetPlayerScope {
     Any,
     Opponent,
+    /// The controller of the replacement source. Used by Worship: "damage
+    /// that would reduce *your* life total to less than 1".
+    Controller,
     Specific(PlayerId),
 }
 

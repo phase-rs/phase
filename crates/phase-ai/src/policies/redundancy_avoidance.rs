@@ -310,12 +310,14 @@ fn redundancy_delta(
         | Effect::PutOnTopOrBottom { .. }
         | Effect::GiftDelivery { .. }
         | Effect::Goad { .. }
+        | Effect::GoadAll { .. }
         | Effect::Detain { .. }
         | Effect::ExchangeControl { .. }
         | Effect::ChangeTargets { .. }
         | Effect::Manifest { .. }
         | Effect::ManifestDread
         | Effect::ExtraTurn { .. }
+        | Effect::GrantExtraLoyaltyActivations { .. }
         | Effect::SkipNextTurn { .. }
         | Effect::SkipNextStep { .. }
         | Effect::AdditionalPhase { .. }

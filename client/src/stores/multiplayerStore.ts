@@ -38,6 +38,7 @@ import {
 } from "../adapter/server-draft-adapter";
 import type { DraftPlayerView } from "../adapter/draft-adapter";
 import type {
+  DeckChoice,
   PlayerSlot,
   SeatMutation,
 } from "../multiplayer/seatTypes";
@@ -61,6 +62,13 @@ function asDeckPayload(deck: HostingDeck): { main_deck: string[]; sideboard: str
     sideboard: deck.sideboard,
     commander: deck.commander,
   };
+}
+
+function aiSeatDeckChoice(deckName: string | null): DeckChoice {
+  if (!deckName || deckName.toLowerCase() === "random") {
+    return { type: "Random" };
+  }
+  return { type: "Named", data: deckName };
 }
 // Prevents onclose from clearing session token after GameStarted
 let gameStartedFired = false;
@@ -423,7 +431,17 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
 
       setServerInfo: (info) => set({ serverInfo: info }),
       setDisplayName: (name) => set({ displayName: name }),
-      setServerAddress: (address) => set({ serverAddress: address }),
+      setServerAddress: (address) => {
+        // Switching servers invalidates the live subscription socket: it's
+        // still connected to the previous region and would keep streaming
+        // that lobby's games and PlayerCount. Tear it down so the next
+        // `ensureSubscriptionSocket` dials the new address. No-op when the
+        // address is unchanged (re-selecting the current server).
+        if (address !== get().serverAddress) {
+          get().closeSubscriptionSocket();
+        }
+        set({ serverAddress: address });
+      },
       setConnectionStatus: (status) => set({ connectionStatus: status }),
       setActivePlayerId: (id) => set({ activePlayerId: id }),
       setOpponentDisplayName: (name) => {
@@ -853,9 +871,10 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           }
         });
 
-        await adapter.initialize();
         activeP2PHostAdapter = adapter;
         activeP2PHostGameId = gameId;
+
+        await adapter.initialize();
 
         set({
           hostIsPublic: opts.useBroker,
@@ -868,6 +887,23 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           },
           playerSlots: adapter.getPlayerSlots(),
         });
+
+        for (const seat of settings.aiSeats) {
+          await adapter.applySeatMutation({
+            type: "SetKind",
+            data: {
+              seatIndex: seat.seatIndex,
+              kind: {
+                type: "Ai",
+                data: {
+                  difficulty: seat.difficulty,
+                  deck: aiSeatDeckChoice(seat.deckName),
+                },
+              },
+            },
+          });
+        }
+
         return true;
       },
 

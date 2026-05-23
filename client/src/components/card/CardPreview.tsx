@@ -121,11 +121,12 @@ function CardPreviewInner({
   const defaultFaceIndex = faceIndex ?? (isTransformed ? 1 : 0);
   // Battlefield path: route through oracle_id when the engine attached one.
   // Deck-builder path: `obj` is null, so we keep the name-based fallback.
-  const { src, isLoading } = useCardImage(cardName, {
+  const { src, isLoading, isRotated } = useCardImage(cardName, {
     size: "normal",
     faceIndex: defaultFaceIndex,
     isToken,
     tokenFilters: isToken && obj ? tokenFiltersForObject(obj) : undefined,
+    tokenImageRef: isToken && obj ? obj.token_image_ref : undefined,
     oracleId: obj?.printed_ref?.oracle_id,
     faceName: obj?.printed_ref?.face_name,
     scryfallId,
@@ -177,15 +178,20 @@ function CardPreviewInner({
 
   const activeSrc = showOtherFace ? otherFaceImgResult.src : src;
   const activeLoading = showOtherFace ? otherFaceImgResult.isLoading : isLoading;
+  const activeRotated = showOtherFace ? otherFaceImgResult.isRotated : isRotated;
   const displayName = showOtherFace ? backFaceName! : cardName;
   const showInfoPanel = obj?.zone === "Battlefield";
   const infoPanelHeight = showInfoPanel ? 120 : 0;
-  const previewWidth =
+  const portraitPreviewWidth =
     typeof window === "undefined" ? 472 : Math.min(Math.max(window.innerWidth * 0.26, 220), 472);
+  const previewWidth = activeRotated ? portraitPreviewWidth * 1.4 : portraitPreviewWidth;
   const previewHeight =
-    (typeof window === "undefined"
-      ? 661
-      : Math.min(window.innerHeight * 0.8, previewWidth * (7 / 5))) + infoPanelHeight;
+    (activeRotated
+      ? portraitPreviewWidth
+      : typeof window === "undefined"
+        ? 661
+        : Math.min(window.innerHeight * 0.8, portraitPreviewWidth * (7 / 5)))
+    + infoPanelHeight;
   const viewportWidth = typeof window === "undefined" ? 1440 : window.innerWidth;
   const viewportHeight = typeof window === "undefined" ? 900 : window.innerHeight;
   const gap = 20;
@@ -297,6 +303,7 @@ function CardPreviewInner({
           obj={obj}
           isLoading={activeLoading}
           src={activeSrc}
+          isRotated={activeRotated}
           backFaceHint={backFaceName != null && !showOtherFace
             ? `Hold Ctrl for ${isTransformed ? "front" : "back"} face`
             : null}
@@ -323,7 +330,7 @@ function MobilePreviewOverlay({
   onDismiss: () => void;
   sourcePrinting?: SourcePrinting;
 }) {
-  const { src } = useCardImage(cardName, {
+  const { src, isRotated } = useCardImage(cardName, {
     size: "normal",
     faceIndex,
     oracleId: obj?.printed_ref?.oracle_id,
@@ -340,13 +347,21 @@ function MobilePreviewOverlay({
       onPointerDown={onDismiss}
     >
       {src && (
-        <img
-          src={src}
-          alt={cardName}
-          draggable={false}
+        <div
+          className={isRotated
+            ? "relative h-[min(60vw,300px)] w-[min(84vw,420px)] max-h-[calc(100dvh-2rem)] max-w-full overflow-hidden rounded-lg shadow-2xl landscape:max-w-[45vw]"
+            : "relative max-h-[calc(100dvh-2rem)] max-w-full overflow-hidden rounded-lg shadow-2xl landscape:max-w-[45vw]"}
           onPointerDown={(e) => e.stopPropagation()}
-          className="max-h-[calc(100dvh-2rem)] max-w-full rounded-lg object-contain shadow-2xl landscape:max-w-[45vw]"
-        />
+        >
+          <img
+            src={src}
+            alt={cardName}
+            draggable={false}
+            className={isRotated
+              ? "absolute left-1/2 top-1/2 h-[min(84vw,420px)] w-[min(60vw,300px)] -translate-x-1/2 -translate-y-1/2 rotate-90 object-cover"
+              : "max-h-[calc(100dvh-2rem)] max-w-full object-contain"}
+          />
+        </div>
       )}
     </div>
   );
@@ -360,6 +375,7 @@ function CardImagePreview({
   obj,
   isLoading,
   src,
+  isRotated,
   backFaceHint,
   altAvailable,
   mobileMode,
@@ -371,14 +387,33 @@ function CardImagePreview({
   obj: GameObject | null;
   isLoading: boolean;
   src: string | null;
+  isRotated: boolean;
   backFaceHint: string | null;
   altAvailable: boolean;
   mobileMode?: boolean;
   debugObjectId?: number | null;
 }) {
-  const sizeClass = mobileMode
-    ? "max-h-[75vh] w-[40vw] max-w-[300px]"
-    : "max-h-[80vh] max-w-[42vw] w-[clamp(220px,26vw,472px)] md:max-w-[45vw]";
+  const frameClass = mobileMode
+    ? isRotated
+      ? "h-[min(40vw,300px)] w-[min(56vw,420px)] max-h-[75vh] max-w-[84vw]"
+      : "max-h-[75vh] w-[40vw] max-w-[300px]"
+    : isRotated
+      ? "h-[clamp(220px,26vw,472px)] w-[clamp(308px,36.4vw,661px)] max-h-[45vw] max-w-[80vh]"
+      : "max-h-[80vh] max-w-[42vw] w-[clamp(220px,26vw,472px)] md:max-w-[45vw]";
+  const containerClass = showInfoPanel
+    ? mobileMode
+      ? isRotated
+        ? "w-[min(56vw,420px)] max-w-[84vw]"
+        : "w-[40vw] max-w-[300px]"
+      : isRotated
+        ? "w-[clamp(308px,36.4vw,661px)] max-w-[80vh]"
+        : "max-w-[42vw] w-[clamp(220px,26vw,472px)] md:max-w-[45vw]"
+    : frameClass;
+  const imageClass = isRotated
+    ? mobileMode
+      ? "absolute left-1/2 top-1/2 h-[min(56vw,420px)] w-[min(40vw,300px)] -translate-x-1/2 -translate-y-1/2 rotate-90 object-cover"
+      : "absolute left-1/2 top-1/2 h-[clamp(308px,36.4vw,661px)] w-[clamp(220px,26vw,472px)] max-h-[80vh] max-w-[42vw] -translate-x-1/2 -translate-y-1/2 rotate-90 object-cover"
+    : `${frameClass} object-cover`;
 
   // Use effective spell cost from engine if available (reflects alt costs, reductions),
   // otherwise fall back to printed mana cost.
@@ -388,18 +423,18 @@ function CardImagePreview({
   if (isLoading || !src) {
     return (
       <div
-        className={`${sizeClass} aspect-[5/7] rounded-[4%] border border-gray-600 bg-gray-700 shadow-2xl animate-pulse`}
+        className={`${frameClass} ${isRotated ? "" : "aspect-[5/7]"} rounded-[4%] border border-gray-600 bg-gray-700 shadow-2xl animate-pulse`}
       />
     );
   }
 
   return (
-    <div className={`${sizeClass} border border-gray-600 overflow-hidden shadow-2xl ${showInfoPanel ? "rounded-t-[4%] rounded-b-lg bg-gray-900" : "rounded-[4%]"}`}>
-      <div className="relative rounded-[4%] overflow-hidden">
+    <div className={`${containerClass} border border-gray-600 overflow-hidden shadow-2xl ${showInfoPanel ? "rounded-t-[4%] rounded-b-lg bg-gray-900" : "rounded-[4%]"}`}>
+      <div className={`${frameClass} relative rounded-[4%] overflow-hidden`}>
         <img
           src={src}
           alt={cardName}
-          className={`${sizeClass} object-cover`}
+          className={imageClass}
           draggable={false}
         />
         {displayCost && (

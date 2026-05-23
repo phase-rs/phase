@@ -12,11 +12,16 @@
 //! that composes those helpers into a client-ready shape.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
+use crate::game::ability_utils::flatten_targets_in_chain;
 use crate::game::game_object::AttachTarget;
 use crate::game::stack::{stack_display_groups, StackDisplayGroup};
-use crate::types::game_state::GameState;
+use crate::types::ability::{KeywordAction, TargetRef};
+use crate::types::events::GameEvent;
+use crate::types::game_state::{
+    CastingVariant, GameState, StackEntry, StackEntryKind, StackPaidSnapshot,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -29,6 +34,47 @@ pub struct CommanderDamageView {
     pub victim: PlayerId,
     pub commander: ObjectId,
     pub damage: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StackTargetDisplay {
+    pub target: TargetRef,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum StackPaidFactView {
+    XValue { value: u32 },
+    ManaSpent { amount: u32 },
+    ColorsSpent { distinct: u32 },
+    Kicked { count: usize },
+    AdditionalCostPaid,
+    CastVariant { variant: String },
+    Convoked { count: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TriggerContextDisplay {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_id: Option<ObjectId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub player: Option<PlayerId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StackEntryDisplay {
+    pub source_name: String,
+    pub kind_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ability_description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<StackTargetDisplay>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paid: Vec<StackPaidFactView>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trigger_context: Vec<TriggerContextDisplay>,
 }
 
 /// Engine-authored projections used by the display layer. Keep this struct
@@ -52,6 +98,11 @@ pub struct DerivedViews {
     /// Authoritative grouping lives in `game::stack::stack_display_groups`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stack_display_groups: Vec<StackDisplayGroup>,
+
+    /// Display-ready facts for each stack entry: chosen targets, ability labels,
+    /// paid cast facts, and public trigger context. Empty when the stack is empty.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub stack_entry_details: HashMap<ObjectId, StackEntryDisplay>,
 
     /// CR 303.4 + CR 702.5: Auras attached to each player (Curse cycle,
     /// Faith's Fetters-class). Players have no `attachments` back-link
@@ -116,6 +167,7 @@ pub fn derive_views(state: &GameState) -> DerivedViews {
     // (no spells/abilities in flight).
     if !state.stack.is_empty() {
         views.stack_display_groups = stack_display_groups(state);
+        views.stack_entry_details = stack_entry_details(state);
     }
 
     // CR 303.4 + CR 702.5: Walk the battlefield once and bucket Player-host
@@ -164,12 +216,307 @@ pub fn derive_views(state: &GameState) -> DerivedViews {
     views
 }
 
+fn stack_entry_details(state: &GameState) -> HashMap<ObjectId, StackEntryDisplay> {
+    state
+        .stack
+        .iter()
+        .map(|entry| (entry.id, stack_entry_detail(state, entry)))
+        .collect()
+}
+
+fn stack_entry_detail(state: &GameState, entry: &StackEntry) -> StackEntryDisplay {
+    let source_name = stack_source_name(state, entry);
+    let (kind_label, ability_description) = match &entry.kind {
+        StackEntryKind::Spell { ability, .. } => (
+            "Spell".to_string(),
+            ability
+                .as_ref()
+                .and_then(|ability| ability.description.clone()),
+        ),
+        StackEntryKind::ActivatedAbility { ability, .. } => (
+            ability
+                .ability_index
+                .map(|idx| format!("Activated ability {}", idx + 1))
+                .unwrap_or_else(|| "Activated ability".to_string()),
+            ability.description.clone(),
+        ),
+        StackEntryKind::TriggeredAbility {
+            ability,
+            description,
+            ..
+        } => (
+            "Triggered ability".to_string(),
+            description.clone().or_else(|| ability.description.clone()),
+        ),
+        StackEntryKind::KeywordAction { action } => (keyword_action_label(action), None),
+    };
+
+    StackEntryDisplay {
+        source_name,
+        kind_label,
+        ability_description,
+        targets: stack_entry_targets(state, entry),
+        paid: stack_paid_facts(state.stack_paid_facts.get(&entry.id)),
+        trigger_context: stack_trigger_context(state, entry),
+    }
+}
+
+fn stack_source_name(state: &GameState, entry: &StackEntry) -> String {
+    match &entry.kind {
+        StackEntryKind::TriggeredAbility { source_name, .. } if !source_name.is_empty() => {
+            source_name.clone()
+        }
+        _ => state
+            .objects
+            .get(&entry.source_id)
+            .map(|obj| obj.name.clone())
+            .unwrap_or_else(|| "Unknown".to_string()),
+    }
+}
+
+fn keyword_action_label(action: &KeywordAction) -> String {
+    match action {
+        KeywordAction::Equip { .. } => "Equip".to_string(),
+        KeywordAction::Crew { .. } => "Crew".to_string(),
+        KeywordAction::Saddle { .. } => "Saddle".to_string(),
+        KeywordAction::Station { .. } => "Station".to_string(),
+    }
+}
+
+fn stack_entry_targets(state: &GameState, entry: &StackEntry) -> Vec<StackTargetDisplay> {
+    let targets = match &entry.kind {
+        StackEntryKind::KeywordAction { action } => keyword_action_targets(action),
+        _ => entry
+            .ability()
+            .map(flatten_targets_in_chain)
+            .unwrap_or_default(),
+    };
+    targets
+        .into_iter()
+        .map(|target| StackTargetDisplay {
+            label: target_label(state, &target),
+            target,
+        })
+        .collect()
+}
+
+fn keyword_action_targets(action: &KeywordAction) -> Vec<TargetRef> {
+    match action {
+        KeywordAction::Equip {
+            target_creature_id, ..
+        } => vec![TargetRef::Object(*target_creature_id)],
+        KeywordAction::Crew { .. }
+        | KeywordAction::Saddle { .. }
+        | KeywordAction::Station { .. } => Vec::new(),
+    }
+}
+
+fn target_label(state: &GameState, target: &TargetRef) -> String {
+    match target {
+        TargetRef::Object(object_id) => state
+            .objects
+            .get(object_id)
+            .map(|obj| obj.name.clone())
+            .unwrap_or_else(|| format!("Object {}", object_id.0)),
+        TargetRef::Player(player_id) => player_label(state, *player_id),
+    }
+}
+
+fn player_label(state: &GameState, player: PlayerId) -> String {
+    state
+        .log_player_names
+        .get(player.0 as usize)
+        .filter(|name| !name.is_empty())
+        .cloned()
+        .unwrap_or_else(|| format!("Player {}", player.0))
+}
+
+fn stack_paid_facts(snapshot: Option<&StackPaidSnapshot>) -> Vec<StackPaidFactView> {
+    let Some(snapshot) = snapshot else {
+        return Vec::new();
+    };
+    let mut facts = Vec::new();
+    if let Some(value) = snapshot.x_value {
+        facts.push(StackPaidFactView::XValue { value });
+    }
+    if snapshot.actual_mana_spent > 0 {
+        facts.push(StackPaidFactView::ManaSpent {
+            amount: snapshot.actual_mana_spent,
+        });
+    }
+    if snapshot.distinct_colors_spent > 0 {
+        facts.push(StackPaidFactView::ColorsSpent {
+            distinct: snapshot.distinct_colors_spent,
+        });
+    }
+    if snapshot.kickers_paid > 0 {
+        facts.push(StackPaidFactView::Kicked {
+            count: snapshot.kickers_paid,
+        });
+    }
+    if snapshot.additional_cost_paid {
+        facts.push(StackPaidFactView::AdditionalCostPaid);
+    }
+    if snapshot.casting_variant != CastingVariant::Normal {
+        facts.push(StackPaidFactView::CastVariant {
+            variant: format!("{:?}", snapshot.casting_variant),
+        });
+    }
+    if snapshot.convoked_creatures > 0 {
+        facts.push(StackPaidFactView::Convoked {
+            count: snapshot.convoked_creatures,
+        });
+    }
+    facts
+}
+
+fn stack_trigger_context(state: &GameState, entry: &StackEntry) -> Vec<TriggerContextDisplay> {
+    let mut events: Vec<&GameEvent> = state
+        .stack_trigger_event_batches
+        .get(&entry.id)
+        .map(|batch| batch.iter().collect())
+        .unwrap_or_default();
+    if events.is_empty() {
+        if let StackEntryKind::TriggeredAbility {
+            trigger_event: Some(event),
+            ..
+        } = &entry.kind
+        {
+            events.push(event);
+        }
+    }
+    events
+        .into_iter()
+        .filter_map(|event| trigger_event_display(state, event))
+        .collect()
+}
+
+fn trigger_event_display(state: &GameState, event: &GameEvent) -> Option<TriggerContextDisplay> {
+    match event {
+        GameEvent::ZoneChanged {
+            object_id,
+            record,
+            from,
+            to,
+        } => Some(TriggerContextDisplay {
+            label: format!(
+                "{} moved {} -> {}",
+                visible_zone_change_object_name(state, *object_id, &record.name, *from, *to),
+                zone_label(*from),
+                zone_label(Some(*to))
+            ),
+            object_id: Some(*object_id),
+            player: Some(record.controller),
+        }),
+        GameEvent::CardsRevealed {
+            player, card_ids, ..
+        } => Some(TriggerContextDisplay {
+            label: if card_ids.len() == 1 {
+                format!(
+                    "{} revealed {}",
+                    player_label(state, *player),
+                    target_label(state, &TargetRef::Object(card_ids[0]))
+                )
+            } else {
+                format!(
+                    "{} revealed {} cards",
+                    player_label(state, *player),
+                    card_ids.len()
+                )
+            },
+            object_id: card_ids.first().copied(),
+            player: Some(*player),
+        }),
+        GameEvent::SpellCast {
+            object_id,
+            controller,
+            ..
+        } => Some(TriggerContextDisplay {
+            label: format!(
+                "{} cast {}",
+                player_label(state, *controller),
+                target_label(state, &TargetRef::Object(*object_id))
+            ),
+            object_id: Some(*object_id),
+            player: Some(*controller),
+        }),
+        GameEvent::AbilityActivated { source_id } => Some(TriggerContextDisplay {
+            label: format!(
+                "{} ability activated",
+                target_label(state, &TargetRef::Object(*source_id))
+            ),
+            object_id: Some(*source_id),
+            player: state.objects.get(source_id).map(|obj| obj.controller),
+        }),
+        GameEvent::VehicleCrewed {
+            vehicle_id,
+            creatures,
+        } => Some(TriggerContextDisplay {
+            label: format!(
+                "{} crewed by {} creature{}",
+                target_label(state, &TargetRef::Object(*vehicle_id)),
+                creatures.len(),
+                if creatures.len() == 1 { "" } else { "s" }
+            ),
+            object_id: Some(*vehicle_id),
+            player: state.objects.get(vehicle_id).map(|obj| obj.controller),
+        }),
+        GameEvent::Saddled {
+            mount_id,
+            creatures,
+        } => Some(TriggerContextDisplay {
+            label: format!(
+                "{} saddled by {} creature{}",
+                target_label(state, &TargetRef::Object(*mount_id)),
+                creatures.len(),
+                if creatures.len() == 1 { "" } else { "s" }
+            ),
+            object_id: Some(*mount_id),
+            player: state.objects.get(mount_id).map(|obj| obj.controller),
+        }),
+        _ => None,
+    }
+}
+
+fn visible_zone_change_object_name(
+    state: &GameState,
+    object_id: ObjectId,
+    fallback: &str,
+    from: Option<Zone>,
+    to: Zone,
+) -> String {
+    if let Some(obj) = state.objects.get(&object_id) {
+        return obj.name.clone();
+    }
+    if matches!(from, Some(Zone::Hand | Zone::Library)) || matches!(to, Zone::Hand | Zone::Library)
+    {
+        return "Hidden Card".to_string();
+    }
+    fallback.to_string()
+}
+
+fn zone_label(zone: Option<Zone>) -> &'static str {
+    match zone {
+        Some(Zone::Battlefield) => "battlefield",
+        Some(Zone::Hand) => "hand",
+        Some(Zone::Library) => "library",
+        Some(Zone::Graveyard) => "graveyard",
+        Some(Zone::Exile) => "exile",
+        Some(Zone::Stack) => "stack",
+        Some(Zone::Command) => "command",
+        None => "nowhere",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::{Effect, ResolvedAbility, TargetRef};
     use crate::types::format::FormatConfig;
-    use crate::types::game_state::CommanderDamageEntry;
+    use crate::types::game_state::{
+        CommanderDamageEntry, StackEntry, StackEntryKind, StackPaidSnapshot, ZoneChangeRecord,
+    };
     use crate::types::identifiers::CardId;
     use crate::types::zones::Zone;
 
@@ -368,6 +715,155 @@ mod tests {
             empty.stack_display_groups.is_empty(),
             "empty-stack short-circuit must leave the group vec empty"
         );
+    }
+
+    #[test]
+    fn derive_views_wires_stack_entry_details() {
+        let mut state = GameState::new_two_player(42);
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Prismatic Ending".to_string(),
+            Zone::Stack,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Sol Ring".to_string(),
+            Zone::Battlefield,
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: "exile".to_string(),
+                description: None,
+            },
+            vec![TargetRef::Object(target)],
+            spell,
+            PlayerId(0),
+        );
+        ability.chosen_x = Some(1);
+        state.stack.push_back(StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: Some(ability),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 2,
+            },
+        });
+        state.stack_paid_facts.insert(
+            spell,
+            StackPaidSnapshot {
+                actual_mana_spent: 2,
+                x_value: Some(1),
+                distinct_colors_spent: 2,
+                ..Default::default()
+            },
+        );
+
+        let views = derive_views(&state);
+        let details = views
+            .stack_entry_details
+            .get(&spell)
+            .expect("stack details include the spell");
+        assert_eq!(details.source_name, "Prismatic Ending");
+        assert_eq!(details.targets[0].label, "Sol Ring");
+        assert!(details
+            .paid
+            .iter()
+            .any(|fact| matches!(fact, StackPaidFactView::XValue { value: 1 })));
+        assert!(details
+            .paid
+            .iter()
+            .any(|fact| matches!(fact, StackPaidFactView::ColorsSpent { distinct: 2 })));
+    }
+
+    #[test]
+    fn derive_views_uses_filtered_names_for_trigger_context() {
+        let mut state = GameState::new_two_player(42);
+        let trigger_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Watcher".to_string(),
+            Zone::Battlefield,
+        );
+        let hidden_card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Secret Card".to_string(),
+            Zone::Library,
+        );
+        let trigger_event = GameEvent::ZoneChanged {
+            object_id: hidden_card,
+            from: Some(Zone::Library),
+            to: Zone::Hand,
+            record: Box::new(ZoneChangeRecord {
+                object_id: hidden_card,
+                name: "Secret Card".to_string(),
+                core_types: Vec::new(),
+                subtypes: Vec::new(),
+                supertypes: Vec::new(),
+                keywords: Vec::new(),
+                power: None,
+                toughness: None,
+                colors: Vec::new(),
+                mana_value: 0,
+                controller: PlayerId(1),
+                owner: PlayerId(1),
+                from_zone: Some(Zone::Library),
+                to_zone: Zone::Hand,
+                attachments: Vec::new(),
+                linked_exile_snapshot: Vec::new(),
+                is_token: false,
+                combat_status: Default::default(),
+            }),
+        };
+        let ability = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: "trigger".to_string(),
+                description: None,
+            },
+            Vec::new(),
+            trigger_source,
+            PlayerId(0),
+        );
+        state.stack.push_back(StackEntry {
+            id: ObjectId(900),
+            source_id: trigger_source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: trigger_source,
+                ability: Box::new(ability),
+                condition: None,
+                trigger_event: Some(trigger_event),
+                description: Some("hidden-zone trigger".to_string()),
+                source_name: "Watcher".to_string(),
+            },
+        });
+
+        let filtered = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(0));
+        let mut views = derive_views(&filtered);
+        let details = views
+            .stack_entry_details
+            .remove(&ObjectId(900))
+            .expect("trigger details are present");
+        let label = details
+            .trigger_context
+            .first()
+            .expect("trigger context is present")
+            .label
+            .clone();
+        assert!(
+            !label.contains("Secret Card"),
+            "trigger context must not bypass multiplayer hidden-card filtering"
+        );
+        assert!(label.contains("Hidden Card"));
     }
 
     /// Wire-format round-trip: the JSON produced from `ClientGameStateRef`

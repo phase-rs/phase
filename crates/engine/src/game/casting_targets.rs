@@ -218,7 +218,17 @@ pub(crate) fn handle_select_targets(
 
     if let Some(ability_index) = pending.activation_ability_index {
         if let Some(ref activation_cost) = pending.activation_cost {
+            let should_record_loyalty = matches!(activation_cost, AbilityCost::Loyalty { .. })
+                && super::planeswalker::can_activate_loyalty_ability(
+                    state,
+                    pending.object_id,
+                    player,
+                    ability_index,
+                );
             pay_ability_cost(state, player, pending.object_id, activation_cost, events)?;
+            if should_record_loyalty {
+                super::planeswalker::record_loyalty_activation(state, pending.object_id, player);
+            }
         }
 
         let assigned_targets = flatten_targets_in_chain(&ability);
@@ -313,7 +323,22 @@ pub(crate) fn handle_choose_target(
 
             if let Some(ability_index) = pending.activation_ability_index {
                 if let Some(ref activation_cost) = pending.activation_cost {
+                    let should_record_loyalty =
+                        matches!(activation_cost, AbilityCost::Loyalty { .. })
+                            && super::planeswalker::can_activate_loyalty_ability(
+                                state,
+                                pending.object_id,
+                                player,
+                                ability_index,
+                            );
                     pay_ability_cost(state, player, pending.object_id, activation_cost, events)?;
+                    if should_record_loyalty {
+                        super::planeswalker::record_loyalty_activation(
+                            state,
+                            pending.object_id,
+                            player,
+                        );
+                    }
                 }
 
                 let assigned_targets = flatten_targets_in_chain(&ability);
@@ -465,21 +490,15 @@ pub(crate) fn emit_keyword_ability_event_if_tagged(
     else {
         return;
     };
-    match def.ability_tag {
-        Some(AbilityTag::Boast) => {
-            events.push(GameEvent::BoastAbilityActivated {
-                player_id: player,
-                source_id,
-            });
-        }
-        Some(AbilityTag::Exhaust) => {
-            events.push(GameEvent::ExhaustAbilityActivated {
-                player_id: player,
-                source_id,
-                is_mana_ability: super::mana_abilities::is_mana_ability(def),
-            });
-        }
-        None => {}
+    if let Some(ability_tag) = def.ability_tag {
+        let is_mana_ability =
+            ability_tag == AbilityTag::Exhaust && super::mana_abilities::is_mana_ability(def);
+        events.push(GameEvent::KeywordAbilityActivated {
+            ability_tag,
+            player_id: player,
+            source_id,
+            is_mana_ability,
+        });
     }
 }
 

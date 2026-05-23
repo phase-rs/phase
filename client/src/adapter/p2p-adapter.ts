@@ -11,6 +11,7 @@ import type {
   MatchConfig,
   PlayerId,
   SubmitResult,
+  WaitingFor,
 } from "./types";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 
@@ -164,6 +165,24 @@ function seatStateToView(state: SeatState): SeatView {
 
 function occupiedSeatCount(state: SeatState): number {
   return state.seats.filter((seat) => seat.type !== "WaitingHuman").length;
+}
+
+function aiActorFromWaitingFor(
+  waitingFor: WaitingFor,
+  seats: SeatState["seats"],
+): PlayerId | null {
+  if (
+    waitingFor.type === "MulliganDecision" ||
+    waitingFor.type === "MulliganBottomCards" ||
+    waitingFor.type === "OpeningHandBottomCards"
+  ) {
+    return (
+      waitingFor.data.pending.find((entry) => seats[entry.player]?.type === "Ai")
+        ?.player ?? null
+    );
+  }
+
+  return "player" in waitingFor.data ? waitingFor.data.player : null;
 }
 
 function playerSlotsFromSeatView(view: SeatView): PlayerSlot[] {
@@ -618,18 +637,22 @@ export class P2PHostAdapter implements EngineAdapter {
       if (!waitingFor || typeof waitingFor !== "object") {
         return;
       }
-      if (!("data" in waitingFor) || !waitingFor.data || !("player" in waitingFor.data)) {
+      if (!("data" in waitingFor) || !waitingFor.data) {
         return;
       }
-      const aiSeat = this.pregameSeatState.seats[waitingFor.data.player];
+      const actor = aiActorFromWaitingFor(waitingFor as WaitingFor, this.pregameSeatState.seats);
+      if (actor == null) {
+        return;
+      }
+      const aiSeat = this.pregameSeatState.seats[actor];
       if (!aiSeat || aiSeat.type !== "Ai") {
         return;
       }
-      const action = await this.wasm.getAiAction(aiSeat.data.difficulty, waitingFor.data.player);
+      const action = await this.wasm.getAiAction(aiSeat.data.difficulty, actor);
       if (!action) {
         return;
       }
-      const result = await this.wasm.submitAction(action, waitingFor.data.player);
+      const result = await this.wasm.submitAction(action, actor);
       await this.broadcastStateUpdate(result.events);
       const nextState = await this.wasm.getState();
       const legalResult = await this.wasm.getLegalActions();

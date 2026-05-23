@@ -1187,6 +1187,7 @@ pub fn parse_type_phrase_with_ctx<'a>(
     let lower = text.to_lowercase();
     let mut pos = 0;
     let mut properties = Vec::new();
+    let mut keyword_disjunction_range: Option<(usize, usize)> = None;
     let lower_trimmed = lower.trim_start();
     let offset = lower.len() - lower_trimmed.len();
     pos += offset;
@@ -1617,8 +1618,11 @@ pub fn parse_type_phrase_with_ctx<'a>(
     if let Some((keyword_props, consumed)) = parse_without_keyword_suffix(&lower[pos..]) {
         properties.extend(keyword_props);
         pos += consumed;
-    } else if let Some((keyword_props, consumed)) = parse_keyword_suffix(&lower[pos..]) {
-        properties.extend(keyword_props);
+    } else if let Some((suffix, consumed)) = parse_keyword_suffix(&lower[pos..]) {
+        if suffix.disjunctive && suffix.properties.len() > 1 {
+            keyword_disjunction_range = Some((properties.len(), suffix.properties.len()));
+        }
+        properties.extend(suffix.properties);
         pos += consumed;
     }
 
@@ -1782,19 +1786,43 @@ pub fn parse_type_phrase_with_ctx<'a>(
         }
     }
 
-    let filter = TargetFilter::Typed(TypedFilter {
-        type_filters: [
-            card_type.map(|ct| vec![ct]).unwrap_or_default(),
-            extra_core_type_filters,
-            subtype
-                .map(|s| vec![TypeFilter::Subtype(s)])
-                .unwrap_or_default(),
-            neg_type_filters,
-        ]
-        .concat(),
-        controller,
-        properties,
-    });
+    let type_filters = [
+        card_type.map(|ct| vec![ct]).unwrap_or_default(),
+        extra_core_type_filters,
+        subtype
+            .map(|s| vec![TypeFilter::Subtype(s)])
+            .unwrap_or_default(),
+        neg_type_filters,
+    ]
+    .concat();
+    let filter = if let Some((start, len)) = keyword_disjunction_range {
+        let keyword_props = properties[start..start + len].to_vec();
+        let common_props = properties[..start]
+            .iter()
+            .chain(properties[start + len..].iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        TargetFilter::Or {
+            filters: keyword_props
+                .into_iter()
+                .map(|keyword_prop| {
+                    let mut branch_props = common_props.clone();
+                    branch_props.push(keyword_prop);
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters: type_filters.clone(),
+                        controller: controller.clone(),
+                        properties: branch_props,
+                    })
+                })
+                .collect(),
+        }
+    } else {
+        TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller,
+            properties,
+        })
+    };
     let filter = if exclude_chosen_type {
         TargetFilter::And {
             filters: vec![
@@ -2972,6 +3000,26 @@ fn parse_cost_paid_mana_value_reference(
     ))
 }
 
+fn parse_bare_any_counter_suffix(input: &str) -> super::oracle_nom::error::OracleResult<'_, ()> {
+    let (input, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>("any "),
+        tag::<_, _, OracleError<'_>>("a "),
+    )))
+    .parse(input)?;
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("counters"),
+        tag::<_, _, OracleError<'_>>("counter"),
+    ))
+    .parse(input)?;
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>(" on it"),
+        tag::<_, _, OracleError<'_>>(" on them"),
+    ))
+    .parse(input)?;
+
+    Ok((input, ()))
+}
+
 /// Parse a counter-presence suffix ("with [count] [counter] counter(s) on
 /// it/them", "with no counters on them", "without a +1/+1 counter on it")
 /// using pure nom combinators. Returns (FilterProp, bytes consumed).
@@ -3034,22 +3082,20 @@ pub(crate) fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
         // the typed suffix loop below. The article-derived count is discarded —
         // negation always means exactly 0 counters of that type.
     } else {
-        // CR 122.1: Bare "with a counter on it" / "with a counter on them" — any
-        // counter of any type. Distinct from typed "with a +1/+1 counter on it".
-        // Must precede the typed-counter branch so the empty-counter-type guard
-        // there doesn't fire.
-        for prefix in ["a counter on it", "a counter on them", "any counter on it"] {
-            if let Ok((after, _)) = tag_e::<_, _, OracleError<'_>>(prefix).parse(rest) {
-                let consumed = leading_ws + lead_len + (rest.len() - after.len());
-                return Some((
-                    FilterProp::Counters {
-                        counters: CounterMatch::Any,
-                        comparator: Comparator::GE,
-                        count: QuantityExpr::Fixed { value: 1 },
-                    },
-                    consumed,
-                ));
-            }
+        // CR 122.1: Bare "with a counter on it" / "with counters on them" —
+        // any counter of any type. Distinct from typed "with a +1/+1 counter on
+        // it". Must precede the typed-counter branch so the empty-counter-type
+        // guard there doesn't fire.
+        if let Ok((after, _)) = parse_bare_any_counter_suffix(rest) {
+            let consumed = leading_ws + lead_len + (rest.len() - after.len());
+            return Some((
+                FilterProp::Counters {
+                    counters: CounterMatch::Any,
+                    comparator: Comparator::GE,
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                consumed,
+            ));
         }
     }
 
@@ -3111,13 +3157,19 @@ pub(crate) fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
     None
 }
 
-fn parse_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
+struct KeywordSuffix {
+    properties: Vec<FilterProp>,
+    disjunctive: bool,
+}
+
+fn parse_keyword_suffix(text: &str) -> Option<(KeywordSuffix, usize)> {
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
     let (after_with, _) = tag::<_, _, OracleError<'_>>("with ").parse(trimmed).ok()?;
     let mut remaining = after_with;
     let mut consumed = leading_ws + "with ".len();
     let mut properties = Vec::new();
+    let mut disjunctive = false;
 
     while let Some((keyword_match, keyword_len)) = parse_leading_keyword_match(remaining) {
         match keyword_match {
@@ -3135,6 +3187,9 @@ fn parse_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
         let mut found_sep = false;
         for sep in &[", and ", ", or ", " and ", " or ", ", "] {
             if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*sep).parse(remaining) {
+                if matches!(*sep, ", or " | " or ") {
+                    disjunctive = true;
+                }
                 consumed += sep.len();
                 remaining = rest;
                 found_sep = true;
@@ -3149,7 +3204,13 @@ fn parse_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
     if properties.is_empty() {
         None
     } else {
-        Some((properties, consumed))
+        Some((
+            KeywordSuffix {
+                properties,
+                disjunctive,
+            },
+            consumed,
+        ))
     }
 }
 
@@ -5740,16 +5801,21 @@ mod tests {
         let (f, rest) =
             parse_type_phrase("card with flashback or disturb, put it into your graveyard");
         assert_eq!(rest, "put it into your graveyard");
-        let TargetFilter::Typed(typed) = f else {
-            panic!("expected typed filter, got {f:?}");
+        let TargetFilter::Or { filters } = f else {
+            panic!("expected Or filter, got {f:?}");
         };
-        assert!(typed.type_filters.contains(&TypeFilter::Card));
-        assert!(typed.properties.contains(&FilterProp::HasKeywordKind {
-            value: KeywordKind::Flashback,
-        }));
-        assert!(typed.properties.contains(&FilterProp::HasKeywordKind {
-            value: KeywordKind::Disturb,
-        }));
+        assert_eq!(filters.len(), 2);
+        for kind in [KeywordKind::Flashback, KeywordKind::Disturb] {
+            assert!(
+                filters.iter().any(|filter| matches!(
+                    filter,
+                    TargetFilter::Typed(TypedFilter { type_filters, properties, .. })
+                        if type_filters.contains(&TypeFilter::Card)
+                            && properties.contains(&FilterProp::HasKeywordKind { value: kind })
+                )),
+                "missing {kind:?} branch in {filters:?}"
+            );
+        }
     }
 
     #[test]
@@ -5797,15 +5863,36 @@ mod tests {
     }
 
     #[test]
+    fn creature_with_trample_or_haste_is_keyword_disjunction() {
+        let (f, _) = parse_type_phrase("creature with trample or haste");
+        let TargetFilter::Or { filters } = f else {
+            panic!("expected Or filter, got {f:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        assert!(filters.iter().any(|filter| matches!(
+            filter,
+            TargetFilter::Typed(TypedFilter { type_filters, properties, .. })
+                if type_filters.contains(&TypeFilter::Creature)
+                    && properties.contains(&FilterProp::WithKeyword { value: Keyword::Trample })
+        )));
+        assert!(filters.iter().any(|filter| matches!(
+            filter,
+            TargetFilter::Typed(TypedFilter { type_filters, properties, .. })
+                if type_filters.contains(&TypeFilter::Creature)
+                    && properties.contains(&FilterProp::WithKeyword { value: Keyword::Haste })
+        )));
+    }
+
+    #[test]
     fn creature_with_keyword_list_or_separator() {
         let (f, rest) = parse_type_phrase(
             "creature with deathtouch, hexproof, reach, or trample and reveal it",
         );
         assert_eq!(rest, "reveal it");
-        let TargetFilter::Typed(typed) = f else {
-            panic!("expected typed filter, got {f:?}");
+        let TargetFilter::Or { filters } = f else {
+            panic!("expected Or filter, got {f:?}");
         };
-        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(filters.len(), 4);
         for keyword in [
             Keyword::Deathtouch,
             Keyword::Hexproof,
@@ -5813,11 +5900,15 @@ mod tests {
             Keyword::Trample,
         ] {
             assert!(
-                typed.properties.contains(&FilterProp::WithKeyword {
-                    value: keyword.clone()
-                }),
-                "missing {keyword:?} in {:?}",
-                typed.properties
+                filters.iter().any(|filter| matches!(
+                    filter,
+                    TargetFilter::Typed(TypedFilter { type_filters, properties, .. })
+                        if type_filters.contains(&TypeFilter::Creature)
+                            && properties.contains(&FilterProp::WithKeyword {
+                                value: keyword.clone()
+                            })
+                )),
+                "missing {keyword:?} in {filters:?}"
             );
         }
     }
@@ -6534,15 +6625,24 @@ mod tests {
     /// Regression — bare positive "with a counter on it" → any-counter GE 1.
     #[test]
     fn parse_counter_suffix_bare_positive_any() {
-        let (prop, _consumed) = parse_counter_suffix(" with a counter on it").expect("must parse");
-        assert_eq!(
-            prop,
-            FilterProp::Counters {
-                counters: CounterMatch::Any,
-                comparator: Comparator::GE,
-                count: QuantityExpr::Fixed { value: 1 },
-            }
-        );
+        for phrase in [
+            " with a counter on it",
+            " with a counter on them",
+            " with any counter on it",
+            " with any counter on them",
+            " with counters on it",
+            " with counters on them",
+        ] {
+            let (prop, _consumed) = parse_counter_suffix(phrase).expect("must parse");
+            assert_eq!(
+                prop,
+                FilterProp::Counters {
+                    counters: CounterMatch::Any,
+                    comparator: Comparator::GE,
+                    count: QuantityExpr::Fixed { value: 1 },
+                }
+            );
+        }
     }
 
     #[test]
@@ -7071,6 +7171,32 @@ mod tests {
                     .controller(ControllerRef::You)
             )
         );
+    }
+
+    #[test]
+    fn spacecraft_artifact_subtype() {
+        let (f, _) = parse_type_phrase("Spacecraft");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::default().subtype("Spacecraft".to_string()))
+        );
+    }
+
+    #[test]
+    fn creatures_and_spacecraft_type_union() {
+        let (f, rest) = parse_type_phrase("creatures and Spacecraft");
+        match f {
+            TargetFilter::Or { ref filters } => {
+                assert_eq!(filters.len(), 2);
+                assert_eq!(filters[0], TargetFilter::Typed(TypedFilter::creature()));
+                assert_eq!(
+                    filters[1],
+                    TargetFilter::Typed(TypedFilter::default().subtype("Spacecraft".to_string()))
+                );
+            }
+            other => panic!("Expected Or filter, got {:?}", other),
+        }
+        assert_eq!(rest.trim(), "");
     }
 
     #[test]

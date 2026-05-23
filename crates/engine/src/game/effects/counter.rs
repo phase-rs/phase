@@ -106,7 +106,9 @@ pub fn resolve(
                     _ => false,
                 };
                 let source_permanent_id = state.stack[idx].source_id;
+                let removed_entry_id = state.stack[idx].id;
                 state.stack.remove(idx);
+                state.stack_paid_facts.remove(&removed_entry_id);
 
                 if is_spell {
                     // CR 608.2b: Countered spells go to graveyard, unless cast via an
@@ -229,7 +231,9 @@ pub fn resolve_all(
             } => casting_variant.replaces_stack_to_graveyard_with_exile(),
             _ => false,
         };
+        let removed_entry_id = state.stack[idx].id;
         state.stack.remove(idx);
+        state.stack_paid_facts.remove(&removed_entry_id);
 
         if is_spell {
             // CR 608.2b: Countered spells go to graveyard, unless cast via an

@@ -21,9 +21,9 @@ use crate::eval::{evaluate_creature, threat_level};
 use super::activation::turn_only;
 use super::context::PolicyContext;
 use super::effect_classify::{
-    aggregate_player_impact, aura_polarity, effect_polarity, extract_target_filter,
-    is_spell_beneficial, targeted_player_impact, targets_creatures, targets_creatures_only,
-    EffectPolarity,
+    aggregate_player_impact, aura_polarity, effect_polarity, effect_targets_object,
+    extract_target_filter, is_spell_beneficial, targeted_object_impact, targeted_player_impact,
+    targets_creatures, targets_creatures_only, EffectPolarity,
 };
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use crate::features::DeckFeatures;
@@ -406,7 +406,11 @@ fn score_target_ref(ctx: &PolicyContext<'_>, target: &TargetRef) -> f64 {
                 -100.0
             }
         }
-        TargetRef::Object(object_id) => score_target_object(ctx, *object_id, beneficial),
+        TargetRef::Object(object_id) => {
+            let object_beneficial =
+                targeted_object_impact(ctx, *object_id).map_or(beneficial, |impact| impact > 0.25);
+            score_target_object(ctx, *object_id, object_beneficial)
+        }
     }
 }
 
@@ -423,6 +427,8 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
         return -100.0;
     }
 
+    let effects = ctx.effects();
+
     let controller_delta = if object.controller == ctx.ai_player {
         if beneficial {
             1.0
@@ -436,11 +442,24 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
     };
     let mut score = controller_delta * 2.0;
 
+    if beneficial
+        && effects.iter().any(|effect| {
+            matches!(effect, Effect::Untap { .. }) && effect_targets_object(ctx, effect, object_id)
+        })
+    {
+        if object.tapped {
+            score += if object.controller == ctx.ai_player {
+                8.0
+            } else {
+                -20.0
+            };
+        } else {
+            score -= 6.0;
+        }
+    }
+
     if object.card_types.core_types.contains(&CoreType::Creature) {
         score += controller_delta * evaluate_creature(ctx.state, object_id);
-
-        // Cache effects once — used by damage check, indestructible check, and bounce check
-        let effects = ctx.effects();
 
         if !beneficial {
             if let Some(damage) = extract_damage_amount(&effects) {
@@ -802,6 +821,20 @@ mod tests {
         obj.card_types.core_types.push(CoreType::Creature);
         obj.power = Some(power);
         obj.toughness = Some(toughness);
+        id
+    }
+
+    fn add_land(state: &mut GameState, owner: PlayerId, name: &str, tapped: bool) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.tapped = tapped;
         id
     }
 
@@ -2028,6 +2061,90 @@ mod tests {
             score_opp < 0.0,
             "Opponent creature score should be negative"
         );
+    }
+
+    #[test]
+    fn rewind_land_targets_use_untap_clause_polarity() {
+        let mut state = make_state();
+        let own_land = add_land(&mut state, PlayerId(0), "Island", true);
+        let opp_land = add_land(&mut state, PlayerId(1), "Plains", true);
+        let rewind_id = create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(0),
+            "Rewind".to_string(),
+            Zone::Hand,
+        );
+        let mut rewind = ResolvedAbility::new(
+            Effect::Counter {
+                target: TargetFilter::StackSpell,
+                source_static: None,
+            },
+            Vec::new(),
+            rewind_id,
+            PlayerId(0),
+        );
+        rewind.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::Untap {
+                target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)),
+            },
+            Vec::new(),
+            rewind_id,
+            PlayerId(0),
+        )));
+        let pending_cast = PendingCast::new(rewind_id, CardId(500), rewind, ManaCost::zero());
+        let config = AiConfig::default();
+
+        let score_own = score_rewind_land_target(&state, &config, &pending_cast, own_land);
+        let score_opp = score_rewind_land_target(&state, &config, &pending_cast, opp_land);
+
+        assert!(
+            score_own > score_opp,
+            "Rewind should prefer untapping own land: own={score_own}, opp={score_opp}"
+        );
+        assert!(
+            score_opp < 0.0,
+            "Untapping opponent land should be penalised, got {score_opp}"
+        );
+    }
+
+    fn score_rewind_land_target(
+        state: &GameState,
+        config: &AiConfig,
+        pending_cast: &PendingCast,
+        target_id: ObjectId,
+    ) -> f64 {
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::TargetSelection {
+                player: PlayerId(0),
+                pending_cast: Box::new(pending_cast.clone()),
+                target_slots: vec![TargetSelectionSlot {
+                    legal_targets: vec![TargetRef::Object(target_id)],
+                    optional: true,
+                }],
+                selection: Default::default(),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target_id)),
+            },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Target,
+            },
+        };
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+        };
+        AntiSelfHarmPolicy.score(&ctx)
     }
 
     fn score_aura_target(

@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-06-06T00:00:00Z",
+  "updated": "2026-06-07T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -1252,12 +1252,11 @@
       ]
     },
     {
-      "name": "Sultai Scapeshift",
+      "name": "Selesnya Angels",
       "author": "MTGGoldfish",
       "colors": [
-        "B",
-        "G",
-        "U"
+        "W",
+        "G"
       ],
       "tags": [
         "metagame"
@@ -1265,169 +1264,97 @@
       "main": [
         {
           "count": 4,
-          "name": "Aftermath Analyst"
+          "name": "Bishop of Wings"
+        },
+        {
+          "count": 4,
+          "name": "Brushland"
+        },
+        {
+          "count": 4,
+          "name": "Collected Company"
+        },
+        {
+          "count": 3,
+          "name": "Elvish Mystic"
+        },
+        {
+          "count": 4,
+          "name": "Razorverge Thicket"
+        },
+        {
+          "count": 4,
+          "name": "Giada, Font of Hope"
+        },
+        {
+          "count": 4,
+          "name": "Hushwood Verge"
+        },
+        {
+          "count": 1,
+          "name": "Inspiring Overseer"
+        },
+        {
+          "count": 4,
+          "name": "Kayla's Reconstruction"
+        },
+        {
+          "count": 3,
+          "name": "Llanowar Elves"
+        },
+        {
+          "count": 1,
+          "name": "Plains"
+        },
+        {
+          "count": 4,
+          "name": "Resplendent Angel"
+        },
+        {
+          "count": 4,
+          "name": "Temple Garden"
+        },
+        {
+          "count": 4,
+          "name": "Righteous Valkyrie"
+        },
+        {
+          "count": 3,
+          "name": "Skyclave Apparition"
         },
         {
           "count": 2,
-          "name": "Swamp"
-        },
-        {
-          "count": 1,
-          "name": "Emeritus of Ideation"
-        },
-        {
-          "count": 1,
-          "name": "Takenuma, Abandoned Mire"
+          "name": "Plains"
         },
         {
           "count": 4,
-          "name": "Lotus Field"
-        },
-        {
-          "count": 4,
-          "name": "Arboreal Grazer"
-        },
-        {
-          "count": 4,
-          "name": "Stock Up"
-        },
-        {
-          "count": 1,
-          "name": "Boseiju, Who Endures"
+          "name": "Plains"
         },
         {
           "count": 3,
-          "name": "Port of Karfell"
-        },
-        {
-          "count": 1,
-          "name": "Ipnu Rivulet"
-        },
-        {
-          "count": 3,
-          "name": "Crumbling Vestige"
-        },
-        {
-          "count": 4,
-          "name": "Spelunking"
-        },
-        {
-          "count": 4,
-          "name": "Forest"
-        },
-        {
-          "count": 1,
-          "name": "Thassa's Oracle"
-        },
-        {
-          "count": 4,
-          "name": "Scapeshift"
-        },
-        {
-          "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 4,
-          "name": "Breeding Pool"
-        },
-        {
-          "count": 4,
-          "name": "Fabled Passage"
-        },
-        {
-          "count": 4,
-          "name": "The Wandering Minstrel"
-        },
-        {
-          "count": 4,
-          "name": "Hedge Maze"
-        },
-        {
-          "count": 1,
-          "name": "Mirrorpool"
-        },
-        {
-          "count": 1,
-          "name": "Otawara, Soaring City"
-        },
-        {
-          "count": 1,
-          "name": "Emeritus of Abundance"
-        },
-        {
-          "count": 1,
-          "name": "Arid Archway"
-        },
-        {
-          "count": 4,
-          "name": "Growth Spiral"
-        },
-        {
-          "count": 4,
-          "name": "Lumra, Bellow of the Woods"
-        },
-        {
-          "count": 3,
-          "name": "Castle Garenbrig"
-        },
-        {
-          "count": 4,
-          "name": "Formidable Speaker"
-        },
-        {
-          "count": 1,
-          "name": "Vibrance"
-        },
-        {
-          "count": 1,
-          "name": "Wistfulness"
-        },
-        {
-          "count": 1,
-          "name": "Cavern of Souls"
+          "name": "Enduring Innocence"
         }
       ],
       "sideboard": [
         {
-          "count": 2,
-          "name": "Aether Gust"
-        },
-        {
-          "count": 1,
-          "name": "Tranquil Frillback"
-        },
-        {
-          "count": 1,
-          "name": "Yorion, Sky Nomad"
-        },
-        {
-          "count": 1,
-          "name": "Wistfulness"
+          "count": 3,
+          "name": "Archon of Emeria"
         },
         {
           "count": 3,
-          "name": "Culling Ritual"
+          "name": "High Noon"
         },
         {
           "count": 2,
-          "name": "Unable to Scream"
+          "name": "Get Lost"
         },
         {
-          "count": 1,
-          "name": "Unable to Scream"
+          "count": 4,
+          "name": "Seam Rip"
         },
         {
-          "count": 1,
-          "name": "Bonny Pall, Clearcutter"
-        },
-        {
-          "count": 1,
-          "name": "Emrakul, the Promised End"
-        },
-        {
-          "count": 2,
-          "name": "Languish"
+          "count": 3,
+          "name": "Rest in Peace"
         }
       ]
     },

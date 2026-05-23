@@ -62,8 +62,18 @@ pub fn can_activate_loyalty_ability(
         return false;
     }
 
-    // CR 606.3: Only if no player has previously activated a loyalty ability of that permanent that turn.
-    if obj.loyalty_activated_this_turn {
+    // CR 606.3: Only if no player has previously activated a loyalty ability of
+    // that permanent that turn. The per-permanent activation count is the
+    // authoritative gate; effects like `Effect::GrantExtraLoyaltyActivations`
+    // (The Chain Veil class) raise the per-planeswalker cap for the controller
+    // by adding to `extra_loyalty_activations_this_turn[controller]`.
+    let extra_grants = state
+        .extra_loyalty_activations_this_turn
+        .get(&player)
+        .copied()
+        .unwrap_or(0);
+    let cap = 1u32.saturating_add(extra_grants);
+    if obj.loyalty_activations_this_turn >= cap {
         return false;
     }
 
@@ -135,6 +145,7 @@ pub fn handle_activate_loyalty(
         // CR 115.1 + CR 701.9b: Random-target loyalty abilities — game picks via
         // `state.rng`. Routes through finalize_loyalty_activation just like the
         // controller-choice degenerate path.
+        let target_constraints = ability_def.target_constraints.clone();
         let resolved_targets = if matches!(
             resolved.target_selection_mode,
             crate::types::ability::TargetSelectionMode::Random
@@ -142,10 +153,10 @@ pub fn handle_activate_loyalty(
             Some(random_select_targets_for_ability(
                 state,
                 &target_slots,
-                &[],
+                &target_constraints,
             )?)
         } else {
-            auto_select_targets_for_ability(state, &resolved, &target_slots, &[])?
+            auto_select_targets_for_ability(state, &resolved, &target_slots, &target_constraints)?
         };
 
         if let Some(targets) = resolved_targets {
@@ -162,24 +173,23 @@ pub fn handle_activate_loyalty(
             ));
         }
 
-        // CR 606.3: Mark activated this turn at announcement time to prevent re-activation.
-        // Only needed here — finalize_loyalty_activation handles the auto-select and
-        // non-targeted paths.
-        state
-            .objects
-            .get_mut(&pw_id)
-            .unwrap()
-            .loyalty_activated_this_turn = true;
         state.lands_tapped_for_mana.remove(&player);
 
-        let selection = begin_target_selection_for_ability(state, &resolved, &target_slots, &[])?;
+        let selection = begin_target_selection_for_ability(
+            state,
+            &resolved,
+            &target_slots,
+            &target_constraints,
+        )?;
         let mut pending = PendingCast::new(pw_id, CardId(0), resolved, ManaCost::NoCost);
         pending.activation_ability_index = Some(ability_index);
+        pending.target_constraints = target_constraints;
         // CR 606.4: Loyalty cost is paid after targets are chosen.
         // Stored here so handle_select_targets can call pay_ability_cost.
         pending.activation_cost = Some(crate::types::ability::AbilityCost::Loyalty {
             amount: loyalty_cost,
         });
+        record_loyalty_activation(state, pw_id, player);
         return Ok(WaitingFor::TargetSelection {
             player,
             pending_cast: Box::new(pending),
@@ -197,6 +207,28 @@ pub fn handle_activate_loyalty(
         ability_index,
         events,
     ))
+}
+
+/// CR 606.3 + CR 606.1: Record a loyalty-ability activation against both the
+/// per-permanent counter (`loyalty_activations_this_turn` — gates re-activation
+/// of this planeswalker) and the per-player counter
+/// (`loyalty_abilities_activated_this_turn` — read by
+/// `QuantityRef::LoyaltyAbilitiesActivatedThisTurn` for The Chain Veil's
+/// intervening-if trigger).
+///
+/// CR 606.3 + CR 602.5b: The per-permanent counter persists across same-turn
+/// control changes (it's a property of the permanent, not the activator).
+/// CR 603.4: The per-player counter is keyed by the player who activated —
+/// "you activated a loyalty ability" reads as the *activator's* history.
+pub(super) fn record_loyalty_activation(state: &mut GameState, pw_id: ObjectId, player: PlayerId) {
+    if let Some(obj) = state.objects.get_mut(&pw_id) {
+        obj.loyalty_activations_this_turn = obj.loyalty_activations_this_turn.saturating_add(1);
+    }
+    state
+        .loyalty_abilities_activated_this_turn
+        .entry(player)
+        .and_modify(|count| *count = count.saturating_add(1))
+        .or_insert(1);
 }
 
 /// Extract the loyalty cost from a typed ability definition.
@@ -239,11 +271,7 @@ fn finalize_loyalty_activation(
     };
     super::casting::pay_ability_cost(state, player, pw_id, &cost, events)
         .expect("loyalty validation passed in handle_activate_loyalty");
-    state
-        .objects
-        .get_mut(&pw_id)
-        .unwrap()
-        .loyalty_activated_this_turn = true;
+    record_loyalty_activation(state, pw_id, player);
 
     let assigned_targets = flatten_targets_in_chain(&resolved);
     emit_targeting_events(state, &assigned_targets, pw_id, player, events);
@@ -368,7 +396,7 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(state.objects[&pw].loyalty, Some(4)); // 3 + 1
-        assert!(state.objects[&pw].loyalty_activated_this_turn);
+        assert!(state.objects[&pw].loyalty_activations_this_turn > 0);
         assert!(!state.stack.is_empty()); // ability on stack
     }
 
@@ -445,14 +473,14 @@ mod tests {
         // Activate loyalty
         let mut events = Vec::new();
         handle_activate_loyalty(&mut state, PlayerId(0), pw, 0, &mut events).unwrap();
-        assert!(state.objects[&pw].loyalty_activated_this_turn);
+        assert!(state.objects[&pw].loyalty_activations_this_turn > 0);
 
         // CR 606.3: the per-permanent loyalty limit resets at the start of every
         // turn for every planeswalker regardless of controller. The reset is
         // global, so it fires on the very first `start_next_turn` (which makes
         // PlayerId(1) the active player) — not two turns later.
         crate::game::turns::start_next_turn(&mut state, &mut events);
-        assert!(!state.objects[&pw].loyalty_activated_this_turn);
+        assert_eq!(state.objects[&pw].loyalty_activations_this_turn, 0);
     }
 
     #[test]
@@ -644,7 +672,7 @@ mod tests {
             "loyalty unchanged before target selection"
         );
         // But activation is marked to prevent re-activation this turn.
-        assert!(state.objects[&pw].loyalty_activated_this_turn);
+        assert!(state.objects[&pw].loyalty_activations_this_turn > 0);
         // Engine waits for the player to select a target.
         assert!(
             matches!(result, WaitingFor::TargetSelection { .. }),
@@ -696,7 +724,7 @@ mod tests {
 
         // P1 (owner & controller) activates the loyalty ability on P1's turn.
         handle_activate_loyalty(&mut state, PlayerId(1), pw, 0, &mut events).unwrap();
-        assert!(state.objects[&pw].loyalty_activated_this_turn);
+        assert!(state.objects[&pw].loyalty_activations_this_turn > 0);
         state.stack.clear();
 
         // P1's turn ends, P0's turn begins. The planeswalker is STILL controlled
@@ -776,13 +804,13 @@ mod tests {
             .objects
             .get_mut(&pw)
             .unwrap()
-            .loyalty_activated_this_turn = true;
+            .loyalty_activations_this_turn = 1;
 
         let mut events = Vec::new();
         crate::game::turns::start_next_turn(&mut state, &mut events);
 
-        assert!(
-            !state.objects[&pw].loyalty_activated_this_turn,
+        assert_eq!(
+            state.objects[&pw].loyalty_activations_this_turn, 0,
             "the loyalty limit resets globally, not just for the active player's permanents"
         );
     }

@@ -8,7 +8,7 @@ use crate::types::ability::{
     CastingPermission, CastingRestriction, ChosenAttribute, ChosenSubtypeKind, ModalChoice,
     ReplacementDefinition, SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
 };
-use crate::types::card::{LayoutKind, PrintedCardRef};
+use crate::types::card::{LayoutKind, PrintedCardRef, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::CounterType;
 use crate::types::definitions::Definitions;
@@ -299,6 +299,14 @@ pub struct GameObject {
     pub static_definitions: Definitions<StaticDefinition>,
     pub color: Vec<ManaColor>,
     pub printed_ref: Option<PrintedCardRef>,
+    /// Exact token-art lookup metadata, populated only when the engine can
+    /// identify one printed token catalog entry without guessing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_image_ref: Option<TokenImageRef>,
+    /// MTGJSON token UUIDs linked from this printed source card. Display/catalog
+    /// metadata copied from `CardFace`; game rules never read it directly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_related_token_ids: Vec<String>,
 
     // Back face data for double-faced cards (DFCs)
     pub back_face: Option<BackFaceData>,
@@ -439,9 +447,16 @@ pub struct GameObject {
     #[serde(skip_deserializing, default)]
     pub available_mana_pips: Vec<ManaPip>,
 
-    // Planeswalker: whether a loyalty ability has been activated this turn
+    /// CR 606.3 + CR 606.1: Per-permanent loyalty-ability activation count for
+    /// the current turn. Default cap is 1 (CR 606.3 "once per turn"); raised
+    /// for the controller by `GameState::extra_loyalty_activations_this_turn`
+    /// (The Chain Veil class). The gate logic lives in
+    /// `planeswalker::can_activate_loyalty_ability`. The historical bool
+    /// "loyalty_activated_this_turn" is replaced by `count > 0`. Cleared at
+    /// turn start (CR 606.3 "that turn" reset) and on battlefield re-entry
+    /// (CR 400.7 — a re-entering permanent is a new object with no memory).
     #[serde(skip_deserializing, default)]
-    pub loyalty_activated_this_turn: bool,
+    pub loyalty_activations_this_turn: u32,
 
     // Commander: whether this object is a commander card
     #[serde(default)]
@@ -740,6 +755,8 @@ impl GameObject {
             static_definitions: Definitions::default(),
             color: Vec::new(),
             printed_ref: None,
+            token_image_ref: None,
+            source_related_token_ids: Vec::new(),
             back_face: None,
             base_power: None,
             base_toughness: None,
@@ -771,7 +788,7 @@ impl GameObject {
             mana_ability_index: None,
             devotion: None,
             available_mana_pips: Vec::new(),
-            loyalty_activated_this_turn: false,
+            loyalty_activations_this_turn: 0,
             is_commander: false,
             commander_tax: None,
             is_renowned: false,
@@ -847,7 +864,7 @@ impl GameObject {
         self.tapped = false;
         self.damage_marked = 0;
         self.dealt_deathtouch_damage = false;
-        self.loyalty_activated_this_turn = false;
+        self.loyalty_activations_this_turn = 0;
         self.is_suspected = false;
         self.is_renowned = false;
         self.monstrous = false;

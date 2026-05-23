@@ -363,7 +363,11 @@ fn collect_matching_triggers(
                         condition: trig_def.condition.clone(),
                         ability: ability.clone(),
                         timestamp,
-                        target_constraints: Vec::new(),
+                        target_constraints: trig_def
+                            .execute
+                            .as_ref()
+                            .map(|execute| execute.target_constraints.clone())
+                            .unwrap_or_default(),
                         distribute: trig_def
                             .execute
                             .as_ref()
@@ -2348,6 +2352,7 @@ pub fn check_state_triggers(state: &mut GameState) {
                     )
                 });
 
+                let target_constraints = execute.target_constraints.clone();
                 let ability = build_resolved_from_def(&execute, obj_id, controller);
                 pending.push(PendingTrigger {
                     source_id: obj_id,
@@ -2355,7 +2360,7 @@ pub fn check_state_triggers(state: &mut GameState) {
                     condition: trigger.condition.clone(),
                     ability,
                     timestamp,
-                    target_constraints: Vec::new(),
+                    target_constraints,
                     distribute: trigger
                         .execute
                         .as_ref()
@@ -2847,7 +2852,7 @@ pub(crate) fn check_trigger_condition(
             .map(|obj| obj.cast_variant_paid == Some((*variant, state.turn_number)))
             .unwrap_or(false),
         TriggerCondition::ActivatedAbilityIsNonMana => match trigger_event {
-            Some(GameEvent::ExhaustAbilityActivated {
+            Some(GameEvent::KeywordAbilityActivated {
                 is_mana_ability, ..
             }) => !*is_mana_ability,
             _ => false,
@@ -6548,7 +6553,9 @@ pub mod tests {
         );
         {
             let obj = state.objects.get_mut(&obj_id).unwrap();
-            let mut trigger = make_trigger(TriggerMode::CommitCrime);
+            // "whenever you commit a crime" → valid_target = Controller (parser sets this)
+            let mut trigger =
+                make_trigger(TriggerMode::CommitCrime).valid_target(TargetFilter::Controller);
             trigger.trigger_zones = vec![Zone::Graveyard];
             trigger.execute = Some(Box::new(crate::types::ability::AbilityDefinition::new(
                 AbilityKind::Spell,
@@ -6890,6 +6897,7 @@ pub mod tests {
                                         .with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
                                 ),
                                 count: None,
+                                random: false,
                                 choice_optional: false,
                             },
                         )

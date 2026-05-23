@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::types::ability::{
-    ControllerRef, DamageKindFilter, EffectKind, OriginConstraint, TargetFilter, TargetRef,
-    TriggerDefinition, TypedFilter,
+    AbilityTag, ControllerRef, DamageKindFilter, EffectKind, OriginConstraint, TargetFilter,
+    TargetRef, TriggerDefinition, TypedFilter,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{GameState, StackEntryKind};
@@ -113,8 +113,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::Saddles => match_saddles,
         TriggerMode::SaddlesOrCrews => match_saddles_or_crews,
         TriggerMode::NinjutsuActivated => match_ninjutsu_activated,
-        TriggerMode::BoastAbilityActivated => match_boast_ability_activated,
-        TriggerMode::ExhaustAbilityActivated => match_exhaust_ability_activated,
+        TriggerMode::KeywordAbilityActivated(_) => match_keyword_ability_activated,
         TriggerMode::Firebend => match_firebend,
         TriggerMode::Airbend => match_airbend,
         TriggerMode::Earthbend => match_earthbend,
@@ -431,15 +430,13 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
 
     // CR 702.49a: Ninjutsu activation trigger
     r.insert(TriggerMode::NinjutsuActivated, match_ninjutsu_activated);
-    // CR 702.142b: Boast ability activation trigger
-    r.insert(
-        TriggerMode::BoastAbilityActivated,
-        match_boast_ability_activated,
-    );
-    r.insert(
-        TriggerMode::ExhaustAbilityActivated,
-        match_exhaust_ability_activated,
-    );
+    // CR 702.107a + CR 702.142b + CR 702.177a: keyword ability activation triggers
+    for tag in [AbilityTag::Boast, AbilityTag::Exhaust, AbilityTag::Outlast] {
+        r.insert(
+            TriggerMode::KeywordAbilityActivated(tag),
+            match_keyword_ability_activated,
+        );
+    }
 
     // Avatar crossover: bending trigger matchers
     r.insert(TriggerMode::Firebend, match_firebend);
@@ -1464,20 +1461,22 @@ pub(super) fn match_becomes_target(
     }
 }
 
-/// Match CommitCrime triggers: fires when the trigger's controller commits a crime.
+/// CR 700.13: Match CommitCrime triggers — scoped by trigger.valid_target.
+///
+/// `valid_target` controls which player's crimes activate the trigger:
+/// - `Controller` → only controller's crimes (e.g., "whenever you commit a crime")
+/// - `Typed(Opponent)` → only an opponent's crimes (e.g., "whenever an opponent commits a crime")
+/// - `Player` → any player's crimes (e.g., "whenever a player commits a crime")
+/// - `None` → any player's crimes (no-filter fallback)
 pub(super) fn match_commit_crime(
     event: &GameEvent,
-    _trigger: &TriggerDefinition,
+    trigger: &TriggerDefinition,
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
     if let GameEvent::CrimeCommitted { player_id } = event {
-        // Fire when the crime was committed by the trigger source's controller
-        state
-            .objects
-            .get(&source_id)
-            .map(|obj| obj.controller == *player_id)
-            .unwrap_or(false)
+        // CR 700.13: Scope the trigger to the acting player via valid_target.
+        valid_player_matches(trigger, state, *player_id, source_id)
     } else {
         false
     }
@@ -1511,10 +1510,16 @@ pub(super) fn match_land_played(
 ) -> bool {
     if let GameEvent::LandPlayed {
         object_id,
+        player_id,
         from_zone,
-        ..
     } = event
     {
+        // CR 305.1 + CR 603.2: Scope the trigger to the acting player.
+        // "whenever you play a land" → valid_target = Controller;
+        // "whenever an opponent plays a land" → valid_target = Opponent filter.
+        if !valid_player_matches(trigger, state, *player_id, source_id) {
+            return false;
+        }
         match &trigger.valid_card {
             None => true,
             Some(filter) => state.objects.get(object_id).is_some_and(|obj| {
@@ -1778,20 +1783,24 @@ pub(super) fn match_cycled_or_discarded(
     }
 }
 
-/// Shuffled: fires when a library is shuffled.
+/// CR 701.24a: Shuffled — fires when a player shuffles their library.
+/// Uses `PlayerPerformedAction { ShuffledLibrary }` to identify the acting
+/// player, then gates on `trigger.valid_target` (e.g. Cosi's Trickster:
+/// "Whenever an opponent shuffles their library").
 pub(super) fn match_shuffled(
     event: &GameEvent,
-    _trigger: &TriggerDefinition,
-    _source_id: ObjectId,
-    _state: &GameState,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
 ) -> bool {
-    matches!(
-        event,
-        GameEvent::EffectResolved {
-            kind: EffectKind::Shuffle,
-            ..
-        }
-    )
+    let GameEvent::PlayerPerformedAction {
+        player_id,
+        action: PlayerActionKind::ShuffledLibrary,
+    } = event
+    else {
+        return false;
+    };
+    valid_player_matches(trigger, state, *player_id, source_id)
 }
 
 /// Revealed: fires when a card is revealed.
@@ -2388,40 +2397,33 @@ pub(super) fn match_ninjutsu_activated(
     }
 }
 
-/// CR 702.142b: Matches when a player activates a boast ability.
-/// The trigger fires for the controller of the trigger source when they activate
-/// any ability tagged as Boast.
-pub(super) fn match_boast_ability_activated(
+/// CR 702.107a + CR 702.142b + CR 702.177a + CR 603.2: Matches when a player activates
+/// a keyword ability whose `AbilityTag` matches the trigger's `KeywordAbilityActivated` tag.
+/// `valid_card` scopes source-specific forms like "~'s outlast ability"; generic forms
+/// like "an exhaust ability" intentionally match any matching activation by the controller.
+pub(super) fn match_keyword_ability_activated(
     event: &GameEvent,
-    _trigger: &TriggerDefinition,
+    trigger: &TriggerDefinition,
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::BoastAbilityActivated { player_id, .. } = event {
-        // Fire when the boast ability was activated by the trigger source's controller
-        state
-            .objects
-            .get(&source_id)
-            .map(|obj| obj.controller == *player_id)
-            .unwrap_or(false)
-    } else {
-        false
-    }
-}
-
-/// CR 702.177a + CR 603.2: Matches when a player activates an exhaust ability.
-pub(super) fn match_exhaust_ability_activated(
-    event: &GameEvent,
-    _trigger: &TriggerDefinition,
-    source_id: ObjectId,
-    state: &GameState,
-) -> bool {
-    if let GameEvent::ExhaustAbilityActivated { player_id, .. } = event {
-        state
-            .objects
-            .get(&source_id)
-            .map(|obj| obj.controller == *player_id)
-            .unwrap_or(false)
+    let TriggerMode::KeywordAbilityActivated(ref tag) = trigger.mode else {
+        return false;
+    };
+    if let GameEvent::KeywordAbilityActivated {
+        ability_tag,
+        player_id,
+        source_id: activated_id,
+        ..
+    } = event
+    {
+        ability_tag == tag
+            && valid_card_matches(trigger, state, *activated_id, source_id)
+            && state
+                .objects
+                .get(&source_id)
+                .map(|obj| obj.controller == *player_id)
+                .unwrap_or(false)
     } else {
         false
     }
@@ -3104,7 +3106,7 @@ mod tests {
     }
 
     #[test]
-    fn exhaust_ability_activation_matches_controller() {
+    fn keyword_ability_activation_matches_generic_controller_trigger() {
         let mut state = setup();
         let source = create_object(
             &mut state,
@@ -3113,22 +3115,90 @@ mod tests {
             "Rangers' Aetherhive".to_string(),
             Zone::Battlefield,
         );
-        let trigger = make_trigger(TriggerMode::ExhaustAbilityActivated);
+        let activated_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Another Exhaust Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = make_trigger(TriggerMode::KeywordAbilityActivated(AbilityTag::Exhaust));
 
-        assert!(match_exhaust_ability_activated(
-            &GameEvent::ExhaustAbilityActivated {
+        // Generic "you activate an exhaust ability" triggers may match a different source.
+        assert!(match_keyword_ability_activated(
+            &GameEvent::KeywordAbilityActivated {
+                ability_tag: AbilityTag::Exhaust,
                 player_id: PlayerId(0),
-                source_id: ObjectId(99),
+                source_id: activated_source,
                 is_mana_ability: false,
             },
             &trigger,
             source,
             &state
         ));
-        assert!(!match_exhaust_ability_activated(
-            &GameEvent::BoastAbilityActivated {
+        // Wrong controller must not match.
+        assert!(!match_keyword_ability_activated(
+            &GameEvent::KeywordAbilityActivated {
+                ability_tag: AbilityTag::Exhaust,
+                player_id: PlayerId(1),
+                source_id: activated_source,
+                is_mana_ability: false,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+        // Wrong ability tag must not match.
+        assert!(!match_keyword_ability_activated(
+            &GameEvent::KeywordAbilityActivated {
+                ability_tag: AbilityTag::Boast,
                 player_id: PlayerId(0),
-                source_id: ObjectId(99),
+                source_id: source,
+                is_mana_ability: false,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+    }
+
+    #[test]
+    fn keyword_ability_activation_valid_card_scopes_self_reference() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Herald of Anafenza".to_string(),
+            Zone::Battlefield,
+        );
+        let other = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Abzan Falconer".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::KeywordAbilityActivated(AbilityTag::Outlast));
+        trigger.valid_card = Some(TargetFilter::SelfRef);
+
+        assert!(match_keyword_ability_activated(
+            &GameEvent::KeywordAbilityActivated {
+                ability_tag: AbilityTag::Outlast,
+                player_id: PlayerId(0),
+                source_id: source,
+                is_mana_ability: false,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+        assert!(!match_keyword_ability_activated(
+            &GameEvent::KeywordAbilityActivated {
+                ability_tag: AbilityTag::Outlast,
+                player_id: PlayerId(0),
+                source_id: other,
+                is_mana_ability: false,
             },
             &trigger,
             source,
@@ -4075,6 +4145,81 @@ mod tests {
     }
 
     #[test]
+    fn changes_zone_parsed_teval_trigger_scopes_to_own_graveyard() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(893),
+            PlayerId(0),
+            "Teval, the Balanced Scale".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = parse_trigger_line(
+            "Whenever one or more cards leave your graveyard, create a 2/2 black Zombie Druid creature token.",
+            "Teval, the Balanced Scale",
+        );
+
+        let own_card = ObjectId(100);
+        let own_card_leaves_graveyard = GameEvent::ZoneChanged {
+            object_id: own_card,
+            from: Some(Zone::Graveyard),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord {
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                ..ZoneChangeRecord::test_minimal(own_card, Some(Zone::Graveyard), Zone::Battlefield)
+            }),
+        };
+        assert!(match_changes_zone(
+            &own_card_leaves_graveyard,
+            &trigger,
+            source,
+            &state
+        ));
+
+        let opponent_card = ObjectId(101);
+        let opponent_card_leaves_graveyard = GameEvent::ZoneChanged {
+            object_id: opponent_card,
+            from: Some(Zone::Graveyard),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord {
+                controller: PlayerId(1),
+                owner: PlayerId(1),
+                ..ZoneChangeRecord::test_minimal(
+                    opponent_card,
+                    Some(Zone::Graveyard),
+                    Zone::Battlefield,
+                )
+            }),
+        };
+        assert!(
+            !match_changes_zone(&opponent_card_leaves_graveyard, &trigger, source, &state),
+            "Teval must not trigger for a card leaving an opponent's graveyard"
+        );
+
+        let opponent_creature = ObjectId(102);
+        let opponent_creature_dies = GameEvent::ZoneChanged {
+            object_id: opponent_creature,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord {
+                core_types: vec![CoreType::Creature],
+                controller: PlayerId(1),
+                owner: PlayerId(1),
+                ..ZoneChangeRecord::test_minimal(
+                    opponent_creature,
+                    Some(Zone::Battlefield),
+                    Zone::Graveyard,
+                )
+            }),
+        };
+        assert!(
+            !match_changes_zone(&opponent_creature_dies, &trigger, source, &state),
+            "Teval must not trigger for an opponent's creature dying"
+        );
+    }
+
+    #[test]
     fn changes_zone_uses_event_snapshot_for_subtype_filters() {
         let mut state = setup();
         let source_id = create_object(
@@ -4752,14 +4897,57 @@ mod tests {
     }
 
     #[test]
-    fn shuffled_matches_shuffled_event() {
+    fn shuffled_matches_player_performed_action_event() {
         let state = setup();
+        let event = GameEvent::PlayerPerformedAction {
+            player_id: PlayerId(0),
+            action: PlayerActionKind::ShuffledLibrary,
+        };
+        let trigger = make_trigger(TriggerMode::Shuffled);
+        assert!(match_shuffled(&event, &trigger, ObjectId(1), &state));
+    }
+
+    #[test]
+    fn shuffled_rejects_opponent_when_valid_target_is_controller() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Cosis Trickster".to_string(),
+            Zone::Battlefield,
+        );
+        // "Whenever an opponent shuffles" — valid_target filters for opponent
+        let mut trigger = make_trigger(TriggerMode::Shuffled);
+        trigger.valid_target = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(crate::types::ability::ControllerRef::Opponent),
+        ));
+
+        // Opponent shuffles — should fire
+        let opp_event = GameEvent::PlayerPerformedAction {
+            player_id: PlayerId(1),
+            action: PlayerActionKind::ShuffledLibrary,
+        };
+        assert!(match_shuffled(&opp_event, &trigger, source, &state));
+
+        // Controller shuffles — should NOT fire
+        let self_event = GameEvent::PlayerPerformedAction {
+            player_id: PlayerId(0),
+            action: PlayerActionKind::ShuffledLibrary,
+        };
+        assert!(!match_shuffled(&self_event, &trigger, source, &state));
+    }
+
+    #[test]
+    fn shuffled_rejects_effect_resolved_event() {
+        let state = setup();
+        // The old EffectResolved event should no longer trigger match_shuffled
         let event = GameEvent::EffectResolved {
             kind: EffectKind::Shuffle,
             source_id: ObjectId(1),
         };
         let trigger = make_trigger(TriggerMode::Shuffled);
-        assert!(match_shuffled(&event, &trigger, ObjectId(1), &state));
+        assert!(!match_shuffled(&event, &trigger, ObjectId(1), &state));
     }
 
     #[test]
@@ -4896,7 +5084,8 @@ mod tests {
         let event = GameEvent::CrimeCommitted {
             player_id: PlayerId(0),
         };
-        let trigger = make_trigger(TriggerMode::CommitCrime);
+        // "whenever you commit a crime" → valid_target = Controller
+        let trigger = make_trigger(TriggerMode::CommitCrime).valid_target(TargetFilter::Controller);
 
         assert!(match_commit_crime(&event, &trigger, obj_id, &state));
     }
@@ -4912,13 +5101,84 @@ mod tests {
             Zone::Battlefield,
         );
 
-        // Opponent committed the crime, not us
+        // Opponent committed the crime; controller-scoped trigger must not fire.
         let event = GameEvent::CrimeCommitted {
             player_id: PlayerId(1),
         };
-        let trigger = make_trigger(TriggerMode::CommitCrime);
+        // "whenever you commit a crime" → valid_target = Controller
+        let trigger = make_trigger(TriggerMode::CommitCrime).valid_target(TargetFilter::Controller);
 
         assert!(!match_commit_crime(&event, &trigger, obj_id, &state));
+    }
+
+    #[test]
+    fn commit_crime_matcher_opponent_scope_fires_for_opponent() {
+        let mut state = setup();
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Patrolling Peacemaker".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Opponent (PlayerId(1)) commits the crime — should fire.
+        let event = GameEvent::CrimeCommitted {
+            player_id: PlayerId(1),
+        };
+        // "whenever an opponent commits a crime" → valid_target = Typed(Opponent)
+        let trigger = make_trigger(TriggerMode::CommitCrime).valid_target(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent),
+        ));
+
+        assert!(match_commit_crime(&event, &trigger, obj_id, &state));
+    }
+
+    #[test]
+    fn commit_crime_matcher_opponent_scope_ignores_controller_crime() {
+        let mut state = setup();
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Patrolling Peacemaker".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Controller (PlayerId(0)) commits — opponent-scoped trigger must NOT fire.
+        let event = GameEvent::CrimeCommitted {
+            player_id: PlayerId(0),
+        };
+        let trigger = make_trigger(TriggerMode::CommitCrime).valid_target(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent),
+        ));
+
+        assert!(!match_commit_crime(&event, &trigger, obj_id, &state));
+    }
+
+    #[test]
+    fn commit_crime_matcher_any_player_scope_fires_for_either() {
+        let mut state = setup();
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Tarnation".to_string(),
+            Zone::Battlefield,
+        );
+
+        // "whenever a player commits a crime" → valid_target = Player (any player)
+        let trigger = make_trigger(TriggerMode::CommitCrime).valid_target(TargetFilter::Player);
+
+        let own_crime = GameEvent::CrimeCommitted {
+            player_id: PlayerId(0),
+        };
+        let opp_crime = GameEvent::CrimeCommitted {
+            player_id: PlayerId(1),
+        };
+
+        assert!(match_commit_crime(&own_crime, &trigger, obj_id, &state));
+        assert!(match_commit_crime(&opp_crime, &trigger, obj_id, &state));
     }
 
     // --- Counter filter tests ---

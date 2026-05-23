@@ -1,8 +1,10 @@
+use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::game_object::GameObject;
 use engine::types::ability::{
     ContinuousModification, Effect, PtValue, QuantityExpr, TargetFilter, TypeFilter,
 };
 use engine::types::counter::CounterType;
+use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
 use engine::types::triggers::TriggerMode;
@@ -322,6 +324,71 @@ pub(crate) fn targeted_player_impact(ctx: &PolicyContext<'_>, player: PlayerId) 
     }
 
     found_targeted_effect.then_some(impact)
+}
+
+pub(crate) fn targeted_object_impact(ctx: &PolicyContext<'_>, object_id: ObjectId) -> Option<f64> {
+    let mut found_targeted_effect = false;
+    let mut impact = 0.0;
+
+    for effect in ctx.effects() {
+        if effect_targets_object(ctx, effect, object_id) {
+            found_targeted_effect = true;
+            impact += player_impact(effect);
+        }
+    }
+
+    found_targeted_effect.then_some(impact)
+}
+
+pub(crate) fn effect_targets_object(
+    ctx: &PolicyContext<'_>,
+    effect: &Effect,
+    object_id: ObjectId,
+) -> bool {
+    let source_id = effect_source_id(ctx);
+    let filter_ctx = FilterContext::from_source(ctx.state, source_id);
+    extract_target_filter(effect)
+        .is_some_and(|filter| object_matches_effect_filter(ctx, object_id, filter, &filter_ctx))
+}
+
+fn effect_source_id(ctx: &PolicyContext<'_>) -> ObjectId {
+    match &ctx.decision.waiting_for {
+        engine::types::game_state::WaitingFor::TargetSelection { pending_cast, .. } => {
+            pending_cast.object_id
+        }
+        engine::types::game_state::WaitingFor::MultiTargetSelection {
+            pending_ability, ..
+        } => pending_ability.source_id,
+        engine::types::game_state::WaitingFor::TriggerTargetSelection { source_id, .. } => {
+            source_id.unwrap_or(ObjectId(0))
+        }
+        _ => ctx
+            .source_object()
+            .map(|object| object.id)
+            .unwrap_or(ObjectId(0)),
+    }
+}
+
+fn object_matches_effect_filter(
+    ctx: &PolicyContext<'_>,
+    object_id: ObjectId,
+    filter: &TargetFilter,
+    filter_ctx: &FilterContext,
+) -> bool {
+    match filter {
+        TargetFilter::StackSpell => ctx.state.stack.iter().any(|entry| entry.id == object_id),
+        TargetFilter::StackAbility { .. } => false,
+        TargetFilter::And { filters } => filters
+            .iter()
+            .all(|filter| object_matches_effect_filter(ctx, object_id, filter, filter_ctx)),
+        TargetFilter::Or { filters } => filters
+            .iter()
+            .any(|filter| object_matches_effect_filter(ctx, object_id, filter, filter_ctx)),
+        TargetFilter::Not { filter } => {
+            !object_matches_effect_filter(ctx, object_id, filter, filter_ctx)
+        }
+        _ => matches_target_filter(ctx.state, object_id, filter, filter_ctx),
+    }
 }
 
 fn player_impact(effect: &Effect) -> f64 {

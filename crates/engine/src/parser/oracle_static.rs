@@ -40,7 +40,7 @@ use crate::types::ability::{
     QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
     TypedFilter,
 };
-use crate::types::card_type::{CoreType, Supertype};
+use crate::types::card_type::{noncreature_subtype_set, CoreType, SubtypeSet, Supertype};
 use crate::types::counter::{parse_counter_type, CounterMatch};
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::{ManaColor, ManaCost, ManaType};
@@ -685,6 +685,10 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     }
     if let Some(def) = parse_collection_counter_play_permission_static(&tp, &text) {
         return Some(def);
+    }
+
+    if let Some(mode) = parse_max_combat_creatures_static(&lower) {
+        return Some(StaticDefinition::new(mode).description(text.to_string()));
     }
 
     if let Some(defs) = parse_cost_payment_prohibition_statics(&tp, &text) {
@@ -2063,6 +2067,36 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         }
     }
 
+    // --- "[Enchanted/Equipped] [type]'s activated abilities cost {N} less to activate" ---
+    // CR 303.4 + CR 602.1 + CR 601.2f: Aura/Equipment-granted activated ability
+    // cost reduction for the attached object (Power Artifact).
+    if let Some(((prefix, filter_part, amount), _)) = nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, prefix) = alt((
+            value("enchanted ", tag::<_, _, OracleError<'_>>("enchanted ")),
+            value("equipped ", tag::<_, _, OracleError<'_>>("equipped ")),
+        ))
+        .parse(i)?;
+        let (i, filter_part) = take_until("'s activated abilities cost ").parse(i)?;
+        let (i, _) = tag("'s activated abilities cost ").parse(i)?;
+        let (i, amount) =
+            nom::sequence::delimited(tag("{"), nom_primitives::parse_number, tag("}")).parse(i)?;
+        let (i, _) = tag(" less to activate").parse(i)?;
+        Ok((i, (prefix, filter_part.to_string(), amount)))
+    }) {
+        let filter_text = format!("{prefix}{filter_part}");
+        let (affected, _rest) = parse_type_phrase(&filter_text);
+        return Some(
+            StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                keyword: "activated".to_string(),
+                amount,
+                minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
+                dynamic_count: None,
+            })
+            .affected(affected)
+            .description(text.to_string()),
+        );
+    }
+
     // --- "Activated abilities of [filter] cost {N} less to activate" ---
     // CR 602.1 + CR 601.2f: Generic activated ability cost reduction (e.g., Training Grounds).
     if let Some(rest) = nom_tag_lower(tp.lower, tp.lower, "activated abilities of ") {
@@ -2282,6 +2316,31 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     }
 
     None
+}
+
+fn parse_max_combat_creatures_static(lower: &str) -> Option<StaticMode> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("no more than ")
+        .parse(lower)
+        .ok()?;
+    let (max, rest) = parse_number(rest)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("creature").parse(rest).ok()?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("s")).parse(rest).ok()?;
+    let (rest, mode) = alt((
+        value(
+            StaticMode::MaxAttackersEachCombat { max },
+            tag::<_, _, OracleError<'_>>(" can attack each combat"),
+        ),
+        value(
+            StaticMode::MaxBlockersEachCombat { max },
+            tag(" can block each combat"),
+        ),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (_, _) = all_consuming(opt(tag::<_, _, OracleError<'_>>(".")))
+        .parse(rest)
+        .ok()?;
+    Some(mode)
 }
 
 fn parse_arcane_adaptation_chosen_type_static(
@@ -2569,8 +2628,8 @@ fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition> {
         return defs;
     }
 
-    // CR 508.1d / CR 509.1c: Cross-mode conjunctions of the form
-    // "<predicate_1> and attack/block each combat if able" combine a
+    // CR 508.1d / CR 509.1c / CR 701.15b: Cross-mode conjunctions of the form
+    // "<predicate_1> and attack/block each combat if able/is goaded" combine a
     // continuous static (usually a keyword grant) with a combat requirement.
     // A single `StaticDefinition` cannot carry both modes, so decompose them.
     if let Some(defs) = try_split_and_must_attack_block(&stripped) {
@@ -2778,6 +2837,10 @@ fn try_split_and_must_attack_block(text: &str) -> Option<Vec<StaticDefinition>> 
                     tag::<_, _, VE>("must be blocked each combat if able"),
                     tag("must be blocked if able"),
                 )),
+            ),
+            value(
+                vec![StaticMode::Goaded],
+                alt((tag::<_, _, VE>("is goaded"), tag("are goaded"))),
             ),
         ))
         .parse(i)
@@ -3545,12 +3608,16 @@ pub(crate) fn parse_additive_type_clause_modifications(
     let after_verb_original = &clause_original[clause_original.len() - after_verb_lower.len()..];
     let (after_suffix_lower, type_words_lower) = terminated(
         take_until::<_, _, VE>(" in addition to "),
-        alt((
-            tag::<_, _, VE>(" in addition to its other types"),
-            tag::<_, _, VE>(" in addition to its other land types"),
-            tag::<_, _, VE>(" in addition to their other types"),
-            tag::<_, _, VE>(" in addition to their other land types"),
-        )),
+        (
+            tag::<_, _, VE>(" in addition to "),
+            alt((tag::<_, _, VE>("its"), tag::<_, _, VE>("their"))),
+            tag::<_, _, VE>(" other "),
+            alt((
+                tag::<_, _, VE>("creature types"),
+                tag::<_, _, VE>("land types"),
+                tag::<_, _, VE>("types"),
+            )),
+        ),
     )
     .parse(after_verb_lower)
     .ok()?;
@@ -7733,6 +7800,9 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     // into one AddType/AddSubtype modification per token (not a single
     // whole-phrase AddSubtype string).
     modifications.extend(parse_becomes_type_addition_modifications(&unquoted_tp));
+    modifications.extend(parse_bare_becomes_type_replacement_modifications(
+        &unquoted_tp,
+    ));
 
     modifications
 }
@@ -7947,6 +8017,158 @@ fn parse_becomes_type_addition_modifications(tp: &TextPair<'_>) -> Vec<Continuou
     let descriptor_original = &tp.original[start..end];
 
     super::oracle_effect::animation::parse_becomes_type_modifications(descriptor_original)
+}
+
+/// CR 205.1a-b + CR 613.1d: bare "becomes a/an <descriptor>" type-changing
+/// effects are replacement-form changes. Setting core card types replaces the
+/// previous card-type set except for CR 205.1b's artifact-creature exception;
+/// setting creature subtypes replaces the object's previous creature types.
+fn parse_bare_becomes_type_replacement_modifications(
+    tp: &TextPair<'_>,
+) -> Vec<ContinuousModification> {
+    type VE<'a> = OracleError<'a>;
+
+    let Some((_, tail_lower)) = nom_primitives::scan_split_at_phrase(tp.lower, |i| {
+        alt((
+            tag::<_, _, VE>("becomes a "),
+            tag::<_, _, VE>("becomes an "),
+        ))
+        .parse(i)
+    }) else {
+        return Vec::new();
+    };
+    let Ok::<_, nom::Err<VE<'_>>>((after_article_lower, _)) =
+        alt((tag("becomes a "), tag("becomes an "))).parse(tail_lower)
+    else {
+        return Vec::new();
+    };
+    let (descriptor_lower, retained_core_type) =
+        if let Some((descriptor_lower, retained_core_type)) =
+            split_type_retention_clause(after_article_lower)
+        {
+            (descriptor_lower, Some(retained_core_type))
+        } else {
+            (after_article_lower, None)
+        };
+    if retained_core_type.is_none()
+        && take_until::<_, _, VE>(" in addition to")
+            .parse(descriptor_lower)
+            .is_ok()
+    {
+        return Vec::new();
+    }
+
+    let Ok::<_, nom::Err<VE<'_>>>((_, descriptor_lower)) =
+        parse_clause_before_optional_period(descriptor_lower)
+    else {
+        return Vec::new();
+    };
+    let (descriptor_lower, _) = strip_trailing_duration(descriptor_lower.trim());
+    let descriptor_lower = descriptor_lower.trim();
+    if descriptor_lower.is_empty() {
+        return Vec::new();
+    }
+
+    let start = tp.lower.len() - after_article_lower.len();
+    let end = start + descriptor_lower.len();
+    let descriptor_original = &tp.original[start..end];
+    let Some(spec) = super::oracle_effect::animation::parse_animation_spec(
+        descriptor_original,
+        &mut ParseContext::default(),
+    ) else {
+        return Vec::new();
+    };
+    let animation_modifications = super::oracle_effect::animation::animation_modifications(&spec);
+    if let Some(core_type) = retained_core_type {
+        let mut modifications = animation_modifications;
+        if !modifications.contains(&ContinuousModification::AddType { core_type }) {
+            modifications.push(ContinuousModification::AddType { core_type });
+        }
+        return modifications;
+    }
+
+    let core_types: Vec<CoreType> = animation_modifications
+        .iter()
+        .filter_map(|modification| match modification {
+            ContinuousModification::AddType { core_type } => Some(*core_type),
+            _ => None,
+        })
+        .collect();
+    let keep_additive_core_types = core_types.len() == 2
+        && core_types.contains(&CoreType::Artifact)
+        && core_types.contains(&CoreType::Creature);
+
+    let mut modifications = Vec::new();
+    let mut set_core_types = false;
+    let mut removed_subtype_sets = Vec::new();
+    for modification in animation_modifications {
+        if matches!(modification, ContinuousModification::AddType { .. }) {
+            if core_types.is_empty() || keep_additive_core_types {
+                modifications.push(modification);
+            } else if !set_core_types {
+                modifications.push(ContinuousModification::SetCardTypes {
+                    core_types: core_types.clone(),
+                });
+                set_core_types = true;
+            }
+            continue;
+        }
+
+        if let ContinuousModification::AddSubtype { subtype } = &modification {
+            let set = noncreature_subtype_set(subtype).unwrap_or(SubtypeSet::Creature);
+            if !removed_subtype_sets.contains(&set) {
+                modifications.push(ContinuousModification::RemoveAllSubtypes { set });
+                removed_subtype_sets.push(set);
+            }
+        }
+        modifications.push(modification);
+    }
+    modifications
+}
+
+fn parse_clause_before_optional_period(input: &str) -> OracleResult<'_, &str> {
+    terminated(alt((take_until("."), rest)), opt(tag("."))).parse(input)
+}
+
+fn split_type_retention_clause(input: &str) -> Option<(&str, CoreType)> {
+    let (descriptor, retention_clause) =
+        nom_primitives::scan_split_at_phrase(input, |i| parse_type_retention_clause(i))?;
+    let (_, retained_core_type) = parse_type_retention_clause(retention_clause).ok()?;
+    Some((descriptor, retained_core_type))
+}
+
+fn parse_type_retention_clause(input: &str) -> OracleResult<'_, CoreType> {
+    let (input, is_plural) = alt((
+        value(false, alt((tag("it's still "), tag("that's still ")))),
+        value(true, tag("they're still ")),
+    ))
+    .parse(input)?;
+
+    let (input, _) = if is_plural {
+        (input, None)
+    } else {
+        let (input, article) = opt(nom_primitives::parse_article).parse(input)?;
+        (input, article)
+    };
+
+    alt((
+        value(CoreType::Artifact, alt((tag("artifact"), tag("artifacts")))),
+        value(CoreType::Battle, alt((tag("battle"), tag("battles")))),
+        value(CoreType::Creature, alt((tag("creature"), tag("creatures")))),
+        value(
+            CoreType::Enchantment,
+            alt((tag("enchantment"), tag("enchantments"))),
+        ),
+        value(CoreType::Instant, alt((tag("instant"), tag("instants")))),
+        value(CoreType::Kindred, alt((tag("kindred"), tag("kindreds")))),
+        value(CoreType::Land, alt((tag("land"), tag("lands")))),
+        value(
+            CoreType::Planeswalker,
+            alt((tag("planeswalker"), tag("planeswalkers"))),
+        ),
+        value(CoreType::Sorcery, alt((tag("sorcery"), tag("sorceries")))),
+    ))
+    .parse(input)
 }
 
 fn parse_base_pt_mod(text: &str) -> Option<(i32, i32)> {
@@ -10271,6 +10493,105 @@ mod tests {
     }
 
     #[test]
+    fn continuous_mods_replace_creature_subtypes_for_bare_becomes_clause() {
+        let mods = parse_continuous_modifications("gets +3/+3 and becomes a Bear Berserker");
+        assert!(mods.contains(&ContinuousModification::AddPower { value: 3 }));
+        assert!(mods.contains(&ContinuousModification::AddToughness { value: 3 }));
+        assert!(mods.contains(&ContinuousModification::RemoveAllSubtypes {
+            set: crate::types::card_type::SubtypeSet::Creature,
+        }));
+        assert!(mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Bear".to_string(),
+        }));
+        assert!(mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Berserker".to_string(),
+        }));
+    }
+
+    #[test]
+    fn continuous_mods_replace_creature_subtypes_with_color_and_core_type_tail() {
+        let mods = parse_continuous_modifications(
+            "becomes a white and green Bear Berserker creature with trample",
+        );
+        assert!(mods.contains(&ContinuousModification::SetColor {
+            colors: vec![ManaColor::White, ManaColor::Green],
+        }));
+        assert!(mods.contains(&ContinuousModification::RemoveAllSubtypes {
+            set: crate::types::card_type::SubtypeSet::Creature,
+        }));
+        assert!(mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Bear".to_string(),
+        }));
+        assert!(mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Berserker".to_string(),
+        }));
+        assert!(mods.contains(&ContinuousModification::SetCardTypes {
+            core_types: vec![CoreType::Creature],
+        }));
+        assert!(mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Trample,
+        }));
+    }
+
+    #[test]
+    fn continuous_mods_preserve_additive_artifact_creature_exception() {
+        let mods = parse_continuous_modifications("becomes an artifact creature");
+        assert!(mods.contains(&ContinuousModification::AddType {
+            core_type: CoreType::Artifact,
+        }));
+        assert!(mods.contains(&ContinuousModification::AddType {
+            core_type: CoreType::Creature,
+        }));
+        assert!(
+            !mods.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::SetCardTypes { .. }
+            )),
+            "artifact creature exception must retain previous card types: {mods:?}"
+        );
+    }
+
+    #[test]
+    fn continuous_mods_preserve_still_type_retention_clause() {
+        let mods = parse_continuous_modifications(
+            "becomes a 0/0 Elemental creature with vigilance and haste that's still a land",
+        );
+        assert!(mods.contains(&ContinuousModification::SetPower { value: 0 }));
+        assert!(mods.contains(&ContinuousModification::SetToughness { value: 0 }));
+        assert!(mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Elemental".to_string(),
+        }));
+        assert!(mods.contains(&ContinuousModification::AddType {
+            core_type: CoreType::Creature,
+        }));
+        assert!(mods.contains(&ContinuousModification::AddType {
+            core_type: CoreType::Land,
+        }));
+        assert!(
+            !mods.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::SetCardTypes { .. }
+                    | ContinuousModification::RemoveAllSubtypes { .. }
+            )),
+            "still-retained types must stay additive under CR 205.1b: {mods:?}"
+        );
+    }
+
+    #[test]
+    fn continuous_mods_replace_noncreature_subtype_set_for_bare_becomes_clause() {
+        let mods = parse_continuous_modifications("becomes a Treasure artifact");
+        assert!(mods.contains(&ContinuousModification::SetCardTypes {
+            core_types: vec![CoreType::Artifact],
+        }));
+        assert!(mods.contains(&ContinuousModification::RemoveAllSubtypes {
+            set: SubtypeSet::Artifact,
+        }));
+        assert!(mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Treasure".to_string(),
+        }));
+    }
+
+    #[test]
     fn static_merfolk_lord() {
         let def = parse_static_line("Other Merfolk you control get +1/+1.").unwrap();
         assert!(def
@@ -12116,6 +12437,40 @@ mod tests {
     }
 
     #[test]
+    fn static_crackling_drake_counts_owned_instant_sorcery_exile_and_graveyard() {
+        let def = parse_static_line(
+            "Crackling Drake's power is equal to the total number of instant and sorcery cards you own in exile and in your graveyard.",
+        )
+        .unwrap();
+
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert!(def.characteristic_defining);
+        let expected = QuantityExpr::Sum {
+            exprs: vec![
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Exile,
+                        card_types: vec![TypeFilter::Instant, TypeFilter::Sorcery],
+                        scope: CountScope::Owner,
+                    },
+                },
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Graveyard,
+                        card_types: vec![TypeFilter::Instant, TypeFilter::Sorcery],
+                        scope: CountScope::Owner,
+                    },
+                },
+            ],
+        };
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::SetDynamicPower { value: expected }]
+        );
+    }
+
+    #[test]
     fn static_multani_cda_total_cards_in_all_players_hands() {
         let qty = QuantityExpr::Ref {
             qty: QuantityRef::HandSize {
@@ -12302,6 +12657,21 @@ mod tests {
         assert_eq!(defs[2].mode, StaticMode::Goaded);
         assert_eq!(defs[1].affected, defs[0].affected);
         assert_eq!(defs[2].affected, defs[0].affected);
+    }
+
+    #[test]
+    fn static_pump_and_goaded_emits_both_defs() {
+        let defs = parse_static_line_multi("Enchanted creature gets +2/+2 and is goaded.");
+        assert_eq!(defs.len(), 2);
+        assert_eq!(defs[0].mode, StaticMode::Continuous);
+        assert!(defs[0]
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 2 }));
+        assert!(defs[0]
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 2 }));
+        assert_eq!(defs[1].mode, StaticMode::Goaded);
+        assert_eq!(defs[1].affected, defs[0].affected);
     }
 
     #[test]
@@ -13096,6 +13466,45 @@ mod tests {
             }
             other => panic!("Expected Typed creature filter, got {:?}", other),
         }
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste
+            }));
+    }
+
+    #[test]
+    fn static_other_creatures_with_any_counters_have_flying_and_haste() {
+        let def = parse_static_line(
+            "Other creatures you control with counters on them have flying and haste.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        match &def.affected {
+            Some(TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::You),
+                properties,
+                type_filters,
+                ..
+            })) => {
+                assert!(type_filters.contains(&TypeFilter::Creature));
+                assert!(properties.contains(&FilterProp::Another));
+                assert!(properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Counters {
+                        counters: CounterMatch::Any,
+                        comparator: Comparator::GE,
+                        count: QuantityExpr::Fixed { value: 1 },
+                    }
+                )));
+            }
+            other => panic!("Expected typed creature filter, got {other:?}"),
+        }
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying
+            }));
         assert!(def
             .modifications
             .contains(&ContinuousModification::AddKeyword {
@@ -14944,6 +15353,24 @@ mod tests {
         let def = parse_static_line("This creature must attack each combat if able.").unwrap();
         assert_eq!(def.mode, StaticMode::MustAttack);
         assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn static_no_more_than_one_creature_can_attack_each_combat() {
+        let def = parse_static_line("No more than one creature can attack each combat.").unwrap();
+        assert_eq!(def.mode, StaticMode::MaxAttackersEachCombat { max: 1 });
+    }
+
+    #[test]
+    fn static_no_more_than_two_creatures_can_attack_each_combat() {
+        let def = parse_static_line("No more than two creatures can attack each combat.").unwrap();
+        assert_eq!(def.mode, StaticMode::MaxAttackersEachCombat { max: 2 });
+    }
+
+    #[test]
+    fn static_no_more_than_one_creature_can_block_each_combat() {
+        let def = parse_static_line("No more than one creature can block each combat.").unwrap();
+        assert_eq!(def.mode, StaticMode::MaxBlockersEachCombat { max: 1 });
     }
 
     #[test]
@@ -17131,6 +17558,27 @@ mod tests {
     }
 
     #[test]
+    fn static_hivestone_adds_sliver_subtype_to_creatures_you_control() {
+        let def = parse_static_line(
+            "Creatures you control are Slivers in addition to their other creature types.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
+        );
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::AddSubtype {
+                subtype: "Sliver".to_string(),
+            }]
+        );
+    }
+
+    #[test]
     fn static_other_multicolored_creatures_get_plus() {
         // CR 105.2: "Other multicolored creatures you control get +1/+0."
         let def = parse_static_line("Other multicolored creatures you control get +1/+0.").unwrap();
@@ -17609,6 +18057,48 @@ mod tests {
                 dynamic_count: None,
             }
         );
+    }
+
+    #[test]
+    fn static_reduce_activated_ability_cost_enchanted_artifact_with_minimum() {
+        let def = parse_static_line(
+            "Enchanted artifact's activated abilities cost {2} less to activate. This effect can't reduce the mana in that cost to less than one mana.",
+        )
+        .unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::ReduceAbilityCost {
+                keyword: "activated".to_string(),
+                amount: 2,
+                minimum_mana: Some(1),
+                dynamic_count: None,
+            }
+        );
+        assert!(matches!(
+            def.affected,
+            Some(TargetFilter::Typed(TypedFilter { .. }))
+        ));
+    }
+
+    #[test]
+    fn static_reduce_activated_ability_cost_equipped_artifact_with_minimum() {
+        let def = parse_static_line(
+            "Equipped artifact's activated abilities cost {2} less to activate. This effect can't reduce the mana in that cost to less than one mana.",
+        )
+        .unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::ReduceAbilityCost {
+                keyword: "activated".to_string(),
+                amount: 2,
+                minimum_mana: Some(1),
+                dynamic_count: None,
+            }
+        );
+        assert!(matches!(
+            def.affected,
+            Some(TargetFilter::Typed(TypedFilter { .. }))
+        ));
     }
 
     // --- Group C: Spells you cast have keyword ---

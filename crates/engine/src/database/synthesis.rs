@@ -4,7 +4,7 @@ use crate::database::mtgjson::{parse_mtgjson_mana_cost, AtomicCard};
 use crate::game::printed_cards::derive_colors_from_mana_cost;
 use crate::parser::oracle::{oracle_text_allows_commander, parse_oracle_text};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AdditionalCost,
     AggregateFunction, CardPlayMode, CastVariantPaid, ChoiceType, ContinuousModification,
     ControllerRef, CopyRetargetPermission, CounterTriggerFilter, Duration, Effect, FilterProp,
     KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
@@ -1096,6 +1096,40 @@ pub fn synthesize_scavenge(face: &mut CardFace) {
         .collect();
 
     face.abilities.extend(scavenge_abilities);
+}
+
+/// CR 702.107a: Synthesize the Outlast activated ability from a `Keyword::Outlast(cost)`.
+/// "Outlast [cost]" means "[Cost], {T}: Put a +1/+1 counter on this creature.
+/// Activate only as a sorcery."
+pub fn synthesize_outlast(face: &mut CardFace) {
+    let outlast_abilities: Vec<AbilityDefinition> = face
+        .keywords
+        .iter()
+        .filter_map(|kw| {
+            let Keyword::Outlast(cost) = kw else {
+                return None;
+            };
+            // CR 702.107a: Composite cost — pay mana, then tap this creature.
+            let composite_cost = AbilityCost::Composite {
+                costs: vec![AbilityCost::Mana { cost: cost.clone() }, AbilityCost::Tap],
+            };
+            // CR 702.107a: "Put a +1/+1 counter on this creature."
+            let effect = Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            };
+            let mut def = AbilityDefinition::new(AbilityKind::Activated, effect)
+                .cost(composite_cost)
+                // CR 702.107a: "Activate only as a sorcery."
+                .sorcery_speed();
+            // Tag so "whenever you activate this creature's outlast ability" triggers fire.
+            def.ability_tag = Some(AbilityTag::Outlast);
+            Some(def)
+        })
+        .collect();
+
+    face.abilities.extend(outlast_abilities);
 }
 
 /// Convert a typecycling subtype string to a `TargetFilter` for library search.
@@ -3088,6 +3122,7 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_level_up(face);
     synthesize_cycling(face);
     synthesize_scavenge(face);
+    synthesize_outlast(face);
     synthesize_casualty(face);
     synthesize_entwine(face);
     synthesize_madness_intrinsics(face);
@@ -7798,18 +7833,19 @@ mod sorcery_speed_invariant_tests {
 mod loyalty_sorcery_speed_tests {
     //! CR 606.3: Planeswalker loyalty abilities may only be activated during
     //! the controller's main phase with an empty stack, and only once per turn
-    //! per permanent. The parser must tag every loyalty line with both
-    //! `ActivationRestriction::AsSorcery` (CR 606.3 timing) and
-    //! `ActivationRestriction::OnlyOnceEachTurn` (CR 606.3 per-permanent
-    //! limit) so downstream consumers (and the shared invariant) see a
-    //! self-describing restriction set. The planeswalker activation path
-    //! (`game::planeswalker::can_activate_loyalty`) already gates loyalty
-    //! independently; these restrictions are defensive + invariant-preserving.
+    //! per permanent. The parser tags every loyalty line with
+    //! `ActivationRestriction::AsSorcery` (CR 606.3 timing) for downstream
+    //! consumers. It does NOT add `OnlyOnceEachTurn`: that restriction is
+    //! per-ability-index, while CR 606.3 is per-permanent across ALL loyalty
+    //! ability indices. The per-permanent cap is enforced authoritatively by
+    //! `game::planeswalker::can_activate_loyalty_ability` against
+    //! `obj.loyalty_activations_this_turn`. See `apply_loyalty_restrictions`
+    //! in `parser::oracle` for the rationale and The Chain Veil interaction.
     use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::ActivationRestriction;
 
     #[test]
-    fn loyalty_ability_parses_with_as_sorcery_and_once_each_turn() {
+    fn loyalty_ability_parses_with_as_sorcery() {
         // Jace, the Mind Sculptor reminder-text-like minimal loyalty line.
         let r = parse_oracle_text("+2: Draw a card.", "Test Planeswalker", &[], &[], &[]);
         assert_eq!(r.abilities.len(), 1);
@@ -7820,10 +7856,13 @@ mod loyalty_sorcery_speed_tests {
                 .contains(&ActivationRestriction::AsSorcery),
             "CR 606.3: AsSorcery restriction is pushed for loyalty"
         );
+        // CR 606.3: Loyalty's "once per turn per permanent" gate lives on the
+        // permanent counter, not on per-ability `OnlyOnceEachTurn`. The Chain
+        // Veil's cap-raise depends on this separation.
         assert!(
-            def.activation_restrictions
+            !def.activation_restrictions
                 .contains(&ActivationRestriction::OnlyOnceEachTurn),
-            "CR 606.3: OnlyOnceEachTurn restriction is pushed for loyalty"
+            "CR 606.3: OnlyOnceEachTurn must NOT be attached — the per-permanent counter is the gate"
         );
     }
 
@@ -7837,7 +7876,7 @@ mod loyalty_sorcery_speed_tests {
         assert!(def
             .activation_restrictions
             .contains(&ActivationRestriction::AsSorcery));
-        assert!(def
+        assert!(!def
             .activation_restrictions
             .contains(&ActivationRestriction::OnlyOnceEachTurn));
     }
@@ -9073,6 +9112,7 @@ mod bloodthirst_synthesis_tests {
             rulings: Vec::new(),
             is_game_changer: false,
             identifiers: crate::database::mtgjson::AtomicIdentifiers {
+                scryfall_id: None,
                 scryfall_oracle_id: None,
             },
         };

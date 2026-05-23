@@ -1,8 +1,9 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_until};
+use nom::bytes::complete::{tag, tag_no_case, take_until};
 use nom::character::complete::multispace1;
 use nom::combinator::{all_consuming, eof, opt, value};
+use nom::sequence::preceded;
 use nom::Parser;
 
 use super::super::oracle_nom::bridge::nom_on_lower;
@@ -80,6 +81,26 @@ fn parse_choose_count_from_text(lower: &str) -> u32 {
 fn parse_choice_partition_destinations(lower: &str) -> Option<(Zone, Zone)> {
     parse_put_choice_partition_destinations(lower)
         .or_else(|| parse_shuffle_choice_partition_destinations(lower))
+}
+
+fn starts_have_base_power_toughness(input: &str) -> bool {
+    value(
+        (),
+        (
+            tag_no_case::<_, _, OracleError<'_>>("have"),
+            multispace1,
+            tag_no_case("base"),
+            multispace1,
+            tag_no_case("power"),
+            multispace1,
+            tag_no_case("and"),
+            multispace1,
+            tag_no_case("toughness"),
+            multispace1,
+        ),
+    )
+    .parse(input)
+    .is_ok()
 }
 
 fn parse_put_chosen_cards_at_library_position(lower: &str) -> Option<LibraryPosition> {
@@ -522,6 +543,15 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                     ))
                     .parse(before_lower.trim_start())
                     .is_ok();
+                    // CR 613.1d + CR 613.4b: "have base power and toughness N/N"
+                    // is a layer-7b continuous modification, never an imperative
+                    // clause starter. Suppress the split so
+                    // `parse_continuous_modifications` can handle the compound
+                    // (e.g. "lose all abilities and have base power and toughness
+                    // 1/1 until end of turn") as a single GenericEffect with the
+                    // correct `affected` filter inherited from the subject.
+                    let have_base_pt_continuation =
+                        starts_have_base_power_toughness(remainder_trimmed);
                     let suppress = nom_primitives::scan_contains(&before_lower, "from among")
                         || is_inside_temporal_prefix(&before_lower)
                         || targeted_compound_continuation
@@ -530,7 +560,8 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         || inside_except_clause
                         || choice_partition_remainder
                         || compound_subject_each
-                        || inside_otherwise_body;
+                        || inside_otherwise_body
+                        || have_base_pt_continuation;
                     if !suppress && starts_bare_and_clause(remainder_trimmed) {
                         push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
                         current.clear();
@@ -996,6 +1027,20 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         value((), tag("players can't ")),
         value((), tag("players cannot ")),
     )))
+    // CR 701.63: "<self-ref subject> endures N" as a conjunct ("you lose 1
+    // life and this creature endures 1" — Sinkhole Surveyor). The self-ref
+    // subject axis (it / this creature / ~) is composed with the "endures "
+    // verb as a single unit, not enumerated per permutation. A self-ref
+    // pronoun/phrase followed by the conjugated keyword-action verb is always
+    // a subject-predicate clause start, never a noun-phrase continuation.
+    .or(preceded(
+        alt((
+            tag::<_, _, OracleError<'_>>("it "),
+            tag("this creature "),
+            tag("~ "),
+        )),
+        value((), tag("endures ")),
+    ))
     .parse(s)
     .is_ok();
     if has_verb_prefix {
@@ -1922,9 +1967,10 @@ pub(super) fn parse_intrinsic_continuation_ast(
     }
 }
 
-/// CR 701.20e + CR 608.2c: Parse "put up to N [filter] from among them/those cards onto the
-/// battlefield / into your hand" into a DigFromAmong continuation that patches the preceding
-/// Dig effect. The player follows the Oracle text instructions in written order (CR 608.2c).
+/// CR 701.20e + CR 608.2c: Parse "put/return up to N [filter] from among
+/// them/those cards onto the battlefield / into your hand / to your hand" into
+/// a DigFromAmong continuation that patches the preceding Dig effect. The
+/// player follows the Oracle text instructions in written order (CR 608.2c).
 ///
 /// Also handles "put N of them into your hand [and the rest on the bottom]" — the simpler
 /// form used by Impulse, Stock Up, Dig Through Time, etc. where no filter is specified.
@@ -1941,6 +1987,7 @@ pub(super) fn parse_intrinsic_continuation_ast(
 /// Examples:
 /// - "put up to two creature cards with mana value 3 or less from among them onto the battlefield"
 /// - "put a creature card from among them into your hand"
+/// - "return a permanent card from among them to your hand"
 /// - "you may reveal a creature card from among them and put it into your hand"
 /// - "put two of them into your hand and the rest on the bottom of your library in any order"
 pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<ContinuationAst> {
@@ -1976,6 +2023,8 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
         Some(Zone::Battlefield)
     } else if nom_primitives::scan_contains(lower, "into your hand")
         || nom_primitives::scan_contains(lower, "into their hand")
+        || nom_primitives::scan_contains(lower, "to your hand")
+        || nom_primitives::scan_contains(lower, "to their hand")
     {
         Some(Zone::Hand)
     } else {
@@ -2026,8 +2075,10 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
     let after_put = alt((
         tag::<_, _, OracleError<'_>>("you may put "),
         tag("you may reveal "),
+        tag("you may return "),
         tag("put "),
         tag("reveal "),
+        tag("return "),
     ))
     .parse(*before_from)
     .map(|(rest, _)| rest)
@@ -2251,12 +2302,14 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::PutOnTopOrBottom { .. }
         | Effect::GiftDelivery { .. }
         | Effect::Goad { .. }
+        | Effect::GoadAll { .. }
         | Effect::Detain { .. }
         | Effect::ExchangeControl { .. }
         | Effect::ChangeTargets { .. }
         | Effect::Manifest { .. }
         | Effect::ManifestDread
         | Effect::ExtraTurn { .. }
+        | Effect::GrantExtraLoyaltyActivations { .. }
         | Effect::SkipNextTurn { .. }
         | Effect::SkipNextStep { .. }
         | Effect::AdditionalPhase { .. }
@@ -2726,7 +2779,8 @@ pub(super) fn parse_followup_continuation_ast(
         {
             Some(ContinuationAst::PutChoiceRemainderOnBottom)
         }
-        // "Put up to N [filter] from among them/those cards onto the battlefield/into your hand"
+        // "Put/return up to N [filter] from among them/those cards onto the
+        // battlefield/into your hand/to your hand"
         // and "put N of them into your hand [and the rest on the bottom]"
         // after Dig — patches keep_count, filter, destination on the preceding Dig effect.
         //
@@ -2743,7 +2797,9 @@ pub(super) fn parse_followup_continuation_ast(
                 || nom_primitives::scan_contains(&lower, "of them"))
                 && (nom_primitives::scan_contains(&lower, "onto the battlefield")
                     || nom_primitives::scan_contains(&lower, "into your hand")
-                    || nom_primitives::scan_contains(&lower, "into their hand")) =>
+                    || nom_primitives::scan_contains(&lower, "into their hand")
+                    || nom_primitives::scan_contains(&lower, "to your hand")
+                    || nom_primitives::scan_contains(&lower, "to their hand")) =>
         {
             parse_dig_from_among(&lower, text)
         }
@@ -3205,6 +3261,24 @@ mod tests {
         );
     }
 
+    /// CR 613.1d + CR 613.4b: Vedalken Humiliator — "lose all abilities and
+    /// have base power and toughness 1/1 until end of turn" must stay as one
+    /// chunk so `parse_continuous_modifications` produces a single GenericEffect
+    /// with both RemoveAllAbilities and SetPower/SetToughness modifications on
+    /// the same affected filter (opponents' creatures).
+    #[test]
+    fn bare_and_does_not_split_lose_abilities_and_have_base_pt() {
+        let chunks = clause_texts(
+            "creatures your opponents control lose all abilities and have base power and toughness 1/1 until end of turn",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "creatures your opponents control lose all abilities and have base power and toughness 1/1 until end of turn"
+            ]
+        );
+    }
+
     #[test]
     fn bare_and_does_not_split_you_and_target_opponent() {
         let chunks = clause_texts("you and target opponent each draw a card");
@@ -3532,6 +3606,7 @@ mod tests {
 
     fn make_dig_effect() -> Effect {
         Effect::Dig {
+            player: TargetFilter::Controller,
             count: QuantityExpr::Fixed { value: 3 },
             destination: None,
             keep_count: None,
@@ -3784,6 +3859,39 @@ mod tests {
         assert_eq!(rest_destination, None);
         // The Or[Artifact, Creature, Land] filter is carried through verbatim.
         assert!(matches!(filter, TargetFilter::Or { .. }), "got {filter:?}");
+    }
+
+    /// CR 701.17c + CR 608.2c: Midnight Tilling uses the equivalent
+    /// "return ... from among them to your hand" wording instead of
+    /// "put ... from among the milled cards into your hand". It must still
+    /// bind the follow-up choice to the just-milled tracked set.
+    #[test]
+    fn mill_return_from_among_them_to_hand_emits_dig_from_among() {
+        let mill = Effect::Mill {
+            count: QuantityExpr::Fixed { value: 4 },
+            target: TargetFilter::Controller,
+            destination: Zone::Graveyard,
+        };
+        let result = parse_followup_continuation_ast(
+            "You may return a permanent card from among them to your hand.",
+            &mill,
+            &mut ParseContext::default(),
+        );
+        let Some(ContinuationAst::DigFromAmong {
+            count,
+            up_to,
+            filter,
+            destination,
+            rest_destination,
+        }) = result
+        else {
+            panic!("expected DigFromAmong continuation, got {result:?}");
+        };
+        assert_eq!(count, 1);
+        assert!(up_to);
+        assert_eq!(destination, Some(Zone::Hand));
+        assert_eq!(rest_destination, None);
+        assert!(matches!(filter, TargetFilter::Typed(_)), "got {filter:?}");
     }
 
     /// CR 701.17c: `apply_clause_continuation` must PUSH a `ChangeZone`

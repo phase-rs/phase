@@ -8,7 +8,7 @@ use crate::types::ability::{
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     CastPaymentMode, CastingVariant, ConvokeMode, DistributionUnit, GameState, PendingCast,
-    StackEntry, StackEntryKind, WaitingFor,
+    StackEntry, StackEntryKind, StackPaidSnapshot, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
@@ -552,7 +552,25 @@ pub(crate) fn handle_discard_for_cost(
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
-/// CR 118.3 + CR 601.2b: Complete sacrifice-as-cost after player selection.
+fn replace_first_one_of_cost(cost: &mut AbilityCost, chosen: AbilityCost) -> bool {
+    match cost {
+        AbilityCost::OneOf { .. } => {
+            *cost = chosen;
+            true
+        }
+        AbilityCost::Composite { costs } => {
+            for cost in costs {
+                if replace_first_one_of_cost(cost, chosen.clone()) {
+                    return true;
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// CR 118.12a + CR 602.2b: Complete disjunctive activation-cost branch selection.
 pub(crate) fn handle_activation_cost_one_of_choice(
     state: &mut GameState,
     player: PlayerId,
@@ -575,19 +593,14 @@ pub(crate) fn handle_activation_cost_one_of_choice(
         ));
     }
 
-    // Replace the OneOf cost with the chosen branch in the pending cast
-    if let Some(AbilityCost::Composite {
-        costs: ref mut composite_costs,
-    }) = pending.activation_cost
-    {
-        for cost in composite_costs.iter_mut() {
-            if matches!(cost, AbilityCost::OneOf { .. }) {
-                *cost = chosen_cost.clone();
-                break;
-            }
-        }
-    } else if matches!(pending.activation_cost, Some(AbilityCost::OneOf { .. })) {
-        pending.activation_cost = Some(chosen_cost.clone());
+    let replaced = pending
+        .activation_cost
+        .as_mut()
+        .is_some_and(|cost| replace_first_one_of_cost(cost, chosen_cost.clone()));
+    if !replaced {
+        return Err(EngineError::InvalidAction(
+            "Pending activation cost no longer has a OneOf branch".to_string(),
+        ));
     }
 
     finish_pending_cost_or_cast(state, player, pending, events)
@@ -677,6 +690,65 @@ pub(crate) fn handle_return_to_hand_for_cost(
 
     for &id in chosen {
         super::zones::move_to_zone(state, id, Zone::Hand, events);
+    }
+
+    finish_pending_cost_or_cast(state, player, pending, events)
+}
+
+/// CR 118.3 + CR 122.1 + CR 601.2b: Complete remove-counter-as-cost after
+/// player selection.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn handle_remove_counter_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    mut pending: PendingCast,
+    count: u32,
+    counter_type: crate::types::counter::CounterMatch,
+    legal_permanents: &[ObjectId],
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if chosen.len() != 1 {
+        return Err(EngineError::InvalidAction(format!(
+            "Must choose exactly one permanent, got {}",
+            chosen.len()
+        )));
+    }
+    let chosen = chosen[0];
+    if !legal_permanents.contains(&chosen) {
+        return Err(EngineError::InvalidAction(
+            "Selected permanent not eligible for counter removal".to_string(),
+        ));
+    }
+
+    if pending.activation_ability_index.is_some() {
+        if let Some(cost) = pending.activation_cost.take() {
+            // CR 602.2b/h: Pay automatic activation-cost components such as
+            // {T} before removing the chosen counter and putting the ability
+            // on the stack. The targeted RemoveCounter sub-cost no-ops in
+            // `pay_ability_cost` because this handler pays that choice.
+            super::casting::pay_ability_cost(state, player, pending.object_id, &cost, events)?;
+        }
+    }
+
+    let concrete_counter =
+        super::effects::counters::resolve_counter_match_for_removal(state, chosen, &counter_type)
+            .ok_or_else(|| EngineError::ActionNotAllowed("No removable counter".to_string()))?;
+    super::effects::counters::remove_counter_with_replacement(
+        state,
+        chosen,
+        concrete_counter,
+        count,
+        events,
+    );
+
+    if let Some(obj) = state.objects.get(&chosen) {
+        pending
+            .ability
+            .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
+                object_id: chosen,
+                lki: obj.snapshot_for_mana_spent(),
+            });
     }
 
     finish_pending_cost_or_cast(state, player, pending, events)
@@ -2065,6 +2137,32 @@ fn pay_additional_cost(
                 pending_cast: Box::new(pending),
             });
         }
+        AbilityCost::RemoveCounter {
+            count,
+            ref counter_type,
+            target: Some(ref target),
+        } => {
+            let eligible = super::casting::find_eligible_remove_counter_for_cost_targets(
+                state,
+                player,
+                pending.object_id,
+                target,
+                counter_type,
+                count,
+            );
+            if eligible.is_empty() {
+                return Err(EngineError::ActionNotAllowed(
+                    "No eligible permanents with counters".into(),
+                ));
+            }
+            return Ok(WaitingFor::RemoveCounterForCost {
+                player,
+                count,
+                counter_type: counter_type.clone(),
+                permanents: eligible,
+                pending_cast: Box::new(pending),
+            });
+        }
         AbilityCost::PayEnergy { amount } => {
             // CR 107.14: A player can pay {E} only if they have enough energy.
             // CR 107.3c: Resolve the `QuantityExpr` so dynamic amounts read game
@@ -2622,12 +2720,14 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     // replacements on X-cost cards like Astral Cornucopia, Walking Ballista, etc.
     let cost_x_paid = ability.chosen_x;
     let kickers_paid = ability.context.kickers_paid.clone();
+    let additional_cost_paid = ability.context.additional_cost_paid;
     let convoked_creatures = state
         .pending_cast
         .as_ref()
         .filter(|pending| pending.object_id == object_id)
         .map(|pending| pending.convoked_creatures.clone())
         .unwrap_or_default();
+    let convoked_creature_count = convoked_creatures.len();
 
     // Determine whether this spell has a meaningful on-resolve ability.
     // Permanent spells with no Spell-kind AbilityDefinition get a placeholder
@@ -2722,6 +2822,23 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         casting_variant,
         actual_mana_spent,
     };
+    let distinct_colors_spent = state
+        .objects
+        .get(&object_id)
+        .map(|obj| obj.colors_spent_to_cast.distinct_colors() as u32)
+        .unwrap_or_default();
+    state.stack_paid_facts.insert(
+        object_id,
+        StackPaidSnapshot {
+            actual_mana_spent,
+            x_value: cost_x_paid,
+            distinct_colors_spent,
+            kickers_paid: kickers_paid.len(),
+            additional_cost_paid,
+            casting_variant,
+            convoked_creatures: convoked_creature_count,
+        },
+    );
 
     // Track commander cast count for tax calculation
     if was_in_command_zone {
@@ -4228,6 +4345,66 @@ mod tests {
             convoked_creatures: Vec::new(),
             payment_mode: CastPaymentMode::Auto,
         }
+    }
+
+    #[test]
+    fn activation_one_of_choice_replaces_nested_first_branch() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            player,
+            "Nested Choice Relic".to_string(),
+            Zone::Battlefield,
+        );
+        let mut pending = make_pending(source);
+        pending.activation_cost = Some(AbilityCost::Composite {
+            costs: vec![AbilityCost::Composite {
+                costs: vec![AbilityCost::OneOf {
+                    costs: vec![
+                        AbilityCost::PayLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                        },
+                        AbilityCost::Mana {
+                            cost: ManaCost::NoCost,
+                        },
+                    ],
+                }],
+            }],
+        });
+        let choices = match pending.activation_cost.as_ref().unwrap() {
+            AbilityCost::Composite { costs } => match &costs[0] {
+                AbilityCost::Composite { costs } => match &costs[0] {
+                    AbilityCost::OneOf { costs } => costs.clone(),
+                    other => panic!("expected nested OneOf, got {other:?}"),
+                },
+                other => panic!("expected nested Composite, got {other:?}"),
+            },
+            other => panic!("expected Composite, got {other:?}"),
+        };
+        let mut events = Vec::new();
+
+        let waiting = handle_activation_cost_one_of_choice(
+            &mut state,
+            player,
+            pending,
+            &choices,
+            1,
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            waiting,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
+        assert!(
+            state.stack.iter().any(|entry| entry.source_id == source),
+            "activation should be pushed after the nested OneOf is replaced and paid"
+        );
     }
 
     #[test]

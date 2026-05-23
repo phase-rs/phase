@@ -6,6 +6,7 @@
   "decks.json",
   "draft-pools.json",
   "scryfall-data.json",
+  "scryfall-token-images.json",
   "scryfall-printings.json",
   "scryfall-sets.json",
   "semantic-audit.json",

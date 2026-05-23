@@ -62,6 +62,11 @@ pub fn find_legal_targets(
         add_players(state, &mut targets, source_id);
     }
 
+    if let TargetFilter::SpecificPlayer { id } = filter {
+        add_specific_player(state, &mut targets, *id, source_id);
+        return targets;
+    }
+
     // Typed filter with no type_filters targets players, not permanents.
     // e.g. "target opponent" → Typed { type_filters: [], controller: Opponent }
     if let TargetFilter::Typed(ref tf) = filter {
@@ -1032,6 +1037,24 @@ fn add_players(state: &GameState, targets: &mut Vec<TargetRef>, source_id: Objec
     }
 }
 
+fn add_specific_player(
+    state: &GameState,
+    targets: &mut Vec<TargetRef>,
+    player_id: PlayerId,
+    source_id: ObjectId,
+) {
+    let Some(player) = state.players.iter().find(|player| player.id == player_id) else {
+        return;
+    };
+    if player.is_phased_out() || player.is_eliminated {
+        return;
+    }
+    if super::static_abilities::player_protection_from(state, player.id, Some(source_id)) {
+        return;
+    }
+    targets.push(TargetRef::Player(player.id));
+}
+
 /// CR 702.16b: Protection prevents targeting from sources with the relevant quality.
 fn is_protected_from(
     obj: &crate::game::game_object::GameObject,
@@ -1694,6 +1717,31 @@ mod tests {
         assert_eq!(targets.len(), 2);
         assert!(targets.contains(&TargetRef::Player(PlayerId(0))));
         assert!(targets.contains(&TargetRef::Player(PlayerId(1))));
+    }
+
+    #[test]
+    fn find_legal_targets_specific_player_returns_only_that_player() {
+        let (state, _c0, _c1, _land) = setup_with_typed_creatures();
+        let targets = find_legal_targets(
+            &state,
+            &TargetFilter::SpecificPlayer { id: PlayerId(1) },
+            PlayerId(0),
+            ObjectId(99),
+        );
+        assert_eq!(targets, vec![TargetRef::Player(PlayerId(1))]);
+    }
+
+    #[test]
+    fn find_legal_targets_specific_player_excludes_ineligible_player() {
+        let (mut state, _c0, _c1, _land) = setup_with_typed_creatures();
+        state.players[1].is_eliminated = true;
+        let targets = find_legal_targets(
+            &state,
+            &TargetFilter::SpecificPlayer { id: PlayerId(1) },
+            PlayerId(0),
+            ObjectId(99),
+        );
+        assert!(targets.is_empty());
     }
 
     /// CR 800.4a: Eliminated players are not legal targets in multiplayer.

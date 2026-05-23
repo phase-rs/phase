@@ -1,4 +1,4 @@
-import type { GameFormat } from "../adapter/types";
+import type { GameFormat, TokenImageRef } from "../adapter/types";
 
 interface ScryfallDataEntry {
   oracle_id: string;
@@ -7,6 +7,7 @@ interface ScryfallDataEntry {
    * `printed_ref.face_name`. */
   face_names: string[];
   faces: Array<{ normal: string; art_crop: string }>;
+  layout?: string;
   name: string;
   mana_cost: string;
   cmc: number;
@@ -45,10 +46,12 @@ export interface PrintingEntry {
 
 type ScryfallDataMap = Record<string, ScryfallDataEntry>;
 type PrintingsDataMap = Record<string, PrintingEntry[]>;
+type TokenImagesDataMap = Record<string, ScryfallDataEntry & { scryfall_id: string; layout: string }>;
 
 let scryfallDataPromise: Promise<ScryfallDataMap | null> | null = null;
 let scryfallDataResolved: ScryfallDataMap | null = null;
 let printingsDataPromise: Promise<PrintingsDataMap | null> | null = null;
+let tokenImagesDataPromise: Promise<TokenImagesDataMap | null> | null = null;
 let scryfallQueue: Promise<void> = Promise.resolve();
 
 function loadScryfallData(): Promise<ScryfallDataMap | null> {
@@ -77,6 +80,15 @@ export function loadPrintingsData(): Promise<PrintingsDataMap | null> {
       .catch(() => null);
   }
   return printingsDataPromise;
+}
+
+function loadTokenImagesData(): Promise<TokenImagesDataMap | null> {
+  if (!tokenImagesDataPromise) {
+    tokenImagesDataPromise = fetch(__SCRYFALL_TOKEN_IMAGES_URL__)
+      .then((r) => r.json() as Promise<TokenImagesDataMap>)
+      .catch(() => null);
+  }
+  return tokenImagesDataPromise;
 }
 
 export function hasAlternatePrintingsSync(oracleId: string): boolean {
@@ -121,11 +133,27 @@ export function resolveOracleIdSync(cardName: string): string | null {
   return scryfallDataResolved[cardName.toLowerCase()]?.oracle_id ?? null;
 }
 
+export function isCardImageRotatedSync(oracleId: string, cardName: string): boolean {
+  if (!scryfallDataResolved) return false;
+  const entry = scryfallDataResolved[oracleId.toLowerCase()]
+    ?? scryfallDataResolved[normalizeCardName(cardName).toLowerCase()];
+  return isSidewaysLayout(entry?.layout);
+}
+
 const SCRYFALL_DELAY_MS = 100;
 const MAX_RETRIES = 3;
 const BASE_BACKOFF_MS = 1000;
 
 export type ImageSize = "small" | "normal" | "large" | "art_crop";
+
+export interface CardImageAsset {
+  src: string;
+  isRotated: boolean;
+}
+
+function isSidewaysLayout(layout: string | undefined): boolean {
+  return layout === "split";
+}
 
 export interface ScryfallCard {
   id?: string;
@@ -312,13 +340,21 @@ export async function fetchCardImageUrl(
   faceIndex: number,
   size: ImageSize = "normal",
 ): Promise<string> {
+  return (await fetchCardImageAsset(cardName, faceIndex, size)).src;
+}
+
+export async function fetchCardImageAsset(
+  cardName: string,
+  faceIndex: number,
+  size: ImageSize = "normal",
+): Promise<CardImageAsset> {
   const data = await loadScryfallData();
   const name = normalizeCardName(cardName).toLowerCase();
   const entry = data?.[name];
   if (!entry) {
     throw new Error(`Card image not in local data: "${name}"`);
   }
-  return resolveImageUrl(entry, faceIndex, size, name);
+  return resolveImageAsset(entry, faceIndex, size, name);
 }
 
 /**
@@ -341,6 +377,14 @@ export async function fetchCardImageByOracleId(
   faceName: string | undefined,
   size: ImageSize = "normal",
 ): Promise<string> {
+  return (await fetchCardImageAssetByOracleId(oracleId, faceName, size)).src;
+}
+
+export async function fetchCardImageAssetByOracleId(
+  oracleId: string,
+  faceName: string | undefined,
+  size: ImageSize = "normal",
+): Promise<CardImageAsset> {
   const data = await loadScryfallData();
   const key = oracleId.toLowerCase();
   const entry = data?.[key];
@@ -350,7 +394,19 @@ export async function fetchCardImageByOracleId(
   const faceIndex = faceName
     ? Math.max(0, entry.face_names.indexOf(faceName.toLowerCase()))
     : 0;
-  return resolveImageUrl(entry, faceIndex, size, entry.name);
+  return resolveImageAsset(entry, faceIndex, size, entry.name);
+}
+
+function resolveImageAsset(
+  entry: ScryfallDataEntry,
+  faceIndex: number,
+  size: ImageSize,
+  diagnosticName: string,
+): CardImageAsset {
+  return {
+    src: resolveImageUrl(entry, faceIndex, size, diagnosticName),
+    isRotated: isSidewaysLayout(entry.layout),
+  };
 }
 
 function resolveImageUrl(
@@ -455,6 +511,35 @@ export async function fetchTokenImageUrl(
   }
 
   throw new Error(`No token image found for "${tokenName}"`);
+}
+
+export async function fetchTokenImageByRef(
+  ref: TokenImageRef,
+  size: ImageSize = "normal",
+): Promise<string | null> {
+  const data = await loadTokenImagesData();
+  if (!data) return null;
+
+  const idEntry = data[`scryfall:${ref.scryfall_id.toLowerCase()}`];
+  if (idEntry) {
+    const faceIndex = ref.face_name
+      ? Math.max(0, idEntry.face_names.indexOf(ref.face_name.toLowerCase()))
+      : 0;
+    return resolveImageUrl(idEntry, faceIndex, size, idEntry.name);
+  }
+
+  if (ref.scryfall_oracle_id) {
+    const faceKey = ref.face_name?.toLowerCase() ?? "";
+    const oracleEntry = data[`oracle:${ref.scryfall_oracle_id.toLowerCase()}:${faceKey}`];
+    if (oracleEntry) {
+      const faceIndex = ref.face_name
+        ? Math.max(0, oracleEntry.face_names.indexOf(ref.face_name.toLowerCase()))
+        : 0;
+      return resolveImageUrl(oracleEntry, faceIndex, size, oracleEntry.name);
+    }
+  }
+
+  return null;
 }
 
 async function fetchTokenImageFromLocal(

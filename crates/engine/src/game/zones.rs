@@ -517,7 +517,10 @@ pub fn remove_from_zone(state: &mut GameState, object_id: ObjectId, zone: Zone, 
             }
         }
         Zone::Battlefield => state.battlefield.retain(|id| *id != object_id),
-        Zone::Stack => state.stack.retain(|e| e.id != object_id),
+        Zone::Stack => {
+            state.stack.retain(|e| e.id != object_id);
+            state.stack_paid_facts.remove(&object_id);
+        }
         Zone::Exile => state.exile.retain(|id| *id != object_id),
         Zone::Command => state.command_zone.retain(|id| *id != object_id),
     }

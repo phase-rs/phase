@@ -1,15 +1,19 @@
 import { useEffect, useState } from "react";
 
 import {
-  fetchCardImageByOracleId,
-  fetchCardImageUrl,
+  fetchCardImageAsset,
+  fetchCardImageAssetByOracleId,
+  fetchTokenImageByRef,
   fetchTokenImageUrl,
   findPrintingById,
   getCardPrintings,
+  isCardImageRotatedSync,
   resolveOracleIdSync,
   resolvePrintingImageUrl,
 } from "../services/scryfall.ts";
 import type { ImageSize, PrintingEntry, TokenSearchFilters } from "../services/scryfall.ts";
+import type { CardImageAsset } from "../services/scryfall.ts";
+import type { TokenImageRef } from "../adapter/types.ts";
 import { usePreferencesStore, registerStrategyCacheClearFn } from "../stores/preferencesStore.ts";
 import type { ArtChainEntry } from "../stores/preferencesStore.ts";
 
@@ -23,6 +27,7 @@ interface UseCardImageOptions {
   faceIndex?: number;
   isToken?: boolean;
   tokenFilters?: TokenSearchFilters;
+  tokenImageRef?: TokenImageRef | null;
   /** Canonical lookup id from `printed_ref.oracle_id`. When provided, the
    * Scryfall service resolves the image by oracle id (preferred) and
    * `cardName`/`faceIndex` are used only as cache-key disambiguators and
@@ -46,12 +51,13 @@ interface UseCardImageOptions {
 interface UseCardImageResult {
   src: string | null;
   isLoading: boolean;
+  isRotated: boolean;
 }
 
 interface MemoryCacheEntry {
-  promise: Promise<string | null> | null;
+  promise: Promise<CardImageAsset | null> | null;
   refCount: number;
-  src: string | null;
+  asset: CardImageAsset | null;
 }
 
 const imageRequestCache = new Map<string, MemoryCacheEntry>();
@@ -182,6 +188,7 @@ function imageRequestKey(
   filterColors: string,
   filterSubtypes: string,
   filterHasAbilities: boolean | null,
+  tokenImageRefKey: string,
   oracleId: string,
   faceName: string,
 ): string {
@@ -195,6 +202,7 @@ function imageRequestKey(
     filterColors,
     filterSubtypes,
     String(filterHasAbilities),
+    tokenImageRefKey,
   ].join("|");
 }
 
@@ -218,44 +226,54 @@ async function acquireCachedImageSrc(
   filterColors: string,
   filterSubtypes: string,
   filterHasAbilities: boolean | null,
+  tokenImageRef: TokenImageRef | null,
   oracleId: string,
   faceName: string,
-): Promise<string | null> {
+): Promise<CardImageAsset | null> {
   const existing = imageRequestCache.get(key);
   if (existing) {
     existing.refCount += 1;
-    if (existing.src !== null) return existing.src;
+    if (existing.asset !== null) return existing.asset;
     if (existing.promise) return existing.promise;
   }
 
   const entry: MemoryCacheEntry = {
     promise: null,
     refCount: 1,
-    src: null,
+    asset: null,
   };
   imageRequestCache.set(key, entry);
 
   entry.promise = (async () => {
-    let remoteSrc: string | null;
+    let asset: CardImageAsset | null;
     if (isToken) {
-      remoteSrc = await fetchTokenImageUrl(cardName, size, {
+      let remoteSrc: string | null = null;
+      if (tokenImageRef) {
+        try {
+          remoteSrc = await fetchTokenImageByRef(tokenImageRef, size);
+        } catch {
+          remoteSrc = null;
+        }
+      }
+      remoteSrc ??= await fetchTokenImageUrl(cardName, size, {
         power: filterPower,
         toughness: filterToughness,
         colors: filterColors ? filterColors.split(",") : undefined,
         subtypes: filterSubtypes ? filterSubtypes.split(",") : undefined,
         hasAbilities: filterHasAbilities ?? undefined,
       });
+      asset = { src: remoteSrc, isRotated: false };
     } else if (oracleId) {
-      remoteSrc = await fetchCardImageByOracleId(oracleId, faceName, size);
+      asset = await fetchCardImageAssetByOracleId(oracleId, faceName, size);
     } else {
-      remoteSrc = await fetchCardImageUrl(cardName, faceIndex, size);
+      asset = await fetchCardImageAsset(cardName, faceIndex, size);
     }
-    entry.src = remoteSrc;
+    entry.asset = asset;
     entry.promise = null;
     if (entry.refCount === 0) {
       imageRequestCache.delete(key);
     }
-    return remoteSrc;
+    return asset;
   })().catch(() => {
     imageRequestCache.delete(key);
     return null;
@@ -272,6 +290,14 @@ export function useCardImage(
   const faceIndex = options?.faceIndex ?? 0;
   const isToken = options?.isToken ?? false;
   const tokenFilters = options?.tokenFilters;
+  const tokenImageRef = options?.tokenImageRef ?? null;
+  const tokenImageRefKey = tokenImageRef
+    ? [
+        tokenImageRef.scryfall_id,
+        tokenImageRef.scryfall_oracle_id ?? "",
+        tokenImageRef.face_name ?? "",
+      ].join(":")
+    : "";
   const oracleId = options?.oracleId ?? "";
   const faceName = options?.faceName ?? "";
   const scryfallId = options?.scryfallId ?? "";
@@ -286,6 +312,7 @@ export function useCardImage(
   const artChain = usePreferencesStore((s) => s.artChain);
 
   const [src, setSrc] = useState<string | null>(null);
+  const [isRotated, setIsRotated] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [, setArtCacheTick] = useState(0);
 
@@ -337,6 +364,7 @@ export function useCardImage(
     filterColors,
     filterSubtypes,
     filterHasAbilities,
+    tokenImageRefKey,
     oracleId,
     faceName,
   );
@@ -344,12 +372,14 @@ export function useCardImage(
   useEffect(() => {
     if (overrideUrl) {
       setSrc(overrideUrl);
+      setIsRotated(isCardImageRotatedSync(resolvedOracleId, cardName));
       setIsLoading(false);
       return;
     }
 
     if (!cardName && !oracleId) {
       setSrc(null);
+      setIsRotated(false);
       setIsLoading(false);
       return;
     }
@@ -361,7 +391,7 @@ export function useCardImage(
       setSrc(null);
 
       try {
-        const imageUrl = await acquireCachedImageSrc(
+        const imageAsset = await acquireCachedImageSrc(
           requestKey,
           cardName,
           size,
@@ -372,15 +402,18 @@ export function useCardImage(
           filterColors,
           filterSubtypes,
           filterHasAbilities,
+          tokenImageRef,
           oracleId,
           faceName,
         );
         if (!cancelled) {
-          setSrc(imageUrl);
+          setSrc(imageAsset?.src || null);
+          setIsRotated(imageAsset?.isRotated ?? false);
           setIsLoading(false);
         }
       } catch {
         if (!cancelled) {
+          setIsRotated(false);
           setIsLoading(false);
         }
       }
@@ -401,12 +434,15 @@ export function useCardImage(
     filterPower,
     filterSubtypes,
     filterToughness,
+    tokenImageRef,
+    tokenImageRefKey,
     isToken,
     oracleId,
     overrideUrl,
     requestKey,
+    resolvedOracleId,
     size,
   ]);
 
-  return { src, isLoading };
+  return { src, isLoading, isRotated };
 }

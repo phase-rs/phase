@@ -145,13 +145,32 @@ pub fn apply(
     state.exiled_from_hand_this_resolution = 0;
     check_actor_authorization(state, actor, &action)?;
     let mut result = apply_action(state, actor, action)?;
+    reconcile_terminal_result(state, &mut result);
     bump_state_revision(state);
     mark_public_state_all_dirty(state);
     sync_waiting_for(state, &result.waiting_for);
     run_auto_pass_loop(state, &mut result);
+    reconcile_terminal_result(state, &mut result);
+    remember_public_reveals(state, &result.events);
     finalize_public_state(state);
     result.log_entries = super::log::resolve_log_entries(&result.events, state);
     Ok(result)
+}
+
+fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
+    super::elimination::ensure_game_over_if_terminal(state, &mut result.events);
+    if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+        match_flow::handle_game_over_transition(state);
+        result.waiting_for = state.waiting_for.clone();
+    }
+}
+
+fn remember_public_reveals(state: &mut GameState, events: &[GameEvent]) {
+    for event in events {
+        if let GameEvent::CardsRevealed { card_ids, .. } = event {
+            state.public_revealed_cards.extend(card_ids.iter().copied());
+        }
+    }
 }
 
 /// Engine-level authorization guard. Any *game action* must come from the
@@ -443,6 +462,41 @@ mod auto_pass_decision_tests {
         state
     }
 
+    #[test]
+    fn apply_reconciles_eliminated_two_player_game_to_game_over() {
+        let mut state = priority_state();
+        state.players[1].is_eliminated = true;
+        state.eliminated_players.push(PlayerId(1));
+
+        let result = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SetAutoPass {
+                mode: AutoPassRequest::UntilEndOfTurn,
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(0))
+            }
+        ));
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(0))
+            }
+        ));
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            GameEvent::GameOver {
+                winner: Some(PlayerId(0))
+            }
+        )));
+    }
+
     fn push_simple_stack_entry(state: &mut GameState, id: u64, controller: PlayerId) {
         state.stack.push_back(StackEntry {
             id: ObjectId(id),
@@ -611,6 +665,43 @@ mod auto_pass_decision_tests {
             .insert(PlayerId(0), vec![Phase::DeclareBlockers]);
         assert!(phase_stop_hit(&state, PlayerId(0)));
         assert!(!end_of_turn_active(&state, PlayerId(0)));
+    }
+
+    #[test]
+    fn until_end_of_turn_does_not_auto_submit_available_blockers() {
+        let waiting_for = WaitingFor::DeclareBlockers {
+            player: PlayerId(0),
+            valid_blocker_ids: vec![ObjectId(10)],
+            valid_block_targets: [(ObjectId(10), vec![ObjectId(20)])].into_iter().collect(),
+        };
+        let mut state = GameState {
+            phase: Phase::DeclareBlockers,
+            active_player: PlayerId(1),
+            waiting_for: waiting_for.clone(),
+            ..GameState::default()
+        };
+        state
+            .auto_pass
+            .insert(PlayerId(0), AutoPassMode::UntilEndOfTurn);
+
+        let mut result = ActionResult {
+            events: Vec::new(),
+            waiting_for,
+            log_entries: Vec::new(),
+        };
+        run_auto_pass_loop(&mut state, &mut result);
+
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::DeclareBlockers {
+                player: PlayerId(0),
+                ..
+            }
+        ));
+        assert!(
+            state.auto_pass.contains_key(&PlayerId(0)),
+            "the defender's auto-pass session should stay armed after pausing for legal blockers"
+        );
     }
 
     #[test]
@@ -882,22 +973,19 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
                 }
             }
 
-            // Auto-submit empty blockers when there's nothing to choose:
-            //   (a) the defender is in UntilEndOfTurn mode, OR
-            //   (b) no legal blocks are available — CR 509.1 says the turn-based action
-            //       still runs, and CR 117.1c requires the active player to receive
-            //       priority during the step (instants and Ninjutsu-family activations
-            //       per CR 702.49 — notably Sneak, which is restricted to this step).
-            // A phase stop on Declare Blockers overrides both paths regardless of
-            // whether an auto-pass session is active: if the player explicitly asked
-            // to pause here, honor it.
+            // Auto-submit empty blockers only when there's nothing to choose.
+            // CR 509.1 says the turn-based action still runs when no legal blocks
+            // are available, and CR 117.1c requires the active player to receive
+            // priority during the step (instants and Ninjutsu-family activations
+            // per CR 702.49 — notably Sneak, which is restricted to this step).
+            // A phase stop on Declare Blockers overrides this even without an
+            // auto-pass session: if the player explicitly asked to pause here,
+            // honor it.
             WaitingFor::DeclareBlockers {
                 player,
                 valid_blocker_ids,
                 ..
-            } if !phase_stop_hit(state, *player)
-                && (valid_blocker_ids.is_empty() || end_of_turn_active(state, *player)) =>
-            {
+            } if !phase_stop_hit(state, *player) && valid_blocker_ids.is_empty() => {
                 let mut events = Vec::new();
                 match engine_combat::handle_empty_blockers(state, *player, &mut events) {
                     Ok(wf) => {
@@ -1718,6 +1806,35 @@ fn apply_action(
         )?,
         (
             WaitingFor::ReturnToHandForCost {
+                player,
+                pending_cast,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        // CR 118.3 + CR 122.1: Player selected a permanent to remove a counter
+        // from as a cost.
+        (
+            WaitingFor::RemoveCounterForCost {
+                player,
+                count,
+                counter_type,
+                permanents,
+                pending_cast,
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => casting_costs::handle_remove_counter_for_cost(
+            state,
+            *player,
+            *pending_cast.clone(),
+            *count,
+            counter_type.clone(),
+            permanents,
+            &chosen,
+            &mut events,
+        )?,
+        (
+            WaitingFor::RemoveCounterForCost {
                 player,
                 pending_cast,
                 ..
@@ -5259,6 +5376,21 @@ mod tests {
                 target: TargetFilter::Controller,
             },
         )
+    }
+
+    #[test]
+    fn cards_revealed_events_are_remembered_publicly() {
+        let mut state = GameState::new_two_player(42);
+        let card_id = ObjectId(42);
+        let events = vec![GameEvent::CardsRevealed {
+            player: PlayerId(1),
+            card_ids: vec![card_id],
+            card_names: vec!["Known Card".to_string()],
+        }];
+
+        remember_public_reveals(&mut state, &events);
+
+        assert!(state.public_revealed_cards.contains(&card_id));
     }
 
     /// Create a DealDamage ability for testing.

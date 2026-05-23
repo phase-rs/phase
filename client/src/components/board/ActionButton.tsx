@@ -245,6 +245,7 @@ export function ActionButton() {
   // Read auto-pass state from engine
   const autoPass = gameState?.auto_pass?.[playerId];
   const isEndingTurn = autoPass?.type === "UntilEndOfTurn";
+  const canActDuringAutoPass = mode === "combat-blockers";
 
   const actionPending = useMultiplayerStore((s) => s.actionPending);
   const idle = mode === "hidden" && !isEndingTurn;
@@ -294,7 +295,7 @@ export function ActionButton() {
           </>
         )}
 
-        {mode === "combat-blockers" && !isEndingTurn && (
+        {mode === "combat-blockers" && (
           <>
             {blockerAssignments.size > 0 ? (
               <>
@@ -422,7 +423,7 @@ export function ActionButton() {
           </>
         )}
 
-        {isEndingTurn && (
+        {isEndingTurn && !canActDuringAutoPass && (
           <button
             disabled={actionPending}
             onClick={() => dispatchAction({ type: "CancelAutoPass" })}

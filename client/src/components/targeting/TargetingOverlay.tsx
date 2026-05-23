@@ -53,6 +53,10 @@ export function TargetingOverlay() {
   const triggerDescription = waitingFor?.type === "TriggerTargetSelection" && waitingFor.data.description
     ? renderDescription(waitingFor.data.description, sourceName ?? "this")
     : undefined;
+  const spellTargetDescription = waitingFor?.type === "TargetSelection" && waitingFor.data.pending_cast.ability.description
+    ? renderDescription(waitingFor.data.pending_cast.ability.description, sourceName ?? "this")
+    : undefined;
+  const enginePrompt = triggerDescription ?? spellTargetDescription;
 
   const handleCancel = useCallback(() => {
     dispatch({ type: "CancelCast" });
@@ -120,9 +124,9 @@ export function TargetingOverlay() {
                   : "Choose a target"
               )}
             </div>
-          {triggerDescription && (
+          {enginePrompt && (
             <div className="max-w-md rounded-md bg-gray-800/90 px-4 py-1 text-center text-xs text-gray-300 shadow">
-              <RichLabel text={triggerDescription} size="xs" />
+              <RichLabel text={enginePrompt} size="xs" />
             </div>
           )}
         </div>

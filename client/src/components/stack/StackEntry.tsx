@@ -13,7 +13,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { renderDescription } from "../../utils/description.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
-import type { StackEntry as StackEntryType } from "../../adapter/types.ts";
+import type { StackEntry as StackEntryType, StackEntryDisplay, StackPaidFactView } from "../../adapter/types.ts";
 
 interface StackEntryProps {
   entry: StackEntryType;
@@ -36,9 +36,10 @@ interface StackEntryProps {
    * that don't proxy group data keep the prior per-entry rendering.
    */
   groupCount?: number;
+  details?: StackEntryDisplay;
 }
 
-export function StackEntry({ entry, index, isTop, isPending, cardSize, style, onHoverChange, pacingMultiplier = 1, groupCount = 1 }: StackEntryProps) {
+export function StackEntry({ entry, index, isTop, isPending, cardSize, style, onHoverChange, pacingMultiplier = 1, groupCount = 1, details }: StackEntryProps) {
   const isMobile = useIsMobile();
   const playerId = usePlayerId();
   const objects = useGameStore((s) => s.gameState?.objects);
@@ -59,7 +60,7 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
   // source_id is ObjectId(0).
   const triggerSourceName =
     entry.kind.type === "TriggeredAbility" ? entry.kind.data.source_name : undefined;
-  const sourceName = triggerSourceName || sourceObj?.name || "Unknown";
+  const sourceName = details?.source_name || triggerSourceName || sourceObj?.name || "Unknown";
   const imageLookup = sourceObj
     ? cardImageLookup(sourceObj)
     : { name: "", faceIndex: 0, oracleId: undefined, faceName: undefined };
@@ -77,15 +78,20 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
   // tell which permanent owns the trigger without hovering the card image.
   // Activated abilities don't carry a pre-resolved source name (different
   // engine path); they keep the bare "Activated" label.
-  const abilityLabel = entry.kind.type === "ActivatedAbility"
+  const abilityLabel = details?.kind_label ?? (entry.kind.type === "ActivatedAbility"
     ? "Activated"
     : isTriggered && triggerSourceName
       ? `Triggered — From ${triggerSourceName}`
-      : "Triggered";
+      : "Triggered");
   const triggerDescription =
-    entry.kind.type === "TriggeredAbility"
-      ? entry.kind.data.description && renderDescription(entry.kind.data.description, sourceName)
-      : undefined;
+    details?.ability_description
+      ? renderDescription(details.ability_description, sourceName)
+      : entry.kind.type === "TriggeredAbility"
+        ? entry.kind.data.description && renderDescription(entry.kind.data.description, sourceName)
+        : undefined;
+  const targetLabels = details?.targets?.map((target) => target.label) ?? [];
+  const paidLabels = details?.paid?.map(formatPaidFact) ?? [];
+  const contextLabels = details?.trigger_context?.map((context) => context.label) ?? [];
   const controllerLabel = entry.controller === playerId ? "You" : "Opp";
   const seatColor = useSeatColor(entry.controller);
   const controllerInitial =
@@ -104,7 +110,7 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
 
   // Ring style: targeting glow overrides default ring
   const ringClass = isValidTarget
-    ? "ring-2 ring-amber-400/60 shadow-[0_0_12px_3px_rgba(201,176,55,0.8)]"
+    ? "ring-4 ring-cyan-300 shadow-[0_0_18px_5px_rgba(103,232,249,0.85)]"
     : "ring-1 ring-white/10";
 
   const handleClick = () => {
@@ -191,7 +197,7 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
       {!isSpell && (
         <div
           className="absolute inset-x-0 bottom-0 rounded-b-lg border-t border-white/10 bg-gray-900/95 px-1.5 py-1 backdrop-blur-sm"
-          title={triggerDescription ? `${abilityLabel}: ${triggerDescription}` : abilityLabel}
+          title={stackEntryTitle(abilityLabel, triggerDescription, targetLabels, paidLabels, contextLabels)}
         >
           <div className="truncate pr-8 text-[9px] font-semibold text-purple-300">{abilityLabel}</div>
           {triggerDescription && (
@@ -199,6 +205,38 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
               {triggerDescription}
             </div>
           )}
+        </div>
+      )}
+
+      {(targetLabels.length > 0 || paidLabels.length > 0 || contextLabels.length > 0) && (
+        <div className="absolute left-1 right-1 top-5 flex flex-wrap gap-1">
+          {targetLabels.slice(0, 2).map((label) => (
+            <span
+              key={`target-${label}`}
+              className="max-w-full rounded bg-cyan-950/90 px-1.5 py-0.5 text-[8px] font-semibold text-cyan-100 shadow"
+              title={`Targeting ${label}`}
+            >
+              → {label}
+            </span>
+          ))}
+          {paidLabels.slice(0, 2).map((label) => (
+            <span
+              key={`paid-${label}`}
+              className="max-w-full rounded bg-amber-950/90 px-1.5 py-0.5 text-[8px] font-semibold text-amber-100 shadow"
+              title={label}
+            >
+              {label}
+            </span>
+          ))}
+          {targetLabels.length === 0 && contextLabels.slice(0, 1).map((label) => (
+            <span
+              key={`context-${label}`}
+              className="max-w-full rounded bg-slate-950/90 px-1.5 py-0.5 text-[8px] font-semibold text-slate-100 shadow"
+              title={label}
+            >
+              {label}
+            </span>
+          ))}
         </div>
       )}
 
@@ -215,4 +253,40 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
       </span>
     </motion.div>
   );
+}
+
+function formatPaidFact(fact: StackPaidFactView): string {
+  switch (fact.type) {
+    case "XValue":
+      return `X=${fact.data.value}`;
+    case "ManaSpent":
+      return `${fact.data.amount} mana`;
+    case "ColorsSpent":
+      return `${fact.data.distinct} colors`;
+    case "Kicked":
+      return fact.data.count > 1 ? `kicked ×${fact.data.count}` : "kicked";
+    case "AdditionalCostPaid":
+      return "extra cost";
+    case "CastVariant":
+      return fact.data.variant;
+    case "Convoked":
+      return `convoked ×${fact.data.count}`;
+    default:
+      return "";
+  }
+}
+
+function stackEntryTitle(
+  label: string,
+  description: string | undefined,
+  targets: string[],
+  paid: string[],
+  context: string[],
+): string {
+  return [
+    description ? `${label}: ${description}` : label,
+    targets.length > 0 ? `Targets: ${targets.join(", ")}` : "",
+    paid.length > 0 ? `Paid: ${paid.join(", ")}` : "",
+    context.length > 0 ? `Context: ${context.join(", ")}` : "",
+  ].filter(Boolean).join("\n");
 }

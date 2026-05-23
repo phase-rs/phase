@@ -311,6 +311,38 @@ function presetSummary(p: TokenPreset): string {
     .trim();
 }
 
+function presetSearchText(p: TokenPreset): string {
+  return [
+    p.body.display_name,
+    ...p.body.core_types,
+    ...p.body.subtypes,
+    ...p.body.supertypes,
+    ...p.body.keywords.map(keywordLabel),
+    ...(p.source_card_names ?? []),
+    p.set_code,
+    p.set_name,
+    p.collector_number ?? undefined,
+    p.type_line,
+    p.rules_text ?? undefined,
+  ]
+    .filter((part): part is string => Boolean(part))
+    .join(" ")
+    .toLowerCase();
+}
+
+function presetSourceSummary(p: TokenPreset): string {
+  const sources = p.source_card_names ?? [];
+  const sourceText =
+    sources.length > 0
+      ? `from ${sources.slice(0, 3).join(", ")}${sources.length > 3 ? ` +${sources.length - 3}` : ""}`
+      : "no linked source";
+  const setText =
+    p.set_code && p.collector_number
+      ? `${p.set_code} #${p.collector_number}`
+      : p.set_code;
+  return [setText, sourceText].filter(Boolean).join(" · ");
+}
+
 function CatalogTokenForm({ onDispatch }: Props) {
   const [owner, setOwner] = useState<PlayerId>(0);
   const [presets, setPresets] = useState<TokenPreset[] | null>(null);
@@ -340,11 +372,7 @@ function CatalogTokenForm({ onDispatch }: Props) {
     if (!presets) return [];
     const q = search.trim().toLowerCase();
     if (!q) return presets;
-    return presets.filter((p) => {
-      if (p.body.display_name.toLowerCase().includes(q)) return true;
-      if (p.body.subtypes.some((s) => s.toLowerCase().includes(q))) return true;
-      return false;
-    });
+    return presets.filter((p) => presetSearchText(p).includes(q));
   }, [presets, search]);
 
   const grouped = useMemo(() => {
@@ -401,9 +429,14 @@ function CatalogTokenForm({ onDispatch }: Props) {
     onDispatch({
       type: "CreateToken",
       data: {
-        owner,
-        characteristics: selectedPreset.body,
-        enter_with_counters: buildEnterCounters(counterType, counterCount),
+        request: {
+          type: "Preset",
+          data: {
+            preset_id: selectedPreset.id,
+            owner,
+            enter_with_counters: buildEnterCounters(counterType, counterCount),
+          },
+        },
       },
     });
   };
@@ -425,7 +458,7 @@ function CatalogTokenForm({ onDispatch }: Props) {
         <PlayerSelect value={owner} onChange={setOwner} />
       </FieldRow>
       <FieldRow label="Search">
-        <TextInput value={search} onChange={setSearch} placeholder="Name or subtype" />
+        <TextInput value={search} onChange={setSearch} placeholder="Token, source card, set" />
       </FieldRow>
       <div className="mb-2 max-h-64 overflow-y-auto rounded border border-gray-800 bg-gray-950/40 p-1">
         {orderedGroups.length === 0 && (
@@ -451,12 +484,17 @@ function CatalogTokenForm({ onDispatch }: Props) {
                       : "text-gray-300 hover:bg-gray-800/60")
                   }
                 >
-                  <span>{presetSummary(p)}</span>
-                  {p.fidelity === "PartialMissingAbilities" && (
-                    <span className="ml-1 rounded border border-amber-500/40 bg-amber-500/10 px-1 text-[9px] text-amber-300">
-                      body only
-                    </span>
-                  )}
+                  <span className="block">
+                    <span>{presetSummary(p)}</span>
+                    {p.fidelity === "PartialMissingAbilities" && (
+                      <span className="ml-1 rounded border border-amber-500/40 bg-amber-500/10 px-1 text-[9px] text-amber-300">
+                        body only
+                      </span>
+                    )}
+                  </span>
+                  <span className="block truncate pt-0.5 text-[10px] text-gray-500">
+                    {presetSourceSummary(p)}
+                  </span>
                 </button>
               ))}
             </div>
@@ -514,18 +552,23 @@ function CustomTokenForm({ onDispatch }: Props) {
     onDispatch({
       type: "CreateToken",
       data: {
-        owner,
-        characteristics: {
-          display_name: name || "Token",
-          power,
-          toughness,
-          core_types: coreTypes,
-          subtypes,
-          supertypes: [],
-          colors,
-          keywords,
+        request: {
+          type: "Custom",
+          data: {
+            owner,
+            characteristics: {
+              display_name: name || "Token",
+              power,
+              toughness,
+              core_types: coreTypes,
+              subtypes,
+              supertypes: [],
+              colors,
+              keywords,
+            },
+            enter_with_counters: buildEnterCounters(counterType, counterCount),
+          },
         },
-        enter_with_counters: buildEnterCounters(counterType, counterCount),
       },
     });
   };
