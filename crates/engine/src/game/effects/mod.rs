@@ -75,6 +75,7 @@ pub mod force_block;
 pub mod gain_control;
 pub mod gift_delivery;
 pub mod goad;
+pub mod grant_extra_loyalty_activations;
 pub mod grant_permission;
 pub mod incubate;
 pub mod investigate;
@@ -1240,6 +1241,9 @@ pub fn resolve_effect(
         Effect::Manifest { .. } => manifest::resolve(state, ability, events),
         Effect::ManifestDread => manifest_dread::resolve(state, ability, events),
         Effect::ExtraTurn { .. } => extra_turn::resolve(state, ability, events),
+        Effect::GrantExtraLoyaltyActivations { .. } => {
+            grant_extra_loyalty_activations::resolve(state, ability, events)
+        }
         Effect::SkipNextStep { .. } => skip_next_step::resolve(state, ability, events),
         Effect::SkipNextTurn { .. } => skip_next_turn::resolve(state, ability, events),
         Effect::Double { .. } => double::resolve(state, ability, events),
@@ -1876,6 +1880,7 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::PutOnTopOrBottom { target, .. }
         | Effect::ChangeTargets { target, .. }
         | Effect::ExtraTurn { target, .. }
+        | Effect::GrantExtraLoyaltyActivations { target, .. }
         | Effect::Double { target, .. }
         // CR 608.2k + CR 603.7c: "that player" sub-effects carry an event-context
         // target (TriggeringPlayer/DefendingPlayer/etc.) that auto-resolves from

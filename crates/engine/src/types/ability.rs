@@ -2835,6 +2835,10 @@ pub enum QuantityRef {
     /// "you've drawn two or more cards this turn" and "an opponent has drawn
     /// four or more cards this turn" reuse the existing per-player aggregate axis.
     CardsDrawnThisTurn { player: PlayerScope },
+    /// CR 305.2a + CR 603.4: Count of lands played by the scoped player this turn.
+    /// Backed by `Player::lands_played_this_turn`. Used for intervening-if conditions
+    /// like "if it wasn't the first land you played this turn" (Fastbond).
+    LandsPlayedThisTurn { player: PlayerScope },
     /// CR 500: Number of turns this player has taken so far in the game.
     /// Resolved against the controller/scope player.
     TurnsTaken,
@@ -2881,6 +2885,14 @@ pub enum QuantityRef {
     AttackedThisTurn,
     /// CR 603.4: Whether the controller descended this turn (permanent card entered graveyard).
     DescendedThisTurn,
+    /// CR 606.1 + CR 603.4: Number of loyalty abilities the scoped player has
+    /// activated this turn (counts per CR 606.3 activations, summed across every
+    /// planeswalker they controlled at activation time). Used for "if you
+    /// activated a loyalty ability of a planeswalker this turn" intervening-if
+    /// triggers (The Chain Veil class). Backed by
+    /// `GameState::loyalty_abilities_activated_this_turn` and incremented in
+    /// `finalize_loyalty_activation`.
+    LoyaltyAbilitiesActivatedThisTurn { player: PlayerScope },
     /// CR 117.1: Number of spells cast last turn (by any player).
     /// Used for werewolf transform conditions.
     SpellsCastLastTurn,
@@ -6074,6 +6086,22 @@ pub enum Effect {
         #[serde(default = "default_target_filter_controller")]
         target: TargetFilter,
     },
+    /// CR 606.3: Grant the resolved target player the right to activate each of
+    /// their planeswalkers' loyalty abilities `amount` additional times this
+    /// turn. Class lift of The Chain Veil's "{4}, {T}: You may activate each
+    /// planeswalker's loyalty ability an additional time this turn." Stored as
+    /// a per-player counter on `GameState::extra_loyalty_activations_this_turn`,
+    /// read by `planeswalker::can_activate_loyalty_ability` as a +N bump to the
+    /// per-permanent CR 606.3 cap. The counter is cleared at turn start.
+    /// `target` defaults to `Controller` (printed wording is "you may
+    /// activate..."); parameterized for future cards that grant the bonus to a
+    /// different player.
+    GrantExtraLoyaltyActivations {
+        #[serde(default = "default_quantity_one")]
+        amount: QuantityExpr,
+        #[serde(default = "default_target_filter_controller")]
+        target: TargetFilter,
+    },
     /// CR 614.10: "Skip your next turn." — the affected player's next N turns are skipped.
     /// Stored as a per-player counter in `GameState.turns_to_skip`; decremented during turn
     /// transition in `start_next_turn`. The target determines who skips (usually Controller).
@@ -6826,6 +6854,7 @@ impl Effect {
             | Effect::Goad { target, .. }
             | Effect::Detain { target, .. }
             | Effect::ExtraTurn { target, .. }
+            | Effect::GrantExtraLoyaltyActivations { target, .. }
             | Effect::SkipNextTurn { target, .. }
             | Effect::SkipNextStep { target, .. }
             | Effect::AdditionalPhase { target, .. }
@@ -7136,6 +7165,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Manifest { .. } => "Manifest",
         Effect::ManifestDread => "ManifestDread",
         Effect::ExtraTurn { .. } => "ExtraTurn",
+        Effect::GrantExtraLoyaltyActivations { .. } => "GrantExtraLoyaltyActivations",
         Effect::SkipNextTurn { .. } => "SkipNextTurn",
         Effect::SkipNextStep { .. } => "SkipNextStep",
         Effect::AdditionalPhase { .. } => "AdditionalPhase",
@@ -7307,6 +7337,7 @@ pub enum EffectKind {
     Manifest,
     ManifestDread,
     ExtraTurn,
+    GrantExtraLoyaltyActivations,
     SkipNextTurn,
     SkipNextStep,
     AdditionalPhase,
@@ -7483,6 +7514,7 @@ impl From<&Effect> for EffectKind {
             Effect::Manifest { .. } => EffectKind::Manifest,
             Effect::ManifestDread => EffectKind::ManifestDread,
             Effect::ExtraTurn { .. } => EffectKind::ExtraTurn,
+            Effect::GrantExtraLoyaltyActivations { .. } => EffectKind::GrantExtraLoyaltyActivations,
             Effect::SkipNextTurn { .. } => EffectKind::SkipNextTurn,
             Effect::SkipNextStep { .. } => EffectKind::SkipNextStep,
             Effect::AdditionalPhase { .. } => EffectKind::AdditionalPhase,
@@ -9103,6 +9135,12 @@ pub enum ReplacementCondition {
     /// step, AND the player has not yet drawn a card during this step
     /// (`cards_drawn_this_step == 0`); otherwise `true` (apply replacement).
     ExceptFirstDrawInDrawStep,
+    /// CR 614.1d: "if you control a [filter]" — replacement applies only while
+    /// the controller has at least one permanent matching `filter` on the
+    /// battlefield. Positive form of `UnlessControlsMatching`. Used by
+    /// Worship ("if you control a creature, damage that would reduce your
+    /// life total to less than 1 reduces it to 1 instead").
+    IfControlsMatching { filter: TargetFilter },
     /// "unless you revealed a [type] card" / "unless you paid {mana}"
     /// CR 614.1d — Generic condition text that the engine does not yet decompose further.
     /// Using this variant lets the replacement be recognized for coverage while deferring
@@ -9555,10 +9593,12 @@ pub enum DamageModification {
     /// `SetToSourcePower` (dynamic) — this is a flat override of the
     /// event's amount with `value`.
     SetTo { value: u32 },
-    /// CR 614.1a + CR 120.3a: Damage to a player is reduced when it would
-    /// cross `floor` from at or above it.
-    /// Used by Worship-class effects.
-    SetPlayerLifeFloor { floor: i32 },
+    /// CR 614.1a: Cap damage so the target player's life total cannot fall
+    /// below `minimum`. Applied only when the damage target is a player.
+    /// Computed at resolution time as `amount = max(0, life_total - minimum)`.
+    /// Used by Worship: "damage that would reduce your life total to less
+    /// than 1 reduces it to 1 instead."
+    LifeFloor { minimum: i32 },
 }
 
 /// CR 614.1a: Quantity modification for replacement effects (tokens, counters).
@@ -9630,8 +9670,10 @@ impl ManaReplacementScope {
 #[serde(tag = "type", content = "data")]
 pub enum DamageTargetPlayerScope {
     Any,
-    You,
     Opponent,
+    /// The controller of the replacement source. Used by Worship: "damage
+    /// that would reduce *your* life total to less than 1".
+    Controller,
     Specific(PlayerId),
 }
 

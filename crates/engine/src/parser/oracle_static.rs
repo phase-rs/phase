@@ -687,6 +687,10 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         return Some(def);
     }
 
+    if let Some(mode) = parse_max_combat_creatures_static(&lower) {
+        return Some(StaticDefinition::new(mode).description(text.to_string()));
+    }
+
     if let Some(defs) = parse_cost_payment_prohibition_statics(&tp, &text) {
         return defs.into_iter().next();
     }
@@ -2282,6 +2286,31 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     }
 
     None
+}
+
+fn parse_max_combat_creatures_static(lower: &str) -> Option<StaticMode> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("no more than ")
+        .parse(lower)
+        .ok()?;
+    let (max, rest) = parse_number(rest)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("creature").parse(rest).ok()?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("s")).parse(rest).ok()?;
+    let (rest, mode) = alt((
+        value(
+            StaticMode::MaxAttackersEachCombat { max },
+            tag::<_, _, OracleError<'_>>(" can attack each combat"),
+        ),
+        value(
+            StaticMode::MaxBlockersEachCombat { max },
+            tag(" can block each combat"),
+        ),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (_, _) = all_consuming(opt(tag::<_, _, OracleError<'_>>(".")))
+        .parse(rest)
+        .ok()?;
+    Some(mode)
 }
 
 fn parse_arcane_adaptation_chosen_type_static(
@@ -13358,6 +13387,45 @@ mod tests {
     }
 
     #[test]
+    fn static_other_creatures_with_any_counters_have_flying_and_haste() {
+        let def = parse_static_line(
+            "Other creatures you control with counters on them have flying and haste.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        match &def.affected {
+            Some(TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::You),
+                properties,
+                type_filters,
+                ..
+            })) => {
+                assert!(type_filters.contains(&TypeFilter::Creature));
+                assert!(properties.contains(&FilterProp::Another));
+                assert!(properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Counters {
+                        counters: CounterMatch::Any,
+                        comparator: Comparator::GE,
+                        count: QuantityExpr::Fixed { value: 1 },
+                    }
+                )));
+            }
+            other => panic!("Expected typed creature filter, got {other:?}"),
+        }
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying
+            }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste
+            }));
+    }
+
+    #[test]
     fn static_creatures_with_counter_get_pump() {
         let def = parse_static_line("Creatures you control with a +1/+1 counter on it gets +2/+2.")
             .unwrap();
@@ -15198,6 +15266,24 @@ mod tests {
         let def = parse_static_line("This creature must attack each combat if able.").unwrap();
         assert_eq!(def.mode, StaticMode::MustAttack);
         assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn static_no_more_than_one_creature_can_attack_each_combat() {
+        let def = parse_static_line("No more than one creature can attack each combat.").unwrap();
+        assert_eq!(def.mode, StaticMode::MaxAttackersEachCombat { max: 1 });
+    }
+
+    #[test]
+    fn static_no_more_than_two_creatures_can_attack_each_combat() {
+        let def = parse_static_line("No more than two creatures can attack each combat.").unwrap();
+        assert_eq!(def.mode, StaticMode::MaxAttackersEachCombat { max: 2 });
+    }
+
+    #[test]
+    fn static_no_more_than_one_creature_can_block_each_combat() {
+        let def = parse_static_line("No more than one creature can block each combat.").unwrap();
+        assert_eq!(def.mode, StaticMode::MaxBlockersEachCombat { max: 1 });
     }
 
     #[test]

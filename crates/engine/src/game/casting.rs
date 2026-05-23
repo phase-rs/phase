@@ -21874,7 +21874,7 @@ mod tests {
                 .objects
                 .get_mut(&pw)
                 .unwrap()
-                .loyalty_activated_this_turn = true;
+                .loyalty_activations_this_turn = 1;
 
             // CR 606.3: every remaining loyalty ability on the same PW is denied.
             assert!(
@@ -21911,7 +21911,7 @@ mod tests {
                 .objects
                 .get_mut(&pw)
                 .unwrap()
-                .loyalty_activated_this_turn = true;
+                .loyalty_activations_this_turn = 1;
             assert!(!can_activate_ability_now(&state, PlayerId(0), pw, 0));
             assert!(!can_activate_ability_now(&state, PlayerId(0), pw, 1));
 
@@ -21930,11 +21930,11 @@ mod tests {
 
             assert!(
                 can_activate_ability_now(&state, PlayerId(0), pw, 0),
-                "ability 0 must be activatable again after loyalty_activated_this_turn reset"
+                "ability 0 must be activatable again after loyalty_activations_this_turn reset"
             );
             assert!(
                 can_activate_ability_now(&state, PlayerId(0), pw, 1),
-                "ability 1 must be activatable again after loyalty_activated_this_turn reset"
+                "ability 1 must be activatable again after loyalty_activations_this_turn reset"
             );
         }
 
@@ -21963,7 +21963,7 @@ mod tests {
                 .objects
                 .get_mut(&pw1)
                 .unwrap()
-                .loyalty_activated_this_turn = true;
+                .loyalty_activations_this_turn = 1;
 
             // PW1 fully locked.
             assert!(!can_activate_ability_now(&state, PlayerId(0), pw1, 0));

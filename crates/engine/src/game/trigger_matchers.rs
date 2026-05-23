@@ -1464,20 +1464,22 @@ pub(super) fn match_becomes_target(
     }
 }
 
-/// Match CommitCrime triggers: fires when the trigger's controller commits a crime.
+/// CR 700.13: Match CommitCrime triggers — scoped by trigger.valid_target.
+///
+/// `valid_target` controls which player's crimes activate the trigger:
+/// - `Controller` → only controller's crimes (e.g., "whenever you commit a crime")
+/// - `Typed(Opponent)` → only an opponent's crimes (e.g., "whenever an opponent commits a crime")
+/// - `Player` → any player's crimes (e.g., "whenever a player commits a crime")
+/// - `None` → any player's crimes (no-filter fallback)
 pub(super) fn match_commit_crime(
     event: &GameEvent,
-    _trigger: &TriggerDefinition,
+    trigger: &TriggerDefinition,
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
     if let GameEvent::CrimeCommitted { player_id } = event {
-        // Fire when the crime was committed by the trigger source's controller
-        state
-            .objects
-            .get(&source_id)
-            .map(|obj| obj.controller == *player_id)
-            .unwrap_or(false)
+        // CR 700.13: Scope the trigger to the acting player via valid_target.
+        valid_player_matches(trigger, state, *player_id, source_id)
     } else {
         false
     }
@@ -1511,10 +1513,16 @@ pub(super) fn match_land_played(
 ) -> bool {
     if let GameEvent::LandPlayed {
         object_id,
+        player_id,
         from_zone,
-        ..
     } = event
     {
+        // CR 305.1 + CR 603.2: Scope the trigger to the acting player.
+        // "whenever you play a land" → valid_target = Controller;
+        // "whenever an opponent plays a land" → valid_target = Opponent filter.
+        if !valid_player_matches(trigger, state, *player_id, source_id) {
+            return false;
+        }
         match &trigger.valid_card {
             None => true,
             Some(filter) => state.objects.get(object_id).is_some_and(|obj| {
@@ -4896,7 +4904,8 @@ mod tests {
         let event = GameEvent::CrimeCommitted {
             player_id: PlayerId(0),
         };
-        let trigger = make_trigger(TriggerMode::CommitCrime);
+        // "whenever you commit a crime" → valid_target = Controller
+        let trigger = make_trigger(TriggerMode::CommitCrime).valid_target(TargetFilter::Controller);
 
         assert!(match_commit_crime(&event, &trigger, obj_id, &state));
     }
@@ -4912,13 +4921,84 @@ mod tests {
             Zone::Battlefield,
         );
 
-        // Opponent committed the crime, not us
+        // Opponent committed the crime; controller-scoped trigger must not fire.
         let event = GameEvent::CrimeCommitted {
             player_id: PlayerId(1),
         };
-        let trigger = make_trigger(TriggerMode::CommitCrime);
+        // "whenever you commit a crime" → valid_target = Controller
+        let trigger = make_trigger(TriggerMode::CommitCrime).valid_target(TargetFilter::Controller);
 
         assert!(!match_commit_crime(&event, &trigger, obj_id, &state));
+    }
+
+    #[test]
+    fn commit_crime_matcher_opponent_scope_fires_for_opponent() {
+        let mut state = setup();
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Patrolling Peacemaker".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Opponent (PlayerId(1)) commits the crime — should fire.
+        let event = GameEvent::CrimeCommitted {
+            player_id: PlayerId(1),
+        };
+        // "whenever an opponent commits a crime" → valid_target = Typed(Opponent)
+        let trigger = make_trigger(TriggerMode::CommitCrime).valid_target(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent),
+        ));
+
+        assert!(match_commit_crime(&event, &trigger, obj_id, &state));
+    }
+
+    #[test]
+    fn commit_crime_matcher_opponent_scope_ignores_controller_crime() {
+        let mut state = setup();
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Patrolling Peacemaker".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Controller (PlayerId(0)) commits — opponent-scoped trigger must NOT fire.
+        let event = GameEvent::CrimeCommitted {
+            player_id: PlayerId(0),
+        };
+        let trigger = make_trigger(TriggerMode::CommitCrime).valid_target(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent),
+        ));
+
+        assert!(!match_commit_crime(&event, &trigger, obj_id, &state));
+    }
+
+    #[test]
+    fn commit_crime_matcher_any_player_scope_fires_for_either() {
+        let mut state = setup();
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Tarnation".to_string(),
+            Zone::Battlefield,
+        );
+
+        // "whenever a player commits a crime" → valid_target = Player (any player)
+        let trigger = make_trigger(TriggerMode::CommitCrime).valid_target(TargetFilter::Player);
+
+        let own_crime = GameEvent::CrimeCommitted {
+            player_id: PlayerId(0),
+        };
+        let opp_crime = GameEvent::CrimeCommitted {
+            player_id: PlayerId(1),
+        };
+
+        assert!(match_commit_crime(&own_crime, &trigger, obj_id, &state));
+        assert!(match_commit_crime(&opp_crime, &trigger, obj_id, &state));
     }
 
     // --- Counter filter tests ---

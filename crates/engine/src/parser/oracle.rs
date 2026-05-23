@@ -3225,11 +3225,16 @@ fn try_parse_loyalty_line(line: &str, ctx: &mut ParseContext) -> Option<AbilityD
 /// CR 606.3: A player may activate a loyalty ability only during a main phase
 /// of their turn with an empty stack, and only if no player has previously
 /// activated a loyalty ability of that permanent that turn. The planeswalker
-/// activation path (`game::planeswalker::can_activate_loyalty`) already gates
-/// this independently, but tagging the ability with `AsSorcery` +
-/// `OnlyOnceEachTurn` + the display flag keeps parser output self-describing
-/// and satisfies the shared invariant that every sorcery-speed activated
-/// ability carries `ActivationRestriction::AsSorcery`.
+/// activation path (`game::planeswalker::can_activate_loyalty_ability`) is the
+/// authoritative gate for the "once per permanent per turn" rule — it reads
+/// `obj.loyalty_activations_this_turn` against a cap raised by
+/// `state.extra_loyalty_activations_this_turn` (The Chain Veil class). We do
+/// NOT add `ActivationRestriction::OnlyOnceEachTurn` here: that restriction is
+/// per-ability-index, while CR 606.3 is per-permanent (across ALL loyalty
+/// ability indices). Conflating the two would (a) incorrectly allow a +2 and
+/// a -1 on the same planeswalker in one turn and (b) block The Chain Veil's
+/// "as though none of its loyalty abilities have been activated this turn"
+/// cap-raise from ever taking effect.
 fn apply_loyalty_restrictions(def: &mut AbilityDefinition) {
     // CR 606.3: "...only during a main phase of their turn when the stack is empty..."
     def.sorcery_speed = true;
@@ -3239,15 +3244,6 @@ fn apply_loyalty_restrictions(def: &mut AbilityDefinition) {
     {
         def.activation_restrictions
             .push(ActivationRestriction::AsSorcery);
-    }
-    // CR 606.3: "...only if no player has previously activated a loyalty ability
-    // of that permanent that turn."
-    if !def
-        .activation_restrictions
-        .contains(&ActivationRestriction::OnlyOnceEachTurn)
-    {
-        def.activation_restrictions
-            .push(ActivationRestriction::OnlyOnceEachTurn);
     }
 }
 
