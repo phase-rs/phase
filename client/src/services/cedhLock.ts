@@ -21,6 +21,9 @@ export const CEDH_BRACKET: CommanderBracket = 5;
 
 /**
  * Returns true when at least one AI seat has cEDH difficulty selected.
+ *
+ * Accepts `AiSeatPref[]` directly rather than the full `GameSetupConfig` to
+ * avoid coupling the helper to the store's shape.
  */
 export function anyAiOpponentIsCedh(seats: AiSeatPref[]): boolean {
   return seats.some((s) => s.difficulty === CEDH_DIFFICULTY);

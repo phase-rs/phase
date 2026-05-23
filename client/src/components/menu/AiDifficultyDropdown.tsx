@@ -50,7 +50,7 @@ export function AiDifficultyDropdown({
         <ChevronDownIcon />
       </div>
 
-      {/* B5 lock badge — visible below the select when cEDH is selected. */}
+      {/* B5 lock badge — visible above the select when cEDH is selected. */}
       {isCedh && (
         <span
           aria-label="B5 lock"

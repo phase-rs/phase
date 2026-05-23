@@ -129,6 +129,40 @@ describe("AiOpponentConfig — cEDH cascade", () => {
   });
 });
 
+describe("AiOpponentConfig — B5 lock badge", () => {
+  it("renders the B5 lock badge when the seat difficulty is CEDH", async () => {
+    const user = userEvent.setup();
+
+    act(() => {
+      usePreferencesStore.getState().ensureAiSeatCount(1);
+      usePreferencesStore.getState().setAiSeatDifficulty(0, "Medium");
+    });
+
+    render(<AiOpponentConfig selectedFormat="Commander" opponentCount={1} />);
+
+    // Badge should not appear before cEDH is selected.
+    expect(screen.queryByLabelText("B5 lock")).not.toBeInTheDocument();
+
+    // Select cEDH difficulty.
+    const difficultySelect = screen.getByRole("combobox", { name: /Difficulty/i });
+    await user.selectOptions(difficultySelect, "CEDH");
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("B5 lock")).toBeInTheDocument();
+    });
+  });
+
+  it("hides the B5 lock badge when the seat difficulty is not CEDH", () => {
+    act(() => {
+      usePreferencesStore.getState().ensureAiSeatCount(1);
+      usePreferencesStore.getState().setAiSeatDifficulty(0, "Hard");
+    });
+
+    render(<AiOpponentConfig selectedFormat="Commander" opponentCount={1} />);
+    expect(screen.queryByLabelText("B5 lock")).not.toBeInTheDocument();
+  });
+});
+
 describe("AiOpponentConfig — bracket filter", () => {
   it("does not render the bracket chip row when format is not Commander", () => {
     render(<AiOpponentConfig selectedFormat="Standard" opponentCount={1} />);

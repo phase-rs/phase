@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { GameFormat, MatchType } from "../../adapter/types";
 import { AI_DIFFICULTIES, getAiDifficultyLabel, type AIDifficulty } from "../../constants/ai";
 import type { AiDeckCandidate } from "../../services/aiDeckCatalog";
-import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
-import { anyAiOpponentIsCedh, applyCedhCascade, CEDH_BRACKET } from "../../services/cedhLock";
+import { filterByBracket, useAiDeckCatalog } from "../../services/aiDeckCatalog";
+import { anyAiOpponentIsCedh, applyCedhCascade, CEDH_BRACKET, CEDH_DIFFICULTY } from "../../services/cedhLock";
 import {
   AI_DECK_RANDOM,
   usePreferencesStore,
@@ -14,6 +14,9 @@ import {
 } from "../../stores/preferencesStore";
 import type { DeckArchetype } from "../../services/engineRuntime";
 import { BracketFilter } from "./BracketFilter";
+
+/** Duration (ms) before the cEDH cascade notice auto-dismisses. */
+const CASCADE_NOTICE_MS = 6000;
 
 interface Props {
   selectedFormat?: GameFormat;
@@ -87,6 +90,15 @@ export function AiOpponentConfig({
 
   // One-time notice shown when the cEDH cascade fires.
   const [cedhCascadeNotice, setCedhCascadeNotice] = useState<string | null>(null);
+  const cascadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Clean up the cascade auto-dismiss timer on unmount.
+  useEffect(
+    () => () => {
+      if (cascadeTimerRef.current) clearTimeout(cascadeTimerRef.current);
+    },
+    [],
+  );
 
   // Keep the persisted seat list in sync with the setup page's player count.
   useEffect(() => {
@@ -119,7 +131,8 @@ export function AiOpponentConfig({
       setCedhCascadeNotice(
         "All AI opponents set to cEDH — deck pool restricted to bracket 5.",
       );
-      setTimeout(() => setCedhCascadeNotice(null), 6000);
+      if (cascadeTimerRef.current) clearTimeout(cascadeTimerRef.current);
+      cascadeTimerRef.current = setTimeout(() => setCedhCascadeNotice(null), CASCADE_NOTICE_MS);
     }
 
     // Commit all seat changes to the store.
@@ -141,16 +154,14 @@ export function AiOpponentConfig({
   const anyCedh = anyAiOpponentIsCedh(aiSeats);
 
   const filteredDecks = useMemo(() => {
-    return candidates.filter((d) => {
+    // When any AI seat is cEDH, restrict the random pool to bracket-5 decks.
+    const cedhFiltered = anyCedh ? filterByBracket(candidates, CEDH_BRACKET) : candidates;
+    return cedhFiltered.filter((d) => {
       if (d.coveragePct != null && d.coveragePct < coverageFloor) return false;
       if (archetypeFilter !== "Any" && d.archetype && d.archetype !== archetypeFilter) {
         return false;
       }
-      // When any AI seat is cEDH, restrict the random pool to bracket-5 decks.
-      if (anyCedh) {
-        return d.bracket === CEDH_BRACKET;
-      }
-      if (bracketFilter.length > 0 && selectedFormat === "Commander") {
+      if (!anyCedh && bracketFilter.length > 0 && selectedFormat === "Commander") {
         if (d.bracket === null) return false;             // untagged excluded
         if (!bracketFilter.includes(d.bracket)) return false;
       }
@@ -345,17 +356,27 @@ function AiSeatPanel({
 
       <label className="flex flex-col gap-1">
         <span className="text-xs text-slate-400">Difficulty</span>
-        <select
-          value={seat.difficulty}
-          onChange={(e) => onDifficultyChange(e.target.value as AIDifficulty)}
-          className="rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1.5 text-sm text-white"
-        >
-          {AI_DIFFICULTIES.map((item) => (
-            <option key={item.id} value={item.id}>
-              {item.label}
-            </option>
-          ))}
-        </select>
+        <div className="relative">
+          <select
+            value={seat.difficulty}
+            onChange={(e) => onDifficultyChange(e.target.value as AIDifficulty)}
+            className="w-full rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1.5 text-sm text-white"
+          >
+            {AI_DIFFICULTIES.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.label}
+              </option>
+            ))}
+          </select>
+          {seat.difficulty === CEDH_DIFFICULTY && (
+            <span
+              aria-label="B5 lock"
+              className="absolute -top-2 left-2 rounded bg-rose-500/80 px-1 py-0.5 text-[9px] font-bold uppercase tracking-wider text-white"
+            >
+              B5 lock
+            </span>
+          )}
+        </div>
       </label>
     </div>
   );
