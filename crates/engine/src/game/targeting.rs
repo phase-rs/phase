@@ -2803,9 +2803,6 @@ mod tests {
             player_id: PlayerId(1),
             source_id: ObjectId(99),
         };
-        assert_eq!(
-            extract_player_from_event(&event, &state),
-            Some(PlayerId(1))
-        );
+        assert_eq!(extract_player_from_event(&event, &state), Some(PlayerId(1)));
     }
 }

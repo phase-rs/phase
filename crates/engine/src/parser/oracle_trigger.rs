@@ -2838,6 +2838,18 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
         .parse(input)
     }
 
+    // Object noun phrase: the "ability" being activated. Decomposed into
+    // article + noun so the article can later admit modifiers ("an activated
+    // ability"), and so this is the clean extension point for the source-
+    // object filter axis ("an ability **of an artifact**", "of a creature or
+    // land", "of a permanent"). The matcher already consults `def.valid_card`
+    // via `valid_card_matches`, so adding source-object filters here unlocks
+    // Crackdown Construct, Wizened Mentor, Runic Armasaur, Ceaseless
+    // Searblades, and similar cards.
+    fn parse_ability_object(input: &str) -> OracleResult<'_, ()> {
+        value((), pair(tag("an "), tag("ability"))).parse(input)
+    }
+
     fn parse_qualifier(input: &str) -> OracleResult<'_, Option<TriggerCondition>> {
         // CR 605.1a: "that isn't a mana ability" qualifier is optional in
         // principle (no such printed card exists today without it, but the
@@ -2852,15 +2864,13 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
         .parse(input)
     }
 
-    // Next extension axis: source-object filter ("activates an ability **of an
-    // artifact**" / "of a creature or land" / "of a permanent"). The matcher
-    // already consults `def.valid_card` via `valid_card_matches`, so this is
-    // purely a parser extension — add an `opt(preceded(tag(" of "), …))` arm
-    // here to unlock Crackdown Construct, Wizened Mentor, Runic Armasaur,
-    // Ceaseless Searblades, and similar cards.
     let parse_line = preceded(
         alt((tag("whenever "), tag("when "))),
-        (parse_subject_and_verb, tag("an ability"), parse_qualifier),
+        (
+            parse_subject_and_verb,
+            parse_ability_object,
+            parse_qualifier,
+        ),
     );
 
     let (_, (subject, _, qualifier)) = all_consuming(parse_line).parse(lower).ok()?;
