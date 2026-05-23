@@ -27,6 +27,7 @@ const CHOICE_TYPE_LABELS: Record<string, string> = {
   TwoColors: "Choose Two Colors",
   NumberRange: "Choose a Number",
   Labeled: "Make a Choice",
+  Keyword: "Choose an Ability",
 };
 
 /** Extract the string key from a ChoiceType value.
