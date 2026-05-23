@@ -7,7 +7,9 @@ import { WasmAdapter, getSharedAdapter } from "../adapter/wasm-adapter";
 import { WebSocketAdapter } from "../adapter/ws-adapter";
 import { audioManager } from "../audio/AudioManager";
 import type { DeckData, WsAdapterEvent } from "../adapter/ws-adapter";
-import { loadActiveDeck } from "../constants/storage";
+import { ACTIVE_DECK_KEY, loadActiveDeck, loadSavedDeckBracket } from "../constants/storage";
+import type { CommanderBracket } from "../types/bracket";
+import type { CommanderBracketTier } from "../types/bracketEstimate";
 import type { AiDeckCandidate } from "../services/aiDeckCatalog";
 import { buildLegalAiDeckCatalog } from "../services/aiDeckCatalog";
 import { AI_DECK_RANDOM, usePreferencesStore } from "../stores/preferencesStore";
@@ -125,11 +127,42 @@ function parsedDeckToDeckData(deck: ParsedDeck): DeckData {
   return expandParsedDeck(deck);
 }
 
-type ExpandedDeck = { main_deck: string[]; sideboard: string[]; commander: string[] };
+/**
+ * Read the declared bracket for the currently active deck from localStorage.
+ * Returns `null` when no deck is selected or the deck carries no bracket tag.
+ * This is the sole call site for bracket → active-deck bridging so future
+ * bracket storage changes only need to update this function.
+ */
+function loadActiveDeckBracket(): CommanderBracket | null {
+  const name = localStorage.getItem(ACTIVE_DECK_KEY);
+  if (!name) return null;
+  return loadSavedDeckBracket(name);
+}
+
+/**
+ * Convert the numeric `CommanderBracket` (1–5) stored on deck metadata into the
+ * lowercase string tier the Rust engine expects on `PlayerDeckList.bracket_tier`.
+ *
+ * Uses the inverse of `BRACKET_TIER_NUMERIC` from `bracketEstimate.ts`.
+ * Returns `"core"` (the engine's `Default`) for any unrecognised value so
+ * that missing or invalid tags degrade safely.
+ */
+function bracketToEngineTier(bracket: CommanderBracket | null | undefined): CommanderBracketTier {
+  switch (bracket) {
+    case 1: return "exhibition";
+    case 2: return "core";
+    case 3: return "upgraded";
+    case 4: return "optimized";
+    case 5: return "cedh";
+    default: return "core";
+  }
+}
+
+type ExpandedDeckWithTier = { main_deck: string[]; sideboard: string[]; commander: string[]; bracket_tier: string };
 type DeckListPayload = {
-  player: ExpandedDeck;
-  opponent: ExpandedDeck;
-  ai_decks: ExpandedDeck[];
+  player: ExpandedDeckWithTier;
+  opponent: ExpandedDeckWithTier;
+  ai_decks: ExpandedDeckWithTier[];
 };
 
 function candidatePassesFilters(
@@ -165,11 +198,12 @@ function pickOpponentDeck(
   return randomPickDistinct(filtered.length > 0 ? filtered : catalog, excludeIds);
 }
 
-function buildPlayerOnlyDeckList(deck: ParsedDeck): DeckListPayload {
-  const player = expandParsedDeck(deck);
+function buildPlayerOnlyDeckList(deck: ParsedDeck, playerBracket?: CommanderBracket | null): DeckListPayload {
+  const expanded = expandParsedDeck(deck);
+  const player: ExpandedDeckWithTier = { ...expanded, bracket_tier: bracketToEngineTier(playerBracket) };
   return {
     player,
-    opponent: { main_deck: [], sideboard: [], commander: [] },
+    opponent: { main_deck: [], sideboard: [], commander: [], bracket_tier: "core" },
     ai_decks: [],
   };
 }
@@ -179,6 +213,7 @@ async function buildLocalAiDeckList(
   playerCount: number,
   formatConfig?: FormatConfig,
   selectedMatchType?: MatchType,
+  playerBracket?: CommanderBracket | null,
 ): Promise<DeckListPayload> {
   const { aiSeats, aiArchetypeFilter, aiCoverageFloor } = usePreferencesStore.getState();
   const catalog = await buildLegalAiDeckCatalog({
@@ -191,7 +226,7 @@ async function buildLocalAiDeckList(
 
   const opponentCount = Math.max(1, playerCount - 1);
   const excludeIds = new Set<string>();
-  const picks: ParsedDeck[] = [];
+  const picks: AiDeckCandidate[] = [];
   for (let i = 0; i < opponentCount; i++) {
     // Unconfigured seats default to Random — NOT to `aiSeats[0]`. Falling
     // through to seat 0 would re-introduce the original bug: if the user
@@ -205,13 +240,16 @@ async function buildLocalAiDeckList(
       aiArchetypeFilter,
       aiCoverageFloor,
     );
-    picks.push(result.deck);
+    picks.push(result);
     excludeIds.add(result.id);
   }
+
+  const playerExpanded = expandParsedDeck(deck);
+  const playerTier = bracketToEngineTier(playerBracket);
   return {
-    player: expandParsedDeck(deck),
-    opponent: expandParsedDeck(picks[0]),
-    ai_decks: picks.slice(1).map(expandParsedDeck),
+    player: { ...playerExpanded, bracket_tier: playerTier },
+    opponent: { ...expandParsedDeck(picks[0].deck), bracket_tier: bracketToEngineTier(picks[0].bracket) },
+    ai_decks: picks.slice(1).map((c) => ({ ...expandParsedDeck(c.deck), bracket_tier: bracketToEngineTier(c.bracket) })),
   };
 }
 
@@ -464,7 +502,7 @@ export function GameProvider({
 
       const setupP2P = async () => {
         const effectivePlayerCount = playerCount ?? 2;
-        const deckList = buildPlayerOnlyDeckList(parsedDeck);
+        const deckList = buildPlayerOnlyDeckList(parsedDeck, loadActiveDeckBracket());
         signal.throwIfAborted();
 
         // Resources that may need undoing on abort/error. `broker` is
@@ -950,6 +988,7 @@ export function GameProvider({
               playerCount ?? 2,
               formatConfig,
               matchConfig?.match_type,
+              loadActiveDeckBracket(),
             );
           } catch (deckErr) {
             onNoDeckRef.current?.(deckErr instanceof Error ? deckErr.message : String(deckErr));
@@ -1047,6 +1086,7 @@ export function GameProvider({
           playerCount ?? 2,
           formatConfig,
           matchConfig?.match_type,
+          loadActiveDeckBracket(),
         );
       } catch (deckErr) {
         onNoDeckRef.current?.(deckErr instanceof Error ? deckErr.message : String(deckErr));

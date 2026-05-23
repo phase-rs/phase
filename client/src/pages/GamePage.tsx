@@ -194,6 +194,10 @@ export function GamePage() {
 
   const [showCardDataMissing, setShowCardDataMissing] = useState(false);
 
+  // cEDH bracket-violation blocking modal: set when the engine rejects a game
+  // init because one or more decks are not declared cEDH at a cEDH table.
+  const [bracketViolationError, setBracketViolationError] = useState<string | null>(null);
+
   // Online multiplayer state
   const [hostGameCode, setHostGameCode] = useState<string | null>(null);
   const [waitingForOpponent, setWaitingForOpponent] = useState(false);
@@ -510,6 +514,12 @@ export function GamePage() {
 
   const handleNoDeck = useCallback((reason?: string) => {
     if (reason) {
+      // cEDH bracket lock: surface as a blocking modal rather than navigating
+      // away, so the user can read the explanation before going back to setup.
+      if (reason.includes("not declared cEDH")) {
+        setBracketViolationError(reason);
+        return;
+      }
       navigate("/setup", { state: { setupError: reason } });
       return;
     }
@@ -576,6 +586,11 @@ export function GamePage() {
         onDismissDisconnectChoice={() => setDisconnectChoice(null)}
         pauseReason={pauseReason}
         isP2PHost={mode === "p2p-host"}
+        bracketViolationError={bracketViolationError}
+        onDismissBracketViolation={() => {
+          setBracketViolationError(null);
+          navigate("/setup");
+        }}
       />
     </GameProvider>
   );
@@ -607,6 +622,10 @@ interface GamePageContentProps {
   onDismissDisconnectChoice: () => void;
   pauseReason: string | null;
   isP2PHost: boolean;
+  /** Set when the engine rejected game init because a deck is not declared cEDH at a cEDH table. */
+  bracketViolationError: string | null;
+  /** Navigate back to setup and clear the bracket-violation modal. */
+  onDismissBracketViolation: () => void;
 }
 
 function GamePageContent({
@@ -631,6 +650,8 @@ function GamePageContent({
   onDismissDisconnectChoice,
   pauseReason,
   isP2PHost,
+  bracketViolationError,
+  onDismissBracketViolation,
 }: GamePageContentProps) {
   const navigate = useNavigate();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -1142,6 +1163,36 @@ function GamePageContent({
       {/* Card data missing modal */}
       {showCardDataMissing && (
         <CardDataMissingModal onContinue={onDismissCardDataMissing} />
+      )}
+
+      {/* cEDH bracket-violation blocking modal.
+          Shown when the engine refuses game init because one or more decks
+          are not declared cEDH (bracket 5) at a cEDH table.
+          Covers the entire page — no game state is accessible behind it
+          because the engine never initialised. */}
+      {bracketViolationError && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80"
+          role="dialog"
+          aria-modal="true"
+          aria-label="cEDH bracket lock"
+          data-testid="bracket-violation-modal"
+        >
+          <div className="mx-4 max-w-md rounded-xl bg-gray-900 p-6 shadow-2xl ring-1 ring-rose-700/60">
+            <h2 className="mb-2 text-lg font-bold text-rose-400">cEDH bracket lock</h2>
+            <p className="mb-4 text-sm text-gray-300">{bracketViolationError}</p>
+            <p className="mb-6 text-xs text-gray-500">
+              All decks at a cEDH table must be declared bracket 5. Update your
+              deck&#39;s bracket in the deck builder and try again.
+            </p>
+            <button
+              onClick={onDismissBracketViolation}
+              className="w-full rounded-lg bg-rose-700 py-2 text-sm font-semibold text-white transition hover:bg-rose-600"
+            >
+              Return to setup
+            </button>
+          </div>
+        </div>
       )}
 
       {/* Resume-failed banner */}
