@@ -4,6 +4,7 @@ export const AI_DIFFICULTIES = [
   { id: "Medium", label: "Medium", shortLabel: "Medium" },
   { id: "Hard", label: "Hard", shortLabel: "Hard" },
   { id: "VeryHard", label: "Very Hard", shortLabel: "Very Hard" },
+  { id: "CEDH", label: "cEDH (B5 lock)", shortLabel: "cEDH" },
 ] as const;
 
 export type AIDifficulty = (typeof AI_DIFFICULTIES)[number]["id"];

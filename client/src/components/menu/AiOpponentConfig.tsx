@@ -4,11 +4,13 @@ import type { GameFormat, MatchType } from "../../adapter/types";
 import { AI_DIFFICULTIES, getAiDifficultyLabel, type AIDifficulty } from "../../constants/ai";
 import type { AiDeckCandidate } from "../../services/aiDeckCatalog";
 import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
+import { anyAiOpponentIsCedh, applyCedhCascade, CEDH_BRACKET } from "../../services/cedhLock";
 import {
   AI_DECK_RANDOM,
   usePreferencesStore,
   type AiArchetypeFilter,
   type AiDeckSelection,
+  type AiSeatPref,
 } from "../../stores/preferencesStore";
 import type { DeckArchetype } from "../../services/engineRuntime";
 import { BracketFilter } from "./BracketFilter";
@@ -83,10 +85,48 @@ export function AiOpponentConfig({
   const bracketFilter = usePreferencesStore((s) => s.aiBracketFilter);
   const setBracketFilter = usePreferencesStore((s) => s.setAiBracketFilter);
 
+  // One-time notice shown when the cEDH cascade fires.
+  const [cedhCascadeNotice, setCedhCascadeNotice] = useState<string | null>(null);
+
   // Keep the persisted seat list in sync with the setup page's player count.
   useEffect(() => {
     ensureAiSeatCount(opponentCount);
   }, [opponentCount, ensureAiSeatCount]);
+
+  /**
+   * Difficulty change handler with cEDH cascade.
+   *
+   * When the user selects cEDH on any seat and there are multiple AI seats,
+   * all other seats are upgraded to cEDH as well (bracket-5 is table-wide).
+   * A one-time inline notice fires on the upgrade; it auto-hides after 6s.
+   */
+  const handleDifficultyChange = (seatIndex: number, newDifficulty: AIDifficulty) => {
+    const currentSeats = usePreferencesStore.getState().aiSeats;
+    const wasAlreadyCedh = anyAiOpponentIsCedh(currentSeats);
+
+    // Build the updated seat list for this seat's change.
+    const updated: AiSeatPref[] = currentSeats.map((s, idx) =>
+      idx === seatIndex ? { ...s, difficulty: newDifficulty } : s,
+    );
+
+    // Apply the cascade: if any seat is now cEDH, all must be.
+    const cascaded = applyCedhCascade(updated);
+    const nowCedh = anyAiOpponentIsCedh(cascaded);
+
+    // Fire notice only when transitioning into cEDH for the first time this
+    // session and there is more than one AI seat being cascaded.
+    if (!wasAlreadyCedh && nowCedh && cascaded.length > 1) {
+      setCedhCascadeNotice(
+        "All AI opponents set to cEDH — deck pool restricted to bracket 5.",
+      );
+      setTimeout(() => setCedhCascadeNotice(null), 6000);
+    }
+
+    // Commit all seat changes to the store.
+    cascaded.forEach((s, idx) => {
+      setAiSeatDifficulty(idx, s.difficulty);
+    });
+  };
 
   const { candidates, loading, error } = useAiDeckCatalog({ selectedFormat, selectedMatchType });
 
@@ -98,11 +138,17 @@ export function AiOpponentConfig({
   // global across all AI seats because they describe which decks are worth
   // considering, not which deck ends up assigned — a concept that doesn't
   // vary per seat.
+  const anyCedh = anyAiOpponentIsCedh(aiSeats);
+
   const filteredDecks = useMemo(() => {
     return candidates.filter((d) => {
       if (d.coveragePct != null && d.coveragePct < coverageFloor) return false;
       if (archetypeFilter !== "Any" && d.archetype && d.archetype !== archetypeFilter) {
         return false;
+      }
+      // When any AI seat is cEDH, restrict the random pool to bracket-5 decks.
+      if (anyCedh) {
+        return d.bracket === CEDH_BRACKET;
       }
       if (bracketFilter.length > 0 && selectedFormat === "Commander") {
         if (d.bracket === null) return false;             // untagged excluded
@@ -110,7 +156,7 @@ export function AiOpponentConfig({
       }
       return true;
     });
-  }, [candidates, coverageFloor, archetypeFilter, bracketFilter, selectedFormat]);
+  }, [candidates, coverageFloor, archetypeFilter, bracketFilter, selectedFormat, anyCedh]);
 
   // Render exactly `opponentCount` panels regardless of how many slots the
   // store currently holds — the effect above will catch the store up on the
@@ -144,6 +190,16 @@ export function AiOpponentConfig({
         {loading && <span className="text-[10px] text-slate-500">Analyzing decks…</span>}
       </div>
 
+      {cedhCascadeNotice && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-200"
+        >
+          {cedhCascadeNotice}
+        </div>
+      )}
+
       <div className="flex flex-col gap-1.5">
         {seatsToRender.map((seat, i) => (
           <AiSeatPanel
@@ -156,7 +212,7 @@ export function AiOpponentConfig({
             collapsible={isMulti}
             onToggle={() => setExpandedIndex((cur) => (cur === i ? null : i))}
             onDeckChange={(id) => setAiSeatDeckId(i, id)}
-            onDifficultyChange={(d) => setAiSeatDifficulty(i, d)}
+            onDifficultyChange={(d) => handleDifficultyChange(i, d)}
           />
         ))}
       </div>

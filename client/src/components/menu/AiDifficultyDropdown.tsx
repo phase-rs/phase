@@ -19,6 +19,8 @@ export function AiDifficultyDropdown({
   className,
   compact = false,
 }: AiDifficultyDropdownProps) {
+  const isCedh = difficulty === "CEDH";
+
   return (
     <div className={`relative ${className ?? ""}`}>
       <label className="sr-only" htmlFor={`ai-difficulty-${compact ? "compact" : "full"}`}>
@@ -34,6 +36,7 @@ export function AiDifficultyDropdown({
           "h-full min-h-11 appearance-none bg-white/[0.03] px-3 pr-9 text-sm font-medium text-white/88 transition-colors",
           "hover:bg-white/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30",
           compact ? "min-w-[6.25rem]" : "min-w-[7.75rem]",
+          isCedh ? "text-rose-300" : "",
         ].join(" ")}
       >
         {AI_DIFFICULTIES.map((item) => (
@@ -46,6 +49,16 @@ export function AiDifficultyDropdown({
       <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-3 text-white/70">
         <ChevronDownIcon />
       </div>
+
+      {/* B5 lock badge — visible below the select when cEDH is selected. */}
+      {isCedh && (
+        <span
+          aria-label="B5 lock"
+          className="absolute -top-2 left-2 rounded bg-rose-500/80 px-1 py-0.5 text-[9px] font-bold uppercase tracking-wider text-white"
+        >
+          B5 lock
+        </span>
+      )}
     </div>
   );
 }
