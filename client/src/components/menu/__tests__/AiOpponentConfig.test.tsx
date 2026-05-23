@@ -42,10 +42,92 @@ beforeEach(() => {
     usePreferencesStore.getState().setAiBracketFilter([]);
     usePreferencesStore.getState().setAiArchetypeFilter("Any");
     usePreferencesStore.getState().setAiCoverageFloor(50);
+    // Reset to a single AI seat at Medium difficulty to avoid cascade state from a prior test.
+    usePreferencesStore.getState().ensureAiSeatCount(1);
+    usePreferencesStore.getState().setAiSeatDifficulty(0, "Medium");
   });
 });
 
 afterEach(cleanup);
+
+describe("AiOpponentConfig — cEDH cascade", () => {
+  it("cascades all AI seats to cEDH when one seat is set to cEDH", async () => {
+    const user = userEvent.setup();
+
+    // Seed: two AI seats — seat 0 at Easy, seat 1 at Hard.
+    act(() => {
+      usePreferencesStore.getState().ensureAiSeatCount(2);
+      usePreferencesStore.getState().setAiSeatDifficulty(0, "Easy");
+      usePreferencesStore.getState().setAiSeatDifficulty(1, "Hard");
+    });
+
+    render(<AiOpponentConfig selectedFormat="Commander" opponentCount={2} />);
+
+    // Expand the first seat panel (multi-AI starts collapsed).
+    await user.click(screen.getByRole("button", { name: /Opponent 1/i }));
+
+    // Select cEDH from seat 0's difficulty dropdown.
+    const difficultySelects = screen.getAllByRole("combobox", { name: /Difficulty/i });
+    await user.selectOptions(difficultySelects[0], "CEDH");
+
+    // Both seats in the store should now be CEDH.
+    await waitFor(() => {
+      const seats = usePreferencesStore.getState().aiSeats;
+      expect(seats[0].difficulty).toBe("CEDH");
+      expect(seats[1].difficulty).toBe("CEDH");
+    });
+  });
+
+  it("does not cascade on selecting a non-cEDH difficulty", async () => {
+    const user = userEvent.setup();
+
+    // Seed: two AI seats — seat 0 at Easy, seat 1 at Hard.
+    act(() => {
+      usePreferencesStore.getState().ensureAiSeatCount(2);
+      usePreferencesStore.getState().setAiSeatDifficulty(0, "Easy");
+      usePreferencesStore.getState().setAiSeatDifficulty(1, "Hard");
+    });
+
+    render(<AiOpponentConfig selectedFormat="Commander" opponentCount={2} />);
+
+    // Expand the first seat panel.
+    await user.click(screen.getByRole("button", { name: /Opponent 1/i }));
+
+    // Change seat 0 from Easy to Medium.
+    const difficultySelects = screen.getAllByRole("combobox", { name: /Difficulty/i });
+    await user.selectOptions(difficultySelects[0], "Medium");
+
+    // Seat 1 must still be Hard — no cascade fired.
+    await waitFor(() => {
+      const seats = usePreferencesStore.getState().aiSeats;
+      expect(seats[0].difficulty).toBe("Medium");
+      expect(seats[1].difficulty).toBe("Hard");
+    });
+  });
+
+  it("shows the cEDH cascade notice when cascading from a non-cEDH seat", async () => {
+    const user = userEvent.setup();
+
+    // Seed: two AI seats — both non-cEDH so the cascade fires on first selection.
+    act(() => {
+      usePreferencesStore.getState().ensureAiSeatCount(2);
+      usePreferencesStore.getState().setAiSeatDifficulty(0, "Easy");
+      usePreferencesStore.getState().setAiSeatDifficulty(1, "Hard");
+    });
+
+    render(<AiOpponentConfig selectedFormat="Commander" opponentCount={2} />);
+
+    // Expand seat 0 and select cEDH.
+    await user.click(screen.getByRole("button", { name: /Opponent 1/i }));
+    const difficultySelects = screen.getAllByRole("combobox", { name: /Difficulty/i });
+    await user.selectOptions(difficultySelects[0], "CEDH");
+
+    // The cascade notice should appear.
+    await waitFor(() => {
+      expect(screen.getByRole("status")).toHaveTextContent(/All AI opponents set to cEDH/i);
+    });
+  });
+});
 
 describe("AiOpponentConfig — bracket filter", () => {
   it("does not render the bracket chip row when format is not Commander", () => {
