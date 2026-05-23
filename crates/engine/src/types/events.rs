@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::counter::CounterType;
 
-use super::ability::{EffectKind, TargetRef};
+use super::ability::{AbilityTag, EffectKind, TargetRef};
 use super::game_state::ZoneChangeRecord;
 use super::identifiers::{CardId, ObjectId};
 use super::mana::ManaType;
@@ -542,18 +542,13 @@ pub enum GameEvent {
         source_id: ObjectId,
     },
 
-    /// CR 702.142b: A boast ability was activated. Emitted alongside AbilityActivated
-    /// when the activated ability has `ability_tag == Some(AbilityTag::Boast)`.
-    /// Enables "whenever you activate a boast ability" triggers.
-    BoastAbilityActivated {
-        player_id: PlayerId,
-        source_id: ObjectId,
-    },
-
-    /// CR 702.177a: An exhaust ability was activated. Emitted alongside
-    /// AbilityActivated for stack-using abilities and from the inline mana
-    /// ability path for mana abilities.
-    ExhaustAbilityActivated {
+    /// CR 702.107a + CR 702.142b + CR 702.177a: A keyword ability was activated.
+    /// Emitted alongside `AbilityActivated` when the activated ability has a recognized
+    /// `ability_tag`. `is_mana_ability` is `true` only for exhaust mana abilities; it is
+    /// always `false` for boast and outlast activations. Parameterized to avoid per-keyword
+    /// variant proliferation (boast, exhaust, outlast share identical event structure).
+    KeywordAbilityActivated {
+        ability_tag: AbilityTag,
         player_id: PlayerId,
         source_id: ObjectId,
         is_mana_ability: bool,

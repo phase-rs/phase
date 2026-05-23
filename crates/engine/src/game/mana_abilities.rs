@@ -2283,7 +2283,8 @@ mod tests {
         assert!(second.is_err());
         assert!(events.iter().any(|event| matches!(
             event,
-            GameEvent::ExhaustAbilityActivated {
+            GameEvent::KeywordAbilityActivated {
+                ability_tag: AbilityTag::Exhaust,
                 player_id: PlayerId(0),
                 source_id,
                 is_mana_ability: true,
@@ -2333,7 +2334,7 @@ mod tests {
         .unwrap();
         assert!(!events
             .iter()
-            .any(|event| matches!(event, GameEvent::ExhaustAbilityActivated { .. })));
+            .any(|event| matches!(event, GameEvent::KeywordAbilityActivated { .. })));
         let WaitingFor::ChooseManaColor {
             choice, context, ..
         } = waiting
@@ -2364,7 +2365,8 @@ mod tests {
         assert!(second.is_err());
         assert!(events.iter().any(|event| matches!(
             event,
-            GameEvent::ExhaustAbilityActivated {
+            GameEvent::KeywordAbilityActivated {
+                ability_tag: AbilityTag::Exhaust,
                 player_id: PlayerId(0),
                 source_id,
                 is_mana_ability: true,

@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::types::ability::{
-    ControllerRef, DamageKindFilter, EffectKind, OriginConstraint, TargetFilter, TargetRef,
-    TriggerDefinition, TypedFilter,
+    AbilityTag, ControllerRef, DamageKindFilter, EffectKind, OriginConstraint, TargetFilter,
+    TargetRef, TriggerDefinition, TypedFilter,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{GameState, StackEntryKind};
@@ -113,8 +113,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::Saddles => match_saddles,
         TriggerMode::SaddlesOrCrews => match_saddles_or_crews,
         TriggerMode::NinjutsuActivated => match_ninjutsu_activated,
-        TriggerMode::BoastAbilityActivated => match_boast_ability_activated,
-        TriggerMode::ExhaustAbilityActivated => match_exhaust_ability_activated,
+        TriggerMode::KeywordAbilityActivated(_) => match_keyword_ability_activated,
         TriggerMode::Firebend => match_firebend,
         TriggerMode::Airbend => match_airbend,
         TriggerMode::Earthbend => match_earthbend,
@@ -431,15 +430,13 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
 
     // CR 702.49a: Ninjutsu activation trigger
     r.insert(TriggerMode::NinjutsuActivated, match_ninjutsu_activated);
-    // CR 702.142b: Boast ability activation trigger
-    r.insert(
-        TriggerMode::BoastAbilityActivated,
-        match_boast_ability_activated,
-    );
-    r.insert(
-        TriggerMode::ExhaustAbilityActivated,
-        match_exhaust_ability_activated,
-    );
+    // CR 702.107a + CR 702.142b + CR 702.177a: keyword ability activation triggers
+    for tag in [AbilityTag::Boast, AbilityTag::Exhaust, AbilityTag::Outlast] {
+        r.insert(
+            TriggerMode::KeywordAbilityActivated(tag),
+            match_keyword_ability_activated,
+        );
+    }
 
     // Avatar crossover: bending trigger matchers
     r.insert(TriggerMode::Firebend, match_firebend);
@@ -2396,40 +2393,33 @@ pub(super) fn match_ninjutsu_activated(
     }
 }
 
-/// CR 702.142b: Matches when a player activates a boast ability.
-/// The trigger fires for the controller of the trigger source when they activate
-/// any ability tagged as Boast.
-pub(super) fn match_boast_ability_activated(
+/// CR 702.107a + CR 702.142b + CR 702.177a + CR 603.2: Matches when a player activates
+/// a keyword ability whose `AbilityTag` matches the trigger's `KeywordAbilityActivated` tag.
+/// `valid_card` scopes source-specific forms like "~'s outlast ability"; generic forms
+/// like "an exhaust ability" intentionally match any matching activation by the controller.
+pub(super) fn match_keyword_ability_activated(
     event: &GameEvent,
-    _trigger: &TriggerDefinition,
+    trigger: &TriggerDefinition,
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::BoastAbilityActivated { player_id, .. } = event {
-        // Fire when the boast ability was activated by the trigger source's controller
-        state
-            .objects
-            .get(&source_id)
-            .map(|obj| obj.controller == *player_id)
-            .unwrap_or(false)
-    } else {
-        false
-    }
-}
-
-/// CR 702.177a + CR 603.2: Matches when a player activates an exhaust ability.
-pub(super) fn match_exhaust_ability_activated(
-    event: &GameEvent,
-    _trigger: &TriggerDefinition,
-    source_id: ObjectId,
-    state: &GameState,
-) -> bool {
-    if let GameEvent::ExhaustAbilityActivated { player_id, .. } = event {
-        state
-            .objects
-            .get(&source_id)
-            .map(|obj| obj.controller == *player_id)
-            .unwrap_or(false)
+    let TriggerMode::KeywordAbilityActivated(ref tag) = trigger.mode else {
+        return false;
+    };
+    if let GameEvent::KeywordAbilityActivated {
+        ability_tag,
+        player_id,
+        source_id: activated_id,
+        ..
+    } = event
+    {
+        ability_tag == tag
+            && valid_card_matches(trigger, state, *activated_id, source_id)
+            && state
+                .objects
+                .get(&source_id)
+                .map(|obj| obj.controller == *player_id)
+                .unwrap_or(false)
     } else {
         false
     }
@@ -3112,7 +3102,7 @@ mod tests {
     }
 
     #[test]
-    fn exhaust_ability_activation_matches_controller() {
+    fn keyword_ability_activation_matches_generic_controller_trigger() {
         let mut state = setup();
         let source = create_object(
             &mut state,
@@ -3121,22 +3111,90 @@ mod tests {
             "Rangers' Aetherhive".to_string(),
             Zone::Battlefield,
         );
-        let trigger = make_trigger(TriggerMode::ExhaustAbilityActivated);
+        let activated_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Another Exhaust Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = make_trigger(TriggerMode::KeywordAbilityActivated(AbilityTag::Exhaust));
 
-        assert!(match_exhaust_ability_activated(
-            &GameEvent::ExhaustAbilityActivated {
+        // Generic "you activate an exhaust ability" triggers may match a different source.
+        assert!(match_keyword_ability_activated(
+            &GameEvent::KeywordAbilityActivated {
+                ability_tag: AbilityTag::Exhaust,
                 player_id: PlayerId(0),
-                source_id: ObjectId(99),
+                source_id: activated_source,
                 is_mana_ability: false,
             },
             &trigger,
             source,
             &state
         ));
-        assert!(!match_exhaust_ability_activated(
-            &GameEvent::BoastAbilityActivated {
+        // Wrong controller must not match.
+        assert!(!match_keyword_ability_activated(
+            &GameEvent::KeywordAbilityActivated {
+                ability_tag: AbilityTag::Exhaust,
+                player_id: PlayerId(1),
+                source_id: activated_source,
+                is_mana_ability: false,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+        // Wrong ability tag must not match.
+        assert!(!match_keyword_ability_activated(
+            &GameEvent::KeywordAbilityActivated {
+                ability_tag: AbilityTag::Boast,
                 player_id: PlayerId(0),
-                source_id: ObjectId(99),
+                source_id: source,
+                is_mana_ability: false,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+    }
+
+    #[test]
+    fn keyword_ability_activation_valid_card_scopes_self_reference() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Herald of Anafenza".to_string(),
+            Zone::Battlefield,
+        );
+        let other = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Abzan Falconer".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::KeywordAbilityActivated(AbilityTag::Outlast));
+        trigger.valid_card = Some(TargetFilter::SelfRef);
+
+        assert!(match_keyword_ability_activated(
+            &GameEvent::KeywordAbilityActivated {
+                ability_tag: AbilityTag::Outlast,
+                player_id: PlayerId(0),
+                source_id: source,
+                is_mana_ability: false,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+        assert!(!match_keyword_ability_activated(
+            &GameEvent::KeywordAbilityActivated {
+                ability_tag: AbilityTag::Outlast,
+                player_id: PlayerId(0),
+                source_id: other,
+                is_mana_ability: false,
             },
             &trigger,
             source,

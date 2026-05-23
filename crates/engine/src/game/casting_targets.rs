@@ -475,21 +475,15 @@ pub(crate) fn emit_keyword_ability_event_if_tagged(
     else {
         return;
     };
-    match def.ability_tag {
-        Some(AbilityTag::Boast) => {
-            events.push(GameEvent::BoastAbilityActivated {
-                player_id: player,
-                source_id,
-            });
-        }
-        Some(AbilityTag::Exhaust) => {
-            events.push(GameEvent::ExhaustAbilityActivated {
-                player_id: player,
-                source_id,
-                is_mana_ability: super::mana_abilities::is_mana_ability(def),
-            });
-        }
-        None => {}
+    if let Some(ability_tag) = def.ability_tag {
+        let is_mana_ability =
+            ability_tag == AbilityTag::Exhaust && super::mana_abilities::is_mana_ability(def);
+        events.push(GameEvent::KeywordAbilityActivated {
+            ability_tag,
+            player_id: player,
+            source_id,
+            is_mana_ability,
+        });
     }
 }
 

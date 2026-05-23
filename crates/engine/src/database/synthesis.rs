@@ -4,7 +4,7 @@ use crate::database::mtgjson::{parse_mtgjson_mana_cost, AtomicCard};
 use crate::game::printed_cards::derive_colors_from_mana_cost;
 use crate::parser::oracle::{oracle_text_allows_commander, parse_oracle_text};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AdditionalCost,
     AggregateFunction, CardPlayMode, CastVariantPaid, ChoiceType, ContinuousModification,
     ControllerRef, CopyRetargetPermission, CounterTriggerFilter, Duration, Effect, FilterProp,
     KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
@@ -1096,6 +1096,40 @@ pub fn synthesize_scavenge(face: &mut CardFace) {
         .collect();
 
     face.abilities.extend(scavenge_abilities);
+}
+
+/// CR 702.107a: Synthesize the Outlast activated ability from a `Keyword::Outlast(cost)`.
+/// "Outlast [cost]" means "[Cost], {T}: Put a +1/+1 counter on this creature.
+/// Activate only as a sorcery."
+pub fn synthesize_outlast(face: &mut CardFace) {
+    let outlast_abilities: Vec<AbilityDefinition> = face
+        .keywords
+        .iter()
+        .filter_map(|kw| {
+            let Keyword::Outlast(cost) = kw else {
+                return None;
+            };
+            // CR 702.107a: Composite cost — pay mana, then tap this creature.
+            let composite_cost = AbilityCost::Composite {
+                costs: vec![AbilityCost::Mana { cost: cost.clone() }, AbilityCost::Tap],
+            };
+            // CR 702.107a: "Put a +1/+1 counter on this creature."
+            let effect = Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            };
+            let mut def = AbilityDefinition::new(AbilityKind::Activated, effect)
+                .cost(composite_cost)
+                // CR 702.107a: "Activate only as a sorcery."
+                .sorcery_speed();
+            // Tag so "whenever you activate this creature's outlast ability" triggers fire.
+            def.ability_tag = Some(AbilityTag::Outlast);
+            Some(def)
+        })
+        .collect();
+
+    face.abilities.extend(outlast_abilities);
 }
 
 /// Convert a typecycling subtype string to a `TargetFilter` for library search.
@@ -3088,6 +3122,7 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_level_up(face);
     synthesize_cycling(face);
     synthesize_scavenge(face);
+    synthesize_outlast(face);
     synthesize_casualty(face);
     synthesize_entwine(face);
     synthesize_madness_intrinsics(face);
