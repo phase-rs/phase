@@ -2032,6 +2032,11 @@ pub(crate) fn static_condition_to_ability_condition(
         }
         StaticCondition::DevotionGE { .. }
         | StaticCondition::ChosenColorIs { .. }
+        // CR 614.12c + CR 607.1b: Anchor-word linked statics are evaluated
+        // by `layers::evaluate_condition_with_context`; no effect-resolution
+        // `AbilityCondition` equivalent (the gate only makes sense for a
+        // static ability bound to the persisted source).
+        | StaticCondition::ChosenLabelIs { .. }
         | StaticCondition::SpeedGE { .. }
         | StaticCondition::ClassLevelGE { .. }
         | StaticCondition::RecipientHasCounters { .. }

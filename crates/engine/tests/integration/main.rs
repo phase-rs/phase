@@ -34,6 +34,7 @@ mod exquisite_blood_routing;
 mod flickerwisp_delayed_return;
 mod floodpits_drowner;
 mod foretell_pipeline;
+mod frostcliff_siege_anchor_word_modes;
 mod gatta_and_luzzu_regression;
 mod gemstone_caverns_begin_game;
 mod giada_angel_counters;
