@@ -3741,15 +3741,37 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 needed_variant: "exiled-card pick (zone-scoped target, not named-choice)".into(),
             });
         }
-        // CR 608.2d: "choose an ability from this list" — the option set is
-        // a list of abilities (Vec<CheckHasable>), not labels/strings. The
-        // engine's `ChoiceType::Labeled` carries `Vec<String>`; ability
-        // identifiers don't have a stable string form here. Strict-fail.
-        Action::ChooseACheckableAbility(_) => {
-            return Err(ConversionGap::EnginePrerequisiteMissing {
-                engine_type: "ChoiceType",
-                needed_variant: "ability-from-list choice (CheckHasable, not Vec<String>)".into(),
-            });
+        // CR 608.2d: "Choose an ability the target has, then remove it" —
+        // used by Urborg and Walking Sponge. The option set is a typed list
+        // of `engine::Keyword`s emitted into `ChoiceType::Keyword`; the
+        // dependent `LosesAbility(TheChosenAbility)` inside the same
+        // ActionList reads back the chosen keyword via
+        // `ContinuousModification::RemoveChosenKeyword`. Phyrexian Splicer
+        // additionally requires `Cost::ChooseACheckableAbility` (not the
+        // `Action::` variant handled here) and
+        // `LayerEffect::AddAbilityVariable(TheChosenAbility)` (not
+        // `LosesAbility`); both are out of scope for this change. Empty
+        // option lists strict-fail (the runtime would surface an empty
+        // NamedChoice prompt, which is rules-incorrect — CR 608.2d requires
+        // a non-empty option set). Unmappable `CheckHasable` variants
+        // (Enchant, AnyKicker, …) strict-fail individually so the gap
+        // report names the exact missing shape rather than collapsing onto
+        // a generic tag.
+        Action::ChooseACheckableAbility(checkhasables) => {
+            if checkhasables.is_empty() {
+                return Err(ConversionGap::EnginePrerequisiteMissing {
+                    engine_type: "ChoiceType::Keyword",
+                    needed_variant: "empty CheckHasable option list".into(),
+                });
+            }
+            let options: Vec<_> = checkhasables
+                .iter()
+                .map(static_effect::check_hasable_to_keyword_option)
+                .collect::<ConvResult<_>>()?;
+            Effect::Choose {
+                choice_type: ChoiceType::Keyword { options },
+                persist: true,
+            }
         }
         // CR 608.2d: "choose colors" without a fixed count — distinct from
         // the `ChooseTwoColors` ETB-axis variant (which has its own engine
