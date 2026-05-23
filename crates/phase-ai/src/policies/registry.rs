@@ -296,6 +296,12 @@ impl PolicyRegistry {
         total
     }
 
+    /// Returns `true` if any registered policy has the given `PolicyId`.
+    /// Intended for integration tests and diagnostics — not for hot paths.
+    pub fn has_policy(&self, id: PolicyId) -> bool {
+        self.policies.iter().any(|p| p.id() == id)
+    }
+
     pub fn priors(
         &self,
         state: &GameState,
