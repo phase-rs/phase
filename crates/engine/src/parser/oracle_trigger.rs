@@ -4647,16 +4647,24 @@ fn try_parse_event(
     }
 
     // CR 701.24: "shuffles their library" / "shuffles" — shuffle trigger
-    if alt((
-        value((), tag::<_, _, OracleError<'_>>("shuffles their library")),
-        value((), tag("shuffles")),
-    ))
+    if let Ok((tail, _)) = pair(
+        alt((tag::<_, _, OracleError<'_>>("shuffles"), tag("shuffle"))),
+        opt(preceded(
+            space1,
+            alt((
+                tag("their library"),
+                tag("his or her library"),
+                tag("your library"),
+                tag("a library"),
+            )),
+        )),
+    )
     .parse(rest)
-    .is_ok()
     {
         let mut def = make_base();
         def.mode = TriggerMode::Shuffled;
-        def.valid_card = Some(subject.clone());
+        def.valid_target = Some(subject.clone());
+        attach_event_timing_tail(&mut def, tail);
         return Some((TriggerMode::Shuffled, def));
     }
 
