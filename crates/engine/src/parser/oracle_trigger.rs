@@ -4646,6 +4646,20 @@ fn try_parse_event(
         }
     }
 
+    // CR 701.24: "shuffles their library" / "shuffles" — shuffle trigger
+    if alt((
+        value((), tag::<_, _, OracleError<'_>>("shuffles their library")),
+        value((), tag("shuffles")),
+    ))
+    .parse(rest)
+    .is_ok()
+    {
+        let mut def = make_base();
+        def.mode = TriggerMode::Shuffled;
+        def.valid_card = Some(subject.clone());
+        return Some((TriggerMode::Shuffled, def));
+    }
+
     // Simple event verbs using nom alt() — each maps to a single TriggerMode
     // These are all "is_some()" pattern strip_prefix calls
     #[derive(Clone)]
