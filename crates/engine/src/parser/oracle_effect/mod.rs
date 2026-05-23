@@ -19,7 +19,7 @@ use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::multispace1;
 use nom::combinator::{eof, map, opt, value};
 use nom::multi::many1;
-use nom::sequence::preceded;
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::oracle_nom::bridge::nom_on_lower;
@@ -9879,6 +9879,33 @@ fn strip_trailing_rounding_annotation(text: &str) -> (String, Option<RoundingMod
     (text.to_string(), None)
 }
 
+/// CR 602.5b: Activation instructions such as "Activate only once each turn"
+/// restrict when an activated ability may be activated; they are not spell or
+/// ability effects and must not become a chained `Unimplemented` effect.
+fn strip_trailing_activation_restriction_sentence(text: &str) -> String {
+    let trimmed = text.trim_end();
+    let trimmed_no_dot = trimmed.trim_end_matches('.').trim_end();
+    let lower = trimmed_no_dot.to_lowercase();
+    for suffix in ["activate only once each turn", "activate only once"] {
+        let Ok((rest, prefix_lower)) = terminated(
+            take_until::<_, _, OracleError<'_>>(suffix),
+            tag::<_, _, OracleError<'_>>(suffix),
+        )
+        .parse(lower.as_str()) else {
+            continue;
+        };
+        if !rest.trim().is_empty() {
+            continue;
+        }
+        let before = &trimmed_no_dot[..prefix_lower.len()];
+        let before_trimmed = before.trim_end();
+        if before_trimmed.ends_with('.') {
+            return before_trimmed.trim_end_matches('.').trim_end().to_string();
+        }
+    }
+    text.to_string()
+}
+
 /// CR 608.2c + CR 107.1a: Apply `f` to every `QuantityExpr` reachable through
 /// the common quantity-bearing fields of an `Effect`. This is a pragmatic
 /// visitor — it covers the subset of `Effect` variants whose counts /
@@ -10339,12 +10366,13 @@ pub(crate) fn parse_effect_chain_ir(
     kind: AbilityKind,
     ctx: &mut ParseContext,
 ) -> EffectChainIr {
+    let text = strip_trailing_activation_restriction_sentence(text);
     // CR 107.1a: Strip a trailing "Round down each time" / "Round up each time"
     // sentence before chain splitting — it is a chain-level rounding annotation
     // (Pox Plague) that back-applies to every `DivideRounded` the chain contains.
     // Stripped here so it doesn't become an Unimplemented chunk; the captured
     // mode is re-applied to the built chain via `rewrite_rounding_mode`.
-    let (text, chain_rounding) = strip_trailing_rounding_annotation(text);
+    let (text, chain_rounding) = strip_trailing_rounding_annotation(&text);
     let text = text.as_str();
     let full_text = text; // Bind before `text` is shadowed by strip helpers in the loop
     let chunks = split_clause_sequence(text);
@@ -22802,6 +22830,38 @@ mod tests {
             Some(MultiTargetSpec::unlimited(0)),
             "should have unlimited multi_target"
         );
+    }
+
+    #[test]
+    fn self_pump_and_bare_becomes_subtypes_stays_one_continuous_effect() {
+        let def = parse_effect_chain(
+            "This creature gets +3/+3 and becomes a Bear Berserker until end of turn. Activate only once each turn.",
+            AbilityKind::Activated,
+        );
+        let Effect::GenericEffect {
+            static_abilities,
+            duration: Some(Duration::UntilEndOfTurn),
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", def.effect);
+        };
+        assert!(
+            def.sub_ability.is_none(),
+            "becomes subtype replacement should be absorbed into the pump effect"
+        );
+        let mods = &static_abilities[0].modifications;
+        assert!(mods.contains(&ContinuousModification::AddPower { value: 3 }));
+        assert!(mods.contains(&ContinuousModification::AddToughness { value: 3 }));
+        assert!(mods.contains(&ContinuousModification::RemoveAllSubtypes {
+            set: crate::types::card_type::SubtypeSet::Creature,
+        }));
+        assert!(mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Bear".to_string(),
+        }));
+        assert!(mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Berserker".to_string(),
+        }));
     }
 
     #[test]
