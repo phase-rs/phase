@@ -6721,7 +6721,13 @@ fn try_parse_player_action_trigger(lower: &str) -> Option<(TriggerMode, TriggerD
                 TypedFilter::default().controller(ControllerRef::Opponent),
             )),
         ),
-        ("whenever a player ", None),
+        (
+            "whenever each opponent ",
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent),
+            )),
+        ),
+        ("whenever a player ", Some(TargetFilter::Player)),
         ("when you ", Some(TargetFilter::Controller)),
         (
             "when an opponent ",
@@ -6729,7 +6735,13 @@ fn try_parse_player_action_trigger(lower: &str) -> Option<(TriggerMode, TriggerD
                 TypedFilter::default().controller(ControllerRef::Opponent),
             )),
         ),
-        ("when a player ", None),
+        (
+            "when each opponent ",
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent),
+            )),
+        ),
+        ("when a player ", Some(TargetFilter::Player)),
     ] {
         let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) else {
             continue;
@@ -6754,6 +6766,13 @@ fn try_parse_player_action_trigger(lower: &str) -> Option<(TriggerMode, TriggerD
             [PlayerActionKind::CollectEvidence] => {
                 def.mode = TriggerMode::CollectEvidence;
                 return Some((TriggerMode::CollectEvidence, def));
+            }
+            // CR 701.24a: Shuffle — player-action trigger, scoped by
+            // valid_target so "you", "an opponent", and "a player" forms all
+            // use the same matcher path.
+            [PlayerActionKind::ShuffledLibrary] => {
+                def.mode = TriggerMode::Shuffled;
+                return Some((TriggerMode::Shuffled, def));
             }
             _ => {
                 def.mode = TriggerMode::PlayerPerformedAction;
@@ -6790,6 +6809,13 @@ fn parse_player_action_phrase(text: &str) -> Option<PlayerActionKind> {
         "surveil" | "surveils" => Some(PlayerActionKind::Surveil),
         // CR 701.59a: Collect evidence — exile cards from your graveyard with total mana value N or more.
         "collect evidence" | "collects evidence" => Some(PlayerActionKind::CollectEvidence),
+        "shuffle your library"
+        | "shuffles their library"
+        | "shuffle their library"
+        | "shuffles his or her library"
+        | "shuffle his or her library"
+        | "shuffles a library"
+        | "shuffle a library" => Some(PlayerActionKind::ShuffledLibrary),
         _ => None,
     }
 }
@@ -16382,6 +16408,42 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::Fight);
         assert!(def.valid_card.is_some());
+    }
+
+    #[test]
+    fn trigger_player_shuffles_library_scopes_actor_as_valid_target() {
+        let def = parse_trigger_line(
+            "Whenever an opponent shuffles their library, put a +1/+1 counter on this creature.",
+            "Cosi's Trickster",
+        );
+        assert_eq!(def.mode, TriggerMode::Shuffled);
+        assert_eq!(def.valid_card, None);
+        assert!(matches!(
+            def.valid_target,
+            Some(TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::Opponent),
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn trigger_player_shuffles_library_sibling_phrases() {
+        let cases = [
+            "Whenever a player shuffles their library, draw a card.",
+            "Whenever each opponent shuffle his or her library, draw a card.",
+            "Whenever you shuffle your library, draw a card.",
+            "Whenever a player shuffles a library, draw a card.",
+        ];
+
+        for text in cases {
+            let def = parse_trigger_line(text, "Test Card");
+            assert_eq!(def.mode, TriggerMode::Shuffled, "{text}");
+            assert!(
+                def.valid_target.is_some(),
+                "shuffle actor must be represented as valid_target for: {text}"
+            );
+        }
     }
 
     // -- StaticCondition → TriggerCondition bridge tests --
