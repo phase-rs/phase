@@ -310,7 +310,7 @@ mod tests {
                 bracket_tier: CommanderBracketTier::Optimized,
                 ..Default::default()
             },
-            ai_decks: vec![],
+            ..Default::default()
         };
         load_deck_into_state(&mut state, &payload);
 

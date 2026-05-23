@@ -395,6 +395,11 @@ impl GameSession {
                 player: player_deck,
                 opponent: opponent_deck,
                 ai_decks,
+                // Multiplayer server does not enforce the cEDH gate at the
+                // session layer (it plumbs bracket tier through separately).
+                // Default to empty so old clients without ai_difficulties
+                // deserialize safely.
+                ai_difficulties: vec![],
             },
             Some(db),
         );

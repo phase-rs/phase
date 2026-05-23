@@ -1,9 +1,8 @@
 use std::sync::Mutex;
 
 use engine::ai_support::{auto_pass_recommended, legal_actions_full};
-use engine::database::legality::validate_cedh_bracket;
+use engine::database::legality::{any_ai_difficulty_is_cedh, validate_cedh_bracket};
 use engine::database::CardDatabase;
-use engine::game::bracket_estimate::CommanderBracketTier;
 use engine::game::deck_loading::PlayerDeckPayload;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
@@ -42,13 +41,12 @@ pub fn initialize_game(
     game.match_config = match_config.unwrap_or_default();
 
     if let Some(payload) = deck_data {
-        // When any deck is declared cEDH, validate the whole table before
-        // initializing. This mirrors the WASM bridge's validation path so the
-        // cEDH bracket lock is enforced identically on desktop.
-        let any_cedh = payload.player.bracket_tier == CommanderBracketTier::Cedh
-            || payload.opponent.bracket_tier == CommanderBracketTier::Cedh
-            || payload.ai_decks.iter().any(|d| d.bracket_tier == CommanderBracketTier::Cedh);
-        if any_cedh {
+        // Validate the table as a cEDH game only when any AI seat has CEDH
+        // difficulty. This prevents a spurious bracket-lock error when a user
+        // brings a bracket-5 tagged deck against a non-cEDH AI — that pairing
+        // is allowed by spec (section 5.5). Gating on AI difficulty (not deck
+        // bracket tier) is the correct signal for "is this a cEDH game?"
+        if any_ai_difficulty_is_cedh(&payload.ai_difficulties) {
             let all_decks: Vec<&PlayerDeckPayload> =
                 std::iter::once(&payload.player)
                     .chain(std::iter::once(&payload.opponent))

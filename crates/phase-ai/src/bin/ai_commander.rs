@@ -149,6 +149,7 @@ fn main() {
         player: deck_lists[0].clone(),
         opponent: deck_lists[1].clone(),
         ai_decks: vec![deck_lists[2].clone(), deck_lists[3].clone()],
+        ..Default::default()
     };
     let payload: DeckPayload = resolve_deck_list(&db, &deck_list);
 

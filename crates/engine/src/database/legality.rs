@@ -197,6 +197,17 @@ impl std::error::Error for CedhBracketError {}
 /// Validate that every deck in a proposed cEDH table is explicitly declared as
 /// `CommanderBracketTier::Cedh`.
 ///
+/// Returns `true` when any AI difficulty string in the slice is `"CEDH"`
+/// (case-insensitive). This is the correct gate for cEDH bracket validation:
+/// a game is a cEDH game when at least one AI seat runs cEDH difficulty, NOT
+/// when any deck is tagged bracket 5. A user can bring a bracket-5 deck to a
+/// non-cEDH game — that pairing is allowed and must not trigger validation.
+pub fn any_ai_difficulty_is_cedh(ai_difficulties: &[String]) -> bool {
+    ai_difficulties
+        .iter()
+        .any(|d| d.eq_ignore_ascii_case("cedh"))
+}
+
 /// Returns `Ok(())` when all decks pass (including the vacuously-true empty
 /// slice). Returns `Err(CedhBracketError::DeckNotCedh)` for the first
 /// offending deck (lowest seat index).
@@ -366,6 +377,101 @@ mod cedh_bracket_tests {
         assert!(
             msg.contains("Upgraded"),
             "expected tier name in message: {msg}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod cedh_gate_tests {
+    use super::{any_ai_difficulty_is_cedh, validate_cedh_bracket};
+    use crate::game::bracket_estimate::CommanderBracketTier;
+    use crate::game::deck_loading::PlayerDeckPayload;
+
+    fn deck(tier: CommanderBracketTier) -> PlayerDeckPayload {
+        PlayerDeckPayload {
+            bracket_tier: tier,
+            ..Default::default()
+        }
+    }
+
+    // ── any_ai_difficulty_is_cedh ─────────────────────────────────────────
+
+    #[test]
+    fn gate_empty_difficulties_is_not_cedh() {
+        assert!(!any_ai_difficulty_is_cedh(&[]));
+    }
+
+    #[test]
+    fn gate_detects_cedh_case_insensitive() {
+        assert!(any_ai_difficulty_is_cedh(&["cedh".to_string()]));
+        assert!(any_ai_difficulty_is_cedh(&["CEDH".to_string()]));
+        assert!(any_ai_difficulty_is_cedh(&["CeDH".to_string()]));
+    }
+
+    #[test]
+    fn gate_requires_any_ai_is_cedh_not_deck_tier() {
+        // A bracket-5 human deck paired against Easy+Hard AI must NOT
+        // trigger the gate. This is the regression case: previously the
+        // WASM bridge gated on deck bracket tier, not AI difficulty.
+        let ai_difficulties: Vec<String> = vec!["Easy".to_string(), "Hard".to_string()];
+        assert!(
+            !any_ai_difficulty_is_cedh(&ai_difficulties),
+            "non-cEDH AI difficulties must not trigger the gate"
+        );
+    }
+
+    #[test]
+    fn gate_fires_when_one_ai_seat_is_cedh() {
+        let ai_difficulties: Vec<String> =
+            vec!["Easy".to_string(), "CEDH".to_string(), "Hard".to_string()];
+        assert!(any_ai_difficulty_is_cedh(&ai_difficulties));
+    }
+
+    // ── gate + validate integration ──────────────────────────────────────
+
+    /// Regression: bracket-5 human deck + non-cEDH AI must be allowed.
+    /// Before the fix, any_cedh used deck bracket tier and this would have
+    /// called validate_cedh_bracket, which would have required the AI deck
+    /// to also be bracket 5 — blocking the game.
+    #[test]
+    fn bracket5_human_vs_non_cedh_ai_is_allowed() {
+        let human = deck(CommanderBracketTier::Cedh);
+        let ai_deck = deck(CommanderBracketTier::Optimized);
+        let ai_difficulties: Vec<String> = vec!["Easy".to_string(), "Hard".to_string()];
+
+        // With the corrected gate, validation is skipped entirely.
+        if any_ai_difficulty_is_cedh(&ai_difficulties) {
+            // This branch must NOT be reached; failing here would indicate the
+            // regression is re-introduced.
+            validate_cedh_bracket(&[&human, &ai_deck]).expect("should pass");
+        }
+        // Gate is false for non-cEDH AI — validate_cedh_bracket is never called.
+        // Reaching this point without panicking confirms the fix is correct.
+    }
+
+    /// cEDH game with all bracket-5 decks must pass validation.
+    #[test]
+    fn all_cedh_ai_and_cedh_decks_pass() {
+        let player = deck(CommanderBracketTier::Cedh);
+        let opponent = deck(CommanderBracketTier::Cedh);
+        let ai_difficulties: Vec<String> = vec!["CEDH".to_string(), "CEDH".to_string()];
+
+        assert!(any_ai_difficulty_is_cedh(&ai_difficulties));
+        assert_eq!(validate_cedh_bracket(&[&player, &opponent]), Ok(()));
+    }
+
+    /// cEDH AI seat with a non-cEDH deck must be rejected.
+    #[test]
+    fn cedh_ai_with_non_cedh_deck_is_rejected() {
+        let player = deck(CommanderBracketTier::Optimized);
+        let opponent = deck(CommanderBracketTier::Cedh);
+        let ai_difficulties: Vec<String> = vec!["CEDH".to_string()];
+
+        assert!(any_ai_difficulty_is_cedh(&ai_difficulties));
+        // The first deck (index 0) is non-cEDH, so validation must fail.
+        assert!(
+            validate_cedh_bracket(&[&player, &opponent]).is_err(),
+            "non-cEDH deck at a cEDH table must be rejected"
         );
     }
 }

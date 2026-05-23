@@ -6,9 +6,8 @@ use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 use engine::ai_support::{auto_pass_recommended, legal_actions_for_viewer, legal_actions_full};
-use engine::database::legality::validate_cedh_bracket;
+use engine::database::legality::{any_ai_difficulty_is_cedh, validate_cedh_bracket};
 use engine::database::CardDatabase;
-use engine::game::bracket_estimate::CommanderBracketTier;
 use engine::game::engine::apply;
 use engine::game::{
     estimate_bracket, evaluate_deck_compatibility, filter_state_for_viewer, finalize_public_state,
@@ -542,16 +541,14 @@ pub fn initialize_game(
                     }
                 }
 
-                // When any deck is declared cEDH, validate the whole table.
-                // The check is performed after AI-deck replication so every
-                // seat that will participate in the game is included.
-                let any_cedh = payload.player.bracket_tier == CommanderBracketTier::Cedh
-                    || payload.opponent.bracket_tier == CommanderBracketTier::Cedh
-                    || payload
-                        .ai_decks
-                        .iter()
-                        .any(|d| d.bracket_tier == CommanderBracketTier::Cedh);
-                if any_cedh {
+                // Validate the table as a cEDH game only when any AI seat
+                // has CEDH difficulty. This prevents a spurious bracket-lock
+                // error when a user brings a bracket-5 tagged deck to a game
+                // against a non-cEDH AI — that combination is allowed by spec
+                // (section 5.5). Gating on AI difficulty (not deck bracket
+                // tier) is the correct signal for "is this a cEDH game?"
+                let any_ai_is_cedh = any_ai_difficulty_is_cedh(&deck_list.ai_difficulties);
+                if any_ai_is_cedh {
                     let all_decks: Vec<&PlayerDeckPayload> = std::iter::once(&payload.player)
                         .chain(std::iter::once(&payload.opponent))
                         .chain(payload.ai_decks.iter())

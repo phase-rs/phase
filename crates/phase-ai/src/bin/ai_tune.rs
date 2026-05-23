@@ -669,7 +669,7 @@ fn main() {
             let deck_list = DeckList {
                 player: m.deck_a.clone(),
                 opponent: m.deck_b.clone(),
-                ai_decks: vec![],
+                ..Default::default()
             };
             (resolve_deck_list(&db, &deck_list), m)
         })

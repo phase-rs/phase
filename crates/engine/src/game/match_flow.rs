@@ -118,6 +118,11 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
             bracket_tier: p1.bracket_tier,
         },
         ai_decks,
+        // ai_difficulties is not persisted in player state; the gate check
+        // that re-assembles a DeckPayload for a rematch sources difficulties
+        // from the match config or re-reads the preference store, so an empty
+        // vec here is correct — rematch validation re-evaluates at start time.
+        ai_difficulties: vec![],
     })
 }
 
@@ -474,7 +479,7 @@ mod tests {
                 commander: vec![],
                 ..Default::default()
             },
-            ai_decks: vec![],
+            ..Default::default()
         };
         load_deck_into_state(&mut state, &payload);
         let _ = start_game(&mut state);

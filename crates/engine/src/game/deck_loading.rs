@@ -34,17 +34,23 @@ pub struct PlayerDeckPayload {
     pub bracket_tier: CommanderBracketTier,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DeckPayload {
     pub player: PlayerDeckPayload,
     pub opponent: PlayerDeckPayload,
     #[serde(default)]
     pub ai_decks: Vec<PlayerDeckPayload>,
+    /// AI difficulty strings per AI seat (opponent-first, then `ai_decks`).
+    /// Used by Tauri and server-core to gate cEDH validation on AI difficulty
+    /// rather than deck bracket tier. Defaults to empty, which means no AI
+    /// seat is cEDH and validation is skipped — safe backward-compat default.
+    #[serde(default)]
+    pub ai_difficulties: Vec<String>,
 }
 
 /// Lightweight deck format using card names only.
 /// Resolved into a DeckPayload via a CardDatabase.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlayerDeckList {
     pub main_deck: Vec<String>,
     #[serde(default)]
@@ -58,12 +64,20 @@ pub struct PlayerDeckList {
     pub bracket_tier: CommanderBracketTier,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DeckList {
     pub player: PlayerDeckList,
     pub opponent: PlayerDeckList,
     #[serde(default)]
     pub ai_decks: Vec<PlayerDeckList>,
+    /// AI difficulty strings per seat, in the same order as the AI seats
+    /// (opponent first, then `ai_decks`). Used by the WASM bridge and Tauri
+    /// commands to gate cEDH bracket validation on AI difficulty rather than
+    /// deck bracket tier: validation fires only when any AI seat is `"CEDH"`.
+    /// Old payloads that omit this field deserialize as an empty vec, which
+    /// means no AI seat is cEDH and validation is skipped — safe default.
+    #[serde(default)]
+    pub ai_difficulties: Vec<String>,
 }
 
 /// Resolve a flat name list into DeckEntry entries using the card database.
@@ -136,6 +150,9 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
                 bracket_tier: deck.bracket_tier,
             })
             .collect(),
+        // ai_difficulties is carried through from the DeckList so the caller's
+        // per-seat difficulty annotations survive resolution.
+        ai_difficulties: list.ai_difficulties.clone(),
     }
 }
 
@@ -552,7 +569,7 @@ mod tests {
                 }],
                 ..Default::default()
             },
-            ai_decks: vec![],
+            ..Default::default()
         };
 
         load_deck_into_state(&mut state, &payload);
@@ -591,7 +608,7 @@ mod tests {
                 }],
                 ..Default::default()
             },
-            ai_decks: vec![],
+            ..Default::default()
         };
 
         load_deck_into_state(&mut state, &payload);
@@ -620,7 +637,7 @@ mod tests {
                 ..Default::default()
             },
             opponent: PlayerDeckPayload::default(),
-            ai_decks: vec![],
+            ..Default::default()
         };
         load_deck_into_state(&mut state, &payload);
 
@@ -736,7 +753,7 @@ mod tests {
                 ..Default::default()
             },
             opponent: PlayerDeckPayload::default(),
-            ai_decks: vec![],
+            ..Default::default()
         };
         let json = serde_json::to_string(&payload).unwrap();
         let deserialized: DeckPayload = serde_json::from_str(&json).unwrap();
@@ -777,7 +794,7 @@ mod tests {
                 }],
                 ..Default::default()
             },
-            ai_decks: vec![],
+            ..Default::default()
         };
 
         load_deck_into_state(&mut state, &payload);
@@ -835,7 +852,7 @@ mod tests {
                 commander: vec![],
                 bracket_tier: Default::default(),
             },
-            ai_decks: vec![],
+            ..Default::default()
         };
 
         let payload = resolve_deck_list(&db, &list);
@@ -877,7 +894,7 @@ mod tests {
                 ..Default::default()
             },
             opponent: PlayerDeckPayload::default(),
-            ai_decks: vec![],
+            ..Default::default()
         };
 
         load_deck_into_state(&mut state, &payload);

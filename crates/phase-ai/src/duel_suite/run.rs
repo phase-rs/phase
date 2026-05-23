@@ -259,7 +259,7 @@ fn build_payload(db: &CardDatabase, spec: &MatchupSpec) -> Result<DeckPayload, S
             commander: Vec::new(),
             bracket_tier: Default::default(),
         },
-        ai_decks: Vec::new(),
+        ..Default::default()
     };
     Ok(resolve_deck_list(db, &deck_list))
 }
