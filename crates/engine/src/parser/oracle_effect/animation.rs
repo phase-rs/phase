@@ -21,7 +21,7 @@ use crate::types::ability::QuantityExpr;
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 
-pub(super) fn parse_animation_spec(text: &str, _ctx: &mut ParseContext) -> Option<AnimationSpec> {
+pub(crate) fn parse_animation_spec(text: &str, _ctx: &mut ParseContext) -> Option<AnimationSpec> {
     let lower = text.to_lowercase();
     if lower.contains(" copy of ")
         || lower.contains(" of your choice")
@@ -106,7 +106,7 @@ pub(super) fn parse_animation_spec(text: &str, _ctx: &mut ParseContext) -> Optio
     }
 }
 
-pub(super) fn animation_modifications(
+pub(crate) fn animation_modifications(
     spec: &AnimationSpec,
 ) -> Vec<crate::types::ability::ContinuousModification> {
     use crate::types::ability::ContinuousModification;
