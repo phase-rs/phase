@@ -1293,7 +1293,74 @@ fn parse_unless_alt_cost(after_unless: &str) -> Option<AbilityCost> {
         return parse_unless_return_to_hand(rest);
     }
 
+    // CR 118.12 + CR 701.20a: "you tap [count] untapped [filter] you control".
+    // The tail parser extracts count and filter via shared target parsing.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you tap ").parse(after_unless) {
+        if let Some(cost) = parse_unless_tap_untapped_cost(rest) {
+            return Some(cost);
+        }
+    }
+
+    // CR 118.12 + CR 701.7: "you exile a card from your graveyard" — exile one
+    // card from your graveyard as an alternative cost. Card: Rotting Giant.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you exile ").parse(after_unless) {
+        if let Some(cost) = parse_unless_exile_cost(rest) {
+            return Some(cost);
+        }
+    }
+
     None
+}
+
+/// CR 118.12 + CR 701.20a: Parse the tail of "you tap ..." unless costs.
+/// Supports articles and numeric counts before delegating the filter phrase to
+/// the shared target parser.
+fn parse_unless_tap_untapped_cost(rest: &str) -> Option<AbilityCost> {
+    let (count, filter) = parse_unless_counted_target_filter(rest)?;
+    Some(AbilityCost::TapCreatures { count, filter })
+}
+
+/// CR 118.12 + CR 701.7: Parse the tail of "you exile ..." unless costs.
+/// Supports articles and numeric counts before delegating the filter phrase to
+/// the shared target parser.
+fn parse_unless_exile_cost(rest: &str) -> Option<AbilityCost> {
+    let (count, filter) = parse_unless_counted_target_filter(rest)?;
+    Some(AbilityCost::Exile {
+        count,
+        zone: filter.extract_in_zone(),
+        filter: Some(filter),
+    })
+}
+
+fn parse_unless_counted_target_filter(rest: &str) -> Option<(u32, TargetFilter)> {
+    let trimmed = rest.trim();
+    let (count, filter_text) = if let Some((n, after_num)) = parse_number(trimmed) {
+        (n, after_num.trim().to_string())
+    } else {
+        let stripped = alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))
+            .parse(trimmed)
+            .map(|(rest, _)| rest)
+            .unwrap_or(trimmed);
+        (1u32, stripped.to_string())
+    };
+
+    if filter_text.is_empty() {
+        return None;
+    }
+
+    let target_phrase = format!("target {filter_text}");
+    let (filter, remainder) = super::oracle_target::parse_target(&target_phrase);
+    if matches!(filter, TargetFilter::Any) {
+        return None;
+    }
+    let (_, _) = all_consuming((
+        opt(tag::<_, _, OracleError<'_>>(".")),
+        eof::<_, OracleError<'_>>,
+    ))
+    .parse(remainder.trim())
+    .ok()?;
+
+    Some((count, filter))
 }
 
 /// CR 118.12 + CR 118.12a: Parse a chain of "they"-pronoun alternative
@@ -12782,6 +12849,135 @@ mod tests {
                 assert!(has_land, "filter should include Land, got {:?}", filter);
             }
             other => panic!("cost should be ReturnToHand, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn trigger_unless_you_tap_untapped_creature() {
+        // CR 118.12 + CR 701.20a: Koskun Falls — "sacrifice this enchantment
+        // unless you tap an untapped creature you control."
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, sacrifice this enchantment unless you tap an untapped creature you control.",
+            "Koskun Falls",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        match &unless_pay.cost {
+            AbilityCost::TapCreatures { count, filter } => {
+                assert_eq!(*count, 1);
+                let is_creature = match filter {
+                    TargetFilter::Typed(tf) => {
+                        tf.type_filters.contains(&TypeFilter::Creature)
+                    }
+                    TargetFilter::And { filters } => filters.iter().any(|f| {
+                        matches!(f, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Creature))
+                    }),
+                    _ => false,
+                };
+                assert!(
+                    is_creature,
+                    "filter should include Creature, got {:?}",
+                    filter
+                );
+            }
+            other => panic!("cost should be TapCreatures, got {:?}", other),
+        }
+        assert_eq!(
+            unless_pay.payer,
+            TargetFilter::Controller,
+            "payer should be Controller"
+        );
+    }
+
+    #[test]
+    fn trigger_unless_you_tap_untapped_permanent() {
+        // CR 118.12 + CR 701.20a: Command Bridge — "sacrifice it unless you
+        // tap an untapped permanent you control."
+        let def = parse_trigger_line(
+            "When this land enters, sacrifice it unless you tap an untapped permanent you control.",
+            "Command Bridge",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        match &unless_pay.cost {
+            AbilityCost::TapCreatures { count, filter: _ } => {
+                assert_eq!(*count, 1);
+            }
+            other => panic!("cost should be TapCreatures, got {:?}", other),
+        }
+        assert_eq!(
+            unless_pay.payer,
+            TargetFilter::Controller,
+            "payer should be Controller"
+        );
+    }
+
+    #[test]
+    fn trigger_unless_you_tap_two_untapped_creatures() {
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, sacrifice this enchantment unless you tap two untapped creatures you control.",
+            "Test Card",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        match &unless_pay.cost {
+            AbilityCost::TapCreatures { count, filter } => {
+                assert_eq!(*count, 2);
+                let has_creature = match filter {
+                    TargetFilter::Typed(tf) => tf.type_filters.contains(&TypeFilter::Creature),
+                    TargetFilter::And { filters } => filters.iter().any(|f| {
+                        matches!(f, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Creature))
+                    }),
+                    _ => false,
+                };
+                assert!(
+                    has_creature,
+                    "filter should include Creature, got {:?}",
+                    filter
+                );
+            }
+            other => panic!("cost should be TapCreatures, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn trigger_unless_you_exile_card_from_graveyard() {
+        // CR 118.12 + CR 701.7: Rotting Giant — "sacrifice it unless you
+        // exile a card from your graveyard."
+        let def = parse_trigger_line(
+            "Whenever this creature attacks or blocks, sacrifice it unless you exile a card from your graveyard.",
+            "Rotting Giant",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        match &unless_pay.cost {
+            AbilityCost::Exile {
+                count,
+                zone,
+                filter,
+            } => {
+                assert_eq!(*count, 1);
+                assert_eq!(*zone, Some(crate::types::zones::Zone::Graveyard));
+                assert!(filter.is_some(), "filter should be present");
+            }
+            other => panic!("cost should be Exile, got {:?}", other),
+        }
+        assert_eq!(
+            unless_pay.payer,
+            TargetFilter::Controller,
+            "payer should be Controller"
+        );
+    }
+
+    #[test]
+    fn trigger_unless_you_exile_two_cards_from_graveyard() {
+        let def = parse_trigger_line(
+            "Whenever this creature attacks, sacrifice it unless you exile two cards from your graveyard.",
+            "Test Card",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        match &unless_pay.cost {
+            AbilityCost::Exile { count, zone, .. } => {
+                assert_eq!(*count, 2);
+                assert_eq!(*zone, Some(crate::types::zones::Zone::Graveyard));
+            }
+            other => panic!("cost should be Exile, got {:?}", other),
         }
     }
 

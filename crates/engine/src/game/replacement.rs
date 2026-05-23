@@ -429,6 +429,28 @@ fn damage_done_applier(
                 }
                 // CR 614.1a: Flat override — replace event amount with `value`.
                 DamageModification::SetTo { value } => value,
+                // CR 614.1a: Life floor — cap damage so target player's life
+                // stays at or above `minimum`. For a player target, computes
+                // `max(0, life_total - minimum)`. For creature targets, no-ops
+                // (non-player targets have no life total to floor).
+                DamageModification::LifeFloor { minimum } => {
+                    if let TargetRef::Player(pid) = target {
+                        let life = state
+                            .players
+                            .iter()
+                            .find(|p| p.id == pid)
+                            .map(|p| p.life)
+                            .unwrap_or(0);
+                        if life < minimum {
+                            amount
+                        } else {
+                            let max_damage = life.saturating_sub(minimum).max(0) as u32;
+                            amount.min(max_damage)
+                        }
+                    } else {
+                        amount
+                    }
+                }
             };
             return ApplyResult::Modified(ProposedEvent::Damage {
                 source_id,
@@ -2074,6 +2096,7 @@ fn matches_damage_target_filter(
         match scope {
             DamageTargetPlayerScope::Any => true,
             DamageTargetPlayerScope::Opponent => player != repl_controller,
+            DamageTargetPlayerScope::Controller => player == repl_controller,
             DamageTargetPlayerScope::Specific(specific) => player == *specific,
         }
     }
@@ -2411,6 +2434,15 @@ fn evaluate_replacement_condition(
             }
             _ => false,
         },
+        // CR 614.1d: "if you control a [filter]" — replacement applies only while
+        // the controller has at least one permanent matching the filter on the battlefield.
+        // Used by Worship.
+        ReplacementCondition::IfControlsMatching { filter } => {
+            let ctx = FilterContext::from_source_with_controller(source_id, controller);
+            state.objects.values().any(|o| {
+                o.zone == Zone::Battlefield && matches_target_filter(state, o.id, filter, &ctx)
+            })
+        }
         // Unrecognized condition — always applies (enters tapped) as a safe default.
         // The engine recognizes the replacement but cannot evaluate the condition,
         // so it conservatively taps the land.
@@ -5968,6 +6000,46 @@ mod tests {
         match result {
             ApplyResult::Modified(ProposedEvent::Damage { amount, .. }) => {
                 assert_eq!(amount, 0);
+            }
+            other => panic!("Expected Modified Damage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn damage_applier_life_floor_caps_damage_that_would_go_below_floor() {
+        let repl = damage_repl(DamageModification::LifeFloor { minimum: 1 });
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+        state.players[1].life = 5;
+        let mut events = Vec::new();
+        let rid = ReplacementId {
+            source: ObjectId(10),
+            index: 0,
+        };
+
+        let result = damage_done_applier(damage_event(10), rid, &mut state, &mut events);
+        match result {
+            ApplyResult::Modified(ProposedEvent::Damage { amount, .. }) => {
+                assert_eq!(amount, 4);
+            }
+            other => panic!("Expected Modified Damage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn damage_applier_life_floor_does_not_apply_when_already_below_floor() {
+        let repl = damage_repl(DamageModification::LifeFloor { minimum: 1 });
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+        state.players[1].life = 0;
+        let mut events = Vec::new();
+        let rid = ReplacementId {
+            source: ObjectId(10),
+            index: 0,
+        };
+
+        let result = damage_done_applier(damage_event(3), rid, &mut state, &mut events);
+        match result {
+            ApplyResult::Modified(ProposedEvent::Damage { amount, .. }) => {
+                assert_eq!(amount, 3);
             }
             other => panic!("Expected Modified Damage, got {other:?}"),
         }

@@ -1035,6 +1035,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::ChosenNumber => "chosen number".into(),
         QuantityRef::AttackedThisTurn => "attacked this turn".into(),
         QuantityRef::DescendedThisTurn => "descended this turn".into(),
+        QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player } => {
+            format!("loyalty abilities activated this turn ({player:?})")
+        }
         QuantityRef::SpellsCastLastTurn => "spells cast last turn".into(),
         QuantityRef::SpellsCastThisGame { scope, filter } => match (scope, filter) {
             (CountScope::Controller, None) => "spells you've cast this game".into(),
@@ -1265,6 +1268,17 @@ fn fmt_choice_type(ct: &ChoiceType) -> String {
         ChoiceType::TwoColors => "two colors",
         ChoiceType::Word => "word",
         ChoiceType::Artist => "artist",
+        // CR 608.2d: "choose an ability" — Urborg / Walking Sponge prompt.
+        ChoiceType::Keyword { options } => {
+            return format!(
+                "ability from: {}",
+                options
+                    .iter()
+                    .map(|kw| kw.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
     }
     .into()
 }
@@ -2059,6 +2073,10 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::ExtraTurn { target } => {
             d.push(("player".into(), fmt_target(target)));
         }
+        Effect::GrantExtraLoyaltyActivations { amount, target } => {
+            d.push(("amount".into(), fmt_quantity(amount)));
+            d.push(("player".into(), fmt_target(target)));
+        }
         Effect::SkipNextTurn { target, count } => {
             d.push(("player".into(), fmt_target(target)));
             if !matches!(
@@ -2354,6 +2372,9 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::AddAllBasicLandTypes => "all basic land types".into(),
         ContinuousModification::AddChosenSubtype { .. } => "add chosen subtype".into(),
         ContinuousModification::AddChosenColor => "add chosen color".into(),
+        // CR 608.2d + CR 613.1f: Urborg / Walking Sponge — strip the
+        // keyword chosen at resolution time.
+        ContinuousModification::RemoveChosenKeyword => "remove chosen keyword".into(),
         ContinuousModification::SetColor { colors } => {
             let c: Vec<_> = colors
                 .iter()
@@ -5053,6 +5074,9 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::ChosenNumber => ("ChosenNumber", Unhandled),
         QuantityRef::AttackedThisTurn => ("AttackedThisTurn", Handled),
         QuantityRef::DescendedThisTurn => ("DescendedThisTurn", Unhandled),
+        QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. } => {
+            ("LoyaltyAbilitiesActivatedThisTurn", Handled)
+        }
         QuantityRef::SpellsCastLastTurn => ("SpellsCastLastTurn", Unhandled),
         QuantityRef::SpellsCastThisGame { .. } => ("SpellsCastThisGame", Handled),
         QuantityRef::CounterAddedThisTurn { .. } => ("CounterAddedThisTurn", Handled),

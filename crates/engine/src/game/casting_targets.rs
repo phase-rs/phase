@@ -219,6 +219,9 @@ pub(crate) fn handle_select_targets(
     if let Some(ability_index) = pending.activation_ability_index {
         if let Some(ref activation_cost) = pending.activation_cost {
             pay_ability_cost(state, player, pending.object_id, activation_cost, events)?;
+            if matches!(activation_cost, AbilityCost::Loyalty { .. }) {
+                super::planeswalker::record_loyalty_activation(state, pending.object_id, player);
+            }
         }
 
         let assigned_targets = flatten_targets_in_chain(&ability);
@@ -314,6 +317,13 @@ pub(crate) fn handle_choose_target(
             if let Some(ability_index) = pending.activation_ability_index {
                 if let Some(ref activation_cost) = pending.activation_cost {
                     pay_ability_cost(state, player, pending.object_id, activation_cost, events)?;
+                    if matches!(activation_cost, AbilityCost::Loyalty { .. }) {
+                        super::planeswalker::record_loyalty_activation(
+                            state,
+                            pending.object_id,
+                            player,
+                        );
+                    }
                 }
 
                 let assigned_targets = flatten_targets_in_chain(&ability);
