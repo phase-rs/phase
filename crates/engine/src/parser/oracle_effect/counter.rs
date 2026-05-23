@@ -2,7 +2,8 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::multispace0;
-use nom::combinator::value;
+use nom::combinator::{eof, value};
+use nom::sequence::terminated;
 use nom::Parser;
 
 use crate::types::ability::{
@@ -729,6 +730,30 @@ pub(super) fn try_parse_double_effect(lower: &str, ctx: &mut ParseContext) -> Op
                 target: TargetFilter::Controller,
             });
         }
+        if let Ok((_, target)) = terminated(
+            alt((
+                value(
+                    TargetFilter::ParentTargetController,
+                    tag::<_, _, OracleError<'_>>("its controller's life total"),
+                ),
+                value(
+                    TargetFilter::ParentTargetController,
+                    tag("that creature's controller's life total"),
+                ),
+                value(
+                    TargetFilter::ParentTargetController,
+                    tag("that permanent's controller's life total"),
+                ),
+            )),
+            eof,
+        )
+        .parse(rest)
+        {
+            return Some(Effect::Double {
+                target_kind: DoubleTarget::LifeTotal,
+                target,
+            });
+        }
         if nom_on_lower(rest, rest, |i| value((), tag("target ")).parse(i)).is_some()
             && rest.contains("life total")
         {
@@ -871,6 +896,20 @@ mod tests {
 
     fn default_ctx() -> ParseContext {
         ParseContext::default()
+    }
+
+    #[test]
+    fn double_its_controllers_life_total_targets_parent_controller() {
+        let result =
+            try_parse_double_effect("double its controller's life total", &mut default_ctx());
+
+        assert!(matches!(
+            result,
+            Some(Effect::Double {
+                target_kind: DoubleTarget::LifeTotal,
+                target: TargetFilter::ParentTargetController,
+            })
+        ));
     }
 
     #[test]

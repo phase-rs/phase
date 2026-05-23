@@ -552,6 +552,9 @@ pub(crate) enum TargetedImperativeAst {
     UntapAll {
         target: TargetFilter,
     },
+    GoadAll {
+        target: TargetFilter,
+    },
     Sacrifice {
         target: TargetFilter,
         /// CR 701.16a: Number of permanents to sacrifice. Defaults to
@@ -696,6 +699,7 @@ pub(crate) enum SearchCreationImperativeAst {
         count: QuantityExpr,
         /// CR 701.20a vs CR 701.16a: True = revealed (public), false = looked at (private).
         reveal: bool,
+        player: TargetFilter,
     },
     CopyTokenOf {
         target: TargetFilter,
@@ -768,6 +772,8 @@ pub(crate) enum UtilityImperativeAst {
 pub(crate) enum HandRevealImperativeAst {
     LookAt {
         target: TargetFilter,
+        count: Option<crate::types::ability::QuantityExpr>,
+        random: bool,
     },
     RevealAll {
         card_filter: TargetFilter,

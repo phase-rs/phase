@@ -58,6 +58,30 @@ pub(super) fn default_earthbend_target() -> TargetFilter {
     TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You))
 }
 
+fn parse_dig_library_owner(rest_lower: &str) -> TargetFilter {
+    if preceded(
+        take_until::<_, _, OracleError<'_>>("target player's library"),
+        tag::<_, _, OracleError<'_>>("target player's library"),
+    )
+    .parse(rest_lower)
+    .is_ok()
+    {
+        return TargetFilter::Player;
+    }
+
+    if preceded(
+        take_until::<_, _, OracleError<'_>>("that player's library"),
+        tag::<_, _, OracleError<'_>>("that player's library"),
+    )
+    .parse(rest_lower)
+    .is_ok()
+    {
+        return TargetFilter::ParentTarget;
+    }
+
+    TargetFilter::Controller
+}
+
 /// Shared ControlNextTurn suffix parser (CR 722.1). Called after a prefix
 /// combinator ("you control " or "gain control of ") has matched; parses the
 /// target, then " during that player's next turn", then the optional extra-turn
@@ -875,6 +899,14 @@ pub(super) fn parse_targeted_action_ast(
         assert_no_compound_remainder(_rem, text);
         return Some(TargetedImperativeAst::UntapAll { target });
     }
+    if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
+        value((), alt((tag("goad all "), tag("goad each ")))).parse(input)
+    }) {
+        let (target, _rem) = parse_target_with_ctx(rest, ctx);
+        #[cfg(debug_assertions)]
+        assert_no_compound_remainder(_rem, text);
+        return Some(TargetedImperativeAst::GoadAll { target });
+    }
     // CR 701.16a: "sacrifice [count] <filter> [of their choice]" —
     // delegates to `parse_count_expr` so "a"/"an"/"X"/"half the permanents
     // they control" all flow through one authority. "Of their choice" is
@@ -1334,6 +1366,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
         TargetedImperativeAst::Untap { target } => Effect::Untap { target },
         TargetedImperativeAst::TapAll { target } => Effect::TapAll { target },
         TargetedImperativeAst::UntapAll { target } => Effect::UntapAll { target },
+        TargetedImperativeAst::GoadAll { target } => Effect::GoadAll { target },
         TargetedImperativeAst::Sacrifice {
             target,
             count,
@@ -1616,7 +1649,11 @@ pub(super) fn parse_search_and_creation_ast(
         } else {
             QuantityExpr::Fixed { value: 1 }
         };
-        return Some(SearchCreationImperativeAst::Dig { count, reveal });
+        return Some(SearchCreationImperativeAst::Dig {
+            count,
+            reveal,
+            player: parse_dig_library_owner(rest_lower),
+        });
     }
     // CR 701.16a: "look at that many cards from the top of your library" — variable-count dig
     // where "that many" references the result of a previous effect (e.g., damage dealt).
@@ -1636,7 +1673,11 @@ pub(super) fn parse_search_and_creation_ast(
         let count = QuantityExpr::Ref {
             qty: QuantityRef::EventContextAmount,
         };
-        return Some(SearchCreationImperativeAst::Dig { count, reveal });
+        return Some(SearchCreationImperativeAst::Dig {
+            count,
+            reveal,
+            player: TargetFilter::Controller,
+        });
     }
     if let Some((_, _)) = nom_on_lower(text, lower, |input| value((), tag("create ")).parse(input))
     {
@@ -1778,7 +1819,12 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             reveal,
             destination,
         },
-        SearchCreationImperativeAst::Dig { count, reveal } => Effect::Dig {
+        SearchCreationImperativeAst::Dig {
+            count,
+            reveal,
+            player,
+        } => Effect::Dig {
+            player,
             count,
             destination: None,
             keep_count: None,
@@ -1863,42 +1909,39 @@ pub(super) fn parse_hand_reveal_ast(
     if nom_on_lower(text, lower, |input| value((), tag("look at ")).parse(input)).is_some()
         && nom_primitives::scan_contains(lower, "hand")
     {
-        if contains_possessive(lower, "look at", "hand") {
-            // CR 400.1/400.2 + CR 508.5 + CR 608.2c: Possessive hand phrases are
-            // player references, not object targets. Map the reusable player
-            // axes explicitly so combat-trigger forms like "defending player's
-            // hand" do not fall back to `Any`.
-            let target = nom_on_lower(text, lower, |input| {
-                preceded(
-                    tag("look at "),
-                    alt((
-                        value(TargetFilter::Controller, tag("your hand")),
-                        value(TargetFilter::Player, tag("target player's hand")),
-                        value(
-                            TargetFilter::Typed(
-                                TypedFilter::default().controller(ControllerRef::Opponent),
-                            ),
-                            tag("target opponent's hand"),
-                        ),
-                        value(TargetFilter::TriggeringPlayer, tag("that player's hand")),
-                        value(TargetFilter::TriggeringPlayer, tag("their hand")),
-                        value(
-                            TargetFilter::DefendingPlayer,
-                            tag("defending player's hand"),
-                        ),
-                    )),
-                )
-                .parse(input)
-            })
-            .map(|(target, _)| target);
-            let target = target?;
-            return Some(HandRevealImperativeAst::LookAt { target });
+        // CR 400.1/400.2 + CR 508.5 + CR 608.2c: Possessive hand phrases are
+        // player references, not object targets. Map the reusable player axes
+        // explicitly so combat-trigger forms like "defending player's hand" and
+        // random-card forms like "a card at random in target player's hand" do
+        // not fall back to parsing "card" as the effect target.
+        if let Some(((target, count, random), _)) = nom_on_lower(text, lower, |input| {
+            let (rest, _) = tag("look at ").parse(input)?;
+            let (rest, random_count) = opt(value(
+                QuantityExpr::Fixed { value: 1 },
+                alt((
+                    tag::<_, _, OracleError<'_>>("a card at random in "),
+                    tag("one card at random in "),
+                )),
+            ))
+            .parse(rest)?;
+            let (rest, target) = parse_hand_possessive_target(rest)?;
+            Ok((rest, (target, random_count.clone(), random_count.is_some())))
+        }) {
+            return Some(HandRevealImperativeAst::LookAt {
+                target,
+                count,
+                random,
+            });
         }
 
         let (_, after_look_at) =
             nom_on_lower(text, lower, |input| value((), tag("look at ")).parse(input))?;
         let (target, _) = parse_target(after_look_at);
-        return Some(HandRevealImperativeAst::LookAt { target });
+        return Some(HandRevealImperativeAst::LookAt {
+            target,
+            count: None,
+            random: false,
+        });
     }
 
     let (_, after_reveal) = nom_on_lower(text, lower, |input| {
@@ -1978,22 +2021,29 @@ fn parse_hand_reveal_card_filter(after_reveal_lower: &str) -> TargetFilter {
 
 pub(super) fn lower_hand_reveal_ast(ast: HandRevealImperativeAst) -> Effect {
     match ast {
-        HandRevealImperativeAst::LookAt { target } => Effect::RevealHand {
+        HandRevealImperativeAst::LookAt {
+            target,
+            count,
+            random,
+        } => Effect::RevealHand {
             target,
             card_filter: TargetFilter::None,
-            count: None,
+            count,
+            random,
             choice_optional: false,
         },
         HandRevealImperativeAst::RevealAll { card_filter } => Effect::RevealHand {
             target: TargetFilter::Any,
             card_filter,
             count: None,
+            random: false,
             choice_optional: false,
         },
         HandRevealImperativeAst::RevealPartial { count } => Effect::RevealHand {
             target: TargetFilter::Any,
             card_filter: TargetFilter::None,
             count: Some(count),
+            random: false,
             choice_optional: false,
         },
         // CR 701.20a: Back-reference reveal — distinct from RevealHand (zone-wide).
@@ -2002,6 +2052,24 @@ pub(super) fn lower_hand_reveal_ast(ast: HandRevealImperativeAst) -> Effect {
             target: TargetFilter::ParentTarget,
         },
     }
+}
+
+fn parse_hand_possessive_target(input: &str) -> nom::IResult<&str, TargetFilter, OracleError<'_>> {
+    alt((
+        value(TargetFilter::Controller, tag("your hand")),
+        value(TargetFilter::Player, tag("target player's hand")),
+        value(
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            tag("target opponent's hand"),
+        ),
+        value(TargetFilter::TriggeringPlayer, tag("that player's hand")),
+        value(TargetFilter::TriggeringPlayer, tag("their hand")),
+        value(
+            TargetFilter::DefendingPlayer,
+            tag("defending player's hand"),
+        ),
+    ))
+    .parse(input)
 }
 
 pub(super) fn parse_choose_ast(
@@ -2512,6 +2580,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             target: TargetFilter::Any,
             card_filter,
             count: None,
+            random: false,
             choice_optional,
         },
         // CR 700.2: Anaphoric "choose N of them/those" → select from the tracked set
@@ -3927,8 +3996,10 @@ pub(super) fn parse_exile_ast(
         // player_scope iteration binds to the iterating player. The chunk_ctx
         // surfaces this via `relative_player_scope = ScopedPlayer`, which
         // `that_player_library_filter` already maps to `TargetFilter::ScopedPlayer`.
-        // For the third-person "each player's library" alternate phrasing we also
-        // accept that variant directly.
+        // For the third-person "each player's library" alternate phrasing,
+        // return `ScopedPlayer`; effect-chain lowering lifts that sentinel into
+        // `player_scope: All` so the existing scoped resolver exiles from each
+        // player's own library without target selection.
         for (pattern, player) in [
             ("card of your library", TargetFilter::Controller),
             ("cards of your library", TargetFilter::Controller),
@@ -3936,8 +4007,8 @@ pub(super) fn parse_exile_ast(
             ("cards of that player's library", that_player.clone()),
             ("card of their library", that_player.clone()),
             ("cards of their library", that_player.clone()),
-            ("card of each player's library", TargetFilter::Player),
-            ("cards of each player's library", TargetFilter::Player),
+            ("card of each player's library", TargetFilter::ScopedPlayer),
+            ("cards of each player's library", TargetFilter::ScopedPlayer),
         ] {
             if let Ok((after_lib, _)) = tag::<_, _, OracleError<'_>>(pattern).parse(remainder) {
                 // CR 406.3: Detect the "face down" suffix Oracle text uses to
@@ -4886,7 +4957,10 @@ pub(super) fn parse_imperative_family_ast(
                 .parse(lower)
                 .map(|(r, _)| r)
                 .unwrap_or("");
-            let count = nom_primitives::parse_number
+            // CR 701.63b: "endure X" degrades to 0 (nothing happens). parse_number_or_x
+            // maps a bare "x" to 0; the unwrap fallback only applies when no count token
+            // is present at all.
+            let count = nom_primitives::parse_number_or_x
                 .parse(rest.trim())
                 .map(|(_, n)| n)
                 .unwrap_or(1);
@@ -5045,6 +5119,17 @@ pub(super) fn parse_imperative_family_ast(
         "goad" | "goads" => {
             let rest = lower[first_word.len()..].trim();
             if !rest.is_empty() {
+                if let Ok((mass_rest, _)) = alt((
+                    tag::<_, _, OracleError<'_>>("all "),
+                    tag::<_, _, OracleError<'_>>("each "),
+                ))
+                .parse(rest)
+                {
+                    let (target, _) = parse_target(mass_rest);
+                    return Some(ImperativeFamilyAst::GainKeyword(Effect::GoadAll {
+                        target,
+                    }));
+                }
                 let (target, _) = parse_target(rest);
                 Some(ImperativeFamilyAst::GainKeyword(Effect::Goad { target }))
             } else {

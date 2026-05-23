@@ -401,6 +401,10 @@ pub enum GameAction {
     ChooseUnlessCostBranch {
         choice: UnlessCostBranch,
     },
+    /// CR 118.12a: Choose which branch of a disjunctive activation cost to pay.
+    ChooseActivationCostBranch {
+        index: usize,
+    },
     /// CR 508.1d + CR 508.1h + CR 509.1c + CR 509.1d: Pay or decline the aggregate
     /// combat tax (Ghostly Prison, Propaganda, Sphere of Safety, Windborn Muse).
     /// On accept the engine deducts the locked-in total and completes the paused
@@ -1125,11 +1129,11 @@ impl GameAction {
             | GameAction::Concede { .. }
             | GameAction::Debug(_)
             | GameAction::GrantDebugPermission { .. }
-            | GameAction::RevokeDebugPermission { .. } => None,
+            | GameAction::RevokeDebugPermission { .. }
+            | GameAction::ChooseActivationCostBranch { .. } => None,
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

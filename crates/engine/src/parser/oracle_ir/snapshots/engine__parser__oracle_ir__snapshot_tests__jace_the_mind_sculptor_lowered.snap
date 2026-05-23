@@ -8,12 +8,15 @@ expression: "&lowered"
       "kind": "Activated",
       "effect": {
         "type": "Dig",
+        "player": {
+          "type": "Player"
+        },
         "count": {
           "type": "Fixed",
           "value": 1
         },
         "destination": null,
-        "keep_count": null,
+        "keep_count": 0,
         "up_to": false,
         "filter": {
           "type": "Any"

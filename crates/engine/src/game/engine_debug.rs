@@ -126,7 +126,7 @@ pub fn apply_debug_action(
 
         DebugAction::ShuffleLibrary { player_id } => {
             validate_player(state, player_id)?;
-            shuffle_library(state, player_id);
+            shuffle_library(state, player_id, events);
         }
 
         DebugAction::Proliferate { player_id } => {
@@ -376,6 +376,7 @@ pub fn apply_debug_action(
                 sacrifice_at: None,
                 source_id: ObjectId(0),
                 controller: owner,
+                attach_to: None,
             };
             let proposed = ProposedEvent::CreateToken {
                 owner,

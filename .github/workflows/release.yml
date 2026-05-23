@@ -276,11 +276,23 @@ jobs:
           jq --arg h "$CARD_DATA_HASH" '. + {card_data_hash: $h}' client/public/coverage-data.json > client/public/coverage-data.json.tmp
           mv client/public/coverage-data.json.tmp client/public/coverage-data.json
 
-      - name: Upload Scryfall image lookup artifact
+      - name: Stage frontend data files artifact
+        run: |
+          rm -rf release-data
+          mkdir -p release-data
+          while IFS= read -r f; do
+            if [ ! -f "client/public/$f" ]; then
+              echo "::error::Expected data file client/public/$f was not generated"
+              exit 1
+            fi
+            cp "client/public/$f" "release-data/$f"
+          done < <(jq -r '.[]' data-files.json)
+
+      - name: Upload frontend data files artifact
         uses: actions/upload-artifact@v4
         with:
-          name: scryfall-data
-          path: client/public/scryfall-data.json
+          name: frontend-data-files
+          path: release-data/*
           if-no-files-found: error
           retention-days: 1
 
@@ -455,6 +467,58 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: pages deploy dist --project-name=phase-rs --commit-dirty=true
+
+  deploy-lobby-worker:
+    # Builds the Rust lobby-broker -> WASM and deploys the Cloudflare Worker +
+    # Durable Object (the matchmaking broker). Independent of the Pages deploy —
+    # the DO is reachable via its own endpoint and is not yet the client's
+    # DEFAULT_SERVER. Redeploys are idempotent (the [[migrations]] tag is only
+    # applied once). The wasm build is driven by wrangler's [build] command
+    # (scripts/build-broker-wasm.sh), so the rust/wasm toolchain must be on PATH.
+    name: Deploy Lobby Worker (Cloudflare)
+    needs: [resolve-release-ref]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-release-ref.outputs.release_sha }}
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          targets: wasm32-unknown-unknown
+          cache-shared-key: rust-wasm
+
+      - uses: taiki-e/install-action@v2
+        with:
+          # Must match the pinned wasm-bindgen crate version in
+          # lobby-worker/broker-wasm/Cargo.toml (schema versions must be exact).
+          tool: wasm-bindgen-cli@0.2.121
+
+      - name: Cache binaryen
+        id: binaryen-cache
+        uses: actions/cache@v4
+        with:
+          path: binaryen-version_123
+          key: binaryen-123-x86_64-linux
+
+      - name: Install binaryen
+        if: steps.binaryen-cache.outputs.cache-hit != 'true'
+        run: curl -L https://github.com/WebAssembly/binaryen/releases/download/version_123/binaryen-version_123-x86_64-linux.tar.gz | tar xz
+
+      - name: Add binaryen to PATH
+        run: echo "$PWD/binaryen-version_123/bin" >> "$GITHUB_PATH"
+
+      - name: Deploy lobby Worker to Cloudflare
+        # `wrangler deploy` runs the [build] command in lobby-worker/wrangler.toml
+        # (scripts/build-broker-wasm.sh release): cargo build -> wasm32,
+        # wasm-bindgen, wasm-opt. The toolchain installed above is inherited.
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: lobby-worker
+          command: deploy
 
   build-server:
     name: Build Server (${{ matrix.os }})
@@ -661,26 +725,26 @@ jobs:
           name: card-data
           path: client/public
 
-      - name: Download draft pools
+      - name: Download frontend data files
         if: steps.macos-signing.outputs.skip != 'true'
         uses: actions/download-artifact@v4
         with:
-          name: draft-pools
-          path: client/public
-
-      - name: Download Scryfall image lookup data
-        if: steps.macos-signing.outputs.skip != 'true'
-        uses: actions/download-artifact@v4
-        with:
-          name: scryfall-data
+          name: frontend-data-files
           path: client/public
 
       - name: Verify Tauri bundled data files
         if: steps.macos-signing.outputs.skip != 'true'
         run: |
           test -s client/public/card-data.json
-          test -s client/public/draft-pools.json
-          test -s client/public/scryfall-data.json
+          node - <<'NODE'
+          const fs = require("fs");
+          const files = JSON.parse(fs.readFileSync("data-files.json", "utf8"));
+          for (const file of files) {
+            const path = `client/public/${file}`;
+            const stat = fs.statSync(path);
+            if (stat.size === 0) throw new Error(`${path} is empty`);
+          }
+          NODE
         shell: bash
 
       - name: Build phase-server sidecar

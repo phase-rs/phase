@@ -1355,16 +1355,23 @@ impl fmt::Display for Keyword {
         match self {
             Keyword::FirstStrike => write!(f, "First Strike"),
             Keyword::DoubleStrike => write!(f, "Double Strike"),
+            // CR 702.14a: Landwalk surfaces in Oracle text as "[type]walk" when
+            // [type] is a land subtype (Plainswalk, Desertwalk, Gatewalk, ...).
+            // When [type] is a supertype or non-land card type, the canonical
+            // phrasing is "[type] landwalk" (Legendary landwalk, Nonbasic landwalk,
+            // Snow landwalk, artifact landwalk). Capitalize "Landwalk" in the
+            // composed form so the rendered label matches the title-case style
+            // used by the rest of this Display impl (e.g. "First Strike").
             Keyword::Landwalk(subtype) => match subtype.as_str() {
                 "Plains" => write!(f, "Plainswalk"),
                 "Island" => write!(f, "Islandwalk"),
                 "Swamp" => write!(f, "Swampwalk"),
                 "Mountain" => write!(f, "Mountainwalk"),
                 "Forest" => write!(f, "Forestwalk"),
-                "Legendary" => write!(f, "Legendary landwalk"),
-                "Nonbasic" => write!(f, "Nonbasic landwalk"),
-                "Snow" => write!(f, "Snow landwalk"),
-                other => write!(f, "{other} landwalk"),
+                "Legendary" | "Nonbasic" | "Snow" | "Artifact" => {
+                    write!(f, "{subtype} Landwalk")
+                }
+                other => write!(f, "{other}walk"),
             },
             Keyword::Flying => write!(f, "Flying"),
             Keyword::Trample => write!(f, "Trample"),
@@ -2293,6 +2300,22 @@ mod tests {
         );
         assert_eq!(Keyword::from_str("Battle Cry").unwrap(), Keyword::Battlecry);
         assert_eq!(Keyword::from_str("Aftermath").unwrap(), Keyword::Aftermath);
+    }
+
+    #[test]
+    fn display_landwalk_uses_oracle_spelling_for_subtypes_and_card_types() {
+        assert_eq!(
+            Keyword::Landwalk("Island".to_string()).to_string(),
+            "Islandwalk"
+        );
+        assert_eq!(
+            Keyword::Landwalk("Snow".to_string()).to_string(),
+            "Snow Landwalk"
+        );
+        assert_eq!(
+            Keyword::Landwalk("Artifact".to_string()).to_string(),
+            "Artifact Landwalk"
+        );
     }
 
     #[test]

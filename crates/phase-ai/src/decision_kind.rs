@@ -104,6 +104,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::TapCreaturesForManaAbility { .. }
         | WaitingFor::ChooseManaColor { .. }
         | WaitingFor::ExileForCost { .. }
+        | WaitingFor::RemoveCounterForCost { .. }
         | WaitingFor::CollectEvidenceChoice { .. }
         | WaitingFor::HarmonizeTapChoice { .. }
         | WaitingFor::OptionalEffectChoice { .. }
@@ -149,7 +150,8 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::DiscardForManaAbility { .. }
         | WaitingFor::ExileFromBattlefieldForManaAbility { .. }
         | WaitingFor::SacrificeForManaAbility { .. }
-        | WaitingFor::PayManaAbilityMana { .. } => DecisionKind::ActivateAbility,
+        | WaitingFor::PayManaAbilityMana { .. }
+        | WaitingFor::ActivationCostOneOfChoice { .. } => DecisionKind::ActivateAbility,
     }
 }
 

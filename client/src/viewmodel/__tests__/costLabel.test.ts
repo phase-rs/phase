@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { AdditionalCost, GameAction, GameObject, Keyword } from "../../adapter/types.ts";
-import { abilityChoiceLabel, additionalCostChoices } from "../costLabel.ts";
+import { abilityChoiceLabel, additionalCostChoices, formatAbilityCost } from "../costLabel.ts";
 
 function makeObject(overrides: Partial<GameObject> = {}): GameObject {
   return {
@@ -242,5 +242,17 @@ describe("additionalCostChoices — multikicker (issue #454)", () => {
     expect(decline.label).toContain("finish casting");
     expect(decline.label).toContain("(kicked 2×)");
     expect(decline.label.toLowerCase()).not.toContain("cancel");
+  });
+});
+
+describe("formatAbilityCost", () => {
+  it("formats disjunctive activation cost branches", () => {
+    expect(formatAbilityCost({
+      type: "OneOf",
+      costs: [
+        { type: "Mana", cost: { type: "Cost", shards: [], generic: 1 } },
+        { type: "PayLife", amount: { type: "Fixed", value: 2 } },
+      ],
+    })).toBe("{1} or Pay 2 life");
   });
 });

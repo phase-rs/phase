@@ -1717,6 +1717,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             filter,
             rest_destination,
             reveal,
+            ..
         } => {
             d.push(("count".into(), fmt_qty(count)));
             if let Some(dest) = destination {
@@ -1800,6 +1801,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             target,
             card_filter,
             count,
+            random,
             ..
         } => {
             d.push(("player".into(), fmt_target(target)));
@@ -1808,6 +1810,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             if let Some(c) = count {
                 d.push(("count".into(), fmt_quantity(c)));
+            }
+            if *random {
+                d.push(("selection".into(), "random".into()));
             }
         }
         Effect::RevealFromHand { filter, on_decline } => {
@@ -2064,7 +2069,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Bolster { count } => {
             d.push(("counters".into(), fmt_quantity(count)));
         }
-        Effect::Goad { target } => {
+        Effect::Goad { target } | Effect::GoadAll { target } => {
             d.push(("target".into(), fmt_target(target)));
         }
         Effect::Detain { target } => {

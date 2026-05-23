@@ -1,24 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 
-import { isValidWebSocketUrl } from "../../services/serverDetection";
+import {
+  SERVER_PRESETS,
+  isValidWebSocketUrl,
+} from "../../services/serverDetection";
 import { useMultiplayerStore } from "../../stores/multiplayerStore";
 import { menuButtonClass } from "../menu/buttonStyles";
-
-interface ServerPreset {
-  label: string;
-  url: string;
-  hint?: string;
-}
-
-/**
- * Canonical regions. Kept as a static list rather than fetched because the
- * set moves slowly and the cost of a client update is lower than the cost of
- * a runtime dependency on a region manifest endpoint.
- */
-const PRESETS: ServerPreset[] = [
-  { label: "US (default)", url: "wss://us.phase-rs.dev/ws" },
-];
+import { ServerFlag } from "./ServerFlag";
 
 interface ServerPickerProps {
   onClose: () => void;
@@ -32,7 +21,7 @@ type ConnTestState = "idle" | "testing" | "ok" | "fail";
 export function ServerPicker({ onClose, onApply }: ServerPickerProps) {
   const currentUrl = useMultiplayerStore((s) => s.serverAddress);
   const [customUrl, setCustomUrl] = useState(
-    PRESETS.some((p) => p.url === currentUrl) ? "" : currentUrl,
+    SERVER_PRESETS.some((p) => p.url === currentUrl) ? "" : currentUrl,
   );
   const [error, setError] = useState<string | null>(null);
   const [connTest, setConnTest] = useState<ConnTestState>("idle");
@@ -112,7 +101,7 @@ export function ServerPicker({ onClose, onApply }: ServerPickerProps) {
         </p>
 
         <div className="mt-4 flex flex-col gap-2">
-          {PRESETS.map((preset) => {
+          {SERVER_PRESETS.map((preset) => {
             const isActive = preset.url === currentUrl;
             return (
               <button
@@ -126,7 +115,13 @@ export function ServerPicker({ onClose, onApply }: ServerPickerProps) {
                     : "border-white/10 bg-black/18 text-gray-200 hover:border-white/18 hover:bg-white/6")
                 }
               >
-                <span className="font-medium">{preset.label}</span>
+                <span className="flex items-center gap-2 font-medium">
+                  <ServerFlag
+                    flag={preset.flag}
+                    className="h-3.5 w-auto rounded-[2px] shadow-sm ring-1 ring-black/20"
+                  />
+                  {preset.label}
+                </span>
                 <span className="font-mono text-[10px] text-slate-500">
                   {preset.url.replace(/^wss?:\/\//, "")}
                 </span>

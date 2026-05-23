@@ -112,6 +112,24 @@ fn register_transient_effect(
         );
         return;
     }
+    let static_affected_references_target_player = target_filter.is_none()
+        && static_def
+            .affected
+            .as_ref()
+            .is_some_and(crate::game::ability_utils::filter_references_target_player);
+    let inherited_object_target = target_filter.is_none()
+        && static_def
+            .affected
+            .as_ref()
+            .is_some_and(generic_effect_affected_uses_inherited_targets)
+        && !static_affected_references_target_player
+        && ability
+            .targets
+            .iter()
+            .any(|target| matches!(target, TargetRef::Object(_)));
+    let direct_binding_uses_targets = target_filter.is_some()
+        || matches!(resolved_filter, Some(TargetFilter::ParentTarget))
+        || inherited_object_target;
 
     // CR 611.1 + CR 611.2c + CR 115.1: Targeted effects — register one transient
     // continuous effect per target. `TargetRef::Object` binds to
@@ -123,12 +141,21 @@ fn register_transient_effect(
     // play lands this turn". The resulting TCE is read by player-scoped runtime
     // queries (`player_has_static_other`, `player_has_cant_gain_life`, etc.)
     // that scan `state.transient_continuous_effects` directly.
-    if !ability.targets.is_empty() {
-        for target in &ability.targets {
-            let bound_filter = match target {
-                TargetRef::Object(obj_id) => TargetFilter::SpecificObject { id: *obj_id },
-                TargetRef::Player(player_id) => TargetFilter::SpecificPlayer { id: *player_id },
-            };
+    // A `ControllerRef::TargetPlayer` affected filter is different: its player
+    // target parameterizes a broadcast object filter and is resolved below.
+    if !ability.targets.is_empty()
+        && direct_binding_uses_targets
+        && !static_affected_references_target_player
+    {
+        let skip_companion_player_target = target_filter
+            .is_some_and(crate::game::ability_utils::filter_references_target_player)
+            && matches!(ability.targets.first(), Some(TargetRef::Player(_)));
+        for bound_filter in transient_bound_filters(
+            ability,
+            resolved_filter,
+            skip_companion_player_target,
+            inherited_object_target,
+        ) {
             state.add_transient_continuous_effect(
                 ability.source_id,
                 ability.controller,
@@ -261,6 +288,40 @@ fn register_transient_effect(
             }
         }
     }
+}
+
+fn transient_bound_filters(
+    ability: &ResolvedAbility,
+    resolved_filter: Option<&TargetFilter>,
+    skip_companion_player_target: bool,
+    inherited_object_target: bool,
+) -> Vec<TargetFilter> {
+    if inherited_object_target {
+        let Some(filter) = resolved_filter else {
+            return Vec::new();
+        };
+        return crate::game::effects::effect_object_targets(filter, &ability.targets)
+            .into_iter()
+            .map(|id| TargetFilter::SpecificObject { id })
+            .collect();
+    }
+
+    ability
+        .targets
+        .iter()
+        .skip(usize::from(skip_companion_player_target))
+        .map(|target| match target {
+            TargetRef::Object(obj_id) => TargetFilter::SpecificObject { id: *obj_id },
+            TargetRef::Player(player_id) => TargetFilter::SpecificPlayer { id: *player_id },
+        })
+        .collect()
+}
+
+fn generic_effect_affected_uses_inherited_targets(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::TriggeringSource | TargetFilter::ParentTarget | TargetFilter::CostPaidObject
+    )
 }
 
 fn snapshot_transient_modifications(
@@ -505,6 +566,342 @@ mod tests {
         assert_eq!(
             state.transient_continuous_effects[0].affected,
             TargetFilter::SpecificObject { id: your_creature }
+        );
+    }
+
+    #[test]
+    fn generic_effect_target_player_affected_filter_binds_matching_objects_not_player() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Sudden Spoiling".to_string(),
+            Zone::Stack,
+        );
+        let your_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Your Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let target_players_creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Target Player's Creature".to_string(),
+            Zone::Battlefield,
+        );
+        for object_id in [your_creature, target_players_creature] {
+            state
+                .objects
+                .get_mut(&object_id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+            ))
+            .modifications(vec![
+                ContinuousModification::RemoveAllAbilities,
+                ContinuousModification::SetPower { value: 0 },
+                ContinuousModification::SetToughness { value: 2 },
+            ]);
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![static_def],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        )
+        .duration(Duration::UntilEndOfTurn);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.transient_continuous_effects.len(), 1);
+        let tce = &state.transient_continuous_effects[0];
+        assert_eq!(
+            tce.affected,
+            TargetFilter::SpecificObject {
+                id: target_players_creature
+            },
+            "TargetPlayer affected filter must bind to the chosen player's creature"
+        );
+        assert!(tce
+            .modifications
+            .contains(&ContinuousModification::RemoveAllAbilities));
+        assert!(tce
+            .modifications
+            .contains(&ContinuousModification::SetPower { value: 0 }));
+        assert!(tce
+            .modifications
+            .contains(&ContinuousModification::SetToughness { value: 2 }));
+    }
+
+    #[test]
+    fn generic_effect_target_player_sibling_static_resolves_own_affected_filter() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Continuous Source".to_string(),
+            Zone::Stack,
+        );
+        let your_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Your Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let target_players_creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Target Player's Creature".to_string(),
+            Zone::Battlefield,
+        );
+        for object_id in [your_creature, target_players_creature] {
+            state
+                .objects
+                .get_mut(&object_id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let target_player_static = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+            ))
+            .modifications(vec![ContinuousModification::SetPower { value: 0 }]);
+        let controller_static = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
+            .modifications(vec![ContinuousModification::SetToughness { value: 2 }]);
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![target_player_static, controller_static],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        )
+        .duration(Duration::UntilEndOfTurn);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.transient_continuous_effects.len(), 2);
+        assert!(state.transient_continuous_effects.iter().any(|tce| {
+            tce.affected
+                == (TargetFilter::SpecificObject {
+                    id: target_players_creature,
+                })
+                && tce
+                    .modifications
+                    .contains(&ContinuousModification::SetPower { value: 0 })
+        }));
+        assert!(state.transient_continuous_effects.iter().any(|tce| {
+            tce.affected == (TargetFilter::SpecificObject { id: your_creature })
+                && tce
+                    .modifications
+                    .contains(&ContinuousModification::SetToughness { value: 2 })
+        }));
+        assert!(!state.transient_continuous_effects.iter().any(|tce| {
+            matches!(
+                tce.affected,
+                TargetFilter::SpecificPlayer { id: PlayerId(1) }
+            )
+        }));
+    }
+
+    #[test]
+    fn generic_effect_without_explicit_target_binds_inherited_object_target() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Earthbender Ascension".to_string(),
+            Zone::Battlefield,
+        );
+        let target_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Target Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&target_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::TriggeringSource)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Trample,
+            }]);
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![static_def],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+            },
+            vec![TargetRef::Object(target_creature)],
+            source,
+            PlayerId(0),
+        )
+        .duration(Duration::UntilEndOfTurn);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.transient_continuous_effects.len(), 1);
+        assert_eq!(
+            state.transient_continuous_effects[0].affected,
+            TargetFilter::SpecificObject {
+                id: target_creature
+            }
+        );
+    }
+
+    #[test]
+    fn generic_effect_inherited_object_binding_ignores_sibling_player_target() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Inherited Context Source".to_string(),
+            Zone::Battlefield,
+        );
+        let target_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Target Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&target_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::TriggeringSource)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Trample,
+            }]);
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![static_def],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+            },
+            vec![
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Object(target_creature),
+            ],
+            source,
+            PlayerId(0),
+        )
+        .duration(Duration::UntilEndOfTurn);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.transient_continuous_effects.len(), 1);
+        assert_eq!(
+            state.transient_continuous_effects[0].affected,
+            TargetFilter::SpecificObject {
+                id: target_creature
+            }
+        );
+    }
+
+    #[test]
+    fn generic_effect_without_explicit_target_ignores_inherited_object_for_broadcast_filter() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Broadcast Source".to_string(),
+            Zone::Battlefield,
+        );
+        let inherited_target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Inherited Target".to_string(),
+            Zone::Battlefield,
+        );
+        let your_creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Your Creature".to_string(),
+            Zone::Battlefield,
+        );
+        for object_id in [inherited_target, your_creature] {
+            state
+                .objects
+                .get_mut(&object_id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Trample,
+            }]);
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![static_def],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+            },
+            vec![TargetRef::Object(inherited_target)],
+            source,
+            PlayerId(0),
+        )
+        .duration(Duration::UntilEndOfTurn);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.transient_continuous_effects.len(), 1);
+        assert_eq!(
+            state.transient_continuous_effects[0].affected,
+            TargetFilter::SpecificObject { id: your_creature },
+            "non-context affected filters must broadcast through their own filter"
         );
     }
 
