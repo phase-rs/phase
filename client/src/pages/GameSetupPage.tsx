@@ -17,8 +17,10 @@ import {
   getDeckCardCount,
 } from "../components/menu/deckHelpers";
 import { menuButtonClass } from "../components/menu/buttonStyles";
-import { ACTIVE_DECK_KEY, touchDeckPlayed } from "../constants/storage";
+import { ACTIVE_DECK_KEY, loadSavedDeckBracket, touchDeckPlayed } from "../constants/storage";
 import { useCardImage } from "../hooks/useCardImage";
+import { BRACKET_LABEL } from "../types/bracket";
+import { anyAiOpponentIsCedh, isDeckCedhLegal } from "../services/cedhLock";
 import { FORMAT_DEFAULTS } from "../stores/multiplayerStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
 import { saveActiveGame, useGameStore } from "../stores/gameStore";
@@ -154,6 +156,14 @@ export function GameSetupPage() {
   const deckBlockedForSelectedFormat = selectedCompat?.selected_format_compatible === false;
   const noLegalAiDecks = legalAiDeckCount === 0;
   const cannotStartAi = noDeckSelected || deckBlockedForSelectedFormat || noLegalAiDecks;
+
+  // cEDH warning: shown when the human deck is not bracket 5 but any AI is cEDH.
+  const aiSeats = usePreferencesStore((s) => s.aiSeats);
+  const humanDeckBracket = activeDeckName ? loadSavedDeckBracket(activeDeckName) : null;
+  const showCedhWarning =
+    activeDeckName !== null &&
+    anyAiOpponentIsCedh(aiSeats) &&
+    !isDeckCedhLegal(humanDeckBracket);
   const representativeCard = useMemo(
     () => (activeDeckName ? getRepresentativeCard(activeDeckName) : null),
     [activeDeckName],
@@ -287,6 +297,19 @@ export function GameSetupPage() {
                     <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
                       {selectedCompat.selected_format_reasons[0]
                         ?? `Deck is not legal in ${selectedFormat}.`}
+                    </div>
+                  )}
+
+                  {showCedhWarning && (
+                    <div
+                      role="alert"
+                      className="mt-3 rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-xs text-yellow-200"
+                    >
+                      Your deck is bracket{" "}
+                      {humanDeckBracket !== null
+                        ? `${humanDeckBracket} (${BRACKET_LABEL[humanDeckBracket]})`
+                        : "untagged"}{" "}
+                      vs. a cEDH AI — expect to lose fast.
                     </div>
                   )}
                 </div>

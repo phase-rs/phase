@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DeckCompatibilityResult } from "../deckCompatibility";
 import type { ParsedDeck } from "../deckParser";
 import { evaluateDeckCompatibility } from "../deckCompatibility";
-import { buildLegalAiDeckCatalog } from "../aiDeckCatalog";
+import { buildLegalAiDeckCatalog, filterByBracket, type AiDeckCandidate } from "../aiDeckCatalog";
 import { getCachedFeed, listSubscriptions } from "../feedService";
 import { loadPreconDeckMap } from "../../hooks/useDecks";
 import { FEED_DECK_ORIGINS_KEY, STORAGE_KEY_PREFIX } from "../../constants/storage";
@@ -261,5 +261,47 @@ describe("buildLegalAiDeckCatalog", () => {
     const ids = catalog.candidates.map((candidate) => candidate.id);
 
     expect(ids).not.toContain("precon:tainted");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// filterByBracket — pure bracket filter
+// ---------------------------------------------------------------------------
+
+function makeCandidate(id: string, bracket: AiDeckCandidate["bracket"]): AiDeckCandidate {
+  return {
+    id,
+    name: id,
+    source: { type: "precon", deckId: id, code: "TST" },
+    deck: { main: [], sideboard: [] },
+    coveragePct: null,
+    archetype: null,
+    bracket,
+  };
+}
+
+const sampleDecks: AiDeckCandidate[] = [
+  makeCandidate("casual", 2),
+  makeCandidate("optimized", 4),
+  makeCandidate("turbo", 5),
+  makeCandidate("untagged", null),
+];
+
+describe("filterByBracket", () => {
+  it("returns only bracket-5 (cEDH) candidates when tier is 5", () => {
+    const result = filterByBracket(sampleDecks, 5);
+    expect(result.map((d) => d.id)).toEqual(["turbo"]);
+  });
+
+  it("returns all candidates unchanged when tier is null", () => {
+    const result = filterByBracket(sampleDecks, null);
+    expect(result).toBe(sampleDecks); // same reference — pure no-op
+    expect(result.map((d) => d.id)).toEqual(["casual", "optimized", "turbo", "untagged"]);
+  });
+
+  it("excludes untagged candidates when a bracket tier is specified", () => {
+    const result = filterByBracket(sampleDecks, 4);
+    expect(result.map((d) => d.id)).toEqual(["optimized"]);
+    expect(result.find((d) => d.id === "untagged")).toBeUndefined();
   });
 });
