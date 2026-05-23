@@ -218,10 +218,12 @@ pub(crate) fn handle_select_targets(
 
     if let Some(ability_index) = pending.activation_ability_index {
         if let Some(ref activation_cost) = pending.activation_cost {
+            // CR 606.4 / CR 602.2b: Pay the activation cost through the single
+            // cost-resolution authority. CR 606.3 announcement-time marking for
+            // loyalty abilities lives in `planeswalker::handle_activate_loyalty`
+            // — this call site MUST NOT branch on cost shape (single-authority
+            // principle: callers dispatch activation, they never inspect costs).
             pay_ability_cost(state, player, pending.object_id, activation_cost, events)?;
-            if matches!(activation_cost, AbilityCost::Loyalty { .. }) {
-                super::planeswalker::record_loyalty_activation(state, pending.object_id, player);
-            }
         }
 
         let assigned_targets = flatten_targets_in_chain(&ability);
@@ -316,14 +318,10 @@ pub(crate) fn handle_choose_target(
 
             if let Some(ability_index) = pending.activation_ability_index {
                 if let Some(ref activation_cost) = pending.activation_cost {
+                    // CR 606.4 / CR 602.2b: Single-authority cost payment. CR 606.3
+                    // marking happens in `planeswalker::handle_activate_loyalty` at
+                    // announcement time — this site MUST NOT branch on cost shape.
                     pay_ability_cost(state, player, pending.object_id, activation_cost, events)?;
-                    if matches!(activation_cost, AbilityCost::Loyalty { .. }) {
-                        super::planeswalker::record_loyalty_activation(
-                            state,
-                            pending.object_id,
-                            player,
-                        );
-                    }
                 }
 
                 let assigned_targets = flatten_targets_in_chain(&ability);

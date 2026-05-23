@@ -138,6 +138,16 @@ pub fn handle_activate_loyalty(
     // Build a ResolvedAbility for the stack from the typed definition
     let resolved = build_pw_resolved(ability_def, pw_id, player);
 
+    // CR 606.3 + CR 602.2a + CR 601.2a: Loyalty-ability activation is recorded at
+    // *announcement time* — once legality checks pass, the activation is committed
+    // and the planeswalker is "marked as having had a loyalty ability activated
+    // this turn" regardless of which downstream branch (auto-target, random-target,
+    // or TargetSelection) finishes the activation. This is the single record site
+    // for the per-permanent counter (`loyalty_activations_this_turn`) and the
+    // per-player counter (`loyalty_abilities_activated_this_turn`); downstream
+    // resolvers MUST NOT re-record, otherwise the targeted path double-counts.
+    record_loyalty_activation(state, pw_id, player);
+
     // CR 602.2b + CR 601.2c: Targets are announced before costs are paid.
     // If this ability requires targets, prompt for selection first.
     let target_slots = build_target_slots(state, &resolved)?;
@@ -212,7 +222,7 @@ pub fn handle_activate_loyalty(
 /// control changes (it's a property of the permanent, not the activator).
 /// CR 603.4: The per-player counter is keyed by the player who activated —
 /// "you activated a loyalty ability" reads as the *activator's* history.
-pub(super) fn record_loyalty_activation(state: &mut GameState, pw_id: ObjectId, player: PlayerId) {
+fn record_loyalty_activation(state: &mut GameState, pw_id: ObjectId, player: PlayerId) {
     if let Some(obj) = state.objects.get_mut(&pw_id) {
         obj.loyalty_activations_this_turn = obj.loyalty_activations_this_turn.saturating_add(1);
     }
@@ -258,12 +268,15 @@ fn finalize_loyalty_activation(
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
     // CR 606.4: Single authority for loyalty cost payment.
+    // CR 606.3 marking happens in `handle_activate_loyalty` at announcement time,
+    // not here — see the note there. Re-recording here would double-count the
+    // targeted path (which announces, returns TargetSelection, then funnels back
+    // through this finalizer after the player chooses targets).
     let cost = crate::types::ability::AbilityCost::Loyalty {
         amount: loyalty_cost,
     };
     super::casting::pay_ability_cost(state, player, pw_id, &cost, events)
         .expect("loyalty validation passed in handle_activate_loyalty");
-    record_loyalty_activation(state, pw_id, player);
 
     let assigned_targets = flatten_targets_in_chain(&resolved);
     emit_targeting_events(state, &assigned_targets, pw_id, player, events);

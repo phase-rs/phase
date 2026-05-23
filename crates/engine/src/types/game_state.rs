@@ -3607,16 +3607,16 @@ pub struct GameState {
     /// Read by `QuantityRef::LoyaltyAbilitiesActivatedThisTurn` for intervening-if
     /// conditions like The Chain Veil's "if you activated a loyalty ability of
     /// a planeswalker this turn". Cleared at turn start.
-    #[serde(default)]
-    pub loyalty_abilities_activated_this_turn: HashMap<PlayerId, u32>,
+    #[serde(default, skip_serializing_if = "im::HashMap::is_empty")]
+    pub loyalty_abilities_activated_this_turn: im::HashMap<PlayerId, u32>,
     /// CR 606.3: Per-player extra loyalty-activation grants for this turn —
     /// each entry raises the per-permanent CR 606.3 cap for every planeswalker
     /// the player controls. Populated by the
     /// `Effect::GrantExtraLoyaltyActivations` resolver (The Chain Veil's
     /// activated ability). Consumed by
     /// `planeswalker::can_activate_loyalty_ability`. Cleared at turn start.
-    #[serde(default)]
-    pub extra_loyalty_activations_this_turn: HashMap<PlayerId, u32>,
+    #[serde(default, skip_serializing_if = "im::HashMap::is_empty")]
+    pub extra_loyalty_activations_this_turn: im::HashMap<PlayerId, u32>,
     /// CR 603.4: Per-ability per-turn resolution counter.
     /// Keyed by `(source_id, ability_index)` — identifies a specific printed
     /// ability on a specific source object. Incremented at the top of
@@ -4317,8 +4317,8 @@ impl GameState {
             activated_abilities_this_turn: HashMap::new(),
             activated_abilities_this_game: HashMap::new(),
             crew_activated_this_turn: HashSet::new(),
-            loyalty_abilities_activated_this_turn: HashMap::new(),
-            extra_loyalty_activations_this_turn: HashMap::new(),
+            loyalty_abilities_activated_this_turn: im::HashMap::new(),
+            extra_loyalty_activations_this_turn: im::HashMap::new(),
             ability_resolutions_this_turn: HashMap::new(),
             graveyard_cast_permissions_used: HashSet::new(),
             graveyard_cast_permissions_used_per_type: HashSet::new(),
