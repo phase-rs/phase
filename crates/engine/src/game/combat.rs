@@ -594,6 +594,15 @@ pub fn validate_blockers_for_player(
                         blocker_id, attacker_id
                     ));
                 }
+                // CR 702.16a + CR 702.16f: Filter-based protection — can't be
+                // blocked by creatures matching the filter (e.g., mana value 3 or less).
+                Keyword::Protection(ProtectionTarget::Filter(ref filter))
+                    if crate::game::keywords::source_matches_protection_filter(blocker, filter) =>
+                {
+                    return Err(format!(
+                        "{blocker_id:?} cannot block {attacker_id:?} (protection from filter)",
+                    ));
+                }
                 _ => {}
             }
         }
@@ -1885,6 +1894,13 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
             }
             // CR 702.16j: Protection from everything — blocked by no creature.
             Keyword::Protection(ProtectionTarget::Everything) => {
+                return false;
+            }
+            // CR 702.16a + CR 702.16f: Filter-based protection — can't be blocked
+            // by creatures matching the filter (e.g., mana value 3 or less).
+            Keyword::Protection(ProtectionTarget::Filter(ref filter))
+                if crate::game::keywords::source_matches_protection_filter(blocker, filter) =>
+            {
                 return false;
             }
             _ => {}

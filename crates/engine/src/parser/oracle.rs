@@ -2732,6 +2732,16 @@ pub(crate) fn parse_oracle_ir(
                 result.triggers.extend(triggers);
                 continue;
             }
+            // Try as keyword — the ability-word prefix ("Void Shields —") was
+            // stripped, so the remainder may be a keyword line that Priority 1b
+            // missed because it ran on the unprefixed original line.
+            if let Some(kw) = parse_keyword_from_oracle(&effect_lower) {
+                if !matches!(kw, Keyword::Unknown(_)) {
+                    result.extracted_keywords.push(kw);
+                    i += 1;
+                    continue;
+                }
+            }
             // Try as static
             if is_static_pattern(&effect_lower) {
                 let effect_static = normalize_self_refs_for_static(&effect_text, card_name);
