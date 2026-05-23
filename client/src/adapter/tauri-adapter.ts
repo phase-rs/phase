@@ -63,13 +63,30 @@ export class TauriAdapter implements EngineAdapter {
   ): Promise<SubmitResult> {
     this.assertInitialized();
     const seed = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
-    const result = await this.invoke!("initialize_game", {
-      deckData: deckData ?? null,
-      seed,
-      matchConfig: matchConfig ?? null,
-    });
-    const ar = result as ActionResult;
-    return { events: ar.events ?? [], log_entries: ar.log_entries ?? [] };
+    try {
+      const result = await this.invoke!("initialize_game", {
+        deckData: deckData ?? null,
+        seed,
+        matchConfig: matchConfig ?? null,
+      });
+      const ar = result as ActionResult;
+      return { events: ar.events ?? [], log_entries: ar.log_entries ?? [] };
+    } catch (err) {
+      // The Tauri command returns Err(e.to_string()) on cEDH bracket
+      // violation, which Tauri serializes as a plain Error string. Detect
+      // the Display message from CedhBracketError::DeckNotCedh and rethrow
+      // as a typed AdapterError so GameProvider can surface the blocking
+      // modal (matches the WASM worker path).
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("not declared cEDH")) {
+        throw new AdapterError(
+          AdapterErrorCode.BRACKET_VIOLATION,
+          msg,
+          false,
+        );
+      }
+      throw err;
+    }
   }
 
   async submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult> {
