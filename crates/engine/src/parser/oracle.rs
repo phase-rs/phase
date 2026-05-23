@@ -3225,11 +3225,16 @@ fn try_parse_loyalty_line(line: &str, ctx: &mut ParseContext) -> Option<AbilityD
 /// CR 606.3: A player may activate a loyalty ability only during a main phase
 /// of their turn with an empty stack, and only if no player has previously
 /// activated a loyalty ability of that permanent that turn. The planeswalker
-/// activation path (`game::planeswalker::can_activate_loyalty`) already gates
-/// this independently, but tagging the ability with `AsSorcery` +
-/// `OnlyOnceEachTurn` + the display flag keeps parser output self-describing
-/// and satisfies the shared invariant that every sorcery-speed activated
-/// ability carries `ActivationRestriction::AsSorcery`.
+/// activation path (`game::planeswalker::can_activate_loyalty_ability`) is the
+/// authoritative gate for the "once per permanent per turn" rule — it reads
+/// `obj.loyalty_activations_this_turn` against a cap raised by
+/// `state.extra_loyalty_activations_this_turn` (The Chain Veil class). We do
+/// NOT add `ActivationRestriction::OnlyOnceEachTurn` here: that restriction is
+/// per-ability-index, while CR 606.3 is per-permanent (across ALL loyalty
+/// ability indices). Conflating the two would (a) incorrectly allow a +2 and
+/// a -1 on the same planeswalker in one turn and (b) block The Chain Veil's
+/// "as though none of its loyalty abilities have been activated this turn"
+/// cap-raise from ever taking effect.
 fn apply_loyalty_restrictions(def: &mut AbilityDefinition) {
     // CR 606.3: "...only during a main phase of their turn when the stack is empty..."
     def.sorcery_speed = true;
@@ -3239,15 +3244,6 @@ fn apply_loyalty_restrictions(def: &mut AbilityDefinition) {
     {
         def.activation_restrictions
             .push(ActivationRestriction::AsSorcery);
-    }
-    // CR 606.3: "...only if no player has previously activated a loyalty ability
-    // of that permanent that turn."
-    if !def
-        .activation_restrictions
-        .contains(&ActivationRestriction::OnlyOnceEachTurn)
-    {
-        def.activation_restrictions
-            .push(ActivationRestriction::OnlyOnceEachTurn);
     }
 }
 
@@ -10920,6 +10916,64 @@ mod tests {
                     std::mem::discriminant(other)
                 );
             }
+        }
+    }
+
+    /// Visions (LEG / 4ED): "Look at the top five cards of target player's
+    /// library. You may then have that player shuffle that library."
+    ///
+    /// End-to-end verification of the wrapper chain: the primary effect is a
+    /// `Dig` (look-at) keyed on a player target, with a `may`-gated sub-ability
+    /// emitting `Effect::Shuffle { target: ParentTarget }` that resolves at
+    /// runtime against the parent's inherited `TargetRef::Player`. The
+    /// `"shuffle that library"` anaphor is the new arm added in
+    /// `parse_shuffle_ast`.
+    #[test]
+    fn visions_look_then_have_target_player_shuffle() {
+        let result = parse(
+            "Look at the top five cards of target player's library. You may then have that player shuffle that library.",
+            "Visions",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert_eq!(result.abilities.len(), 1, "Visions has one ability");
+        let ability = &result.abilities[0];
+        // Primary effect: Look at top 5 cards (Dig with reveal=false, no
+        // keep_count — pure peek). The parent target is the player whose
+        // library we are looking at.
+        match &*ability.effect {
+            Effect::Dig { count, reveal, .. } => {
+                assert_eq!(count, &QuantityExpr::Fixed { value: 5 }, "look at top 5");
+                assert!(!reveal, "look at (private), not reveal (public)");
+            }
+            other => panic!(
+                "Expected Dig effect for sentence 1, got {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+        // Sub-ability: "you may then have that player shuffle that library"
+        // → `may`-gated `Effect::Shuffle { target: ParentTarget }`.
+        let sub = ability
+            .sub_ability
+            .as_ref()
+            .expect("Visions should have a sub-ability for the shuffle clause");
+        // CR 608.2d: A spell's resolution-time "you may" choice — the player
+        // announces the optional shuffle while applying the effect.
+        assert!(sub.optional, "sub-ability should be optional ('you may')");
+        match &*sub.effect {
+            Effect::Shuffle { target, .. } => {
+                assert_eq!(
+                    target,
+                    &TargetFilter::ParentTarget,
+                    "shuffle target should be the context-ref ParentTarget filter so it \
+                     inherits the parent ability's targeted player at resolution",
+                );
+            }
+            other => panic!(
+                "Expected Effect::Shuffle in sub-ability, got {:?}",
+                std::mem::discriminant(other)
+            ),
         }
     }
 

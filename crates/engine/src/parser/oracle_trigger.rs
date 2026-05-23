@@ -1293,7 +1293,74 @@ fn parse_unless_alt_cost(after_unless: &str) -> Option<AbilityCost> {
         return parse_unless_return_to_hand(rest);
     }
 
+    // CR 118.12 + CR 701.20a: "you tap [count] untapped [filter] you control".
+    // The tail parser extracts count and filter via shared target parsing.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you tap ").parse(after_unless) {
+        if let Some(cost) = parse_unless_tap_untapped_cost(rest) {
+            return Some(cost);
+        }
+    }
+
+    // CR 118.12 + CR 701.7: "you exile a card from your graveyard" — exile one
+    // card from your graveyard as an alternative cost. Card: Rotting Giant.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you exile ").parse(after_unless) {
+        if let Some(cost) = parse_unless_exile_cost(rest) {
+            return Some(cost);
+        }
+    }
+
     None
+}
+
+/// CR 118.12 + CR 701.20a: Parse the tail of "you tap ..." unless costs.
+/// Supports articles and numeric counts before delegating the filter phrase to
+/// the shared target parser.
+fn parse_unless_tap_untapped_cost(rest: &str) -> Option<AbilityCost> {
+    let (count, filter) = parse_unless_counted_target_filter(rest)?;
+    Some(AbilityCost::TapCreatures { count, filter })
+}
+
+/// CR 118.12 + CR 701.7: Parse the tail of "you exile ..." unless costs.
+/// Supports articles and numeric counts before delegating the filter phrase to
+/// the shared target parser.
+fn parse_unless_exile_cost(rest: &str) -> Option<AbilityCost> {
+    let (count, filter) = parse_unless_counted_target_filter(rest)?;
+    Some(AbilityCost::Exile {
+        count,
+        zone: filter.extract_in_zone(),
+        filter: Some(filter),
+    })
+}
+
+fn parse_unless_counted_target_filter(rest: &str) -> Option<(u32, TargetFilter)> {
+    let trimmed = rest.trim();
+    let (count, filter_text) = if let Some((n, after_num)) = parse_number(trimmed) {
+        (n, after_num.trim().to_string())
+    } else {
+        let stripped = alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))
+            .parse(trimmed)
+            .map(|(rest, _)| rest)
+            .unwrap_or(trimmed);
+        (1u32, stripped.to_string())
+    };
+
+    if filter_text.is_empty() {
+        return None;
+    }
+
+    let target_phrase = format!("target {filter_text}");
+    let (filter, remainder) = super::oracle_target::parse_target(&target_phrase);
+    if matches!(filter, TargetFilter::Any) {
+        return None;
+    }
+    let (_, _) = all_consuming((
+        opt(tag::<_, _, OracleError<'_>>(".")),
+        eof::<_, OracleError<'_>>,
+    ))
+    .parse(remainder.trim())
+    .ok()?;
+
+    Some((count, filter))
 }
 
 /// CR 118.12 + CR 118.12a: Parse a chain of "they"-pronoun alternative
@@ -2293,14 +2360,18 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     // Fastbond's intervening-if. Evaluates to lands_played_this_turn >= 2
     // (the counter is incremented before the LandPlayed event fires, so at
     // detection/resolution time the 2nd land shows count == 2).
-    fn parse_first_land_played_this_turn_clause(input: &str) -> OracleResult<'_, ()> {
-        value((), tag("if it wasn't the first land you played this turn")).parse(input)
+    fn first_land_played_condition(input: &str) -> OracleResult<'_, ()> {
+        value(
+            (),
+            tag::<_, _, OracleError<'_>>("if it wasn't the first land you played this turn"),
+        )
+        .parse(input)
     }
-    if let Some((before, _, _)) = scan_preceded(&lower, parse_first_land_played_this_turn_clause) {
+    if let Some((before, _, _)) = scan_preceded(&lower, first_land_played_condition) {
         let pos = before.len();
-        let pattern = "if it wasn't the first land you played this turn";
+        let pattern_len = "if it wasn't the first land you played this turn".len();
         return (
-            strip_condition_clause(text, pos, pattern.len()),
+            strip_condition_clause(text, pos, pattern_len),
             Some(TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::LandsPlayedThisTurn {
@@ -4889,13 +4960,8 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
         }
     }
 
-    if matches!(
-        lower,
-        "whenever you commit a crime" | "when you commit a crime"
-    ) {
-        let mut def = make_base();
-        def.mode = TriggerMode::CommitCrime;
-        return Some((TriggerMode::CommitCrime, def));
+    if let Some(result) = try_parse_commit_crime(lower) {
+        return Some(result);
     }
 
     if matches!(
@@ -6003,65 +6069,19 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     // second-person "play a land" form (you — e.g. Fastbond). The optional
     // from-zone tail rides through `parse_type_phrase`, matching the existing
     // cast-spell trigger shape used by Rocco, Street Chef.
-    #[derive(Clone, Copy)]
-    enum LandPlayActor {
-        Controller,
-        Opponent,
-        AnyPlayer,
-    }
-
-    fn parse_land_play_actor(input: &str) -> OracleResult<'_, LandPlayActor> {
-        alt((
-            value(LandPlayActor::Controller, tag("you")),
-            value(
-                LandPlayActor::Opponent,
-                alt((tag("an opponent"), tag("each opponent"))),
-            ),
-            value(
-                LandPlayActor::AnyPlayer,
-                alt((tag("a player"), tag("each player"))),
-            ),
-        ))
-        .parse(input)
-    }
-
-    fn parse_land_play_trigger(input: &str) -> OracleResult<'_, LandPlayActor> {
-        preceded(
-            alt((tag("whenever "), tag("when "))),
-            terminated(
-                parse_land_play_actor,
-                pair(space1, alt((tag("plays a land"), tag("play a land")))),
-            ),
-        )
-        .parse(input)
-    }
-
-    fn parse_land_play_card_clause(input: &str) -> OracleResult<'_, &str> {
-        alt((terminated(take_until(", "), tag(", ")), rest)).parse(input)
-    }
-
-    if let Ok((after_land_play, actor)) = parse_land_play_trigger(lower) {
+    if let Some((valid_target, after_land_play)) = parse_land_play_trigger_subject(lower) {
         let mut def = make_base();
         def.mode = TriggerMode::LandPlayed;
-
-        // "whenever you play a land" scopes to controller; "opponent" scopes to
-        // opponents; "a player" / "each player" has no valid_target restriction.
-        match actor {
-            LandPlayActor::Controller => {
-                def.valid_target = Some(TargetFilter::Controller);
-            }
-            LandPlayActor::Opponent => {
-                def.valid_target = Some(TargetFilter::Typed(
-                    TypedFilter::default().controller(ControllerRef::Opponent),
-                ));
-            }
-            LandPlayActor::AnyPlayer => {}
-        }
+        def.valid_target = valid_target;
 
         let after_land_play = after_land_play.trim_start();
-        let clause = parse_land_play_card_clause(after_land_play)
-            .map(|(_, clause)| clause)
-            .unwrap_or(after_land_play);
+        let clause = terminated(
+            take_until::<_, _, OracleError<'_>>(", "),
+            tag::<_, _, OracleError<'_>>(", "),
+        )
+        .parse(after_land_play)
+        .map(|(_, before)| before)
+        .unwrap_or(after_land_play);
         let (filter, _) = parse_type_phrase(clause);
         if !matches!(filter, TargetFilter::Any) {
             def.valid_card = Some(filter);
@@ -8133,6 +8153,106 @@ fn parse_turn_constraint(phase_text: &str) -> Option<TriggerConstraint> {
             .map_or("", |i| remaining[i + 1..].trim_start());
     }
     None
+}
+
+/// CR 305.1 + CR 603.2: Parse the subject and land-play verb from
+/// "whenever/when [subject] plays/play a land".
+fn parse_land_play_trigger_subject(lower: &str) -> Option<(Option<TargetFilter>, &str)> {
+    let (after_prefix, _) = alt((
+        tag::<_, _, OracleError<'_>>("whenever "),
+        tag::<_, _, OracleError<'_>>("when "),
+    ))
+    .parse(lower)
+    .ok()?;
+    let (after_subject, valid_target) = alt((
+        value(
+            Some(TargetFilter::Controller),
+            tag::<_, _, OracleError<'_>>("you "),
+        ),
+        value(
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent),
+            )),
+            tag::<_, _, OracleError<'_>>("an opponent "),
+        ),
+        value(None, tag::<_, _, OracleError<'_>>("a player ")),
+        value(None, tag::<_, _, OracleError<'_>>("each player ")),
+    ))
+    .parse(after_prefix)
+    .ok()?;
+    let (after_land, _) = alt((
+        tag::<_, _, OracleError<'_>>("plays a land"),
+        tag("play a land"),
+    ))
+    .parse(after_subject)
+    .ok()?;
+    Some((valid_target, after_land))
+}
+
+/// CR 700.13: "Whenever [subject] commits a crime" — scoped crime trigger parser.
+///
+/// Handles three subject forms (trailing space bundled into each tag for precision):
+/// - "you commit a crime" → `valid_target = Controller`
+/// - "an opponent commits a crime" → `valid_target = Typed(Opponent)`
+/// - "a player commits a crime" → `valid_target = Player` (any player)
+///
+/// Also recognizes the optional " during your turn" suffix, which adds
+/// `TriggerConstraint::OnlyDuringYourTurn` (Overzealous Muscle and similar).
+fn try_parse_commit_crime(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
+    // Strip "whenever " / "when " prefix.
+    let (after_prefix, ()) = alt((
+        value((), tag::<_, _, OracleError<'_>>("whenever ")),
+        value((), tag("when ")),
+    ))
+    .parse(lower)
+    .ok()?;
+
+    // Subject axis — trailing space bundled in tag to avoid prefix-loose ambiguity.
+    fn parse_crime_actor(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
+        alt((
+            value(Some(TargetFilter::Controller), tag("you ")),
+            value(
+                Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                )),
+                tag("an opponent "),
+            ),
+            value(Some(TargetFilter::Player), tag("a player ")),
+        ))
+        .parse(input)
+    }
+    let (after_subject, valid_target) = parse_crime_actor.parse(after_prefix).ok()?;
+
+    // Verb axis — "commits" before "commit" so the longer string wins (nom is greedy).
+    let (after_verb, ()) = alt((
+        value((), tag::<_, _, OracleError<'_>>("commits")),
+        value((), tag("commit")),
+    ))
+    .parse(after_subject)
+    .ok()?;
+
+    // " a crime"
+    let (after_crime, ()) = value((), tag::<_, _, OracleError<'_>>(" a crime"))
+        .parse(after_verb)
+        .ok()?;
+
+    // Optional " during your turn" constraint suffix.
+    let (remainder, during_your_turn) = opt(tag::<_, _, OracleError<'_>>(" during your turn"))
+        .parse(after_crime)
+        .ok()?;
+
+    // Nothing else allowed — this is a complete trigger condition clause.
+    if !remainder.trim().is_empty() {
+        return None;
+    }
+
+    let mut def = make_base();
+    def.mode = TriggerMode::CommitCrime;
+    def.valid_target = valid_target;
+    if during_your_turn.is_some() {
+        def.constraint = Some(TriggerConstraint::OnlyDuringYourTurn);
+    }
+    Some((TriggerMode::CommitCrime, def))
 }
 
 /// CR 603.8: Parse the filter from "you control no [filter]" state trigger conditions.
@@ -11851,6 +11971,22 @@ mod tests {
     }
 
     #[test]
+    fn opponent_land_play_trigger_scopes_to_opponent() {
+        let t = parse_trigger_line(
+            "Whenever an opponent plays a land, draw a card.",
+            "Test Card",
+        );
+        assert_eq!(t.mode, TriggerMode::LandPlayed);
+        assert!(matches!(
+            t.valid_target,
+            Some(TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::Opponent),
+                ..
+            }))
+        ));
+    }
+
+    #[test]
     fn extract_if_condition_first_land_pattern() {
         // CR 305.3 + CR 603.4: Verify the condition is stripped from the effect text.
         let (cleaned, cond) = super::extract_if_condition(
@@ -12717,6 +12853,135 @@ mod tests {
     }
 
     #[test]
+    fn trigger_unless_you_tap_untapped_creature() {
+        // CR 118.12 + CR 701.20a: Koskun Falls — "sacrifice this enchantment
+        // unless you tap an untapped creature you control."
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, sacrifice this enchantment unless you tap an untapped creature you control.",
+            "Koskun Falls",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        match &unless_pay.cost {
+            AbilityCost::TapCreatures { count, filter } => {
+                assert_eq!(*count, 1);
+                let is_creature = match filter {
+                    TargetFilter::Typed(tf) => {
+                        tf.type_filters.contains(&TypeFilter::Creature)
+                    }
+                    TargetFilter::And { filters } => filters.iter().any(|f| {
+                        matches!(f, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Creature))
+                    }),
+                    _ => false,
+                };
+                assert!(
+                    is_creature,
+                    "filter should include Creature, got {:?}",
+                    filter
+                );
+            }
+            other => panic!("cost should be TapCreatures, got {:?}", other),
+        }
+        assert_eq!(
+            unless_pay.payer,
+            TargetFilter::Controller,
+            "payer should be Controller"
+        );
+    }
+
+    #[test]
+    fn trigger_unless_you_tap_untapped_permanent() {
+        // CR 118.12 + CR 701.20a: Command Bridge — "sacrifice it unless you
+        // tap an untapped permanent you control."
+        let def = parse_trigger_line(
+            "When this land enters, sacrifice it unless you tap an untapped permanent you control.",
+            "Command Bridge",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        match &unless_pay.cost {
+            AbilityCost::TapCreatures { count, filter: _ } => {
+                assert_eq!(*count, 1);
+            }
+            other => panic!("cost should be TapCreatures, got {:?}", other),
+        }
+        assert_eq!(
+            unless_pay.payer,
+            TargetFilter::Controller,
+            "payer should be Controller"
+        );
+    }
+
+    #[test]
+    fn trigger_unless_you_tap_two_untapped_creatures() {
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, sacrifice this enchantment unless you tap two untapped creatures you control.",
+            "Test Card",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        match &unless_pay.cost {
+            AbilityCost::TapCreatures { count, filter } => {
+                assert_eq!(*count, 2);
+                let has_creature = match filter {
+                    TargetFilter::Typed(tf) => tf.type_filters.contains(&TypeFilter::Creature),
+                    TargetFilter::And { filters } => filters.iter().any(|f| {
+                        matches!(f, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Creature))
+                    }),
+                    _ => false,
+                };
+                assert!(
+                    has_creature,
+                    "filter should include Creature, got {:?}",
+                    filter
+                );
+            }
+            other => panic!("cost should be TapCreatures, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn trigger_unless_you_exile_card_from_graveyard() {
+        // CR 118.12 + CR 701.7: Rotting Giant — "sacrifice it unless you
+        // exile a card from your graveyard."
+        let def = parse_trigger_line(
+            "Whenever this creature attacks or blocks, sacrifice it unless you exile a card from your graveyard.",
+            "Rotting Giant",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        match &unless_pay.cost {
+            AbilityCost::Exile {
+                count,
+                zone,
+                filter,
+            } => {
+                assert_eq!(*count, 1);
+                assert_eq!(*zone, Some(crate::types::zones::Zone::Graveyard));
+                assert!(filter.is_some(), "filter should be present");
+            }
+            other => panic!("cost should be Exile, got {:?}", other),
+        }
+        assert_eq!(
+            unless_pay.payer,
+            TargetFilter::Controller,
+            "payer should be Controller"
+        );
+    }
+
+    #[test]
+    fn trigger_unless_you_exile_two_cards_from_graveyard() {
+        let def = parse_trigger_line(
+            "Whenever this creature attacks, sacrifice it unless you exile two cards from your graveyard.",
+            "Test Card",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        match &unless_pay.cost {
+            AbilityCost::Exile { count, zone, .. } => {
+                assert_eq!(*count, 2);
+                assert_eq!(*zone, Some(crate::types::zones::Zone::Graveyard));
+            }
+            other => panic!("cost should be Exile, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn trigger_unless_intervening_attacked_this_turn() {
         // Bellowing Saddlebrute (Raid) — "When this creature enters, you lose 4
         // life unless you attacked this turn." The trailing intervening-unless
@@ -13023,8 +13288,51 @@ mod tests {
 
     #[test]
     fn trigger_commit_crime_mode() {
+        // CR 700.13: "you commit a crime" scopes the trigger to the controller.
         let def = parse_trigger_line("Whenever you commit a crime, draw a card.", "At Knifepoint");
         assert_eq!(def.mode, TriggerMode::CommitCrime);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_commit_crime_opponent_scope() {
+        // CR 700.13: "an opponent commits a crime" → Patrolling Peacemaker / similar.
+        let def = parse_trigger_line(
+            "Whenever an opponent commits a crime, proliferate.",
+            "Patrolling Peacemaker",
+        );
+        assert_eq!(def.mode, TriggerMode::CommitCrime);
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+        assert_eq!(def.constraint, None);
+    }
+
+    #[test]
+    fn trigger_commit_crime_any_player_scope() {
+        // CR 700.13: "a player commits a crime" → fires for any player (Tarnation / similar).
+        let def = parse_trigger_line(
+            "Whenever a player commits a crime, they may draw a card.",
+            "Tarnation",
+        );
+        assert_eq!(def.mode, TriggerMode::CommitCrime);
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+        assert_eq!(def.constraint, None);
+    }
+
+    #[test]
+    fn trigger_commit_crime_during_your_turn() {
+        // CR 700.13 + CR 500.6: "during your turn" restricts the trigger to the controller's turn.
+        let def = parse_trigger_line(
+            "Whenever you commit a crime during your turn, this creature gains indestructible until end of turn.",
+            "Overzealous Muscle",
+        );
+        assert_eq!(def.mode, TriggerMode::CommitCrime);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
     }
 
     // CR 701.62: "Whenever you manifest dread" — actor-side Manifest Dread

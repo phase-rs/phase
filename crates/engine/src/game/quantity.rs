@@ -1389,7 +1389,7 @@ fn resolve_ref(
         // CR 305.2a + CR 603.4: Lands played this turn by the scoped player.
         QuantityRef::LandsPlayedThisTurn { player } => {
             resolve_per_player_scalar(state, player, controller, ctx, targets, ability, |p| {
-                u32_to_i32_saturating(u32::from(p.lands_played_this_turn))
+                i32::from(p.lands_played_this_turn)
             })
         }
         // CR 400.7 + CR 700.4: Count zone-change snapshots from this turn
@@ -1457,6 +1457,20 @@ fn resolve_ref(
             } else {
                 0
             }
+        }
+        // CR 606.1 + CR 603.4: Per-player loyalty-ability activation count for
+        // the current turn. Reads from `GameState::loyalty_abilities_activated_this_turn`,
+        // a player-id-keyed counter populated in
+        // `planeswalker::record_loyalty_activation`.
+        QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player: scope } => {
+            resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| {
+                state
+                    .loyalty_abilities_activated_this_turn
+                    .get(&p.id)
+                    .copied()
+                    .map(u32_to_i32_saturating)
+                    .unwrap_or(0)
+            })
         }
         // CR 117.1: Total spells cast last turn (by any player).
         QuantityRef::SpellsCastLastTurn => state.spells_cast_last_turn.map_or(0, i32::from),
@@ -1741,7 +1755,7 @@ fn scoped_players<'a>(
         .or_else(|| triggering_event_player(state))
         .unwrap_or(controller);
     state.players.iter().filter(move |p| match scope {
-        CountScope::Controller => p.id == controller,
+        CountScope::Controller | CountScope::Owner => p.id == controller,
         CountScope::ScopedPlayer => p.id == scoped_player,
         CountScope::All => true,
         CountScope::Opponents => p.id != controller,
@@ -1758,7 +1772,7 @@ fn count_scope_owner_matches(
     owner: PlayerId,
 ) -> bool {
     match scope {
-        CountScope::Controller => owner == controller,
+        CountScope::Controller | CountScope::Owner => owner == controller,
         CountScope::ScopedPlayer => owner == ctx.scoped_player.unwrap_or(controller),
         CountScope::All => true,
         CountScope::Opponents => owner != controller,
@@ -1772,7 +1786,7 @@ fn counter_added_actor_matches(
     actor: PlayerId,
 ) -> bool {
     match scope {
-        CountScope::Controller => actor == controller,
+        CountScope::Controller | CountScope::Owner => actor == controller,
         CountScope::ScopedPlayer => actor == ctx.scoped_player.unwrap_or(controller),
         CountScope::All => true,
         CountScope::Opponents => actor != controller,

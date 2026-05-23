@@ -6548,7 +6548,9 @@ pub mod tests {
         );
         {
             let obj = state.objects.get_mut(&obj_id).unwrap();
-            let mut trigger = make_trigger(TriggerMode::CommitCrime);
+            // "whenever you commit a crime" → valid_target = Controller (parser sets this)
+            let mut trigger =
+                make_trigger(TriggerMode::CommitCrime).valid_target(TargetFilter::Controller);
             trigger.trigger_zones = vec![Zone::Graveyard];
             trigger.execute = Some(Box::new(crate::types::ability::AbilityDefinition::new(
                 AbilityKind::Spell,

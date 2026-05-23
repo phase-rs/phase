@@ -2972,6 +2972,26 @@ fn parse_cost_paid_mana_value_reference(
     ))
 }
 
+fn parse_bare_any_counter_suffix(input: &str) -> super::oracle_nom::error::OracleResult<'_, ()> {
+    let (input, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>("any "),
+        tag::<_, _, OracleError<'_>>("a "),
+    )))
+    .parse(input)?;
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("counters"),
+        tag::<_, _, OracleError<'_>>("counter"),
+    ))
+    .parse(input)?;
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>(" on it"),
+        tag::<_, _, OracleError<'_>>(" on them"),
+    ))
+    .parse(input)?;
+
+    Ok((input, ()))
+}
+
 /// Parse a counter-presence suffix ("with [count] [counter] counter(s) on
 /// it/them", "with no counters on them", "without a +1/+1 counter on it")
 /// using pure nom combinators. Returns (FilterProp, bytes consumed).
@@ -3034,22 +3054,20 @@ pub(crate) fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
         // the typed suffix loop below. The article-derived count is discarded —
         // negation always means exactly 0 counters of that type.
     } else {
-        // CR 122.1: Bare "with a counter on it" / "with a counter on them" — any
-        // counter of any type. Distinct from typed "with a +1/+1 counter on it".
-        // Must precede the typed-counter branch so the empty-counter-type guard
-        // there doesn't fire.
-        for prefix in ["a counter on it", "a counter on them", "any counter on it"] {
-            if let Ok((after, _)) = tag_e::<_, _, OracleError<'_>>(prefix).parse(rest) {
-                let consumed = leading_ws + lead_len + (rest.len() - after.len());
-                return Some((
-                    FilterProp::Counters {
-                        counters: CounterMatch::Any,
-                        comparator: Comparator::GE,
-                        count: QuantityExpr::Fixed { value: 1 },
-                    },
-                    consumed,
-                ));
-            }
+        // CR 122.1: Bare "with a counter on it" / "with counters on them" —
+        // any counter of any type. Distinct from typed "with a +1/+1 counter on
+        // it". Must precede the typed-counter branch so the empty-counter-type
+        // guard there doesn't fire.
+        if let Ok((after, _)) = parse_bare_any_counter_suffix(rest) {
+            let consumed = leading_ws + lead_len + (rest.len() - after.len());
+            return Some((
+                FilterProp::Counters {
+                    counters: CounterMatch::Any,
+                    comparator: Comparator::GE,
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                consumed,
+            ));
         }
     }
 
@@ -6534,15 +6552,24 @@ mod tests {
     /// Regression — bare positive "with a counter on it" → any-counter GE 1.
     #[test]
     fn parse_counter_suffix_bare_positive_any() {
-        let (prop, _consumed) = parse_counter_suffix(" with a counter on it").expect("must parse");
-        assert_eq!(
-            prop,
-            FilterProp::Counters {
-                counters: CounterMatch::Any,
-                comparator: Comparator::GE,
-                count: QuantityExpr::Fixed { value: 1 },
-            }
-        );
+        for phrase in [
+            " with a counter on it",
+            " with a counter on them",
+            " with any counter on it",
+            " with any counter on them",
+            " with counters on it",
+            " with counters on them",
+        ] {
+            let (prop, _consumed) = parse_counter_suffix(phrase).expect("must parse");
+            assert_eq!(
+                prop,
+                FilterProp::Counters {
+                    counters: CounterMatch::Any,
+                    comparator: Comparator::GE,
+                    count: QuantityExpr::Fixed { value: 1 },
+                }
+            );
+        }
     }
 
     #[test]
