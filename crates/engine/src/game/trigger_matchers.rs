@@ -2387,8 +2387,8 @@ pub(super) fn match_ninjutsu_activated(
 
 /// CR 702.107a + CR 702.142b + CR 702.177a + CR 603.2: Matches when a player activates
 /// a keyword ability whose `AbilityTag` matches the trigger's `KeywordAbilityActivated` tag.
-/// Guards on both `source_id` equality (the activated creature must be the trigger source)
-/// and controller equality (the activating player must control the trigger source).
+/// `valid_card` scopes source-specific forms like "~'s outlast ability"; generic forms
+/// like "an exhaust ability" intentionally match any matching activation by the controller.
 pub(super) fn match_keyword_ability_activated(
     event: &GameEvent,
     trigger: &TriggerDefinition,
@@ -2406,7 +2406,7 @@ pub(super) fn match_keyword_ability_activated(
     } = event
     {
         ability_tag == tag
-            && *activated_id == source_id
+            && valid_card_matches(trigger, state, *activated_id, source_id)
             && state
                 .objects
                 .get(&source_id)
@@ -3094,7 +3094,7 @@ mod tests {
     }
 
     #[test]
-    fn exhaust_ability_activation_matches_controller() {
+    fn keyword_ability_activation_matches_generic_controller_trigger() {
         let mut state = setup();
         let source = create_object(
             &mut state,
@@ -3103,26 +3103,33 @@ mod tests {
             "Rangers' Aetherhive".to_string(),
             Zone::Battlefield,
         );
+        let activated_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Another Exhaust Creature".to_string(),
+            Zone::Battlefield,
+        );
         let trigger = make_trigger(TriggerMode::KeywordAbilityActivated(AbilityTag::Exhaust));
 
-        // Matches when ability tag, source, and controller all agree.
+        // Generic "you activate an exhaust ability" triggers may match a different source.
         assert!(match_keyword_ability_activated(
             &GameEvent::KeywordAbilityActivated {
                 ability_tag: AbilityTag::Exhaust,
                 player_id: PlayerId(0),
-                source_id: source,
+                source_id: activated_source,
                 is_mana_ability: false,
             },
             &trigger,
             source,
             &state
         ));
-        // CR 603.2: triggers are source-specific — a different source must not match.
+        // Wrong controller must not match.
         assert!(!match_keyword_ability_activated(
             &GameEvent::KeywordAbilityActivated {
                 ability_tag: AbilityTag::Exhaust,
-                player_id: PlayerId(0),
-                source_id: ObjectId(99),
+                player_id: PlayerId(1),
+                source_id: activated_source,
                 is_mana_ability: false,
             },
             &trigger,
@@ -3135,6 +3142,50 @@ mod tests {
                 ability_tag: AbilityTag::Boast,
                 player_id: PlayerId(0),
                 source_id: source,
+                is_mana_ability: false,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+    }
+
+    #[test]
+    fn keyword_ability_activation_valid_card_scopes_self_reference() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Herald of Anafenza".to_string(),
+            Zone::Battlefield,
+        );
+        let other = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Abzan Falconer".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::KeywordAbilityActivated(AbilityTag::Outlast));
+        trigger.valid_card = Some(TargetFilter::SelfRef);
+
+        assert!(match_keyword_ability_activated(
+            &GameEvent::KeywordAbilityActivated {
+                ability_tag: AbilityTag::Outlast,
+                player_id: PlayerId(0),
+                source_id: source,
+                is_mana_ability: false,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+        assert!(!match_keyword_ability_activated(
+            &GameEvent::KeywordAbilityActivated {
+                ability_tag: AbilityTag::Outlast,
+                player_id: PlayerId(0),
+                source_id: other,
                 is_mana_ability: false,
             },
             &trigger,

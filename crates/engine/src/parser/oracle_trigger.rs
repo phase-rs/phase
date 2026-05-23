@@ -2578,19 +2578,59 @@ fn try_parse_keyword_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
             def.mode = TriggerMode::KeywordAbilityActivated(AbilityTag::Boast);
             return Some((TriggerMode::KeywordAbilityActivated(AbilityTag::Boast), def));
         }
-        // CR 702.107a: Match "~'s outlast ability" or "an outlast ability".
+        #[derive(Clone, Copy)]
+        enum KeywordActivationSubject {
+            SelfRef,
+            Generic,
+            Controller,
+            Opponent,
+        }
+
+        fn parse_outlast_activation_subject(
+            input: &str,
+        ) -> OracleResult<'_, KeywordActivationSubject> {
+            alt((
+                value(KeywordActivationSubject::SelfRef, tag("~'s")),
+                value(KeywordActivationSubject::Opponent, tag("an opponent's")),
+                value(KeywordActivationSubject::Controller, tag("your")),
+                value(KeywordActivationSubject::Generic, tag("an")),
+            ))
+            .parse(input)
+        }
+
+        fn parse_outlast_activation_reference(
+            input: &str,
+        ) -> OracleResult<'_, KeywordActivationSubject> {
+            all_consuming(terminated(
+                parse_outlast_activation_subject,
+                preceded(space1, tag("outlast ability")),
+            ))
+            .parse(input)
+        }
+
+        // CR 702.107a: Match possessive/generic outlast activation subjects.
         // "this creature" normalizes to ~ before trigger parsing, so the self-ref form
-        // arrives as "~'s outlast ability". The "an outlast ability" variant covers
-        // generic activation references.
-        if alt((
-            tag::<_, _, OracleError<'_>>("~'s outlast ability"),
-            tag("an outlast ability"),
-        ))
-        .parse(rest)
-        .is_ok()
-        {
+        // arrives as "~'s outlast ability"; generic and controller-scoped variants
+        // share the same keyword event and differ only by `valid_card`.
+        if let Ok((_, subject)) = parse_outlast_activation_reference(rest) {
             let mut def = make_base();
             def.mode = TriggerMode::KeywordAbilityActivated(AbilityTag::Outlast);
+            match subject {
+                KeywordActivationSubject::SelfRef => {
+                    def.valid_card = Some(TargetFilter::SelfRef);
+                }
+                KeywordActivationSubject::Controller => {
+                    def.valid_card = Some(TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::You),
+                    ));
+                }
+                KeywordActivationSubject::Opponent => {
+                    def.valid_card = Some(TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::Opponent),
+                    ));
+                }
+                KeywordActivationSubject::Generic => {}
+            }
             return Some((
                 TriggerMode::KeywordAbilityActivated(AbilityTag::Outlast),
                 def,
@@ -14174,6 +14214,51 @@ mod tests {
             def.condition,
             Some(TriggerCondition::ActivatedAbilityIsNonMana)
         );
+    }
+
+    #[test]
+    fn outlast_activation_trigger_self_ref_scopes_valid_card() {
+        let def = parse_trigger_line(
+            "Whenever you activate this creature's outlast ability, create a 1/1 white Warrior creature token.",
+            "Herald of Anafenza",
+        );
+        assert_eq!(
+            def.mode,
+            TriggerMode::KeywordAbilityActivated(AbilityTag::Outlast)
+        );
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn outlast_activation_trigger_subject_siblings() {
+        let cases = [
+            (
+                "Whenever you activate an outlast ability, draw a card.",
+                None,
+            ),
+            (
+                "Whenever you activate your outlast ability, draw a card.",
+                Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            ),
+            (
+                "Whenever you activate an opponent's outlast ability, draw a card.",
+                Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                )),
+            ),
+        ];
+
+        for (text, valid_card) in cases {
+            let def = parse_trigger_line(text, "Outlast Test");
+            assert_eq!(
+                def.mode,
+                TriggerMode::KeywordAbilityActivated(AbilityTag::Outlast),
+                "{text}"
+            );
+            assert_eq!(def.valid_card, valid_card, "{text}");
+        }
     }
 
     // --- CR 115.9c: "that targets only [X]" trigger tests ---
