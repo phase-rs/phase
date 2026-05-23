@@ -3192,6 +3192,57 @@ pub enum StackEntryKind {
     KeywordAction { action: KeywordAction },
 }
 
+/// CR 608.2e: A clause-local snapshot of an equalization minimum/maximum,
+/// frozen when a `player_scope` link begins so every player in that clause's
+/// APNAP fan-out resolves its disposal count against the same pre-clause board.
+///
+/// Balance's three clauses ("sacrifice lands", "discard cards", "sacrifice
+/// creatures") each compute an independent extremum at a different time. The
+/// `player_scope` driver re-resolves the effect's `count` expression on every
+/// per-player iteration; without a snapshot, after APNAP player 0 sacrifices
+/// down to the minimum, player 1 would recompute a smaller minimum. The
+/// snapshot freezes only the cross-player aggregate (`ControlledByEachPlayer` /
+/// `HandSize { AllPlayers }`); the per-player `left` operand still re-resolves
+/// per iteration, which is correct.
+///
+/// Transient — never serialized. Captured before a `player_scope` link's
+/// fan-out and cleared when the link completes, so the next clause re-enters
+/// the driver with `None` and re-captures against the post-clause board.
+///
+/// # Single-cell invariant
+///
+/// This is stored as a single `Option<ClauseMinimumSnapshot>` on `GameState`
+/// (not a `Vec` stack). That is sound today because no inline-recursion path
+/// exists for the only effects Balance uses (`Effect::Sacrifice` and
+/// `Effect::Discard`): a player-scope clause's per-player iteration never
+/// re-enters the `player_scope` driver mid-fan-out, so an outer snapshot is
+/// never overwritten by an inner one within a single clause.
+///
+/// If a future feature inlines a nested ability-chain resolution during a
+/// Balance-style clause's fan-out — for example, a replacement effect on
+/// sacrifice that spawns another player-scope effect — the outer Balance
+/// snapshot would be silently corrupted by the inner capture. At that point
+/// this field MUST become a `Vec<ClauseMinimumSnapshot>` stack with
+/// push/pop bracketing each `player_scope` link entry/exit.
+#[derive(Debug, Clone, Default)]
+pub struct ClauseMinimumSnapshot {
+    /// Reduced cross-player aggregates keyed by the originating quantity
+    /// reference, so multiple distinct refs in one clause do not collide.
+    entries: Vec<(super::ability::QuantityRef, i32)>,
+}
+
+impl ClauseMinimumSnapshot {
+    /// Record a captured aggregate for a quantity reference.
+    pub fn insert(&mut self, qty: super::ability::QuantityRef, value: i32) {
+        self.entries.push((qty, value));
+    }
+
+    /// Look up the frozen aggregate for a quantity reference, if captured.
+    pub fn get(&self, qty: &super::ability::QuantityRef) -> Option<i32> {
+        self.entries.iter().find(|(k, _)| k == qty).map(|(_, v)| *v)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameState {
     pub turn_number: u32,
@@ -3907,6 +3958,16 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub last_effect_counts_by_player: HashMap<PlayerId, i32>,
 
+    /// CR 608.2e: Clause-local equalization snapshot. Each `player_scope` link
+    /// (e.g. a Balance clause) captures its cross-player extremum here before
+    /// the APNAP fan-out begins and clears it when the link completes, so every
+    /// player in that clause resolves against the same pre-clause board. The
+    /// per-link lifecycle is deliberately narrower than `last_vote_ballots`'
+    /// per-chain reset — three Balance clauses are three links in one chain and
+    /// must each snapshot independently. Transient.
+    #[serde(skip)]
+    pub clause_minimum_snapshot: Option<ClauseMinimumSnapshot>,
+
     /// CR 400.7 + CR 608.2c: Number of cards exiled from a hand by the most recent
     /// `Effect::ChangeZoneAll` resolution. Read by `QuantityRef::ExiledFromHandThisResolution`
     /// for "draws a card for each card exiled from their hand this way" patterns
@@ -4330,6 +4391,7 @@ impl GameState {
             last_effect_amount: None,
             last_effect_count: None,
             last_effect_counts_by_player: HashMap::new(),
+            clause_minimum_snapshot: None,
             exiled_from_hand_this_resolution: 0,
             monarch: None,
             city_blessing: HashSet::new(),

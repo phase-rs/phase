@@ -1077,6 +1077,17 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::PartySize { player } => {
             format!("party size ({})", fmt_player_scope(player))
         }
+        QuantityRef::ControlledByEachPlayer { filter, aggregate } => {
+            let func = match aggregate {
+                AggregateFunction::Max => "most",
+                AggregateFunction::Min => "fewest",
+                AggregateFunction::Sum => "total",
+            };
+            format!(
+                "# of {} controlled by player with {func}",
+                fmt_target(filter)
+            )
+        }
     }
 }
 
@@ -5021,6 +5032,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::AttachmentsOnLeavingObject { .. } => ("AttachmentsOnLeavingObject", Handled),
         QuantityRef::PlayerCounter { .. } => ("PlayerCounter", Handled),
         QuantityRef::PartySize { .. } => ("PartySize", Handled),
+        QuantityRef::ControlledByEachPlayer { .. } => ("ControlledByEachPlayer", Handled),
     }
 }
 
