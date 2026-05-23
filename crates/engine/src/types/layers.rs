@@ -87,6 +87,7 @@ impl ContinuousModification {
             | ContinuousModification::SetDynamicToughness { .. } => Layer::CharDef,
             ContinuousModification::AddKeyword { .. }
             | ContinuousModification::RemoveKeyword { .. }
+            | ContinuousModification::RemoveChosenKeyword
             | ContinuousModification::AddDynamicKeyword { .. }
             | ContinuousModification::GrantAbility { .. }
             | ContinuousModification::GrantTrigger { .. }
