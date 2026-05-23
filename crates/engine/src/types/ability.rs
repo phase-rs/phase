@@ -5475,6 +5475,14 @@ pub enum Effect {
     /// CR 400.11/400.11a + CR 701.23j: Choose card(s) the player owns from
     /// outside the game. For tournament-style play, the bounded accessible set
     /// is the player's current sideboard, which is not modeled as a zone.
+    ///
+    /// CR 406.3: The `include_face_up_exile` flag widens the eligible pool to
+    /// also include face-up cards the controller owns in the exile zone — the
+    /// Karn, the Great Creator / Coax from the Blind Eternities pattern of
+    /// "reveal a card you own from outside the game OR choose a face-up card
+    /// you own in exile". Face-up exile cards are in-game cards (the exile
+    /// zone is a normal zone per CR 406.1); the disjunction simply unifies
+    /// two source pools under one selection.
     SearchOutsideGame {
         filter: TargetFilter,
         #[serde(default = "default_quantity_one")]
@@ -5483,6 +5491,10 @@ pub enum Effect {
         reveal: bool,
         #[serde(default = "default_zone_hand")]
         destination: Zone,
+        /// CR 406.3 + CR 400.11: Also offer face-up exile cards the controller
+        /// owns and that match `filter` as legal selections (Karn-class).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        include_face_up_exile: bool,
     },
     RevealHand {
         #[serde(default = "default_target_filter_any")]

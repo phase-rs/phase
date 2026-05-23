@@ -691,6 +691,10 @@ pub(crate) enum SearchCreationImperativeAst {
         reveal: bool,
         destination: Zone,
         up_to: bool,
+        /// CR 406.3 + CR 400.11: Also offer face-up exile cards the controller
+        /// owns and that match `filter` (Karn-class "or choose a face-up …
+        /// card you own in exile" disjunction).
+        include_face_up_exile: bool,
     },
     Dig {
         count: QuantityExpr,

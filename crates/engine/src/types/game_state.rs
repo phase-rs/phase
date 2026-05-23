@@ -1137,10 +1137,43 @@ pub struct OutsideGameCardUse {
     pub count: u32,
 }
 
+/// CR 400.11 + CR 406.3: A discriminated source for one outside-game selection.
+/// Sideboard entries (the wishboard pool) and face-up exile cards (the Karn /
+/// Coax wishboard return pool) are surfaced through one choice list so the
+/// caster picks across both pools in a single decision.
+///
+/// The size delta between the two variants (`Sideboard` carries a full
+/// `CardFace` so the UI can render the wishboard card without a sideboard
+/// lookup; `FaceUpExile` holds only an `ObjectId`) is intentional —
+/// `OutsideGameChoiceEntry` lists are short-lived (one entry per offered
+/// candidate while a single `WaitingFor::OutsideGameChoice` is active) and
+/// never collected by the million, so the asymmetry doesn't warrant boxing
+/// every CardFace through a heap indirection.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum OutsideGameChoiceSource {
+    /// CR 400.11a: A card in the player's sideboard.
+    Sideboard {
+        sideboard_index: usize,
+        card: crate::types::card::CardFace,
+    },
+    /// CR 406.3: A face-up card the player owns in the exile zone.
+    FaceUpExile { object_id: ObjectId },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutsideGameChoiceEntry {
-    pub sideboard_index: usize,
-    pub entry: DeckEntry,
+    pub source: OutsideGameChoiceSource,
+    /// Remaining copies eligible (sideboard: copies not yet brought in; exile: 1).
+    #[serde(default = "default_one_u32")]
+    pub count: u32,
+    /// Display name for UI; mirrors the underlying card / object's printed name.
+    pub name: String,
+}
+
+fn default_one_u32() -> u32 {
+    1
 }
 
 /// CR 103.6: A beginning-of-game ability waiting to resolve after mulligans.

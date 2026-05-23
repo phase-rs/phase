@@ -4,10 +4,11 @@ use crate::types::ability::{
     CategoryChooserScope, ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectKind,
     PaymentCost, QuantityExpr, QuantityRef, ResolvedAbility, TargetRef,
 };
-use crate::types::actions::{GameAction, LearnOption};
+use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActionResult, ChosenDamageSource, GameState, PayableResource, PendingContinuation, WaitingFor,
+    ActionResult, ChosenDamageSource, GameState, OutsideGameChoiceSource, PayableResource,
+    PendingContinuation, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
@@ -1177,51 +1178,96 @@ pub(super) fn handle_resolution_choice(
                 up_to,
                 destination,
             },
-            GameAction::ChooseOutsideGameCards { sideboard_indices },
+            GameAction::ChooseOutsideGameCards { selections },
         ) => {
             let valid = if up_to {
-                sideboard_indices.len() <= count
+                selections.len() <= count
             } else {
-                sideboard_indices.len() == count
+                selections.len() == count
             };
             if !valid {
                 return Err(EngineError::InvalidAction(format!(
                     "Must select {}{} outside-game card(s), got {}",
                     if up_to { "up to " } else { "exactly " },
                     count,
-                    sideboard_indices.len()
+                    selections.len()
                 )));
             }
-            let mut requested_counts = HashMap::new();
-            for index in &sideboard_indices {
-                *requested_counts.entry(*index).or_insert(0usize) += 1;
+            // CR 400.11 + CR 406.3: Each selection must match an offered choice
+            // and (for sideboard) not exceed the remaining copies. Face-up
+            // exile selections are single-object so duplicates of the same
+            // object_id are illegal.
+            let mut sideboard_counts: HashMap<usize, usize> = HashMap::new();
+            let mut exile_seen: std::collections::HashSet<ObjectId> =
+                std::collections::HashSet::new();
+            for selection in &selections {
+                match selection {
+                    OutsideGameSelection::Sideboard { sideboard_index } => {
+                        *sideboard_counts.entry(*sideboard_index).or_insert(0) += 1;
+                    }
+                    OutsideGameSelection::FaceUpExile { object_id } => {
+                        if !exile_seen.insert(*object_id) {
+                            return Err(EngineError::InvalidAction(
+                                "Same face-up exile card selected more than once".to_string(),
+                            ));
+                        }
+                    }
+                }
             }
-            for (index, requested_count) in requested_counts {
-                let Some(choice) = choices
-                    .iter()
-                    .find(|choice| choice.sideboard_index == index)
-                else {
+            for (sideboard_index, requested_count) in &sideboard_counts {
+                let Some(choice) = choices.iter().find(|choice| match &choice.source {
+                    OutsideGameChoiceSource::Sideboard {
+                        sideboard_index: idx,
+                        ..
+                    } => idx == sideboard_index,
+                    _ => false,
+                }) else {
                     return Err(EngineError::InvalidAction(
-                        "Selected card not in outside-game choices".to_string(),
+                        "Selected sideboard slot not in outside-game choices".to_string(),
                     ));
                 };
-                if requested_count > choice.entry.count as usize {
+                if *requested_count > choice.count as usize {
                     return Err(EngineError::InvalidAction(
                         "Selected more copies than are available outside the game".to_string(),
                     ));
                 }
             }
+            for object_id in &exile_seen {
+                if !choices.iter().any(|choice| match &choice.source {
+                    OutsideGameChoiceSource::FaceUpExile { object_id: oid } => oid == object_id,
+                    _ => false,
+                }) {
+                    return Err(EngineError::InvalidAction(
+                        "Selected face-up exile card not in outside-game choices".to_string(),
+                    ));
+                }
+            }
 
             let mut chosen_ids = Vec::new();
-            for sideboard_index in sideboard_indices {
-                let object_id = effects::search_outside_game::put_sideboard_entry_into_game(
-                    state,
-                    player,
-                    sideboard_index,
-                    destination,
-                )
-                .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?;
-                chosen_ids.push(object_id);
+            for selection in selections {
+                match selection {
+                    OutsideGameSelection::Sideboard { sideboard_index } => {
+                        let object_id =
+                            effects::search_outside_game::put_sideboard_entry_into_game(
+                                state,
+                                player,
+                                sideboard_index,
+                                destination,
+                            )
+                            .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?;
+                        chosen_ids.push(object_id);
+                    }
+                    OutsideGameSelection::FaceUpExile { object_id } => {
+                        let moved = effects::search_outside_game::put_face_up_exile_into(
+                            state,
+                            object_id,
+                            destination,
+                            events,
+                        )
+                        .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?;
+                        chosen_ids.push(moved);
+                    }
+                }
             }
 
             if reveal {

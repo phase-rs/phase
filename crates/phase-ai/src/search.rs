@@ -343,13 +343,34 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
                 .collect(),
         }),
         WaitingFor::OutsideGameChoice { choices, count, .. } => {
-            Some(GameAction::ChooseOutsideGameCards {
-                sideboard_indices: choices
-                    .iter()
-                    .flat_map(|choice| (0..choice.entry.count).map(move |_| choice.sideboard_index))
-                    .take(*count)
-                    .collect(),
-            })
+            // CR 400.11 + CR 406.3: Take the first `count` available picks
+            // across the unified sideboard + face-up-exile pool. Sideboard
+            // entries can be picked up to their remaining `count`; face-up
+            // exile entries are unique objects (count fixed at 1) per the
+            // resolver. The selection wire format is one discriminated
+            // `OutsideGameSelection` per pick.
+            use engine::types::actions::OutsideGameSelection;
+            use engine::types::game_state::OutsideGameChoiceSource;
+            let selections: Vec<OutsideGameSelection> = choices
+                .iter()
+                .flat_map(|choice| {
+                    let count = choice.count as usize;
+                    (0..count).map(move |_| match &choice.source {
+                        OutsideGameChoiceSource::Sideboard {
+                            sideboard_index, ..
+                        } => OutsideGameSelection::Sideboard {
+                            sideboard_index: *sideboard_index,
+                        },
+                        OutsideGameChoiceSource::FaceUpExile { object_id } => {
+                            OutsideGameSelection::FaceUpExile {
+                                object_id: *object_id,
+                            }
+                        }
+                    })
+                })
+                .take(*count)
+                .collect();
+            Some(GameAction::ChooseOutsideGameCards { selections })
         }
 
         // Sylvan Library-style choices: topdeck the required cards rather than

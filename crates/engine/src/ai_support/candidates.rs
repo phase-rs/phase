@@ -8,7 +8,9 @@ use crate::game::keywords;
 use crate::game::mana_sources;
 use crate::types::ability::ChoiceType;
 use crate::types::ability::TargetRef;
-use crate::types::actions::{CastChoice, GameAction, LearnOption, MulliganChoice};
+use crate::types::actions::{
+    CastChoice, GameAction, LearnOption, MulliganChoice, OutsideGameSelection,
+};
 use crate::types::card::LayoutKind;
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{ConvokeMode, GameState, TargetSelectionSlot, WaitingFor};
@@ -774,22 +776,41 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             up_to,
             ..
         } => {
-            let indices: Vec<usize> = choices
-                .iter()
-                .flat_map(|choice| (0..choice.entry.count).map(move |_| choice.sideboard_index))
-                .collect();
+            // CR 400.11 + CR 406.3: Expand each offered choice into one
+            // selection per available copy (sideboard copies multiply, face-up
+            // exile is always count=1 — a unique in-game object).
+            use crate::types::game_state::OutsideGameChoiceSource;
+            let mut pool: Vec<OutsideGameSelection> = Vec::new();
+            for choice in choices.iter() {
+                match &choice.source {
+                    OutsideGameChoiceSource::Sideboard {
+                        sideboard_index, ..
+                    } => {
+                        for _ in 0..choice.count {
+                            pool.push(OutsideGameSelection::Sideboard {
+                                sideboard_index: *sideboard_index,
+                            });
+                        }
+                    }
+                    OutsideGameChoiceSource::FaceUpExile { object_id } => {
+                        pool.push(OutsideGameSelection::FaceUpExile {
+                            object_id: *object_id,
+                        });
+                    }
+                }
+            }
             let sizes = if *up_to {
                 (0..=*count).collect()
             } else {
                 vec![*count]
             };
-            let mut seen = HashSet::new();
-            bounded_combinations_usize(&indices, sizes, SELECTION_POOL_CAP, SELECTION_CANDIDATE_CAP)
+            let mut seen: HashSet<Vec<OutsideGameSelection>> = HashSet::new();
+            bounded_combinations_generic(&pool, sizes, SELECTION_POOL_CAP, SELECTION_CANDIDATE_CAP)
                 .into_iter()
-                .filter(|sideboard_indices| seen.insert(sideboard_indices.clone()))
-                .map(|sideboard_indices| {
+                .filter(|selections| seen.insert(selections.clone()))
+                .map(|selections| {
                     candidate(
-                        GameAction::ChooseOutsideGameCards { sideboard_indices },
+                        GameAction::ChooseOutsideGameCards { selections },
                         TacticalClass::Selection,
                         Some(*player),
                     )
@@ -3501,44 +3522,61 @@ fn combinations_usize(items: &[usize], k: usize) -> Vec<Vec<usize>> {
     result
 }
 
-fn bounded_combinations_usize(
-    items: &[usize],
+/// Generic equivalent of `bounded_combinations_usize` for selection types that
+/// aren't `usize`-indexed (e.g., `OutsideGameSelection`). `T` must be `Clone +
+/// Hash + Eq` so duplicates are de-duplicated.
+fn bounded_combinations_generic<T>(
+    items: &[T],
     sizes: impl IntoIterator<Item = usize>,
     pool_cap: usize,
     output_cap: usize,
-) -> Vec<Vec<usize>> {
-    let mut seen = HashSet::new();
-    let mut output = Vec::new();
-
+) -> Vec<Vec<T>>
+where
+    T: Clone + std::hash::Hash + Eq,
+{
+    let mut seen: HashSet<Vec<T>> = HashSet::new();
+    let mut output: Vec<Vec<T>> = Vec::new();
     for size in sizes {
         if output.len() >= output_cap || size > items.len() {
             continue;
         }
         if size > pool_cap {
-            push_usize_combo(&mut output, &mut seen, items.iter().take(size).copied());
+            let combo: Vec<T> = items.iter().take(size).cloned().collect();
+            if seen.insert(combo.clone()) {
+                output.push(combo);
+            }
             continue;
         }
         let pool_len = items.len().min(pool_cap);
-        for combo in combinations_usize(&items[..pool_len], size) {
-            push_usize_combo(&mut output, &mut seen, combo);
+        for combo in combinations_generic(&items[..pool_len], size) {
+            if seen.insert(combo.clone()) {
+                output.push(combo);
+            }
             if output.len() >= output_cap {
                 break;
             }
         }
     }
-
     output
 }
 
-fn push_usize_combo(
-    output: &mut Vec<Vec<usize>>,
-    seen: &mut HashSet<Vec<usize>>,
-    combo: impl IntoIterator<Item = usize>,
-) {
-    let combo: Vec<_> = combo.into_iter().collect();
-    if seen.insert(combo.clone()) {
-        output.push(combo);
+fn combinations_generic<T: Clone>(items: &[T], k: usize) -> Vec<Vec<T>> {
+    if k == 0 {
+        return vec![Vec::new()];
     }
+    if items.len() < k {
+        return Vec::new();
+    }
+    if items.len() == k {
+        return vec![items.to_vec()];
+    }
+    let mut result = Vec::new();
+    for mut combo in combinations_generic(&items[1..], k - 1) {
+        combo.insert(0, items[0].clone());
+        result.push(combo);
+    }
+    result.extend(combinations_generic(&items[1..], k));
+    result
 }
 
 #[cfg(test)]

@@ -6,7 +6,16 @@ import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImage
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
-import type { GameObject, ManaCost, ManaType, ObjectId, TargetFilter, WaitingFor } from "../../adapter/types.ts";
+import type {
+  GameObject,
+  ManaCost,
+  ManaType,
+  ObjectId,
+  OutsideGameChoiceEntry,
+  OutsideGameSelection,
+  TargetFilter,
+  WaitingFor,
+} from "../../adapter/types.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { CancelButton, ChoiceOverlay, ConfirmButton, ScrollableCardStrip } from "./ChoiceOverlay.tsx";
 import { ManaSymbol } from "../mana/ManaSymbol.tsx";
@@ -948,34 +957,82 @@ function SearchPartitionModal({ data }: { data: SearchPartitionChoice["data"] })
   );
 }
 
+/**
+ * Stable string key for an `OutsideGameChoiceEntry`. Sideboard and face-up
+ * exile entries share the modal's selection state, so their identities must
+ * not collide as raw numbers — namespacing by source variant keeps the two
+ * pools disjoint.
+ */
+function entryKey(entry: OutsideGameChoiceEntry): string {
+  switch (entry.source.type) {
+    case "Sideboard":
+      return `sb:${entry.source.data.sideboard_index}`;
+    case "FaceUpExile":
+      return `fx:${entry.source.data.object_id}`;
+  }
+}
+
+/**
+ * Lower an `OutsideGameChoiceEntry` to the wire-format `OutsideGameSelection`
+ * the engine consumes. Sideboard entries strip the embedded `CardFace`; exile
+ * entries pass through their `object_id` unchanged.
+ */
+function entryToSelection(entry: OutsideGameChoiceEntry): OutsideGameSelection {
+  switch (entry.source.type) {
+    case "Sideboard":
+      return {
+        type: "Sideboard",
+        data: { sideboard_index: entry.source.data.sideboard_index },
+      };
+    case "FaceUpExile":
+      return {
+        type: "FaceUpExile",
+        data: { object_id: entry.source.data.object_id },
+      };
+  }
+}
+
 function OutsideGameModal({ data }: { data: OutsideGameChoice["data"] }) {
   const dispatch = useGameDispatch();
-  const [selectedCounts, setSelectedCounts] = useState<Map<number, number>>(new Map());
-  const availableCounts = useMemo(
-    () => new Map(data.choices.map((choice) => [choice.sideboard_index, choice.entry.count])),
-    [data.choices],
-  );
-  const selectedIndices = useMemo(
+  // Map keyed by `entryKey(entry)` → number of copies the user has selected.
+  const [selectedCounts, setSelectedCounts] = useState<Map<string, number>>(new Map());
+
+  const entriesByKey = useMemo(() => {
+    const map = new Map<string, OutsideGameChoiceEntry>();
+    for (const entry of data.choices) {
+      map.set(entryKey(entry), entry);
+    }
+    return map;
+  }, [data.choices]);
+
+  const selections: OutsideGameSelection[] = useMemo(
     () =>
-      Array.from(selectedCounts.entries()).flatMap(([sideboardIndex, count]) => {
-        const availableCount = availableCounts.get(sideboardIndex) ?? 0;
-        return Array.from({ length: Math.min(count, availableCount) }, () => sideboardIndex);
+      Array.from(selectedCounts.entries()).flatMap(([key, count]) => {
+        const entry = entriesByKey.get(key);
+        if (!entry) return [];
+        const clamped = Math.min(count, entry.count);
+        return Array.from({ length: clamped }, () => entryToSelection(entry));
       }),
-    [availableCounts, selectedCounts],
+    [entriesByKey, selectedCounts],
   );
+
   const minCount = data.up_to ? 0 : data.count;
-  const countValid = selectedIndices.length >= minCount && selectedIndices.length <= data.count;
+  const countValid = selections.length >= minCount && selections.length <= data.count;
+  // CR 406.3: Face-up exile candidates exist only when the disjunction
+  // explicitly offers them, so we can detect their presence on the choice
+  // list and surface a clearer modal title in that case.
+  const hasExileCandidates = data.choices.some((entry) => entry.source.type === "FaceUpExile");
 
   const toggleSelect = useCallback(
-    (sideboardIndex: number, maxCopies: number) => {
+    (key: string, maxCopies: number) => {
       setSelectedCounts((prev) => {
         const next = new Map(prev);
-        const current = next.get(sideboardIndex) ?? 0;
+        const current = next.get(key) ?? 0;
         const selectedTotal = Array.from(prev.values()).reduce((sum, count) => sum + count, 0);
         if (current > 0 && (current >= maxCopies || selectedTotal >= data.count)) {
-          next.delete(sideboardIndex);
+          next.delete(key);
         } else if (selectedTotal < data.count) {
-          next.set(sideboardIndex, current + 1);
+          next.set(key, current + 1);
         }
         return next;
       });
@@ -987,38 +1044,43 @@ function OutsideGameModal({ data }: { data: OutsideGameChoice["data"] }) {
     if (countValid) {
       dispatch({
         type: "ChooseOutsideGameCards",
-        data: { sideboard_indices: selectedIndices },
+        data: { selections },
       });
     }
-  }, [countValid, dispatch, selectedIndices]);
+  }, [countValid, dispatch, selections]);
 
   return (
     <ChoiceOverlay
-      title="Choose From Sideboard"
+      title={hasExileCandidates ? "Choose From Sideboard or Exile" : "Choose From Sideboard"}
       subtitle={`Choose ${data.up_to ? "up to " : ""}${data.count}`}
       footer={<ConfirmButton onClick={handleConfirm} disabled={!countValid} />}
     >
       <div className="flex max-h-[60vh] min-w-[280px] flex-col gap-2 overflow-y-auto p-1">
-        {data.choices.map((choice) => {
-          const selectedCount = Math.min(
-            selectedCounts.get(choice.sideboard_index) ?? 0,
-            choice.entry.count,
-          );
+        {data.choices.map((entry) => {
+          const key = entryKey(entry);
+          const selectedCount = Math.min(selectedCounts.get(key) ?? 0, entry.count);
           const isSelected = selectedCount > 0;
+          const sourceLabel =
+            entry.source.type === "FaceUpExile" ? "From exile" : "From sideboard";
           return (
             <button
-              key={choice.sideboard_index}
+              key={key}
               type="button"
               className={`flex items-center justify-between rounded-md border px-3 py-2 text-left text-sm transition ${
                 isSelected
                   ? "border-emerald-400 bg-emerald-500/20 text-white"
                   : "border-white/15 bg-black/30 text-zinc-100 hover:bg-white/10"
               }`}
-              onClick={() => toggleSelect(choice.sideboard_index, choice.entry.count)}
+              onClick={() => toggleSelect(key, entry.count)}
             >
-              <span>{choice.entry.card.name}</span>
+              <span className="flex flex-col">
+                <span>{entry.name}</span>
+                <span className="text-[10px] uppercase tracking-wide text-zinc-400">
+                  {sourceLabel}
+                </span>
+              </span>
               <span className="text-xs text-zinc-400">
-                {isSelected ? `${selectedCount}/` : ""}x{choice.entry.count}
+                {isSelected ? `${selectedCount}/` : ""}x{entry.count}
               </span>
             </button>
           );
@@ -1029,9 +1091,7 @@ function OutsideGameModal({ data }: { data: OutsideGameChoice["data"] }) {
 }
 
 function outsideGameChoiceKey(data: OutsideGameChoice["data"]) {
-  const choicesKey = data.choices
-    .map((choice) => `${choice.sideboard_index}:${choice.entry.count}`)
-    .join(",");
+  const choicesKey = data.choices.map((entry) => `${entryKey(entry)}:${entry.count}`).join(",");
   return `${data.player}:${data.count}:${data.up_to ?? false}:${data.destination}:${choicesKey}`;
 }
 

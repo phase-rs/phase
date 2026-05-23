@@ -201,10 +201,29 @@ export interface DeckPoolEntry {
   count: number;
 }
 
+/**
+ * Discriminated source for a single outside-game candidate. Sideboard entries
+ * carry their full `CardFace` so the UI can render them without a sideboard
+ * lookup; face-up exile candidates are addressed by their in-game `ObjectId`.
+ * Mirrors Rust `OutsideGameChoiceSource` (engine `types/game_state.rs`).
+ */
+export type OutsideGameChoiceSource =
+  | { type: "Sideboard"; data: { sideboard_index: number; card: CardFacePartial } }
+  | { type: "FaceUpExile"; data: { object_id: ObjectId } };
+
 export interface OutsideGameChoiceEntry {
-  sideboard_index: number;
-  entry: DeckPoolEntry;
+  source: OutsideGameChoiceSource;
+  count: number;
+  name: string;
 }
+
+/**
+ * One committed selection on `GameAction::ChooseOutsideGameCards`. Mirrors
+ * Rust `OutsideGameSelection` (engine `types/actions.rs`).
+ */
+export type OutsideGameSelection =
+  | { type: "Sideboard"; data: { sideboard_index: number } }
+  | { type: "FaceUpExile"; data: { object_id: ObjectId } };
 
 export interface OutsideGameCardUse {
   player: PlayerId;
@@ -1286,7 +1305,7 @@ export type GameAction =
   | { type: "UntapLandForMana"; data: { object_id: ObjectId } }
   | { type: "TapForConvoke"; data: { object_id: ObjectId; mana_type: ManaType } }
   | { type: "SelectCards"; data: { cards: ObjectId[] } }
-  | { type: "ChooseOutsideGameCards"; data: { sideboard_indices: number[] } }
+  | { type: "ChooseOutsideGameCards"; data: { selections: OutsideGameSelection[] } }
   | { type: "SelectTargets"; data: { targets: TargetRef[] } }
   | { type: "ChooseTarget"; data: { target: TargetRef | null } }
   | { type: "ChoosePair"; data: { partner: ObjectId | null } }

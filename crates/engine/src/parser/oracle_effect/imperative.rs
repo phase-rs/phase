@@ -1701,12 +1701,34 @@ fn parse_search_outside_game_ast(
     lower: &str,
     ctx: &mut ParseContext,
 ) -> Option<SearchCreationImperativeAst> {
+    // CR 406.3 + CR 400.11: Two source pools may appear under a single
+    // "reveal … or choose a face-up … card you own in exile" disjunction
+    // (Karn, the Great Creator; Coax from the Blind Eternities). The
+    // controller picks one card from the union of (a) the owned outside-the-
+    // game collection and (b) face-up exile cards they own matching the
+    // filter. The destination clause may be inline (" and put it into your
+    // hand") or a sibling sentence handled by the chain splitter.
+    // (filter_text, destination, include_face_up_exile) — extracted into a
+    // type alias so the parser's return type stays under the
+    // clippy::type_complexity threshold.
+    type OutsideGameParseFields<'a> = (&'a str, Zone, bool);
     fn parse_clause<'a>(
         input: &'a str,
-    ) -> Result<(&'a str, (&'a str, Zone)), nom::Err<OracleError<'a>>> {
-        let (rest, _) = tag("reveal a ").parse(input)?;
+    ) -> Result<(&'a str, OutsideGameParseFields<'a>), nom::Err<OracleError<'a>>> {
+        // "reveal a "/"reveal an " — articles vary by filter (artifact → an).
+        let (rest, _) = alt((tag("reveal a "), tag("reveal an "))).parse(input)?;
+        // Outside-the-game branch is mandatory and yields filter_text.
         let (rest, filter_text) = take_until(" card you own from outside the game").parse(rest)?;
         let (rest, _) = tag(" card you own from outside the game").parse(rest)?;
+        // Optional face-up exile disjunction. Re-uses the same filter phrase
+        // (Karn and Coax both repeat the filter literally in both branches);
+        // we discard the second filter_text since the outside-game one is
+        // canonical for the unified pool's filter.
+        let (rest, include_face_up_exile) = opt(parse_face_up_exile_branch).parse(rest)?;
+        let include_face_up_exile = include_face_up_exile.is_some();
+        // Optional inline destination clause. When absent, the destination
+        // arrives as a follow-up "Put that card into your hand." chunk
+        // routed through the chain splitter into a ChangeZone sub-ability.
         let (rest, destination) = opt(alt((
             value(Zone::Hand, tag(" and put it into your hand")),
             value(Zone::Hand, tag(" and put that card into your hand")),
@@ -1714,10 +1736,27 @@ fn parse_search_outside_game_ast(
         .parse(rest)?;
         let (rest, _) = opt(tag(".")).parse(rest)?;
         let (rest, _) = eof.parse(rest)?;
-        Ok((rest, (filter_text, destination.unwrap_or(Zone::Hand))))
+        Ok((
+            rest,
+            (
+                filter_text,
+                destination.unwrap_or(Zone::Hand),
+                include_face_up_exile,
+            ),
+        ))
     }
 
-    let (_, (filter_text, destination)) = parse_clause(lower).ok()?;
+    // " or choose a face-up <filter> card you own in exile". English
+    // grammar always pairs "a face-up" (the head noun begins with the
+    // consonant /f/), so no "an face-up" variant exists in MTGJSON.
+    fn parse_face_up_exile_branch(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+        let (rest, _) = tag(" or choose a face-up ").parse(input)?;
+        let (rest, _filter_text) = take_until(" card you own in exile").parse(rest)?;
+        let (rest, _) = tag(" card you own in exile").parse(rest)?;
+        Ok((rest, ()))
+    }
+
+    let (_, (filter_text, destination, include_face_up_exile)) = parse_clause(lower).ok()?;
     let filter = super::search::parse_search_filter(filter_text, ctx);
     Some(SearchCreationImperativeAst::SearchOutsideGame {
         filter,
@@ -1725,6 +1764,7 @@ fn parse_search_outside_game_ast(
         reveal: true,
         destination,
         up_to: true,
+        include_face_up_exile,
     })
 }
 
@@ -1768,6 +1808,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             reveal,
             destination,
             up_to,
+            include_face_up_exile,
         } => Effect::SearchOutsideGame {
             filter,
             count: if up_to {
@@ -1777,6 +1818,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             },
             reveal,
             destination,
+            include_face_up_exile,
         },
         SearchCreationImperativeAst::Dig { count, reveal } => Effect::Dig {
             count,
@@ -6499,10 +6541,15 @@ mod tests {
                 count,
                 reveal,
                 destination,
+                include_face_up_exile,
             } => {
                 assert_eq!(count, QuantityExpr::up_to(QuantityExpr::Fixed { value: 1 }));
                 assert!(reveal);
                 assert_eq!(destination, Zone::Hand);
+                assert!(
+                    !include_face_up_exile,
+                    "legacy single-branch wording must default to sideboard-only"
+                );
                 match filter {
                     TargetFilter::Typed(typed) => {
                         assert!(typed.type_filters.contains(&TypeFilter::Sorcery));
@@ -6523,6 +6570,114 @@ mod tests {
                 }
                 other => panic!("expected creature filter, got {other:?}"),
             },
+            other => panic!("expected SearchOutsideGame, got {other:?}"),
+        }
+    }
+
+    /// CR 406.3 + CR 400.11: Karn, the Great Creator's -2 reveals OR pulls
+    /// from face-up exile. Verifies the Karn-class disjunction sets
+    /// `include_face_up_exile: true`, identifies the artifact filter, and
+    /// captures Hand as the destination. The trailing "Put that card into
+    /// your hand." sentence (CR 608.2c anaphoric "that card") is absorbed
+    /// into the parent effect's destination by the chain splitter, so no
+    /// separate ChangeZone sub-ability is built.
+    #[test]
+    fn parse_outside_game_karn_minus_two() {
+        let ability = super::super::parse_effect_chain(
+            "You may reveal an artifact card you own from outside the game or choose a face-up artifact card you own in exile. Put that card into your hand.",
+            AbilityKind::Activated,
+        );
+        match &*ability.effect {
+            Effect::SearchOutsideGame {
+                filter,
+                destination,
+                include_face_up_exile,
+                reveal,
+                ..
+            } => {
+                assert!(
+                    *include_face_up_exile,
+                    "Karn-class disjunction must set include_face_up_exile"
+                );
+                assert!(reveal);
+                assert_eq!(*destination, Zone::Hand);
+                match filter {
+                    TargetFilter::Typed(typed) => {
+                        assert!(
+                            typed.type_filters.contains(&TypeFilter::Artifact),
+                            "artifact filter must be recognized from the outside-game branch"
+                        );
+                    }
+                    other => panic!("expected artifact filter, got {other:?}"),
+                }
+            }
+            other => panic!("expected SearchOutsideGame, got {other:?}"),
+        }
+    }
+
+    /// CR 406.3 + CR 400.11: Coax from the Blind Eternities — same Karn-class
+    /// disjunction with an Eldrazi subtype filter. Confirms the parser is
+    /// filter-agnostic and the disjunction trigger is structural, not
+    /// keyword-specific.
+    #[test]
+    fn parse_outside_game_coax_blind_eternities() {
+        let ability = super::super::parse_effect_chain(
+            "You may reveal an Eldrazi card you own from outside the game or choose a face-up Eldrazi card you own in exile. Put that card into your hand.",
+            AbilityKind::Spell,
+        );
+        match &*ability.effect {
+            Effect::SearchOutsideGame {
+                filter,
+                include_face_up_exile,
+                destination,
+                ..
+            } => {
+                assert!(
+                    *include_face_up_exile,
+                    "Coax disjunction must set include_face_up_exile"
+                );
+                assert_eq!(*destination, Zone::Hand);
+                // CR 205.3m: Eldrazi is a creature subtype; the search filter
+                // carries it as TypeFilter::Subtype within `type_filters`.
+                match filter {
+                    TargetFilter::Typed(typed) => {
+                        let has_eldrazi = typed.type_filters.iter().any(|tf| {
+                            matches!(tf, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("eldrazi"))
+                        });
+                        assert!(
+                            has_eldrazi,
+                            "expected Eldrazi subtype filter, got {:?}",
+                            typed.type_filters
+                        );
+                    }
+                    other => panic!("expected typed filter, got {other:?}"),
+                }
+            }
+            other => panic!("expected SearchOutsideGame, got {other:?}"),
+        }
+    }
+
+    /// Regression: legacy single-branch "reveal a … from outside the game"
+    /// wording (Wish, Cunning Wish, Burning Wish) must still parse with
+    /// `include_face_up_exile: false` so non-Karn wishboard cards keep their
+    /// sideboard-only resolution path.
+    #[test]
+    fn parse_outside_game_legacy_single_branch_still_works() {
+        let effect = super::super::parse_effect(
+            "reveal a sorcery card you own from outside the game and put it into your hand",
+        );
+        match effect {
+            Effect::SearchOutsideGame {
+                include_face_up_exile,
+                destination,
+                ..
+            } => {
+                assert!(
+                    !include_face_up_exile,
+                    "legacy wishboard text must NOT enable face-up exile"
+                );
+                assert_eq!(destination, Zone::Hand);
+            }
             other => panic!("expected SearchOutsideGame, got {other:?}"),
         }
     }
