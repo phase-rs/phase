@@ -2633,15 +2633,22 @@ fn apply_battlefield_cost_modifiers_inner(
 ) {
     use crate::types::ability::ControllerRef;
 
-    // CR 702.26b + CR 114.4: Functioning gate (phased-out / command-zone) owned
-    // by `battlefield_functioning_statics`. We deliberately use the non-
-    // condition-filtered helper here — CR 604.1 condition evaluation must run
-    // against `caster` (so `SpellsCastThisTurn`-style conditions resolve against
-    // the casting player's history), not against the static's controller. The
+    // CR 702.26b + CR 114.4 + CR 113.6b: Functioning gate (phased-out /
+    // command-zone with Eminence-style opt-in) owned by
+    // `game_functioning_statics`. We deliberately use the non-condition-
+    // filtered helper here — CR 604.1 condition evaluation must run against
+    // `caster` (so `SpellsCastThisTurn`-style conditions resolve against the
+    // casting player's history), not against the static's controller. The
     // inline `evaluate_condition(... caster, ...)` call below does that work.
-    for (bf_obj, def) in super::functioning_abilities::battlefield_functioning_statics(state) {
-        let bf_id = bf_obj.id;
-        let source_controller = bf_obj.controller;
+    //
+    // CR 113.6b: cost-reduction statics that opt into the command zone via
+    // `active_zones.contains(Command)` (Eminence — The Ur-Dragon, Edgar Markov)
+    // function from the command zone for non-emblem objects; the per-static
+    // `active_zones` filter below still enforces the static's declared zones
+    // when the source is on the battlefield.
+    for (src_obj, def) in super::functioning_abilities::game_functioning_statics(state) {
+        let bf_id = src_obj.id;
+        let source_controller = src_obj.controller;
 
         {
             let (amount, spell_filter, dynamic_count, is_raise) = match &def.mode {
@@ -2676,9 +2683,15 @@ fn apply_battlefield_cost_modifiers_inner(
                 continue;
             }
 
-            // CR 113.6: Statics that declare non-battlefield active_zones must not
-            // fire from the battlefield. Empty active_zones = battlefield default.
-            if !def.active_zones.is_empty() && !def.active_zones.contains(&Zone::Battlefield) {
+            // CR 113.6 + CR 113.6b: A static functions only in its declared
+            // zones. Empty `active_zones` means battlefield default; non-empty
+            // means restrict to the listed zones. Eminence statics list both
+            // Battlefield and Command and pass for either source zone.
+            if def.active_zones.is_empty() {
+                if src_obj.zone != Zone::Battlefield {
+                    continue;
+                }
+            } else if !def.active_zones.contains(&src_obj.zone) {
                 continue;
             }
 

@@ -5181,7 +5181,9 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::SourceAttachedToCreature => ("SourceAttachedToCreature", Unhandled),
         StaticCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Unhandled),
         StaticCondition::SourceIsPaired => ("SourceIsPaired", Handled),
-        StaticCondition::SourceInZone { .. } => ("SourceInZone", Unhandled),
+        // CR 113.6b: evaluated by `layers::evaluate_condition` — checks source
+        // object's zone against the specified zone. Runtime-handled.
+        StaticCondition::SourceInZone { .. } => ("SourceInZone", Handled),
         StaticCondition::EnchantedIsFaceDown => ("EnchantedIsFaceDown", Handled),
         StaticCondition::AdditionalCostPaid => ("AdditionalCostPaid", Handled),
     }

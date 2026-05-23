@@ -1226,6 +1226,17 @@ pub fn spell_object_matches_filter_from_state(
             state,
             source_id,
             source_controller: source_obj.controller,
+            // CR 109.1 is cited as the identity foundation here (an object
+            // is uniquely the object that it is) because the Comprehensive
+            // Rules have no dedicated entry defining "another" — the
+            // standard reading across the rules text is "an object distinct
+            // from the referenced object". Thread the cast-spell's
+            // object_id through so `FilterProp::Another` ("other Dragon
+            // spells you cast") can exclude the case where the spell being
+            // cast IS the static's own source (e.g. casting The Ur-Dragon
+            // itself from the command zone — Eminence must not reduce its
+            // own cost).
+            spell_object_id: Some(spell_obj.id),
         }),
     )
 }
@@ -1250,6 +1261,14 @@ struct SpellFilterContext<'a> {
     state: &'a GameState,
     source_id: ObjectId,
     source_controller: PlayerId,
+    /// CR 109.1 (cited as identity foundation — CR has no dedicated
+    /// "another" entry): ObjectId of the spell being filtered. `None` when
+    /// the caller is matching against a historical `SpellCastRecord`
+    /// (CR 117.x turn-history queries) for which `Another` is structurally
+    /// indeterminate — those callers fail-closed on `Another`. Live
+    /// cost-modifier evaluation passes `Some(spell.id)` so "other [X]
+    /// spells you cast" excludes the static's own source.
+    spell_object_id: Option<ObjectId>,
 }
 
 fn spell_object_matches_filter_inner(
@@ -1427,6 +1446,20 @@ fn spell_object_matches_property(
                     })
                 })
                 .is_some_and(|card_type| record.core_types.contains(card_type))
+        }),
+        // CR 109.1 (cited as identity foundation — CR has no dedicated
+        // "another" entry): "other [X] spells you cast" excludes the case
+        // where the spell being cast IS the static's own source object. The
+        // check is identity-only (`object_id != source_id`); two distinct
+        // copies of the same card are NOT "the same" object. Historical-
+        // record callers pass `spell_object_id: None` and fail-closed here
+        // (a turn-history "another" query needs the original cast's
+        // object_id, which is not stored in the snapshot — CR 117.x
+        // predicates that need it must route through dedicated `Another`-
+        // aware paths).
+        FilterProp::Another => context.is_some_and(|ctx| {
+            ctx.spell_object_id
+                .is_some_and(|spell_id| spell_id != ctx.source_id)
         }),
         _ => spell_record_matches_property(record, prop),
     }
