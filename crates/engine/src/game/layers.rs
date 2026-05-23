@@ -14,7 +14,7 @@ use crate::types::ability::{
     TypedFilter,
 };
 use crate::types::attribution::EffectRef;
-use crate::types::card_type::{is_land_subtype, CoreType};
+use crate::types::card_type::{is_land_subtype, noncreature_subtype_set, CoreType, SubtypeSet};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::game_state::{DayNight, GameState};
 use crate::types::identifiers::ObjectId;
@@ -32,6 +32,32 @@ struct ActiveCombatAssignmentRuleEffect {
     modification: ContinuousModification,
     affected_filter: TargetFilter,
     condition: Option<StaticCondition>,
+}
+
+// CR 205.3c: Each subtype is correlated to its appropriate card type.
+fn subtype_matches_core_types(
+    subtype: &str,
+    core_types: &[CoreType],
+    all_creature_types: &[String],
+) -> bool {
+    let Some(set) = noncreature_subtype_set(subtype) else {
+        return core_types.contains(&CoreType::Creature)
+            || core_types.contains(&CoreType::Kindred)
+            || all_creature_types
+                .iter()
+                .any(|creature_type| creature_type == subtype);
+    };
+    core_types.iter().any(|core_type| {
+        matches!(
+            (core_type, set),
+            (CoreType::Artifact, SubtypeSet::Artifact)
+                | (CoreType::Enchantment, SubtypeSet::Enchantment)
+                | (CoreType::Land, SubtypeSet::Land)
+                | (CoreType::Planeswalker, SubtypeSet::Planeswalker)
+                | (CoreType::Instant | CoreType::Sorcery, SubtypeSet::Spell)
+                | (CoreType::Battle, SubtypeSet::Battle)
+        )
+    })
 }
 
 /// Remove transient effects that have expired based on their duration.
@@ -1941,6 +1967,7 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
     } else {
         None
     };
+    let all_creature_types = state.all_creature_types.clone();
 
     for id in affected_ids {
         // CR 613.4c: When the dynamic modification's QuantityExpr depends on
@@ -2131,18 +2158,20 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             // CR 205.1a + CR 613.1d: Replace the entire core card-type set.
             ContinuousModification::SetCardTypes { ref core_types } => {
                 obj.card_types.core_types = core_types.clone();
+                obj.card_types.subtypes.retain(|subtype| {
+                    subtype_matches_core_types(subtype, core_types, &all_creature_types)
+                });
             }
             // CR 205.1a + CR 613.1d: Remove every subtype belonging to the
             // named subtype set. Membership for the `Creature` set is resolved
             // against the runtime-populated `state.all_creature_types` — the
             // same source `AddAllCreatureTypes` uses below.
             ContinuousModification::RemoveAllSubtypes { set } => {
-                use crate::types::card_type::SubtypeSet;
                 match set {
                     SubtypeSet::Creature => {
                         obj.card_types
                             .subtypes
-                            .retain(|s| !state.all_creature_types.iter().any(|c| c == s));
+                            .retain(|s| !all_creature_types.iter().any(|c| c == s));
                     }
                     SubtypeSet::Land => {
                         // CR 205.3i: land-type membership via the basic/non-basic
@@ -2152,11 +2181,12 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
                     SubtypeSet::Artifact
                     | SubtypeSet::Enchantment
                     | SubtypeSet::Planeswalker
-                    | SubtypeSet::Spell => unreachable!(
-                        "RemoveAllSubtypes for {set:?} has no membership source wired; \
-                         only Creature and Land subtype removal is emitted by the parser. \
-                         Add a membership classifier before emitting this set."
-                    ),
+                    | SubtypeSet::Spell
+                    | SubtypeSet::Battle => {
+                        obj.card_types
+                            .subtypes
+                            .retain(|s| noncreature_subtype_set(s) != Some(*set));
+                    }
                 }
             }
             // CR 205.4 + CR 707.9d: "in addition to its other types" — append
@@ -2553,6 +2583,38 @@ mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    #[test]
+    fn set_card_types_prunes_subtypes_not_matching_new_core_types() {
+        let mut state = setup();
+        state.all_creature_types = vec!["Bear".to_string(), "Berserker".to_string()];
+
+        assert!(subtype_matches_core_types(
+            "Bear",
+            &[CoreType::Creature],
+            &state.all_creature_types
+        ));
+        assert!(!subtype_matches_core_types(
+            "Equipment",
+            &[CoreType::Creature],
+            &state.all_creature_types
+        ));
+        assert!(!subtype_matches_core_types(
+            "Mountain",
+            &[CoreType::Creature],
+            &state.all_creature_types
+        ));
+        assert!(subtype_matches_core_types(
+            "Equipment",
+            &[CoreType::Artifact, CoreType::Creature],
+            &state.all_creature_types
+        ));
+        assert!(subtype_matches_core_types(
+            "Siege",
+            &[CoreType::Battle],
+            &state.all_creature_types
+        ));
     }
 
     fn make_creature(
