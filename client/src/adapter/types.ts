@@ -886,7 +886,7 @@ export type OpeningHandBottomReason = { type: "TinyLeadersMultiCommander" };
 
 export type WaitingFor =
   | { type: "Priority"; data: { player: PlayerId } }
-  | { type: "ActivationCostOneOfChoice"; data: { player: PlayerId; costs: AbilityCost[]; pending_cast: PendingCast } }
+  | { type: "ActivationCostOneOfChoice"; data: { player: PlayerId; costs: SerializedAbilityCost[]; pending_cast: PendingCast } }
   | {
       type: "MulliganDecision";
       data: {
