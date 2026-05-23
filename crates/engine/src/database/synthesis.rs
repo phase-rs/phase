@@ -7798,18 +7798,19 @@ mod sorcery_speed_invariant_tests {
 mod loyalty_sorcery_speed_tests {
     //! CR 606.3: Planeswalker loyalty abilities may only be activated during
     //! the controller's main phase with an empty stack, and only once per turn
-    //! per permanent. The parser must tag every loyalty line with both
-    //! `ActivationRestriction::AsSorcery` (CR 606.3 timing) and
-    //! `ActivationRestriction::OnlyOnceEachTurn` (CR 606.3 per-permanent
-    //! limit) so downstream consumers (and the shared invariant) see a
-    //! self-describing restriction set. The planeswalker activation path
-    //! (`game::planeswalker::can_activate_loyalty`) already gates loyalty
-    //! independently; these restrictions are defensive + invariant-preserving.
+    //! per permanent. The parser tags every loyalty line with
+    //! `ActivationRestriction::AsSorcery` (CR 606.3 timing) for downstream
+    //! consumers. It does NOT add `OnlyOnceEachTurn`: that restriction is
+    //! per-ability-index, while CR 606.3 is per-permanent across ALL loyalty
+    //! ability indices. The per-permanent cap is enforced authoritatively by
+    //! `game::planeswalker::can_activate_loyalty_ability` against
+    //! `obj.loyalty_activations_this_turn`. See `apply_loyalty_restrictions`
+    //! in `parser::oracle` for the rationale and The Chain Veil interaction.
     use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::ActivationRestriction;
 
     #[test]
-    fn loyalty_ability_parses_with_as_sorcery_and_once_each_turn() {
+    fn loyalty_ability_parses_with_as_sorcery() {
         // Jace, the Mind Sculptor reminder-text-like minimal loyalty line.
         let r = parse_oracle_text("+2: Draw a card.", "Test Planeswalker", &[], &[], &[]);
         assert_eq!(r.abilities.len(), 1);
@@ -7820,10 +7821,13 @@ mod loyalty_sorcery_speed_tests {
                 .contains(&ActivationRestriction::AsSorcery),
             "CR 606.3: AsSorcery restriction is pushed for loyalty"
         );
+        // CR 606.3: Loyalty's "once per turn per permanent" gate lives on the
+        // permanent counter, not on per-ability `OnlyOnceEachTurn`. The Chain
+        // Veil's cap-raise depends on this separation.
         assert!(
-            def.activation_restrictions
+            !def.activation_restrictions
                 .contains(&ActivationRestriction::OnlyOnceEachTurn),
-            "CR 606.3: OnlyOnceEachTurn restriction is pushed for loyalty"
+            "CR 606.3: OnlyOnceEachTurn must NOT be attached — the per-permanent counter is the gate"
         );
     }
 
@@ -7837,7 +7841,7 @@ mod loyalty_sorcery_speed_tests {
         assert!(def
             .activation_restrictions
             .contains(&ActivationRestriction::AsSorcery));
-        assert!(def
+        assert!(!def
             .activation_restrictions
             .contains(&ActivationRestriction::OnlyOnceEachTurn));
     }

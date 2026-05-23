@@ -3598,6 +3598,25 @@ pub struct GameState {
     /// (keyed by `(source_id, ability_index)`). Cleared at turn start.
     #[serde(default)]
     pub crew_activated_this_turn: HashSet<ObjectId>,
+    /// CR 606.1 + CR 606.3 + CR 603.4: Per-player count of loyalty-ability
+    /// activations this turn. Incremented in
+    /// `planeswalker::finalize_loyalty_activation` whenever any loyalty ability
+    /// resolves onto the stack (CR 606.1: loyalty abilities are a subset of
+    /// activated abilities; the activation event happens at announcement, not
+    /// resolution — which matches the CR 603.4 "this turn" history reading).
+    /// Read by `QuantityRef::LoyaltyAbilitiesActivatedThisTurn` for intervening-if
+    /// conditions like The Chain Veil's "if you activated a loyalty ability of
+    /// a planeswalker this turn". Cleared at turn start.
+    #[serde(default)]
+    pub loyalty_abilities_activated_this_turn: HashMap<PlayerId, u32>,
+    /// CR 606.3: Per-player extra loyalty-activation grants for this turn —
+    /// each entry raises the per-permanent CR 606.3 cap for every planeswalker
+    /// the player controls. Populated by the
+    /// `Effect::GrantExtraLoyaltyActivations` resolver (The Chain Veil's
+    /// activated ability). Consumed by
+    /// `planeswalker::can_activate_loyalty_ability`. Cleared at turn start.
+    #[serde(default)]
+    pub extra_loyalty_activations_this_turn: HashMap<PlayerId, u32>,
     /// CR 603.4: Per-ability per-turn resolution counter.
     /// Keyed by `(source_id, ability_index)` — identifies a specific printed
     /// ability on a specific source object. Incremented at the top of
@@ -4298,6 +4317,8 @@ impl GameState {
             activated_abilities_this_turn: HashMap::new(),
             activated_abilities_this_game: HashMap::new(),
             crew_activated_this_turn: HashSet::new(),
+            loyalty_abilities_activated_this_turn: HashMap::new(),
+            extra_loyalty_activations_this_turn: HashMap::new(),
             ability_resolutions_this_turn: HashMap::new(),
             graveyard_cast_permissions_used: HashSet::new(),
             graveyard_cast_permissions_used_per_type: HashSet::new(),
@@ -4567,6 +4588,9 @@ impl PartialEq for GameState {
             && self.activated_abilities_this_turn == other.activated_abilities_this_turn
             && self.activated_abilities_this_game == other.activated_abilities_this_game
             && self.crew_activated_this_turn == other.crew_activated_this_turn
+            && self.loyalty_abilities_activated_this_turn
+                == other.loyalty_abilities_activated_this_turn
+            && self.extra_loyalty_activations_this_turn == other.extra_loyalty_activations_this_turn
             && self.ability_resolutions_this_turn == other.ability_resolutions_this_turn
             && self.graveyard_cast_permissions_used == other.graveyard_cast_permissions_used
             && self.graveyard_cast_permissions_used_per_type
