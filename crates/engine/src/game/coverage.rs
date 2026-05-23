@@ -1035,6 +1035,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::ChosenNumber => "chosen number".into(),
         QuantityRef::AttackedThisTurn => "attacked this turn".into(),
         QuantityRef::DescendedThisTurn => "descended this turn".into(),
+        QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player } => {
+            format!("loyalty abilities activated this turn ({player:?})")
+        }
         QuantityRef::SpellsCastLastTurn => "spells cast last turn".into(),
         QuantityRef::SpellsCastThisGame { scope, filter } => match (scope, filter) {
             (CountScope::Controller, None) => "spells you've cast this game".into(),
@@ -1090,7 +1093,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         }
         QuantityRef::PlayerCounter { kind, scope } => {
             let scope_s = match scope {
-                CountScope::Controller => "you have",
+                CountScope::Controller | CountScope::Owner => "you have",
                 CountScope::ScopedPlayer => "the scoped player has",
                 CountScope::Opponents => "each opponent has",
                 CountScope::All => "each player has",
@@ -1375,7 +1378,7 @@ fn fmt_core_type(ct: &CoreType) -> &'static str {
 
 fn fmt_count_scope(scope: &CountScope) -> &'static str {
     match scope {
-        CountScope::Controller => "your",
+        CountScope::Controller | CountScope::Owner => "your",
         CountScope::ScopedPlayer => "their",
         CountScope::All => "all",
         CountScope::Opponents => "opponents'",
@@ -2068,6 +2071,10 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("target".into(), fmt_target(target)));
         }
         Effect::ExtraTurn { target } => {
+            d.push(("player".into(), fmt_target(target)));
+        }
+        Effect::GrantExtraLoyaltyActivations { amount, target } => {
+            d.push(("amount".into(), fmt_quantity(amount)));
             d.push(("player".into(), fmt_target(target)));
         }
         Effect::SkipNextTurn { target, count } => {
@@ -5067,6 +5074,9 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::ChosenNumber => ("ChosenNumber", Unhandled),
         QuantityRef::AttackedThisTurn => ("AttackedThisTurn", Handled),
         QuantityRef::DescendedThisTurn => ("DescendedThisTurn", Unhandled),
+        QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. } => {
+            ("LoyaltyAbilitiesActivatedThisTurn", Handled)
+        }
         QuantityRef::SpellsCastLastTurn => ("SpellsCastLastTurn", Unhandled),
         QuantityRef::SpellsCastThisGame { .. } => ("SpellsCastThisGame", Handled),
         QuantityRef::CounterAddedThisTurn { .. } => ("CounterAddedThisTurn", Handled),

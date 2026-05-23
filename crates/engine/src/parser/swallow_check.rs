@@ -387,7 +387,13 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
         | Effect::RevealUntil {
             kept_optional_to: Some(_),
             ..
-        } => true,
+        }
+        // CR 606.3 + CR 117.3a: `GrantExtraLoyaltyActivations` inherently
+        // encodes the "you may activate" permission — granting permission is
+        // opt-in by definition, mirroring `GrantCastingPermission`. The Chain
+        // Veil's "you may activate one of its loyalty abilities once this turn"
+        // is the permission itself; the player still decides each activation.
+        | Effect::GrantExtraLoyaltyActivations { .. } => true,
         Effect::ChooseOneOf { branches, .. } => branches.iter().any(def_tree_has_optional),
         Effect::CreateDelayedTrigger { effect, .. } => def_tree_has_optional(effect),
         Effect::CreateEmblem { statics, triggers } => {

@@ -439,9 +439,16 @@ pub struct GameObject {
     #[serde(skip_deserializing, default)]
     pub available_mana_pips: Vec<ManaPip>,
 
-    // Planeswalker: whether a loyalty ability has been activated this turn
+    /// CR 606.3 + CR 606.1: Per-permanent loyalty-ability activation count for
+    /// the current turn. Default cap is 1 (CR 606.3 "once per turn"); raised
+    /// for the controller by `GameState::extra_loyalty_activations_this_turn`
+    /// (The Chain Veil class). The gate logic lives in
+    /// `planeswalker::can_activate_loyalty_ability`. The historical bool
+    /// "loyalty_activated_this_turn" is replaced by `count > 0`. Cleared at
+    /// turn start (CR 606.3 "that turn" reset) and on battlefield re-entry
+    /// (CR 400.7 — a re-entering permanent is a new object with no memory).
     #[serde(skip_deserializing, default)]
-    pub loyalty_activated_this_turn: bool,
+    pub loyalty_activations_this_turn: u32,
 
     // Commander: whether this object is a commander card
     #[serde(default)]
@@ -771,7 +778,7 @@ impl GameObject {
             mana_ability_index: None,
             devotion: None,
             available_mana_pips: Vec::new(),
-            loyalty_activated_this_turn: false,
+            loyalty_activations_this_turn: 0,
             is_commander: false,
             commander_tax: None,
             is_renowned: false,
@@ -847,7 +854,7 @@ impl GameObject {
         self.tapped = false;
         self.damage_marked = 0;
         self.dealt_deathtouch_damage = false;
-        self.loyalty_activated_this_turn = false;
+        self.loyalty_activations_this_turn = 0;
         self.is_suspected = false;
         self.is_renowned = false;
         self.monstrous = false;

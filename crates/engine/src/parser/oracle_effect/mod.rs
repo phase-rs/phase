@@ -10089,6 +10089,13 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
                         player: PlayerScope::ScopedPlayer,
                     }
                 }
+                QuantityRef::HandSize {
+                    player: PlayerScope::Target,
+                } => {
+                    *qty = QuantityRef::HandSize {
+                        player: PlayerScope::ScopedPlayer,
+                    }
+                }
                 QuantityRef::TargetZoneCardCount { zone } => match zone {
                     crate::types::ability::ZoneRef::Hand => {
                         *qty = QuantityRef::HandSize {
@@ -11452,14 +11459,39 @@ pub(crate) fn parse_effect_chain_ir(
 
         let (text_no_temporal, delayed_condition) = strip_temporal_suffix(&text);
         let (text_no_qty, multi_target) = strip_any_number_quantifier(text_no_temporal);
-        let (suffix_repeat_for, stripped_text_no_qty) = strip_for_each_repeat_suffix(&text_no_qty);
-        let stripped_clause = parse_effect_clause(&stripped_text_no_qty, ctx);
-        let (clause, repeat_for) = if suffix_repeat_for.is_some()
-            && matches!(stripped_clause.effect, Effect::CopySpell { .. })
-        {
-            (stripped_clause, repeat_for.or(suffix_repeat_for))
+        // CR 121.1 + CR 609.3: "draw cards equal to the difference" — anaphoric draw
+        // count. When a leading QuantityCheck condition establishes two operands (e.g.
+        // "if you have fewer than seven cards in hand"), "the difference" draws the
+        // unsigned gap between them. Resolved here, in scope of both operands, to
+        // QuantityExpr::Difference { left, right }. Cards: Kozilek the Great Distortion,
+        // Iymrith Desert Doom, Damia Sage of Stone, Slithermuse, Balance of Power.
+        let difference_draw = condition.as_ref().and_then(|cond| {
+            let lower = text_no_qty.to_lowercase();
+            let clean = lower.trim().trim_end_matches('.');
+            if clean == "draw cards equal to the difference" {
+                conditions::difference_expr(cond).map(|diff| {
+                    parsed_clause(Effect::Draw {
+                        count: diff,
+                        target: TargetFilter::Controller,
+                    })
+                })
+            } else {
+                None
+            }
+        });
+        let (clause, repeat_for) = if let Some(draw) = difference_draw {
+            (draw, repeat_for)
         } else {
-            (parse_effect_clause(&text_no_qty, ctx), repeat_for)
+            let (suffix_repeat_for, stripped_text_no_qty) =
+                strip_for_each_repeat_suffix(&text_no_qty);
+            let stripped_clause = parse_effect_clause(&stripped_text_no_qty, ctx);
+            if suffix_repeat_for.is_some()
+                && matches!(stripped_clause.effect, Effect::CopySpell { .. })
+            {
+                (stripped_clause, repeat_for.or(suffix_repeat_for))
+            } else {
+                (parse_effect_clause(&text_no_qty, ctx), repeat_for)
+            }
         };
 
         // CR 608.2c + CR 109.4: After a `Choose(Player)` clause is finalized,
@@ -13249,6 +13281,20 @@ fn split_difference_repeat_suffix(text: &str) -> Option<&str> {
 /// CR 609.3: Strip "for each [X], " prefix from effect text.
 /// Returns the QuantityExpr for the iteration count and the remaining text.
 /// "For as long as" is NOT matched (different construct — duration, not iteration).
+/// CR 606.3: Recognize The Chain Veil's printed second-ability pattern,
+/// "for each planeswalker you control, you may activate one of its loyalty
+/// abilities once this turn as though none of its loyalty abilities have been
+/// activated this turn." This belongs to `strip_for_each_prefix` solely to
+/// bail out — the grant is a single per-controller cap raise, not a per-iteration
+/// repeat. The actual `Effect::GrantExtraLoyaltyActivations` mapping lives in
+/// `imperative::parse_grant_extra_loyalty_activations`.
+fn is_chain_veil_for_each_grant(lower: &str) -> bool {
+    nom_primitives::scan_contains(
+        lower,
+        "for each planeswalker you control, you may activate one of its loyalty abilities once this turn",
+    )
+}
+
 fn strip_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String) {
     let lower = text.to_lowercase();
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("for each ")).parse(i)) {
@@ -13270,6 +13316,16 @@ fn strip_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String) {
                     return (None, text.to_string());
                 }
                 if parse_for_each_object_copy_parts(text, &lower).is_some() {
+                    return (None, text.to_string());
+                }
+                // CR 606.3: The Chain Veil's "For each planeswalker you control,
+                // you may activate one of its loyalty abilities once this turn..."
+                // is parsed as a single Effect::GrantExtraLoyaltyActivations —
+                // the "for each planeswalker" preamble names the beneficiaries
+                // (every planeswalker the controller controls gets +1 cap), not
+                // a repeat count. Bailing out keeps the residual text intact so
+                // the imperative dispatch can recognize the full pattern.
+                if is_chain_veil_for_each_grant(&lower) {
                     return (None, text.to_string());
                 }
                 let offset = text.len() - remainder.len();
@@ -20078,6 +20134,95 @@ mod tests {
         );
     }
 
+    /// CR 121.1 + CR 402: "if you have fewer than N cards in hand, draw cards equal to
+    /// the difference" — the draw count is `Difference(Fixed(N), HandSize(Controller))`.
+    /// Anchor card: Kozilek, the Great Distortion. Same infrastructure fixes Iymrith
+    /// Desert Doom (N=3), Damia Sage of Stone (N=7).
+    #[test]
+    fn draw_cards_equal_to_hand_difference_from_limit() {
+        let def = parse_effect_chain(
+            "If you have fewer than seven cards in hand, draw cards equal to the difference.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::Draw {
+                    target: TargetFilter::Controller,
+                    ..
+                }
+            ),
+            "expected Draw(Controller), got {:?}",
+            def.effect
+        );
+        assert_eq!(
+            def.condition,
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                comparator: Comparator::LT,
+                rhs: QuantityExpr::Fixed { value: 7 },
+            }),
+            "condition must be HandSize(Controller) LT 7"
+        );
+        if let Effect::Draw { ref count, .. } = *def.effect {
+            assert_eq!(
+                *count,
+                QuantityExpr::Difference {
+                    left: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::Controller,
+                        },
+                    }),
+                    right: Box::new(QuantityExpr::Fixed { value: 7 }),
+                },
+                "draw count must be Difference(HandSize(Controller), Fixed(7))"
+            );
+        }
+    }
+
+    /// CR 121.1 + CR 402: "if that player has more cards in hand than you, draw cards
+    /// equal to the difference" — cross-player difference. Anchor: Slithermuse.
+    #[test]
+    fn draw_cards_equal_to_cross_player_hand_difference() {
+        let def = parse_effect_chain(
+            "If that player has more cards in hand than you, draw cards equal to the difference.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::Draw {
+                    target: TargetFilter::Controller,
+                    ..
+                }
+            ),
+            "expected Draw(Controller), got {:?}",
+            def.effect
+        );
+        if let Effect::Draw { ref count, .. } = *def.effect {
+            assert_eq!(
+                *count,
+                QuantityExpr::Difference {
+                    left: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::ScopedPlayer,
+                        },
+                    }),
+                    right: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::Controller,
+                        },
+                    }),
+                },
+                "draw count must be Difference(HandSize(ScopedPlayer), HandSize(Controller))"
+            );
+        }
+    }
+
     #[test]
     fn effect_for_each_object_copy_token_uses_source_filter_not_repeat() {
         let def = parse_effect_chain(
@@ -20504,7 +20649,25 @@ mod tests {
             AbilityKind::Spell,
         );
         assert_eq!(def.player_scope, Some(PlayerFilter::All));
-        assert!(matches!(&*def.effect, Effect::Discard { .. }));
+        // CR 109.5 + CR 115.10: "their hand" under `player_scope: All` must
+        // resolve the count against the iterating player, not the caster.
+        // Regression for the Windfall bug where opponents drew without
+        // discarding because `HandSize { Controller }` survived the rebind.
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::Discard {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::ScopedPlayer,
+                        },
+                    },
+                    ..
+                }
+            ),
+            "expected HandSize {{ ScopedPlayer }}, got {:?}",
+            def.effect
+        );
         let sub = def
             .sub_ability
             .as_ref()
@@ -20517,6 +20680,24 @@ mod tests {
                     qty: QuantityRef::PreviousEffectAmount
                 },
                 target: TargetFilter::Controller,
+            }
+        ));
+    }
+
+    #[test]
+    fn target_player_discards_their_hand_uses_target_hand_size() {
+        let def = parse_effect_chain("Target player discards their hand.", AbilityKind::Spell);
+        assert_eq!(def.player_scope, None);
+        assert!(matches!(
+            &*def.effect,
+            Effect::Discard {
+                target: TargetFilter::Player,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Target,
+                    },
+                },
+                ..
             }
         ));
     }
@@ -21285,6 +21466,53 @@ mod tests {
                 assert!(mods.contains(&&ContinuousModification::AddKeyword {
                     keyword: Keyword::Haste
                 }));
+            }
+            other => panic!("expected single GenericEffect, got {other:?}"),
+        }
+    }
+
+    /// CR 613.1d + CR 613.4b: Vedalken Humiliator — "lose all abilities and
+    /// have base power and toughness 1/1 until end of turn" must parse as a
+    /// single GenericEffect with RemoveAllAbilities + SetPower(1) + SetToughness(1)
+    /// on the same StaticDefinition. The sequence splitter must NOT split at
+    /// " and have base power and toughness" because the base-PT phrase is a
+    /// layer-7b continuous modification, not an imperative clause starter.
+    #[test]
+    fn lose_abilities_and_have_base_pt_parses_as_single_generic_effect() {
+        let def = parse_effect_chain(
+            "creatures your opponents control lose all abilities and have base power and toughness 1/1 until end of turn",
+            AbilityKind::Spell,
+        );
+        assert!(
+            def.sub_ability.is_none(),
+            "must parse as a single clause, not split into sub_ability"
+        );
+        match &*def.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                ..
+            } => {
+                assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+                let mods: Vec<_> = static_abilities
+                    .iter()
+                    .flat_map(|s| s.modifications.iter())
+                    .collect();
+                assert!(
+                    mods.iter()
+                        .any(|m| matches!(m, ContinuousModification::RemoveAllAbilities)),
+                    "must contain RemoveAllAbilities"
+                );
+                assert!(
+                    mods.iter()
+                        .any(|m| matches!(m, ContinuousModification::SetPower { value: 1 })),
+                    "must contain SetPower(1)"
+                );
+                assert!(
+                    mods.iter()
+                        .any(|m| matches!(m, ContinuousModification::SetToughness { value: 1 })),
+                    "must contain SetToughness(1)"
+                );
             }
             other => panic!("expected single GenericEffect, got {other:?}"),
         }
@@ -22558,12 +22786,14 @@ mod tests {
         }
     }
 
-    /// CR 701.6 + CR 603.7 + CR 202.3: Full parse tree for Mana Drain.
-    /// Verifies that prefix-position "At the beginning of your next main
-    /// phase, …" wraps the inner effect in CreateDelayedTrigger, and that
-    /// "that spell's mana value" parses to `ObjectManaValue{CostPaidObject}`
-    /// (the existing event-context anaphor; the runtime snapshot walker
-    /// resolves this against the parent ability's targets[0]).
+    /// CR 701.6 + CR 603.7 + CR 202.3 + CR 608.2c: Full parse tree for Mana
+    /// Drain. Verifies that prefix-position "At the beginning of your next
+    /// main phase, …" wraps the inner effect in CreateDelayedTrigger, and
+    /// that "that spell's mana value" parses to
+    /// `ObjectManaValue{Anaphoric}` — the bare-anaphoric-possessive class
+    /// (CR 608.2c instruction-order referent), routed by
+    /// `classify_possessive_referent` to the runtime arm that consults
+    /// `effect_context_object` (the counter-target spell snapshot) first.
     ///
     /// Asserts:
     /// - primary effect is `Counter` targeting stack spell,
@@ -22609,7 +22839,18 @@ mod tests {
             "expected AtNextPhaseForPlayer(PreCombatMain), got {delayed_cond:?}"
         );
 
-        // Inner delayed effect: Mana(Colorless, Ref(ObjectManaValue{CostPaidObject})).
+        // Inner delayed effect: Mana(Colorless, Ref(ObjectManaValue{Anaphoric})).
+        //
+        // CR 608.2c — "that spell" in the delayed-trigger clause is a bare
+        // anaphoric pronoun: it points at the spell introduced by the
+        // earlier-instruction `Counter target spell`. `classify_possessive_referent`
+        // emits `ObjectScope::Anaphoric` whose runtime resolver (in
+        // `game/quantity.rs`) consults `effect_context_object` (the
+        // captured-on-counter spell snapshot stamped by the parent chain)
+        // before falling back to the trigger-event source / cost_paid_object.
+        // The integration test `mana_drain_refund.rs` exercises the runtime
+        // end-to-end; this parser assertion just freezes the parse-time
+        // scope.
         let Effect::Mana { produced, .. } = &*delayed_effect_def.effect else {
             panic!(
                 "expected Mana effect on delayed trigger, got {:?}",
@@ -22622,10 +22863,12 @@ mod tests {
                     *count,
                     QuantityExpr::Ref {
                         qty: QuantityRef::ObjectManaValue {
-                            scope: crate::types::ability::ObjectScope::CostPaidObject,
+                            scope: crate::types::ability::ObjectScope::Anaphoric,
                         }
                     },
-                    "Colorless count must reference parent target's mana value via ObjectManaValue{{CostPaidObject}}"
+                    "Colorless count must reference the counter-target spell's \
+                     mana value via ObjectManaValue{{Anaphoric}} (CR 608.2c \
+                     instruction-order referent)"
                 );
             }
             other => panic!("expected Colorless mana production, got {other:?}"),
