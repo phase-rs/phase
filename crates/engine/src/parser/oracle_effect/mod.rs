@@ -20757,11 +20757,22 @@ mod tests {
 
     #[test]
     fn effect_shuffle_their_library() {
+        // CR 608.2c: "their" in "shuffle their library" is an anaphoric
+        // reference to the player target bound earlier in the same instruction
+        // (Visions: "Look at the top five cards of target player's library.
+        // You may then have that player shuffle that library."). PR #796
+        // moved this arm — together with "that player's" / "that" / "his or
+        // her" — from `TargetFilter::Player` to `TargetFilter::ParentTarget`
+        // so the shuffle resolves against the spell's existing player target
+        // rather than re-selecting one. This test had the pre-#796
+        // expectation; updated to track the new semantics. The
+        // building-block-level coverage lives in
+        // `imperative::parse_shuffle_possessive_library_siblings`.
         let e = parse_effect("Shuffle their library");
         assert!(matches!(
             e,
             Effect::Shuffle {
-                target: TargetFilter::Player
+                target: TargetFilter::ParentTarget
             }
         ));
     }
