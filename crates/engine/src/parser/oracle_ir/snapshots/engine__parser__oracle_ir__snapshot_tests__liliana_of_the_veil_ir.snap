@@ -1,6 +1,5 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 220
 expression: "&ir"
 ---
 {
@@ -30,9 +29,6 @@ expression: "&ir"
         "activation_restrictions": [
           {
             "type": "AsSorcery"
-          },
-          {
-            "type": "OnlyOnceEachTurn"
           }
         ],
         "condition": null,
@@ -74,9 +70,6 @@ expression: "&ir"
         "activation_restrictions": [
           {
             "type": "AsSorcery"
-          },
-          {
-            "type": "OnlyOnceEachTurn"
           }
         ],
         "condition": null,
@@ -133,9 +126,6 @@ expression: "&ir"
         "activation_restrictions": [
           {
             "type": "AsSorcery"
-          },
-          {
-            "type": "OnlyOnceEachTurn"
           }
         ],
         "condition": null,

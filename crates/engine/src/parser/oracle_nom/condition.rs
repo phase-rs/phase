@@ -6,8 +6,9 @@
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::bytes::complete::take_until;
+use nom::character::complete::multispace1;
 use nom::combinator::{map, opt, value};
-use nom::sequence::preceded;
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::error::{OracleError, OracleResult};
@@ -506,49 +507,63 @@ struct AttachedConditionSubject {
     attachment_prop: FilterProp,
 }
 
-fn parse_attached_condition_subject(input: &str) -> OracleResult<'_, AttachedConditionSubject> {
+fn parse_attached_condition_subject_core(
+    input: &str,
+) -> OracleResult<'_, AttachedConditionSubject> {
     alt((
         value(
             AttachedConditionSubject {
                 type_filter: TypeFilter::Permanent,
                 attachment_prop: FilterProp::EnchantedBy,
             },
-            tag("enchanted permanent "),
+            tag("enchanted permanent"),
         ),
         value(
             AttachedConditionSubject {
                 type_filter: TypeFilter::Creature,
                 attachment_prop: FilterProp::EnchantedBy,
             },
-            tag("enchanted creature "),
+            tag("enchanted creature"),
         ),
         value(
             AttachedConditionSubject {
                 type_filter: TypeFilter::Artifact,
                 attachment_prop: FilterProp::EnchantedBy,
             },
-            tag("enchanted artifact "),
+            tag("enchanted artifact"),
         ),
         value(
             AttachedConditionSubject {
                 type_filter: TypeFilter::Land,
                 attachment_prop: FilterProp::EnchantedBy,
             },
-            tag("enchanted land "),
+            tag("enchanted land"),
         ),
         value(
             AttachedConditionSubject {
                 type_filter: TypeFilter::Creature,
                 attachment_prop: FilterProp::EquippedBy,
             },
-            tag("equipped creature "),
+            tag("equipped creature"),
         ),
     ))
     .parse(input)
 }
 
+fn parse_attached_condition_subject(input: &str) -> OracleResult<'_, AttachedConditionSubject> {
+    terminated(parse_attached_condition_subject_core, multispace1).parse(input)
+}
+
 fn attached_subject_typed_filter(subject: &AttachedConditionSubject) -> TypedFilter {
     TypedFilter::new(subject.type_filter.clone()).properties(vec![subject.attachment_prop.clone()])
+}
+
+pub(crate) fn parse_attached_subject_target_filter(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (rest, subject) = parse_attached_condition_subject_core(input)?;
+    Ok((
+        rest,
+        TargetFilter::Typed(attached_subject_typed_filter(&subject)),
+    ))
 }
 
 fn merge_attached_predicate_filter(
@@ -1125,6 +1140,41 @@ fn parse_hand_size_predicate(rest: &str, player: PlayerScope) -> Option<(&str, S
         ));
     }
 
+    // CR 402: "fewer than N cards in hand" → HandSize LT N
+    // "fewer than" is a strict inequality (e.g. "fewer than seven" excludes seven),
+    // used by Kozilek, the Great Distortion and Iymrith, Desert Doom.
+    if let Ok((after_n, n)) =
+        nom::sequence::preceded(tag::<_, _, OracleError<'_>>("fewer than "), parse_number)
+            .parse(rest)
+    {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" cards in hand").parse(after_n) {
+            return Some((
+                rest,
+                make_quantity_comparison(QuantityRef::HandSize { player }, Comparator::LT, n),
+            ));
+        }
+    }
+
+    // CR 402: "more cards in hand than you" → HandSize(player) GT HandSize(Controller)
+    // Used in cross-player comparisons like "that player has more cards in hand than you"
+    // (Slithermuse, Sandstone Oracle, Balance of Power).
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("more cards in hand than you").parse(rest) {
+        return Some((
+            rest,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize { player },
+                },
+                comparator: Comparator::GT,
+                rhs: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Controller,
+                    },
+                },
+            },
+        ));
+    }
+
     // "N or more cards in hand" → HandSize GE N
     let (after_n, n) = parse_number(rest).ok()?;
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" or more cards in hand").parse(after_n) {
@@ -1531,13 +1581,25 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
 /// patterns; life-total / graveyard variants will compose in here as more
 /// cards exercise them.
 fn parse_that_player_has_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("that player has "),
-        tag::<_, _, OracleError<'_>>("that opponent has "),
+    // CR 115.1 + CR 603.4: "that/target player/opponent has" decomposes the
+    // reference axis ("that" vs. "target") from the subject noun
+    // ("player" vs. "opponent"). "That" binds to the scoped event/iteration
+    // player; "target" binds to the first player target of the ability.
+    let (rest, player) = alt((
+        value(
+            PlayerScope::ScopedPlayer,
+            tag::<_, _, OracleError<'_>>("that "),
+        ),
+        value(PlayerScope::Target, tag::<_, _, OracleError<'_>>("target ")),
     ))
     .parse(input)?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("player has "),
+        tag::<_, _, OracleError<'_>>("opponent has "),
+    ))
+    .parse(rest)?;
 
-    if let Some((rest, cond)) = parse_hand_size_predicate(rest, PlayerScope::ScopedPlayer) {
+    if let Some((rest, cond)) = parse_hand_size_predicate(rest, player) {
         return Ok((rest, cond));
     }
     Err(nom::Err::Error(nom::error::Error::new(
@@ -2793,6 +2855,9 @@ fn parse_spell_history_condition(input: &str) -> OracleResult<'_, StaticConditio
         parse_opponent_drew_cards_this_turn,
         // "you cast another spell this turn" / "you cast a [type] spell this turn"
         parse_you_cast_spell_this_turn,
+        // CR 606.1 + CR 603.4: "you activated a loyalty ability of a planeswalker this turn"
+        // / "you activated a loyalty ability this turn" — The Chain Veil class.
+        parse_you_activated_loyalty_this_turn,
         // "no spells were cast last turn" (werewolf)
         value(
             make_quantity_comparison(QuantityRef::SpellsCastLastTurn, Comparator::EQ, 0),
@@ -2810,6 +2875,30 @@ fn parse_spell_history_condition(input: &str) -> OracleResult<'_, StaticConditio
             tag("a spell was warped this turn"),
         ),
     ))
+    .parse(input)
+}
+
+/// CR 606.1 + CR 603.4: "you activated a loyalty ability of a planeswalker this
+/// turn" / "you activated a loyalty ability this turn" / "you've activated ..."
+/// — The Chain Veil class. Each loyalty activation increments the
+/// `loyalty_abilities_activated_this_turn[controller]` counter
+/// (see `planeswalker::record_loyalty_activation`); the intervening-if is true
+/// whenever the counter is `>= 1`.
+fn parse_you_activated_loyalty_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
+    value(
+        make_quantity_ge(
+            QuantityRef::LoyaltyAbilitiesActivatedThisTurn {
+                player: PlayerScope::Controller,
+            },
+            1,
+        ),
+        (
+            alt((tag("you activated "), tag("you've activated "))),
+            tag("a loyalty ability"),
+            opt(tag(" of a planeswalker")),
+            tag(" this turn"),
+        ),
+    )
     .parse(input)
 }
 
@@ -3812,6 +3901,22 @@ fn parse_you_didnt_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
         value(
             make_quantity_comparison(QuantityRef::AttackedThisTurn, Comparator::EQ, 0),
             tag("attack this turn"),
+        ),
+        // CR 606.1 + CR 603.4: "you didn't activate a loyalty ability of a
+        // planeswalker this turn" — The Chain Veil's printed end-step penalty.
+        value(
+            make_quantity_comparison(
+                QuantityRef::LoyaltyAbilitiesActivatedThisTurn {
+                    player: PlayerScope::Controller,
+                },
+                Comparator::EQ,
+                0,
+            ),
+            (
+                tag("activate a loyalty ability"),
+                opt(tag(" of a planeswalker")),
+                tag(" this turn"),
+            ),
         ),
     ))
     .parse(rest)
@@ -4861,6 +4966,105 @@ mod tests {
                 assert_eq!(rhs, QuantityExpr::Fixed { value: 1 });
             }
             other => panic!("expected QuantityComparison, got {other:?}"),
+        }
+    }
+
+    /// CR 402: "fewer than N cards in hand" — strict less-than hand-size gate.
+    /// Used by Kozilek, the Great Distortion ("fewer than seven") and Iymrith,
+    /// Desert Doom ("fewer than three") as the draw-difference condition.
+    #[test]
+    fn test_parse_condition_you_have_fewer_than_n_cards() {
+        let (rest, c) = parse_condition("if you have fewer than seven cards in hand").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert_eq!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::Controller,
+                        },
+                    }
+                );
+                assert_eq!(comparator, Comparator::LT, "fewer than → strict LT");
+                assert_eq!(rhs, QuantityExpr::Fixed { value: 7 });
+            }
+            other => panic!("expected HandSize LT 7, got {other:?}"),
+        }
+    }
+
+    /// CR 402: "that player has more cards in hand than you" — cross-player GT
+    /// comparison. Used by Slithermuse and Sandstone Oracle.
+    #[test]
+    fn test_parse_condition_that_player_more_cards_than_you() {
+        let (rest, c) = parse_condition("if that player has more cards in hand than you").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert_eq!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::ScopedPlayer,
+                        },
+                    }
+                );
+                assert_eq!(comparator, Comparator::GT);
+                assert_eq!(
+                    rhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::Controller,
+                        },
+                    }
+                );
+            }
+            other => {
+                panic!("expected HandSize(ScopedPlayer) GT HandSize(Controller), got {other:?}")
+            }
+        }
+    }
+
+    /// CR 402: "target opponent has more cards in hand than you" — Target-scoped
+    /// cross-player GT comparison. Used by Balance of Power.
+    #[test]
+    fn test_parse_condition_target_opponent_more_cards_than_you() {
+        let (rest, c) =
+            parse_condition("if target opponent has more cards in hand than you").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert_eq!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::Target,
+                        },
+                    }
+                );
+                assert_eq!(comparator, Comparator::GT);
+                assert_eq!(
+                    rhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::Controller,
+                        },
+                    }
+                );
+            }
+            other => panic!("expected HandSize(Target) GT HandSize(Controller), got {other:?}"),
         }
     }
 

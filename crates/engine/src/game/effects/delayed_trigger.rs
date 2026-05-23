@@ -339,11 +339,24 @@ fn snapshot_quantity_ref(
         _ => None,
     })?;
     match qty {
+        // CR 608.2c + CR 608.2k: All three target-bound object-scope variants
+        // (`CostPaidObject` cost/trigger referent, `Target` first-target slot,
+        // `Anaphoric` instruction-order referent) bake to the parent's
+        // first object target at snapshot time. `Anaphoric` joined this list
+        // when `classify_possessive_referent` started routing bare-anaphoric
+        // possessives ("that spell's mana value", Mana Drain class) to
+        // `Anaphoric` instead of `CostPaidObject`; snapshot baking must
+        // preserve the prior behavior — read the parent target's mana value
+        // now and freeze it as `Fixed` — or the delayed trigger fires later
+        // with an empty context and produces 0.
         QuantityRef::ObjectManaValue {
             scope: ObjectScope::CostPaidObject,
         }
         | QuantityRef::ObjectManaValue {
             scope: ObjectScope::Target,
+        }
+        | QuantityRef::ObjectManaValue {
+            scope: ObjectScope::Anaphoric,
         } => {
             // Read live state first, LKI as fallback, 0 if neither.
             let value = state

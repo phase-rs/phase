@@ -1005,6 +1005,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::CardsDrawnThisTurn { player } => {
             format!("cards drawn this turn ({})", fmt_player_scope(player))
         }
+        QuantityRef::LandsPlayedThisTurn { player } => {
+            format!("lands played this turn ({})", fmt_player_scope(player))
+        }
         QuantityRef::ZoneChangeCountThisTurn { from, to, filter } => {
             format!(
                 "{} zone changes this turn ({from:?}->{to:?})",
@@ -1032,6 +1035,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::ChosenNumber => "chosen number".into(),
         QuantityRef::AttackedThisTurn => "attacked this turn".into(),
         QuantityRef::DescendedThisTurn => "descended this turn".into(),
+        QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player } => {
+            format!("loyalty abilities activated this turn ({player:?})")
+        }
         QuantityRef::SpellsCastLastTurn => "spells cast last turn".into(),
         QuantityRef::SpellsCastThisGame { scope, filter } => match (scope, filter) {
             (CountScope::Controller, None) => "spells you've cast this game".into(),
@@ -1087,7 +1093,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         }
         QuantityRef::PlayerCounter { kind, scope } => {
             let scope_s = match scope {
-                CountScope::Controller => "you have",
+                CountScope::Controller | CountScope::Owner => "you have",
                 CountScope::ScopedPlayer => "the scoped player has",
                 CountScope::Opponents => "each opponent has",
                 CountScope::All => "each player has",
@@ -1262,6 +1268,17 @@ fn fmt_choice_type(ct: &ChoiceType) -> String {
         ChoiceType::TwoColors => "two colors",
         ChoiceType::Word => "word",
         ChoiceType::Artist => "artist",
+        // CR 608.2d: "choose an ability" — Urborg / Walking Sponge prompt.
+        ChoiceType::Keyword { options } => {
+            return format!(
+                "ability from: {}",
+                options
+                    .iter()
+                    .map(|kw| kw.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
     }
     .into()
 }
@@ -1361,7 +1378,7 @@ fn fmt_core_type(ct: &CoreType) -> &'static str {
 
 fn fmt_count_scope(scope: &CountScope) -> &'static str {
     match scope {
-        CountScope::Controller => "your",
+        CountScope::Controller | CountScope::Owner => "your",
         CountScope::ScopedPlayer => "their",
         CountScope::All => "all",
         CountScope::Opponents => "opponents'",
@@ -2056,6 +2073,10 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::ExtraTurn { target } => {
             d.push(("player".into(), fmt_target(target)));
         }
+        Effect::GrantExtraLoyaltyActivations { amount, target } => {
+            d.push(("amount".into(), fmt_quantity(amount)));
+            d.push(("player".into(), fmt_target(target)));
+        }
         Effect::SkipNextTurn { target, count } => {
             d.push(("player".into(), fmt_target(target)));
             if !matches!(
@@ -2351,6 +2372,9 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::AddAllBasicLandTypes => "all basic land types".into(),
         ContinuousModification::AddChosenSubtype { .. } => "add chosen subtype".into(),
         ContinuousModification::AddChosenColor => "add chosen color".into(),
+        // CR 608.2d + CR 613.1f: Urborg / Walking Sponge — strip the
+        // keyword chosen at resolution time.
+        ContinuousModification::RemoveChosenKeyword => "remove chosen keyword".into(),
         ContinuousModification::SetColor { colors } => {
             let c: Vec<_> = colors
                 .iter()
@@ -5043,12 +5067,16 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::CrimesCommittedThisTurn => ("CrimesCommittedThisTurn", Handled),
         QuantityRef::LifeGainedThisTurn { .. } => ("LifeGainedThisTurn", Handled),
         QuantityRef::CardsDrawnThisTurn { .. } => ("CardsDrawnThisTurn", Handled),
+        QuantityRef::LandsPlayedThisTurn { .. } => ("LandsPlayedThisTurn", Handled),
         QuantityRef::ZoneChangeCountThisTurn { .. } => ("ZoneChangeCountThisTurn", Handled),
         QuantityRef::DamageDealtThisTurn { .. } => ("DamageDealtThisTurn", Handled),
         QuantityRef::TurnsTaken => ("TurnsTaken", Unhandled),
         QuantityRef::ChosenNumber => ("ChosenNumber", Unhandled),
         QuantityRef::AttackedThisTurn => ("AttackedThisTurn", Handled),
         QuantityRef::DescendedThisTurn => ("DescendedThisTurn", Unhandled),
+        QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. } => {
+            ("LoyaltyAbilitiesActivatedThisTurn", Handled)
+        }
         QuantityRef::SpellsCastLastTurn => ("SpellsCastLastTurn", Unhandled),
         QuantityRef::SpellsCastThisGame { .. } => ("SpellsCastThisGame", Handled),
         QuantityRef::CounterAddedThisTurn { .. } => ("CounterAddedThisTurn", Handled),

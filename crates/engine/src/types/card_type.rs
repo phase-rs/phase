@@ -171,6 +171,8 @@ pub enum SubtypeSet {
     Planeswalker,
     /// CR 205.3k: Spell subtypes (instant/sorcery).
     Spell,
+    /// CR 205.3q: Battle subtypes.
+    Battle,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,6 +206,43 @@ pub fn is_land_subtype(s: &str) -> bool {
             | "Town"
             | "Urza's"
     )
+}
+
+/// CR 205.3: Return the noncreature subtype set for subtypes whose membership
+/// is fixed by the card-type rules. Creature subtypes are intentionally
+/// excluded because the runtime card database owns that list.
+pub fn noncreature_subtype_set(s: &str) -> Option<SubtypeSet> {
+    if is_land_subtype(s) {
+        return Some(SubtypeSet::Land);
+    }
+    match s {
+        // CR 205.3g: Artifact subtypes.
+        "Attraction" | "Blood" | "Bobblehead" | "Book" | "Clue" | "Contraption" | "Equipment"
+        | "Food" | "Fortification" | "Gold" | "Incubator" | "Infinity" | "Junk" | "Lander"
+        | "Map" | "Mutagen" | "Powerstone" | "Spacecraft" | "Stone" | "Treasure" | "Vehicle" => {
+            Some(SubtypeSet::Artifact)
+        }
+        // CR 205.3h: Enchantment subtypes.
+        "Aura" | "Background" | "Cartouche" | "Case" | "Class" | "Curse" | "Role" | "Room"
+        | "Rune" | "Saga" | "Shard" | "Shrine" => Some(SubtypeSet::Enchantment),
+        // CR 205.3k: Spell subtypes.
+        "Adventure" | "Arcane" | "Lesson" | "Omen" | "Trap" => Some(SubtypeSet::Spell),
+        // CR 205.3q: Battle subtypes.
+        "Siege" => Some(SubtypeSet::Battle),
+        // CR 205.3j: Planeswalker subtypes.
+        "Ajani" | "Aminatou" | "Angrath" | "Arlinn" | "Ashiok" | "Bahamut" | "Basri" | "Bolas"
+        | "Calix" | "Chandra" | "Comet" | "Dack" | "Dakkon" | "Daretti" | "Davriel" | "Dellian"
+        | "Dihada" | "Domri" | "Dovin" | "Ellywick" | "Elminster" | "Elspeth" | "Estrid"
+        | "Freyalise" | "Garruk" | "Gideon" | "Grist" | "Guff" | "Huatli" | "Jace" | "Jared"
+        | "Jaya" | "Jeska" | "Kaito" | "Karn" | "Kasmina" | "Kaya" | "Kiora" | "Koth"
+        | "Liliana" | "Lolth" | "Lukka" | "Minsc" | "Mordenkainen" | "Nahiri" | "Narset"
+        | "Niko" | "Nissa" | "Nixilis" | "Oko" | "Quintorius" | "Ral" | "Rowan" | "Saheeli"
+        | "Samut" | "Sarkhan" | "Serra" | "Sivitri" | "Sorin" | "Szat" | "Tamiyo" | "Tasha"
+        | "Teferi" | "Teyo" | "Tezzeret" | "Tibalt" | "Tyvar" | "Ugin" | "Urza" | "Venser"
+        | "Vivien" | "Vraska" | "Vronos" | "Will" | "Windgrace" | "Wrenn" | "Xenagos"
+        | "Yanggu" | "Yanling" | "Zariel" => Some(SubtypeSet::Planeswalker),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

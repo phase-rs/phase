@@ -448,8 +448,14 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // permanent that turn"), not its controller. It resets at the start of every
     // turn for every planeswalker regardless of who controls it.
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
-        obj.loyalty_activated_this_turn = false;
+        obj.loyalty_activations_this_turn = 0;
     }
+    // CR 606.1 + CR 603.4: Per-player loyalty-activation history is a CR 603.4
+    // "this turn" record. The cap-raising grant from
+    // `Effect::GrantExtraLoyaltyActivations` (The Chain Veil class) is bounded
+    // to the same turn, so both maps clear together at turn start.
+    state.loyalty_abilities_activated_this_turn.clear();
+    state.extra_loyalty_activations_this_turn.clear();
     // CR 514 + CR 603.4: Per-ability per-turn resolution counter resets at turn
     // boundary alongside other "this turn" trackers (mirrors the cleanup of
     // `trigger_fire_counts_this_turn`).
