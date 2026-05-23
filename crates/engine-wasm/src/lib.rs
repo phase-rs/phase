@@ -6,7 +6,9 @@ use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 use engine::ai_support::{auto_pass_recommended, legal_actions_for_viewer, legal_actions_full};
+use engine::database::legality::validate_cedh_bracket;
 use engine::database::CardDatabase;
+use engine::game::bracket_estimate::CommanderBracketTier;
 use engine::game::engine::apply;
 use engine::game::{
     estimate_bracket, evaluate_deck_compatibility, filter_state_for_viewer, finalize_public_state,
@@ -334,6 +336,7 @@ pub fn classify_deck_js(names_js: JsValue) -> Result<JsValue, JsValue> {
             main_deck: names,
             sideboard: Vec::new(),
             commander: Vec::new(),
+            bracket_tier: Default::default(),
         };
         let payload = resolve_player_deck_list(
             db,
@@ -539,6 +542,25 @@ pub fn initialize_game(
                     }
                 }
 
+                // When any deck is declared cEDH, validate the whole table.
+                // The check is performed after AI-deck replication so every
+                // seat that will participate in the game is included.
+                let any_cedh = payload.player.bracket_tier == CommanderBracketTier::Cedh
+                    || payload.opponent.bracket_tier == CommanderBracketTier::Cedh
+                    || payload
+                        .ai_decks
+                        .iter()
+                        .any(|d| d.bracket_tier == CommanderBracketTier::Cedh);
+                if any_cedh {
+                    let all_decks: Vec<&PlayerDeckPayload> = std::iter::once(&payload.player)
+                        .chain(std::iter::once(&payload.opponent))
+                        .chain(payload.ai_decks.iter())
+                        .collect();
+                    if let Err(e) = validate_cedh_bracket(&all_decks) {
+                        return Some(vec![e.to_string()]);
+                    }
+                }
+
                 load_and_hydrate_decks(&mut state, &payload, Some(db));
                 state.all_card_names = db.card_names().into();
                 None
@@ -547,6 +569,7 @@ pub fn initialize_game(
             if let Some(reasons) = validation_error {
                 return to_js(&serde_json::json!({
                     "error": true,
+                    "cedh_bracket_violation": true,
                     "reasons": reasons,
                 }));
             }
@@ -1256,6 +1279,7 @@ pub fn apply_seat_mutation(state_json: &str, mutation_json: &str) -> Result<JsVa
                         main_deck: deck_data.main_deck,
                         sideboard: deck_data.sideboard,
                         commander: deck_data.commander,
+                        bracket_tier: Default::default(),
                     },
                     engine::game::bracket_estimate::CommanderBracketTier::Core,
                 ))
@@ -1328,6 +1352,7 @@ mod bracket_estimate_tests {
             commander: vec!["Atraxa, Praetors' Voice".into()],
             main_deck: vec!["Smothering Tithe".into(), "Forest".into()],
             sideboard: vec![],
+            bracket_tier: Default::default(),
         };
         let result = estimate_bracket_inner(&deck);
         let est = result.expect("estimate present");
@@ -1344,6 +1369,7 @@ mod bracket_estimate_tests {
             commander: vec!["Cmdr".into()],
             main_deck: vec!["Forest".into()],
             sideboard: vec![],
+            bracket_tier: Default::default(),
         };
         assert!(estimate_bracket_inner(&deck).is_none());
     }

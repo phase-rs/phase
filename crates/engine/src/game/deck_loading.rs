@@ -51,6 +51,11 @@ pub struct PlayerDeckList {
     pub sideboard: Vec<String>,
     #[serde(default)]
     pub commander: Vec<String>,
+    /// Declared bracket tier for this player's deck. Defaults to `Core` for
+    /// backward-compatible deserialization (payloads that predate this field
+    /// omit it, which `#[serde(default)]` handles transparently).
+    #[serde(default)]
+    pub bracket_tier: CommanderBracketTier,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,8 +87,11 @@ fn resolve_names(db: &CardDatabase, names: &[String]) -> Vec<DeckEntry> {
 
 /// Resolve a single player's deck list (name-only) into a `PlayerDeckPayload`
 /// using a `CardDatabase` for lookup. Unresolvable names are silently skipped.
-/// `bracket_tier` is passed through from the caller; `PlayerDeckList` itself
-/// carries no tier declaration.
+///
+/// The `bracket_tier` field on `list` is forwarded directly into the returned
+/// payload. Callers that need to override the tier (e.g., the WASM bridge
+/// overriding with an explicit value) should set it on the `PlayerDeckList`
+/// before calling this function.
 pub fn resolve_player_deck_list(
     db: &CardDatabase,
     list: &PlayerDeckList,
@@ -99,22 +107,24 @@ pub fn resolve_player_deck_list(
 
 /// Resolve a DeckList (name-only) into a DeckPayload (full CardFace objects)
 /// using a CardDatabase for lookup. Unresolvable names are silently skipped.
-/// `DeckList` carries no tier declarations; all resolved payloads inherit the
-/// default `CommanderBracketTier::Core`. Use `DeckPayload` directly when a
-/// tier is known at construction time.
+///
+/// Each `PlayerDeckList`'s `bracket_tier` field is forwarded directly to the
+/// corresponding `PlayerDeckPayload`, so callers that populate the tier before
+/// calling this function receive correctly-tiered payloads. Old payloads that
+/// omit the field deserialize with `CommanderBracketTier::Core` (the `default`).
 pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
     DeckPayload {
         player: PlayerDeckPayload {
             main_deck: resolve_names(db, &list.player.main_deck),
             sideboard: resolve_names(db, &list.player.sideboard),
             commander: resolve_names(db, &list.player.commander),
-            bracket_tier: CommanderBracketTier::Core,
+            bracket_tier: list.player.bracket_tier,
         },
         opponent: PlayerDeckPayload {
             main_deck: resolve_names(db, &list.opponent.main_deck),
             sideboard: resolve_names(db, &list.opponent.sideboard),
             commander: resolve_names(db, &list.opponent.commander),
-            bracket_tier: CommanderBracketTier::Core,
+            bracket_tier: list.opponent.bracket_tier,
         },
         ai_decks: list
             .ai_decks
@@ -123,7 +133,7 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
                 main_deck: resolve_names(db, &deck.main_deck),
                 sideboard: resolve_names(db, &deck.sideboard),
                 commander: resolve_names(db, &deck.commander),
-                bracket_tier: CommanderBracketTier::Core,
+                bracket_tier: deck.bracket_tier,
             })
             .collect(),
     }
@@ -817,11 +827,13 @@ mod tests {
                 commander: vec![String::from(
                     "Brigid, Clachan's Heart // Brigid, Doun's Mind",
                 )],
+                bracket_tier: Default::default(),
             },
             opponent: PlayerDeckList {
                 main_deck: vec![],
                 sideboard: vec![],
                 commander: vec![],
+                bracket_tier: Default::default(),
             },
             ai_decks: vec![],
         };
