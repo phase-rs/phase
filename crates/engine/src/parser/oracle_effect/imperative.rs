@@ -40,7 +40,7 @@ use super::super::oracle_target::{
     parse_target, parse_target_with_ctx, parse_type_phrase, resolve_pronoun_target,
 };
 use super::super::oracle_util::{
-    contains_possessive, contains_self_or_object_pronoun, parse_count_expr, parse_mana_symbols,
+    contains_object_pronoun, contains_possessive, parse_count_expr, parse_mana_symbols,
     parse_ordinal, split_around, starts_with_possessive, strip_after, TextPair,
 };
 
@@ -3373,12 +3373,13 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
     // their owner's / their owners' / your) are classified via nom combinators
     // so the lowered `ChangeZone` carries the correct `target` (SelfRef vs
     // ParentTarget) and `owner_library` flag. The `~` token is produced by
-    // `normalize_card_name_refs` for self-references; it is handled by
-    // `contains_self_or_object_pronoun` here (not `contains_object_pronoun`)
-    // because the anaphoric/self-reference distinction matters at other call
-    // sites (compound action splitting in `try_split_targeted_compound`).
-    if contains_self_or_object_pronoun(lower, "shuffle", "into")
-        || contains_self_or_object_pronoun(lower, "shuffles", "into")
+    // `normalize_card_name_refs` for self-references and is a member of
+    // `OBJECT_PRONOUNS`, so `contains_object_pronoun` accepts both anaphoric
+    // ("shuffle it into …") and self-referential ("shuffle ~ into …") forms.
+    // The downstream `alt()` below still distinguishes them: `~`/`it` →
+    // `SelfRef`, `them`/`that card`/`those cards` → `ParentTarget`.
+    if contains_object_pronoun(lower, "shuffle", "into")
+        || contains_object_pronoun(lower, "shuffles", "into")
     {
         // Pronoun classification. Walk word-boundaries, peel "shuffle"/
         // "shuffles" + " ", then alt() over the five recognized references.
@@ -3386,8 +3387,8 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
         // "~" is the self-reference token from `normalize_card_name_refs`);
         // "them" / "that card" / "those cards" → ParentTarget (refers to a
         // previously-bound target). The fall-through "SelfRef" arm only
-        // engages when the outer `contains_self_or_object_pronoun` guard
-        // somehow matched a pronoun the inner combinator didn't recognize —
+        // engages when the outer `contains_object_pronoun` guard somehow
+        // matched a pronoun the inner combinator didn't recognize —
         // defensive and also matches the existing "shuffle this creature
         // into …" form.
         let target = nom_primitives::scan_at_word_boundaries(lower, |input| {

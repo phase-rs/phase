@@ -531,22 +531,6 @@ const POSSESSIVES: &[&str] = &[
 /// into its owner's library" (Zenith cycle, Fblthp, etc.).
 pub const OBJECT_PRONOUNS: &[&str] = &["it", "them", "that card", "those cards", "~"];
 
-/// Object-style references that include both anaphoric pronouns (`OBJECT_PRONOUNS`)
-/// and the self-reference token `~` produced by `normalize_card_name_refs`.
-///
-/// Use this when a guard must accept both "shuffle it into …" (anaphoric, refers to a
-/// previously-bound target) and "shuffle ~ into …" (self-referential, refers to the
-/// source object — Green Sun's Zenith, the Beacon cycle, Nexus of Fate, etc.). The
-/// downstream classifier still distinguishes them: `~` → `TargetFilter::SelfRef`,
-/// `it`/`them`/`that card`/`those cards` → `ParentTarget` or `SelfRef` per the
-/// inner combinator.
-///
-/// Kept separate from `OBJECT_PRONOUNS` because the anaphoric / self-reference
-/// distinction matters at other call sites (compound action splitting in
-/// `try_split_targeted_compound`, etc.), where treating `~` as an anaphoric pronoun
-/// would mis-classify self-referential clauses.
-pub const SELF_AND_OBJECT_PRONOUNS: &[&str] = &["it", "them", "that card", "those cards", "~"];
-
 /// "this \<card_type\>" self-reference phrases in Oracle text.
 ///
 /// Used by: `parse_target` (object recognition), `subject.rs` (subject stripping),
@@ -645,20 +629,15 @@ pub fn starts_with_possessive(text: &str, prefix: &str, suffix: &str) -> bool {
 
 /// Check if `text` contains `"{prefix} {pronoun} {suffix}"` for any object pronoun variant.
 ///
-/// Matches anaphoric references like "shuffle it into", "put them onto", "exile that card from".
-pub fn contains_object_pronoun(text: &str, prefix: &str, suffix: &str) -> bool {
-    match_phrase_variants(text, prefix, suffix, OBJECT_PRONOUNS, |hay, needle| {
-        hay.contains(needle)
-    })
-}
-
-/// Like `contains_object_pronoun` but also matches the self-reference token `~`.
+/// Matches anaphoric references like "shuffle it into", "put them onto", "exile that card
+/// from", as well as the `~` self-reference token produced by `normalize_card_name_refs`
+/// for self-referential clauses like "shuffle ~ into its owner's library" (Green Sun's
+/// Zenith, Beacon cycle, Nexus of Fate). The full pronoun set is `OBJECT_PRONOUNS`.
 ///
-/// Use this in guards that need to accept both anaphoric references ("shuffle it
-/// into …") and self-references ("shuffle ~ into …" — Green Sun's Zenith, Beacon
-/// cycle, Nexus of Fate). The downstream classifier still distinguishes the two,
-/// so this only widens the gate, not the semantics.
-pub fn contains_self_or_object_pronoun(text: &str, prefix: &str, suffix: &str) -> bool {
+/// Uses word-boundary scanning so the pronoun must appear as a complete token — substring
+/// matches inside other words are rejected. This is the canonical anaphoric-pronoun guard
+/// for parsing dispatch.
+pub fn contains_object_pronoun(text: &str, prefix: &str, suffix: &str) -> bool {
     nom_primitives::scan_at_word_boundaries(text, |input| {
         let input = if prefix.is_empty() {
             input
@@ -667,7 +646,7 @@ pub fn contains_self_or_object_pronoun(text: &str, prefix: &str, suffix: &str) -
             let (input, _) = space1(input)?;
             input
         };
-        let (input, _) = parse_self_or_object_pronoun(input)?;
+        let (input, _) = parse_object_pronoun(input)?;
         let input = if suffix.is_empty() {
             input
         } else {
@@ -680,7 +659,7 @@ pub fn contains_self_or_object_pronoun(text: &str, prefix: &str, suffix: &str) -
     .is_some()
 }
 
-fn parse_self_or_object_pronoun(input: &str) -> OracleResult<'_, &str> {
+fn parse_object_pronoun(input: &str) -> OracleResult<'_, &str> {
     alt((
         tag("that card"),
         tag("those cards"),
@@ -2497,39 +2476,17 @@ mod tests {
             "into"
         ));
         // CR 201.5: "~" is the card-name placeholder used in self-shuffle effects
-        // (e.g. "shuffle ~ into its owner's library" — Black Sun's Zenith, Zenith cycle).
+        // (Green Sun's Zenith, Beacon cycle, Nexus of Fate). It is a member of
+        // `OBJECT_PRONOUNS` and must be accepted by this guard.
+        assert!(contains_object_pronoun("shuffle ~ into", "shuffle", "into"));
         assert!(contains_object_pronoun(
             "shuffle ~ into its owner's library",
             "shuffle",
             "into"
         ));
-    }
-
-    #[test]
-    fn contains_self_or_object_pronoun_includes_tilde() {
-        // The tilde self-reference token must be accepted in addition to all
-        // four object pronouns. This is the building-block guarantee that
-        // unlocks "shuffle ~ into …" for Green Sun's Zenith and the Beacon
-        // cycle without weakening the anaphoric-only `contains_object_pronoun`
-        // semantics used elsewhere.
-        assert!(contains_self_or_object_pronoun(
-            "shuffle ~ into",
-            "shuffle",
-            "into"
-        ));
-        assert!(contains_self_or_object_pronoun(
-            "shuffle it into",
-            "shuffle",
-            "into"
-        ));
-        assert!(contains_self_or_object_pronoun(
-            "shuffle them into",
-            "shuffle",
-            "into"
-        ));
-        // Negative: tilde must NOT make `contains_object_pronoun` accept self-references.
+        // Word-boundary scanning rejects substring-only matches inside other words.
         assert!(!contains_object_pronoun(
-            "shuffle ~ into",
+            "shuffle bit into",
             "shuffle",
             "into"
         ));
