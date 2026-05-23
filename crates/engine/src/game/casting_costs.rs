@@ -642,6 +642,64 @@ pub(crate) fn handle_return_to_hand_for_cost(
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
+/// CR 118.3 + CR 122.1 + CR 601.2b: Complete remove-counter-as-cost after
+/// player selection.
+pub(crate) fn handle_remove_counter_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    mut pending: PendingCast,
+    count: u32,
+    counter_type: crate::types::counter::CounterMatch,
+    legal_permanents: &[ObjectId],
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if chosen.len() != 1 {
+        return Err(EngineError::InvalidAction(format!(
+            "Must choose exactly one permanent, got {}",
+            chosen.len()
+        )));
+    }
+    let chosen = chosen[0];
+    if !legal_permanents.contains(&chosen) {
+        return Err(EngineError::InvalidAction(
+            "Selected permanent not eligible for counter removal".to_string(),
+        ));
+    }
+
+    if pending.activation_ability_index.is_some() {
+        if let Some(cost) = pending.activation_cost.take() {
+            // CR 602.2b/h: Pay automatic activation-cost components such as
+            // {T} before removing the chosen counter and putting the ability
+            // on the stack. The targeted RemoveCounter sub-cost no-ops in
+            // `pay_ability_cost` because this handler pays that choice.
+            super::casting::pay_ability_cost(state, player, pending.object_id, &cost, events)?;
+        }
+    }
+
+    let concrete_counter =
+        super::effects::counters::resolve_counter_match_for_removal(state, chosen, &counter_type)
+            .ok_or_else(|| EngineError::ActionNotAllowed("No removable counter".to_string()))?;
+    super::effects::counters::remove_counter_with_replacement(
+        state,
+        chosen,
+        concrete_counter,
+        count,
+        events,
+    );
+
+    if let Some(obj) = state.objects.get(&chosen) {
+        pending
+            .ability
+            .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
+                object_id: chosen,
+                lki: obj.snapshot_for_mana_spent(),
+            });
+    }
+
+    finish_pending_cost_or_cast(state, player, pending, events)
+}
+
 /// Blight cost — CR 701.68a: put N -1/-1 counters on the one chosen creature.
 pub(crate) fn handle_blight_choice(
     state: &mut GameState,
@@ -2021,6 +2079,32 @@ fn pay_additional_cost(
             return Ok(WaitingFor::ReturnToHandForCost {
                 player,
                 count: count as usize,
+                permanents: eligible,
+                pending_cast: Box::new(pending),
+            });
+        }
+        AbilityCost::RemoveCounter {
+            count,
+            ref counter_type,
+            target: Some(ref target),
+        } => {
+            let eligible = super::casting::find_eligible_remove_counter_for_cost_targets(
+                state,
+                player,
+                pending.object_id,
+                target,
+                counter_type,
+                count,
+            );
+            if eligible.is_empty() {
+                return Err(EngineError::ActionNotAllowed(
+                    "No eligible permanents with counters".into(),
+                ));
+            }
+            return Ok(WaitingFor::RemoveCounterForCost {
+                player,
+                count,
+                counter_type: counter_type.clone(),
                 permanents: eligible,
                 pending_cast: Box::new(pending),
             });

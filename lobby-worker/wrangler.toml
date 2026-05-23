@@ -1,0 +1,33 @@
+# Cloudflare Worker + Durable Object for the official phase.rs lobby broker.
+#
+# STUB / plumbing-validation phase: the DO body (src/lobby-do.ts) is a
+# hand-written TS mirror of the LobbyOnly protocol, used only to prove the
+# Cloudflare path end-to-end (wrangler -> DO -> WebSocket Hibernation ->
+# client handshake) before the real broker lands. It will be replaced by the
+# compiled Rust `lobby-broker` crate (WASM) per
+# .planning/lobby-failover-federation-plan.md §4a.
+
+name = "phase-lobby"
+main = "src/index.ts"
+compatibility_date = "2026-05-01"
+
+# Single global lobby = one DO instance addressed by a fixed name ("global").
+[[durable_objects.bindings]]
+name = "LOBBY"
+class_name = "LobbyDO"
+
+# SQLite-backed DO class — REQUIRED for the Workers Free plan (KV-backed DOs
+# need a paid plan). Also what WebSocket Hibernation + DO storage build on.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["LobbyDO"]
+
+# Test first on the automatic *.workers.dev URL (no config needed — just
+# `wrangler deploy`). When ready to serve from your own domain (the phase-rs.dev
+# zone is already on Cloudflare), uncomment this: `custom_domain = true` makes
+# Workers auto-provision the DNS record + TLS cert. Endpoint becomes
+# wss://lobby.phase-rs.dev/ws. Do NOT point the production default at it until
+# the real Rust broker is in (keep phase-server as DEFAULT_SERVER until cutover).
+# [[routes]]
+# pattern = "lobby.phase-rs.dev"
+# custom_domain = true

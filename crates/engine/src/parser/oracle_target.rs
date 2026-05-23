@@ -1187,6 +1187,7 @@ pub fn parse_type_phrase_with_ctx<'a>(
     let lower = text.to_lowercase();
     let mut pos = 0;
     let mut properties = Vec::new();
+    let mut keyword_disjunction_range: Option<(usize, usize)> = None;
     let lower_trimmed = lower.trim_start();
     let offset = lower.len() - lower_trimmed.len();
     pos += offset;
@@ -1617,8 +1618,11 @@ pub fn parse_type_phrase_with_ctx<'a>(
     if let Some((keyword_props, consumed)) = parse_without_keyword_suffix(&lower[pos..]) {
         properties.extend(keyword_props);
         pos += consumed;
-    } else if let Some((keyword_props, consumed)) = parse_keyword_suffix(&lower[pos..]) {
-        properties.extend(keyword_props);
+    } else if let Some((suffix, consumed)) = parse_keyword_suffix(&lower[pos..]) {
+        if suffix.disjunctive && suffix.properties.len() > 1 {
+            keyword_disjunction_range = Some((properties.len(), suffix.properties.len()));
+        }
+        properties.extend(suffix.properties);
         pos += consumed;
     }
 
@@ -1782,19 +1786,43 @@ pub fn parse_type_phrase_with_ctx<'a>(
         }
     }
 
-    let filter = TargetFilter::Typed(TypedFilter {
-        type_filters: [
-            card_type.map(|ct| vec![ct]).unwrap_or_default(),
-            extra_core_type_filters,
-            subtype
-                .map(|s| vec![TypeFilter::Subtype(s)])
-                .unwrap_or_default(),
-            neg_type_filters,
-        ]
-        .concat(),
-        controller,
-        properties,
-    });
+    let type_filters = [
+        card_type.map(|ct| vec![ct]).unwrap_or_default(),
+        extra_core_type_filters,
+        subtype
+            .map(|s| vec![TypeFilter::Subtype(s)])
+            .unwrap_or_default(),
+        neg_type_filters,
+    ]
+    .concat();
+    let filter = if let Some((start, len)) = keyword_disjunction_range {
+        let keyword_props = properties[start..start + len].to_vec();
+        let common_props = properties[..start]
+            .iter()
+            .chain(properties[start + len..].iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        TargetFilter::Or {
+            filters: keyword_props
+                .into_iter()
+                .map(|keyword_prop| {
+                    let mut branch_props = common_props.clone();
+                    branch_props.push(keyword_prop);
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters: type_filters.clone(),
+                        controller: controller.clone(),
+                        properties: branch_props,
+                    })
+                })
+                .collect(),
+        }
+    } else {
+        TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller,
+            properties,
+        })
+    };
     let filter = if exclude_chosen_type {
         TargetFilter::And {
             filters: vec![
@@ -3129,13 +3157,19 @@ pub(crate) fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
     None
 }
 
-fn parse_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
+struct KeywordSuffix {
+    properties: Vec<FilterProp>,
+    disjunctive: bool,
+}
+
+fn parse_keyword_suffix(text: &str) -> Option<(KeywordSuffix, usize)> {
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
     let (after_with, _) = tag::<_, _, OracleError<'_>>("with ").parse(trimmed).ok()?;
     let mut remaining = after_with;
     let mut consumed = leading_ws + "with ".len();
     let mut properties = Vec::new();
+    let mut disjunctive = false;
 
     while let Some((keyword_match, keyword_len)) = parse_leading_keyword_match(remaining) {
         match keyword_match {
@@ -3153,6 +3187,9 @@ fn parse_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
         let mut found_sep = false;
         for sep in &[", and ", ", or ", " and ", " or ", ", "] {
             if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*sep).parse(remaining) {
+                if matches!(*sep, ", or " | " or ") {
+                    disjunctive = true;
+                }
                 consumed += sep.len();
                 remaining = rest;
                 found_sep = true;
@@ -3167,7 +3204,13 @@ fn parse_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
     if properties.is_empty() {
         None
     } else {
-        Some((properties, consumed))
+        Some((
+            KeywordSuffix {
+                properties,
+                disjunctive,
+            },
+            consumed,
+        ))
     }
 }
 
@@ -5758,16 +5801,21 @@ mod tests {
         let (f, rest) =
             parse_type_phrase("card with flashback or disturb, put it into your graveyard");
         assert_eq!(rest, "put it into your graveyard");
-        let TargetFilter::Typed(typed) = f else {
-            panic!("expected typed filter, got {f:?}");
+        let TargetFilter::Or { filters } = f else {
+            panic!("expected Or filter, got {f:?}");
         };
-        assert!(typed.type_filters.contains(&TypeFilter::Card));
-        assert!(typed.properties.contains(&FilterProp::HasKeywordKind {
-            value: KeywordKind::Flashback,
-        }));
-        assert!(typed.properties.contains(&FilterProp::HasKeywordKind {
-            value: KeywordKind::Disturb,
-        }));
+        assert_eq!(filters.len(), 2);
+        for kind in [KeywordKind::Flashback, KeywordKind::Disturb] {
+            assert!(
+                filters.iter().any(|filter| matches!(
+                    filter,
+                    TargetFilter::Typed(TypedFilter { type_filters, properties, .. })
+                        if type_filters.contains(&TypeFilter::Card)
+                            && properties.contains(&FilterProp::HasKeywordKind { value: kind })
+                )),
+                "missing {kind:?} branch in {filters:?}"
+            );
+        }
     }
 
     #[test]
@@ -5815,15 +5863,36 @@ mod tests {
     }
 
     #[test]
+    fn creature_with_trample_or_haste_is_keyword_disjunction() {
+        let (f, _) = parse_type_phrase("creature with trample or haste");
+        let TargetFilter::Or { filters } = f else {
+            panic!("expected Or filter, got {f:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        assert!(filters.iter().any(|filter| matches!(
+            filter,
+            TargetFilter::Typed(TypedFilter { type_filters, properties, .. })
+                if type_filters.contains(&TypeFilter::Creature)
+                    && properties.contains(&FilterProp::WithKeyword { value: Keyword::Trample })
+        )));
+        assert!(filters.iter().any(|filter| matches!(
+            filter,
+            TargetFilter::Typed(TypedFilter { type_filters, properties, .. })
+                if type_filters.contains(&TypeFilter::Creature)
+                    && properties.contains(&FilterProp::WithKeyword { value: Keyword::Haste })
+        )));
+    }
+
+    #[test]
     fn creature_with_keyword_list_or_separator() {
         let (f, rest) = parse_type_phrase(
             "creature with deathtouch, hexproof, reach, or trample and reveal it",
         );
         assert_eq!(rest, "reveal it");
-        let TargetFilter::Typed(typed) = f else {
-            panic!("expected typed filter, got {f:?}");
+        let TargetFilter::Or { filters } = f else {
+            panic!("expected Or filter, got {f:?}");
         };
-        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(filters.len(), 4);
         for keyword in [
             Keyword::Deathtouch,
             Keyword::Hexproof,
@@ -5831,11 +5900,15 @@ mod tests {
             Keyword::Trample,
         ] {
             assert!(
-                typed.properties.contains(&FilterProp::WithKeyword {
-                    value: keyword.clone()
-                }),
-                "missing {keyword:?} in {:?}",
-                typed.properties
+                filters.iter().any(|filter| matches!(
+                    filter,
+                    TargetFilter::Typed(TypedFilter { type_filters, properties, .. })
+                        if type_filters.contains(&TypeFilter::Creature)
+                            && properties.contains(&FilterProp::WithKeyword {
+                                value: keyword.clone()
+                            })
+                )),
+                "missing {keyword:?} in {filters:?}"
             );
         }
     }

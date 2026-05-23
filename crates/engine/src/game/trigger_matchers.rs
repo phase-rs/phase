@@ -1783,20 +1783,24 @@ pub(super) fn match_cycled_or_discarded(
     }
 }
 
-/// Shuffled: fires when a library is shuffled.
+/// CR 701.24a: Shuffled — fires when a player shuffles their library.
+/// Uses `PlayerPerformedAction { ShuffledLibrary }` to identify the acting
+/// player, then gates on `trigger.valid_target` (e.g. Cosi's Trickster:
+/// "Whenever an opponent shuffles their library").
 pub(super) fn match_shuffled(
     event: &GameEvent,
-    _trigger: &TriggerDefinition,
-    _source_id: ObjectId,
-    _state: &GameState,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
 ) -> bool {
-    matches!(
-        event,
-        GameEvent::EffectResolved {
-            kind: EffectKind::Shuffle,
-            ..
-        }
-    )
+    let GameEvent::PlayerPerformedAction {
+        player_id,
+        action: PlayerActionKind::ShuffledLibrary,
+    } = event
+    else {
+        return false;
+    };
+    valid_player_matches(trigger, state, *player_id, source_id)
 }
 
 /// Revealed: fires when a card is revealed.
@@ -4893,14 +4897,57 @@ mod tests {
     }
 
     #[test]
-    fn shuffled_matches_shuffled_event() {
+    fn shuffled_matches_player_performed_action_event() {
         let state = setup();
+        let event = GameEvent::PlayerPerformedAction {
+            player_id: PlayerId(0),
+            action: PlayerActionKind::ShuffledLibrary,
+        };
+        let trigger = make_trigger(TriggerMode::Shuffled);
+        assert!(match_shuffled(&event, &trigger, ObjectId(1), &state));
+    }
+
+    #[test]
+    fn shuffled_rejects_opponent_when_valid_target_is_controller() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Cosis Trickster".to_string(),
+            Zone::Battlefield,
+        );
+        // "Whenever an opponent shuffles" — valid_target filters for opponent
+        let mut trigger = make_trigger(TriggerMode::Shuffled);
+        trigger.valid_target = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(crate::types::ability::ControllerRef::Opponent),
+        ));
+
+        // Opponent shuffles — should fire
+        let opp_event = GameEvent::PlayerPerformedAction {
+            player_id: PlayerId(1),
+            action: PlayerActionKind::ShuffledLibrary,
+        };
+        assert!(match_shuffled(&opp_event, &trigger, source, &state));
+
+        // Controller shuffles — should NOT fire
+        let self_event = GameEvent::PlayerPerformedAction {
+            player_id: PlayerId(0),
+            action: PlayerActionKind::ShuffledLibrary,
+        };
+        assert!(!match_shuffled(&self_event, &trigger, source, &state));
+    }
+
+    #[test]
+    fn shuffled_rejects_effect_resolved_event() {
+        let state = setup();
+        // The old EffectResolved event should no longer trigger match_shuffled
         let event = GameEvent::EffectResolved {
             kind: EffectKind::Shuffle,
             source_id: ObjectId(1),
         };
         let trigger = make_trigger(TriggerMode::Shuffled);
-        assert!(match_shuffled(&event, &trigger, ObjectId(1), &state));
+        assert!(!match_shuffled(&event, &trigger, ObjectId(1), &state));
     }
 
     #[test]

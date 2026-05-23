@@ -618,6 +618,56 @@ fn divide_rounded(value: i32, divisor: u32, rounding: RoundingMode) -> i32 {
     rounded as i32
 }
 
+/// CR 400.1 + CR 603.4 + CR 109.3: The object IDs an `ObjectCount { filter }`
+/// matches — resolved in the filter's zone (default battlefield) with the
+/// `OtherThanTriggerObject` exclusion applied. Single source of truth: the
+/// `ObjectCount` count is `.len()` of this, and a "for each [object]" loop
+/// (`effects::resolve_chain_body`) iterates these exact ids for per-iteration
+/// `ParentTarget` rebinding — so the count and the iteration members can never
+/// diverge.
+///
+/// The `OtherThanTriggerObject` exclusion drops the trigger id by SET MEMBERSHIP
+/// (`retain`), which is a slight correctness improvement over the prior inline
+/// `saturating_sub(1)`: it only excludes the trigger when it actually appears in
+/// the matched set, so a trigger object that matches the filter predicate but
+/// lies outside the filter's zone is no longer wrongly decremented. This matches
+/// the `Aggregate` arm's zone-membership exclusion.
+pub(crate) fn object_count_matching_ids(
+    state: &GameState,
+    filter: &TargetFilter,
+    filter_ctx: &FilterContext<'_>,
+    source_id: ObjectId,
+) -> Vec<ObjectId> {
+    let zone = filter
+        .extract_in_zone()
+        .unwrap_or(crate::types::zones::Zone::Battlefield);
+    let mut ids: Vec<ObjectId> = crate::game::targeting::zone_object_ids(state, zone)
+        .into_iter()
+        .filter(|&id| matches_target_filter(state, id, filter, filter_ctx))
+        .collect();
+    // CR 603.4 + CR 109.3: drop the triggering object for an "other than" filter
+    // (Valakut's "five other Mountains" — the newly-entered Mountain matches the
+    // per-object filter as a pass-through and is removed here). Falls back to the
+    // ability source when the trigger event carries no object subject (CR 109.3's
+    // general "other than the speaking object"). Resolution-time prefers the live
+    // `current_trigger_event`; detection-time uses the TLS override set by
+    // `resolve_quantity_for_trigger_check`.
+    if filter_contains_other_than_trigger_object(filter) {
+        let triggering_id = state
+            .current_trigger_event
+            .as_ref()
+            .and_then(crate::game::targeting::extract_source_from_event)
+            .or_else(|| {
+                detection_trigger_event()
+                    .as_ref()
+                    .and_then(crate::game::targeting::extract_source_from_event)
+            })
+            .unwrap_or(source_id);
+        ids.retain(|&id| id != triggering_id);
+    }
+    ids
+}
+
 fn resolve_ref(
     state: &GameState,
     qty: &QuantityRef,
@@ -695,54 +745,13 @@ fn resolve_ref(
                 i32::from(effective_speed(state, p.id))
             })
         }
-        QuantityRef::ObjectCount { filter } => {
-            // CR 400.1: If the filter constrains to a specific zone via InZone,
-            // count objects in that zone. Otherwise default to battlefield.
-            let zone = filter
-                .extract_in_zone()
-                .unwrap_or(crate::types::zones::Zone::Battlefield);
-            let raw = crate::game::targeting::zone_object_ids(state, zone)
-                .iter()
-                .filter(|&&id| matches_target_filter(state, id, filter, &filter_ctx))
-                .count();
-            // CR 603.4 + CR 109.3: If the filter carries `OtherThanTriggerObject`,
-            // exclude the triggering object from the count (e.g., Valakut's "five
-            // other Mountains" — the newly-entered Mountain is counted by the
-            // per-object filter as a pass-through, then subtracted here). Uses
-            // the currently-resolving trigger event; at detection time the event
-            // is threaded in via `resolve_quantity_for_trigger_check`, which sets
-            // a scoped override read here.
-            //
-            // When the trigger event carries no object subject (e.g. a `PhaseChanged`
-            // event for "at the beginning of your upkeep" / "end step"), the
-            // "other" modifier degrades to "other than the ability source" — this
-            // matches CR 109.3's general sense of "other" as "not the speaking
-            // object" and preserves Platoon-Dispenser-style "two or more other
-            // creatures" semantics where source == the only entity to exclude.
-            let adjusted = if filter_contains_other_than_trigger_object(filter) {
-                // Prefer the live `current_trigger_event` (resolution-time);
-                // fall back to the detection-time TLS override populated by
-                // `resolve_quantity_for_trigger_check`.
-                let triggering_id = state
-                    .current_trigger_event
-                    .as_ref()
-                    .and_then(crate::game::targeting::extract_source_from_event)
-                    .or_else(|| {
-                        detection_trigger_event()
-                            .as_ref()
-                            .and_then(crate::game::targeting::extract_source_from_event)
-                    })
-                    .unwrap_or(source_id);
-                if matches_target_filter(state, triggering_id, filter, &filter_ctx) {
-                    raw.saturating_sub(1)
-                } else {
-                    raw
-                }
-            } else {
-                raw
-            };
-            usize_to_i32_saturating(adjusted)
-        }
+        QuantityRef::ObjectCount { filter } => usize_to_i32_saturating(
+            // CR 400.1 + CR 603.4 + CR 109.3: count of the matching objects in
+            // the filter's zone, with `OtherThanTriggerObject` exclusion applied
+            // — shared with the "for each [object]" iteration so count and
+            // members stay in lockstep.
+            object_count_matching_ids(state, filter, &filter_ctx, source_id).len(),
+        ),
         // CR 201.2 + CR 603.4: Count of objects matching `filter`,
         // deduplicated by the listed `qualities`. Each object contributes a
         // tuple-key formed from its values per quality; objects whose tuples
@@ -1178,8 +1187,15 @@ fn resolve_ref(
             .as_ref()
             .and_then(crate::game::targeting::extract_amount_from_event)
             .or_else(|| {
-                ctx.scoped_player
-                    .and_then(|player| state.last_effect_counts_by_player.get(&player).copied())
+                ctx.scoped_player.and_then(|player| {
+                    (!state.last_effect_counts_by_player.is_empty()).then(|| {
+                        state
+                            .last_effect_counts_by_player
+                            .get(&player)
+                            .copied()
+                            .unwrap_or(0)
+                    })
+                })
             })
             .or(state.last_effect_count)
             .or(state.last_effect_amount)

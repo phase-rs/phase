@@ -145,6 +145,7 @@ pub fn handle_activate_loyalty(
         // CR 115.1 + CR 701.9b: Random-target loyalty abilities — game picks via
         // `state.rng`. Routes through finalize_loyalty_activation just like the
         // controller-choice degenerate path.
+        let target_constraints = ability_def.target_constraints.clone();
         let resolved_targets = if matches!(
             resolved.target_selection_mode,
             crate::types::ability::TargetSelectionMode::Random
@@ -152,10 +153,10 @@ pub fn handle_activate_loyalty(
             Some(random_select_targets_for_ability(
                 state,
                 &target_slots,
-                &[],
+                &target_constraints,
             )?)
         } else {
-            auto_select_targets_for_ability(state, &resolved, &target_slots, &[])?
+            auto_select_targets_for_ability(state, &resolved, &target_slots, &target_constraints)?
         };
 
         if let Some(targets) = resolved_targets {
@@ -174,9 +175,15 @@ pub fn handle_activate_loyalty(
 
         state.lands_tapped_for_mana.remove(&player);
 
-        let selection = begin_target_selection_for_ability(state, &resolved, &target_slots, &[])?;
+        let selection = begin_target_selection_for_ability(
+            state,
+            &resolved,
+            &target_slots,
+            &target_constraints,
+        )?;
         let mut pending = PendingCast::new(pw_id, CardId(0), resolved, ManaCost::NoCost);
         pending.activation_ability_index = Some(ability_index);
+        pending.target_constraints = target_constraints;
         // CR 606.4: Loyalty cost is paid after targets are chosen.
         // Stored here so handle_select_targets can call pay_ability_cost.
         pending.activation_cost = Some(crate::types::ability::AbilityCost::Loyalty {

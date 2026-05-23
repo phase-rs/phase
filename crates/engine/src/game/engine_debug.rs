@@ -126,7 +126,7 @@ pub fn apply_debug_action(
 
         DebugAction::ShuffleLibrary { player_id } => {
             validate_player(state, player_id)?;
-            shuffle_library(state, player_id);
+            shuffle_library(state, player_id, events);
         }
 
         DebugAction::Proliferate { player_id } => {

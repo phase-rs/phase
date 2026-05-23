@@ -1248,6 +1248,18 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             permanents,
             ..
         } => bounded_select_card_candidates(*player, permanents, [*count]),
+        WaitingFor::RemoveCounterForCost {
+            player, permanents, ..
+        } => permanents
+            .iter()
+            .map(|id| {
+                candidate(
+                    GameAction::SelectCards { cards: vec![*id] },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         // CR 701.68a: AI selects exactly one creature to put N -1/-1 counters on as cost.
         WaitingFor::BlightChoice {
             player, creatures, ..

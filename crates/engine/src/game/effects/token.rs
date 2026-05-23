@@ -3097,4 +3097,72 @@ mod tests {
         // The created token should be on the battlefield
         assert!(state.objects.contains_key(&state.last_created_token_ids[0]));
     }
+
+    // CR 111.1 + CR 616.1: The Brass's Bounty fix, end to end. A folded
+    // "for each X, create a token" ability carries the iteration in `count`
+    // (here `Fixed{3}` standing in for 3 lands), so `resolve` proposes ONE
+    // batched CreateToken event. With Xorn's `Plus{1}` token replacement on the
+    // battlefield, the batch becomes 3 + 1 = 4 tokens.
+    //
+    // This discriminates the fix from the pre-fix bug: when the same instruction
+    // was modeled as `count: 1` + `repeat_for: 3`, the loop emitted three
+    // separate count-1 events and Xorn's +1 applied to each — `(1 + 1) * 3 = 6`
+    // tokens. Asserting exactly 4 (not 6) proves the single batched event.
+    // Xorn is a lone candidate, so no CR 616.1 ordering prompt is involved.
+    #[test]
+    fn folded_for_each_token_applies_xorn_once_to_the_batch() {
+        use crate::game::game_object::GameObject;
+        use crate::types::ability::{QuantityModification, ReplacementDefinition};
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Xorn: "create those tokens plus an additional Treasure" — modeled as a
+        // CreateToken count `Plus{1}` replacement.
+        let xorn_repl = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            .quantity_modification(QuantityModification::Plus { value: 1 });
+        let mut xorn = GameObject::new(
+            ObjectId(50),
+            CardId(1),
+            PlayerId(0),
+            "Xorn".to_string(),
+            Zone::Battlefield,
+        );
+        xorn.replacement_definitions = vec![xorn_repl].into();
+        state.objects.insert(ObjectId(50), xorn);
+        state.battlefield.push_back(ObjectId(50));
+
+        // The folded shape: a single Token effect whose `count` carries the
+        // per-land quantity (3), with no `repeat_for` loop.
+        let ability = ResolvedAbility::new(
+            Effect::Token {
+                name: "treasure".to_string(),
+                power: PtValue::Fixed(0),
+                toughness: PtValue::Fixed(0),
+                types: vec!["Artifact".to_string(), "Treasure".to_string()],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 3 },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.last_created_token_ids.len(),
+            4,
+            "batched event: 3 + Xorn's 1 = 4 tokens (the pre-fix per-token loop would give 6)"
+        );
+    }
 }

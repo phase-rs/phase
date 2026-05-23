@@ -544,6 +544,20 @@ fn resolve_defined_or_targets(
         }
     }
 
+    if let Effect::MultiplyCounter { target, .. } = &ability.effect {
+        if ability.targets.is_empty() {
+            let effective_filter = crate::game::effects::resolved_object_filter(ability, target);
+            let ctx = crate::game::filter::FilterContext::from_ability(ability);
+            return state
+                .battlefield_phased_in_ids()
+                .into_iter()
+                .filter(|id| {
+                    crate::game::filter::matches_target_filter(state, *id, &effective_filter, &ctx)
+                })
+                .collect();
+        }
+    }
+
     ability
         .targets
         .iter()
@@ -839,7 +853,8 @@ pub fn resolve_remove(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{QuantityExpr, TargetFilter};
+    use crate::types::ability::{ControllerRef, QuantityExpr, TargetFilter, TypedFilter};
+    use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -851,6 +866,16 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
+    }
+
+    fn mark_creature(state: &mut GameState, object_id: ObjectId) {
+        state
+            .objects
+            .get_mut(&object_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
     }
 
     #[test]
@@ -1058,6 +1083,66 @@ mod tests {
             CounterType::Plus1Plus1
         );
         assert_eq!(state.counter_added_this_turn[0].count, 2);
+    }
+
+    #[test]
+    fn multiply_counter_with_no_explicit_targets_expands_filter() {
+        let mut state = GameState::new_two_player(42);
+        let creature_a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Hydra".to_string(),
+            Zone::Battlefield,
+        );
+        let creature_b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Elf".to_string(),
+            Zone::Battlefield,
+        );
+        let opponent_creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [creature_a, creature_b, opponent_creature] {
+            mark_creature(&mut state, id);
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .counters
+                .insert(CounterType::Plus1Plus1, 2);
+        }
+        let ability = ResolvedAbility::new(
+            Effect::MultiplyCounter {
+                counter_type: CounterType::Plus1Plus1,
+                multiplier: 2,
+                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        resolve_multiply(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        assert_eq!(
+            state.objects[&creature_a].counters[&CounterType::Plus1Plus1],
+            4
+        );
+        assert_eq!(
+            state.objects[&creature_b].counters[&CounterType::Plus1Plus1],
+            4
+        );
+        assert_eq!(
+            state.objects[&opponent_creature].counters[&CounterType::Plus1Plus1],
+            2
+        );
     }
 
     /// Regression test: SelfRef PutCounter (Ajani's Pridemate trigger) must apply the counter

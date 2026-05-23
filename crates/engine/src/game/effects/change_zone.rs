@@ -16,11 +16,17 @@ use crate::types::zones::Zone;
 
 /// CR 401.3: Shuffle a player's library using the game's seeded RNG.
 /// Reusable helper for auto-shuffle after zone moves to Library.
-pub fn shuffle_library(state: &mut GameState, player: PlayerId) {
+pub fn shuffle_library(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEvent>) {
     let GameState { players, rng, .. } = state;
     if let Some(p) = players.iter_mut().find(|p| p.id == player) {
         crate::util::im_ext::shuffle_vector(&mut p.library, rng);
     }
+    // CR 701.24a: Emit player-action event so trigger matchers can filter
+    // by the identity of the shuffling player.
+    events.push(GameEvent::PlayerPerformedAction {
+        player_id: player,
+        action: crate::types::events::PlayerActionKind::ShuffledLibrary,
+    });
 }
 
 /// CR 701.17c + CR 603.7: For a `TrackedSet` / `TrackedSetFiltered` target,
@@ -152,7 +158,7 @@ pub(crate) fn deliver_replaced_zone_change(
         if to == Zone::Library {
             let owner = state.objects.get(&object_id).map(|o| o.owner);
             if let Some(owner) = owner {
-                shuffle_library(state, owner);
+                shuffle_library(state, owner, events);
             }
         }
         // Track cards exiled by the source. Some linked exiles return when the

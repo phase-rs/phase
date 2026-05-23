@@ -2,12 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { FormatGroup, GameFormat } from "../../adapter/types";
 import { FORMAT_REGISTRY } from "../../data/formatRegistry";
-import { parseJoinCode } from "../../services/serverDetection";
+import { flagForServer, parseJoinCode } from "../../services/serverDetection";
 import { FORMAT_DEFAULTS, isLobbyEntryCompatible, useMultiplayerStore } from "../../stores/multiplayerStore";
 import { MenuPanel } from "../menu/MenuShell";
 import { menuButtonClass } from "../menu/buttonStyles";
 import { GameListItem } from "./GameListItem";
 import type { LobbyGame } from "./GameListItem";
+import { ServerFlag } from "./ServerFlag";
 import { ServerPicker } from "./ServerPicker";
 
 interface LobbyViewProps {
@@ -69,6 +70,8 @@ export function LobbyView({
   const isServer = connectionMode !== "p2p";
   const isP2P = connectionMode === "p2p";
   const serverAddress = useMultiplayerStore((s) => s.serverAddress);
+  // Flag for the connected region, or null for self-hosted/custom servers.
+  const serverFlag = flagForServer(serverAddress);
   const [games, setGames] = useState<LobbyGame[]>([]);
   const gamesRef = useRef<LobbyGame[]>([]);
   const [playerCount, setPlayerCount] = useState(0);
@@ -255,8 +258,14 @@ export function LobbyView({
               type="button"
               onClick={() => setServerPickerOpen(true)}
               title={serverAddress}
-              className="rounded-full border border-white/10 bg-black/18 px-2.5 py-0.5 font-mono text-[10px] text-slate-300 transition-colors hover:border-white/18 hover:bg-white/6"
+              className="flex items-center gap-1.5 rounded-full border border-white/10 bg-black/18 px-2.5 py-0.5 font-mono text-[10px] text-slate-300 transition-colors hover:border-white/18 hover:bg-white/6"
             >
+              {serverFlag && (
+                <ServerFlag
+                  flag={serverFlag}
+                  className="h-2.5 w-auto rounded-[1px] ring-1 ring-black/20"
+                />
+              )}
               {serverAddress.replace(/^wss?:\/\//, "").split("/")[0]}
             </button>
           )}
