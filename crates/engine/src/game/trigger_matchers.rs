@@ -3196,6 +3196,77 @@ mod tests {
     }
 
     #[test]
+    fn city_of_traitors_another_land_excludes_source_land() {
+        let mut state = setup();
+        let city = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "City of Traitors".to_string(),
+            Zone::Battlefield,
+        );
+        let other_land = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Ancient Tomb".to_string(),
+            Zone::Battlefield,
+        );
+        let opponent_land = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(1),
+            "Opponent Land".to_string(),
+            Zone::Battlefield,
+        );
+        for land in [city, other_land, opponent_land] {
+            state
+                .objects
+                .get_mut(&land)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Land);
+        }
+
+        let trigger = parse_trigger_line(
+            "When you play another land, sacrifice this land.",
+            "City of Traitors",
+        );
+
+        assert!(!match_land_played(
+            &GameEvent::LandPlayed {
+                object_id: city,
+                player_id: PlayerId(0),
+                from_zone: Zone::Hand,
+            },
+            &trigger,
+            city,
+            &state,
+        ));
+        assert!(match_land_played(
+            &GameEvent::LandPlayed {
+                object_id: other_land,
+                player_id: PlayerId(0),
+                from_zone: Zone::Hand,
+            },
+            &trigger,
+            city,
+            &state,
+        ));
+        assert!(!match_land_played(
+            &GameEvent::LandPlayed {
+                object_id: opponent_land,
+                player_id: PlayerId(1),
+                from_zone: Zone::Hand,
+            },
+            &trigger,
+            city,
+            &state,
+        ));
+    }
+
+    #[test]
     fn becomes_plotted_matches_only_source_card() {
         let mut state = setup();
         let plotted = create_object(

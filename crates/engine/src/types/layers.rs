@@ -219,7 +219,8 @@ mod tests {
                     trigger_definitions: Default::default(),
                     replacement_definitions: Default::default(),
                     static_definitions: Default::default(),
-                })
+                }),
+                printed_ref: None,
             }
             .layer(),
             Layer::Copy

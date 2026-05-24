@@ -6723,11 +6723,11 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     // second-person "play a land" form (you — e.g. Fastbond). The optional
     // from-zone tail rides through `parse_type_phrase`, matching the existing
     // cast-spell trigger shape used by Rocco, Street Chef.
-    if let Some((valid_target, after_land_play)) = parse_land_play_trigger_subject(lower) {
+    if let Some((valid_target, qualifier, after_land_play)) = parse_land_play_trigger_subject(lower)
+    {
         let mut def = make_base();
         def.mode = TriggerMode::LandPlayed;
         def.valid_target = valid_target;
-
         let after_land_play = after_land_play.trim_start();
         let clause = terminated(
             take_until::<_, _, OracleError<'_>>(", "),
@@ -6737,10 +6737,12 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         .map(|(_, before)| before)
         .unwrap_or(after_land_play);
         let (filter, _) = parse_type_phrase(clause);
-        if !matches!(filter, TargetFilter::Any) {
+        if qualifier.is_some() {
+            // CR 305.1: "another land" excludes the source permanent.
+            def.valid_card = Some(add_another_prop(filter));
+        } else if !matches!(filter, TargetFilter::Any) {
             def.valid_card = Some(filter);
         }
-
         return Some((TriggerMode::LandPlayed, def));
     }
 
@@ -8871,7 +8873,9 @@ fn parse_turn_constraint(phase_text: &str) -> Option<TriggerConstraint> {
 
 /// CR 305.1 + CR 603.2: Parse the subject and land-play verb from
 /// "whenever/when [subject] plays/play a land".
-fn parse_land_play_trigger_subject(lower: &str) -> Option<(Option<TargetFilter>, &str)> {
+fn parse_land_play_trigger_subject(
+    lower: &str,
+) -> Option<(Option<TargetFilter>, Option<FilterProp>, &str)> {
     let (after_prefix, _) = alt((
         tag::<_, _, OracleError<'_>>("whenever "),
         tag::<_, _, OracleError<'_>>("when "),
@@ -8894,13 +8898,21 @@ fn parse_land_play_trigger_subject(lower: &str) -> Option<(Option<TargetFilter>,
     ))
     .parse(after_prefix)
     .ok()?;
-    let (after_land, _) = alt((
-        tag::<_, _, OracleError<'_>>("plays a land"),
-        tag("play a land"),
+    // CR 305.1: Decompose verb ("play"/"plays") and land-qualifier ("another"/"a")
+    // into separate axes to avoid Cartesian-product enumeration.
+    let (after_verb, _) = alt((tag::<_, _, OracleError<'_>>("plays "), tag("play ")))
+        .parse(after_subject)
+        .ok()?;
+    let (after_land, qualifier) = alt((
+        value(
+            Some(FilterProp::Another),
+            tag::<_, _, OracleError<'_>>("another land"),
+        ),
+        value(None, tag("a land")),
     ))
-    .parse(after_subject)
+    .parse(after_verb)
     .ok()?;
-    Some((valid_target, after_land))
+    Some((valid_target, qualifier, after_land))
 }
 
 /// CR 700.13: "Whenever [subject] commits a crime" — scoped crime trigger parser.
@@ -12802,6 +12814,33 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    #[test]
+    fn trigger_city_of_traitors_play_another_land() {
+        // CR 305.1: "When you play another land, sacrifice ~."
+        // The "another" qualifier must produce FilterProp::Another on valid_card
+        // so the trigger does not fire when City of Traitors itself enters.
+        let t = parse_trigger_line(
+            "When you play another land, sacrifice this land.",
+            "City of Traitors",
+        );
+        assert_eq!(t.mode, TriggerMode::LandPlayed);
+        assert_eq!(t.valid_target, Some(TargetFilter::Controller));
+        // valid_card must contain Another
+        let filter = t
+            .valid_card
+            .expect("valid_card must be set for 'another' qualifier");
+        match &filter {
+            TargetFilter::Typed(tf) => {
+                assert!(
+                    tf.properties.contains(&FilterProp::Another),
+                    "expected FilterProp::Another in properties, got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("expected Typed filter with Another, got {:?}", other),
+        }
     }
 
     #[test]
