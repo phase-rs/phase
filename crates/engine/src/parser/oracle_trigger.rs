@@ -3348,6 +3348,10 @@ fn split_or_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<Stri
             value((), tag("play ")),
             value((), tag("casts ")),
             value((), tag("cast ")),
+            // CR 701.7: Token creation as compound event verb (Mirkwood Bats:
+            // "whenever you create or sacrifice a token").
+            value((), tag("creates ")),
+            value((), tag("create ")),
         ));
         alt((combat_or_zone, player_actions)).parse(text).is_ok()
     }
@@ -3371,7 +3375,7 @@ fn split_or_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<Stri
         if is_event_verb_start(after) {
             // Found a compound event "or". Extract the trigger keyword and subject
             // from the first half to reconstruct the second trigger line.
-            let first = condition[..pos].trim().to_string();
+            let mut first = condition[..pos].trim().to_string();
 
             // Extract the trigger keyword ("When"/"Whenever") and subject from the first condition.
             // The subject is everything between the keyword and the first event verb.
@@ -3379,11 +3383,52 @@ fn split_or_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<Stri
             let second_event = condition[pos + 4..].trim();
             let second = format!("{keyword_and_subject} {second_event}");
 
+            // CR 701.7 + CR 701.21: Shared-object compound verbs — "you create
+            // or sacrifice a token" shares the object between both verbs. If the
+            // first half ends with a bare verb (no object), propagate the object
+            // from the second verb.
+            if let Some(last_word) = first.rsplit(' ').next() {
+                if is_bare_event_verb(&last_word.to_lowercase()) {
+                    if let Some(obj) = extract_shared_object(after, second_event) {
+                        first = format!("{first} {obj}");
+                    }
+                }
+            }
+
             return Some(vec![first, second]);
         }
         search_start = pos + 4;
     }
     None
+}
+
+/// Check if a single word (no spaces) is a known event verb.
+fn is_bare_event_verb(word: &str) -> bool {
+    matches!(
+        word,
+        "create"
+            | "creates"
+            | "sacrifice"
+            | "sacrifices"
+            | "discard"
+            | "discards"
+            | "play"
+            | "plays"
+            | "cast"
+            | "casts"
+    )
+}
+
+/// Extract the shared object from a verb+object phrase.
+/// E.g., `"sacrifice a token"` → `Some("a token")` (using original case).
+fn extract_shared_object<'a>(lower: &str, original: &'a str) -> Option<&'a str> {
+    let space = lower.find(' ')?;
+    let obj = original[space..].trim();
+    if obj.is_empty() {
+        None
+    } else {
+        Some(obj)
+    }
 }
 
 /// Extract the trigger keyword + subject from a condition prefix.
@@ -3451,6 +3496,13 @@ fn extract_subject_text(text: &str) -> &str {
             tag("play "),
             tag("casts "),
             tag("cast "),
+            // CR 701.7: Keep in sync with `is_event_verb_start` for
+            // create-or-sacrifice compound triggers. Spaceless variants
+            // handle end-of-string after compound split removes the object.
+            tag("creates "),
+            tag("creates"),
+            tag("create "),
+            tag("create"),
         ));
         alt((combat_or_zone, player_actions)).parse(i)
     }) {
@@ -5633,7 +5685,8 @@ fn try_parse_one_or_more_die(lower: &str) -> Option<(TriggerMode, TriggerDefinit
 /// shared Controller scope pattern. The matcher evaluates both against the
 /// `TokenCreated` event's `object_id`.
 fn try_parse_one_or_more_tokens_created(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
-    let (_, rest) = alt((
+    // CR 701.7 + CR 603.2c: "one or more" form fires once per batch.
+    let batched_match = alt((
         value(
             (),
             tag::<_, _, OracleError<'_>>("whenever you create one or more "),
@@ -5645,7 +5698,24 @@ fn try_parse_one_or_more_tokens_created(lower: &str) -> Option<(TriggerMode, Tri
     ))
     .parse(lower)
     .map(|(r, _)| ((), r))
-    .ok()?;
+    .ok();
+
+    // CR 701.7: Simple "you create a token" fires per token (not batched).
+    let simple_match = alt((
+        value((), tag::<_, _, OracleError<'_>>("whenever you create a ")),
+        value((), tag::<_, _, OracleError<'_>>("when you create a ")),
+    ))
+    .parse(lower)
+    .map(|(r, _)| ((), r))
+    .ok();
+
+    let (rest, batched) = if let Some((_, rest)) = batched_match {
+        (rest, true)
+    } else if let Some((_, rest)) = simple_match {
+        (rest, false)
+    } else {
+        return None;
+    };
 
     // Accept bare "tokens"/"token" (no type phrase) as well as "[type] tokens".
     let subject_text = if rest == "tokens" || rest == "token" {
@@ -5670,7 +5740,7 @@ fn try_parse_one_or_more_tokens_created(lower: &str) -> Option<(TriggerMode, Tri
     def.mode = TriggerMode::TokenCreated;
     def.valid_card = valid_card;
     def.valid_target = Some(TargetFilter::Controller);
-    def.batched = true;
+    def.batched = batched;
     Some((TriggerMode::TokenCreated, def))
 }
 
@@ -17526,6 +17596,18 @@ mod tests {
         assert_eq!(triggers.len(), 2);
         assert_eq!(triggers[0].mode, TriggerMode::ChangesZone);
         assert_eq!(triggers[1].mode, TriggerMode::SpellCast);
+    }
+
+    #[test]
+    fn compound_or_create_or_sacrifice_token() {
+        // CR 701.7 + CR 701.21: Mirkwood Bats — "Whenever you create or sacrifice a token"
+        let triggers = parse_trigger_lines(
+            "Whenever you create or sacrifice a token, each opponent loses 1 life.",
+            "Mirkwood Bats",
+        );
+        assert_eq!(triggers.len(), 2);
+        assert_eq!(triggers[0].mode, TriggerMode::TokenCreated);
+        assert_eq!(triggers[1].mode, TriggerMode::Sacrificed);
     }
 
     #[test]
