@@ -6529,6 +6529,15 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         def.valid_target = Some(TargetFilter::Controller);
         return Some((TriggerMode::LifeGained, def));
     }
+    // CR 725.1: "Whenever you become the monarch" / "Whenever an opponent becomes
+    // the monarch" — monarch-designation trigger. Decompose into prefix (whenever/when)
+    // + subject (you/opponent/player) + verb (become/becomes) + "the monarch".
+    if let Some((valid_target, _after)) = parse_become_monarch_trigger(lower) {
+        let mut def = make_base();
+        def.mode = TriggerMode::BecomeMonarch;
+        def.valid_target = valid_target;
+        return Some((TriggerMode::BecomeMonarch, def));
+    }
 
     // "whenever you cast your Nth spell each turn" — must precede generic "you cast a"
     if let Some(result) = try_parse_nth_spell_trigger(lower) {
@@ -8785,6 +8794,45 @@ fn parse_land_play_trigger_subject(lower: &str) -> Option<(Option<TargetFilter>,
     Some((valid_target, after_land))
 }
 
+/// CR 725.1: Parse "whenever/when [subject] become(s) the monarch" trigger.
+///
+/// Decomposes the phrase into three axes via nom combinators:
+/// 1. Prefix: "whenever " / "when "
+/// 2. Subject + verb: "you become" / "an opponent becomes" / "a player becomes"
+/// 3. Object: " the monarch"
+///
+/// Returns `(valid_target, remaining_text)` on success.
+fn parse_become_monarch_trigger(lower: &str) -> Option<(Option<TargetFilter>, &str)> {
+    let (after_prefix, _) = alt((
+        tag::<_, _, OracleError<'_>>("whenever "),
+        tag::<_, _, OracleError<'_>>("when "),
+    ))
+    .parse(lower)
+    .ok()?;
+    let (after_verb, valid_target) = alt((
+        value(
+            Some(TargetFilter::Controller),
+            tag::<_, _, OracleError<'_>>("you become"),
+        ),
+        value(
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent),
+            )),
+            tag::<_, _, OracleError<'_>>("an opponent becomes"),
+        ),
+        value(
+            Some(TargetFilter::Player),
+            pair(tag::<_, _, OracleError<'_>>("a player"), tag(" becomes")),
+        ),
+    ))
+    .parse(after_prefix)
+    .ok()?;
+    let (after_monarch, _) = tag::<_, _, OracleError<'_>>(" the monarch")
+        .parse(after_verb)
+        .ok()?;
+    Some((valid_target, after_monarch))
+}
+
 /// CR 700.13: "Whenever [subject] commits a crime" — scoped crime trigger parser.
 ///
 /// Handles three subject forms (trailing space bundled into each tag for precision):
@@ -9934,6 +9982,44 @@ mod tests {
         // invariant is that it is NOT scoped to Controller (which would silently
         // restrict to the source's controller).
         assert_ne!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    // CR 725.1: "become the monarch" trigger tests.
+    #[test]
+    fn trigger_you_become_the_monarch_scopes_to_controller() {
+        // Custodi Lich: "Whenever you become the monarch, target player
+        // sacrifices a creature of their choice."
+        let def = parse_trigger_line(
+            "Whenever you become the monarch, target player sacrifices a creature of their choice.",
+            "Custodi Lich",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomeMonarch);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+    #[test]
+    fn trigger_opponent_becomes_the_monarch() {
+        // Knights of the Black Rose: "Whenever an opponent becomes the monarch,
+        // if you were the monarch as the turn began, that player loses 2 life."
+        let def = parse_trigger_line(
+            "Whenever an opponent becomes the monarch, that player loses 2 life.",
+            "Knights of the Black Rose",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomeMonarch);
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+    }
+    #[test]
+    fn trigger_a_player_becomes_the_monarch() {
+        let def = parse_trigger_line(
+            "Whenever a player becomes the monarch, draw a card.",
+            "Some Card",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomeMonarch);
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
     }
 
     #[test]
