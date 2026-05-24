@@ -47,6 +47,17 @@ interface CardPreviewProps {
   position?: { x: number; y: number };
   scryfallId?: string;
   sourcePrinting?: SourcePrinting;
+  /** Overrides the mobile-overlay dismiss handler. Contexts that drive the
+   *  preview via their own state (e.g. the deck builder's hoveredCard) pass
+   *  this so a tap-to-dismiss clears THAT state; defaults to the in-game
+   *  uiStore.dismissPreview. */
+  onDismiss?: () => void;
+  /** Mobile/touch presentation. "modal" (default) is the full-screen,
+   *  tap-to-dismiss overlay used in-game. "compact" is a smaller, non-blocking
+   *  floating card that auto-dismisses on the next tap or scroll — used by the
+   *  deck builder, where you browse many cards quickly and a full-screen
+   *  takeover requiring a separate dismiss tap is too heavy. */
+  mobileLayout?: "modal" | "compact";
 }
 
 export function CardPreview({
@@ -56,6 +67,8 @@ export function CardPreview({
   position,
   scryfallId,
   sourcePrinting,
+  onDismiss,
+  mobileLayout = "modal",
 }: CardPreviewProps) {
   if (!cardName) return null;
 
@@ -67,6 +80,8 @@ export function CardPreview({
       position={position}
       scryfallId={scryfallId}
       sourcePrinting={sourcePrinting}
+      onDismiss={onDismiss}
+      mobileLayout={mobileLayout}
     />
   );
 }
@@ -78,6 +93,8 @@ function CardPreviewInner({
   position,
   scryfallId,
   sourcePrinting,
+  onDismiss,
+  mobileLayout,
 }: {
   cardName: string;
   backFaceName: string | null;
@@ -85,6 +102,8 @@ function CardPreviewInner({
   position?: { x: number; y: number };
   scryfallId?: string;
   sourcePrinting?: SourcePrinting;
+  onDismiss?: () => void;
+  mobileLayout?: "modal" | "compact";
 }) {
   const inspectedObjectId = useUiStore((s) => s.inspectedObjectId);
   const dismissPreview = useUiStore((s) => s.dismissPreview);
@@ -212,15 +231,21 @@ function CardPreviewInner({
       const pointer = pointerRef.current;
       if (!preview || !pointer) return;
 
+      // Clamp against the ACTUAL rendered size, not the image-only estimate:
+      // the "Alt: parsed abilities" / "Hold Ctrl" hint bars add height below the
+      // card, and clamping on the estimate let that overflow the bottom of short
+      // (e.g. tablet) viewports.
+      const measuredWidth = preview.offsetWidth || previewWidth;
+      const measuredHeight = preview.offsetHeight || previewHeight;
       const left =
         pointer.x > viewportWidth / 2
-          ? Math.max(16, pointer.x - previewWidth - gap)
-          : Math.min(pointer.x + gap, viewportWidth - previewWidth - 16);
+          ? Math.max(16, pointer.x - measuredWidth - gap)
+          : Math.min(pointer.x + gap, viewportWidth - measuredWidth - 16);
       const top = altHeld
         ? margin
         : Math.min(
-            Math.max(margin, pointer.y - previewHeight / 2),
-            viewportHeight - previewHeight - margin,
+            Math.max(margin, pointer.y - measuredHeight / 2),
+            viewportHeight - measuredHeight - margin,
           );
 
       preview.style.right = "auto";
@@ -241,8 +266,18 @@ function CardPreviewInner({
     window.addEventListener("mousemove", handlePointerMove);
     schedulePositionUpdate();
 
+    // The preview grows when async content settles (image load, hint bars, face
+    // swap); re-clamp on size change so a late-appearing hint bar can't leave the
+    // card hanging off the bottom.
+    const resizeObserver =
+      previewRef.current != null
+        ? new ResizeObserver(() => schedulePositionUpdate())
+        : null;
+    if (resizeObserver && previewRef.current) resizeObserver.observe(previewRef.current);
+
     return () => {
       window.removeEventListener("mousemove", handlePointerMove);
+      resizeObserver?.disconnect();
       if (frameRef.current != null) {
         window.cancelAnimationFrame(frameRef.current);
         frameRef.current = null;
@@ -268,8 +303,9 @@ function CardPreviewInner({
         backFaceName={backFaceName}
         faceIndex={defaultFaceIndex}
         obj={obj}
-        onDismiss={dismissPreview}
+        onDismiss={onDismiss ?? dismissPreview}
         sourcePrinting={sourcePrinting}
+        layout={mobileLayout ?? "modal"}
       />
     );
   }
@@ -324,6 +360,7 @@ function MobilePreviewOverlay({
   obj,
   onDismiss,
   sourcePrinting,
+  layout = "modal",
 }: {
   cardName: string;
   backFaceName: string | null;
@@ -331,6 +368,7 @@ function MobilePreviewOverlay({
   obj: GameObject | null;
   onDismiss: () => void;
   sourcePrinting?: SourcePrinting;
+  layout?: "modal" | "compact";
 }) {
   const { src, isRotated } = useCardImage(cardName, {
     size: "normal",
@@ -339,6 +377,53 @@ function MobilePreviewOverlay({
     faceName: obj?.printed_ref?.face_name,
     sourcePrinting,
   });
+
+  // Compact layout: dismiss on the next tap or scroll anywhere, so no separate
+  // dismiss gesture is needed. Listeners attach on a deferred tick so the very
+  // tap that opened the preview doesn't immediately close it. Capture phase so
+  // scrolls inside the deck's own overflow container are caught too.
+  useEffect(() => {
+    if (layout !== "compact") return undefined;
+    const id = window.setTimeout(() => {
+      document.addEventListener("pointerdown", onDismiss, true);
+      document.addEventListener("scroll", onDismiss, true);
+      document.addEventListener("touchmove", onDismiss, true);
+      document.addEventListener("wheel", onDismiss, true);
+    }, 0);
+    return () => {
+      window.clearTimeout(id);
+      document.removeEventListener("pointerdown", onDismiss, true);
+      document.removeEventListener("scroll", onDismiss, true);
+      document.removeEventListener("touchmove", onDismiss, true);
+      document.removeEventListener("wheel", onDismiss, true);
+    };
+  }, [layout, onDismiss]);
+
+  if (layout === "compact") {
+    // Non-blocking peek: a smaller card, no dimming backdrop, click-through
+    // container (taps fall through to the deck so the next card can be tapped
+    // directly). The card itself dismisses on tap.
+    return (
+      <div
+        className="pointer-events-none fixed inset-0 z-[100] flex items-center justify-center p-4"
+        data-card-preview
+      >
+        {src && (
+          <img
+            src={src}
+            alt={cardName}
+            draggable={false}
+            onPointerDown={onDismiss}
+            className={
+              isRotated
+                ? "pointer-events-auto max-h-[58vw] max-w-[80vh] rotate-90 rounded-xl border border-white/15 object-contain shadow-2xl"
+                : "pointer-events-auto max-h-[60vh] max-w-[68vw] rounded-xl border border-white/15 object-contain shadow-2xl"
+            }
+          />
+        )}
+      </div>
+    );
+  }
 
   // pointerdown (not click): the touch-release that opened this overlay fires
   // pointerup, not pointerdown, so a fresh tap is required to dismiss.

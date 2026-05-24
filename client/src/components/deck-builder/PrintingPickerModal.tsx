@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { getCardPrintings } from "../../services/scryfall.ts";
 import type { PrintingEntry } from "../../services/scryfall.ts";
@@ -23,6 +23,7 @@ export function PrintingPickerModal({
   const [printings, setPrintings] = useState<PrintingEntry[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [visibleCount, setVisibleCount] = useState(INITIAL_PAGE_SIZE);
+  const [query, setQuery] = useState("");
 
   const currentOverride = usePreferencesStore((s) => s.artOverrides[oracleId]);
   const setArtOverride = usePreferencesStore((s) => s.setArtOverride);
@@ -52,8 +53,26 @@ export function PrintingPickerModal({
     onClose();
   }, [oracleId, clearArtOverride, onClose]);
 
-  const visiblePrintings = printings?.slice(0, visibleCount) ?? [];
-  const hasMore = (printings?.length ?? 0) > visibleCount;
+  // Filter by set name, set code, or collector number. Reset pagination when
+  // the query changes so results aren't hidden behind a stale visibleCount.
+  const filteredPrintings = useMemo(() => {
+    if (!printings) return [];
+    const q = query.trim().toLowerCase();
+    if (!q) return printings;
+    return printings.filter(
+      (p) =>
+        p.set_name.toLowerCase().includes(q)
+        || p.set.toLowerCase().includes(q)
+        || p.collector_number.toLowerCase().includes(q),
+    );
+  }, [printings, query]);
+
+  useEffect(() => {
+    setVisibleCount(INITIAL_PAGE_SIZE);
+  }, [query]);
+
+  const visiblePrintings = filteredPrintings.slice(0, visibleCount);
+  const hasMore = filteredPrintings.length > visibleCount;
 
   return (
     <ModalPanelShell
@@ -77,9 +96,19 @@ export function PrintingPickerModal({
 
       {!loading && printings && printings.length > 0 && (
         <>
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Filter by set or collector number…"
+            aria-label="Filter printings"
+            className="mb-3 w-full rounded-[16px] border border-white/10 bg-black/18 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-white/20 focus:outline-none"
+          />
+
           <div className="mb-4 flex items-center justify-between">
             <span className="text-xs text-slate-400">
-              {printings.length} printing{printings.length === 1 ? "" : "s"}
+              {filteredPrintings.length} printing{filteredPrintings.length === 1 ? "" : "s"}
+              {query.trim() && ` matching “${query.trim()}”`}
             </span>
             <button
               type="button"
@@ -89,6 +118,12 @@ export function PrintingPickerModal({
               Use Default
             </button>
           </div>
+
+          {filteredPrintings.length === 0 && (
+            <div className="py-8 text-center text-sm text-slate-400">
+              No printings match your filter.
+            </div>
+          )}
 
           <div className="grid gap-3 grid-cols-[repeat(auto-fill,minmax(140px,1fr))]">
             {visiblePrintings.map((printing) => {
@@ -155,7 +190,7 @@ export function PrintingPickerModal({
                 onClick={() => setVisibleCount((c) => c + INITIAL_PAGE_SIZE)}
                 className="rounded-lg border border-white/10 bg-white/5 px-4 py-2 text-sm text-slate-200 transition hover:bg-white/10"
               >
-                Show more ({printings.length - visibleCount} remaining)
+                Show more ({filteredPrintings.length - visibleCount} remaining)
               </button>
             </div>
           )}

@@ -132,7 +132,12 @@ export function DeckBuilderPage() {
         onSearchFiltersChange={handleSearchFiltersChange}
         onResetSearch={handleResetSearch}
       />
-      <CardPreview cardName={hoveredCard?.name ?? null} scryfallId={hoveredCard?.scryfallId} />
+      <CardPreview
+        cardName={hoveredCard?.name ?? null}
+        scryfallId={hoveredCard?.scryfallId}
+        onDismiss={useCallback(() => setHoveredCard(null), [])}
+        mobileLayout="compact"
+      />
     </div>
   );
 }
