@@ -5,8 +5,9 @@ import { motion, AnimatePresence } from "framer-motion";
 import { menuButtonClass } from "./buttonStyles";
 import { STORAGE_KEY_PREFIX, listSavedDeckNames, stampDeckMeta } from "../../constants/storage";
 import { deriveImportedDeckName, detectAndParseDeck, resolveCommander } from "../../services/deckParser";
+import { fetchDeckFromUrl } from "../../services/deckUrlImport";
 
-type ImportTab = "paste" | "file";
+type ImportTab = "paste" | "url" | "file";
 
 interface ImportDeckModalProps {
   open: boolean;
@@ -46,6 +47,9 @@ function resolveImportDeckName(
 export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalProps) {
   const [tab, setTab] = useState<ImportTab>("paste");
   const [pasteText, setPasteText] = useState("");
+  const [urlText, setUrlText] = useState("");
+  const [urlError, setUrlError] = useState<string | null>(null);
+  const [urlLoading, setUrlLoading] = useState(false);
   const [deckName, setDeckName] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -58,6 +62,26 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
     const names = listSavedDeckNames();
     onImported(name, names);
     resetAndClose();
+  };
+
+  const handleUrlImport = async () => {
+    const trimmed = urlText.trim();
+    if (!trimmed || urlLoading) return;
+    setUrlError(null);
+    setUrlLoading(true);
+    try {
+      const content = await fetchDeckFromUrl(trimmed);
+      const deck = await resolveCommander(detectAndParseDeck(content));
+      const name = resolveImportDeckName(deckName, content, deck);
+      localStorage.setItem(STORAGE_KEY_PREFIX + name, JSON.stringify(deck));
+      stampDeckMeta(name);
+      onImported(name, listSavedDeckNames());
+      resetAndClose();
+    } catch (err) {
+      setUrlError(err instanceof Error ? err.message : "Failed to import deck.");
+    } finally {
+      setUrlLoading(false);
+    }
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -81,6 +105,9 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
 
   const resetAndClose = () => {
     setPasteText("");
+    setUrlText("");
+    setUrlError(null);
+    setUrlLoading(false);
     setDeckName("");
     setTab("paste");
     onClose();
@@ -120,6 +147,9 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
               <button className={TAB_CLASS(tab === "paste")} onClick={() => setTab("paste")}>
                 Paste Text
               </button>
+              <button className={TAB_CLASS(tab === "url")} onClick={() => setTab("url")}>
+                From URL
+              </button>
               <button className={TAB_CLASS(tab === "file")} onClick={() => setTab("file")}>
                 From File
               </button>
@@ -152,6 +182,47 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
                   })}
                 >
                   Import
+                </button>
+              </div>
+            )}
+
+            {tab === "url" && (
+              <div className="flex flex-col gap-3">
+                <input
+                  type="text"
+                  value={deckName}
+                  onChange={(e) => setDeckName(e.target.value)}
+                  placeholder="Deck name (optional)"
+                  className="rounded-xl border border-white/25 bg-white/8 px-3 py-2 text-sm text-white placeholder-white/30 outline-none backdrop-blur-sm focus:border-amber-300/70"
+                />
+                <input
+                  type="url"
+                  value={urlText}
+                  onChange={(e) => {
+                    setUrlText(e.target.value);
+                    if (urlError) setUrlError(null);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") void handleUrlImport();
+                  }}
+                  placeholder="https://moxfield.com/decks/… or https://archidekt.com/decks/…"
+                  className="rounded-xl border border-white/25 bg-white/8 px-3 py-2 text-sm text-white placeholder-white/30 outline-none backdrop-blur-sm focus:border-amber-300/70"
+                />
+                <p className="text-xs text-white/40">
+                  Imports a public deck from Moxfield or Archidekt.
+                </p>
+                {urlError && <p className="text-xs text-red-400">{urlError}</p>}
+                <button
+                  onClick={handleUrlImport}
+                  disabled={!urlText.trim() || urlLoading}
+                  className={menuButtonClass({
+                    tone: "amber",
+                    size: "md",
+                    disabled: !urlText.trim() || urlLoading,
+                    className: "w-full font-bold",
+                  })}
+                >
+                  {urlLoading ? "Importing…" : "Import"}
                 </button>
               </div>
             )}
