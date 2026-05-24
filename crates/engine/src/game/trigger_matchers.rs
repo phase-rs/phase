@@ -150,7 +150,6 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::ConjureAll
         | TriggerMode::Vote
         | TriggerMode::BecomeRenowned
-        | TriggerMode::Proliferate
         | TriggerMode::Abandoned
         | TriggerMode::ClaimPrize
         | TriggerMode::CrankContraption
@@ -160,6 +159,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::GiveGift
         | TriggerMode::Mentored
         | TriggerMode::Mutates
+        | TriggerMode::Proliferate
         | TriggerMode::SeekAll
         | TriggerMode::SetInMotion
         | TriggerMode::Specializes
@@ -377,7 +377,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::ConjureAll,
         TriggerMode::Vote,
         TriggerMode::BecomeRenowned,
-        TriggerMode::Proliferate,
         TriggerMode::Abandoned,
         TriggerMode::ClaimPrize,
         TriggerMode::CrankContraption,
@@ -4016,6 +4015,27 @@ mod tests {
             action: PlayerActionKind::SearchedLibrary,
         };
         assert!(!match_player_action(&event, &trigger, source_id, &state));
+    }
+
+    #[test]
+    fn player_performed_action_matches_proliferate() {
+        let mut state = setup();
+        let source_id = create_object(
+            &mut state,
+            CardId(15),
+            PlayerId(0),
+            "Scheming Aspirant".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = parse_trigger_line(
+            "Whenever you proliferate, each opponent loses 2 life and you gain 2 life.",
+            "Scheming Aspirant",
+        );
+        let event = GameEvent::PlayerPerformedAction {
+            player_id: PlayerId(0),
+            action: PlayerActionKind::Proliferate,
+        };
+        assert!(match_player_action(&event, &trigger, source_id, &state));
     }
 
     #[test]

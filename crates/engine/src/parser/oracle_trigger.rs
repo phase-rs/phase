@@ -7019,6 +7019,9 @@ fn parse_player_action_list(text: &str) -> Option<Vec<PlayerActionKind>> {
 }
 
 fn parse_player_action_phrase(text: &str) -> Option<PlayerActionKind> {
+    if let Ok(("", action)) = parse_proliferate_player_action(text) {
+        return Some(action);
+    }
     match text {
         "search your library" | "searches their library" => Some(PlayerActionKind::SearchedLibrary),
         "scry" | "scries" => Some(PlayerActionKind::Scry),
@@ -7034,6 +7037,15 @@ fn parse_player_action_phrase(text: &str) -> Option<PlayerActionKind> {
         | "shuffle a library" => Some(PlayerActionKind::ShuffledLibrary),
         _ => None,
     }
+}
+
+fn parse_proliferate_player_action(input: &str) -> OracleResult<'_, PlayerActionKind> {
+    // CR 701.34a: Proliferate — choose permanents/players with counters.
+    all_consuming(alt((
+        value(PlayerActionKind::Proliferate, tag("proliferate")),
+        value(PlayerActionKind::Proliferate, tag("proliferates")),
+    )))
+    .parse(input)
 }
 
 /// Parse "whenever you cast your Nth spell each turn" (or "in a turn") and
@@ -12747,6 +12759,22 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::CollectEvidence);
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_you_proliferate() {
+        // Scheming Aspirant (ONE): "Whenever you proliferate, each opponent loses 2 life
+        // and you gain 2 life."
+        let def = parse_trigger_line(
+            "Whenever you proliferate, each opponent loses 2 life and you gain 2 life.",
+            "Scheming Aspirant",
+        );
+        assert_eq!(def.mode, TriggerMode::PlayerPerformedAction);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(
+            def.player_actions,
+            Some(vec![PlayerActionKind::Proliferate])
+        );
     }
 
     #[test]

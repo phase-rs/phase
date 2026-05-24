@@ -85,6 +85,8 @@ pub enum PlayerActionKind {
     CollectEvidence,
     /// CR 701.24a: A player shuffled their library.
     ShuffledLibrary,
+    /// CR 701.34a: A player proliferated.
+    Proliferate,
 }
 
 /// CR 701.30d: Result of a clash — whether the controller won, lost, or tied.
