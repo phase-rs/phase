@@ -5188,7 +5188,7 @@ pub enum Effect {
         target: TargetFilter,
     },
     /// CR 701.3d: Unattach every matching Equipment from a matched host while
-    /// leaving those Equipment on the battlefield. `attachment` scopes which
+    /// leaving that Equipment on the battlefield. `attachment` scopes which
     /// attached objects move; `target` scopes the host object.
     UnattachAll {
         #[serde(default = "default_target_filter_any")]

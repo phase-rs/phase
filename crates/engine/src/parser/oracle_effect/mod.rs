@@ -21036,6 +21036,41 @@ mod tests {
     }
 
     #[test]
+    fn effect_choose_two_tap_then_unattach_equipment_keeps_unattach_clause() {
+        let def = parse_effect_chain(
+            "Choose two target creatures. Tap those creatures, then unattach all Equipment from them.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(*def.effect, Effect::TargetOnly { .. }));
+        assert_eq!(def.multi_target, Some(MultiTargetSpec::fixed(2, 2)));
+
+        let tap = def
+            .sub_ability
+            .expect("targeted creatures should be tapped");
+        assert!(matches!(
+            &*tap.effect,
+            Effect::Tap {
+                target: TargetFilter::TrackedSet { .. }
+            }
+        ));
+
+        let unattach = tap
+            .sub_ability
+            .expect("unattach clause should remain in the continuation chain");
+        match &*unattach.effect {
+            Effect::UnattachAll { attachment, target } => {
+                assert!(matches!(
+                    attachment,
+                    TargetFilter::Typed(tf)
+                        if tf.type_filters == vec![TypeFilter::Subtype("Equipment".to_string())]
+                ));
+                assert!(matches!(target, TargetFilter::ParentTarget));
+            }
+            other => panic!("expected UnattachAll continuation, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn effect_target_creature_explores_x_times_sets_repeat_for() {
         let def = parse_effect_chain("Target creature explores X times", AbilityKind::Spell);
         assert!(matches!(*def.effect, Effect::TargetOnly { .. }));

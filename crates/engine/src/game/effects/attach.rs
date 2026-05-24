@@ -1,6 +1,5 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::AttachTarget;
-use crate::game::replacement::{self, ReplacementResult};
 use crate::game::targeting::resolved_object_ids_for_filter;
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
@@ -9,8 +8,6 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::ProposedEvent;
-use crate::types::zones::Zone;
 
 /// CR 701.3a + CR 701.3b: Attach — to place an Aura, Equipment, or Fortification on another object or player.
 pub fn resolve(
@@ -45,10 +42,8 @@ pub fn resolve(
     Ok(())
 }
 
-/// CR 701.3d: Unattach each matching Equipment, Aura, or Fortification from
-/// the matched host. Equipment/Fortifications remain on the battlefield;
-/// Auras that are instructed to become unattached leave via the zone-change
-/// replacement pipeline.
+/// CR 701.3d: Unattach each matching Equipment from the matched host, leaving
+/// it on the battlefield but no longer attached.
 pub fn resolve_unattach_all(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -72,11 +67,7 @@ pub fn resolve_unattach_all(
             if !matches_target_filter(state, attachment_id, attachment_filter, &ctx) {
                 continue;
             }
-            if is_aura(state, attachment_id) {
-                if !move_unattached_aura_to_graveyard(state, ability, attachment_id, events) {
-                    return Ok(());
-                }
-            } else if let Some(old_target) = unattach(state, attachment_id) {
+            if let Some(old_target) = unattach(state, attachment_id) {
                 events.push(GameEvent::Unattached {
                     attachment_id,
                     old_target,
@@ -91,52 +82,6 @@ pub fn resolve_unattach_all(
     });
 
     Ok(())
-}
-
-fn move_unattached_aura_to_graveyard(
-    state: &mut GameState,
-    ability: &ResolvedAbility,
-    attachment_id: ObjectId,
-    events: &mut Vec<GameEvent>,
-) -> bool {
-    let proposed = ProposedEvent::zone_change(
-        attachment_id,
-        Zone::Battlefield,
-        Zone::Graveyard,
-        Some(ability.source_id),
-    );
-
-    match replacement::replace_event(state, proposed, events) {
-        ReplacementResult::Execute(event) => {
-            if let Some(old_target) = unattach(state, attachment_id) {
-                events.push(GameEvent::Unattached {
-                    attachment_id,
-                    old_target,
-                });
-            }
-            crate::game::effects::change_zone::deliver_replaced_zone_change(
-                state,
-                event,
-                Some(ability.source_id),
-                None,
-                false,
-                events,
-            );
-            true
-        }
-        ReplacementResult::Prevented => true,
-        ReplacementResult::NeedsChoice(player) => {
-            state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
-            false
-        }
-    }
-}
-
-fn is_aura(state: &GameState, attachment_id: ObjectId) -> bool {
-    state
-        .objects
-        .get(&attachment_id)
-        .is_some_and(|obj| obj.card_types.subtypes.iter().any(|s| s == "Aura"))
 }
 
 pub(crate) fn target_ref_from_attach_target(target: AttachTarget) -> TargetRef {
@@ -319,9 +264,9 @@ pub fn attach_to_player(
     old_target
 }
 
-/// CR 701.3d: Move an Equipment away from the object it is equipping while it
-/// remains on the battlefield. This is the single graph update primitive for
-/// explicit unattach costs and effects.
+/// CR 701.3d: Move an attachment away from the object or player it was attached
+/// to while it remains on the battlefield. This is the single graph update
+/// primitive for explicit unattach costs and effects.
 pub(crate) fn unattach(state: &mut GameState, attachment_id: ObjectId) -> Option<TargetRef> {
     let old_target = current_attachment_target(state, attachment_id)?;
     let old_target_id = state
@@ -723,38 +668,6 @@ mod tests {
             .unwrap()
             .attachments
             .contains(&shield));
-    }
-
-    #[test]
-    fn unattach_all_moves_matching_auras_to_owner_graveyard() {
-        let mut state = setup();
-        let aura = spawn_with_subtype(&mut state, "Pacifism", "Aura");
-        let creature = spawn_creature(&mut state, "Bear");
-        attach_to(&mut state, aura, creature);
-
-        let ability = crate::types::ability::ResolvedAbility::new(
-            Effect::UnattachAll {
-                attachment: TargetFilter::Typed(
-                    crate::types::ability::TypedFilter::default().subtype("Aura".to_string()),
-                ),
-                target: TargetFilter::Any,
-            },
-            vec![TargetRef::Object(creature)],
-            ObjectId(999),
-            PlayerId(0),
-        );
-        let mut events = vec![];
-
-        resolve_unattach_all(&mut state, &ability, &mut events).unwrap();
-
-        let aura_obj = state.objects.get(&aura).unwrap();
-        assert_eq!(aura_obj.zone, Zone::Graveyard);
-        assert_eq!(aura_obj.attached_to, None);
-        assert!(state.players[0].graveyard.contains(&aura));
-        assert!(state.objects.get(&creature).unwrap().attachments.is_empty());
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, GameEvent::ZoneChanged { object_id, to, .. } if *object_id == aura && *to == Zone::Graveyard)));
     }
 
     #[test]

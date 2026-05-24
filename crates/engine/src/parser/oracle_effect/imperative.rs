@@ -6730,7 +6730,7 @@ mod tests {
 
     #[test]
     fn parse_unattach_all_decomposes_attachment_type_and_pronoun_target() {
-        let input = "unattach all Auras from it";
+        let input = "unattach all Equipment from it";
         let lower = input.to_lowercase();
         let result = parse_utility_imperative_ast(input, &lower, &mut ParseContext::default());
         let Some(UtilityImperativeAst::UnattachAll { attachment, target }) = result else {
@@ -6738,7 +6738,7 @@ mod tests {
         };
         assert_eq!(
             attachment,
-            TargetFilter::Typed(TypedFilter::default().subtype("Aura".to_string()))
+            TargetFilter::Typed(TypedFilter::default().subtype("Equipment".to_string()))
         );
         assert!(matches!(target, TargetFilter::ParentTarget));
     }
