@@ -7042,6 +7042,61 @@ mod tests {
     }
 
     #[test]
+    fn explored_trigger_filters_exploring_creature_controller() {
+        let mut state = setup();
+        let source_id = create_object(
+            &mut state,
+            CardId(340),
+            PlayerId(0),
+            "Wildgrowth Walker".to_string(),
+            Zone::Battlefield,
+        );
+        make_creature(&mut state, source_id);
+        let controlled_explorer = create_object(
+            &mut state,
+            CardId(341),
+            PlayerId(0),
+            "Merfolk Branchwalker".to_string(),
+            Zone::Battlefield,
+        );
+        make_creature(&mut state, controlled_explorer);
+        let opponent_explorer = create_object(
+            &mut state,
+            CardId(342),
+            PlayerId(1),
+            "Opponent Scout".to_string(),
+            Zone::Battlefield,
+        );
+        make_creature(&mut state, opponent_explorer);
+        let trigger = parse_trigger_line(
+            "Whenever a creature you control explores, put a +1/+1 counter on this creature and you gain 3 life.",
+            "Wildgrowth Walker",
+        );
+
+        let controlled_event = GameEvent::EffectResolved {
+            kind: EffectKind::Explore,
+            source_id: controlled_explorer,
+        };
+        assert!(match_explored(
+            &controlled_event,
+            &trigger,
+            source_id,
+            &state
+        ));
+
+        let opponent_event = GameEvent::EffectResolved {
+            kind: EffectKind::Explore,
+            source_id: opponent_explorer,
+        };
+        assert!(!match_explored(
+            &opponent_event,
+            &trigger,
+            source_id,
+            &state
+        ));
+    }
+
+    #[test]
     fn sacrifice_blood_token_trigger_honors_token_property() {
         // CR 111.1 + CR 603.2 + CR 701.21: "Whenever you sacrifice a Blood token"
         // parses with FilterProp::Token, so a non-token object that happens to be a

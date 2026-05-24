@@ -5055,6 +5055,9 @@ fn try_parse_event(
                 def.valid_card = Some(subject.clone());
             }
             SimpleEvent::Explores => {
+                if !remaining.trim().is_empty() {
+                    return None;
+                }
                 // CR 701.44b: "explores" fires after the explore process completes.
                 def.mode = TriggerMode::Explored;
                 def.valid_card = Some(subject.clone());
@@ -9831,6 +9834,19 @@ mod tests {
         let def = parse_trigger_line("Whenever this creature explores, draw a card.", "Test Card");
         assert_eq!(def.mode, TriggerMode::Explored);
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn trigger_explores_card_quality_remains_unknown() {
+        let def = parse_trigger_line(
+            "Whenever a creature you control explores a land card, you may put a land card from your hand onto the battlefield tapped.",
+            "Nicanzil, Current Conductor",
+        );
+        assert!(
+            matches!(def.mode, TriggerMode::Unknown(_)),
+            "explore-card-quality trigger needs event payload support, got {:?}",
+            def.mode
+        );
     }
 
     // --- Subject decomposition tests ---
