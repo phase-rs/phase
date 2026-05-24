@@ -1599,20 +1599,28 @@ pub(crate) fn parse_oracle_ir(
                         i += 2;
                         continue;
                     }
-
-                    // Some instants/sorceries carry static text lines that define their own
-                    // characteristics (e.g., "~ is colorless."). Parse these as statics
-                    // before the spell-resolution catch-all consumes the line as an effect.
-                    if is_spell {
-                        let defs =
-                            parse_static_line_with_graveyard_keyword_continuation(&static_line);
-                        if !defs.is_empty() {
-                            result.statics.extend(defs);
-                            i += 1;
-                            continue;
-                        }
-                    }
                 }
+            }
+        }
+
+        // Some instants/sorceries carry self color-defining CDA lines
+        // (e.g., "~ is colorless."). Intercept only that narrow class so we
+        // do not steal ordinary spell instruction lines that happen to have
+        // static-like phrasing.
+        if is_spell {
+            let defs = parse_static_line_with_graveyard_keyword_continuation(&static_line);
+            let is_self_color_cda = defs.len() == 1
+                && defs[0].characteristic_defining
+                && defs[0].affected == Some(TargetFilter::SelfRef)
+                && defs[0].modifications.len() == 1
+                && matches!(
+                    defs[0].modifications[0],
+                    ContinuousModification::SetColor { .. }
+                );
+            if is_self_color_cda {
+                result.statics.extend(defs);
+                i += 1;
+                continue;
             }
         }
 
