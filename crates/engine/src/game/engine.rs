@@ -3,7 +3,7 @@ use thiserror::Error;
 
 use crate::types::ability::{EffectKind, KeywordAction, TargetRef};
 use crate::types::actions::GameAction;
-use crate::types::events::{BendingType, GameEvent, ManaTapState};
+use crate::types::events::{BendingType, GameEvent, ManaTapState, PlayerActionKind};
 use crate::types::game_state::{
     ActionResult, AutoPassMode, AutoPassRequest, ConvokeMode, GameState, StackEntry,
     StackEntryKind, WaitingFor,
@@ -3545,6 +3545,11 @@ fn apply_action(
             events.push(GameEvent::EffectResolved {
                 kind: crate::types::ability::EffectKind::Proliferate,
                 source_id: ObjectId(0), // Source not tracked through choice state
+            });
+            // CR 701.34a: Emit player-action event so proliferate triggers fire.
+            events.push(GameEvent::PlayerPerformedAction {
+                player_id: p,
+                action: PlayerActionKind::Proliferate,
             });
             state.waiting_for = WaitingFor::Priority { player: p };
             state.priority_player = p;
