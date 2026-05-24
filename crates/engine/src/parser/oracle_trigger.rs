@@ -3331,37 +3331,7 @@ fn split_or_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<Stri
     // existing `try_parse_sacrifice_trigger` / `try_parse_discard_trigger`
     // handlers via the per-half re-parse loop.
     fn is_event_verb_start(text: &str) -> bool {
-        let combat_or_zone = alt((
-            value((), tag::<_, _, OracleError<'_>>("dies")),
-            value((), tag("die ")),
-            value((), tag("deals ")),
-            value((), tag("deal ")),
-            value((), tag("enters")),
-            value((), tag("enter ")),
-            value((), tag("attacks")),
-            value((), tag("attack ")),
-            value((), tag("blocks")),
-            value((), tag("block ")),
-            value((), tag("leaves")),
-            value((), tag("is put into")),
-        ));
-        let player_actions = alt((
-            value((), tag::<_, _, OracleError<'_>>("is sacrificed")),
-            value((), tag("are sacrificed")),
-            value((), tag("sacrifices ")),
-            value((), tag("sacrifice ")),
-            value((), tag("discards ")),
-            value((), tag("discard ")),
-            value((), tag("is exiled")),
-            value((), tag("are exiled")),
-            // CR 305.1 + CR 601.2: Player-action verbs for Rocco-class
-            // "a player plays a land from exile or casts a spell from exile".
-            value((), tag("plays ")),
-            value((), tag("play ")),
-            value((), tag("casts ")),
-            value((), tag("cast ")),
-        ));
-        alt((combat_or_zone, player_actions)).parse(text).is_ok()
+        parse_event_verb_start(text).is_ok()
     }
 
     // Patterns already handled as dedicated compound TriggerMode variants
@@ -3383,19 +3353,177 @@ fn split_or_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<Stri
         if is_event_verb_start(after) {
             // Found a compound event "or". Extract the trigger keyword and subject
             // from the first half to reconstruct the second trigger line.
-            let first = condition[..pos].trim().to_string();
 
             // Extract the trigger keyword ("When"/"Whenever") and subject from the first condition.
             // The subject is everything between the keyword and the first event verb.
             let keyword_and_subject = extract_keyword_and_subject(&cond_lower[..pos]);
+            let first_lower = cond_lower[..pos].trim();
             let second_event = condition[pos + 4..].trim();
             let second = format!("{keyword_and_subject} {second_event}");
+            let first = append_shared_object_if_bare_event(
+                condition[..pos].trim(),
+                first_lower,
+                after,
+                second_event,
+            );
 
             return Some(vec![first, second]);
         }
         search_start = pos + 4;
     }
     None
+}
+
+fn parse_event_boundary(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        peek(alt((
+            value((), eof),
+            value((), space1),
+            value((), tag(",")),
+            value((), tag(".")),
+        ))),
+    )
+    .parse(input)
+}
+
+fn parse_event_word<'a>(
+    word: &'static str,
+) -> impl Parser<&'a str, Output = (), Error = OracleError<'a>> {
+    value((), terminated(tag(word), parse_event_boundary))
+}
+
+fn parse_event_phrase<'a>(
+    phrase: &'static str,
+) -> impl Parser<&'a str, Output = (), Error = OracleError<'a>> {
+    value((), tag(phrase))
+}
+
+fn parse_event_verb_start(input: &str) -> OracleResult<'_, ()> {
+    let combat_or_zone = alt((
+        parse_event_word("dies"),
+        parse_event_phrase("die "),
+        parse_event_phrase("deals "),
+        parse_event_phrase("deal "),
+        parse_event_word("enters"),
+        parse_event_phrase("enter "),
+        parse_event_word("attacks"),
+        parse_event_phrase("attack "),
+        parse_event_word("blocks"),
+        parse_event_phrase("block "),
+        parse_event_word("leaves"),
+        parse_event_phrase("is put into"),
+    ));
+    let passive_player_actions = alt((
+        parse_event_word("is sacrificed"),
+        parse_event_word("are sacrificed"),
+        parse_event_word("is exiled"),
+        parse_event_word("are exiled"),
+    ));
+    let sacrifice_discard_actions = alt((
+        parse_event_phrase("sacrifices "),
+        parse_event_word("sacrifices"),
+        parse_event_phrase("sacrifice "),
+        parse_event_word("sacrifice"),
+        parse_event_phrase("discards "),
+        parse_event_word("discards"),
+        parse_event_phrase("discard "),
+        parse_event_word("discard"),
+    ));
+    let play_cast_create_actions = alt((
+        // CR 305.1 + CR 601.2: Player-action verbs for Rocco-class
+        // "a player plays a land from exile or casts a spell from exile".
+        parse_event_phrase("plays "),
+        parse_event_word("plays"),
+        parse_event_phrase("play "),
+        parse_event_word("play"),
+        parse_event_phrase("casts "),
+        parse_event_word("casts"),
+        parse_event_phrase("cast "),
+        parse_event_word("cast"),
+        // CR 701.7: Token creation as compound event verb (Mirkwood Bats:
+        // "whenever you create or sacrifice a token").
+        parse_event_phrase("creates "),
+        parse_event_word("creates"),
+        parse_event_phrase("create "),
+        parse_event_word("create"),
+    ));
+    let player_actions = alt((
+        passive_player_actions,
+        sacrifice_discard_actions,
+        play_cast_create_actions,
+    ));
+    alt((combat_or_zone, player_actions)).parse(input)
+}
+
+fn parse_bare_shared_event_verb(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        parse_event_word("creates"),
+        parse_event_word("create"),
+        parse_event_word("sacrifices"),
+        parse_event_word("sacrifice"),
+        parse_event_word("discards"),
+        parse_event_word("discard"),
+        parse_event_word("plays"),
+        parse_event_word("play"),
+        parse_event_word("casts"),
+        parse_event_word("cast"),
+    ))
+    .parse(input)
+}
+
+fn parse_shared_object_verb_head(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        parse_event_phrase("creates "),
+        parse_event_phrase("create "),
+        parse_event_phrase("sacrifices "),
+        parse_event_phrase("sacrifice "),
+        parse_event_phrase("discards "),
+        parse_event_phrase("discard "),
+        parse_event_phrase("plays "),
+        parse_event_phrase("play "),
+        parse_event_phrase("casts "),
+        parse_event_phrase("cast "),
+    ))
+    .parse(input)
+}
+
+fn ends_with_bare_event_verb(text: &str) -> bool {
+    scan_preceded(text, |i| {
+        all_consuming(parse_bare_shared_event_verb).parse(i)
+    })
+    .is_some()
+}
+
+/// Extract the shared object from a verb+object phrase.
+/// E.g., `"sacrifice a token"` → `Some("a token")` (using original case).
+fn extract_shared_object<'a>(lower: &str, original: &'a str) -> Option<&'a str> {
+    let (rest_lower, ()) = parse_shared_object_verb_head(lower).ok()?;
+    let object_start = original.len() - rest_lower.len();
+    let obj = original[object_start..].trim();
+    if obj.is_empty() {
+        None
+    } else {
+        Some(obj)
+    }
+}
+
+fn append_shared_object_if_bare_event(
+    first: &str,
+    first_lower: &str,
+    after_lower: &str,
+    second_event: &str,
+) -> String {
+    // CR 701.7 + CR 701.21: Shared-object compound verbs — "you create
+    // or sacrifice a token" shares the object between both verbs. If the
+    // first half ends with a bare verb (no object), propagate the object
+    // from the second verb.
+    if ends_with_bare_event_verb(first_lower) {
+        if let Some(obj) = extract_shared_object(after_lower, second_event) {
+            return format!("{first} {obj}");
+        }
+    }
+    first.to_string()
 }
 
 /// Extract the trigger keyword + subject from a condition prefix.
@@ -3429,43 +3557,7 @@ fn extract_subject_text(text: &str) -> &str {
     // Known event verb starts that end the subject span.
     // scan_split_at_phrase tries the combinator at each word boundary,
     // returning (prefix, matched_start) on the first hit.
-    if let Some((prefix, _)) = scan_split_at_phrase(text, |i| {
-        let combat_or_zone = alt((
-            tag("enters"),
-            tag("enter "),
-            tag("dies"),
-            tag("die "),
-            tag("deals "),
-            tag("deal "),
-            tag("attacks"),
-            tag("attack "),
-            tag("blocks"),
-            tag("block "),
-            tag("leaves"),
-            tag("is put into"),
-        ));
-        let player_actions = alt((
-            tag("is sacrificed"),
-            tag("are sacrificed"),
-            // CR 701.21 + CR 701.9: Active-voice player-subject verbs paired
-            // with `is_event_verb_start` (above) so player-actor compound
-            // triggers ("an opponent sacrifices ... or discards ...") split
-            // into independently parsed halves.
-            tag("sacrifices "),
-            tag("sacrifice "),
-            tag("discards "),
-            tag("discard "),
-            tag("is exiled"),
-            tag("are exiled"),
-            // CR 305.1 + CR 601.2: Keep in sync with `is_event_verb_start`
-            // for Rocco-class play-land / cast-spell compound triggers.
-            tag("plays "),
-            tag("play "),
-            tag("casts "),
-            tag("cast "),
-        ));
-        alt((combat_or_zone, player_actions)).parse(i)
-    }) {
+    if let Some((prefix, _)) = scan_split_at_phrase(text, parse_event_verb_start) {
         if !prefix.is_empty() {
             return prefix.trim_end();
         }
@@ -5816,7 +5908,8 @@ fn try_parse_one_or_more_die(lower: &str) -> Option<(TriggerMode, TriggerDefinit
 /// shared Controller scope pattern. The matcher evaluates both against the
 /// `TokenCreated` event's `object_id`.
 fn try_parse_one_or_more_tokens_created(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
-    let (_, rest) = alt((
+    // CR 701.7 + CR 603.2c: "one or more" form fires once per batch.
+    let batched_match = alt((
         value(
             (),
             tag::<_, _, OracleError<'_>>("whenever you create one or more "),
@@ -5828,7 +5921,24 @@ fn try_parse_one_or_more_tokens_created(lower: &str) -> Option<(TriggerMode, Tri
     ))
     .parse(lower)
     .map(|(r, _)| ((), r))
-    .ok()?;
+    .ok();
+
+    // CR 701.7: Simple "you create a token" fires per token (not batched).
+    let simple_match = alt((
+        value((), tag::<_, _, OracleError<'_>>("whenever you create a ")),
+        value((), tag::<_, _, OracleError<'_>>("when you create a ")),
+    ))
+    .parse(lower)
+    .map(|(r, _)| ((), r))
+    .ok();
+
+    let (rest, batched) = if let Some((_, rest)) = batched_match {
+        (rest, true)
+    } else if let Some((_, rest)) = simple_match {
+        (rest, false)
+    } else {
+        return None;
+    };
 
     // Accept bare "tokens"/"token" (no type phrase) as well as "[type] tokens".
     let subject_text = if rest == "tokens" || rest == "token" {
@@ -5853,7 +5963,7 @@ fn try_parse_one_or_more_tokens_created(lower: &str) -> Option<(TriggerMode, Tri
     def.mode = TriggerMode::TokenCreated;
     def.valid_card = valid_card;
     def.valid_target = Some(TargetFilter::Controller);
-    def.batched = true;
+    def.batched = batched;
     Some((TriggerMode::TokenCreated, def))
 }
 
@@ -17829,6 +17939,28 @@ mod tests {
     }
 
     #[test]
+    fn compound_or_create_or_sacrifice_token() {
+        // CR 701.7 + CR 701.21: Mirkwood Bats — "Whenever you create or sacrifice a token"
+        let triggers = parse_trigger_lines(
+            "Whenever you create or sacrifice a token, each opponent loses 1 life.",
+            "Mirkwood Bats",
+        );
+        assert_eq!(triggers.len(), 2);
+        assert_eq!(triggers[0].mode, TriggerMode::TokenCreated);
+        assert_eq!(triggers[1].mode, TriggerMode::Sacrificed);
+    }
+
+    #[test]
+    fn compound_or_create_subject_boundary_rejects_created_prefix() {
+        // CR 701.7: "create" is an event verb; "created" is not the verb head.
+        assert_eq!(extract_subject_text("you create"), "you");
+        assert_eq!(
+            extract_subject_text("you created a token"),
+            "you created a token"
+        );
+    }
+
+    #[test]
     fn non_compound_trigger_returns_single() {
         // Normal trigger should produce exactly 1 result
         let triggers = parse_trigger_lines("When this creature enters, draw a card.", "Test Card");
@@ -18569,6 +18701,18 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::TokenCreated);
         assert!(def.batched);
+        assert_eq!(def.valid_card, None);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_simple_token_created_is_not_batched() {
+        let def = parse_trigger_line(
+            "Whenever you create a token, each opponent loses 1 life.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::TokenCreated);
+        assert!(!def.batched);
         assert_eq!(def.valid_card, None);
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
     }
