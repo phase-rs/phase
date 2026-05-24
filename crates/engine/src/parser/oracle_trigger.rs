@@ -5211,6 +5211,19 @@ fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefi
         def.valid_target = Some(TargetFilter::Controller);
         return Some((TriggerMode::DungeonCompleted, def));
     }
+
+    // CR 701.54d: "Whenever the Ring tempts you" / "When the Ring tempts you" —
+    // the Ring temptation event fires once per temptation resolution.
+    if all_consuming(pair(
+        alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when "))),
+        tag("the ring tempts you"),
+    ))
+    .parse(lower)
+    .is_ok()
+    {
+        def.mode = TriggerMode::RingTemptsYou;
+        return Some((TriggerMode::RingTemptsYou, def));
+    }
     None
 }
 
@@ -13987,6 +14000,7 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::CrankContraption);
     }
+
     #[test]
     fn trigger_dungeon_completed_whenever() {
         let def = parse_trigger_line(
@@ -14005,6 +14019,24 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::DungeonCompleted);
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
     }
+
+    #[test]
+    fn trigger_ring_tempts_you_whenever() {
+        let def = parse_trigger_line(
+            "Whenever the Ring tempts you, you may discard your hand.",
+            "Sauron, the Dark Lord",
+        );
+        assert_eq!(def.mode, TriggerMode::RingTemptsYou);
+    }
+    #[test]
+    fn trigger_ring_tempts_you_when() {
+        let def = parse_trigger_line(
+            "When the Ring tempts you, return this card from your graveyard to your hand.",
+            "Ringwraiths",
+        );
+        assert_eq!(def.mode, TriggerMode::RingTemptsYou);
+    }
+
     #[test]
     fn trigger_turn_face_up_mode() {
         let def = parse_trigger_line(
