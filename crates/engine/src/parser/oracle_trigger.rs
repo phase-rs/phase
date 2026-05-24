@@ -5101,7 +5101,7 @@ fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefi
 }
 
 /// CR 120.1 + CR 120.3 + CR 603.2: "Whenever a source [you control] deals
-/// [combat/noncombat] [N or more] damage to <recipient>, …" — the source-led
+/// [combat/noncombat] [N or more] damage [to <recipient>], …" — the source-led
 /// damage-event trigger class. Composes four independent axes (source filter ×
 /// damage kind × amount threshold × recipient filter) so adding a new
 /// recipient or a new source qualifier is a one-line change to the relevant
@@ -5126,15 +5126,22 @@ fn try_parse_source_deals_damage_trigger(lower: &str) -> Option<(TriggerMode, Tr
     // Shared predicate tail: optional kind, optional "N or more", "damage".
     let (after_damage, (damage_kind, threshold)) = parse_damage_predicate_tail(rest).ok()?;
 
-    // Recipient: " to <recipient>" — `parse_damage_to_qualifier` consumes the
-    // leading " to " itself, so pass the remainder including the space.
-    let valid_target = parse_damage_to_qualifier(after_damage)?;
-
     let mut def = make_base();
     def.mode = TriggerMode::DamageDone;
     def.damage_kind = damage_kind;
     def.valid_source = Some(source_filter);
-    def.valid_target = Some(valid_target);
+    // Optional recipient: "to <recipient>" narrows the damage target; absence
+    // means any damage target may satisfy the event. If a "to ..." tail exists
+    // but is not one of this parser's recipient qualifiers, leave the line for
+    // narrower parsers such as "a source deals damage to this creature".
+    let valid_target = parse_damage_to_qualifier(after_damage);
+    let has_recipient_tail = preceded(opt(space1), tag::<_, _, OracleError<'_>>("to "))
+        .parse(after_damage)
+        .is_ok();
+    if has_recipient_tail && valid_target.is_none() {
+        return None;
+    }
+    def.valid_target = valid_target;
     def.damage_amount = threshold;
     Some((TriggerMode::DamageDone, def))
 }
@@ -5147,11 +5154,9 @@ fn try_parse_source_deals_damage_trigger(lower: &str) -> Option<(TriggerMode, Tr
 ///   * article         — "a " | "an "
 ///   * other-prefix    — optional "another "  → `FilterProp::Another`
 ///   * color qualifier — optional ManaColor   → `FilterProp::HasColor`
-///   * head noun       — "source" (the only damage-source head noun in printed cards today)
+///   * head noun       — "source" | supported object type head nouns
 ///   * controller      — optional " you control" → `ControllerRef::You`
 fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
-    use crate::parser::oracle_nom::primitives::parse_color;
-
     // CR 109.4: leading article is mandatory in printed damage-source phrases
     // ("a source", "an opponent's source" — the latter not in any printed card
     // today, deferred). Word boundary on the trailing space.
@@ -5176,9 +5181,18 @@ fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
     // mandatory `tag(" ")` after it is structural — without it `parse_color`
     // would match the "red" prefix of "redirect" / "redacted" / etc. and
     // misclassify the subject.
-    let (rest, color) = opt(terminated(parse_color, tag(" "))).parse(rest)?;
+    let (rest, color) = opt(terminated(nom_primitives::parse_color, tag(" "))).parse(rest)?;
 
-    let (rest, _) = tag::<_, _, OracleError<'_>>("source").parse(rest)?;
+    let (rest, head_type) = alt((
+        value(None, tag::<_, _, OracleError<'_>>("source")),
+        value(Some(TypeFilter::Creature), tag("creature")),
+        value(Some(TypeFilter::Artifact), tag("artifact")),
+        value(Some(TypeFilter::Enchantment), tag("enchantment")),
+        value(Some(TypeFilter::Planeswalker), tag("planeswalker")),
+        value(Some(TypeFilter::Battle), tag("battle")),
+        value(Some(TypeFilter::Land), tag("land")),
+    ))
+    .parse(rest)?;
 
     // Optional " you control" controller scope. Absence → no controller
     // restriction (matches any source — Phyrexian Obliterator class, deferred).
@@ -5192,7 +5206,7 @@ fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
     // "sourceless" / "sourced".
     let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest)?;
 
-    let mut typed = TypedFilter::default();
+    let mut typed = head_type.map_or_else(TypedFilter::default, TypedFilter::new);
     if let Some(c) = controller {
         typed = typed.controller(c);
     }
@@ -5222,14 +5236,14 @@ fn parse_damage_kind_adjective(input: &str) -> OracleResult<'_, DamageKindFilter
 
 /// CR 120.1 + CR 120.3 + CR 603.2: Compose the predicate tail that follows the
 /// damage verb (`"deal"` / `"deals"`) — optional kind adjective, optional
-/// "N or more" amount quantifier, and the mandatory `"damage"` head noun.
+/// amount quantifier, and the mandatory `"damage"` head noun.
 /// Returns the parsed kind/amount pair and the remainder after `"damage"` so
 /// the caller can hand it to `parse_damage_to_qualifier`.
 ///
 /// Used by both the source-led grammar (`try_parse_source_deals_damage_trigger`)
 /// and the subject-led grammar in `try_parse_event`. Keeping the tail in one
 /// combinator means a new kind (e.g. "noncreature damage") or a new comparator
-/// (e.g. "less than N", "exactly N") is added in exactly one place.
+/// (e.g. "less than N") is added in exactly one place.
 fn parse_damage_predicate_tail(
     input: &str,
 ) -> OracleResult<'_, (DamageKindFilter, Option<(Comparator, u32)>)> {
@@ -5240,17 +5254,27 @@ fn parse_damage_predicate_tail(
 }
 
 /// CR 603.2 + CR 120.1: Parse a damage-amount quantifier
-/// ("`5 or more `") and return the resulting `(Comparator, threshold)` pair to
-/// store on `TriggerDefinition::damage_amount`. The trailing space is consumed
-/// so the caller can chain directly into `tag("damage")`.
+/// ("`5 or more `" / "`exactly 5 `") and return the resulting
+/// `(Comparator, threshold)` pair to store on `TriggerDefinition::damage_amount`.
+/// The trailing space is consumed so the caller can chain directly into
+/// `tag("damage")`.
 ///
-/// Today only `"N or more"` is printed in the Oracle corpus for damage triggers;
-/// `"exactly N"` and `"less than N"` slot in here via the same axis when needed.
+/// `"less than N"` slots in here via the same axis when needed.
 fn parse_damage_amount_quantifier(input: &str) -> OracleResult<'_, (Comparator, u32)> {
-    use crate::parser::oracle_nom::primitives::parse_number;
-    let (rest, n) = parse_number(input)?;
-    let (rest, _) = tag(" or more ").parse(rest)?;
-    Ok((rest, (Comparator::GE, n)))
+    fn parse_or_more(input: &str) -> OracleResult<'_, (Comparator, u32)> {
+        let (rest, n) = nom_primitives::parse_number(input)?;
+        let (rest, _) = tag(" or more ").parse(rest)?;
+        Ok((rest, (Comparator::GE, n)))
+    }
+
+    fn parse_exactly(input: &str) -> OracleResult<'_, (Comparator, u32)> {
+        let (rest, _) = tag("exactly ").parse(input)?;
+        let (rest, n) = nom_primitives::parse_number(rest)?;
+        let (rest, _) = tag(" ").parse(rest)?;
+        Ok((rest, (Comparator::EQ, n)))
+    }
+
+    alt((parse_exactly, parse_or_more)).parse(input)
 }
 
 fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
@@ -14657,6 +14681,54 @@ mod tests {
                 ..
             }))
         ));
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+    }
+
+    #[test]
+    fn trigger_source_deals_n_or_more_damage_without_recipient() {
+        let def = parse_trigger_line(
+            "Whenever a source you control deals 5 or more damage, draw a card.",
+            "Test",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(def.damage_amount, Some((Comparator::GE, 5)));
+        assert!(matches!(
+            def.valid_source,
+            Some(TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::You),
+                ..
+            }))
+        ));
+        assert_eq!(def.valid_target, None);
+    }
+
+    #[test]
+    fn trigger_creature_source_deals_n_or_more_damage_to_player() {
+        let def = parse_trigger_line(
+            "Whenever a creature you control deals 5 or more damage to a player, draw a card.",
+            "Test",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(def.damage_amount, Some((Comparator::GE, 5)));
+        match def.valid_source {
+            Some(TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller: Some(ControllerRef::You),
+                ..
+            })) => assert_eq!(type_filters, vec![TypeFilter::Creature]),
+            other => panic!("expected controlled creature source filter, got {other:?}"),
+        }
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+    }
+
+    #[test]
+    fn trigger_source_deals_exactly_n_damage_to_player() {
+        let def = parse_trigger_line(
+            "Whenever a source you control deals exactly 5 damage to a player, draw a card.",
+            "Test",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(def.damage_amount, Some((Comparator::EQ, 5)));
         assert_eq!(def.valid_target, Some(TargetFilter::Player));
     }
 
