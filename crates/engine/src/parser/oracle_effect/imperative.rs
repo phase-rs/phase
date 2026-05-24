@@ -41,7 +41,7 @@ use super::super::oracle_target::{
 };
 use super::super::oracle_util::{
     contains_possessive, contains_self_or_object_pronoun, parse_count_expr, parse_mana_symbols,
-    parse_ordinal, split_around, starts_with_possessive, strip_after, TextPair,
+    parse_ordinal, split_around, starts_with_possessive, TextPair,
 };
 
 /// CR 702.26: Phasing direction used by the "phase in"/"phase out" dispatch.
@@ -261,6 +261,53 @@ fn parse_dynamic_count_phrase(lower: &str) -> Option<QuantityExpr> {
     None
 }
 
+fn parse_life_verb_remainder<'a>(
+    text: &'a str,
+    lower: &str,
+    verb: &str,
+    third_person: &str,
+) -> Option<&'a str> {
+    let you_verb = format!("you {verb} ");
+    let bare_verb = format!("{verb} ");
+    let direct_third_person = format!("{third_person} ");
+    if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
+        value(
+            (),
+            alt((
+                tag(you_verb.as_str()),
+                tag(bare_verb.as_str()),
+                tag(direct_third_person.as_str()),
+            )),
+        )
+        .parse(input)
+    }) {
+        return Some(rest);
+    }
+
+    let subject_predicate = format!(" {third_person} ");
+    nom_on_lower(text, lower, |input| {
+        let (rest, _) = (
+            take_until::<_, _, OracleError<'_>>(subject_predicate.as_str()),
+            tag(subject_predicate.as_str()),
+        )
+            .parse(input)?;
+        Ok((rest, ()))
+    })
+    .map(|(_, rest)| rest)
+}
+
+fn parse_life_equal_quantity(after_verb_lower: &str) -> Option<QuantityExpr> {
+    let (qty_text, _) = tag::<_, _, OracleError<'_>>("life equal to ")
+        .parse(after_verb_lower)
+        .ok()?;
+    let qty_text = qty_text.trim_end_matches('.').trim();
+    if let Some(qty) = crate::parser::oracle_quantity::parse_event_context_quantity(qty_text) {
+        return Some(qty);
+    }
+    crate::parser::oracle_quantity::parse_quantity_ref(qty_text)
+        .map(|qty| QuantityExpr::Ref { qty })
+}
+
 pub(super) fn parse_numeric_imperative_ast(
     text: &str,
     lower: &str,
@@ -292,7 +339,7 @@ pub(super) fn parse_numeric_imperative_ast(
         if let Some(count) = parse_dynamic_count_phrase(rest_lower.as_str()) {
             return Some(NumericImperativeAst::Draw { count, up_to });
         }
-        // CR 119.1 / CR 121.1: When the verb committed but the quantity phrase
+        // CR 121.1: When the verb committed but the quantity phrase
         // can't be classified, return None so the line surfaces as
         // `Effect::Unimplemented` upstream. Silently substituting Fixed{1} hides
         // dynamic-quantity gaps from the coverage report.
@@ -300,144 +347,96 @@ pub(super) fn parse_numeric_imperative_ast(
         return Some(NumericImperativeAst::Draw { count, up_to });
     }
 
-    if nom_primitives::scan_contains(lower, "gain") && nom_primitives::scan_contains(lower, "life")
-    {
-        // CR 119.1: Handle "life equal to {quantity}" — dynamic amount from game state.
-        if let Some(qty_text) =
-            strip_after(lower, "life equal to ").map(|s| s.trim_end_matches('.'))
-        {
-            if let Some(qty) =
-                crate::parser::oracle_quantity::parse_event_context_quantity(qty_text)
-            {
-                return Some(NumericImperativeAst::GainLife { amount: qty });
-            }
-            // CR 119.1: target-relative quantity refs ("target creature's
-            // power/toughness/mana value"). Mirrors LoseLife. Soul's Grace,
-            // Heron's Grace Champion, Lifeblood Hydra, etc.
-            if let Some(qty) = crate::parser::oracle_quantity::parse_quantity_ref(qty_text) {
-                return Some(NumericImperativeAst::GainLife {
-                    amount: QuantityExpr::Ref { qty },
-                });
-            }
-        }
-        let after_gain = nom_on_lower(text, lower, |input| {
-            value((), alt((tag("you gain "), tag("gain ")))).parse(input)
-        })
-        .map(|(_, rest)| rest)
-        .or_else(|| {
-            nom_on_lower(text, lower, |input| {
-                let (rest, _) = (
-                    take_until::<_, _, OracleError<'_>>(" gains "),
-                    tag(" gains "),
-                )
-                    .parse(input)?;
-                Ok((rest, ()))
-            })
-            .map(|(_, rest)| rest)
-        })
-        .unwrap_or("");
-        if !after_gain.is_empty() {
-            // CR 603.7c + CR 119.1: "gain that much life" / "gain that many life" —
-            // amount is the triggering event's amount (Exquisite Blood). Extract the
-            // amount phrase before " life" and route through the event-context
-            // quantity parser so "that much" resolves to `EventContextAmount`
-            // rather than defaulting to 1.
-            let after_lower = after_gain.to_ascii_lowercase();
-            // CR 614.1a: First try the full phrase including any " life plus N" /
-            // " life minus N" suffix. The Offset-aware combinator in
-            // `parse_event_context_quantity` recognises the post-quantifier noun
-            // ("that much life plus 1" / "that many life minus 2"), so cards
-            // like Heron of Hope, Angel of Vitality, Leyline of Hope must be
-            // probed BEFORE the bare-quantifier path strips " life" via
-            // `take_until` (which would discard the offset clause).
-            //
-            // Strip the trailing " instead" rider via PATTERNS.md §2a:
-            // `terminated(take_until(...), opt(tag(...)))` — the parser stops at
-            // the suffix and consumes it (when present), leaving the body for
-            // the offset combinator. Falls back to the trimmed full phrase
-            // when the suffix is absent (Exquisite Blood-class non-replacement
-            // gain-life).
-            let full_phrase = after_lower.trim_end_matches('.').trim();
-            let full_phrase_no_instead = terminated(
-                take_until::<_, _, OracleError<'_>>(" instead"),
-                opt(tag(" instead")),
-            )
-            .parse(full_phrase)
-            .map(|(_rem, body)| body.trim_end())
-            .unwrap_or(full_phrase);
-            if let Some(qty) =
-                crate::parser::oracle_quantity::parse_event_context_quantity(full_phrase_no_instead)
-            {
-                return Some(NumericImperativeAst::GainLife { amount: qty });
-            }
-            let amount_phrase = take_until::<_, _, OracleError<'_>>(" life")
-                .parse(after_lower.as_str())
-                .map(|(_, before)| before.trim())
-                .unwrap_or(full_phrase);
-            if let Some(qty) =
-                crate::parser::oracle_quantity::parse_event_context_quantity(amount_phrase)
-            {
-                return Some(NumericImperativeAst::GainLife { amount: qty });
-            }
-            // CR 119.1: GainLife committed but quantity phrase unclassified —
-            // surface as Unimplemented rather than fabricating Fixed{1}.
-            let amount = parse_count_expr(after_gain).map(|(q, _)| q)?;
+    if let Some(after_gain) = parse_life_verb_remainder(text, lower, "gain", "gains") {
+        let after_lower = after_gain.to_ascii_lowercase();
+        // CR 119.3: Handle "life equal to {quantity}" — dynamic amount from game state.
+        // CR 119.3: target-relative quantity refs ("target creature's
+        // power/toughness/mana value"). Mirrors LoseLife. Soul's Grace,
+        // Heron's Grace Champion, Lifeblood Hydra, etc.
+        if let Some(amount) = parse_life_equal_quantity(after_lower.as_str()) {
             return Some(NumericImperativeAst::GainLife { amount });
         }
+        // CR 119.3: "gain that much life" / "gain that many life" —
+        // amount is the triggering event's amount (Exquisite Blood). Extract the
+        // amount phrase before " life" and route through the event-context
+        // quantity parser so "that much" resolves to `EventContextAmount`
+        // rather than defaulting to 1.
+        // CR 614.1a: First try the full phrase including any " life plus N" /
+        // " life minus N" suffix. The Offset-aware combinator in
+        // `parse_event_context_quantity` recognises the post-quantifier noun
+        // ("that much life plus 1" / "that many life minus 2"), so cards
+        // like Heron of Hope, Angel of Vitality, Leyline of Hope must be
+        // probed BEFORE the bare-quantifier path strips " life" via
+        // `take_until` (which would discard the offset clause).
+        //
+        // Strip the trailing " instead" rider via PATTERNS.md §2a:
+        // `terminated(take_until(...), opt(tag(...)))` — the parser stops at
+        // the suffix and consumes it (when present), leaving the body for
+        // the offset combinator. Falls back to the trimmed full phrase
+        // when the suffix is absent (Exquisite Blood-class non-replacement
+        // gain-life).
+        let full_phrase = after_lower.trim_end_matches('.').trim();
+        let full_phrase_no_instead = terminated(
+            take_until::<_, _, OracleError<'_>>(" instead"),
+            opt(tag(" instead")),
+        )
+        .parse(full_phrase)
+        .map(|(_rem, body)| body.trim_end())
+        .unwrap_or(full_phrase);
+        if let Some(qty) =
+            crate::parser::oracle_quantity::parse_event_context_quantity(full_phrase_no_instead)
+        {
+            return Some(NumericImperativeAst::GainLife { amount: qty });
+        }
+        let amount_phrase = take_until::<_, _, OracleError<'_>>(" life")
+            .parse(after_lower.as_str())
+            .map(|(_, before)| before.trim())
+            .unwrap_or(full_phrase);
+        if let Some(qty) =
+            crate::parser::oracle_quantity::parse_event_context_quantity(amount_phrase)
+        {
+            return Some(NumericImperativeAst::GainLife { amount: qty });
+        }
+        // CR 119.3: GainLife committed but quantity phrase unclassified —
+        // surface as Unimplemented rather than fabricating Fixed{1}.
+        let amount = parse_count_expr(after_gain).map(|(q, _)| q)?;
+        return Some(NumericImperativeAst::GainLife { amount });
     }
 
-    if nom_primitives::scan_contains(lower, "lose") && nom_primitives::scan_contains(lower, "life")
-    {
-        if let Some(expr) = try_parse_half_life_amount(lower) {
+    if let Some(after_lose) = parse_life_verb_remainder(text, lower, "lose", "loses") {
+        let after_lower = after_lose.to_ascii_lowercase();
+        if let Some(expr) = try_parse_half_life_amount(after_lower.as_str()) {
             return Some(NumericImperativeAst::LoseLife { amount: expr });
         }
         // CR 119.3: Handle "life equal to {quantity}" — dynamic amount from game state.
-        if let Some(qty_text) =
-            strip_after(lower, "life equal to ").map(|s| s.trim_end_matches('.'))
+        // CR 119.3: target-relative quantity refs ("target creature's
+        // power/toughness/mana value", etc.) — Final Punishment, Tomb
+        // Blade-class drain, Genesis of the Daleks. Delegates to the
+        // shared `parse_quantity_ref` building block.
+        if let Some(amount) = parse_life_equal_quantity(after_lower.as_str()) {
+            return Some(NumericImperativeAst::LoseLife { amount });
+        }
+        // CR 119.3: "lose that much life" / "lose that many life" —
+        // amount is the triggering event's amount. Probe for event-context phrases
+        // before falling back to the numeric last-word extractor.
+        if let Ok((_, before_life)) =
+            take_until::<_, _, OracleError<'_>>("life").parse(after_lower.as_str())
         {
+            let amount_phrase = take_until::<_, _, OracleError<'_>>(" life")
+                .parse(after_lower.as_str())
+                .map(|(_, before)| before.trim())
+                .unwrap_or_else(|_: nom::Err<OracleError<'_>>| {
+                    after_lower.trim_end_matches('.').trim()
+                });
             if let Some(qty) =
-                crate::parser::oracle_quantity::parse_event_context_quantity(qty_text)
+                crate::parser::oracle_quantity::parse_event_context_quantity(amount_phrase)
             {
                 return Some(NumericImperativeAst::LoseLife { amount: qty });
             }
-            // CR 119.3: target-relative quantity refs ("target creature's
-            // power/toughness/mana value", etc.) — Final Punishment, Tomb
-            // Blade-class drain, Genesis of the Daleks. Delegates to the
-            // shared `parse_quantity_ref` building block.
-            if let Some(qty) = crate::parser::oracle_quantity::parse_quantity_ref(qty_text) {
-                return Some(NumericImperativeAst::LoseLife {
-                    amount: QuantityExpr::Ref { qty },
-                });
-            }
-        }
-        // CR 603.7c + CR 119.3: "lose that much life" / "lose that many life" —
-        // amount is the triggering event's amount. Probe for event-context phrases
-        // before falling back to the numeric last-word extractor.
-        if let Ok((_, before_life)) = take_until::<_, _, OracleError<'_>>("life").parse(lower) {
-            let after_verb = nom_on_lower(text, lower, |input| {
-                value((), alt((tag("you lose "), tag("lose ")))).parse(input)
-            })
-            .map(|(_, rest)| rest)
-            .unwrap_or("");
-            if !after_verb.is_empty() {
-                let after_lower = after_verb.to_ascii_lowercase();
-                let amount_phrase = take_until::<_, _, OracleError<'_>>(" life")
-                    .parse(after_lower.as_str())
-                    .map(|(_, before)| before.trim())
-                    .unwrap_or_else(|_: nom::Err<OracleError<'_>>| {
-                        after_lower.trim_end_matches('.').trim()
-                    });
-                if let Some(qty) =
-                    crate::parser::oracle_quantity::parse_event_context_quantity(amount_phrase)
-                {
-                    return Some(NumericImperativeAst::LoseLife { amount: qty });
+            if let Some((amount, remainder)) = parse_count_expr(amount_phrase) {
+                if remainder.trim().is_empty() {
+                    return Some(NumericImperativeAst::LoseLife { amount });
                 }
-                if let Some((amount, remainder)) = parse_count_expr(amount_phrase) {
-                    if remainder.trim().is_empty() {
-                        return Some(NumericImperativeAst::LoseLife { amount });
-                    }
-                }
-                return None;
             }
             // CR 119.3: LoseLife committed but neither the event-context phrase
             // nor a numeric tail parsed — return None so the line lands in
@@ -519,14 +518,10 @@ pub(super) fn parse_numeric_imperative_ast(
 /// and (b) silently mis-bound the nom remainder. Both bugs disappear by
 /// routing through the shared combinator.
 fn try_parse_half_life_amount(lower: &str) -> Option<QuantityExpr> {
-    // Strip "lose " / "loses " and any intervening whitespace.
-    let (after_verb, _) = alt((tag::<_, _, OracleError<'_>>("lose "), tag("loses ")))
-        .parse(lower)
-        .ok()?;
-    let after_verb = after_verb.trim_start();
     // Delegate to the shared "half ..." combinator. This picks up the
     // possessive inner ref AND the rounding suffix in one call.
-    let (_, expr) = super::super::oracle_nom::quantity::parse_half_rounded(after_verb).ok()?;
+    let (_, expr) =
+        super::super::oracle_nom::quantity::parse_half_rounded(lower.trim_start()).ok()?;
     Some(expr)
 }
 
@@ -3293,7 +3288,7 @@ fn try_parse_that_many_counters(lower: &str, ctx: &mut ParseContext) -> Option<E
         TargetFilter::SelfRef
     };
 
-    // CR 603.7c: "that many" — resolve from trigger event context at runtime.
+    // "That many" resolves from trigger event context at runtime.
     Some(Effect::PutCounter {
         counter_type,
         count: QuantityExpr::Ref {
@@ -7555,6 +7550,33 @@ mod tests {
     }
 
     #[test]
+    fn parse_lose_life_equal_to_life_gained_this_turn() {
+        let text = "loses life equal to the amount of life you gained this turn";
+        let lower = text.to_lowercase();
+        let result = parse_numeric_imperative_ast(text, &lower);
+        assert!(
+            result.is_some(),
+            "Should parse third-person life loss whose amount references gained life"
+        );
+        match result.unwrap() {
+            NumericImperativeAst::LoseLife { amount } => {
+                assert!(
+                    matches!(
+                        amount,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::LifeGainedThisTurn {
+                                player: PlayerScope::Controller
+                            }
+                        }
+                    ),
+                    "Expected LifeGainedThisTurn {{ Controller }}, got {amount:?}"
+                );
+            }
+            other => panic!("Expected LoseLife, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_lose_life_two_times_x() {
         let text = "lose two times X life";
         let lower = text.to_lowercase();
@@ -7601,6 +7623,31 @@ mod tests {
                     "Expected Power {{ CostPaidObject }}, got {amount:?}"
                 );
             }
+            other => panic!("Expected GainLife, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_gains_life_equal_to_power() {
+        let text = "gains life equal to its power";
+        let lower = text.to_lowercase();
+        let result = parse_numeric_imperative_ast(text, &lower);
+        assert!(
+            result.is_some(),
+            "Should parse stripped third-person gain-life predicates"
+        );
+        match result.unwrap() {
+            NumericImperativeAst::GainLife { amount } => assert!(
+                matches!(
+                    amount,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: crate::types::ability::ObjectScope::Anaphoric
+                        }
+                    }
+                ),
+                "Expected Power {{ Anaphoric }}, got {amount:?}"
+            ),
             other => panic!("Expected GainLife, got {other:?}"),
         }
     }

@@ -2013,18 +2013,46 @@ fn apply_action(
             WaitingFor::ChooseManaColor {
                 choice, context, ..
             },
-            GameAction::ChooseManaColor { choice: chosen },
+            GameAction::ChooseManaColor {
+                choice: chosen,
+                count,
+            },
         ) => {
             let events_before = events.len();
             let wf = match context {
                 crate::types::game_state::ManaChoiceContext::ManaAbility(pending_mana_ability) => {
-                    engine_casting::handle_choose_mana_color(
+                    // CR 605.3a: validate the requested batch size BEFORE any mana
+                    // is produced, so an out-of-range count rejects cleanly with
+                    // no partial application. The cap is the just-activated source
+                    // plus its choice-free identical twins.
+                    if count as usize > pending_mana_ability.batch_siblings.len() + 1 {
+                        return Err(EngineError::InvalidAction(format!(
+                            "ChooseManaColor count {count} exceeds the {} batchable sources",
+                            pending_mana_ability.batch_siblings.len() + 1
+                        )));
+                    }
+                    let wf = engine_casting::handle_choose_mana_color(
                         state,
                         pending_mana_ability,
                         choice,
                         chosen.clone(),
                         &mut events,
-                    )?
+                    )?;
+                    // CR 605.3a: one color choice may bulk-activate the player's
+                    // other identical, choice-free mana sources (their remaining
+                    // Treasures, etc.) with the same color. Sibling cost/mana
+                    // events append before the shared trigger scan below, so each
+                    // sacrifice's observers fire exactly once.
+                    if count > 1 {
+                        engine_casting::batch_activate_mana_siblings(
+                            state,
+                            pending_mana_ability,
+                            &chosen,
+                            count,
+                            &mut events,
+                        )?;
+                    }
+                    wf
                 }
                 crate::types::game_state::ManaChoiceContext::ResolvingEffect(pending_effect) => {
                     effects::mana::handle_choose_mana_effect(
@@ -2432,31 +2460,55 @@ fn apply_action(
                     EngineError::InvalidAction("No pending cast for Phyrexian payment".to_string())
                 })?;
                 let cost = pending_ref.cost.clone();
-                let spell_meta = casting::build_spell_meta(state, player, spell_object);
-                let any_color =
-                    casting::player_can_spend_as_any_color_for_spell(state, player, spell_object);
-                // CR 107.4f + CR 118.1 + CR 118.3 + CR 119.8: Re-derive the
-                // payment-permission bundle (any_color + max_life + life_colors)
-                // so re-validation sees the same K'rrik-promoted shard set the
-                // pause UI was built from.
-                let permissions = super::static_abilities::build_cost_permission_context(
-                    state, player, any_color,
-                );
                 let player_pool = state
                     .players
                     .iter()
                     .find(|p| p.id == player)
                     .map(|p| p.mana_pool.clone())
                     .ok_or_else(|| EngineError::InvalidAction("Player not found".to_string()))?;
-                let spell_ctx = spell_meta
-                    .as_ref()
-                    .map(crate::types::mana::PaymentContext::Spell);
-                let current_shards = mana_payment::compute_phyrexian_shards(
-                    &player_pool,
-                    &cost,
-                    spell_ctx.as_ref(),
-                    permissions,
-                );
+                let current_shards = if pending_ref.activation_ability_index.is_some() {
+                    let (source_types, source_subtypes) =
+                        casting::activation_source_types(state, spell_object);
+                    let activation_ctx = crate::types::mana::PaymentContext::Activation {
+                        source_types: &source_types,
+                        source_subtypes: &source_subtypes,
+                    };
+                    let any_color = casting::player_can_spend_as_any_color_for_payment(
+                        state,
+                        player,
+                        spell_object,
+                        Some(&activation_ctx),
+                    );
+                    let permissions = super::static_abilities::build_cost_permission_context(
+                        state, player, any_color,
+                    );
+                    mana_payment::compute_phyrexian_shards(
+                        &player_pool,
+                        &cost,
+                        Some(&activation_ctx),
+                        permissions,
+                    )
+                } else {
+                    let spell_meta = casting::build_spell_meta(state, player, spell_object);
+                    let spell_ctx = spell_meta
+                        .as_ref()
+                        .map(crate::types::mana::PaymentContext::Spell);
+                    let any_color = casting::player_can_spend_as_any_color_for_payment(
+                        state,
+                        player,
+                        spell_object,
+                        spell_ctx.as_ref(),
+                    );
+                    let permissions = super::static_abilities::build_cost_permission_context(
+                        state, player, any_color,
+                    );
+                    mana_payment::compute_phyrexian_shards(
+                        &player_pool,
+                        &cost,
+                        spell_ctx.as_ref(),
+                        permissions,
+                    )
+                };
                 if current_shards.len() != expected_len {
                     return Err(EngineError::ActionNotAllowed(
                         "Phyrexian shard count changed during pause".to_string(),
@@ -7473,6 +7525,7 @@ mod tests {
                 choice: crate::types::game_state::ManaChoice::SingleColor(
                     crate::types::mana::ManaType::Green,
                 ),
+                count: 1,
             },
         )
         .unwrap();
@@ -9224,6 +9277,7 @@ mod tests {
                 choice: crate::types::game_state::ManaChoice::SingleColor(
                     crate::types::mana::ManaType::Green,
                 ),
+                count: 1,
             },
         )
         .unwrap();
@@ -9351,6 +9405,7 @@ mod tests {
                 choice: crate::types::game_state::ManaChoice::SingleColor(
                     crate::types::mana::ManaType::Green,
                 ),
+                count: 1,
             },
         )
         .unwrap();
@@ -9521,6 +9576,7 @@ mod tests {
                 choice: crate::types::game_state::ManaChoice::SingleColor(
                     crate::types::mana::ManaType::Green,
                 ),
+                count: 1,
             },
         )
         .unwrap();
@@ -9696,6 +9752,7 @@ mod tests {
             &mut state,
             GameAction::ChooseManaColor {
                 choice: crate::types::game_state::ManaChoice::SingleColor(ManaType::Green),
+                count: 1,
             },
         )
         .unwrap();

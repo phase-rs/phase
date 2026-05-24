@@ -100,7 +100,27 @@ fn with_owner_scope(filter: TargetFilter, controller: ControllerRef) -> TargetFi
     }
 }
 
-fn self_recursion_trigger_zone(ability: &crate::types::ability::AbilityDefinition) -> Option<Zone> {
+fn parse_self_return_origin_zone(lower: &str) -> Option<Zone> {
+    nom_primitives::scan_preceded(lower, |input| {
+        let (rest, _) = (
+            alt((
+                tag::<_, _, OracleError<'_>>("return this card "),
+                tag("return ~ "),
+                tag("return it "),
+            )),
+            tag("from "),
+        )
+            .parse(input)?;
+        let (rest, zone) = parse_cast_origin_zone(rest)?;
+        Ok((rest, zone))
+    })
+    .and_then(|(_, zone, _)| zone)
+}
+
+fn self_recursion_trigger_zone(
+    ability: &crate::types::ability::AbilityDefinition,
+    source_lower: &str,
+) -> Option<Zone> {
     match ability.effect.as_ref() {
         crate::types::ability::Effect::ChangeZone {
             origin: Some(origin),
@@ -110,16 +130,18 @@ fn self_recursion_trigger_zone(ability: &crate::types::ability::AbilityDefinitio
         crate::types::ability::Effect::Bounce {
             target: TargetFilter::SelfRef,
             destination,
-        } if destination.is_none_or(|zone| zone == Zone::Hand) => Some(Zone::Graveyard),
+        } if destination.is_none_or(|zone| zone == Zone::Hand) => {
+            parse_self_return_origin_zone(source_lower)
+        }
         _ => ability
             .sub_ability
             .as_deref()
-            .and_then(self_recursion_trigger_zone)
+            .and_then(|ability| self_recursion_trigger_zone(ability, source_lower))
             .or_else(|| {
                 ability
                     .else_ability
                     .as_deref()
-                    .and_then(self_recursion_trigger_zone)
+                    .and_then(|ability| self_recursion_trigger_zone(ability, source_lower))
             }),
     }
 }
@@ -754,7 +776,11 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         && def.destination == Some(Zone::Graveyard)
     {
         def.trigger_zones = vec![Zone::Graveyard];
-    } else if let Some(zone) = def.execute.as_deref().and_then(self_recursion_trigger_zone) {
+    } else if let Some(zone) = def
+        .execute
+        .as_deref()
+        .and_then(|execute| self_recursion_trigger_zone(execute, modifiers.effect_lower.as_str()))
+    {
         def.trigger_zones = vec![zone];
     }
 
@@ -14402,6 +14428,55 @@ mod tests {
                 target: TargetFilter::SelfRef,
                 destination: None,
             })
+        ));
+    }
+
+    #[test]
+    fn trigger_card_name_self_return_uses_graveyard_zone() {
+        let def = parse_trigger_line(
+            "Whenever you fully unlock a Room, you may return Fear of Infinity from your graveyard to your hand.",
+            "Fear of Infinity",
+        );
+        assert_eq!(def.mode, TriggerMode::FullyUnlock);
+        assert_eq!(def.trigger_zones, vec![Zone::Graveyard]);
+        assert!(matches!(
+            def.execute
+                .as_deref()
+                .map(|ability| ability.effect.as_ref()),
+            Some(Effect::Bounce {
+                target: TargetFilter::SelfRef,
+                destination: None,
+            })
+        ));
+    }
+
+    #[test]
+    fn phase_trigger_self_bounce_stays_battlefield_hosted() {
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, if you control no Thopters other than this creature, return ~ to its owner's hand and create five 1/1 colorless Thopter artifact creature tokens with flying.",
+            "Thopter Assembly",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::Upkeep));
+        assert!(
+            def.trigger_zones.is_empty() || def.trigger_zones == vec![Zone::Battlefield],
+            "ordinary phase trigger must not be hosted from graveyard: {:?}",
+            def.trigger_zones
+        );
+        let execute = def.execute.as_deref().expect("should have execute");
+        assert!(matches!(
+            execute.effect.as_ref(),
+            Effect::Bounce {
+                target: TargetFilter::SelfRef,
+                destination: None,
+            }
+        ));
+        assert!(matches!(
+            execute
+                .sub_ability
+                .as_deref()
+                .map(|ability| ability.effect.as_ref()),
+            Some(Effect::Token { name, .. }) if name == "Thopter"
         ));
     }
 

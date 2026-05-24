@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    AbilityCost, AdditionalCost, BeholdCostAction, CastTimingPermission, CostPaidObjectSnapshot,
-    Effect, KickerVariant, QuantityExpr, ResolvedAbility, SpellCastingOptionKind, TargetFilter,
-    TypedFilter,
+    AbilityCondition, AbilityCost, AdditionalCost, BeholdCostAction, CastTimingPermission,
+    CostPaidObjectSnapshot, Effect, KickerVariant, QuantityExpr, QuantityRef, ResolvedAbility,
+    SpellCastingOptionKind, TargetFilter, TypedFilter,
 };
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
@@ -31,6 +31,73 @@ use super::ability_utils::{
     random_select_targets_for_ability, target_constraints_from_modal,
 };
 use super::life_costs::PayLifeCostResult;
+
+fn stamp_controller_controlled_as_cast(
+    state: &GameState,
+    ability: &mut ResolvedAbility,
+    player: PlayerId,
+    source_id: ObjectId,
+) {
+    let mut filters = Vec::new();
+    collect_controller_controlled_as_cast_filters(ability, &mut filters);
+    let mut unique_filters = Vec::new();
+    for filter in filters {
+        if !unique_filters.contains(&filter) {
+            unique_filters.push(filter);
+        }
+    }
+    ability.context.controller_controlled_as_cast = unique_filters
+        .into_iter()
+        .filter(|filter| {
+            super::quantity::resolve_quantity(
+                state,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: filter.clone(),
+                    },
+                },
+                player,
+                source_id,
+            ) > 0
+        })
+        .collect();
+}
+
+fn collect_controller_controlled_as_cast_filters(
+    ability: &ResolvedAbility,
+    filters: &mut Vec<TargetFilter>,
+) {
+    if let Some(condition) = &ability.condition {
+        collect_controller_controlled_as_cast_filters_from_condition(condition, filters);
+    }
+    if let Some(sub_ability) = &ability.sub_ability {
+        collect_controller_controlled_as_cast_filters(sub_ability, filters);
+    }
+    if let Some(else_ability) = &ability.else_ability {
+        collect_controller_controlled_as_cast_filters(else_ability, filters);
+    }
+}
+
+fn collect_controller_controlled_as_cast_filters_from_condition(
+    condition: &AbilityCondition,
+    filters: &mut Vec<TargetFilter>,
+) {
+    match condition {
+        AbilityCondition::ControllerControlledMatchingAsCast { filter } => {
+            filters.push(filter.clone());
+        }
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            for condition in conditions {
+                collect_controller_controlled_as_cast_filters_from_condition(condition, filters);
+            }
+        }
+        AbilityCondition::Not { condition }
+        | AbilityCondition::ConditionInstead { inner: condition } => {
+            collect_controller_controlled_as_cast_filters_from_condition(condition, filters);
+        }
+        _ => {}
+    }
+}
 
 /// Handle the player's decision on an additional cost (kicker, blight, "or pay").
 ///
@@ -2470,8 +2537,15 @@ pub(super) fn pay_and_push_adventure(
     // CR 107.4f + CR 601.2f: Pause for interactive Phyrexian choice when the cost has
     // at least one shard with both mana and 2-life viable. The resume handler calls
     // `finalize_mana_payment_with_phyrexian_choices` which finishes the cast.
-    if let Some(waiting) = maybe_pause_for_phyrexian_choice(state, player, object_id, cost, events)
-    {
+    if let Some(waiting) = maybe_pause_for_phyrexian_choice(
+        state,
+        player,
+        object_id,
+        cost,
+        events,
+        None,
+        &HashSet::new(),
+    ) {
         let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
         pending.casting_variant = casting_variant;
         pending.cast_timing_permission = cast_timing_permission;
@@ -2708,6 +2782,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     let mut ability = ability;
     ability.context.cast_from_zone = Some(source_zone);
     ability.context.cast_phase = Some(state.phase);
+    stamp_controller_controlled_as_cast(state, &mut ability, player, object_id);
 
     // Emit targeting events now that the cast is committed.
     emit_targeting_events(
@@ -3734,6 +3809,16 @@ pub fn max_x_value(
     cost: &ManaCost,
     object_id: Option<ObjectId>,
 ) -> u32 {
+    max_x_value_excluding(state, player, cost, object_id, &HashSet::new())
+}
+
+pub(super) fn max_x_value_excluding(
+    state: &GameState,
+    player: PlayerId,
+    cost: &ManaCost,
+    object_id: Option<ObjectId>,
+    excluded_sources: &HashSet<ObjectId>,
+) -> u32 {
     let ManaCost::Cost { shards, generic } = cost else {
         return 0;
     };
@@ -3796,6 +3881,7 @@ pub fn max_x_value(
     let capacity: u32 = state
         .battlefield
         .iter()
+        .filter(|id| !excluded_sources.contains(id))
         .map(|&id| {
             let mana = mana_sources::max_mana_yield(state, id, player);
             let tap = pred
@@ -3834,7 +3920,20 @@ pub fn enter_payment_step(
     if let Some(pending) = state.pending_cast.as_ref() {
         if pending.ability.chosen_x.is_none() && cost_has_x(&pending.cost) {
             let min = pending.ability.min_x_value;
-            let max = max_x_value(state, player, &pending.cost, Some(pending.object_id));
+            let excluded_sources = pending
+                .activation_cost
+                .as_ref()
+                .map(|cost| {
+                    super::casting::ability_mana_payment_excluded_sources(cost, pending.object_id)
+                })
+                .unwrap_or_default();
+            let max = max_x_value_excluding(
+                state,
+                player,
+                &pending.cost,
+                Some(pending.object_id),
+                &excluded_sources,
+            );
             if min > max {
                 let pending_for_cancel = pending.clone();
                 state.pending_cast = None;
@@ -3894,11 +3993,45 @@ pub fn finalize_mana_payment(
     // `PendingCast` stays in `state.pending_cast` across the pause — the resume handler
     // in `engine.rs` calls `finalize_mana_payment_with_phyrexian_choices`.
     if let Some(pending_ref) = state.pending_cast.as_ref() {
-        let cost = pending_ref.cost.clone();
+        let mana_cost = pending_ref.cost.clone();
         let source_id = pending_ref.object_id;
-        if let Some(waiting) =
-            maybe_pause_for_phyrexian_choice(state, player, source_id, &cost, events)
-        {
+        if pending_ref.activation_ability_index.is_some() {
+            let excluded_sources = pending_ref
+                .activation_cost
+                .as_ref()
+                .map(|activation_cost| {
+                    super::casting::ability_mana_payment_excluded_sources(
+                        activation_cost,
+                        source_id,
+                    )
+                })
+                .unwrap_or_default();
+            let (source_types, source_subtypes) =
+                super::casting::activation_source_types(state, source_id);
+            let activation_ctx = PaymentContext::Activation {
+                source_types: &source_types,
+                source_subtypes: &source_subtypes,
+            };
+            if let Some(waiting) = maybe_pause_for_phyrexian_choice(
+                state,
+                player,
+                source_id,
+                &mana_cost,
+                events,
+                Some(&activation_ctx),
+                &excluded_sources,
+            ) {
+                return Ok(waiting);
+            }
+        } else if let Some(waiting) = maybe_pause_for_phyrexian_choice(
+            state,
+            player,
+            source_id,
+            &mana_cost,
+            events,
+            None,
+            &HashSet::new(),
+        ) {
             return Ok(waiting);
         }
     }
@@ -3909,7 +4042,21 @@ pub fn finalize_mana_payment(
         .ok_or_else(|| EngineError::InvalidAction("No pending cast to finalize".to_string()))?;
 
     if let Some(ability_index) = pending.activation_ability_index {
-        super::casting::pay_mana_cost(state, player, pending.object_id, &pending.cost, events)?;
+        let excluded_sources = pending
+            .activation_cost
+            .as_ref()
+            .map(|cost| {
+                super::casting::ability_mana_payment_excluded_sources(cost, pending.object_id)
+            })
+            .unwrap_or_default();
+        super::casting::pay_ability_mana_cost_excluding(
+            state,
+            player,
+            pending.object_id,
+            &pending.cost,
+            events,
+            &excluded_sources,
+        )?;
         return push_activated_ability_to_stack(
             state,
             player,
@@ -4044,13 +4191,21 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
         .ok_or_else(|| EngineError::InvalidAction("No pending cast to finalize".to_string()))?;
 
     if let Some(ability_index) = pending.activation_ability_index {
-        super::casting::pay_mana_cost_with_choices(
+        let excluded_sources = pending
+            .activation_cost
+            .as_ref()
+            .map(|cost| {
+                super::casting::ability_mana_payment_excluded_sources(cost, pending.object_id)
+            })
+            .unwrap_or_default();
+        super::casting::pay_ability_mana_cost_with_choices_excluding(
             state,
             player,
             pending.object_id,
             &pending.cost,
             Some(phyrexian_choices),
             events,
+            &excluded_sources,
         )?;
         return push_activated_ability_to_stack(
             state,
@@ -4171,6 +4326,8 @@ pub(super) fn maybe_pause_for_phyrexian_choice(
     source_id: ObjectId,
     cost: &crate::types::mana::ManaCost,
     events: &mut Vec<GameEvent>,
+    payment_context: Option<&PaymentContext<'_>>,
+    excluded_sources: &HashSet<ObjectId>,
 ) -> Option<WaitingFor> {
     // CR 107.4f: Fast reject — pause only when cost has intrinsic Phyrexian
     // shards OR the player has a K'rrik-style grant whose color appears in the
@@ -4213,15 +4370,35 @@ pub(super) fn maybe_pause_for_phyrexian_choice(
     // CR 601.2h + CR 605: Auto-tap mana sources before shard-options computation so
     // the simulation reflects the actual post-tap pool.
     let events_before = events.len();
-    auto_tap_mana_sources(state, player, cost, events, Some(source_id));
+    if payment_context.is_none() && excluded_sources.is_empty() {
+        auto_tap_mana_sources(state, player, cost, events, Some(source_id));
+    } else {
+        auto_tap_mana_sources_with_context_excluding(
+            state,
+            player,
+            cost,
+            events,
+            Some(source_id),
+            payment_context,
+            excluded_sources,
+        );
+    }
     // CR 605.4a: Resolve coupled `TapsForMana` triggered mana abilities inline so
     // the bonus mana is in the pool before Phyrexian shard options are computed.
     super::triggers::resolve_tap_mana_triggers_inline(state, events, events_before);
 
-    let spell_meta = super::casting::build_spell_meta(state, player, source_id);
+    let spell_meta = payment_context
+        .is_none()
+        .then(|| super::casting::build_spell_meta(state, player, source_id))
+        .flatten();
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
-    let any_color =
-        super::casting::player_can_spend_as_any_color_for_spell(state, player, source_id);
+    let effective_payment_context = payment_context.or(spell_ctx.as_ref());
+    let any_color = super::casting::player_can_spend_as_any_color_for_payment(
+        state,
+        player,
+        source_id,
+        effective_payment_context,
+    );
     // CR 107.4f + CR 118.1: Single-authority permission bundle — passes
     // `life_colors` through to `compute_phyrexian_shards` so K'rrik-promoted
     // shards surface in the pause UI.
@@ -4233,7 +4410,7 @@ pub(super) fn maybe_pause_for_phyrexian_choice(
         mana_payment::compute_phyrexian_shards(
             &player_data.mana_pool,
             cost,
-            spell_ctx.as_ref(),
+            effective_payment_context,
             permissions,
         )
     };
@@ -4351,6 +4528,64 @@ mod tests {
             convoked_creatures: Vec::new(),
             payment_mode: CastPaymentMode::Auto,
         }
+    }
+
+    #[test]
+    fn stamp_controller_controlled_as_cast_uses_quantity_resolver_snapshot() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Conditional Spell".to_string(),
+            Zone::Hand,
+        );
+        let faerie_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Faerie".to_string(),
+            Zone::Battlefield,
+        );
+        let faerie = state.objects.get_mut(&faerie_id).unwrap();
+        faerie.card_types.core_types.push(CoreType::Creature);
+        faerie.card_types.subtypes.push("Faerie".to_string());
+
+        let filter = TargetFilter::Typed(
+            TypedFilter::creature()
+                .subtype("Faerie".to_string())
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                }]),
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::Scry {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source_id,
+            PlayerId(0),
+        )
+        .sub_ability(
+            ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                source_id,
+                PlayerId(0),
+            )
+            .condition(AbilityCondition::ControllerControlledMatchingAsCast {
+                filter: filter.clone(),
+            }),
+        );
+
+        stamp_controller_controlled_as_cast(&state, &mut ability, PlayerId(0), source_id);
+
+        assert_eq!(ability.context.controller_controlled_as_cast, vec![filter]);
     }
 
     #[test]
@@ -5725,6 +5960,7 @@ mod tests {
                     choice: crate::types::game_state::ManaChoice::SingleColor(
                         crate::types::mana::ManaType::Red,
                     ),
+                    count: 1,
                 },
             )
             .expect("color choice succeeds");
@@ -5863,6 +6099,7 @@ mod tests {
                     choice: crate::types::game_state::ManaChoice::SingleColor(
                         crate::types::mana::ManaType::Red,
                     ),
+                    count: 1,
                 },
             )
             .expect("color choice succeeds");
