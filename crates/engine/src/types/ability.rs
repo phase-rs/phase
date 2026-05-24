@@ -11,6 +11,7 @@ use super::counter::{CounterMatch, CounterType};
 use super::events::BendingType;
 use super::game_state::{
     is_zero_usize, DistributionUnit, LKISnapshot, MayTriggerOrigin, RetargetScope,
+    TargetSelectionConstraint,
 };
 use super::identifiers::ObjectId;
 use super::keywords::{Keyword, KeywordKind};
@@ -419,6 +420,24 @@ pub enum PreventionAmount {
     All,
 }
 
+/// CR 614.9: Recipient of a one-shot damage-redirection effect — the
+/// battle/creature/planeswalker/player the replaced damage is dealt to instead.
+/// Resolved to a concrete object/player at effect-resolution time (see
+/// `effects::create_damage_replacement::resolve`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum DamageRedirectTarget {
+    /// "...to you instead" — the replacement source's controller (Jade Monolith,
+    /// Goblin Psychopath).
+    Controller,
+    /// "...to ~ instead" / "...dealt to this creature instead" — the replacement
+    /// source object itself (Beacon of Destiny).
+    SourceObject,
+    /// "...to target creature instead" — an object chosen as a target of the
+    /// creating ability (Soltari Guerrillas).
+    ChosenObjectTarget,
+}
+
 /// Shield type for one-shot replacement effects that expire at cleanup.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ShieldKind {
@@ -428,6 +447,17 @@ pub enum ShieldKind {
     Regeneration,
     /// CR 615: Prevention shield — absorbs/prevents damage, expires at cleanup.
     Prevention { amount: PreventionAmount },
+    /// CR 614.5 + CR 614.1a: One-shot damage-amount replacement created by an
+    /// effect ("the next time ... would deal damage this turn, it deals double
+    /// that damage instead" — Desperate Gambit). Gets one opportunity to affect
+    /// a damage event, is consumed on use, and expires at cleanup. Distinct from
+    /// a continuous static `damage_modification` (Furnace of Rath), which keeps
+    /// `ShieldKind::None` and re-applies to every damage event.
+    DamageReplacementOneShot,
+    /// CR 614.9: One-shot redirection shield — replaces the recipient of a
+    /// damage event with `recipient`. Consumed on use, expires at cleanup
+    /// (Soltari Guerrillas, Beacon of Destiny, Jade Monolith, Goblin Psychopath).
+    Redirection { recipient: DamageRedirectTarget },
 }
 
 impl ShieldKind {
@@ -1853,14 +1883,33 @@ pub enum FilterProp {
     HasColor {
         color: ManaColor,
     },
-    /// Matches objects with power <= N (for "creature with power 2 or less").
-    /// CR 208.1: Uses QuantityExpr to support both fixed and dynamic comparisons.
-    PowerLE {
-        value: QuantityExpr,
-    },
-    /// Matches objects with power >= N (for "creature with power 3 or greater").
-    /// CR 208.1: Uses QuantityExpr to support both fixed and dynamic comparisons.
-    PowerGE {
+    /// CR 208 (Power/Toughness) + CR 208.4b (base vs current) + CR 613.4b
+    /// (layer 7b: base P/T is set before counters/modifiers in 7c): Matches
+    /// objects whose power or toughness satisfies `comparator` against `value`.
+    ///
+    /// Replaces the former `PowerLE`/`PowerGE`/`ToughnessLE`/`ToughnessGE`
+    /// sibling cluster (a `stat × comparator` cross-product) with a single
+    /// parameterized predicate, mirroring the `Cmc` and `Counters` refactors.
+    /// Three orthogonal axes:
+    /// - `stat`: which characteristic to read — power (CR 208.1) or toughness.
+    /// - `scope`: `Current` reads the live `power`/`toughness` (after all layers);
+    ///   `Base` reads `base_power`/`base_toughness` per CR 208.4b — the value
+    ///   after CDAs and set effects (layers 7a/7b) but ignoring counters and
+    ///   modifying effects (layer 7c). A 1/1 with a +1/+1 counter has base
+    ///   power 1 but current power 2.
+    /// - `comparator`: any `Comparator` (LE/GE/EQ/LT/GT/NE).
+    ///
+    /// The disjunctive natural-language form "power or toughness N or less"
+    /// composes two `PtComparison` props under `AnyOf`.
+    ///
+    /// Card data is regenerated from Oracle text at build time, so no legacy-tag
+    /// deserialization shim is required; `scope` defaults to `Current` when
+    /// absent for forward-compatible hand-authored fixtures.
+    PtComparison {
+        stat: PtStat,
+        #[serde(default)]
+        scope: PtValueScope,
+        comparator: Comparator,
         value: QuantityExpr,
     },
     /// CR 509.1b: Matches objects whose power is strictly greater than the source object's power.
@@ -1928,20 +1977,10 @@ pub enum FilterProp {
     Suspected,
     /// CR 510.1c: Matches creatures whose toughness is greater than their power.
     ToughnessGTPower,
-    /// CR 208.1: Matches objects with toughness <= N. Mirrors `PowerLE`.
-    /// Used for "creature with toughness N or less" and as a building block
-    /// for disjunctive P/T filters ("power or toughness N or less").
-    ToughnessLE {
-        value: QuantityExpr,
-    },
-    /// CR 208.1: Matches objects with toughness >= N. Mirrors `PowerGE`.
-    ToughnessGE {
-        value: QuantityExpr,
-    },
     /// Disjunctive composite: the object matches if ANY inner prop matches.
     /// Used for natural-language OR within a property suffix — e.g.
     /// "creature with power or toughness N or less" decomposes to
-    /// `AnyOf { [PowerLE(N), ToughnessLE(N)] }` on a `creature` typed filter,
+    /// `AnyOf { [PtComparison(Power,LE,N), PtComparison(Toughness,LE,N)] }` on a `creature` typed filter,
     /// preserving the single-type constraint while expressing the OR
     /// semantics at the property layer. Nest by composing with other props.
     AnyOf {
@@ -3357,6 +3396,33 @@ impl Comparator {
             Comparator::NE => Comparator::EQ,
         }
     }
+}
+
+/// CR 208: Selects which creature characteristic a `FilterProp::PtComparison`
+/// reads. Power and toughness are both defined in CR 208 (Power/Toughness) and
+/// are read identically by a filter — only the field differs — so they are a
+/// leaf-level parameterization axis, not a cross-section conflation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PtStat {
+    /// CR 208.1: The creature's power (first number).
+    Power,
+    /// CR 208.1: The creature's toughness (second number).
+    Toughness,
+}
+
+/// CR 208.4b: Selects whether a `FilterProp::PtComparison` reads the creature's
+/// current power/toughness (after all continuous effects) or its base
+/// power/toughness. Per CR 613.4b, base values are those set in layer 7b (after
+/// CDAs in 7a and set effects, but before counters and modifying effects in
+/// 7c). A 1/1 with a +1/+1 counter has base power 1 but current power 2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum PtValueScope {
+    /// CR 613.4: The fully-modified value after applying every layer-7 sublayer.
+    #[default]
+    Current,
+    /// CR 208.4b: The value after layer 7b only — ignores counters (7c) and
+    /// other modifying effects.
+    Base,
 }
 
 /// CR 719.1: Condition that must be met for a Case to become solved.
@@ -5011,6 +5077,10 @@ pub enum Effect {
     /// CR 701.20e + CR 608.2c: Look at top N cards (shown only to the looking player),
     /// select some to keep per the effect's instructions, rest go elsewhere.
     Dig {
+        /// Which player's library is inspected. Defaults to the ability controller
+        /// for "your library"; `Player` covers "target player's library".
+        #[serde(default = "default_target_filter_controller")]
+        player: TargetFilter,
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
         /// Kept-card destination override (None = Hand).
@@ -5492,6 +5562,9 @@ pub enum Effect {
         /// None = reveal entire hand. Some = reveal this many cards. CR 701.20a.
         #[serde(default)]
         count: Option<QuantityExpr>,
+        /// CR 701.20a: When true, reveal `count` cards chosen at random from that hand.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        random: bool,
         /// CR 608.2d: "You may choose a [card] from it" makes the post-reveal
         /// card selection optional while the hand reveal itself remains mandatory.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -5767,6 +5840,52 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         damage_source_filter: Option<TargetFilter>,
     },
+    /// CR 614.9 + CR 614.1a + CR 615: Create a one-shot "the next time [source]
+    /// would deal [combat] damage [to X] this turn, [modify/redirect] instead"
+    /// damage-replacement shield (Desperate Gambit, Soltari Guerrillas, Beacon
+    /// of Destiny, Jade Monolith, Goblin Psychopath).
+    ///
+    /// Distinct from a continuous static `damage_modification` replacement
+    /// (Furnace of Rath / Gratuitous Violence): this effect, created by an
+    /// activated/triggered ability at resolution, builds a one-shot
+    /// `ReplacementDefinition` tagged with `ShieldKind::DamageReplacementOneShot`
+    /// (amount form) or `ShieldKind::Redirection` (redirect form), consumed on
+    /// its single use (CR 614.5) and dropped at cleanup.
+    ///
+    /// Exactly one of `modification` / `redirect_to` is `Some`. When
+    /// `redirect_to == Some(ChosenObjectTarget)` ("to target creature" —
+    /// Soltari Guerrillas), `redirect_object_filter` carries the recipient's
+    /// `TargetFilter` so the targeting layer surfaces a standard object target
+    /// slot (`ability_utils::collect_target_slots`); the resolver captures the
+    /// chosen object into the shield. All other redirect forms host on the
+    /// controller / source with no declared target.
+    CreateDamageReplacement {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_filter: Option<TargetFilter>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        combat_scope: Option<CombatDamageScope>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_filter: Option<DamageTargetFilter>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        modification: Option<DamageModification>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        redirect_to: Option<DamageRedirectTarget>,
+        /// CR 115.1: The redirect recipient's target filter for the
+        /// `ChosenObjectTarget` form ("...deals that damage to target creature
+        /// instead" — Soltari Guerrillas). `None` for the `Controller` /
+        /// `SourceObject` redirect forms, which need no target slot.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        redirect_object_filter: Option<TargetFilter>,
+        /// CR 115.1 + CR 614.9: The *original-recipient* target filter when the
+        /// damage-to clause names a target ("would deal damage to target
+        /// creature" — Jade Monolith). When `Some`, the shield is hosted on the
+        /// chosen object with `valid_card: SelfRef` so it fires only on damage
+        /// to that specific permanent (not the broader `target_filter` scope).
+        /// `None` for cards whose recipient is a scope ("to an opponent" —
+        /// Soltari) or implicit ("you" — Beacon).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recipient_object_filter: Option<TargetFilter>,
+    },
     /// CR 104.3a: A player who meets this effect's condition loses the game.
     /// The affected player is determined by resolution context (controller's opponent
     /// if untargeted, or explicit target if targeted).
@@ -6035,6 +6154,13 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
+    /// CR 701.15a/b: Goad every creature matching a battlefield filter without
+    /// declaring targets. Mirrors `DestroyAll` / `TapAll` for mass Oracle text
+    /// like "Goad all creatures you don't control."
+    GoadAll {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+    },
     /// CR 701.35a: Detain target permanent — until the controller's next turn, that
     /// permanent can't attack or block and its activated abilities can't be activated.
     /// Follows the same per-player tracking pattern as Goad (detained_by on GameObject).
@@ -6199,7 +6325,9 @@ pub enum Effect {
         #[serde(default = "default_one")]
         amount: u32,
     },
-    /// Endure N — if this creature would die, instead remove N damage from it.
+    /// CR 701.63a: Endure N — the enduring permanent's controller chooses: create an
+    /// N/N white Spirit creature token, or put N +1/+1 counters on that permanent.
+    /// CR 701.63b: Endure 0 does nothing.
     Endure {
         amount: u32,
     },
@@ -6897,16 +7025,30 @@ impl Effect {
                 }
             }
 
-            Effect::ExileTop { player, .. } | Effect::ExileFromTopUntil { player, .. } => {
-                Some(player)
-            }
+            Effect::Dig { player, .. }
+            | Effect::ExileTop { player, .. }
+            | Effect::ExileFromTopUntil { player, .. } => Some(player),
 
+            // CR 115.1a + CR 601.2c: "Create a [Role/Aura] token attached to
+            // target creature" targets its host — surface `attach_to` as the
+            // target slot when it is a real targetable filter. CR 303.4 + the
+            // Asinine Antics ruling: a for-each host (`ParentTarget`, a context
+            // ref) is NOT targeted (hexproof can't stop it); it's bound
+            // per-iteration by the member-driven loop, so `owner` is surfaced and
+            // `attach_to` is reached as a hidden parent-ref slot instead. Mirrors
+            // `CopyTokenOf` (two targetable axes; no real card targets both —
+            // `attach_to` wins and `owner` falls back to the controller at resolve
+            // via `token::resolve_token_owner`).
+            //
             // CR 111.2 + CR 601.2c: "Target player creates ..." token modes
             // (e.g. Ashling's Command mode 4, Brigid's Command, Prismari Command)
             // surface their token-creation target as the `owner` filter — the
             // player who creates the token is its owner. The default
             // `TargetFilter::Controller` preserves "you create ..." semantics.
-            Effect::Token { owner, .. } => Some(owner),
+            Effect::Token { owner, attach_to, .. } => match attach_to {
+                Some(f) if !f.is_context_ref() => Some(f),
+                _ => Some(owner),
+            },
 
             // GenericEffect and LoseLife have Option<TargetFilter>
             Effect::GenericEffect { target, .. } | Effect::LoseLife { target, .. } => {
@@ -6933,10 +7075,10 @@ impl Effect {
             | Effect::DestroyAll { .. }
             | Effect::TapAll { .. }
             | Effect::UntapAll { .. }
+            | Effect::GoadAll { .. }
             | Effect::BounceAll { .. }
             | Effect::CounterAll { .. }
             | Effect::ChangeZoneAll { .. }
-            | Effect::Dig { .. }
             | Effect::PutCounterAll { .. }
             | Effect::DoublePTAll { .. }
             | Effect::Explore
@@ -7018,7 +7160,15 @@ impl Effect {
             | Effect::SeparateIntoPiles { .. }
             // CR 701.20a: RevealFromHand implicitly targets the controller's own hand;
             // it has no discrete `target` field for the generic targeting layer.
-            | Effect::RevealFromHand { .. } => None,
+            | Effect::RevealFromHand { .. }
+            // CR 614.9 + CR 115.1: CreateDamageReplacement has no `target:
+            // TargetFilter` field. Its "to target creature" redirect recipient
+            // (Soltari Guerrillas — `redirect_to: ChosenObjectTarget`) is
+            // surfaced through dedicated branches in `ability_utils`
+            // (`collect_target_slots` / `collect_target_slot_specs`), mirroring
+            // `MoveCounters`/`Attach`; all other forms host on the controller or
+            // source and declare no target.
+            | Effect::CreateDamageReplacement { .. } => None,
             // CR 701.23a: SearchLibrary has an optional player target for opponent search.
             Effect::SearchLibrary { target_player, .. } => target_player.as_ref(),
             Effect::ChooseDrawnThisTurnPayOrTopdeck { player, .. } => Some(player),
@@ -7127,6 +7277,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::PayCost { .. } => "PayCost",
         Effect::CastFromZone { .. } => "CastFromZone",
         Effect::PreventDamage { .. } => "PreventDamage",
+        Effect::CreateDamageReplacement { .. } => "CreateDamageReplacement",
         Effect::LoseTheGame => "LoseTheGame",
         Effect::WinTheGame => "WinTheGame",
         Effect::RollDie { .. } => "RollDie",
@@ -7157,6 +7308,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::PutOnTopOrBottom { .. } => "PutOnTopOrBottom",
         Effect::GiftDelivery { .. } => "GiftDelivery",
         Effect::Goad { .. } => "Goad",
+        Effect::GoadAll { .. } => "GoadAll",
         Effect::Detain { .. } => "Detain",
         Effect::ExchangeControl { .. } => "ExchangeControl",
         Effect::ChangeTargets { .. } => "ChangeTargets",
@@ -7298,6 +7450,7 @@ pub enum EffectKind {
     PayCost,
     CastFromZone,
     PreventDamage,
+    CreateDamageReplacement,
     Regenerate,
     LoseTheGame,
     WinTheGame,
@@ -7329,6 +7482,7 @@ pub enum EffectKind {
     PutOnTopOrBottom,
     GiftDelivery,
     Goad,
+    GoadAll,
     Detain,
     ExchangeControl,
     ChangeTargets,
@@ -7474,6 +7628,7 @@ impl From<&Effect> for EffectKind {
             Effect::PayCost { .. } => EffectKind::PayCost,
             Effect::CastFromZone { .. } => EffectKind::CastFromZone,
             Effect::PreventDamage { .. } => EffectKind::PreventDamage,
+            Effect::CreateDamageReplacement { .. } => EffectKind::CreateDamageReplacement,
             Effect::LoseTheGame => EffectKind::LoseTheGame,
             Effect::WinTheGame => EffectKind::WinTheGame,
             Effect::RollDie { .. } => EffectKind::RollDie,
@@ -7506,6 +7661,7 @@ impl From<&Effect> for EffectKind {
             Effect::PutOnTopOrBottom { .. } => EffectKind::PutOnTopOrBottom,
             Effect::GiftDelivery { .. } => EffectKind::GiftDelivery,
             Effect::Goad { .. } => EffectKind::Goad,
+            Effect::GoadAll { .. } => EffectKind::GoadAll,
             Effect::Detain { .. } => EffectKind::Detain,
             Effect::ExchangeControl { .. } => EffectKind::ExchangeControl,
             Effect::ChangeTargets { .. } => EffectKind::ChangeTargets,
@@ -7867,6 +8023,9 @@ pub struct AbilityDefinition {
     /// CR 601.2c + CR 115.1d.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_target: Option<MultiTargetSpec>,
+    /// CR 115.1 + CR 601.2c: Additional legality constraints across selected targets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_constraints: Vec<TargetSelectionConstraint>,
     /// CR 601.2c + CR 608.2d: Timing for object/player choices represented by
     /// this ability's target filter. Stack timing is true targeting; resolution
     /// timing is used for non-target instructions such as "return a land card
@@ -7980,6 +8139,8 @@ struct AbilityDefinitionRepr<'a> {
     optional_for: &'a Option<OpponentMayScope>,
     #[serde(skip_serializing_if = "Option::is_none")]
     multi_target: &'a Option<MultiTargetSpec>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    target_constraints: &'a Vec<TargetSelectionConstraint>,
     #[serde(skip_serializing_if = "TargetChoiceTiming::is_stack")]
     target_choice_timing: TargetChoiceTiming,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -8034,6 +8195,7 @@ impl Serialize for AbilityDefinition {
             optional,
             optional_for,
             multi_target,
+            target_constraints,
             target_choice_timing,
             distribute,
             unless_pay,
@@ -8069,6 +8231,7 @@ impl Serialize for AbilityDefinition {
             optional: *optional,
             optional_for,
             multi_target,
+            target_constraints,
             target_choice_timing: *target_choice_timing,
             distribute,
             unless_pay,
@@ -8192,6 +8355,7 @@ impl AbilityDefinition {
             optional: false,
             optional_for: None,
             multi_target: None,
+            target_constraints: Vec::new(),
             target_choice_timing: TargetChoiceTiming::Stack,
             distribute: None,
             unless_pay: None,
@@ -8237,6 +8401,11 @@ impl AbilityDefinition {
 
     pub fn multi_target(mut self, spec: MultiTargetSpec) -> Self {
         self.multi_target = Some(spec);
+        self
+    }
+
+    pub fn target_constraint(mut self, constraint: TargetSelectionConstraint) -> Self {
+        self.target_constraints.push(constraint);
         self
     }
 
@@ -9999,6 +10168,23 @@ impl ReplacementDefinition {
     /// The shield absorbs or prevents damage, and is cleaned up at end of turn.
     pub fn prevention_shield(mut self, amount: PreventionAmount) -> Self {
         self.shield_kind = ShieldKind::Prevention { amount };
+        self
+    }
+
+    /// CR 614.5 + CR 614.1a: Mark this replacement as a one-shot damage-amount
+    /// shield (Desperate Gambit). Pair with `.damage_modification(...)` to set
+    /// the amount formula; the shield is consumed after its single use and
+    /// expires at cleanup. Distinct from a continuous static (Furnace of Rath),
+    /// which leaves `shield_kind` as `None`.
+    pub fn damage_replacement_oneshot_shield(mut self) -> Self {
+        self.shield_kind = ShieldKind::DamageReplacementOneShot;
+        self
+    }
+
+    /// CR 614.9: Mark this replacement as a one-shot redirection shield that
+    /// re-targets the damage recipient. Consumed on use, expires at cleanup.
+    pub fn redirection_shield(mut self, recipient: DamageRedirectTarget) -> Self {
+        self.shield_kind = ShieldKind::Redirection { recipient };
         self
     }
 

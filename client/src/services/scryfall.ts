@@ -7,6 +7,7 @@ interface ScryfallDataEntry {
    * `printed_ref.face_name`. */
   face_names: string[];
   faces: Array<{ normal: string; art_crop: string }>;
+  layout?: string;
   name: string;
   mana_cost: string;
   cmc: number;
@@ -132,11 +133,50 @@ export function resolveOracleIdSync(cardName: string): string | null {
   return scryfallDataResolved[cardName.toLowerCase()]?.oracle_id ?? null;
 }
 
+/**
+ * Resolve the numeric Scryfall face index for an engine-reported `faceName`.
+ *
+ * The printings/art-strategy path (`resolvePrintingImageUrl`) keys off a raw
+ * numeric `faceIndex`, but for a DFC/MDFC the engine only knows the *active
+ * face's name* — and for an MDFC cast as its back face, `transformed` stays
+ * `false`, so `cardImageLookup` yields `faceIndex: 0` (the front). This helper
+ * recovers the correct index by matching `faceName` against the entry's
+ * `face_names` array, the same way the canonical oracle-id image path does.
+ * Returns `null` when the data isn't loaded yet or the face can't be matched,
+ * so callers fall back to their provided `faceIndex`.
+ */
+export function resolveFaceIndexSync(
+  oracleId: string,
+  faceName: string | undefined,
+): number | null {
+  if (!scryfallDataResolved || !faceName) return null;
+  const entry = scryfallDataResolved[oracleId.toLowerCase()];
+  if (!entry) return null;
+  const idx = entry.face_names.indexOf(faceName.toLowerCase());
+  return idx >= 0 ? idx : null;
+}
+
+export function isCardImageRotatedSync(oracleId: string, cardName: string): boolean {
+  if (!scryfallDataResolved) return false;
+  const entry = scryfallDataResolved[oracleId.toLowerCase()]
+    ?? scryfallDataResolved[normalizeCardName(cardName).toLowerCase()];
+  return isSidewaysLayout(entry?.layout);
+}
+
 const SCRYFALL_DELAY_MS = 100;
 const MAX_RETRIES = 3;
 const BASE_BACKOFF_MS = 1000;
 
 export type ImageSize = "small" | "normal" | "large" | "art_crop";
+
+export interface CardImageAsset {
+  src: string;
+  isRotated: boolean;
+}
+
+function isSidewaysLayout(layout: string | undefined): boolean {
+  return layout === "split";
+}
 
 export interface ScryfallCard {
   id?: string;
@@ -323,13 +363,21 @@ export async function fetchCardImageUrl(
   faceIndex: number,
   size: ImageSize = "normal",
 ): Promise<string> {
+  return (await fetchCardImageAsset(cardName, faceIndex, size)).src;
+}
+
+export async function fetchCardImageAsset(
+  cardName: string,
+  faceIndex: number,
+  size: ImageSize = "normal",
+): Promise<CardImageAsset> {
   const data = await loadScryfallData();
   const name = normalizeCardName(cardName).toLowerCase();
   const entry = data?.[name];
   if (!entry) {
     throw new Error(`Card image not in local data: "${name}"`);
   }
-  return resolveImageUrl(entry, faceIndex, size, name);
+  return resolveImageAsset(entry, faceIndex, size, name);
 }
 
 /**
@@ -352,6 +400,14 @@ export async function fetchCardImageByOracleId(
   faceName: string | undefined,
   size: ImageSize = "normal",
 ): Promise<string> {
+  return (await fetchCardImageAssetByOracleId(oracleId, faceName, size)).src;
+}
+
+export async function fetchCardImageAssetByOracleId(
+  oracleId: string,
+  faceName: string | undefined,
+  size: ImageSize = "normal",
+): Promise<CardImageAsset> {
   const data = await loadScryfallData();
   const key = oracleId.toLowerCase();
   const entry = data?.[key];
@@ -361,7 +417,19 @@ export async function fetchCardImageByOracleId(
   const faceIndex = faceName
     ? Math.max(0, entry.face_names.indexOf(faceName.toLowerCase()))
     : 0;
-  return resolveImageUrl(entry, faceIndex, size, entry.name);
+  return resolveImageAsset(entry, faceIndex, size, entry.name);
+}
+
+function resolveImageAsset(
+  entry: ScryfallDataEntry,
+  faceIndex: number,
+  size: ImageSize,
+  diagnosticName: string,
+): CardImageAsset {
+  return {
+    src: resolveImageUrl(entry, faceIndex, size, diagnosticName),
+    isRotated: isSidewaysLayout(entry.layout),
+  };
 }
 
 function resolveImageUrl(

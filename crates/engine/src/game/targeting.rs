@@ -576,7 +576,7 @@ pub(crate) fn extract_source_from_event(
         GameEvent::BecomesTarget { source_id, .. } => Some(*source_id),
         GameEvent::SpellCast { object_id, .. } => Some(*object_id),
         GameEvent::DamageDealt { source_id, .. } => Some(*source_id),
-        GameEvent::AbilityActivated { source_id } => Some(*source_id),
+        GameEvent::AbilityActivated { source_id, .. } => Some(*source_id),
         GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
         GameEvent::PermanentTapped { object_id, .. } => Some(*object_id),
         GameEvent::PermanentUntapped { object_id } => Some(*object_id),
@@ -643,6 +643,12 @@ pub(crate) fn extract_player_from_event(
         GameEvent::Discarded { player_id, .. } => Some(*player_id),
         GameEvent::LandPlayed { player_id, .. } => Some(*player_id),
         GameEvent::SpellCast { controller, .. } => Some(*controller),
+        // CR 602.2a: "Its controller is the player who activated the ability."
+        // For "Whenever a player activates an ability, … deals 1 damage to that
+        // player" triggers (Burning-Tree Shaman, Flamescroll Celebrant),
+        // `TriggeringPlayer` / "that player" binds to the activating player
+        // carried on the event.
+        GameEvent::AbilityActivated { player_id, .. } => Some(*player_id),
         GameEvent::PermanentSacrificed { player_id, .. } => Some(*player_id),
         GameEvent::Unattached {
             old_target: TargetRef::Player(player_id),
@@ -1268,6 +1274,7 @@ mod tests {
     use super::*;
     use crate::game::game_object::AttachTarget;
     use crate::game::zones::create_object;
+    use crate::types::ability::{Comparator, QuantityExpr};
     use crate::types::card_type::CoreType;
     use crate::types::game_state::CastingVariant;
     use crate::types::identifiers::CardId;
@@ -2593,6 +2600,52 @@ mod tests {
         assert!(!can_target(obj, PlayerId(0), source_id, &state));
     }
 
+    #[test]
+    fn protection_from_mana_value_filter_blocks_targeting() {
+        let (mut state, _c0, c1) = setup_with_creatures();
+        state
+            .objects
+            .get_mut(&c1)
+            .unwrap()
+            .keywords
+            .push(Keyword::Protection(ProtectionTarget::Filter(
+                TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Fixed { value: 3 },
+                }])),
+            )));
+
+        let low_mv_source = create_object(
+            &mut state,
+            CardId(103),
+            PlayerId(0),
+            "Small Spell".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&low_mv_source).unwrap().mana_cost =
+            crate::types::mana::ManaCost::Cost {
+                generic: 3,
+                shards: vec![],
+            };
+
+        let high_mv_source = create_object(
+            &mut state,
+            CardId(104),
+            PlayerId(0),
+            "Large Spell".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&high_mv_source).unwrap().mana_cost =
+            crate::types::mana::ManaCost::Cost {
+                generic: 4,
+                shards: vec![],
+            };
+
+        let obj = state.objects.get(&c1).unwrap();
+        assert!(!can_target(obj, PlayerId(0), low_mv_source, &state));
+        assert!(can_target(obj, PlayerId(0), high_mv_source, &state));
+    }
+
     /// CR 702.16b + CR 702.16j: A player with protection from everything
     /// cannot be a legal target of any spell or ability from any source.
     /// `find_legal_targets` must exclude that player from the "any target"
@@ -2783,5 +2836,20 @@ mod tests {
             result: 7,
         };
         assert_eq!(extract_amount_from_event(&event), Some(7));
+    }
+
+    /// CR 602.2a: For Burning-Tree Shaman / Flamescroll Celebrant's "deals 1
+    /// damage to that player" effect, `TriggeringPlayer` must resolve to the
+    /// player who activated the ability — carried directly on the event, not
+    /// inferred from the source object's controller (which would be wrong
+    /// when an opponent activates a granted ability).
+    #[test]
+    fn extract_player_from_ability_activated_returns_activator() {
+        let (state, _c0, _c1) = setup_with_creatures();
+        let event = crate::types::events::GameEvent::AbilityActivated {
+            player_id: PlayerId(1),
+            source_id: ObjectId(99),
+        };
+        assert_eq!(extract_player_from_event(&event, &state), Some(PlayerId(1)));
     }
 }

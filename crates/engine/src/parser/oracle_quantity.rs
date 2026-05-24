@@ -68,6 +68,35 @@ pub(crate) fn parse_quantity_ref_with_context(
         }
     }
 
+    if all_consuming(pair(
+        tag::<_, _, OracleError<'_>>("the number of"),
+        alt((tag(" counters on ~"), tag(" counters on it"))),
+    ))
+    .parse(trimmed)
+    .is_ok()
+    {
+        return Some(QuantityRef::CountersOn {
+            scope: ObjectScope::Source,
+            counter_type: None,
+        });
+    }
+
+    if all_consuming(pair(
+        tag::<_, _, OracleError<'_>>("the number of"),
+        alt((
+            tag(" counters on that creature"),
+            tag(" counters on that permanent"),
+        )),
+    ))
+    .parse(trimmed)
+    .is_ok()
+    {
+        return Some(QuantityRef::CountersOn {
+            scope: ObjectScope::Target,
+            counter_type: None,
+        });
+    }
+
     // "[counter type] counter(s) on ~" / "[counter type] counter(s) on it"
     // Handles both plural ("counters on ~") and singular ("counter on ~") forms.
     if let Some(rest) = trimmed
@@ -942,41 +971,90 @@ fn classify_possessive_referent(prefix: &str) -> Option<ObjectScope> {
     None
 }
 
+/// CR 608.2k: Recognize a participle adjective that names an earlier cost or
+/// trigger-condition event in the same ability. The participle binds the
+/// possessive referent to the cost-paid / event-condition object:
+///
+/// - cost participles: `sacrificed`, `exiled`, `discarded`, `milled`, `targeted`
+/// - trigger-condition participles: `destroyed`, `countered`, `returned`,
+///   `revealed`, `drawn`, `copied`, `discovered`
+///
+/// The combinator only consumes the participle word; callers MUST follow with
+/// a whitespace boundary + an object type (via [`parse_possessive_object_type`])
+/// to avoid matching prefixes like `"targeter"` or `"revealed cards face down"`.
 fn parse_possessive_participle(input: &str) -> OracleResult<'_, ()> {
     value(
         (),
         alt((
-            tag("destroyed"),
-            tag("countered"),
-            tag("returned"),
-            tag("targeted"),
-            tag("revealed"),
-            tag("drawn"),
-            tag("copied"),
-            tag("sacrificed"),
-            tag("exiled"),
-            tag("discarded"),
+            // alt() has an arity limit; group cost vs. trigger-condition forms.
+            alt((
+                tag("sacrificed"),
+                tag("exiled"),
+                tag("discarded"),
+                tag("milled"),
+                tag("targeted"),
+            )),
+            alt((
+                tag("destroyed"),
+                tag("countered"),
+                tag("returned"),
+                tag("revealed"),
+                tag("drawn"),
+                tag("copied"),
+                tag("discovered"),
+            )),
         )),
     )
     .parse(input)
 }
 
+/// CR 603.7c / CR 205: Recognize the object-type phrase that follows the
+/// determiner (and optional participle) in a possessive prefix.
+///
+/// Decomposes as `opt(supertype) + type_word`, reusing the shared
+/// `oracle_nom::target::parse_supertype_prefix` building block (CR 205.4a
+/// supertypes) for the optional adjective. This covers both bare single-word
+/// forms (`"creature"`, `"artifact"`, `"permanent"`) and composed forms
+/// (`"legendary creature"`, `"snow land"`, `"basic land"`) without
+/// enumerating verbatim multi-word strings.
+///
+/// The bare type word is a *singular* card type or the `token` referent:
+///
+/// - Card types per CR 205.2/205.3: `creature`, `artifact`, `enchantment`,
+///   `card`, `spell`, `permanent`, `planeswalker`, `land`, `battle`,
+///   `instant`, `sorcery`.
+/// - Token referent per CR 109.1 / CR 110.5: a non-card object that can still
+///   anchor a possessive reference. Not a CR 205 type, so listed explicitly.
+///
+/// Plural forms (`creatures'`) are rejected — Oracle text possessives are
+/// always singular (`the sacrificed creature's`). Plurals also cannot reach
+/// this combinator through `parse_event_context_quantity` because the caller
+/// splits on `"'s "` (apostrophe + s + space), and `creatures' power` has
+/// `s' ` (no `'s ` substring) — but listing only singular forms here pins the
+/// invariant at the parser layer, not the caller.
 fn parse_possessive_object_type(input: &str) -> OracleResult<'_, ()> {
+    // Optional supertype prefix consumes a trailing space.
+    let (rest, _) = opt(nom_target::parse_supertype_prefix).parse(input)?;
+    // Singular object-type words. Order matters where one is a prefix of
+    // another: none of these share a prefix, so any order works.
     value(
         (),
         alt((
             tag("creature"),
-            tag("spell"),
-            tag("card"),
-            tag("permanent"),
             tag("artifact"),
             tag("enchantment"),
             tag("planeswalker"),
-            tag("land"),
+            tag("permanent"),
             tag("battle"),
+            tag("instant"),
+            tag("sorcery"),
+            tag("land"),
+            tag("spell"),
+            tag("card"),
+            tag("token"),
         )),
     )
-    .parse(input)
+    .parse(rest)
 }
 
 /// CR 400.7 + CR 608.2c: Match "<noun> exiled from <possessive> hand this way"
@@ -1658,6 +1736,40 @@ mod tests {
                 counter_type: Some(ref counter_type),
             } => assert_eq!(*counter_type, CounterType::Age),
             other => panic!("Expected CountersOn{{Source, age}}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quantity_ref_all_counters_on_normalized_self() {
+        for phrase in [
+            "the number of counters on ~",
+            "the number of counters on it",
+        ] {
+            let qty = parse_quantity_ref(phrase).unwrap();
+            match qty {
+                QuantityRef::CountersOn {
+                    scope: ObjectScope::Source,
+                    counter_type: None,
+                } => {}
+                other => panic!("Expected CountersOn{{Source, any}} for {phrase}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn quantity_ref_all_counters_on_that_object() {
+        for phrase in [
+            "the number of counters on that creature",
+            "the number of counters on that permanent",
+        ] {
+            let qty = parse_quantity_ref(phrase).unwrap();
+            match qty {
+                QuantityRef::CountersOn {
+                    scope: ObjectScope::Target,
+                    counter_type: None,
+                } => {}
+                other => panic!("Expected CountersOn{{Target, any}} for {phrase}, got {other:?}"),
+            }
         }
     }
 
@@ -2634,6 +2746,132 @@ mod tests {
         // Player possessives are not event context
         assert_eq!(
             parse_event_context_quantity("each opponent's life total"),
+            None
+        );
+    }
+
+    /// CR 608.2k — `milled` is a participle-possessive cost referent
+    /// (Patchwork Automaton, Demilich, Court of Cunning class). The mill
+    /// resolves to an event-context object whose mana value is then queried.
+    #[test]
+    fn parse_event_context_possessive_milled_card_mana_value() {
+        assert_eq!(
+            parse_event_context_quantity("the milled card's mana value"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject
+                }
+            })
+        );
+    }
+
+    /// CR 608.2k — `discovered` is a participle-possessive trigger-condition
+    /// referent (LCI mechanic). The discovered card's mana value is queried
+    /// in the same instruction that introduced it.
+    #[test]
+    fn parse_event_context_possessive_discovered_card_mana_value() {
+        assert_eq!(
+            parse_event_context_quantity("the discovered card's mana value"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject
+                }
+            })
+        );
+    }
+
+    /// CR 608.2k — sacrificed-`artifact` and sacrificed-`enchantment`
+    /// participle-possessives (Krark-Clan Ironworks family, Goblin Welder
+    /// adjacent). Locks the type-word axis: any single-word card type
+    /// (`creature`/`artifact`/`enchantment`/`card`/`spell`/`permanent`/
+    /// `land`/`battle`/`planeswalker`) must classify as `CostPaidObject` when
+    /// preceded by a participle, not just `creature`.
+    #[test]
+    fn parse_event_context_possessive_sacrificed_artifact_mana_value() {
+        assert_eq!(
+            parse_event_context_quantity("the sacrificed artifact's mana value"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn parse_event_context_possessive_sacrificed_enchantment_mana_value() {
+        assert_eq!(
+            parse_event_context_quantity("the sacrificed enchantment's mana value"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject
+                }
+            })
+        );
+    }
+
+    /// CR 608.2k + CR 205.4a — supertype composition: the participle prefix is
+    /// `participle + opt(supertype) + type_word`. Real Oracle text does not
+    /// presently use forms like `"the sacrificed legendary creature's power"`,
+    /// but the grammar accepts it via decomposition from
+    /// `parse_supertype_prefix` + `parse_type_filter_word`. This test pins the
+    /// composition contract so future printings of multi-word possessives are
+    /// covered the moment they ship.
+    #[test]
+    fn parse_event_context_possessive_legendary_creature_supertype_composition() {
+        assert_eq!(
+            parse_event_context_quantity("the sacrificed legendary creature's power"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject
+                }
+            })
+        );
+    }
+
+    /// CR 109.1 / CR 110.5 — tokens are objects and can anchor possessive
+    /// references. The `token` referent is accepted explicitly (it is not a
+    /// CR 205 card type so `parse_type_filter_word` would not match it).
+    #[test]
+    fn parse_event_context_possessive_sacrificed_token_power() {
+        assert_eq!(
+            parse_event_context_quantity("the sacrificed token's power"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject
+                }
+            })
+        );
+    }
+
+    /// Negative guard — a player-possessive prefix (one that does not begin
+    /// with the `"that "` / `"the "` determiner) must NOT be classified as
+    /// either `CostPaidObject` or `Anaphoric`. The determiner gate in
+    /// `classify_possessive_referent` is the load-bearing rejection: without
+    /// it, `"an opponent's"` would split to prefix `"an opponent"` and
+    /// silently fall through to the player-possessive parser. Locking this
+    /// behavior at the classifier boundary prevents future regressions if the
+    /// determiner alt is ever loosened.
+    #[test]
+    fn parse_event_context_possessive_rejects_an_opponent_prefix() {
+        assert_eq!(
+            parse_event_context_quantity("an opponent's life total"),
+            None
+        );
+    }
+
+    /// Negative guard — plural possessive (`creatures'`) is ungrammatical in
+    /// Oracle text. `parse_type_filter_word` accepts plural forms for the
+    /// targeting branch, but the possessive object-type combinator must
+    /// reject them so `"the sacrificed creatures' power"` does NOT classify.
+    #[test]
+    fn parse_event_context_possessive_rejects_plural_type() {
+        // Real possessives are always singular. Split happens on "'s ", so a
+        // plural-with-apostrophe form like `creatures'` won't even reach
+        // `classify_possessive_referent` — this test belt-and-suspenders the
+        // singular-only contract via the trailing-'s' guard.
+        assert_eq!(
+            parse_event_context_quantity("the sacrificed creatures' power"),
             None
         );
     }

@@ -42,6 +42,20 @@ fn maybe_negate(cond: AbilityCondition, negated: bool) -> AbilityCondition {
     }
 }
 
+/// CR 205.3: True when a `TypeFilter` references a subtype anywhere in its
+/// structure (directly, behind a `Non` negation, or inside an `AnyOf`
+/// disjunction). Used to distinguish the present-target subtype condition
+/// ("it's a Goblin") — owned by `TargetMatchesFilter` — from CoreType phrases
+/// the explicit CoreType match already routes to `RevealedHasCardType`.
+fn type_filter_references_subtype(filter: &TypeFilter) -> bool {
+    match filter {
+        TypeFilter::Subtype(_) => true,
+        TypeFilter::Non(inner) => type_filter_references_subtype(inner),
+        TypeFilter::AnyOf(inners) => inners.iter().any(type_filter_references_subtype),
+        _ => false,
+    }
+}
+
 pub(crate) fn split_leading_conditional(text: &str) -> Option<(String, String)> {
     let lower = text.to_lowercase();
     if tag::<_, _, OracleError<'_>>("if ")
@@ -1684,6 +1698,7 @@ pub(super) fn try_parse_dig_instead_alternative(
     // Gate: previous effect must be a Dig that the alternative can piggy-back on.
     let prev = previous?;
     let Effect::Dig {
+        player: prev_player,
         count: prev_count,
         destination: _,
         keep_count: _,
@@ -1741,6 +1756,7 @@ pub(super) fn try_parse_dig_instead_alternative(
     // preceding Dig's (already-patched or None — a trailing PutRest continuation
     // patches both branches by rewriting into the chain).
     let alt_effect = Effect::Dig {
+        player: prev_player.clone(),
         count: prev_count.clone(),
         destination: alt_destination,
         keep_count: Some(alt_keep_count),
@@ -2418,6 +2434,57 @@ pub(super) fn try_nom_condition_as_ability_condition(
                 },
                 negated,
             ));
+        }
+        // CR 608.2c + CR 205.3a: "it's a [subtype]" (Goblin, Aura, Equipment, ...).
+        // The CoreType match above only covers card types; subtypes route through
+        // the parse_type_phrase building block + TargetMatchesFilter, exactly like
+        // the "permanent" arm. Subtype disjunctions ("Goblin or Orc") are handled by
+        // parse_type_phrase's Or support; an unparseable remainder leaves non-empty
+        // leftover and falls through to parse_inner_condition.
+        //
+        // The `references_subtype` gate is load-bearing: parse_type_phrase also
+        // consumes CoreType phrases the explicit `match` above already owns
+        // (e.g. "creature card of the chosen type" → Creature + IsChosenCreatureType
+        // with empty leftover). Those belong to RevealedHasCardType, not the
+        // present-target TargetMatchesFilter, so this arm fires only when the parsed
+        // filter genuinely references a CR 205.3 subtype.
+        let (filter, leftover) = crate::parser::oracle_target::parse_type_phrase(rest);
+        if let TargetFilter::Typed(typed) = &filter {
+            if leftover.trim().is_empty()
+                && typed
+                    .type_filters
+                    .iter()
+                    .any(type_filter_references_subtype)
+            {
+                return Some(maybe_negate(
+                    AbilityCondition::TargetMatchesFilter {
+                        filter: filter.clone(),
+                        use_lki: false,
+                    },
+                    negated,
+                ));
+            }
+        }
+    }
+
+    // CR 608.2c + CR 702.1: "it has [keyword]" — affirmative pronoun keyword check
+    // (e.g. "If it has flying, ..."). Routed through TargetMatchesFilter +
+    // FilterProp::WithKeyword, the same abstraction the "it's a [type]" arm uses
+    // (no SourceHasKeyword sibling to SourceLacksKeyword). Disjoint prefix from the
+    // "it doesn't have" arm above, so ordering is irrelevant.
+    if let Ok((keyword_text, _)) = tag::<_, _, OracleError<'_>>("it has ").parse(lower.as_str()) {
+        let keyword: Keyword = keyword_text
+            .trim()
+            .parse()
+            .unwrap_or(Keyword::Unknown(String::new()));
+        if !matches!(keyword, Keyword::Unknown(_)) {
+            return Some(AbilityCondition::TargetMatchesFilter {
+                filter: TargetFilter::Typed(TypedFilter {
+                    properties: vec![FilterProp::WithKeyword { value: keyword }],
+                    ..Default::default()
+                }),
+                use_lki: false,
+            });
         }
     }
 
@@ -3554,5 +3621,102 @@ mod tests {
         };
         assert!(tf.type_filters.contains(&TypeFilter::Permanent));
         assert_eq!(body, "draw a card.");
+    }
+
+    /// CR 608.2c + CR 205.3a: "If it's a [subtype]" gates the parent target on a
+    /// subtype via parse_type_phrase + TargetMatchesFilter. Pre-fix this dropped to
+    /// `None` (only CoreType words matched), which silently dropped the else-branch.
+    #[test]
+    fn if_its_a_subtype_parses_condition() {
+        let (cond, body) = strip_leading_general_conditional(
+            "If it's a Goblin, destroy it.",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(body, "destroy it.");
+        let Some(AbilityCondition::TargetMatchesFilter { filter, use_lki }) = cond else {
+            panic!("expected TargetMatchesFilter for 'Goblin' subtype, got {cond:?}");
+        };
+        assert!(!use_lki, "present-tense 'it's a' check must not use LKI");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter for subtype");
+        };
+        assert!(
+            tf.type_filters
+                .contains(&TypeFilter::Subtype("Goblin".to_string())),
+            "expected Goblin subtype filter, got {:?}",
+            tf.type_filters
+        );
+    }
+
+    /// CR 608.2c + CR 702.1: "If it has [keyword]" gates on FilterProp::WithKeyword.
+    /// Pre-fix this dropped to `None` (only the negative "it doesn't have" arm
+    /// existed), dropping the else-branch.
+    #[test]
+    fn if_it_has_keyword_parses_condition() {
+        let (cond, body) = strip_leading_general_conditional(
+            "If it has flying, destroy it.",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(body, "destroy it.");
+        let Some(AbilityCondition::TargetMatchesFilter { filter, use_lki }) = cond else {
+            panic!("expected TargetMatchesFilter for 'flying' keyword, got {cond:?}");
+        };
+        assert!(!use_lki);
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter for keyword");
+        };
+        assert!(
+            tf.properties.contains(&FilterProp::WithKeyword {
+                value: Keyword::Flying
+            }),
+            "expected WithKeyword(Flying) property, got {:?}",
+            tf.properties
+        );
+    }
+
+    /// CR 608.2c + CR 205.3a: "If it's not a [subtype]" wraps the subtype filter in
+    /// `Not` via the existing maybe_negate path (the "it's not a " prefix branch).
+    #[test]
+    fn if_its_not_a_subtype_negates() {
+        let (cond, body) = strip_leading_general_conditional(
+            "If it's not a Goblin, destroy it.",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(body, "destroy it.");
+        let Some(AbilityCondition::Not { condition }) = cond else {
+            panic!("expected negated condition for 'not a Goblin', got {cond:?}");
+        };
+        let AbilityCondition::TargetMatchesFilter { filter, .. } = *condition else {
+            panic!("expected inner TargetMatchesFilter");
+        };
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter");
+        };
+        assert!(
+            tf.type_filters
+                .contains(&TypeFilter::Subtype("Goblin".to_string())),
+            "expected Goblin subtype filter, got {:?}",
+            tf.type_filters
+        );
+    }
+
+    /// CR 608.2c: Regression guard for the subtype fall-through. parse_type_phrase
+    /// fully consumes "creature card of the chosen type" (CoreType + chosen-type
+    /// property, empty leftover), but that phrase belongs to RevealedHasCardType
+    /// (produced by strip_card_type_conditional in the chain path), not the
+    /// present-target subtype filter. The references_subtype gate ensures the new
+    /// subtype arm declines here rather than hijacking it into a TargetMatchesFilter
+    /// — without the gate this regressed Herald's Horn (Dig + chosen-type reveal).
+    #[test]
+    fn if_its_a_creature_card_of_chosen_type_not_hijacked_by_subtype_arm() {
+        let cond = try_nom_condition_as_ability_condition(
+            "it's a creature card of the chosen type",
+            &mut ParseContext::default(),
+        );
+        assert!(
+            !matches!(cond, Some(AbilityCondition::TargetMatchesFilter { .. })),
+            "CoreType chosen-type phrase must not be hijacked into a subtype \
+             TargetMatchesFilter, got {cond:?}"
+        );
     }
 }

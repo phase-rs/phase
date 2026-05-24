@@ -388,6 +388,10 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
             kept_optional_to: Some(_),
             ..
         }
+        // CR 608.2d: ChangeZone `up_to` encodes "you may put/return up to N"
+        // at resolution time. The player may choose zero cards, so this is
+        // the same internal optionality shape as Dig { up_to: true }.
+        | Effect::ChangeZone { up_to: true, .. }
         // CR 606.3 + CR 117.3a: `GrantExtraLoyaltyActivations` inherently
         // encodes the "you may activate" permission — granting permission is
         // opt-in by definition, mirroring `GrantCastingPermission`. The Chain
@@ -1841,6 +1845,23 @@ fn detect_duration_this_turn(
         // remains visibly unsupported (`Unrecognized` is an explicit failure
         // node + coverage `supported=false`), so no gap is hidden.
         "\"condition\":{\"type\":\"Unrecognized\"",
+        // CR 601.2 + CR 601.3a + CR 604.1: `PerTurnCastLimit` / `PerTurnDrawLimit`
+        // static modes are themselves the per-turn enforcement window — the
+        // "this turn" / "each turn" scope is intrinsic to the variant and not
+        // a separate `duration` slot (CR 604.1 anchors the static; CR 601.2 +
+        // CR 601.3a authorize the casting prohibition itself). Cards like
+        // Ethersworn Canonist phrase the subject as "...who has cast a
+        // [type] spell this turn..."; that "this turn" is consumed by the
+        // per-turn limit, not swallowed.
+        //
+        // Markers use the serde-default external-tag JSON shape
+        // `"<Variant>":{` so they only match when the typed variant is the
+        // current node — matching the precision class of the
+        // `"condition":{"type":"Unrecognized"` marker above and ruling out
+        // false positives where the literal token "PerTurnCastLimit" appears
+        // in unrelated positions (e.g. a description string).
+        "\"PerTurnCastLimit\":{",
+        "\"PerTurnDrawLimit\":{",
     ];
     if json_has_any(ast_json, markers) {
         return;
@@ -2170,6 +2191,16 @@ mod tests {
             "Reveal the top card of your library and put that card into your \
              hand. You lose life equal to its mana value. You may repeat this \
              process any number of times.",
+            &["Instant"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
+    fn optional_you_may_accepts_up_to_change_zone_choice() {
+        let parsed = parse(
+            "Mill four cards, then you may return a permanent card from among them to your hand.",
             &["Instant"],
         );
 

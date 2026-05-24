@@ -166,7 +166,18 @@ pub fn build_chained_resolved(
     controller: PlayerId,
 ) -> Result<ResolvedAbility, EngineError> {
     if indices.is_empty() {
-        return Err(EngineError::InvalidAction("No modes selected".to_string()));
+        // CR 700.2a: "Choose up to one" permits choosing no modes. The ability
+        // still resolves, but it has no instructions to perform.
+        return Ok(ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: Vec::new(),
+                duration: None,
+                target: None,
+            },
+            Vec::new(),
+            source_id,
+            controller,
+        ));
     }
 
     let mut ordered: Vec<usize> = indices.to_vec();
@@ -248,7 +259,7 @@ pub fn parent_target_controller(ability: &ResolvedAbility, state: &GameState) ->
 pub fn parent_target_owner(ability: &ResolvedAbility, state: &GameState) -> Option<PlayerId> {
     ability.targets.iter().find_map(|t| match t {
         TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.owner),
-        TargetRef::Player(pid) => Some(*pid),
+        TargetRef::Player(_) => None,
     })
 }
 
@@ -653,7 +664,7 @@ pub fn random_select_targets_for_ability(
     // Multi-slot constraints (e.g., DifferentTargetPlayers) — reuse the same
     // validator the controller-choice path uses so random selection respects
     // every constraint declared on the ability.
-    validate_target_constraints(&chosen, constraints)?;
+    validate_target_constraints(Some(state), &chosen, constraints)?;
     Ok(chosen)
 }
 
@@ -719,7 +730,7 @@ fn validate_target_prefix(
         }
     }
 
-    validate_target_constraints(targets, constraints)
+    validate_target_constraints(None, targets, constraints)
 }
 
 pub fn generate_target_assignments(
@@ -975,6 +986,38 @@ fn collect_target_slots(
                 optional: ability.optional_targeting,
             });
         }
+    } else if let Effect::CreateDamageReplacement {
+        recipient_object_filter,
+        redirect_object_filter,
+        ..
+    } = &ability.effect
+    {
+        // CR 115.1 + CR 614.9: Surface up to two object target slots for the
+        // one-shot damage replacement — `target_filter()` returns None for this
+        // effect, so the generic path below never reaches it.
+        //
+        // ORDER IS LOAD-BEARING: the *original-recipient* slot ("would deal
+        // damage to target creature" — Jade Monolith) is declared FIRST, then
+        // the *redirect-destination* slot ("...to target creature instead" —
+        // Soltari Guerrillas). The resolver reads `recipient_host` from
+        // `chosen_target_object(ability, 0)` and the redirect from
+        // `chosen_redirect_object` (which skips the recipient slot when present),
+        // so the surfacing order here must match that indexing exactly.
+        for filter in [recipient_object_filter, redirect_object_filter]
+            .into_iter()
+            .flatten()
+        {
+            let legal_targets = legal_targets_for_ability_filter(state, ability, filter, slots);
+            if legal_targets.is_empty() && !ability.optional_targeting {
+                return Err(EngineError::ActionNotAllowed(
+                    "No legal targets available".to_string(),
+                ));
+            }
+            slots.push(TargetSelectionSlot {
+                legal_targets,
+                optional: ability.optional_targeting,
+            });
+        }
     } else {
         if is_per_opponent_target_fanout(ability) {
             collect_per_opponent_target_fanout_slots(state, ability, slots)?;
@@ -1168,6 +1211,22 @@ fn effect_references_target_player(effect: &Effect) -> bool {
             || filter_references_target_player(target);
     }
 
+    if let Effect::GenericEffect {
+        static_abilities,
+        target: None,
+        ..
+    } = effect
+    {
+        if static_abilities.iter().any(|static_def| {
+            static_def
+                .affected
+                .as_ref()
+                .is_some_and(filter_references_target_player)
+        }) {
+            return true;
+        }
+    }
+
     match effect.target_filter() {
         Some(f) if filter_references_target_player(f) => return true,
         _ => {}
@@ -1279,7 +1338,7 @@ fn attach_filter_needs_target_slot(filter: &TargetFilter) -> bool {
 
 /// Tree-walks a `TargetFilter` and returns true if any `TypedFilter` inside
 /// it has `controller == Some(ControllerRef::TargetPlayer)`.
-fn filter_references_target_player(filter: &TargetFilter) -> bool {
+pub(crate) fn filter_references_target_player(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(TypedFilter { controller, .. }) => {
             matches!(controller, Some(ControllerRef::TargetPlayer))
@@ -1342,6 +1401,24 @@ fn collect_target_slot_specs(
                     optional: ability.optional_targeting,
                 });
             }
+        }
+    } else if let Effect::CreateDamageReplacement {
+        recipient_object_filter,
+        redirect_object_filter,
+        ..
+    } = &ability.effect
+    {
+        // CR 115.1 + CR 614.9: Mirror `collect_target_slots` one-for-one — the
+        // recipient slot (Jade Monolith) before the redirect slot (Soltari) — so
+        // per-slot specs line up with the surfaced TargetSelectionSlots.
+        for filter in [recipient_object_filter, redirect_object_filter]
+            .into_iter()
+            .flatten()
+        {
+            specs.push(TargetSlotSpec {
+                filter: filter.clone(),
+                optional: ability.optional_targeting,
+            });
         }
     } else {
         if is_per_opponent_target_fanout(ability) {
@@ -2278,7 +2355,7 @@ fn validate_selected_slot_prefix(
         }
     }
 
-    validate_target_constraints(&compact_targets, constraints)
+    validate_target_constraints(None, &compact_targets, constraints)
 }
 
 fn validate_target_prefix_for_ability(
@@ -2382,7 +2459,7 @@ fn validate_selected_slots_with_specs(
         }
     }
 
-    validate_target_constraints(&compact_targets, constraints)
+    validate_target_constraints(Some(state), &compact_targets, constraints)
 }
 
 fn assign_targets_recursive(
@@ -2787,6 +2864,7 @@ fn assign_selected_slots_after_deferred_effect(
 
 /// CR 115.3: Validate targeting constraints — e.g., different target players must be distinct.
 fn validate_target_constraints(
+    state: Option<&GameState>,
     targets: &[TargetRef],
     constraints: &[TargetSelectionConstraint],
 ) -> Result<(), EngineError> {
@@ -2808,6 +2886,30 @@ fn validate_target_constraints(
                     return Err(EngineError::InvalidAction(
                         "Selected player targets must be different".to_string(),
                     ));
+                }
+            }
+            TargetSelectionConstraint::DifferentObjectControllers => {
+                let Some(state) = state else {
+                    continue;
+                };
+                let mut controllers = std::collections::HashSet::new();
+                for target in targets {
+                    let TargetRef::Object(object_id) = target else {
+                        continue;
+                    };
+                    let controller = state
+                        .objects
+                        .get(object_id)
+                        .ok_or_else(|| {
+                            EngineError::InvalidAction("Selected object target is missing".into())
+                        })?
+                        .controller;
+                    if !controllers.insert(controller) {
+                        return Err(EngineError::InvalidAction(
+                            "Selected object targets must be controlled by different players"
+                                .to_string(),
+                        ));
+                    }
                 }
             }
         }
@@ -3218,6 +3320,30 @@ mod tests {
             }
             other => panic!("expected Maze's End activated ability on stack, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn build_chained_resolved_allows_empty_up_to_mode_selection() {
+        let abilities = vec![AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Bounce {
+                target: TargetFilter::Any,
+                destination: None,
+            },
+        )];
+
+        let resolved = build_chained_resolved(&abilities, &[], ObjectId(1), PlayerId(0)).unwrap();
+
+        assert!(matches!(
+            resolved.effect,
+            Effect::GenericEffect {
+                ref static_abilities,
+                duration: None,
+                target: None,
+            } if static_abilities.is_empty()
+        ));
+        assert!(resolved.targets.is_empty());
+        assert!(resolved.sub_ability.is_none());
     }
 
     #[test]
@@ -4138,6 +4264,79 @@ mod tests {
     }
 
     #[test]
+    fn target_selection_filters_objects_with_same_controller() {
+        let mut state = GameState::new_two_player(42);
+        let p0_a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "P0 A".to_string(),
+            Zone::Battlefield,
+        );
+        let p0_b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "P0 B".to_string(),
+            Zone::Battlefield,
+        );
+        let p1_a = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "P1 A".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [p0_a, p0_b, p1_a] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            Vec::new(),
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.multi_target = Some(MultiTargetSpec::fixed(2, 2));
+        let slots = build_target_slots(&state, &ability).expect("target slots");
+        let progress = begin_target_selection_for_ability(
+            &state,
+            &ability,
+            &slots,
+            &[TargetSelectionConstraint::DifferentObjectControllers],
+        )
+        .expect("selection starts");
+
+        let TargetSelectionAdvance::InProgress(progress) = choose_target_for_ability(
+            &state,
+            &ability,
+            &slots,
+            &[TargetSelectionConstraint::DifferentObjectControllers],
+            &progress,
+            Some(TargetRef::Object(p0_a)),
+        )
+        .expect("first target accepted") else {
+            panic!("expected second target prompt");
+        };
+
+        assert_eq!(
+            progress.current_legal_targets,
+            vec![TargetRef::Object(p1_a)]
+        );
+        assert!(!progress
+            .current_legal_targets
+            .contains(&TargetRef::Object(p0_b)));
+    }
+
+    #[test]
     fn auto_select_targets_preserves_optional_single_target_choice() {
         let slots = vec![TargetSelectionSlot {
             legal_targets: vec![TargetRef::Player(PlayerId(1))],
@@ -5020,6 +5219,7 @@ mod tests {
                 target: TargetFilter::Player,
                 card_filter: TargetFilter::Any,
                 count: None,
+                random: false,
                 choice_optional: false,
             },
             vec![],
@@ -5144,6 +5344,92 @@ mod tests {
                 chosen.0
             );
         }
+    }
+
+    /// CR 115.1 + CR 611.2c: Continuous effects whose affected set is
+    /// parameterized by "target player" also declare a player target even when
+    /// `GenericEffect.target` itself is absent. Sudden Spoiling is this class:
+    /// "creatures target player controls lose all abilities..."
+    #[test]
+    fn build_target_slots_surfaces_player_slot_for_generic_effect_static_affected_target_player() {
+        let state = GameState::new_two_player(42);
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+            ))
+            .modifications(vec![ContinuousModification::RemoveAllAbilities]);
+        let mut ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![static_def],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+
+        let slots = build_target_slots(&state, &ability).expect("should build");
+        assert_eq!(
+            slots.len(),
+            1,
+            "expected one companion player slot for TargetPlayer affected filter"
+        );
+        assert!(slots[0]
+            .legal_targets
+            .contains(&TargetRef::Player(PlayerId(0))));
+        assert!(slots[0]
+            .legal_targets
+            .contains(&TargetRef::Player(PlayerId(1))));
+
+        assign_targets_in_chain(&state, &mut ability, &[TargetRef::Player(PlayerId(1))])
+            .expect("companion player target should assign to GenericEffect");
+        assert_eq!(ability.targets, vec![TargetRef::Player(PlayerId(1))]);
+    }
+
+    #[test]
+    fn build_target_slots_generic_effect_explicit_target_ignores_target_player_static_affected() {
+        let mut state = GameState::new_two_player(42);
+        let target_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Target Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&target_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+            ))
+            .modifications(vec![ContinuousModification::RemoveAllAbilities]);
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![static_def],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: Some(TargetFilter::Typed(TypedFilter::creature())),
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+
+        let slots = build_target_slots(&state, &ability).expect("should build");
+        assert_eq!(
+            slots.len(),
+            1,
+            "explicit GenericEffect.target owns target-slot surfacing"
+        );
+        assert_eq!(
+            slots[0].legal_targets,
+            vec![TargetRef::Object(target_creature)]
+        );
     }
 
     /// CR 115.1 + CR 404 + CR 406: Nihil Spellbomb / Bojuka Bog / Tormod's
@@ -5976,6 +6262,31 @@ mod tests {
         );
     }
 
+    /// CR 108.3 + CR 608.2c: "its owner" refers to an object target's owner,
+    /// not a companion player target that happens to precede it.
+    #[test]
+    fn parent_target_owner_ignores_player_targets() {
+        let mut state = GameState::new_two_player(42);
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Owned Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&creature).unwrap().owner = PlayerId(0);
+        let ability = make_simple_ability(
+            vec![TargetRef::Player(PlayerId(1)), TargetRef::Object(creature)],
+            ObjectId(0),
+        );
+
+        assert_eq!(
+            parent_target_owner(&ability, &state),
+            Some(PlayerId(0)),
+            "ParentTargetOwner must skip player targets and read the object owner"
+        );
+    }
+
     /// An ability with no targets has no parent target — returns None.
     #[test]
     fn parent_target_controller_returns_none_for_empty_targets() {
@@ -5985,6 +6296,171 @@ mod tests {
             parent_target_controller(&ability, &state),
             None,
             "An ability with no targets has no parent target controller"
+        );
+    }
+
+    fn creature_filter() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature))
+    }
+
+    /// CR 115.1 + CR 614.9 (Defect 1 / Nit 2): Soltari Guerrillas's "...deals
+    /// that damage to target creature instead" redirect destination MUST surface
+    /// a creature target slot through `build_target_slots`. This drives the REAL
+    /// targeting pipeline — deleting the `collect_target_slots`
+    /// CreateDamageReplacement branch makes this fail.
+    #[test]
+    fn build_target_slots_surfaces_redirect_creature_slot() {
+        use crate::types::ability::DamageRedirectTarget;
+        let mut state = GameState::new_two_player(42);
+        let host = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Soltari".into(),
+            Zone::Battlefield,
+        );
+        let creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Redirect Target".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+
+        let ability = ResolvedAbility::new(
+            Effect::CreateDamageReplacement {
+                source_filter: Some(TargetFilter::SelfRef),
+                combat_scope: None,
+                target_filter: None,
+                modification: None,
+                redirect_to: Some(DamageRedirectTarget::ChosenObjectTarget),
+                redirect_object_filter: Some(creature_filter()),
+                recipient_object_filter: None,
+            },
+            vec![],
+            host,
+            PlayerId(0),
+        );
+
+        let slots = build_target_slots(&state, &ability).expect("redirect slot must build");
+        assert_eq!(slots.len(), 1, "exactly one redirect-destination slot");
+        assert!(
+            slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(creature)),
+            "the redirect creature must be a legal target, got {:?}",
+            slots[0].legal_targets
+        );
+    }
+
+    /// CR 115.1 + CR 614.9 (Defect 3 / Nit 1+2): Jade Monolith's "would deal
+    /// damage to target creature" original recipient MUST surface a creature
+    /// target slot — without it the shield hosts on Jade with no recipient
+    /// scoping and redirects damage to ANY creature. Deleting the
+    /// `recipient_object_filter` arm of the `collect_target_slots` branch makes
+    /// this fail.
+    #[test]
+    fn build_target_slots_surfaces_recipient_creature_slot() {
+        use crate::types::ability::DamageRedirectTarget;
+        let mut state = GameState::new_two_player(42);
+        let host = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Jade".into(),
+            Zone::Battlefield,
+        );
+        let protected = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Protected Creature".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&protected)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+
+        let ability = ResolvedAbility::new(
+            Effect::CreateDamageReplacement {
+                source_filter: Some(TargetFilter::ChosenDamageSource),
+                combat_scope: None,
+                target_filter: None,
+                modification: None,
+                redirect_to: Some(DamageRedirectTarget::Controller),
+                redirect_object_filter: None,
+                recipient_object_filter: Some(creature_filter()),
+            },
+            vec![],
+            host,
+            PlayerId(0),
+        );
+
+        let slots = build_target_slots(&state, &ability).expect("recipient slot must build");
+        assert_eq!(slots.len(), 1, "exactly one original-recipient slot");
+        assert!(
+            slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(protected)),
+            "the protected creature must be a legal target, got {:?}",
+            slots[0].legal_targets
+        );
+    }
+
+    /// Ordering contract (Nit 1): when BOTH filters are present the recipient
+    /// slot is surfaced FIRST, then the redirect slot — matching the resolver's
+    /// `chosen_target_object(_, 0)` / `chosen_redirect_object` indexing.
+    #[test]
+    fn build_target_slots_recipient_slot_precedes_redirect_slot() {
+        use crate::types::ability::DamageRedirectTarget;
+        let mut state = GameState::new_two_player(42);
+        let host = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Hybrid".into(),
+            Zone::Battlefield,
+        );
+        for (cid, name) in [(2u64, "A"), (3, "B")] {
+            let id = create_object(
+                &mut state,
+                CardId(cid),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::CreateDamageReplacement {
+                source_filter: Some(TargetFilter::SelfRef),
+                combat_scope: None,
+                target_filter: None,
+                modification: None,
+                redirect_to: Some(DamageRedirectTarget::ChosenObjectTarget),
+                redirect_object_filter: Some(creature_filter()),
+                recipient_object_filter: Some(creature_filter()),
+            },
+            vec![],
+            host,
+            PlayerId(0),
+        );
+
+        let slots = build_target_slots(&state, &ability).expect("two slots must build");
+        assert_eq!(
+            slots.len(),
+            2,
+            "recipient + redirect slots must both surface when both filters are set"
         );
     }
 }

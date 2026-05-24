@@ -203,17 +203,6 @@ jobs:
           npx wrangler r2 object put phase-rs-data/preview/coverage-summary.json --file data/coverage-summary.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
           npx wrangler r2 object put phase-rs-data/preview/semantic-audit.json --file data/semantic-audit.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
 
-      - name: Upload server data artifact
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/upload-artifact@v4
-        with:
-          name: server-data
-          path: |
-            data/card-data.json
-            data/draft-pools.json
-          if-no-files-found: error
-          retention-days: 1
-
   wasm-check:
     name: WASM compile check
     runs-on: ubuntu-latest
@@ -306,53 +295,6 @@ jobs:
               exit 1
             fi
           done
-
-  build-preview-server-image:
-    name: Build Preview Server Image
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    needs:
-      - rust-check
-      - card-data-gate
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    permissions:
-      contents: read
-      packages: write
-    env:
-      IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/phase-server
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download server data
-        uses: actions/download-artifact@v4
-        with:
-          name: server-data
-          path: data
-
-      - name: Verify server data
-        run: |
-          test -s data/card-data.json
-          test -s data/draft-pools.json
-
-      - name: Compute image tags
-        id: image
-        run: echo "short_sha=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
-
-      - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push preview image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: |
-            ${{ env.IMAGE_NAME }}:preview
-            ${{ env.IMAGE_NAME }}:sha-${{ steps.image.outputs.short_sha }}
 
   frontend:
     name: Frontend (lint, type-check, test)

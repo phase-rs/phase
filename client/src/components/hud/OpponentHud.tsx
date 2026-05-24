@@ -64,6 +64,11 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
   // not just the explicit one — otherwise the default-focused tab lights
   // up a redundant badge at game start.
   const effectiveFocused = focusedOpponent ?? liveOpponents[0] ?? null;
+  const activeOpponentId = gameState?.active_player;
+  const activeFollowedOpponent =
+    activeOpponentId != null && liveOpponents.includes(activeOpponentId)
+      ? activeOpponentId
+      : null;
 
   // Cross-board attacker glimpse: for each non-focused opponent, collect the
   // ids of their creatures currently attacking the local player or their
@@ -163,6 +168,27 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
     },
     [dispatch],
   );
+  const handleSelectFocus = useCallback(
+    (opId: PlayerId) => {
+      if (
+        followActiveOpponent
+        && activeFollowedOpponent != null
+        && opId !== activeFollowedOpponent
+      ) {
+        setFollowActiveOpponent(false);
+      }
+      setFocusedOpponent(opId);
+    },
+    [
+      activeFollowedOpponent,
+      followActiveOpponent,
+      setFocusedOpponent,
+      setFollowActiveOpponent,
+    ],
+  );
+  const handleToggleFollowActiveOpponent = useCallback(() => {
+    setFollowActiveOpponent(!followActiveOpponent);
+  }, [followActiveOpponent, setFollowActiveOpponent]);
 
   const disconnectedPlayers = useMultiplayerStore((s) => s.disconnectedPlayers);
   const connectionStatus = useMultiplayerStore((s) => s.connectionStatus);
@@ -264,7 +290,7 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
           legalObjectTargetIds={legalObjectTargetsByController.get(opId) ?? EMPTY_OBJECT_IDS}
           showMana={focusedId === opId}
           incomingAttackerIds={incomingByOpponent.get(opId) ?? EMPTY_OBJECT_IDS}
-          onSelectFocus={() => setFocusedOpponent(opId)}
+          onSelectFocus={() => handleSelectFocus(opId)}
           onTargetPlayer={() => handlePlayerTarget(opId)}
           onKick={
             onKickPlayer && !eliminated.includes(opId)
@@ -284,7 +310,7 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
       />
       <FollowActiveToggle
         enabled={followActiveOpponent}
-        onToggle={() => setFollowActiveOpponent(!followActiveOpponent)}
+        onToggle={handleToggleFollowActiveOpponent}
       />
     </div>
   );

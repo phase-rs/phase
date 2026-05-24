@@ -255,9 +255,14 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             card_seg(state, *object_id),
         ],
 
-        GameEvent::AbilityActivated { source_id } => {
-            vec![text("Ability activated: "), card_seg(state, *source_id)]
-        }
+        GameEvent::AbilityActivated {
+            player_id,
+            source_id,
+        } => vec![
+            player_seg(state, *player_id),
+            text(" activates ability: "),
+            card_seg(state, *source_id),
+        ],
 
         GameEvent::NinjutsuActivated {
             player_id,

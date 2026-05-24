@@ -260,6 +260,7 @@ pub(crate) fn handle_select_targets(
             .pending_activations
             .push((pending.object_id, ability_index));
         events.push(GameEvent::AbilityActivated {
+            player_id: player,
             source_id: pending.object_id,
         });
         // CR 702.142b: Emit additional event when a boast ability is activated.
@@ -371,6 +372,7 @@ pub(crate) fn handle_choose_target(
                     .pending_activations
                     .push((pending.object_id, ability_index));
                 events.push(GameEvent::AbilityActivated {
+                    player_id: player,
                     source_id: pending.object_id,
                 });
                 // CR 702.142b: Emit additional event when a boast ability is activated.

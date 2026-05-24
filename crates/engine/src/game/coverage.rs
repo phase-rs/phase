@@ -11,8 +11,8 @@ use crate::types::ability::{
     AdditionalCost, AggregateFunction, CardTypeSetSource, ChoiceType, Comparator,
     ContinuousModification, ControllerRef, CountScope, DelayedTriggerCondition, DoublePTMode,
     Duration, Effect, FilterProp, GainLifePlayer, GameRestriction, ManaProduction, ObjectProperty,
-    ObjectScope, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
-    ReplacementCondition, ReplacementDefinition, ReplacementMode, SharedQuality,
+    ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr,
+    QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode, SharedQuality,
     SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind, StaticCondition,
     StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
@@ -475,8 +475,34 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::Another => parts.push("another".into()),
             FilterProp::OtherThanTriggerObject => parts.push("other".into()),
             FilterProp::HasColor { color } => parts.push(format!("{color:?}").to_lowercase()),
-            FilterProp::PowerLE { value } => parts.push(format!("power ≤{}", fmt_quantity(value))),
-            FilterProp::PowerGE { value } => parts.push(format!("power ≥{}", fmt_quantity(value))),
+            // CR 208 + CR 208.4b: unified power/toughness comparison display.
+            FilterProp::PtComparison {
+                stat,
+                scope,
+                comparator,
+                value,
+            } => {
+                let stat_str = match stat {
+                    PtStat::Power => "power",
+                    PtStat::Toughness => "toughness",
+                };
+                let scope_str = match scope {
+                    PtValueScope::Current => "",
+                    PtValueScope::Base => "base ",
+                };
+                let cmp_str = match comparator {
+                    Comparator::LE => "≤",
+                    Comparator::GE => "≥",
+                    Comparator::LT => "<",
+                    Comparator::GT => ">",
+                    Comparator::EQ => "=",
+                    Comparator::NE => "≠",
+                };
+                parts.push(format!(
+                    "{scope_str}{stat_str} {cmp_str}{}",
+                    fmt_quantity(value)
+                ));
+            }
             FilterProp::ColorCount { comparator, count } => {
                 let label = match (comparator, count) {
                     (Comparator::EQ, 0) => "colorless".into(),
@@ -578,12 +604,6 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::Named { name } => parts.push(format!("named \"{name}\"")),
             FilterProp::IsChosenColor => parts.push("chosen color".into()),
             FilterProp::PowerGTSource => parts.push("power > source".into()),
-            FilterProp::ToughnessLE { value } => {
-                parts.push(format!("toughness ≤{}", fmt_quantity(value)));
-            }
-            FilterProp::ToughnessGE { value } => {
-                parts.push(format!("toughness ≥{}", fmt_quantity(value)));
-            }
             FilterProp::AnyOf { props } => {
                 let inner_tf = TypedFilter::default().properties(props.clone());
                 parts.push(format!("any of ({})", fmt_typed_filter(&inner_tf)));
@@ -1717,6 +1737,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             filter,
             rest_destination,
             reveal,
+            ..
         } => {
             d.push(("count".into(), fmt_qty(count)));
             if let Some(dest) = destination {
@@ -1800,6 +1821,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             target,
             card_filter,
             count,
+            random,
             ..
         } => {
             d.push(("player".into(), fmt_target(target)));
@@ -1808,6 +1830,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             if let Some(c) = count {
                 d.push(("count".into(), fmt_quantity(c)));
+            }
+            if *random {
+                d.push(("selection".into(), "random".into()));
             }
         }
         Effect::RevealFromHand { filter, on_decline } => {
@@ -1950,6 +1975,30 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("target".into(), fmt_target(target)));
             d.push(("scope".into(), format!("{scope:?}")));
         }
+        Effect::CreateDamageReplacement {
+            modification,
+            redirect_to,
+            combat_scope,
+            redirect_object_filter,
+            recipient_object_filter,
+            ..
+        } => {
+            if let Some(m) = modification {
+                d.push(("modification".into(), format!("{m:?}")));
+            }
+            if let Some(r) = redirect_to {
+                d.push(("redirect_to".into(), format!("{r:?}")));
+            }
+            if let Some(cs) = combat_scope {
+                d.push(("combat_scope".into(), format!("{cs:?}")));
+            }
+            if let Some(f) = redirect_object_filter {
+                d.push(("redirect_object_filter".into(), fmt_target(f)));
+            }
+            if let Some(f) = recipient_object_filter {
+                d.push(("recipient_object_filter".into(), fmt_target(f)));
+            }
+        }
         Effect::ChooseFromZone { count, zone, .. } => {
             d.push(("count".into(), count.to_string()));
             d.push(("zone".into(), fmt_zone(zone)));
@@ -2064,7 +2113,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Bolster { count } => {
             d.push(("counters".into(), fmt_quantity(count)));
         }
-        Effect::Goad { target } => {
+        Effect::Goad { target } | Effect::GoadAll { target } => {
             d.push(("target".into(), fmt_target(target)));
         }
         Effect::Detain { target } => {
@@ -6203,10 +6252,15 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
 
         // Also check if this line is covered by keywords, casting restrictions, or
         // other non-ability structured data
+        let after_ability_word = lower
+            .find(" \u{2014} ")
+            .map(|pos| lower[pos + 4..].trim_start());
         let covered_by_keyword = face.keywords.iter().any(|k| {
             let kw_name = format!("{k:?}").to_lowercase();
             lower.starts_with(&kw_name)
-        }) || is_keyword_line(&lower);
+                || after_ability_word.is_some_and(|aw| aw.starts_with(&kw_name))
+        }) || is_keyword_line(&lower)
+            || after_ability_word.is_some_and(is_keyword_line);
         let covered_by_casting = !face.casting_restrictions.is_empty()
             && (lower.starts_with("cast this spell only ")
                 || lower.starts_with("you can't cast ")

@@ -6,8 +6,8 @@
 //! shapes — full Permanents conversion lands with Phase 3.
 
 use engine::types::ability::{
-    ChoiceType, Comparator, ControllerRef, FilterProp, QuantityExpr, TargetFilter, TypeFilter,
-    TypedFilter,
+    ChoiceType, Comparator, ControllerRef, FilterProp, PtStat, PtValueScope, QuantityExpr,
+    TargetFilter, TypeFilter, TypedFilter,
 };
 use engine::types::counter::CounterMatch;
 use engine::types::keywords::{Keyword, KeywordKind};
@@ -960,10 +960,10 @@ pub(crate) fn spells_to_filter(s: &crate::schema::types::Spells) -> ConvResult<T
                 TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Historic]))
             }
 
-            // CR 202.3 / CR 208.1: Numeric comparisons on the cast spell. Reuse
+            // CR 202.3 / CR 208: Numeric comparisons on the cast spell. Reuse
             // the same comparison helpers Permanents uses; they emit
-            // FilterProp::CmcGE/PowerGE/ToughnessGE which evaluate against the
-            // card's printed/current values regardless of zone.
+            // FilterProp::Cmc / FilterProp::PtComparison which evaluate against
+            // the card's printed/current values regardless of zone.
             S::ManaValueIs(cmp) => cmc_comparison_filter(cmp)?,
             S::PowerIs(cmp) => power_comparison_filter(cmp)?,
             S::ToughnessIs(cmp) => toughness_comparison_filter(cmp)?,
@@ -1380,9 +1380,9 @@ pub(crate) fn cards_to_filter(c: &crate::schema::types::Cards) -> ConvResult<Tar
                 TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Historic]))
             }
 
-            // CR 202.3 / CR 208.1: Numeric comparisons. Reuse the same comparison
+            // CR 202.3 / CR 208: Numeric comparisons. Reuse the same comparison
             // helpers Permanents uses; the resulting TargetFilter shape is
-            // zone-agnostic (FilterProp::CmcGE / PowerGE / ToughnessGE evaluate
+            // zone-agnostic (FilterProp::Cmc / FilterProp::PtComparison evaluate
             // against the card's printed/current values).
             C::ManaValueIs(cmp) => cmc_comparison_filter(cmp)?,
             C::PowerIs(cmp) => power_comparison_filter(cmp)?,
@@ -1588,55 +1588,48 @@ fn counter_comparison_filter(
     })
 }
 
-/// CR 208.1: Power comparison over a typed creature filter.
+/// CR 208 (Power/Toughness): Power comparison over a typed creature filter.
+/// Emits the unified `FilterProp::PtComparison` (Current scope — mtgish does not
+/// distinguish base vs current). Strict `>`/`<` lower to GE/LE with an integer
+/// offset (CR 107.1).
 fn power_comparison_filter(cmp: &Comparison) -> ConvResult<TargetFilter> {
-    Ok(match cmp {
-        Comparison::GreaterThanOrEqualTo(g) => prop_filter_creature(FilterProp::PowerGE {
-            value: convert_quantity(g)?,
-        }),
-        Comparison::GreaterThan(g) => prop_filter_creature(FilterProp::PowerGE {
-            value: offset(convert_quantity(g)?, 1),
-        }),
-        Comparison::LessThanOrEqualTo(g) => prop_filter_creature(FilterProp::PowerLE {
-            value: convert_quantity(g)?,
-        }),
-        Comparison::LessThan(g) => prop_filter_creature(FilterProp::PowerLE {
-            value: offset(convert_quantity(g)?, -1),
-        }),
-        Comparison::EqualTo(g) => {
-            let n = convert_quantity(g)?;
-            TargetFilter::Typed(TypedFilter::creature().properties(vec![
-                FilterProp::PowerGE { value: n.clone() },
-                FilterProp::PowerLE { value: n },
-            ]))
-        }
-        other => return Err(unsupported_comparison("power", other)),
-    })
+    pt_comparison_filter(PtStat::Power, cmp, "power")
 }
 
-/// CR 208.1: Toughness comparison over a typed creature filter.
+/// CR 208 (Power/Toughness): Toughness comparison over a typed creature filter.
 fn toughness_comparison_filter(cmp: &Comparison) -> ConvResult<TargetFilter> {
+    pt_comparison_filter(PtStat::Toughness, cmp, "toughness")
+}
+
+/// Shared power/toughness comparison converter — selects the stat via `PtStat`
+/// and emits `FilterProp::PtComparison` so power and toughness share one path
+/// (mirrors the engine's single `PtComparison` predicate).
+fn pt_comparison_filter(
+    stat: PtStat,
+    cmp: &Comparison,
+    label: &'static str,
+) -> ConvResult<TargetFilter> {
+    let pt = |comparator: Comparator, value| FilterProp::PtComparison {
+        stat,
+        scope: PtValueScope::Current,
+        comparator,
+        value,
+    };
     Ok(match cmp {
-        Comparison::GreaterThanOrEqualTo(g) => prop_filter_creature(FilterProp::ToughnessGE {
-            value: convert_quantity(g)?,
-        }),
-        Comparison::GreaterThan(g) => prop_filter_creature(FilterProp::ToughnessGE {
-            value: offset(convert_quantity(g)?, 1),
-        }),
-        Comparison::LessThanOrEqualTo(g) => prop_filter_creature(FilterProp::ToughnessLE {
-            value: convert_quantity(g)?,
-        }),
-        Comparison::LessThan(g) => prop_filter_creature(FilterProp::ToughnessLE {
-            value: offset(convert_quantity(g)?, -1),
-        }),
-        Comparison::EqualTo(g) => {
-            let n = convert_quantity(g)?;
-            TargetFilter::Typed(TypedFilter::creature().properties(vec![
-                FilterProp::ToughnessGE { value: n.clone() },
-                FilterProp::ToughnessLE { value: n },
-            ]))
+        Comparison::GreaterThanOrEqualTo(g) => {
+            prop_filter_creature(pt(Comparator::GE, convert_quantity(g)?))
         }
-        other => return Err(unsupported_comparison("toughness", other)),
+        Comparison::GreaterThan(g) => {
+            prop_filter_creature(pt(Comparator::GE, offset(convert_quantity(g)?, 1)))
+        }
+        Comparison::LessThanOrEqualTo(g) => {
+            prop_filter_creature(pt(Comparator::LE, convert_quantity(g)?))
+        }
+        Comparison::LessThan(g) => {
+            prop_filter_creature(pt(Comparator::LE, offset(convert_quantity(g)?, -1)))
+        }
+        Comparison::EqualTo(g) => prop_filter_creature(pt(Comparator::EQ, convert_quantity(g)?)),
+        other => return Err(unsupported_comparison(label, other)),
     })
 }
 

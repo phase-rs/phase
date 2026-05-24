@@ -353,6 +353,133 @@ mod tests {
         )
     }
 
+    /// CR 208.4b + CR 613.4b: Discriminating runtime test that base power/
+    /// toughness (layer 7b) is enforced, NOT current power/toughness (after
+    /// counters in 7c). This is the Angelic Aberration ETB filter:
+    /// "sacrifice any number of creatures each with base power or toughness 1
+    /// or less". The filter is `AnyOf [PtComparison{Power,Base,LE,1},
+    /// PtComparison{Toughness,Base,LE,1}]`.
+    ///
+    /// The test drives the actual sacrifice handler (`resolve`), which computes
+    /// the eligible set via `matches_target_filter` → `matches_filter_prop`'s
+    /// base-scope arm. A base-1/1 creature carrying a +1/+1 counter (current
+    /// 2/2) MUST be eligible (base power 1 ≤ 1) while a base-3/3 creature MUST
+    /// NOT — the exact case that would fail under a current-P/T mapping.
+    #[test]
+    fn sacrifice_base_pt_filter_enforces_base_not_current() {
+        use crate::types::ability::{Comparator, FilterProp, PtStat, PtValueScope, TypedFilter};
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+
+        // A: base 1/1 with a +1/+1 counter → current 2/2. Base power 1 ≤ 1 ⇒ eligible.
+        let a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Counter Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&a).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(1);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+
+        // B: base 3/3, current 3/3. Base power 3 and base toughness 3 ⇒ NOT eligible.
+        let b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Big Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&b).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.base_power = Some(3);
+            obj.base_toughness = Some(3);
+            obj.power = Some(3);
+            obj.toughness = Some(3);
+        }
+
+        // C: base 0/1 ⇒ eligible (base power 0 ≤ 1). A second eligible creature
+        // forces the multi-choice path so the handler exposes the eligible set
+        // via `EffectZoneChoice.cards` rather than auto-sacrificing.
+        let c = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Wall".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&c).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.base_power = Some(0);
+            obj.base_toughness = Some(1);
+            obj.power = Some(0);
+            obj.toughness = Some(1);
+        }
+
+        let filter =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::AnyOf {
+                props: vec![
+                    FilterProp::PtComparison {
+                        stat: PtStat::Power,
+                        scope: PtValueScope::Base,
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Fixed { value: 1 },
+                    },
+                    FilterProp::PtComparison {
+                        stat: PtStat::Toughness,
+                        scope: PtValueScope::Base,
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Fixed { value: 1 },
+                    },
+                ],
+            }]));
+
+        // Mirror Angelic Aberration's actual count shape:
+        // `UpTo(ObjectCount(<same base-PT filter>))`, min_count 0.
+        let ability = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: filter.clone(),
+                count: QuantityExpr::up_to(QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { filter },
+                }),
+                min_count: 0,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice { cards, .. } => {
+                assert!(
+                    cards.contains(&a),
+                    "base-1/1-with-counter (current 2/2) must be eligible (base power 1 ≤ 1)"
+                );
+                assert!(
+                    cards.contains(&c),
+                    "base-0/1 must be eligible (base power 0 ≤ 1)"
+                );
+                assert!(
+                    !cards.contains(&b),
+                    "base-3/3 must NOT be eligible — would be a current-vs-base bug only if it leaked in"
+                );
+            }
+            other => panic!("expected EffectZoneChoice with eligible set, got {other:?}"),
+        }
+    }
+
     #[test]
     fn sacrifice_moves_to_graveyard() {
         let mut state = GameState::new_two_player(42);

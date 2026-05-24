@@ -15,18 +15,24 @@ permissions:
   contents: read
   pages: write
   id-token: write
+  packages: write
 
 jobs:
   build-and-deploy:
     name: Build & Deploy Staging
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 75
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
+    env:
+      IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/phase-server
+      DEPLOY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -283,3 +289,29 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deploy
         uses: actions/deploy-pages@v4
+
+      - name: Prepare server image data
+        run: |
+          cp client/public/draft-pools.json data/draft-pools.json
+          test -s data/card-data.json
+          test -s data/draft-pools.json
+
+      - name: Compute image tags
+        id: image
+        run: echo "short_sha=${DEPLOY_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push preview image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:preview
+            ${{ env.IMAGE_NAME }}:sha-${{ steps.image.outputs.short_sha }}

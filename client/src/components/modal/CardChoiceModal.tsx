@@ -42,6 +42,7 @@ type MultiTargetSelection = Extract<WaitingFor, { type: "MultiTargetSelection" }
 type ParadigmCastOffer = Extract<WaitingFor, { type: "ParadigmCastOffer" }>;
 type PayManaAbilityMana = Extract<WaitingFor, { type: "PayManaAbilityMana" }>;
 type ReturnToHandForCost = Extract<WaitingFor, { type: "ReturnToHandForCost" }>;
+type RemoveCounterForCost = Extract<WaitingFor, { type: "RemoveCounterForCost" }>;
 type BlightChoice = Extract<WaitingFor, { type: "BlightChoice" }>;
 type BeholdForCost = Extract<WaitingFor, { type: "BeholdForCost" }>;
 type ExileForCost = Extract<WaitingFor, { type: "ExileForCost" }>;
@@ -243,6 +244,9 @@ export function CardChoiceModal() {
     case "ReturnToHandForCost":
       if (!canActForWaitingState) return null;
       return <ReturnToHandModal key={waitingFor.data.permanents.join(",")} data={waitingFor.data} />;
+    case "RemoveCounterForCost":
+      if (!canActForWaitingState) return null;
+      return <RemoveCounterModal key={waitingFor.data.permanents.join(",")} data={waitingFor.data} />;
     case "BlightChoice":
       if (!canActForWaitingState) return null;
       return <BlightModal data={waitingFor.data} />;
@@ -1681,6 +1685,21 @@ function ReturnToHandModal({ data }: { data: ReturnToHandForCost["data"] }) {
   );
 }
 
+function RemoveCounterModal({ data }: { data: RemoveCounterForCost["data"] }) {
+  return (
+    <PermanentCostModal
+      data={data}
+      choices={data.permanents}
+      title="Remove Counter"
+      subtitle="Choose a permanent to remove a counter from"
+      label="Remove"
+      selectedClassName="z-10 ring-2 ring-violet-300/80"
+      overlayClassName="absolute inset-0 flex items-center justify-center rounded-lg bg-violet-500/20"
+      badgeClassName="rounded-full bg-violet-500/90 px-3 py-1 text-xs font-bold text-white"
+    />
+  );
+}
+
 function PermanentCostModal({
   data,
   choices,
@@ -1694,6 +1713,7 @@ function PermanentCostModal({
   data:
     | SacrificeForCost["data"]
     | ReturnToHandForCost["data"]
+    | RemoveCounterForCost["data"]
     | ExileFromBattlefieldForManaAbility["data"]
     | SacrificeForManaAbility["data"];
   choices: ObjectId[];

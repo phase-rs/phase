@@ -9,7 +9,7 @@ import {
 import { useLocation, useNavigate, useParams, useSearchParams } from "react-router";
 import { AnimatePresence, motion } from "framer-motion";
 
-import type { DeckCardCount, GameFormat, MatchConfig } from "../adapter/types";
+import type { DeckCardCount, GameFormat, MatchConfig, SerializedAbilityCost } from "../adapter/types";
 import { useDraftStore } from "../stores/draftStore";
 import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
 import type { DraftMatchResult } from "../services/quickDraftPersistence";
@@ -94,7 +94,7 @@ import { useGameDispatch } from "../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../hooks/useInspectHoverProps.ts";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
 import { usePreviewDismiss } from "../hooks/usePreviewDismiss.ts";
-import { clearGame, useGameStore } from "../stores/gameStore.ts";
+import { clearGame, loadActiveGame, useGameStore } from "../stores/gameStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { usePreferencesStore } from "../stores/preferencesStore.ts";
 import {
@@ -107,7 +107,7 @@ import {
 } from "../stores/multiplayerStore.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
 import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from "../hooks/usePlayerId.ts";
-import { abilityChoiceLabel } from "../viewmodel/costLabel.ts";
+import { abilityChoiceLabel, formatAbilityCost } from "../viewmodel/costLabel.ts";
 import { getWaitingForObjectChoiceIds } from "../viewmodel/gameStateView.ts";
 import { gameButtonClass } from "../components/ui/buttonStyles.ts";
 import { cardImageLookup } from "../services/cardImageLookup.ts";
@@ -160,6 +160,14 @@ export function GamePage() {
   const sourceParam = searchParams.get("source") ?? undefined;
   const draftIdParam = searchParams.get("draftId") ?? undefined;
   const playerCount = playersParam ? Number(playersParam) : undefined;
+  const activeGameMeta = useMemo(
+    () => (gameId ? loadActiveGame() : null),
+    [gameId],
+  );
+  const savedFormatConfig =
+    activeGameMeta && activeGameMeta.id === gameId
+      ? activeGameMeta.formatConfig
+      : undefined;
   // Memoize so the `GameProvider` `useEffect` dep array doesn't
   // tear-down/rebuild the P2P session on every parent re-render. Without
   // `useMemo`, each render constructs a fresh object reference from
@@ -168,8 +176,8 @@ export function GamePage() {
   // treats as new). The explicit memo makes the stability guarantee
   // self-documenting.
   const formatConfig = useMemo(
-    () => (formatParam ? FORMAT_DEFAULTS[formatParam] : undefined),
-    [formatParam],
+    () => savedFormatConfig ?? (formatParam ? FORMAT_DEFAULTS[formatParam] : undefined),
+    [formatParam, savedFormatConfig],
   );
   // CR 103.1: 0 = play first, 1 = draw first, undefined = random
   const firstPlayer = firstParam === "play" ? 0 : firstParam === "draw" ? 1 : undefined;
@@ -1288,6 +1296,10 @@ function GamePageContent({
           canActForWaitingState && (
             <UnlessPaymentChooseCostModal />
           )}
+        {waitingFor?.type === "ActivationCostOneOfChoice" &&
+          canActForWaitingState && (
+            <ActivationCostOneOfChoiceModal />
+          )}
       </DialogHost>
 
       {waitingFor?.type === "CompanionReveal" &&
@@ -2387,6 +2399,31 @@ function UnlessPaymentChooseCostModal() {
           data: { choice },
         });
       }}
+    />
+  );
+}
+
+function ActivationCostOneOfChoiceModal() {
+  const dispatch = useGameDispatch();
+  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+
+  if (waitingFor?.type !== "ActivationCostOneOfChoice") return null;
+
+  const branchOptions = waitingFor.data.costs.map((cost: SerializedAbilityCost, idx: number) => ({
+    id: String(idx),
+    label: formatAbilityCost(cost),
+  }));
+
+  return (
+    <ChoiceModal
+      title="Choose Activation Cost"
+      options={branchOptions}
+      onChoose={(id) =>
+        dispatch({
+          type: "ChooseActivationCostBranch",
+          data: { index: Number.parseInt(id, 10) },
+        })
+      }
     />
   );
 }

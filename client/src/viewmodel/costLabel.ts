@@ -187,6 +187,8 @@ export function formatCost(cost: SerializedCost): string {
       return `Collect evidence ${cost.amount ?? 0}`;
     case "Composite":
       return (cost.costs ?? []).map(formatCost).join(", ");
+    case "OneOf":
+      return (cost.costs ?? []).map(formatCost).join(" or ");
     default:
       return "Activate";
   }
@@ -357,7 +359,7 @@ export function abilityChoiceLabel(
 }
 
 /** Format a SerializedAbilityCost (same shape as SerializedCost but from the AdditionalCost type). */
-function formatAbilityCost(cost: SerializedAbilityCost): string {
+export function formatAbilityCost(cost: SerializedAbilityCost): string {
   return formatCost(cost);
 }
 

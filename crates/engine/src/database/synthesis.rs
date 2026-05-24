@@ -5,13 +5,13 @@ use crate::game::printed_cards::derive_colors_from_mana_cost;
 use crate::parser::oracle::{oracle_text_allows_commander, parse_oracle_text};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AdditionalCost,
-    AggregateFunction, CardPlayMode, CastVariantPaid, ChoiceType, ContinuousModification,
-    ControllerRef, CopyRetargetPermission, CounterTriggerFilter, Duration, Effect, FilterProp,
-    KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
-    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, PtValue, QuantityExpr, QuantityRef,
-    ReplacementCondition, ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint,
-    StaticDefinition, TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier,
+    AggregateFunction, CardPlayMode, CastVariantPaid, ChoiceType, Comparator,
+    ContinuousModification, ControllerRef, CopyRetargetPermission, CounterTriggerFilter, Duration,
+    Effect, FilterProp, KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
+    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, PtStat, PtValue, PtValueScope,
+    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, RuntimeHandler,
+    SearchSelectionConstraint, StaticDefinition, TargetChoiceTiming, TargetFilter,
+    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -1184,14 +1184,16 @@ pub fn synthesize_casualty(face: &mut CardFace) {
 
     // CR 702.153a: "As an additional cost, you may sacrifice a creature with power N or greater"
     if face.additional_cost.is_none() {
-        let sacrifice_filter =
-            TargetFilter::Typed(
-                TypedFilter::creature().properties(vec![FilterProp::PowerGE {
-                    value: QuantityExpr::Fixed {
-                        value: threshold as i32,
-                    },
-                }]),
-            );
+        let sacrifice_filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed {
+                    value: threshold as i32,
+                },
+            },
+        ]));
         face.additional_cost = Some(AdditionalCost::Optional(AbilityCost::Sacrifice {
             target: sacrifice_filter,
             count: 1,
