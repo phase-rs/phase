@@ -79,6 +79,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::Cycled => match_cycled,
         TriggerMode::CycledOrDiscarded => match_cycled_or_discarded,
         TriggerMode::Shuffled => match_shuffled,
+        TriggerMode::Proliferate => match_proliferate,
         TriggerMode::Revealed => match_revealed,
         TriggerMode::TapsForMana => match_taps_for_mana,
         TriggerMode::ChangesController => match_changes_controller,
@@ -150,7 +151,6 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::ConjureAll
         | TriggerMode::Vote
         | TriggerMode::BecomeRenowned
-        | TriggerMode::Proliferate
         | TriggerMode::Abandoned
         | TriggerMode::ClaimPrize
         | TriggerMode::CrankContraption
@@ -377,7 +377,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::ConjureAll,
         TriggerMode::Vote,
         TriggerMode::BecomeRenowned,
-        TriggerMode::Proliferate,
         TriggerMode::Abandoned,
         TriggerMode::ClaimPrize,
         TriggerMode::CrankContraption,
@@ -1800,6 +1799,23 @@ pub(super) fn match_shuffled(
     let GameEvent::PlayerPerformedAction {
         player_id,
         action: PlayerActionKind::ShuffledLibrary,
+    } = event
+    else {
+        return false;
+    };
+    valid_player_matches(trigger, state, *player_id, source_id)
+}
+
+/// CR 701.34a: Proliferate — fires when a player proliferates.
+pub(super) fn match_proliferate(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    let GameEvent::PlayerPerformedAction {
+        player_id,
+        action: PlayerActionKind::Proliferate,
     } = event
     else {
         return false;
@@ -5095,6 +5111,46 @@ mod tests {
         };
         let trigger = make_trigger(TriggerMode::Shuffled);
         assert!(!match_shuffled(&event, &trigger, ObjectId(1), &state));
+    }
+
+    #[test]
+    fn proliferate_matches_player_performed_action_event() {
+        let state = setup();
+        let event = GameEvent::PlayerPerformedAction {
+            player_id: PlayerId(0),
+            action: PlayerActionKind::Proliferate,
+        };
+        let trigger = make_trigger(TriggerMode::Proliferate);
+        assert!(match_proliferate(&event, &trigger, ObjectId(1), &state));
+    }
+
+    #[test]
+    fn proliferate_rejects_opponent_when_valid_target_is_controller() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Scheming Aspirant".to_string(),
+            Zone::Battlefield,
+        );
+        // "Whenever you proliferate" — valid_target filters for controller
+        let mut trigger = make_trigger(TriggerMode::Proliferate);
+        trigger.valid_target = Some(TargetFilter::Controller);
+
+        // Controller proliferates — should fire
+        let self_event = GameEvent::PlayerPerformedAction {
+            player_id: PlayerId(0),
+            action: PlayerActionKind::Proliferate,
+        };
+        assert!(match_proliferate(&self_event, &trigger, source, &state));
+
+        // Opponent proliferates — should NOT fire
+        let opp_event = GameEvent::PlayerPerformedAction {
+            player_id: PlayerId(1),
+            action: PlayerActionKind::Proliferate,
+        };
+        assert!(!match_proliferate(&opp_event, &trigger, source, &state));
     }
 
     #[test]

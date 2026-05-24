@@ -6868,6 +6868,11 @@ fn try_parse_player_action_trigger(lower: &str) -> Option<(TriggerMode, TriggerD
                 def.mode = TriggerMode::Shuffled;
                 return Some((TriggerMode::Shuffled, def));
             }
+            // CR 701.34a: Proliferate — player-action trigger.
+            [PlayerActionKind::Proliferate] => {
+                def.mode = TriggerMode::Proliferate;
+                return Some((TriggerMode::Proliferate, def));
+            }
             _ => {
                 def.mode = TriggerMode::PlayerPerformedAction;
                 def.player_actions = Some(actions.clone());
@@ -6910,6 +6915,8 @@ fn parse_player_action_phrase(text: &str) -> Option<PlayerActionKind> {
         | "shuffle his or her library"
         | "shuffles a library"
         | "shuffle a library" => Some(PlayerActionKind::ShuffledLibrary),
+        // CR 701.34a: Proliferate — choose permanents/players with counters.
+        "proliferate" | "proliferates" => Some(PlayerActionKind::Proliferate),
         _ => None,
     }
 }
@@ -12624,6 +12631,18 @@ mod tests {
             "Surveillance Monitor",
         );
         assert_eq!(def.mode, TriggerMode::CollectEvidence);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_you_proliferate() {
+        // Scheming Aspirant (ONE): "Whenever you proliferate, each opponent loses 2 life
+        // and you gain 2 life."
+        let def = parse_trigger_line(
+            "Whenever you proliferate, each opponent loses 2 life and you gain 2 life.",
+            "Scheming Aspirant",
+        );
+        assert_eq!(def.mode, TriggerMode::Proliferate);
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
     }
 

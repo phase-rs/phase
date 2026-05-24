@@ -64,6 +64,12 @@ pub fn resolve(
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
         });
+        // CR 701.34a: Emit player-action event so proliferate triggers fire
+        // even when there are no eligible targets.
+        events.push(GameEvent::PlayerPerformedAction {
+            player_id: ability.controller,
+            action: crate::types::events::PlayerActionKind::Proliferate,
+        });
         return Ok(());
     }
 
