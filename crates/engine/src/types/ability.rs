@@ -9505,6 +9505,13 @@ pub struct CounterTriggerFilter {
     pub threshold: Option<u32>,
 }
 
+/// CR 705.2: Typed result filter for coin-flip triggers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CoinFlipResult {
+    Won,
+    Lost,
+}
+
 /// Trigger definition with typed fields. Zero params HashMap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TriggerDefinition {
@@ -9596,6 +9603,10 @@ pub struct TriggerDefinition {
     /// `DamageDealtOnce`); ignored by other modes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub damage_amount: Option<(Comparator, u32)>,
+    /// CR 705.2: Coin-flip result filter for FlippedCoin trigger mode.
+    /// When `Some(Won)`, fires only on wins; `Some(Lost)` only on losses; `None` fires on any flip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coin_flip_result: Option<CoinFlipResult>,
 }
 
 impl TriggerDefinition {
@@ -9627,6 +9638,7 @@ impl TriggerDefinition {
             attack_target_filter: None,
             player_actions: None,
             damage_amount: None,
+            coin_flip_result: None,
         }
     }
 
@@ -11602,6 +11614,7 @@ mod tests {
             attack_target_filter: None,
             player_actions: None,
             damage_amount: None,
+            coin_flip_result: None,
         };
         let json = serde_json::to_string(&trigger).unwrap();
         let deserialized: TriggerDefinition = serde_json::from_str(&json).unwrap();

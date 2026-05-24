@@ -869,6 +869,29 @@ pub(super) fn parse_one_or_more_sacrifice(
     Some((count, target, min_count))
 }
 
+/// CR 701.21a + CR 609.3: "sacrifice all <filter>" carries a mandatory
+/// count equal to the eligible object pool. This lets the sacrifice resolver's
+/// existing mandatory-all fast path perform every legal sacrifice without a
+/// one-card special case.
+pub(super) fn parse_all_sacrifice<'a>(
+    text: &'a str,
+    ctx: &mut ParseContext,
+) -> Option<(QuantityExpr, TargetFilter, &'a str)> {
+    let lower = text.to_lowercase();
+    let ((), rest) = nom_on_lower(text, &lower, |input| value((), tag("all ")).parse(input))?;
+    let (mut target, rem) = parse_target_with_ctx(rest.trim_start(), ctx);
+    if matches!(target, TargetFilter::Any) {
+        return None;
+    }
+    apply_actor_default(&mut target, ctx);
+    let count = QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: target.clone(),
+        },
+    };
+    Some((count, target, rem))
+}
+
 /// NOTE: Shares verb prefixes with `try_parse_verb_and_target` in `mod.rs`.
 /// When adding a new targeted verb here, check if it also needs to be added there
 /// (for compound action splitting like "tap target creature and put a counter on it").
@@ -910,6 +933,15 @@ pub(super) fn parse_targeted_action_ast(
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
         value((), tag("sacrifice ")).parse(input)
     }) {
+        if let Some((count, target, _rem)) = parse_all_sacrifice(rest, ctx) {
+            #[cfg(debug_assertions)]
+            assert_no_compound_remainder(_rem, text);
+            return Some(TargetedImperativeAst::Sacrifice {
+                target,
+                count,
+                min_count: 0,
+            });
+        }
         if let Some((count, target, min_count)) = parse_one_or_more_sacrifice(rest, ctx) {
             return Some(TargetedImperativeAst::Sacrifice {
                 target,
@@ -6983,6 +7015,68 @@ mod tests {
                         other => panic!("expected ObjectCount max, got {other:?}"),
                     },
                     other => panic!("expected UpTo count, got {other:?}"),
+                }
+            }
+            other => panic!("expected Effect::Sacrifice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_sacrifice_all_uses_filtered_object_count() {
+        let text = "sacrifice all permanents you control";
+        let lower = text.to_lowercase();
+        let mut ctx = ParseContext::default();
+        let result =
+            parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
+        match lower_targeted_action_ast(result) {
+            Effect::Sacrifice {
+                target,
+                count,
+                min_count,
+            } => {
+                assert_eq!(min_count, 0);
+                match &target {
+                    TargetFilter::Typed(tf) => {
+                        assert_eq!(tf.controller, Some(ControllerRef::You));
+                        assert!(tf
+                            .type_filters
+                            .iter()
+                            .any(|type_filter| matches!(type_filter, TypeFilter::Permanent)));
+                    }
+                    other => panic!("expected Typed target, got {other:?}"),
+                }
+                match count {
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    } => assert_eq!(filter, target),
+                    other => panic!("expected ObjectCount count, got {other:?}"),
+                }
+            }
+            other => panic!("expected Effect::Sacrifice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_sacrifice_all_applies_actor_default_to_count_filter() {
+        let text = "sacrifice all permanents";
+        let lower = text.to_lowercase();
+        let mut ctx = ParseContext {
+            actor: Some(ControllerRef::ParentTargetController),
+            ..Default::default()
+        };
+        let result =
+            parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
+        match lower_targeted_action_ast(result) {
+            Effect::Sacrifice { target, count, .. } => {
+                let TargetFilter::Typed(tf) = &target else {
+                    panic!("expected Typed target, got {target:?}");
+                };
+                assert_eq!(tf.controller, Some(ControllerRef::ParentTargetController));
+                match count {
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    } => assert_eq!(filter, target),
+                    other => panic!("expected ObjectCount count, got {other:?}"),
                 }
             }
             other => panic!("expected Effect::Sacrifice, got {other:?}"),

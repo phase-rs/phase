@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 
 import { useAudioContext } from "../audio/useAudioContext";
@@ -7,13 +7,17 @@ import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { MainMenuActionCard } from "../components/menu/MainMenuActionCard";
 import { MenuLogo } from "../components/menu/MenuLogo";
 import { MenuParticles } from "../components/menu/MenuParticles";
+import { GameplayTooltip } from "../components/ui/GameplayTooltip";
 import {
   ACTIVE_DECK_KEY,
   listSavedDeckNames,
 } from "../constants/storage";
 import { isTauri } from "../services/sidecar";
+import { openExternal } from "../services/openExternal";
+import { buildLegalAiDeckCatalog } from "../services/aiDeckCatalog";
 import { loadWsSession } from "../services/multiplayerSession";
 import { loadP2PSession } from "../services/p2pSession";
+import { useCardDataStore } from "../stores/cardDataStore";
 import {
   clearActiveGame,
   loadActiveGame,
@@ -21,6 +25,7 @@ import {
   useGameStore,
 } from "../stores/gameStore";
 import type { ActiveGameMeta } from "../stores/gameStore";
+import { usePreferencesStore } from "../stores/preferencesStore";
 
 interface FormatCoverageSummary {
   total_cards: number;
@@ -47,7 +52,34 @@ export function MenuPage() {
   const [, setDeckCount] = useState(0);
   const [, setActiveDeckName] = useState<string | null>(null);
   const [formatCoverage, setFormatCoverage] = useState<[string, FormatCoverageSummary][]>([]);
+  const previewTooltipId = useId();
+  const cardStatus = useCardDataStore((s) => s.status);
+  const lastFormat = usePreferencesStore((s) => s.lastFormat);
+  const lastMatchType = usePreferencesStore((s) => s.lastMatchType);
+  const deckPrewarmStarted = useRef(false);
   useAudioContext("menu");
+
+  // Start warming the shared engine worker's card database immediately so
+  // compat checks and game start are instant by the time the player picks an
+  // action. Idempotent; deck-requiring buttons gate on `cardStatus` below.
+  useEffect(() => {
+    void useCardDataStore.getState().warm();
+  }, []);
+
+  // Once the DB is warm, pre-run summary compatibility for the saved-deck +
+  // AI catalog in the background using the last-used format/match type — the
+  // same keys the setup page evaluates, so its checks become cache hits. This
+  // is the work the gate does NOT block on (per design): the menu un-gates at
+  // DB-ready while these finish moments later. Skipped when no format has been
+  // chosen yet (new users have no decks to pre-check anyway).
+  useEffect(() => {
+    if (cardStatus !== "ready" || !lastFormat || deckPrewarmStarted.current) return;
+    deckPrewarmStarted.current = true;
+    void buildLegalAiDeckCatalog({
+      selectedFormat: lastFormat,
+      selectedMatchType: lastMatchType,
+    }).catch(() => {/* prewarm is best-effort; setup re-runs uncached if needed */});
+  }, [cardStatus, lastFormat, lastMatchType]);
 
   useEffect(() => {
     const savedNames = listSavedDeckNames();
@@ -126,6 +158,11 @@ export function MenuPage() {
   }, [activeGame, navigate]);
 
   const hasSavedGame = activeGame !== null;
+  // Deck-requiring actions wait for the card DB warm. `error` un-gates so a
+  // failed warm never traps the player — downstream init retries best-effort.
+  // Resume and Draft are never gated (Resume awaits the DB itself; Draft uses
+  // its own DraftAdapter and low-difficulty pods need no card data).
+  const cardsPending = cardStatus !== "ready" && cardStatus !== "error";
   const menuActions = useMemo(() => {
     const actions = [];
     if (hasSavedGame) {
@@ -136,6 +173,7 @@ export function MenuPage() {
         accent: "ember" as const,
         onClick: handleResumeGame,
         icon: <ResumeIcon />,
+        disabled: false,
       });
     }
     actions.push(
@@ -146,6 +184,7 @@ export function MenuPage() {
         accent: "arcane" as const,
         onClick: () => navigate("/setup"),
         icon: <SigilIcon />,
+        disabled: cardsPending,
       },
       {
         key: "online",
@@ -154,6 +193,7 @@ export function MenuPage() {
         accent: "jade" as const,
         onClick: () => navigate("/multiplayer"),
         icon: <CrownIcon />,
+        disabled: cardsPending,
       },
     );
     actions.push({
@@ -163,6 +203,7 @@ export function MenuPage() {
       accent: "ember" as const,
       onClick: () => navigate("/draft"),
       icon: <DraftIcon />,
+      disabled: false,
     });
     actions.push(
       {
@@ -172,10 +213,11 @@ export function MenuPage() {
         accent: "stone" as const,
         onClick: () => navigate("/my-decks"),
         icon: <DeckIcon />,
+        disabled: cardsPending,
       },
     );
     return actions;
-  }, [hasSavedGame, navigate, handleResumeGame]);
+  }, [hasSavedGame, navigate, handleResumeGame, cardsPending]);
 
   return (
     <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
@@ -186,36 +228,95 @@ export function MenuPage() {
       <div className="menu-scene__sigil menu-scene__sigil--right" />
       <div className="menu-scene__haze" />
 
-      <div className="fixed left-4 top-[calc(env(safe-area-inset-top)+1rem)] z-20 flex items-center gap-2">
+      {/* Social cluster. Icon-only on mobile (labels return at sm) with tighter
+          padding/gap so it never collides with the top-right chrome cluster
+          (Fullscreen/Volume/Settings in ScreenChrome) on narrow screens. */}
+      <div className="fixed left-4 top-[calc(env(safe-area-inset-top)+1rem)] z-20 flex items-center gap-1.5 sm:gap-2">
         <DiscordBadge />
         <a
           href="https://github.com/phase-rs/phase"
           target="_blank"
           rel="noopener noreferrer"
-          className="flex items-center gap-1.5 rounded-full border border-white/8 bg-black/20 px-3 py-1.5 text-xs font-medium text-slate-400 backdrop-blur-sm transition-colors hover:border-white/20 hover:text-white"
+          onClick={(e) => {
+            e.preventDefault();
+            openExternal("https://github.com/phase-rs/phase");
+          }}
+          aria-label="GitHub"
+          className="flex items-center gap-1.5 rounded-full border border-white/8 bg-black/20 px-2 py-1.5 text-xs font-medium text-slate-400 backdrop-blur-sm transition-colors hover:border-white/20 hover:text-white sm:px-3"
         >
           <GitHubIcon />
-          GitHub
+          <span className="hidden sm:inline">GitHub</span>
         </a>
         <a
           href="https://github.com/sponsors/matthewevans"
           target="_blank"
           rel="noopener noreferrer"
-          className="flex items-center gap-1.5 rounded-full border border-white/8 bg-black/20 px-3 py-1.5 text-xs font-medium text-slate-400 backdrop-blur-sm transition-colors hover:border-pink-400/40 hover:text-pink-400"
+          onClick={(e) => {
+            e.preventDefault();
+            openExternal("https://github.com/sponsors/matthewevans");
+          }}
+          aria-label="Sponsor"
+          className="flex items-center gap-1.5 rounded-full border border-white/8 bg-black/20 px-2 py-1.5 text-xs font-medium text-slate-400 backdrop-blur-sm transition-colors hover:border-pink-400/40 hover:text-pink-400 sm:px-3"
         >
           <SponsorIcon />
-          Sponsor
+          <span className="hidden sm:inline">Sponsor</span>
         </a>
         <a
           href="https://ko-fi.com/phasers"
           target="_blank"
           rel="noopener noreferrer"
-          className="flex items-center gap-1.5 rounded-full border border-white/8 bg-black/20 px-3 py-1.5 text-xs font-medium text-slate-400 backdrop-blur-sm transition-colors hover:border-[#FF5E5B]/40 hover:text-[#FF5E5B]"
+          onClick={(e) => {
+            e.preventDefault();
+            openExternal("https://ko-fi.com/phasers");
+          }}
+          aria-label="Ko-fi"
+          className="flex items-center gap-1.5 rounded-full border border-white/8 bg-black/20 px-2 py-1.5 text-xs font-medium text-slate-400 backdrop-blur-sm transition-colors hover:border-[#FF5E5B]/40 hover:text-[#FF5E5B] sm:px-3"
         >
           <KoFiIcon />
-          Ko-fi
+          <span className="hidden sm:inline">Ko-fi</span>
         </a>
       </div>
+
+      {/* Release builds invite players to the bleeding-edge preview site
+          (deploy.yml → preview.phase-rs.dev). Sits just below the upper-right
+          chrome cluster (Fullscreen/Volume/Settings, h-11 tall, in
+          ScreenChrome). Hidden in dev and on the preview deploy itself — see
+          __IS_RELEASE_BUILD__ in vite.config.ts. */}
+      {__IS_RELEASE_BUILD__ && (
+        <div className="fixed right-3 top-[calc(env(safe-area-inset-top)+4.25rem)] z-20 flex max-w-[calc(100vw-1.5rem)] justify-end sm:right-4">
+          <a
+            href={__PREVIEW_SITE_URL__}
+            target="_blank"
+            rel="noopener noreferrer"
+            // Route through openExternal so the desktop (Tauri) build opens the
+            // system browser deterministically; href/target remain the web path
+            // and the graceful fallback for middle-click / right-click-copy.
+            onClick={(e) => {
+              e.preventDefault();
+              openExternal(__PREVIEW_SITE_URL__);
+            }}
+            aria-describedby={previewTooltipId}
+            className="group relative flex items-center gap-1 rounded-full border border-amber-400/40 bg-amber-500/10 px-3 py-1 text-[11px] font-semibold text-amber-200 shadow-[0_0_16px_-2px_rgba(245,158,11,0.45)] backdrop-blur-sm transition-all hover:border-amber-300/70 hover:bg-amber-500/20 hover:text-amber-100 hover:shadow-[0_0_22px_0_rgba(245,158,11,0.65)] sm:gap-1.5 sm:px-3.5 sm:py-1.5 sm:text-xs"
+          >
+            <span
+              aria-hidden
+              className="pointer-events-none absolute inset-0 -z-10 animate-ping rounded-full bg-amber-400/20 [animation-duration:2.4s]"
+            />
+            <BoltIcon />
+            <span>Try Preview</span>
+            <span className="transition-transform group-hover:translate-x-0.5">&rarr;</span>
+            {/* Below the badge, not above — the default bottom-full placement
+                would cover the chrome cluster overhead. */}
+            <GameplayTooltip
+              id={previewTooltipId}
+              className="top-full bottom-auto! mt-2 mb-0!"
+            >
+              Play the latest preview build — newest cards &amp; fixes land here
+              before each release.
+            </GameplayTooltip>
+          </a>
+        </div>
+      )}
 
       <div className="relative z-10 mx-auto flex min-h-screen w-full max-w-7xl flex-col justify-center px-6 py-16 lg:px-10">
         <div className="mx-auto flex w-full max-w-3xl flex-col items-center text-center">
@@ -269,6 +370,8 @@ export function MenuPage() {
               accent={action.accent}
               onClick={action.onClick}
               icon={action.icon}
+              disabled={action.disabled}
+              statusLabel="Preparing cards…"
             />
           ))}
         </div>
@@ -352,6 +455,14 @@ function KoFiIcon() {
   return (
     <svg aria-hidden="true" viewBox="0 0 24 24" className="h-3.5 w-3.5 fill-current">
       <path d="M22.5 8.5c-.3-2-1.9-3.5-3.9-3.8-.6-.1-1.2-.1-1.9-.1H4.8c-1 0-1.8.7-1.9 1.7-.2 1.7-.2 5.5.7 8.2.6 1.7 2 3 3.8 3.4.9.2 1.9.3 2.8.3h4c.9 0 1.8-.1 2.7-.3 1.4-.3 2.5-1.2 3.1-2.5h.2c2.4 0 4.3-2 4.3-4.3 0-1.4-.7-2.7-2-3.4v.8ZM9.4 13.3c-1.2-1.1-2.7-2.3-2.7-4 0-1 .8-1.8 1.8-1.8.6 0 1.2.3 1.6.8.4-.5.9-.8 1.6-.8 1 0 1.8.8 1.8 1.8 0 1.7-1.5 2.9-2.7 4l-.7.6-.7-.6Zm10.7-1.6c-.3.4-.8.6-1.3.7V9c.4 0 .7.1 1 .3.4.3.7.8.7 1.3s-.1.9-.4 1.1Z" />
+    </svg>
+  );
+}
+
+function BoltIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" className="h-3.5 w-3.5 shrink-0 fill-current">
+      <path d="M13 2 4.5 13.5H11l-1 8.5 8.5-11.5H12l1-8.5Z" />
     </svg>
   );
 }

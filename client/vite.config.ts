@@ -73,6 +73,13 @@ function dataFileDefines(): Record<string, string> {
     __BUILD_HASH__: JSON.stringify(gitHash()),
     __AUDIO_BASE_URL__: JSON.stringify(process.env.AUDIO_BASE_URL || ""),
     __GIT_REPO_URL__: JSON.stringify("https://github.com/phase-rs/phase"),
+    __PREVIEW_SITE_URL__: JSON.stringify("https://preview.phase-rs.dev"),
+    // True only for tagged production releases (release.yml sets RELEASE_BUILD).
+    // The staging deploy (deploy.yml) is also a production Vite build, so we
+    // cannot key off import.meta.env.PROD — that would surface the "try the
+    // preview" link on the preview site itself. dev + staging → false (hidden);
+    // tagged release → true (shown).
+    __IS_RELEASE_BUILD__: JSON.stringify(process.env.RELEASE_BUILD === "true"),
     __CARD_DATA_URL__: JSON.stringify(process.env.CARD_DATA_URL || "/card-data.json"),
   };
   for (const filename of manifest) {
