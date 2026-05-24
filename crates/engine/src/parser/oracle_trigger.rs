@@ -2087,6 +2087,18 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
             maximum: *maximum,
         }),
 
+        // CR 614.12c + CR 607.2d: Anchor-word labels bridge directly between
+        // static and trigger sides — both query the same persisted
+        // `ChosenAttribute::Label` on the source permanent. Lets a single
+        // `parse_inner_condition` invocation flow into either an
+        // `ability.condition` (trigger-side intervening-if) or a
+        // `static_def.condition` (continuous-ability gate).
+        StaticCondition::ChosenLabelIs { label } => {
+            Some(TriggerCondition::ChosenLabelIs {
+                label: label.clone(),
+            })
+        }
+
         // Variants with no TriggerCondition equivalent (combat-only / source-state / cost).
         StaticCondition::SourceEnteredThisTurn
         | StaticCondition::IsRingBearer
