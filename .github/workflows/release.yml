@@ -231,11 +231,19 @@ jobs:
         # Reads data/mtgjson/sets/*.json → writes client/public/draft-pools.json.
         # Included in data-files.json manifest so it's uploaded to R2 and
         # stripped from the Pages dist automatically.
-        run: cargo run --release --bin draft-pool-gen
+        # Profile `tool`, not `release`: this is a one-shot JSON transform, not a
+        # shipped binary. `release` is the WASM-size profile (lto + codegen-units=1)
+        # — the slowest compile in the repo. draft-pool-gen lives in draft-core
+        # and can't take `--features cli`, so it gets its own `[tool,default]`
+        # engine fingerprint regardless; `tool` just makes that compile cheap.
+        run: cargo run --profile tool --bin draft-pool-gen
 
       - name: Validate card-data against engine schema
         # Deploy gate — refuse to ship card-data the current engine cannot parse.
-        run: cargo run --release --bin card-data-validate -- client/public/card-data.json
+        # `--profile tool --features cli` matches gen-card-data.sh's build above,
+        # so the engine + this bin are already compiled — a cache hit, not a
+        # second (release+LTO) engine compile.
+        run: cargo run --profile tool --features cli --bin card-data-validate -- client/public/card-data.json
 
       - name: Compute content-addressed card-data filename
         id: card-data-hash
@@ -251,6 +259,7 @@ jobs:
       - name: Generate Scryfall data
         run: |
           ./scripts/gen-scryfall-images.sh
+          ./scripts/gen-scryfall-token-images.sh
           ./scripts/gen-scryfall-sets.sh
           ./scripts/gen-scryfall-printings.sh
 
@@ -275,11 +284,23 @@ jobs:
           jq --arg h "$CARD_DATA_HASH" '. + {card_data_hash: $h}' client/public/coverage-data.json > client/public/coverage-data.json.tmp
           mv client/public/coverage-data.json.tmp client/public/coverage-data.json
 
-      - name: Upload Scryfall image lookup artifact
+      - name: Stage frontend data files artifact
+        run: |
+          rm -rf release-data
+          mkdir -p release-data
+          while IFS= read -r f; do
+            if [ ! -f "client/public/$f" ]; then
+              echo "::error::Expected data file client/public/$f was not generated"
+              exit 1
+            fi
+            cp "client/public/$f" "release-data/$f"
+          done < <(jq -r '.[]' data-files.json)
+
+      - name: Upload frontend data files artifact
         uses: actions/upload-artifact@v4
         with:
-          name: scryfall-data
-          path: client/public/scryfall-data.json
+          name: frontend-data-files
+          path: release-data/*
           if-no-files-found: error
           retention-days: 1
 
@@ -386,9 +407,53 @@ jobs:
           path: client/public/draft-pools.json
           retention-days: 1
 
+  # ── Server binary compile (linux musl, shared) ──────────────────────────────
+  # Compiles the static musl binary ONCE per release run. Consumed by both
+  # build-server-image (prebuilt Docker image) and build-server's linux leg
+  # (release archive), so neither pays a redundant ~10min compile. Needs nothing
+  # the data pipeline produces, so it starts immediately.
+  build-server-binary:
+    name: Build Server Binary (linux)
+    needs: [resolve-release-ref]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-shared-key: rust-server-linux
+
+      - name: Install musl tools and target
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          rustup target add x86_64-unknown-linux-musl
+
+      - name: Build phase-server (static musl)
+        # No chmod here: upload-artifact strips the executable bit anyway; both
+        # consumers (image build, archive packaging) re-apply it.
+        run: |
+          cargo build --profile server-release --bin phase-server --target x86_64-unknown-linux-musl
+          cp target/x86_64-unknown-linux-musl/server-release/phase-server ./phase-server
+
+      - name: Upload server binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-binary-linux
+          path: phase-server
+          if-no-files-found: error
+          retention-days: 1
+
   build-server-image:
     name: Build Server Image
-    needs: [resolve-release-ref, build-wasm]
+    needs: [resolve-release-ref, build-wasm, build-server-binary]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -415,8 +480,16 @@ jobs:
           name: draft-pools
           path: data
 
-      - name: Verify server data
+      - name: Download server binary
+        uses: actions/download-artifact@v4
+        with:
+          name: server-binary-linux
+          path: .
+
+      - name: Verify build context
         run: |
+          test -s phase-server
+          chmod +x phase-server
           test -s data/card-data.json
           test -s data/draft-pools.json
 
@@ -428,10 +501,16 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push release image
+        # BINARY_STAGE=prebuilt: copy the musl binary from build-server-binary
+        # instead of compiling in-container — the build is just apt + COPY.
         uses: docker/build-push-action@v6
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: false
         with:
           context: .
           push: true
+          build-args: |
+            BINARY_STAGE=prebuilt
           tags: |
             ${{ env.IMAGE_NAME }}:${{ env.RELEASE_TAG }}
             ${{ env.IMAGE_NAME }}:latest
@@ -449,15 +528,83 @@ jobs:
           path: dist
 
       - name: Deploy to Cloudflare Pages
-        uses: cloudflare/wrangler-action@v3
+        uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: pages deploy dist --project-name=phase-rs --commit-dirty=true
 
+  deploy-lobby-worker:
+    # Builds the Rust lobby-broker -> WASM and deploys the Cloudflare Worker +
+    # Durable Object (the matchmaking broker). Independent of the Pages deploy —
+    # the DO is reachable via its own endpoint and is not yet the client's
+    # DEFAULT_SERVER. Redeploys are idempotent (the [[migrations]] tag is only
+    # applied once). The wasm build is driven by wrangler's [build] command
+    # (scripts/build-broker-wasm.sh), so the rust/wasm toolchain must be on PATH.
+    name: Deploy Lobby Worker (Cloudflare)
+    needs: [resolve-release-ref]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-release-ref.outputs.release_sha }}
+
+      - name: Detect lobby Worker source
+        id: lobby-worker
+        run: |
+          if [ -d lobby-worker ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "lobby-worker/ is not present in this release commit; skipping lobby Worker deploy."
+          fi
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        if: steps.lobby-worker.outputs.exists == 'true'
+        with:
+          targets: wasm32-unknown-unknown
+          cache-shared-key: rust-wasm
+
+      - uses: taiki-e/install-action@v2
+        if: steps.lobby-worker.outputs.exists == 'true'
+        with:
+          # Must match the pinned wasm-bindgen crate version in
+          # lobby-worker/broker-wasm/Cargo.toml (schema versions must be exact).
+          tool: wasm-bindgen-cli@0.2.121
+
+      - name: Cache binaryen
+        id: binaryen-cache
+        if: steps.lobby-worker.outputs.exists == 'true'
+        uses: actions/cache@v4
+        with:
+          path: binaryen-version_123
+          key: binaryen-123-x86_64-linux
+
+      - name: Install binaryen
+        if: steps.lobby-worker.outputs.exists == 'true' && steps.binaryen-cache.outputs.cache-hit != 'true'
+        run: curl -L https://github.com/WebAssembly/binaryen/releases/download/version_123/binaryen-version_123-x86_64-linux.tar.gz | tar xz
+
+      - name: Add binaryen to PATH
+        if: steps.lobby-worker.outputs.exists == 'true'
+        run: echo "$PWD/binaryen-version_123/bin" >> "$GITHUB_PATH"
+
+      - name: Deploy lobby Worker to Cloudflare
+        if: steps.lobby-worker.outputs.exists == 'true'
+        # `wrangler deploy` runs the [build] command in lobby-worker/wrangler.toml
+        # (scripts/build-broker-wasm.sh release): cargo build -> wasm32,
+        # wasm-bindgen, wasm-opt. The toolchain installed above is inherited.
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: "4.94.0"
+          workingDirectory: lobby-worker
+          command: deploy
+
   build-server:
     name: Build Server (${{ matrix.os }})
-    needs: [resolve-release-ref, tauri-preflight, build-wasm]
+    needs: [resolve-release-ref, tauri-preflight, build-wasm, build-server-binary]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 35
     env:
@@ -491,15 +638,20 @@ jobs:
         with:
           cache-shared-key: rust-server-${{ matrix.os }}
 
-      - name: Install musl tools
-        if: matrix.triple == 'x86_64-unknown-linux-musl'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools
-          rustup target add x86_64-unknown-linux-musl
-
-      - name: Build phase-server
+      - name: Build phase-server (macOS/Windows)
+        # Linux musl is compiled once in build-server-binary and reused below;
+        # only the non-musl targets compile here.
+        if: matrix.triple != 'x86_64-unknown-linux-musl'
         run: cargo build --profile server-release --bin phase-server --target ${{ matrix.triple }}
+
+      - name: Download prebuilt linux binary
+        # Reuse the single musl build from build-server-binary, placed at the
+        # canonical target path so the packaging step is identical across OSes.
+        if: matrix.triple == 'x86_64-unknown-linux-musl'
+        uses: actions/download-artifact@v4
+        with:
+          name: server-binary-linux
+          path: target/x86_64-unknown-linux-musl/server-release
 
       - name: Download card data
         uses: actions/download-artifact@v4
@@ -660,26 +812,26 @@ jobs:
           name: card-data
           path: client/public
 
-      - name: Download draft pools
+      - name: Download frontend data files
         if: steps.macos-signing.outputs.skip != 'true'
         uses: actions/download-artifact@v4
         with:
-          name: draft-pools
-          path: client/public
-
-      - name: Download Scryfall image lookup data
-        if: steps.macos-signing.outputs.skip != 'true'
-        uses: actions/download-artifact@v4
-        with:
-          name: scryfall-data
+          name: frontend-data-files
           path: client/public
 
       - name: Verify Tauri bundled data files
         if: steps.macos-signing.outputs.skip != 'true'
         run: |
           test -s client/public/card-data.json
-          test -s client/public/draft-pools.json
-          test -s client/public/scryfall-data.json
+          node - <<'NODE'
+          const fs = require("fs");
+          const files = JSON.parse(fs.readFileSync("data-files.json", "utf8"));
+          for (const file of files) {
+            const path = `client/public/${file}`;
+            const stat = fs.statSync(path);
+            if (stat.size === 0) throw new Error(`${path} is empty`);
+          }
+          NODE
         shell: bash
 
       - name: Build phase-server sidecar

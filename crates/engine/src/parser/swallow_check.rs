@@ -388,6 +388,10 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
             kept_optional_to: Some(_),
             ..
         }
+        // CR 608.2d: ChangeZone `up_to` encodes "you may put/return up to N"
+        // at resolution time. The player may choose zero cards, so this is
+        // the same internal optionality shape as Dig { up_to: true }.
+        | Effect::ChangeZone { up_to: true, .. }
         // CR 606.3 + CR 117.3a: `GrantExtraLoyaltyActivations` inherently
         // encodes the "you may activate" permission — granting permission is
         // opt-in by definition, mirroring `GrantCastingPermission`. The Chain
@@ -1472,6 +1476,13 @@ fn detect_condition_if(
         "\"type\":\"FlipCoins\"",
         "\"type\":\"RollDie\"",
         "DefilerCostReduction",
+        // CR 701.6 + CR 608.2c: Effect::Counter.source_rider encodes the
+        // "If a permanent's ability is countered this way, [destroy that
+        // permanent | that permanent loses all abilities]" follow-up. Its
+        // presence (serialized as the `source_rider` field key with
+        // skip_serializing_if = is_none) IS the conditional gate (Teferi's
+        // Response, Green Slime, Tishana's Tidebinder).
+        "\"source_rider\":",
     ];
     if json_has_any(ast_json, cond_markers) {
         return;
@@ -1841,6 +1852,23 @@ fn detect_duration_this_turn(
         // remains visibly unsupported (`Unrecognized` is an explicit failure
         // node + coverage `supported=false`), so no gap is hidden.
         "\"condition\":{\"type\":\"Unrecognized\"",
+        // CR 601.2 + CR 601.3a + CR 604.1: `PerTurnCastLimit` / `PerTurnDrawLimit`
+        // static modes are themselves the per-turn enforcement window — the
+        // "this turn" / "each turn" scope is intrinsic to the variant and not
+        // a separate `duration` slot (CR 604.1 anchors the static; CR 601.2 +
+        // CR 601.3a authorize the casting prohibition itself). Cards like
+        // Ethersworn Canonist phrase the subject as "...who has cast a
+        // [type] spell this turn..."; that "this turn" is consumed by the
+        // per-turn limit, not swallowed.
+        //
+        // Markers use the serde-default external-tag JSON shape
+        // `"<Variant>":{` so they only match when the typed variant is the
+        // current node — matching the precision class of the
+        // `"condition":{"type":"Unrecognized"` marker above and ruling out
+        // false positives where the literal token "PerTurnCastLimit" appears
+        // in unrelated positions (e.g. a description string).
+        "\"PerTurnCastLimit\":{",
+        "\"PerTurnDrawLimit\":{",
     ];
     if json_has_any(ast_json, markers) {
         return;
@@ -2177,6 +2205,16 @@ mod tests {
     }
 
     #[test]
+    fn optional_you_may_accepts_up_to_change_zone_choice() {
+        let parsed = parse(
+            "Mill four cards, then you may return a permanent card from among them to your hand.",
+            &["Instant"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
     fn duration_this_turn_accepts_force_block_scope() {
         let parsed = parse(
             "Target creature blocks target creature this turn if able.",
@@ -2408,6 +2446,30 @@ mod tests {
         );
         assert!(!has_swallowed_detector(&songbirds, "Optional_YouMay"));
         assert!(!has_swallowed_detector(&songbirds, "Condition_If"));
+    }
+
+    /// CR 701.6 + CR 608.2c: The "If a permanent's ability is countered this
+    /// way, destroy that permanent." rider is represented as
+    /// `Effect::Counter.source_rider = Some(Destroy)`, so the `Condition_If`
+    /// detector must not flag Teferi's Response or Green Slime.
+    #[test]
+    fn condition_if_accepts_counter_destroy_rider() {
+        let teferis = parse_named(
+            "Counter target spell or ability an opponent controls that targets a land you control. \
+             If a permanent's ability is countered this way, destroy that permanent.\nDraw two cards.",
+            "Teferi's Response",
+            &["Instant"],
+        );
+        assert!(!has_swallowed_detector(&teferis, "Condition_If"));
+
+        let green_slime = parse_named(
+            "Flash\nWhen this creature enters, counter target activated or triggered ability from \
+             an artifact or enchantment source. If a permanent's ability is countered this way, \
+             destroy that permanent.",
+            "Green Slime",
+            &["Creature"],
+        );
+        assert!(!has_swallowed_detector(&green_slime, "Condition_If"));
     }
 
     /// CR 707.10c: Mirrorpool's "you may choose new targets for the copy" is

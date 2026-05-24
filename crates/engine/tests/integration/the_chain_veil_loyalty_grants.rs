@@ -211,11 +211,11 @@ fn chain_veil_grant_raises_per_planeswalker_cap() {
     );
 }
 
-/// CR 606.3 + CR 601.2c: A targeted loyalty ability is announced, waits for
-/// target choice, then pays its loyalty cost and records exactly one loyalty
-/// activation when the ability is pushed to the stack.
+/// CR 606.3 + CR 601.2c: A targeted loyalty ability is announced and recorded,
+/// waits for target choice, then pays its loyalty cost when the ability is
+/// pushed to the stack.
 #[test]
-fn targeted_loyalty_activation_records_once_after_target_selection() {
+fn targeted_loyalty_activation_records_once_across_target_selection() {
     let mut state = setup_main_phase();
     let pw = create_planeswalker(&mut state, PlayerId(0), "Jace", 3);
     {
@@ -227,8 +227,14 @@ fn targeted_loyalty_activation_records_once_after_target_selection() {
     let waiting =
         planeswalker::handle_activate_loyalty(&mut state, PlayerId(0), pw, 0, &mut events).unwrap();
     assert!(matches!(waiting, WaitingFor::TargetSelection { .. }));
-    assert_eq!(state.objects[&pw].loyalty_activations_this_turn, 0);
-    assert!(state.loyalty_abilities_activated_this_turn.is_empty());
+    assert_eq!(state.objects[&pw].loyalty_activations_this_turn, 1);
+    assert_eq!(
+        state
+            .loyalty_abilities_activated_this_turn
+            .get(&PlayerId(0))
+            .copied(),
+        Some(1)
+    );
 
     state.waiting_for = waiting;
     apply(

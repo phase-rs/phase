@@ -302,6 +302,7 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "ravenous gigantotherium",
     "razor hippogriff",
     "reanimate",
+    "reanimate [6cb8b8c4-0674-4f14-9d89-010969fbb80e]",
     "refuse",
     "reviving vapors",
     "riddle of lightning",
@@ -438,10 +439,11 @@ fn anaphoric_scope_set_is_frozen() {
     // both this and ANAPHORIC_SCOPE_CARDS shrink together.
     assert_eq!(
         observed.len(),
-        244,
-        "Expected exactly 244 cards retaining ObjectScope::Anaphoric (the #495 \
+        245,
+        "Expected exactly 245 cards retaining ObjectScope::Anaphoric (the #495 \
          behavior-neutral floor of 156, minus four cards unlocked by #607's \
-         target-subject DamageAll source wrapper, plus 88 cards from category 4 \
+         target-subject DamageAll source wrapper, plus 88 cards from category 4, \
+         plus the UUID-disambiguated Reanimate print key \
          — the Yuriko/Dark Confidant bare-anaphoric-possessive class \
          routed onto the Anaphoric arm by `classify_possessive_referent`); \
          count moved to {}.",
@@ -449,8 +451,8 @@ fn anaphoric_scope_set_is_frozen() {
     );
     assert_eq!(
         ANAPHORIC_SCOPE_CARDS.len(),
-        244,
-        "ANAPHORIC_SCOPE_CARDS must list exactly 244 cards."
+        245,
+        "ANAPHORIC_SCOPE_CARDS must list exactly 245 cards."
     );
 }
 

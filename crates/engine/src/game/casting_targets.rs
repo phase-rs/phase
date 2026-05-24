@@ -218,8 +218,15 @@ pub(crate) fn handle_select_targets(
 
     if let Some(ability_index) = pending.activation_ability_index {
         if let Some(ref activation_cost) = pending.activation_cost {
+            let should_record_loyalty = matches!(activation_cost, AbilityCost::Loyalty { .. })
+                && super::planeswalker::can_activate_loyalty_ability(
+                    state,
+                    pending.object_id,
+                    player,
+                    ability_index,
+                );
             pay_ability_cost(state, player, pending.object_id, activation_cost, events)?;
-            if matches!(activation_cost, AbilityCost::Loyalty { .. }) {
+            if should_record_loyalty {
                 super::planeswalker::record_loyalty_activation(state, pending.object_id, player);
             }
         }
@@ -253,6 +260,7 @@ pub(crate) fn handle_select_targets(
             .pending_activations
             .push((pending.object_id, ability_index));
         events.push(GameEvent::AbilityActivated {
+            player_id: player,
             source_id: pending.object_id,
         });
         // CR 702.142b: Emit additional event when a boast ability is activated.
@@ -316,8 +324,16 @@ pub(crate) fn handle_choose_target(
 
             if let Some(ability_index) = pending.activation_ability_index {
                 if let Some(ref activation_cost) = pending.activation_cost {
+                    let should_record_loyalty =
+                        matches!(activation_cost, AbilityCost::Loyalty { .. })
+                            && super::planeswalker::can_activate_loyalty_ability(
+                                state,
+                                pending.object_id,
+                                player,
+                                ability_index,
+                            );
                     pay_ability_cost(state, player, pending.object_id, activation_cost, events)?;
-                    if matches!(activation_cost, AbilityCost::Loyalty { .. }) {
+                    if should_record_loyalty {
                         super::planeswalker::record_loyalty_activation(
                             state,
                             pending.object_id,
@@ -356,6 +372,7 @@ pub(crate) fn handle_choose_target(
                     .pending_activations
                     .push((pending.object_id, ability_index));
                 events.push(GameEvent::AbilityActivated {
+                    player_id: player,
                     source_id: pending.object_id,
                 });
                 // CR 702.142b: Emit additional event when a boast ability is activated.

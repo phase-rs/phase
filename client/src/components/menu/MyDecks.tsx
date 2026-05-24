@@ -363,7 +363,6 @@ interface SavedDeckTileProps {
   deckName: string;
   isActive: boolean;
   compatibility: DeckCompatibilityResult | undefined;
-  mode: "manage" | "select";
   onTileClick: (deckName: string) => void;
   onEditDeck?: (deckName: string) => void;
   onDeleteDeck: (deckName: string) => void;
@@ -376,7 +375,6 @@ const SavedDeckTile = memo(function SavedDeckTile({
   deckName,
   isActive,
   compatibility,
-  mode,
   onTileClick,
   onEditDeck,
   onDeleteDeck,
@@ -388,10 +386,7 @@ const SavedDeckTile = memo(function SavedDeckTile({
     () => onEditDeck ? () => onEditDeck(deckName) : undefined,
     [deckName, onEditDeck],
   );
-  const handleDelete = useMemo(
-    () => mode === "manage" ? () => onDeleteDeck(deckName) : undefined,
-    [deckName, mode, onDeleteDeck],
-  );
+  const handleDelete = useCallback(() => onDeleteDeck(deckName), [deckName, onDeleteDeck]);
   const preconDeckOverride = useMemo(
     () => preconCandidate ? preconCandidateToDeckEntry(preconCandidate) : undefined,
     [preconCandidate],
@@ -1255,7 +1250,6 @@ export function MyDecks({
                   deckName={deckName}
                   isActive={deckName === activeDeckName}
                   compatibility={compatibilities[deckName]}
-                  mode={mode}
                   onTileClick={handleTileClick}
                   onEditDeck={onEditDeck}
                   onDeleteDeck={handleDeleteDeck}
@@ -1288,7 +1282,6 @@ export function MyDecks({
                     deckName={deckName}
                     isActive={deckName === activeDeckName}
                     compatibility={compatibilities[deckName]}
-                    mode={mode}
                     onTileClick={handleTileClick}
                     onEditDeck={onEditDeck}
                     onDeleteDeck={handleDeleteDeck}
@@ -1323,7 +1316,6 @@ export function MyDecks({
                       deckName={deckName}
                       isActive={deckName === activeDeckName}
                       compatibility={compatibilities[deckName]}
-                      mode={mode}
                       onTileClick={handleTileClick}
                       onEditDeck={onEditDeck}
                       onDeleteDeck={handleDeleteDeck}

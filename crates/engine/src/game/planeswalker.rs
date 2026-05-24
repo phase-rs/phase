@@ -145,6 +145,7 @@ pub fn handle_activate_loyalty(
         // CR 115.1 + CR 701.9b: Random-target loyalty abilities — game picks via
         // `state.rng`. Routes through finalize_loyalty_activation just like the
         // controller-choice degenerate path.
+        let target_constraints = ability_def.target_constraints.clone();
         let resolved_targets = if matches!(
             resolved.target_selection_mode,
             crate::types::ability::TargetSelectionMode::Random
@@ -152,10 +153,10 @@ pub fn handle_activate_loyalty(
             Some(random_select_targets_for_ability(
                 state,
                 &target_slots,
-                &[],
+                &target_constraints,
             )?)
         } else {
-            auto_select_targets_for_ability(state, &resolved, &target_slots, &[])?
+            auto_select_targets_for_ability(state, &resolved, &target_slots, &target_constraints)?
         };
 
         if let Some(targets) = resolved_targets {
@@ -174,14 +175,21 @@ pub fn handle_activate_loyalty(
 
         state.lands_tapped_for_mana.remove(&player);
 
-        let selection = begin_target_selection_for_ability(state, &resolved, &target_slots, &[])?;
+        let selection = begin_target_selection_for_ability(
+            state,
+            &resolved,
+            &target_slots,
+            &target_constraints,
+        )?;
         let mut pending = PendingCast::new(pw_id, CardId(0), resolved, ManaCost::NoCost);
         pending.activation_ability_index = Some(ability_index);
+        pending.target_constraints = target_constraints;
         // CR 606.4: Loyalty cost is paid after targets are chosen.
         // Stored here so handle_select_targets can call pay_ability_cost.
         pending.activation_cost = Some(crate::types::ability::AbilityCost::Loyalty {
             amount: loyalty_cost,
         });
+        record_loyalty_activation(state, pw_id, player);
         return Ok(WaitingFor::TargetSelection {
             player,
             pending_cast: Box::new(pending),
@@ -291,7 +299,10 @@ fn finalize_loyalty_activation(
     // CR 117.1b: Priority permits unbounded activation. `pending_activations`
     // is a per-priority-window AI-guard — see `GameState::pending_activations`.
     state.pending_activations.push((pw_id, ability_index));
-    events.push(GameEvent::AbilityActivated { source_id: pw_id });
+    events.push(GameEvent::AbilityActivated {
+        player_id: player,
+        source_id: pw_id,
+    });
     state.lands_tapped_for_mana.remove(&player);
     state.priority_passes.clear();
     state.priority_pass_count = 0;

@@ -154,7 +154,7 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
       : selectedTapCount > 0
         ? "ring-2 ring-emerald-400 shadow-[0_0_14px_4px_rgba(52,211,153,0.55)]"
         : canOpenPicker
-          ? "ring-2 ring-amber-400/60 shadow-[0_0_12px_3px_rgba(201,176,55,0.8)]"
+          ? "outline outline-2 outline-black/80 ring-4 ring-lime-300 shadow-[0_0_18px_6px_rgba(190,242,100,0.72),inset_0_0_18px_4px_rgba(190,242,100,0.22)]"
           : "";
 
   if (renderMode === "single") {

@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 draft-core = { path = "../draft-core" }
 engine = { path = "../engine" }
+lobby-broker = { path = "../lobby-broker" }
 phase-ai = { path = "../phase-ai" }
 seat-reducer = { path = "../seat-reducer" }
 serde = { workspace = true }

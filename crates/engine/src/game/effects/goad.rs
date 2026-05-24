@@ -1,6 +1,8 @@
-use crate::types::ability::{EffectError, EffectKind, ResolvedAbility, TargetRef};
+use crate::game::filter::{matches_target_filter, FilterContext};
+use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::identifiers::ObjectId;
 use crate::types::zones::Zone;
 
 /// CR 701.15a: Goad a creature — until the goading player's next turn, the creature
@@ -17,36 +19,56 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    for target in &ability.targets {
-        if let TargetRef::Object(obj_id) = target {
-            let Some(obj) = state.objects.get_mut(obj_id) else {
-                continue;
-            };
+    for obj_id in goad_targets(state, ability) {
+        let Some(obj) = state.objects.get_mut(&obj_id) else {
+            continue;
+        };
 
-            // CR 701.15a: Only goad creatures on the battlefield.
-            if obj.zone != Zone::Battlefield {
-                continue;
-            }
-
-            // CR 701.15a: Mark the creature as goaded by the controller of this effect.
-            // CR 701.15d: Re-goading by the same player is a no-op (HashSet semantics).
-            obj.goaded_by.insert(ability.controller);
+        // CR 701.15a: Only goad creatures on the battlefield.
+        if obj.zone != Zone::Battlefield {
+            continue;
         }
+
+        // CR 701.15a: Mark the creature as goaded by the controller of this effect.
+        // CR 701.15d: Re-goading by the same player is a no-op (HashSet semantics).
+        obj.goaded_by.insert(ability.controller);
     }
 
     events.push(GameEvent::EffectResolved {
-        kind: EffectKind::Goad,
+        kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
     });
 
     Ok(())
 }
 
+fn goad_targets(state: &GameState, ability: &ResolvedAbility) -> Vec<ObjectId> {
+    if let Effect::GoadAll { target } = &ability.effect {
+        let effective_filter = crate::game::effects::resolved_object_filter(ability, target);
+        let ctx = FilterContext::from_ability(ability);
+        return state
+            .battlefield_phased_in_ids()
+            .into_iter()
+            .filter(|id| matches_target_filter(state, *id, &effective_filter, &ctx))
+            .collect();
+    }
+
+    ability
+        .targets
+        .iter()
+        .filter_map(|target| match target {
+            TargetRef::Object(obj_id) => Some(*obj_id),
+            TargetRef::Player(_) => None,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{Effect, TargetFilter, TargetRef};
+    use crate::types::ability::{ControllerRef, Effect, TargetFilter, TargetRef, TypedFilter};
+    use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
 
@@ -59,6 +81,16 @@ mod tests {
             ObjectId(100),
             controller,
         )
+    }
+
+    fn mark_creature(state: &mut GameState, object_id: ObjectId) {
+        state
+            .objects
+            .get_mut(&object_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
     }
 
     #[test]
@@ -134,6 +166,66 @@ mod tests {
         assert!(obj.goaded_by.contains(&PlayerId(0)));
         assert!(obj.goaded_by.contains(&PlayerId(1)));
         assert_eq!(obj.goaded_by.len(), 2);
+    }
+
+    #[test]
+    fn goad_all_marks_matching_creatures_without_explicit_targets() {
+        let mut state = GameState::new_two_player(42);
+        let opponent_creature_a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let opponent_creature_b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Wolf".to_string(),
+            Zone::Battlefield,
+        );
+        let controller_creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Cat".to_string(),
+            Zone::Battlefield,
+        );
+        mark_creature(&mut state, opponent_creature_a);
+        mark_creature(&mut state, opponent_creature_b);
+        mark_creature(&mut state, controller_creature);
+        let ability = ResolvedAbility::new(
+            Effect::GoadAll {
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::Opponent),
+                ),
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        assert!(state
+            .objects
+            .get(&opponent_creature_a)
+            .unwrap()
+            .goaded_by
+            .contains(&PlayerId(0)));
+        assert!(state
+            .objects
+            .get(&opponent_creature_b)
+            .unwrap()
+            .goaded_by
+            .contains(&PlayerId(0)));
+        assert!(!state
+            .objects
+            .get(&controller_creature)
+            .unwrap()
+            .goaded_by
+            .contains(&PlayerId(0)));
     }
 
     #[test]

@@ -90,10 +90,14 @@ fn strip_chapter_title(effect: &str) -> &str {
         return effect;
     };
     let title = title.trim();
-    let looks_like_title = !title.is_empty()
-        && title.len() < 40
-        && title.chars().next().is_some_and(|c| c.is_ascii_uppercase())
-        && !title.contains(['.', ',', ';', ':', '!', '?']);
+    let normalized_title = title.trim_end_matches(['!', '?']).trim_end();
+    let looks_like_title = !normalized_title.is_empty()
+        && normalized_title.len() < 40
+        && normalized_title
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_uppercase())
+        && !normalized_title.contains(['.', ',', ';', ':']);
     if looks_like_title {
         body.trim()
     } else {
@@ -275,6 +279,7 @@ fn promote_generic_effect_duration(effect: &mut Effect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::{ControllerRef, FilterProp, PtValue, TypeFilter};
 
     #[test]
     fn parse_roman_numeral_range() {
@@ -339,10 +344,54 @@ mod tests {
         assert_eq!(nums, vec![3]);
         assert_eq!(effect, "Target creature you control gets +X/+X.");
 
+        // FIN Summon titles can carry emphatic punctuation.
+        let (nums, effect) = parse_chapter_line(
+            "I, II, III, IV — Stampede! — Other creatures you control get +1/+0 until end of turn.",
+        )
+        .unwrap();
+        assert_eq!(nums, vec![1, 2, 3, 4]);
+        assert_eq!(
+            effect,
+            "Other creatures you control get +1/+0 until end of turn."
+        );
+
         // No title: plain chapter still works
         let (nums, effect) = parse_chapter_line("II — Create a 1/1 green Saproling.").unwrap();
         assert_eq!(nums, vec![2]);
         assert_eq!(effect, "Create a 1/1 green Saproling.");
+    }
+
+    #[test]
+    fn emphatic_chapter_title_keeps_mass_pump_subject() {
+        let lines = vec![
+            "I, II, III, IV — Stampede! — Other creatures you control get +1/+0 until end of turn.",
+        ];
+        let (triggers, _etb, _consumed) = parse_saga_chapters(&lines, "Summon: Choco/Mog");
+        assert_eq!(triggers.len(), 4);
+
+        for trigger in triggers {
+            let exec = trigger.execute.expect("chapter should have execute effect");
+            match &*exec.effect {
+                Effect::PumpAll {
+                    power,
+                    toughness,
+                    target,
+                } => {
+                    assert_eq!(*power, PtValue::Fixed(1));
+                    assert_eq!(*toughness, PtValue::Fixed(0));
+                    match target {
+                        TargetFilter::Typed(filter) => {
+                            assert_eq!(filter.controller, Some(ControllerRef::You));
+                            assert!(filter.type_filters.contains(&TypeFilter::Creature));
+                            assert!(filter.properties.contains(&FilterProp::Another));
+                        }
+                        other => panic!("expected typed creature target, got {other:?}"),
+                    }
+                }
+                other => panic!("expected PumpAll, got {other:?}"),
+            }
+            assert_eq!(exec.duration, Some(Duration::UntilEndOfTurn));
+        }
     }
 
     #[test]

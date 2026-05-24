@@ -634,17 +634,27 @@ pub(crate) fn lower_static_ir(ir: &StaticIr) -> StaticDefinition {
 /// mirrors `self_recursion_trigger_zone` for `TriggerDefinition.trigger_zones`.
 ///
 /// Walks the `StaticCondition` tree and collects every `SourceInZone { zone }`
-/// where `zone != Zone::Battlefield`, populating `StaticDefinition.active_zones`.
-/// The battlefield is NOT included (battlefield is the CR 113.6 default and
-/// does not need opt-in). If the condition does not reference a
-/// non-battlefield zone, `active_zones` is left empty (battlefield-only).
+/// it can reach. For a single non-battlefield reference (Anger-class), the
+/// resulting `active_zones` is `[Zone]` — `Battlefield` is the CR 113.6 default
+/// and only needs to be listed when the condition is a disjunction that names
+/// multiple zones (Eminence: "in the command zone or on the battlefield").
+/// When ALL collected zones happen to be `Battlefield`, `active_zones` is left
+/// empty so the standard battlefield-default applies.
 fn populate_active_zones_from_condition(def: &mut StaticDefinition) {
-    let mut zones: Vec<crate::types::zones::Zone> = Vec::new();
+    use crate::types::zones::Zone;
+    let mut zones: Vec<Zone> = Vec::new();
     if let Some(cond) = def.condition.as_ref() {
         collect_source_in_zones(cond, &mut zones);
     }
     // Deduplicate while preserving order.
     zones.dedup();
+    // If the only reference was Battlefield, fall back to the empty/default
+    // representation (CR 113.6) — adding `[Battlefield]` explicitly is
+    // semantically identical but would diverge from existing tests that
+    // assume `active_zones.is_empty()` for pure-battlefield statics.
+    if zones.len() == 1 && zones[0] == Zone::Battlefield {
+        zones.clear();
+    }
     // Don't clobber an explicitly-set active_zones: upstream callers may pin
     // non-battlefield zones directly on the StaticDefinition (e.g. hand-zone
     // statics) and the condition-derived inference should only fill in zones
@@ -655,11 +665,8 @@ fn populate_active_zones_from_condition(def: &mut StaticDefinition) {
 }
 
 fn collect_source_in_zones(cond: &StaticCondition, out: &mut Vec<crate::types::zones::Zone>) {
-    use crate::types::zones::Zone;
     match cond {
-        StaticCondition::SourceInZone { zone }
-            if *zone != Zone::Battlefield && !out.contains(zone) =>
-        {
+        StaticCondition::SourceInZone { zone } if !out.contains(zone) => {
             out.push(*zone);
         }
         StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
@@ -2628,8 +2635,8 @@ fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition> {
         return defs;
     }
 
-    // CR 508.1d / CR 509.1c: Cross-mode conjunctions of the form
-    // "<predicate_1> and attack/block each combat if able" combine a
+    // CR 508.1d / CR 509.1c / CR 701.15b: Cross-mode conjunctions of the form
+    // "<predicate_1> and attack/block each combat if able/is goaded" combine a
     // continuous static (usually a keyword grant) with a combat requirement.
     // A single `StaticDefinition` cannot carry both modes, so decompose them.
     if let Some(defs) = try_split_and_must_attack_block(&stripped) {
@@ -2837,6 +2844,10 @@ fn try_split_and_must_attack_block(text: &str) -> Option<Vec<StaticDefinition>> 
                     tag::<_, _, VE>("must be blocked each combat if able"),
                     tag("must be blocked if able"),
                 )),
+            ),
+            value(
+                vec![StaticMode::Goaded],
+                alt((tag::<_, _, VE>("is goaded"), tag("are goaded"))),
             ),
         ))
         .parse(i)
@@ -6302,10 +6313,104 @@ fn strip_casting_prohibition_subject(tp: &str) -> Option<(ProhibitionScope, &str
         })
 }
 
+/// CR 601.2 + CR 601.3a + CR 604.1: Parse the "<SUBJECT> who has/have cast a [type] spell
+/// this turn can't cast additional [type] spells." phrasing (Ethersworn Canonist) into
+/// the equivalent `PerTurnCastLimit { max: 1, spell_filter: <type> }`.
+///
+/// Casting prohibitions are authorized by CR 601.2 (legality-to-cast check) and CR
+/// 601.3a (the "qualities prohibit casting" rule); the per-turn enforcement window
+/// is the static itself (CR 604.1).
+///
+/// The conditional subject ("who has cast a [type] spell this turn") combined with
+/// "can't cast additional [type] spells" is logically equivalent to "can't cast more
+/// than one [type] spell each turn" — once a player has cast a matching spell, every
+/// further matching spell is "additional" and prohibited.
+///
+/// The subject prefix is parsed via the shared `strip_casting_prohibition_subject`
+/// building block so this combinator covers the full subject axis (each player, each
+/// opponent, you, your opponents, enchanted player — not just AllPlayers). Both the
+/// subject-clause type phrase and the object-clause type phrase must match. If they
+/// diverge (a hypothetical future card like "who has cast an artifact spell ... can't
+/// cast noncreature spells"), the `max=1` reduction is no longer sound and we return
+/// `None` so the line falls through to other parsers (or `Unimplemented`).
+fn parse_conditional_subject_per_turn_cast_limit(tp: &str, text: &str) -> Option<StaticDefinition> {
+    // 1. Strip subject prefix → scope, via the shared building block. This is the
+    //    single authority for subject→`ProhibitionScope` mapping; inlining a
+    //    hard-coded "each player" branch here would silently exclude every other
+    //    scope (each opponent, you, your opponents, enchanted player).
+    let (who, predicate) = strip_casting_prohibition_subject(tp)?;
+
+    // 2. Nom dispatch on the predicate: assemble the conditional-cast grammar as
+    //    composed combinators.
+    //   ("who has cast " | "who have cast ") ("a " | "an ") <SUBJECT_TYPE>
+    //   " spell this turn can't cast additional " <OBJECT_TYPE> (" spell" | " spells") "."?
+    //
+    // `take_until` is the canonical nom combinator for "everything up to delimiter",
+    // the structural counterpart to manually slicing on a found substring.
+    let mut parser = (
+        alt((
+            tag::<_, _, OracleError<'_>>("who has cast "),
+            tag("who have cast "),
+        )),
+        alt((tag("a "), tag("an "))),
+        take_until(" spell"),
+        tag(" spell"),
+        tag(" this turn can't cast additional "),
+        take_until(" spell"),
+        alt((tag(" spells"), tag(" spell"))),
+        opt(tag(".")),
+    );
+    let (rest, (_, _, subject_type_text, _, _, object_type_text, _, _)) =
+        parser.parse(predicate).ok()?;
+    // Disallow trailing content — we matched the entire restriction sentence.
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    // Both type phrases must canonicalize identically to preserve the `max=1` equivalence.
+    let (subject_filter, subject_rest) = parse_type_phrase(subject_type_text.trim());
+    let (object_filter, object_rest) = parse_type_phrase(object_type_text.trim());
+    if !subject_rest.trim().is_empty() || !object_rest.trim().is_empty() {
+        return None;
+    }
+    if subject_filter != object_filter {
+        return None;
+    }
+
+    // Verify a real type filter was extracted; mirrors the gate `parse_per_turn_cast_limit`
+    // uses on the standard "more than N" phrasing.
+    let spell_filter = match &subject_filter {
+        TargetFilter::Typed(tf) if !tf.type_filters.is_empty() => Some(subject_filter),
+        _ => None,
+    };
+    // Untyped "<SUBJECT> who has cast a spell" is not a real sentence in printed
+    // Magic; require a typed filter to avoid over-matching.
+    spell_filter.as_ref()?;
+
+    Some(
+        StaticDefinition::new(StaticMode::PerTurnCastLimit {
+            who,
+            max: 1,
+            spell_filter,
+        })
+        .description(text.to_string()),
+    )
+}
+
 /// CR 101.2 + CR 604.1: Parse per-turn casting limits from Oracle text.
 /// Handles "Each player/opponent can't cast more than N [type] spell(s) each turn"
 /// and the alternate phrasing "You can cast no more than N spells each turn."
 fn parse_per_turn_cast_limit(tp: &str, text: &str) -> Option<StaticDefinition> {
+    // CR 601.2 + CR 601.3a + CR 604.1: Conditional-subject phrasing — "<SUBJECT> who
+    // has cast a [type] spell this turn can't cast additional [type] spells."
+    // Semantically equivalent to `max=1` per-turn cast limit on the same [type]
+    // (Ethersworn Canonist). The two type phrases must match — if they diverge, the
+    // equivalence breaks and we bail (defensive: future cards with mismatched types
+    // would need a different model).
+    if let Some(def) = parse_conditional_subject_per_turn_cast_limit(tp, text) {
+        return Some(def);
+    }
+
     // 1. Strip subject → scope, yielding the predicate
     let (who, predicate) = strip_casting_prohibition_subject(tp)?;
 
@@ -10389,8 +10494,8 @@ fn try_parse_scoped_must_attack_block(lower: &str, text: &str) -> Option<Vec<Sta
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AggregateFunction, CardTypeSetSource, CountScope, Duration, Effect, PlayerScope,
-        SharedQuality, SharedQualityRelation, TypeFilter, ZoneRef,
+        AggregateFunction, CardTypeSetSource, CountScope, Duration, Effect, PlayerScope, PtStat,
+        PtValueScope, SharedQuality, SharedQualityRelation, TypeFilter, ZoneRef,
     };
 
     /// CR 702.16 + CR 609.6: Serra's Emissary's compound-subject keyword grant
@@ -10628,9 +10733,9 @@ mod tests {
             matches!(
                 &def.mode,
                 StaticMode::CantBeBlockedBy { filter }
-                if matches!(filter, TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::PowerLE { value: QuantityExpr::Fixed { value: 2 } }))
+                if matches!(filter, TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::PtComparison { stat: PtStat::Power, scope: PtValueScope::Current, comparator: Comparator::LE, value: QuantityExpr::Fixed { value: 2 } }))
             ),
-            "Expected CantBeBlockedBy with PowerLE(2), got {:?}",
+            "Expected CantBeBlockedBy with PtComparison(Power, LE, 2), got {:?}",
             def.mode
         );
     }
@@ -10646,9 +10751,9 @@ mod tests {
             matches!(
                 &def.mode,
                 StaticMode::CantBeBlockedBy { filter }
-                if matches!(filter, TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::PowerGE { value: QuantityExpr::Fixed { value: 3 } }))
+                if matches!(filter, TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::PtComparison { stat: PtStat::Power, scope: PtValueScope::Current, comparator: Comparator::GE, value: QuantityExpr::Fixed { value: 3 } }))
             ),
-            "Expected CantBeBlockedBy with PowerGE(3), got {:?}",
+            "Expected CantBeBlockedBy with PtComparison(Power, GE, 3), got {:?}",
             def.mode
         );
     }
@@ -11617,6 +11722,94 @@ mod tests {
 
     // NOTE: static_enters_with_counters test moved to oracle_replacement tests —
     // "enters with counters" is now parsed as a Moved replacement effect.
+
+    /// CR 113.6b + CR 207.2c + CR 408 + CR 601.2f: The Ur-Dragon's Eminence
+    /// line (canonical form) — "Other Dragon spells you cast cost {1} less to
+    /// cast as long as ~ is in the command zone or on the battlefield."
+    /// The condition disjunction must seed `active_zones` with both
+    /// `Battlefield` and `Command`, and produce a typed `Or { SourceInZone,
+    /// SourceInZone }` (no `SwallowedClause`).
+    #[test]
+    fn static_eminence_cost_reduction_command_zone_or_battlefield() {
+        let def = parse_static_line(
+            "Other Dragon spells you cast cost {1} less to cast as long as ~ is in the command zone or on the battlefield.",
+        )
+        .expect("Eminence cost-reduction line must parse");
+
+        // Mode is unchanged: ReduceCost {1} with a Dragon spell filter.
+        assert!(
+            matches!(
+                def.mode,
+                StaticMode::ReduceCost {
+                    amount: ManaCost::Cost { generic: 1, .. },
+                    ..
+                }
+            ),
+            "expected ReduceCost {{1}}, got {:?}",
+            def.mode
+        );
+
+        // CR 113.6b: active_zones must include BOTH Battlefield and Command —
+        // populate_active_zones_from_condition walks the typed Or-disjunction.
+        assert!(
+            def.active_zones.contains(&Zone::Battlefield),
+            "active_zones must contain Battlefield, got {:?}",
+            def.active_zones
+        );
+        assert!(
+            def.active_zones.contains(&Zone::Command),
+            "active_zones must contain Command, got {:?}",
+            def.active_zones
+        );
+
+        // Condition is a typed Or-disjunction over SourceInZone variants —
+        // NOT a SwallowedClause / Unrecognized fallback.
+        match def.condition.as_ref().expect("condition must be set") {
+            StaticCondition::Or { conditions } => {
+                let zones: Vec<Zone> = conditions
+                    .iter()
+                    .filter_map(|c| match c {
+                        StaticCondition::SourceInZone { zone } => Some(*zone),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(zones.contains(&Zone::Command));
+                assert!(zones.contains(&Zone::Battlefield));
+            }
+            other => panic!("expected Or-disjunction, got {other:?}"),
+        }
+    }
+
+    /// CR 113.6b: Inverted Eminence form — "As long as ~ is in the command zone
+    /// or on the battlefield, other Dragon spells you cast cost {1} less to
+    /// cast." (The shape parsed straight off the printed Oracle text after the
+    /// Eminence ability-word strip.) Must converge to the same typed shape as
+    /// the canonical-form test.
+    #[test]
+    fn static_eminence_cost_reduction_inverted_form() {
+        let def = parse_static_line(
+            "As long as ~ is in the command zone or on the battlefield, other Dragon spells you cast cost {1} less to cast.",
+        )
+        .expect("inverted Eminence cost-reduction must parse");
+
+        assert!(
+            matches!(
+                def.mode,
+                StaticMode::ReduceCost {
+                    amount: ManaCost::Cost { generic: 1, .. },
+                    ..
+                }
+            ),
+            "expected ReduceCost {{1}}, got {:?}",
+            def.mode
+        );
+        assert!(def.active_zones.contains(&Zone::Battlefield));
+        assert!(def.active_zones.contains(&Zone::Command));
+        assert!(matches!(
+            def.condition.as_ref().expect("condition must be set"),
+            StaticCondition::Or { .. }
+        ));
+    }
 
     #[test]
     fn static_as_long_as_chosen_color() {
@@ -12653,6 +12846,21 @@ mod tests {
         assert_eq!(defs[2].mode, StaticMode::Goaded);
         assert_eq!(defs[1].affected, defs[0].affected);
         assert_eq!(defs[2].affected, defs[0].affected);
+    }
+
+    #[test]
+    fn static_pump_and_goaded_emits_both_defs() {
+        let defs = parse_static_line_multi("Enchanted creature gets +2/+2 and is goaded.");
+        assert_eq!(defs.len(), 2);
+        assert_eq!(defs[0].mode, StaticMode::Continuous);
+        assert!(defs[0]
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 2 }));
+        assert!(defs[0]
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 2 }));
+        assert_eq!(defs[1].mode, StaticMode::Goaded);
+        assert_eq!(defs[1].affected, defs[0].affected);
     }
 
     #[test]
@@ -16053,6 +16261,160 @@ mod tests {
                 spell_filter: None,
             }
         );
+    }
+
+    #[test]
+    fn per_turn_cast_limit_ethersworn_canonist_nonartifact() {
+        // CR 101.2 + CR 604.1: Ethersworn Canonist — conditional-subject phrasing
+        // semantically equivalent to "Each player can't cast more than one nonartifact
+        // spell each turn." Reduces to PerTurnCastLimit{ AllPlayers, max=1, Non(Artifact) }.
+        let def = parse_static_line(
+            "Each player who has cast a nonartifact spell this turn can't cast additional nonartifact spells.",
+        )
+        .unwrap();
+        let StaticMode::PerTurnCastLimit {
+            who,
+            max,
+            spell_filter,
+        } = &def.mode
+        else {
+            panic!("expected PerTurnCastLimit, got {:?}", def.mode);
+        };
+        assert_eq!(*who, ProhibitionScope::AllPlayers);
+        assert_eq!(*max, 1);
+        let Some(TargetFilter::Typed(tf)) = spell_filter else {
+            panic!("expected typed spell filter, got {spell_filter:?}");
+        };
+        assert_eq!(
+            tf.type_filters,
+            vec![TypeFilter::Non(Box::new(TypeFilter::Artifact))]
+        );
+    }
+
+    #[test]
+    fn per_turn_cast_limit_conditional_subject_creature_filter() {
+        // Class test: same conditional-subject grammar with a different matched
+        // type — proves the building block works across the type-filter axis,
+        // not just Ethersworn's Non(Artifact). Hypothetical future printed text.
+        let def = parse_static_line(
+            "Each player who has cast a creature spell this turn can't cast additional creature spells.",
+        )
+        .unwrap();
+        let StaticMode::PerTurnCastLimit {
+            who,
+            max,
+            spell_filter,
+        } = &def.mode
+        else {
+            panic!("expected PerTurnCastLimit, got {:?}", def.mode);
+        };
+        assert_eq!(*who, ProhibitionScope::AllPlayers);
+        assert_eq!(*max, 1);
+        let Some(TargetFilter::Typed(tf)) = spell_filter else {
+            panic!("expected typed spell filter, got {spell_filter:?}");
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+    }
+
+    #[test]
+    fn per_turn_cast_limit_conditional_subject_instant_filter() {
+        // Class test: third filter axis to lock in the building-block behavior.
+        let def = parse_static_line(
+            "Each player who has cast an instant spell this turn can't cast additional instant spells.",
+        )
+        .unwrap();
+        let StaticMode::PerTurnCastLimit { spell_filter, .. } = &def.mode else {
+            panic!("expected PerTurnCastLimit, got {:?}", def.mode);
+        };
+        let Some(TargetFilter::Typed(tf)) = spell_filter else {
+            panic!("expected typed spell filter, got {spell_filter:?}");
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Instant]);
+    }
+
+    #[test]
+    fn per_turn_cast_limit_conditional_subject_each_opponent_scope() {
+        // Class test (subject axis): "Each opponent who has cast..." must produce
+        // `Opponents` scope, not the hard-coded `AllPlayers`. Proves the subject
+        // prefix is dispatched through `strip_casting_prohibition_subject` instead
+        // of being inlined. Hypothetical future printed text within the class.
+        let def = parse_static_line(
+            "Each opponent who has cast a creature spell this turn can't cast additional creature spells.",
+        )
+        .unwrap();
+        let StaticMode::PerTurnCastLimit { who, max, .. } = &def.mode else {
+            panic!("expected PerTurnCastLimit, got {:?}", def.mode);
+        };
+        assert_eq!(*who, ProhibitionScope::Opponents);
+        assert_eq!(*max, 1);
+    }
+
+    #[test]
+    fn per_turn_cast_limit_conditional_subject_plural_agreement() {
+        // Sibling coverage: plural subjects use "who have cast", and the parser
+        // should still flow through the shared subject and type-filter axes.
+        let def = parse_static_line(
+            "Players who have cast a creature spell this turn can't cast additional creature spells.",
+        )
+        .unwrap();
+        let StaticMode::PerTurnCastLimit { who, max, .. } = &def.mode else {
+            panic!("expected PerTurnCastLimit, got {:?}", def.mode);
+        };
+        assert_eq!(*who, ProhibitionScope::AllPlayers);
+        assert_eq!(*max, 1);
+    }
+
+    #[test]
+    fn per_turn_cast_limit_conditional_subject_singular_additional_spell() {
+        // Sibling coverage: some Oracle-style restrictions use singular
+        // "additional [type] spell" rather than plural "spells".
+        let def = parse_static_line(
+            "Each player who has cast an instant spell this turn can't cast additional instant spell.",
+        )
+        .unwrap();
+        let StaticMode::PerTurnCastLimit { spell_filter, .. } = &def.mode else {
+            panic!("expected PerTurnCastLimit, got {:?}", def.mode);
+        };
+        let Some(TargetFilter::Typed(tf)) = spell_filter else {
+            panic!("expected typed spell filter, got {spell_filter:?}");
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Instant]);
+    }
+
+    #[test]
+    fn per_turn_cast_limit_conditional_subject_you_scope() {
+        // Class test (subject axis): the helper accepts the "you " subject prefix;
+        // we lock in
+        // the building-block behavior for completeness across the
+        // `strip_casting_prohibition_subject` outputs that have a trailing space
+        // suitable for the "who have cast" continuation. The "you " arm of the
+        // shared subject helper covers cards like Arcane Laboratory variants.
+        let def = parse_static_line(
+            "You who have cast a creature spell this turn can't cast additional creature spells.",
+        )
+        .unwrap();
+        let StaticMode::PerTurnCastLimit { who, .. } = &def.mode else {
+            panic!("expected PerTurnCastLimit, got {:?}", def.mode);
+        };
+        assert_eq!(*who, ProhibitionScope::Controller);
+    }
+
+    #[test]
+    fn per_turn_cast_limit_conditional_subject_mismatched_types_rejected() {
+        // Defensive: if subject and object types diverge, the max=1 reduction is
+        // no longer sound. The parser must not silently mis-model such a card.
+        // (No known printed card uses this shape; the test guards future text.)
+        let def = parse_static_line(
+            "Each player who has cast a creature spell this turn can't cast additional noncreature spells.",
+        );
+        // Either falls through to a different parser (None preferred) or is not the
+        // conditional-subject mode. The key invariant: it must NOT produce a
+        // PerTurnCastLimit with one type's filter on the other.
+        if let Some(def) = def {
+            if let StaticMode::PerTurnCastLimit { .. } = def.mode {
+                panic!("mismatched-type conditional subject must not collapse to PerTurnCastLimit");
+            }
+        }
     }
 
     #[test]

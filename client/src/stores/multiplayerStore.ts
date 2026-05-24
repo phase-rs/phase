@@ -38,6 +38,7 @@ import {
 } from "../adapter/server-draft-adapter";
 import type { DraftPlayerView } from "../adapter/draft-adapter";
 import type {
+  DeckChoice,
   PlayerSlot,
   SeatMutation,
 } from "../multiplayer/seatTypes";
@@ -61,6 +62,13 @@ function asDeckPayload(deck: HostingDeck): { main_deck: string[]; sideboard: str
     sideboard: deck.sideboard,
     commander: deck.commander,
   };
+}
+
+function aiSeatDeckChoice(deckName: string | null): DeckChoice {
+  if (!deckName || deckName.toLowerCase() === "random") {
+    return { type: "Random" };
+  }
+  return { type: "Named", data: deckName };
 }
 // Prevents onclose from clearing session token after GameStarted
 let gameStartedFired = false;
@@ -392,12 +400,22 @@ export const FORMAT_DEFAULTS: Record<GameFormat, FormatConfig> = {
   TwoHeadedGiant: TWO_HEADED_GIANT_DEFAULT,
 };
 
+/**
+ * Canonical official lobby URL, mirroring `DEFAULT_SERVER` in serverDetection.
+ * Kept as a local literal (not imported) because this constant is read at the
+ * top level during `create()`, and serverDetection ↔ multiplayerStore form an
+ * import cycle — a top-level read of the imported value could hit a TDZ crash
+ * depending on bundler load order. The migration below uses the same constant
+ * to retire the decommissioned regional host from persisted state.
+ */
+const OFFICIAL_LOBBY_URL = "wss://lobby.phase-rs.dev/ws";
+
 export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>()(
   persist(
     (set, get) => ({
       playerId: crypto.randomUUID(),
       displayName: "",
-      serverAddress: "wss://us.phase-rs.dev/ws",
+      serverAddress: OFFICIAL_LOBBY_URL,
       connectionStatus: "disconnected",
       activePlayerId: null,
       opponentDisplayName: null,
@@ -423,7 +441,17 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
 
       setServerInfo: (info) => set({ serverInfo: info }),
       setDisplayName: (name) => set({ displayName: name }),
-      setServerAddress: (address) => set({ serverAddress: address }),
+      setServerAddress: (address) => {
+        // Switching servers invalidates the live subscription socket: it's
+        // still connected to the previous region and would keep streaming
+        // that lobby's games and PlayerCount. Tear it down so the next
+        // `ensureSubscriptionSocket` dials the new address. No-op when the
+        // address is unchanged (re-selecting the current server).
+        if (address !== get().serverAddress) {
+          get().closeSubscriptionSocket();
+        }
+        set({ serverAddress: address });
+      },
       setConnectionStatus: (status) => set({ connectionStatus: status }),
       setActivePlayerId: (id) => set({ activePlayerId: id }),
       setOpponentDisplayName: (name) => {
@@ -853,9 +881,10 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           }
         });
 
-        await adapter.initialize();
         activeP2PHostAdapter = adapter;
         activeP2PHostGameId = gameId;
+
+        await adapter.initialize();
 
         set({
           hostIsPublic: opts.useBroker,
@@ -868,6 +897,23 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           },
           playerSlots: adapter.getPlayerSlots(),
         });
+
+        for (const seat of settings.aiSeats) {
+          await adapter.applySeatMutation({
+            type: "SetKind",
+            data: {
+              seatIndex: seat.seatIndex,
+              kind: {
+                type: "Ai",
+                data: {
+                  difficulty: seat.difficulty,
+                  deck: aiSeatDeckChoice(seat.deckName),
+                },
+              },
+            },
+          });
+        }
+
         return true;
       },
 
@@ -1097,6 +1143,24 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
     }),
     {
       name: "phase-multiplayer",
+      version: 1,
+      // v0 → v1: the regional "us.phase-rs.dev" lobby was retired in favour of
+      // the single global broker at "lobby.phase-rs.dev". A returning user's
+      // persisted serverAddress overrides the in-code default on rehydrate, so
+      // without this rewrite they stay pinned to the dead host forever. Only the
+      // old official host is rewritten — custom self-hosted addresses are left
+      // untouched.
+      migrate: (persisted: unknown, version: number) => {
+        if (!persisted || typeof persisted !== "object") return persisted;
+        const migrated = persisted as Record<string, unknown>;
+        if (version < 1) {
+          const addr = migrated.serverAddress;
+          if (typeof addr === "string" && addr.includes("us.phase-rs.dev")) {
+            migrated.serverAddress = OFFICIAL_LOBBY_URL;
+          }
+        }
+        return migrated;
+      },
       partialize: (state) => ({
         playerId: state.playerId,
         displayName: state.displayName,

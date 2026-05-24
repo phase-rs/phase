@@ -55,7 +55,7 @@ When creating or participating in an agent team (whether triggered by `/batch-me
 1. **Use existing skills.** Every implementation must follow the relevant skill checklist (`/add-engine-effect`, `/add-keyword`, `/add-trigger`, etc.). No ad-hoc approaches.
 2. **Teammates cannot spawn subagents.** All review subagents must be spawned by the lead. The lead receives the plan/implementation from the teammate, spawns a review subagent (model: opus), and sends feedback back to the teammate. This review loop repeats until clean (max 3 rounds).
 3. **Sequential execution by default.** Multiple teammates must not implement concurrently unless their file sets are completely disjoint. Shared files like `types/ability.rs`, `effects/mod.rs`, and `parser/oracle.rs` are frequent collision points.
-4. **Verify before committing.** Run `cargo fmt --all`, then check Tilt logs (`tilt logs clippy --tail 30 --since 2m`, `tilt logs test-engine --tail 50 --since 2m`) to confirm clippy and tests pass. For frontend changes, check `tilt logs check-frontend --tail 30 --since 2m`. Do NOT run cargo build/clippy/test directly — Tilt handles these continuously and running them manually causes target lock contention. TypeScript errors must not be committed.
+4. **Use risk-scaled verification.** Run `cargo fmt --all`, then verify at the cheapest level that gives useful signal for the change. For small parser/AST-only fixes, run the parser combinator gate and targeted semantic checks, then let Tilt continue in the background; do not block every minor commit on full `clippy` + `test-engine` + `card-data` green. For non-trivial engine plumbing, shared target/stack/state-machine changes, frontend changes, or before marking an issue fixed-unreleased, collect stronger evidence from the relevant Tilt resources. Do NOT run cargo build/clippy/test directly — Tilt handles these continuously and running them manually causes target lock contention. TypeScript errors must not be committed.
 
 ### CRITICAL: Use Tilt Logs Instead of Running Builds
 
@@ -92,6 +92,7 @@ Exit codes: `0` all ok, `1` a resource is in terminal error (`updateStatus=error
 
 **Rules:**
 - After saving files, wait ~10-30s for Tilt to detect changes and rebuild, then check logs.
+- Do not wait for every Tilt resource to go green after every minor edit. Use the smallest relevant signal while iterating, and batch broader Tilt verification at natural checkpoints such as before marking an issue fixed, after a risky engine change, or before handing work off.
 - Prefer the `tilt get uiresource` polling loop when waiting on multiple resources; use logs after a resource reports `error` or when you need detailed output.
 - Do not treat `.status.buildHistory[0].error` as actionable while `.status.currentBuild.spanID` is present. Build history may still contain the previous failed run while Tilt is compiling a newer one.
 - Only diagnose/fix a resource error after `updateStatus == "error"` and `currentBuild.spanID == "none"`. `pending` with no current span usually means the resource is queued behind another resource or cargo lock; wait instead of starting manual cargo commands.
@@ -101,7 +102,7 @@ Exit codes: `0` all ok, `1` a resource is in terminal error (`updateStatus=error
 - Only run cargo/pnpm commands directly if Tilt is confirmed not running. Detect with `tilt get uiresource clippy >/dev/null 2>&1` (exit 0 = Tilt up; exit non-zero = Tilt down or unreachable). `tilt status` is **not** a valid subcommand — do not use it.
 - `cargo fmt --all` is the one exception — always run it directly since Tilt doesn't auto-format.
 
-**Canonical verification pattern (use this everywhere — agent, skills, ad-hoc):**
+**Risk-scaled verification cadence (use this everywhere — agent, skills, ad-hoc):**
 
 Tilt is the *preferred* path but is not always running (fresh clones, CI shells, headless tooling). Every verification step must default to `tilt-wait.sh` when Tilt is up and fall back to direct cargo/pnpm commands when it is not. Detection is a single shell guard:
 
@@ -109,8 +110,20 @@ Tilt is the *preferred* path but is not always running (fresh clones, CI shells,
 # Always run fmt directly — Tilt does not auto-format.
 cargo fmt --all
 
-# Rust verification (engine + parser — any engine src change invalidates
-# card-data per Tiltfile, so wait on it unconditionally):
+# Fast parser iteration: use this for small parser/AST-only changes while
+# moving through many bug reports. Broader Tilt resources may keep running in
+# the background; do not wait on card-data for every tiny parser edit.
+./scripts/check-parser-combinators.sh
+if tilt get uiresource clippy >/dev/null 2>&1; then
+  ./scripts/tilt-wait.sh --timeout 180 clippy
+else
+  cargo clippy --all-targets -- -D warnings
+fi
+
+# Full Rust verification: use this before marking an issue fixed-unreleased,
+# after non-trivial engine/runtime changes, before long handoffs, and before PR
+# or release boundaries. Parser changes invalidate card-data, but card-data is
+# a checkpoint resource, not a per-micro-edit throttle.
 if tilt get uiresource clippy >/dev/null 2>&1; then
   ./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data
 else

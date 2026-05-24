@@ -11,8 +11,9 @@ use crate::game::quantity::{
     counter_count_from_map, resolve_quantity, resolve_quantity_with_targets,
 };
 use crate::types::ability::{
-    ChoiceValue, ChosenAttribute, ControllerRef, FilterProp, QuantityExpr, ResolvedAbility,
-    SharedQuality, SharedQualityRelation, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    ChoiceValue, ChosenAttribute, ControllerRef, FilterProp, PtStat, PtValueScope, QuantityExpr,
+    ResolvedAbility, SharedQuality, SharedQualityRelation, TargetFilter, TargetRef, TypeFilter,
+    TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterMatch;
@@ -337,7 +338,7 @@ pub fn matches_target_filter_on_counter_added_record(
     )
 }
 
-/// CR 400.7 + CR 608.2c: Evaluate a target filter against last-known information.
+/// CR 400.7 + CR 608.2h: Evaluate a target filter against last-known information.
 ///
 /// This reuses the zone-change snapshot evaluator because both paths answer the
 /// same question: did the object have the requested characteristics at the last
@@ -358,6 +359,10 @@ pub fn matches_target_filter_on_lki_snapshot(
         keywords: lki.keywords.clone(),
         power: lki.power,
         toughness: lki.toughness,
+        // CR 208.4b + CR 613.4b: Carry base P/T into the synthesized record so
+        // the base-scope `PtComparison` arm reads the LKI base value.
+        base_power: lki.base_power,
+        base_toughness: lki.base_toughness,
         colors: lki.colors.clone(),
         mana_value: lki.mana_value,
         controller: lki.controller,
@@ -1226,6 +1231,17 @@ pub fn spell_object_matches_filter_from_state(
             state,
             source_id,
             source_controller: source_obj.controller,
+            // CR 109.1 is cited as the identity foundation here (an object
+            // is uniquely the object that it is) because the Comprehensive
+            // Rules have no dedicated entry defining "another" — the
+            // standard reading across the rules text is "an object distinct
+            // from the referenced object". Thread the cast-spell's
+            // object_id through so `FilterProp::Another` ("other Dragon
+            // spells you cast") can exclude the case where the spell being
+            // cast IS the static's own source (e.g. casting The Ur-Dragon
+            // itself from the command zone — Eminence must not reduce its
+            // own cost).
+            spell_object_id: Some(spell_obj.id),
         }),
     )
 }
@@ -1250,6 +1266,14 @@ struct SpellFilterContext<'a> {
     state: &'a GameState,
     source_id: ObjectId,
     source_controller: PlayerId,
+    /// CR 109.1 (cited as identity foundation — CR has no dedicated
+    /// "another" entry): ObjectId of the spell being filtered. `None` when
+    /// the caller is matching against a historical `SpellCastRecord`
+    /// (CR 117.x turn-history queries) for which `Another` is structurally
+    /// indeterminate — those callers fail-closed on `Another`. Live
+    /// cost-modifier evaluation passes `Some(spell.id)` so "other [X]
+    /// spells you cast" excludes the static's own source.
+    spell_object_id: Option<ObjectId>,
 }
 
 fn spell_object_matches_filter_inner(
@@ -1428,6 +1452,20 @@ fn spell_object_matches_property(
                 })
                 .is_some_and(|card_type| record.core_types.contains(card_type))
         }),
+        // CR 109.1 (cited as identity foundation — CR has no dedicated
+        // "another" entry): "other [X] spells you cast" excludes the case
+        // where the spell being cast IS the static's own source object. The
+        // check is identity-only (`object_id != source_id`); two distinct
+        // copies of the same card are NOT "the same" object. Historical-
+        // record callers pass `spell_object_id: None` and fail-closed here
+        // (a turn-history "another" query needs the original cast's
+        // object_id, which is not stored in the snapshot — CR 117.x
+        // predicates that need it must route through dedicated `Another`-
+        // aware paths).
+        FilterProp::Another => context.is_some_and(|ctx| {
+            ctx.spell_object_id
+                .is_some_and(|spell_id| spell_id != ctx.source_id)
+        }),
         _ => spell_record_matches_property(record, prop),
     }
 }
@@ -1555,10 +1593,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::Another
         | FilterProp::Unpaired
         | FilterProp::OtherThanTriggerObject
-        | FilterProp::PowerLE { .. }
-        | FilterProp::PowerGE { .. }
-        | FilterProp::ToughnessLE { .. }
-        | FilterProp::ToughnessGE { .. }
+        | FilterProp::PtComparison { .. }
         | FilterProp::PowerGTSource
         | FilterProp::IsChosenCreatureType
         | FilterProp::MostPrevalentCreatureTypeIn { .. }
@@ -2070,21 +2105,26 @@ fn matches_filter_prop(
         // every object from individual match checks.
         FilterProp::OtherThanTriggerObject => true,
         FilterProp::HasColor { color } => obj.color.contains(color),
-        // CR 208.1: Power comparison against a dynamic threshold. Dynamic thresholds
-        // (`QuantityRef::Variable { "X" }`) resolve against the ability's `chosen_x`
-        // when a `ResolvedAbility` is in scope via `FilterContext::from_ability`.
-        FilterProp::PowerLE { value } => {
-            obj.power.unwrap_or(0) <= resolve_filter_threshold(state, value, source)
-        }
-        FilterProp::PowerGE { value } => {
-            obj.power.unwrap_or(0) >= resolve_filter_threshold(state, value, source)
-        }
-        // CR 208.1: Toughness comparison against a dynamic threshold.
-        FilterProp::ToughnessLE { value } => {
-            obj.toughness.unwrap_or(0) <= resolve_filter_threshold(state, value, source)
-        }
-        FilterProp::ToughnessGE { value } => {
-            obj.toughness.unwrap_or(0) >= resolve_filter_threshold(state, value, source)
+        // CR 208 + CR 208.4b: Power/toughness comparison against a dynamic
+        // threshold. `scope = Base` reads `base_power`/`base_toughness` (the
+        // value after layer 7b, ignoring counters/modifiers per CR 208.4b);
+        // `scope = Current` reads the fully-modified `power`/`toughness`.
+        // Dynamic thresholds (`QuantityRef::Variable { "X" }`) resolve against
+        // the ability's `chosen_x` via `FilterContext::from_ability`.
+        FilterProp::PtComparison {
+            stat,
+            scope,
+            comparator,
+            value,
+        } => {
+            let lhs = match (stat, scope) {
+                (PtStat::Power, PtValueScope::Current) => obj.power,
+                (PtStat::Power, PtValueScope::Base) => obj.base_power,
+                (PtStat::Toughness, PtValueScope::Current) => obj.toughness,
+                (PtStat::Toughness, PtValueScope::Base) => obj.base_toughness,
+            }
+            .unwrap_or(0);
+            comparator.evaluate(lhs, resolve_filter_threshold(state, value, source))
         }
         // Disjunctive composite: any inner prop matches.
         FilterProp::AnyOf { props } => props
@@ -2344,20 +2384,30 @@ fn zone_change_record_matches_property(
         }
         // CR 201.2: Name match (case-insensitive) on the event-time object.
         FilterProp::Named { name } => record.name.eq_ignore_ascii_case(name),
-        // CR 208.1: Power threshold on the event-time object. A `None` power
-        // (non-creature in some zones) treats as 0 — matches live-state behavior.
-        FilterProp::PowerLE { value } => {
-            record.power.unwrap_or(0) <= resolve_filter_threshold(state, value, source)
-        }
-        FilterProp::PowerGE { value } => {
-            record.power.unwrap_or(0) >= resolve_filter_threshold(state, value, source)
-        }
-        // CR 208.1: Toughness threshold on the event-time object.
-        FilterProp::ToughnessLE { value } => {
-            record.toughness.unwrap_or(0) <= resolve_filter_threshold(state, value, source)
-        }
-        FilterProp::ToughnessGE { value } => {
-            record.toughness.unwrap_or(0) >= resolve_filter_threshold(state, value, source)
+        // CR 208 + CR 208.4b: Power/toughness threshold on the event-time
+        // object. A `None` value (non-creature in some zones) treats as 0,
+        // matching live-state behavior. The zone-change snapshot captures both
+        // the current (post-layer-7) and base (layer-7b, per CR 613.4b) values
+        // at move-time, so `scope = Base` reads `record.base_power`/
+        // `record.base_toughness` while `scope = Current` reads
+        // `record.power`/`record.toughness`. This makes the look-back
+        // (leaves-the-battlefield / dies) path as precise as live-object
+        // battlefield filtering (CR 603.10a): a base-1/1 with a +1/+1 counter
+        // matches `power <= 1` under `Base` but not under `Current`.
+        FilterProp::PtComparison {
+            stat,
+            scope,
+            comparator,
+            value,
+        } => {
+            let lhs = match (stat, scope) {
+                (PtStat::Power, PtValueScope::Current) => record.power,
+                (PtStat::Power, PtValueScope::Base) => record.base_power,
+                (PtStat::Toughness, PtValueScope::Current) => record.toughness,
+                (PtStat::Toughness, PtValueScope::Base) => record.base_toughness,
+            }
+            .unwrap_or(0);
+            comparator.evaluate(lhs, resolve_filter_threshold(state, value, source))
         }
         // CR 202.3: Mana value threshold on the event-time object.
         FilterProp::Cmc { comparator, value } => comparator.evaluate(
@@ -5069,12 +5119,13 @@ mod tests {
         assert!(!super::matches_target_filter(&state, cmc8, &filter, &ctx));
     }
 
-    /// CR 208.1 + CR 107.3a: `PowerLE { Variable("X") }` + `chosen_x = Some(3)`
-    /// matches only power-≤-3 creatures.
+    /// CR 208 + CR 107.3a: `PtComparison { Power, Current, LE, Variable("X") }`
+    /// + `chosen_x = Some(3)` matches only power-≤-3 creatures.
     #[test]
     fn filter_context_from_ability_resolves_x_in_power_le() {
         use crate::types::ability::{
-            Effect, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TypedFilter,
+            Comparator, Effect, PtStat, PtValueScope, QuantityExpr, QuantityRef, ResolvedAbility,
+            TargetFilter, TypedFilter,
         };
         let mut state = setup();
         let weak = add_creature(&mut state, PlayerId(0), "Weak");
@@ -5082,16 +5133,18 @@ mod tests {
         let strong = add_creature(&mut state, PlayerId(0), "Strong");
         state.objects.get_mut(&strong).unwrap().power = Some(5);
 
-        let filter =
-            TargetFilter::Typed(
-                TypedFilter::creature().properties(vec![FilterProp::PowerLE {
-                    value: QuantityExpr::Ref {
-                        qty: QuantityRef::Variable {
-                            name: "X".to_string(),
-                        },
+        let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::LE,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
                     },
-                }]),
-            );
+                },
+            },
+        ]));
         let mut ability = ResolvedAbility::new(
             Effect::Unimplemented {
                 name: String::new(),
@@ -5376,14 +5429,19 @@ mod tests {
         assert!(super::matches_target_filter(&state, mixed, &ne0, &ctx));
     }
 
-    /// Serde round-trip for widened `FilterProp::PowerLE.value: QuantityExpr`,
+    /// Serde round-trip for `FilterProp::PtComparison.value: QuantityExpr`,
     /// `Counters.count: QuantityExpr`, and `Effect::SearchLibrary.count: QuantityExpr`.
     #[test]
     fn widened_numeric_fields_roundtrip_through_json() {
-        use crate::types::ability::{Comparator, Effect, QuantityExpr, TargetFilter, TypedFilter};
+        use crate::types::ability::{
+            Comparator, Effect, PtStat, PtValueScope, QuantityExpr, TargetFilter, TypedFilter,
+        };
         use crate::types::counter::{CounterMatch, CounterType};
 
-        let power_filter = FilterProp::PowerLE {
+        let power_filter = FilterProp::PtComparison {
+            stat: PtStat::Power,
+            scope: PtValueScope::Current,
+            comparator: Comparator::LE,
             value: QuantityExpr::Fixed { value: 3 },
         };
         let json = serde_json::to_string(&power_filter).unwrap();
@@ -6118,6 +6176,8 @@ mod tests {
             name: "Returned Creature".into(),
             power: Some(2),
             toughness: Some(2),
+            base_power: Some(2),
+            base_toughness: Some(2),
             mana_value: 3,
             controller: PlayerId(1),
             owner: PlayerId(1),
@@ -6157,6 +6217,8 @@ mod tests {
             name: "Destroyed Land".into(),
             power: None,
             toughness: None,
+            base_power: None,
+            base_toughness: None,
             mana_value: 0,
             controller: PlayerId(1),
             owner: PlayerId(1),
@@ -6264,6 +6326,171 @@ mod tests {
             &vanilla_record,
             &source_ctx,
         ));
+    }
+
+    /// CR 208.4b + CR 613.4b + CR 603.10a: `FilterProp::PtComparison` on a
+    /// zone-change snapshot must honor `scope`. A base-1/1 creature that had a
+    /// +1/+1 counter (current 2/2) when it left the battlefield records
+    /// `base_power/base_toughness = 1` and `power/toughness = 2`. A look-back
+    /// "with base power 1 or less dies" filter (`scope: Base`) must match, while
+    /// the same threshold under `scope: Current` must not — proving the
+    /// snapshot path reads the captured base value rather than the current one.
+    #[test]
+    fn zone_change_record_pt_comparison_honors_base_scope() {
+        use crate::types::ability::{Comparator, PtStat, PtValueScope, QuantityExpr};
+        use crate::types::game_state::ZoneChangeRecord;
+
+        let state = GameState::default();
+        let source_ctx = SourceContext {
+            id: ObjectId(1),
+            controller: Some(PlayerId(0)),
+            attached_to: None,
+            source_is_aura: false,
+            source_is_equipment: false,
+            chosen_creature_type: None,
+            chosen_attributes: &[],
+            ability: None,
+            recipient_id: None,
+        };
+
+        // base 1/1, current 2/2 (had a +1/+1 counter when it left the battlefield).
+        let record = ZoneChangeRecord {
+            core_types: vec![CoreType::Creature],
+            power: Some(2),
+            toughness: Some(2),
+            base_power: Some(1),
+            base_toughness: Some(1),
+            ..ZoneChangeRecord::test_minimal(ObjectId(7), Some(Zone::Battlefield), Zone::Graveyard)
+        };
+
+        let pt_filter = |stat, scope| FilterProp::PtComparison {
+            stat,
+            scope,
+            comparator: Comparator::LE,
+            value: QuantityExpr::Fixed { value: 1 },
+        };
+
+        // Base scope reads base_power/base_toughness (1) — matches `<= 1`.
+        assert!(zone_change_record_matches_property(
+            &pt_filter(PtStat::Power, PtValueScope::Base),
+            &state,
+            &record,
+            &source_ctx,
+        ));
+        assert!(zone_change_record_matches_property(
+            &pt_filter(PtStat::Toughness, PtValueScope::Base),
+            &state,
+            &record,
+            &source_ctx,
+        ));
+
+        // Current scope reads power/toughness (2) — does NOT match `<= 1`.
+        assert!(!zone_change_record_matches_property(
+            &pt_filter(PtStat::Power, PtValueScope::Current),
+            &state,
+            &record,
+            &source_ctx,
+        ));
+        assert!(!zone_change_record_matches_property(
+            &pt_filter(PtStat::Toughness, PtValueScope::Current),
+            &state,
+            &record,
+            &source_ctx,
+        ));
+    }
+
+    /// CR 208.4b + CR 613.4b + CR 603.10a: End-to-end look-back path. Drives a
+    /// REAL `GameObject` (base 1/1) with a +1/+1 counter through the live layer
+    /// pipeline (`evaluate_layers` makes current power/toughness 2/2 while the
+    /// layer-7b base stays 1/1), then snapshots it via the authoritative
+    /// production constructor `GameObject::snapshot_for_zone_change` — NOT a
+    /// hand-built literal. The resulting `ZoneChangeRecord` must carry
+    /// `base_power = 1` (layer-7b base) and `power = 2` (current), and the
+    /// snapshot matcher must read the base value under `scope: Base`. This is
+    /// the discriminating dies/LTB scenario: "whenever a creature with base
+    /// power 1 or less dies" matches, "with power 1 or less" (current) does not.
+    #[test]
+    fn snapshot_for_zone_change_captures_layer_7b_base_for_lookback_filter() {
+        use crate::game::layers::evaluate_layers;
+        use crate::types::ability::{Comparator, PtStat, PtValueScope, QuantityExpr};
+        use crate::types::counter::CounterType;
+
+        let mut state = setup();
+        let id = add_creature(&mut state, PlayerId(0), "Base One Creature");
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            // Base 1/1 (layer-7b values), plus a +1/+1 counter (layer 7c).
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(1);
+            obj.base_card_types = obj.card_types.clone();
+            obj.counters.insert(CounterType::Plus1Plus1, 1);
+        }
+
+        // Live layer pass: current becomes 2/2, base stays 1/1.
+        evaluate_layers(&mut state);
+        {
+            let obj = &state.objects[&id];
+            assert_eq!(obj.power, Some(2), "counter should raise current power");
+            assert_eq!(obj.toughness, Some(2));
+            assert_eq!(obj.base_power, Some(1), "layer-7b base power unchanged");
+            assert_eq!(obj.base_toughness, Some(1));
+        }
+
+        // Authoritative production snapshot constructor (the dies/LTB path).
+        let record = state.objects[&id].snapshot_for_zone_change(
+            id,
+            Some(Zone::Battlefield),
+            Zone::Graveyard,
+        );
+        // The record must carry the layer-7b base, not the current value.
+        assert_eq!(
+            record.base_power,
+            Some(1),
+            "snapshot must capture layer-7b base power, not current"
+        );
+        assert_eq!(record.base_toughness, Some(1));
+        assert_eq!(record.power, Some(2), "snapshot must capture current power");
+        assert_eq!(record.toughness, Some(2));
+
+        let source_ctx = SourceContext {
+            id,
+            controller: Some(PlayerId(0)),
+            attached_to: None,
+            source_is_aura: false,
+            source_is_equipment: false,
+            chosen_creature_type: None,
+            chosen_attributes: &[],
+            ability: None,
+            recipient_id: None,
+        };
+        let pt_filter = |scope| FilterProp::PtComparison {
+            stat: PtStat::Power,
+            scope,
+            comparator: Comparator::LE,
+            value: QuantityExpr::Fixed { value: 1 },
+        };
+
+        // Base scope (base 1 <= 1) matches; current scope (current 2 <= 1) does not.
+        assert!(
+            zone_change_record_matches_property(
+                &pt_filter(PtValueScope::Base),
+                &state,
+                &record,
+                &source_ctx,
+            ),
+            "base power 1 <= 1 must match on the look-back path"
+        );
+        assert!(
+            !zone_change_record_matches_property(
+                &pt_filter(PtValueScope::Current),
+                &state,
+                &record,
+                &source_ctx,
+            ),
+            "current power 2 <= 1 must NOT match — proves base != current on snapshot path"
+        );
     }
 
     /// CR 700.6: `FilterProp::Historic` on a `SpellCastRecord` must read the
@@ -6727,6 +6954,8 @@ mod tests {
             keywords: vec![Keyword::Changeling],
             power: Some(2),
             toughness: Some(3),
+            base_power: Some(2),
+            base_toughness: Some(3),
             colors: vec![],
             mana_value: 5,
             controller: PlayerId(0),
@@ -6815,6 +7044,8 @@ mod tests {
             name: "Test Creature".to_string(),
             power: Some(2),
             toughness: Some(2),
+            base_power: Some(2),
+            base_toughness: Some(2),
             mana_value: 2,
             controller: PlayerId(0),
             owner: PlayerId(0),
@@ -6829,6 +7060,8 @@ mod tests {
             name: "Test Land".to_string(),
             power: None,
             toughness: None,
+            base_power: None,
+            base_toughness: None,
             mana_value: 0,
             controller: PlayerId(0),
             owner: PlayerId(0),

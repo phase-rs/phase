@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::format::{FormatConfig, GameFormat};
+use engine::types::format::FormatConfig;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
 use engine::types::log::GameLogEntry;
@@ -49,67 +49,12 @@ pub struct AiSeatRequest {
     pub deck_name: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LobbyGame {
-    pub game_code: String,
-    pub host_name: String,
-    pub created_at: u64,
-    pub has_password: bool,
-    /// Display string (e.g. `"0.1.11"`). Human-readable; not a compatibility gate.
-    #[serde(default)]
-    pub host_version: String,
-    /// Git short-hash of the host's build. The compatibility gate — clients on
-    /// a different commit cannot join because GameState / rules may have diverged.
-    #[serde(default)]
-    pub host_build_commit: String,
-    /// Number of seats currently occupied (host + joined guests, including AI
-    /// if present). Updated as players join/leave.
-    #[serde(default)]
-    pub current_players: u32,
-    /// Configured seat count for this game. For 1v1 formats this is 2; for
-    /// Commander it ranges 2–4.
-    #[serde(default)]
-    pub max_players: u32,
-    /// Game format (Standard, Commander, etc.) — lets lobby UIs filter or
-    /// badge the row. Optional because older persisted entries predate the
-    /// field.
-    #[serde(default)]
-    pub format: Option<GameFormat>,
-    /// Optional per-match label distinct from the host's player name. When
-    /// set, lobby UIs render this as the row's primary title ("Friday Night
-    /// Commander") and the host's name as secondary metadata. `None` means
-    /// "use the host's name as the room label" — the behavior before this
-    /// field existed, preserved for backward compatibility.
-    #[serde(default)]
-    pub room_name: Option<String>,
-    /// True when this room is P2P-brokered (host runs the engine). False for
-    /// server-run rooms. Derived from `host_peer_id` presence at publish
-    /// time. This field is populated by the server, never by clients.
-    #[serde(default)]
-    pub is_p2p: bool,
-    /// True when the host enabled Sandbox mode for this game. Populated by
-    /// the publisher from `format_config.allow_debug_actions`. Lobby UIs
-    /// render a SANDBOX badge and prompt joiners to confirm.
-    #[serde(default)]
-    pub is_sandbox: bool,
-    /// When present, this lobby entry is a draft pod rather than a
-    /// constructed-play room. Contains set code and draft kind so the
-    /// lobby UI can badge the row appropriately.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub draft_metadata: Option<DraftLobbyMetadata>,
-}
-
-/// Metadata attached to a lobby entry when the room is a draft pod.
-/// Lightweight — only the fields the lobby listing needs to render a
-/// meaningful row. The full draft state lives in the host's WASM engine.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DraftLobbyMetadata {
-    /// Three-letter set code (e.g. "MKM", "OTJ").
-    pub set_code: String,
-    /// Draft kind label: "Quick", "Premier", or "Traditional".
-    pub draft_kind: String,
-}
+// `LobbyGame` and `DraftLobbyMetadata` are now DEFINED in `lobby-broker`
+// (the WASM-safe broker crate owns the lobby-listing wire types) and
+// re-exported here so `ServerMessage::LobbyUpdate { games: Vec<LobbyGame> }`
+// and the broker reference the same struct. The serde shape is unchanged —
+// wire bytes are byte-identical (guarded by tests/lobby_wire_contract.rs).
+pub use lobby_broker::protocol::{DraftLobbyMetadata, LobbyGame};
 
 pub use seat_reducer::types::{DeckChoice, SeatKind, SeatMutation, SeatView};
 
@@ -476,6 +421,7 @@ pub enum ServerMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine::types::format::GameFormat;
     use serde_json::Value;
 
     fn load_fixture(path: &str) -> Value {

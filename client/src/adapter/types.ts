@@ -442,6 +442,10 @@ export type CounterType =
   | "stun"
   | (string & {});
 
+export type CounterMatch =
+  | { type: "Any" }
+  | { type: "OfType"; data: CounterType };
+
 export type PlayerCounterKind =
   | "Poison"
   | "Experience"
@@ -474,6 +478,13 @@ export interface TokenCharacteristics {
   supertypes: Supertype[];
   colors: ManaColor[];
   keywords: Keyword[];
+}
+
+export interface TokenImageRef {
+  scryfall_id: string;
+  scryfall_oracle_id?: string | null;
+  face_name?: string | null;
+  preset_id: string;
 }
 
 // ── CR 701.57a + CR 702.85a: Cast/decline choice for Discover and Cascade ──
@@ -614,6 +625,8 @@ export interface GameObject {
    *  (Lander, etc.). Used as alt-text / aria-label when the Scryfall token
    *  image is unavailable. Absent for non-predefined objects. */
   token_rules_text?: string;
+  token_image_ref?: TokenImageRef | null;
+  source_related_token_ids?: string[];
   unimplemented_mechanics?: string[];
   has_summoning_sickness?: boolean;
   has_mana_ability?: boolean;
@@ -625,6 +638,14 @@ export interface GameObject {
   available_mana_pips?: ManaPip[];
   casting_permissions?: CastingPermission[];
   is_emblem?: boolean;
+  /**
+   * CR 111.1: Whether this object is a token (not a card). Independent of
+   * `display_source`: a token-copy of a real card (Twinflame, Helm of the
+   * Host) carries `is_token = true` AND `display_source = "Card"`, so it
+   * renders visually identical to the printed card. Combine the two to flag
+   * such copies (`is_token && display_source !== "Token"`).
+   */
+  is_token?: boolean;
   /**
    * Image-lookup routing hint from the engine. "Card" → look up the image
    * in the real-card database (default; also covers token-copies of real
@@ -777,14 +798,23 @@ export interface CombatState {
 export interface ResolvedAbility {
   targets: TargetRef[];
   sub_ability?: ResolvedAbility;
+  else_ability?: ResolvedAbility;
+  description?: string;
 }
 
 // ── Stack ────────────────────────────────────────────────────────────────
 
+export type KeywordAction =
+  | { Equip: { equipment_id: ObjectId; target_creature_id: ObjectId } }
+  | { Crew: { vehicle_id: ObjectId; paid_creature_ids: ObjectId[] } }
+  | { Saddle: { mount_id: ObjectId; paid_creature_ids: ObjectId[] } }
+  | { Station: { spacecraft_id: ObjectId; paid_creature_id: ObjectId; snapshot_power: number } };
+
 export type StackEntryKind =
   | { type: "Spell"; data: { card_id: CardId; ability?: ResolvedAbility; actual_mana_spent?: number } }
   | { type: "ActivatedAbility"; data: { source_id: ObjectId; ability: ResolvedAbility } }
-  | { type: "TriggeredAbility"; data: { source_id: ObjectId; ability: ResolvedAbility; description?: string; source_name?: string } };
+  | { type: "TriggeredAbility"; data: { source_id: ObjectId; ability: ResolvedAbility; description?: string; source_name?: string } }
+  | { type: "KeywordAction"; data: { action: KeywordAction } };
 
 export interface StackEntry {
   id: ObjectId;
@@ -804,6 +834,35 @@ export interface StackDisplayGroup {
   representative: ObjectId;
   count: number;
   member_ids: ObjectId[];
+}
+
+export interface StackTargetDisplay {
+  target: TargetRef;
+  label: string;
+}
+
+export type StackPaidFactView =
+  | { type: "XValue"; data: { value: number } }
+  | { type: "ManaSpent"; data: { amount: number } }
+  | { type: "ColorsSpent"; data: { distinct: number } }
+  | { type: "Kicked"; data: { count: number } }
+  | { type: "AdditionalCostPaid" }
+  | { type: "CastVariant"; data: { variant: string } }
+  | { type: "Convoked"; data: { count: number } };
+
+export interface TriggerContextDisplay {
+  label: string;
+  object_id?: ObjectId;
+  player?: PlayerId;
+}
+
+export interface StackEntryDisplay {
+  source_name: string;
+  kind_label: string;
+  ability_description?: string;
+  targets?: StackTargetDisplay[];
+  paid?: StackPaidFactView[];
+  trigger_context?: TriggerContextDisplay[];
 }
 
 // ── Pending Cast (for target selection) ──────────────────────────────────
@@ -886,6 +945,7 @@ export type OpeningHandBottomReason = { type: "TinyLeadersMultiCommander" };
 
 export type WaitingFor =
   | { type: "Priority"; data: { player: PlayerId } }
+  | { type: "ActivationCostOneOfChoice"; data: { player: PlayerId; costs: SerializedAbilityCost[]; pending_cast: PendingCast } }
   | {
       type: "MulliganDecision";
       data: {
@@ -952,6 +1012,7 @@ export type WaitingFor =
   | { type: "DiscardForCost"; data: { player: PlayerId; count: number; cards: ObjectId[]; pending_cast: PendingCast } }
   | { type: "SacrificeForCost"; data: { player: PlayerId; count: number; permanents: ObjectId[]; pending_cast: PendingCast } }
   | { type: "ReturnToHandForCost"; data: { player: PlayerId; count: number; permanents: ObjectId[]; pending_cast: PendingCast } }
+  | { type: "RemoveCounterForCost"; data: { player: PlayerId; count: number; counter_type: CounterMatch; permanents: ObjectId[]; pending_cast: PendingCast } }
   | { type: "BlightChoice"; data: { player: PlayerId; count: number; creatures: ObjectId[]; pending_cast: PendingCast } }
   | { type: "BeholdForCost"; data: { player: PlayerId; count: number; choices: ObjectId[]; action: "ChooseOrReveal" | "ExileChosen"; pending_cast: PendingCast } }
   | { type: "TapCreaturesForManaAbility"; data: { player: PlayerId; count: number; creatures: ObjectId[]; pending_mana_ability: unknown } }
@@ -959,7 +1020,19 @@ export type WaitingFor =
   | { type: "ExileFromBattlefieldForManaAbility"; data: { player: PlayerId; count: number; permanents: ObjectId[]; pending_mana_ability: unknown } }
   | { type: "SacrificeForManaAbility"; data: { player: PlayerId; count: number; permanents: ObjectId[]; pending_mana_ability: unknown } }
   | { type: "PayManaAbilityMana"; data: { player: PlayerId; options: ManaType[][]; pending_mana_ability: unknown } }
-  | { type: "ChooseManaColor"; data: { player: PlayerId; choice: ManaChoicePrompt; context: unknown } }
+  | {
+      type: "ChooseManaColor";
+      data: {
+        player: PlayerId;
+        choice: ManaChoicePrompt;
+        // CR 605.3a: Only the ManaAbility context carries the bulk-activation
+        // siblings the UI reads (omitted from the wire when empty). The heavy
+        // PendingManaAbility / ResolvedAbility payloads stay opaque here.
+        context:
+          | { type: "ManaAbility"; data: { batch_siblings?: ObjectId[] } }
+          | { type: "ResolvingEffect"; data: unknown };
+      };
+    }
   | { type: "TapCreaturesForSpellCost"; data: { player: PlayerId; count: number; creatures: ObjectId[]; pending_cast: PendingCast } }
   | { type: "ExileForCost"; data: { player: PlayerId; zone: ExileCostSourceZone; count: number; cards: ObjectId[]; pending_cast: PendingCast } }
   | { type: "CollectEvidenceChoice"; data: { player: PlayerId; minimum_mana_value: number; cards: ObjectId[]; resume: unknown } }
@@ -1158,6 +1231,24 @@ export interface ActionResult {
 
 // ── Game Actions (discriminated union, tag="type", content="data") ───────
 
+export type DebugTokenRequest =
+  | {
+      type: "Preset";
+      data: {
+        preset_id: string;
+        owner: PlayerId;
+        enter_with_counters?: [CounterType, number][];
+      };
+    }
+  | {
+      type: "Custom";
+      data: {
+        owner: PlayerId;
+        characteristics: TokenCharacteristics;
+        enter_with_counters?: [CounterType, number][];
+      };
+    };
+
 export type DebugAction =
   | {
       type: "MoveToZone";
@@ -1181,6 +1272,7 @@ export type DebugAction =
   | { type: "DrawCards"; data: { player_id: PlayerId; count: number } }
   | { type: "Mill"; data: { player_id: PlayerId; count: number } }
   | { type: "ShuffleLibrary"; data: { player_id: PlayerId } }
+  | { type: "Proliferate"; data: { player_id: PlayerId } }
   | { type: "SetBasePowerToughness"; data: { object_id: ObjectId; power: number | null; toughness: number | null } }
   | { type: "ModifyCounters"; data: { object_id: ObjectId; counter_type: CounterType; delta: number } }
   | { type: "SetTapped"; data: { object_id: ObjectId; tapped: boolean } }
@@ -1200,14 +1292,14 @@ export type DebugAction =
   | {
       type: "CreateToken";
       data: {
-        owner: PlayerId;
-        characteristics: TokenCharacteristics;
-        enter_with_counters?: [CounterType, number][];
+        request: DebugTokenRequest;
       };
-    };
+    }
+  | { type: "CreateTokenCopy"; data: { source_id: ObjectId; owner: PlayerId } };
 
 export type GameAction =
   | { type: "PassPriority" }
+  | { type: "ChooseActivationCostBranch"; data: { index: number } }
   | { type: "PlayLand"; data: { object_id: ObjectId; card_id: CardId } }
   | { type: "CastSpell"; data: { object_id: ObjectId; card_id: CardId; targets: ObjectId[] } }
   | { type: "CastSpellWithPaymentMode"; data: { object_id: ObjectId; card_id: CardId; targets: ObjectId[]; payment_mode: CastPaymentMode } }
@@ -1298,7 +1390,7 @@ export type GameAction =
   | { type: "ChooseX"; data: { value: number } }
   | { type: "SubmitPayAmount"; data: { amount: number } }
   | { type: "SubmitPhyrexianChoices"; data: { choices: ShardChoice[] } }
-  | { type: "ChooseManaColor"; data: { choice: ManaChoice } }
+  | { type: "ChooseManaColor"; data: { choice: ManaChoice; count?: number } }
   | { type: "PayManaAbilityMana"; data: { payment: ManaType[] } }
   | { type: "CastPreparedCopy"; data: { source: ObjectId } }
   | { type: "CastParadigmCopy"; data: { source: ObjectId } }
@@ -1348,7 +1440,7 @@ export type GameEvent =
   | { type: "PriorityPassed"; data: { player_id: PlayerId } }
   | { type: "SpellCast"; data: { card_id: CardId; controller: PlayerId; object_id: ObjectId } }
   | { type: "XValueChosen"; data: { player: PlayerId; object_id: ObjectId; value: number } }
-  | { type: "AbilityActivated"; data: { source_id: ObjectId } }
+  | { type: "AbilityActivated"; data: { player_id: PlayerId; source_id: ObjectId } }
   | { type: "ExhaustAbilityActivated"; data: { player_id: PlayerId; source_id: ObjectId; is_mana_ability: boolean } }
   | { type: "ZoneChanged"; data: { object_id: ObjectId; from: Zone; to: Zone } }
   | { type: "LifeChanged"; data: { player_id: PlayerId; amount: number } }
@@ -1431,6 +1523,12 @@ export interface DerivedViews {
    */
   stack_display_groups?: StackDisplayGroup[];
   /**
+   * Engine-authored display details keyed by stack entry id. Includes targets,
+   * selected paid-cost facts, and public trigger context so stack UI does not
+   * infer game logic from raw abilities.
+   */
+  stack_entry_details?: Record<string, StackEntryDisplay>;
+  /**
    * Engine-authored "Auras attached to player X" projection. Players have no
    * `attachments` back-link on the GameObject side because they aren't
    * GameObjects — this map is the FE's only legitimate channel for "which
@@ -1506,6 +1604,7 @@ export interface GameState {
    */
   debug_permitted?: PlayerId[];
   eliminated_players?: PlayerId[];
+  public_revealed_cards?: ObjectId[];
   dungeon_progress?: Record<string, { current_dungeon: DungeonId | null; current_room: number; completed: DungeonId[] }>;
   initiative?: PlayerId | null;
   monarch?: PlayerId | null;

@@ -5,7 +5,9 @@ use super::oracle_nom::error::OracleError;
 use super::oracle_nom::error::OracleResult;
 use super::oracle_nom::primitives as nom_primitives;
 use crate::types::ability::{Comparator, QuantityExpr, QuantityRef, TargetFilter};
-use crate::types::card_type::CoreType;
+use crate::types::card_type::{
+    fixed_noncreature_subtypes, noncreature_subtype_set, CoreType, SubtypeSet,
+};
 use crate::types::mana::{ManaColor, ManaCost};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
@@ -526,10 +528,7 @@ const POSSESSIVES: &[&str] = &[
 
 /// Object pronouns in MTG Oracle text that refer to previously-mentioned objects.
 /// Used in anaphoric references like "shuffle it into", "put them onto", "exile that card".
-/// `"~"` is the card-name placeholder (normalized from the card's own name by the Oracle
-/// pre-processor) and acts as an object pronoun in self-shuffle effects like "shuffle ~
-/// into its owner's library" (Zenith cycle, Fblthp, etc.).
-pub const OBJECT_PRONOUNS: &[&str] = &["it", "them", "that card", "those cards", "~"];
+pub const OBJECT_PRONOUNS: &[&str] = &["it", "them", "that card", "those cards"];
 
 /// Object-style references that include both anaphoric pronouns (`OBJECT_PRONOUNS`)
 /// and the self-reference token `~` produced by `normalize_card_name_refs`.
@@ -1240,9 +1239,10 @@ pub(crate) fn is_non_subtype_subject_name(text: &str) -> bool {
 /// `Cleric Class`, `Druid Arcanist`, `Coward` must not replace the bare
 /// subtype word in their own Oracle text).
 pub(crate) fn is_subtype_word(candidate_lower: &str) -> bool {
-    SUBTYPES
-        .iter()
-        .any(|s| s.eq_ignore_ascii_case(candidate_lower))
+    fixed_noncreature_subtypes().any(|s| s.eq_ignore_ascii_case(candidate_lower))
+        || SUBTYPES
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case(candidate_lower))
 }
 
 /// Test whether a lowercased candidate word matches an MTG supertype.
@@ -1284,24 +1284,37 @@ pub fn parse_subtype(text: &str) -> Option<(String, usize)> {
         }
     }
 
+    for subtype in fixed_noncreature_subtypes() {
+        if let Some(parsed) = parse_subtype_entry(text, subtype) {
+            return Some(parsed);
+        }
+    }
+
     // Check each subtype (singular and regular plural)
     for &subtype in SUBTYPES {
-        // Try singular
-        if starts_with_word_ci(text, subtype) {
-            return Some((subtype.to_string(), subtype.len()));
+        if let Some(parsed) = parse_subtype_entry(text, subtype) {
+            return Some(parsed);
         }
+    }
 
-        // Try regular plural: subtype + "s" — check subtype prefix + 's' at boundary
-        let plural_len = subtype.len() + 1;
-        if text.len() >= plural_len
-            && text.is_char_boundary(subtype.len())
-            && text[..subtype.len()].eq_ignore_ascii_case(subtype)
-            && text.as_bytes()[subtype.len()] == b's'
-        {
-            let after = &text[plural_len..];
-            if after.is_empty() || after.starts_with(|c: char| !c.is_alphanumeric()) {
-                return Some((subtype.to_string(), plural_len));
-            }
+    None
+}
+
+fn parse_subtype_entry(text: &str, subtype: &str) -> Option<(String, usize)> {
+    if starts_with_word_ci(text, subtype) {
+        return Some((subtype.to_string(), subtype.len()));
+    }
+
+    // Try regular plural: subtype + "s" — check subtype prefix + 's' at boundary
+    let plural_len = subtype.len() + 1;
+    if text.len() >= plural_len
+        && text.is_char_boundary(subtype.len())
+        && text[..subtype.len()].eq_ignore_ascii_case(subtype)
+        && text.as_bytes()[subtype.len()] == b's'
+    {
+        let after = &text[plural_len..];
+        if after.is_empty() || after.starts_with(|c: char| !c.is_alphanumeric()) {
+            return Some((subtype.to_string(), plural_len));
         }
     }
 
@@ -1318,20 +1331,12 @@ pub fn parse_subtype(text: &str) -> Option<(String, usize)> {
 ///
 /// Used by lord-pattern parsers to avoid defaulting all subtypes to Creature.
 pub fn infer_core_type_for_subtype(subtype: &str) -> Option<CoreType> {
-    match subtype {
-        // Artifact subtypes (CR 205.3g)
-        "Treasure" | "Food" | "Clue" | "Blood" | "Gold" | "Map" | "Junk" | "Powerstone"
-        | "Equipment" | "Spacecraft" | "Vehicle" | "Fortification" | "Contraption" => {
-            // CR 205.3g: Spacecraft is an artifact subtype.
-            Some(CoreType::Artifact)
-        }
-        // Land subtypes (CR 205.3i)
-        "Forest" | "Plains" | "Island" | "Mountain" | "Swamp" | "Desert" | "Gate" | "Locus"
-        | "Cave" | "Sphere" | "Mine" | "Tower" | "Power-Plant" => Some(CoreType::Land),
-        // Enchantment subtypes (CR 205.3h)
-        "Aura" | "Shrine" | "Saga" | "Cartouche" | "Case" | "Class" | "Curse" | "Room"
-        | "Shard" | "Rune" | "Background" => Some(CoreType::Enchantment),
-        _ => None,
+    match noncreature_subtype_set(subtype)? {
+        SubtypeSet::Land => Some(CoreType::Land),
+        SubtypeSet::Artifact => Some(CoreType::Artifact),
+        SubtypeSet::Enchantment => Some(CoreType::Enchantment),
+        SubtypeSet::Spell | SubtypeSet::Planeswalker | SubtypeSet::Battle => None,
+        SubtypeSet::Creature => None,
     }
 }
 
@@ -2496,9 +2501,7 @@ mod tests {
             "shuffle",
             "into"
         ));
-        // CR 201.5: "~" is the card-name placeholder used in self-shuffle effects
-        // (e.g. "shuffle ~ into its owner's library" — Black Sun's Zenith, Zenith cycle).
-        assert!(contains_object_pronoun(
+        assert!(!contains_object_pronoun(
             "shuffle ~ into its owner's library",
             "shuffle",
             "into"
@@ -2575,7 +2578,14 @@ mod tests {
             Some(("Spacecraft".to_string(), 11))
         );
         assert_eq!(parse_subtype("forest"), Some(("Forest".to_string(), 6)));
+        assert_eq!(parse_subtype("towns"), Some(("Town".to_string(), 5)));
         assert_eq!(parse_subtype("aura"), Some(("Aura".to_string(), 4)));
+    }
+
+    #[test]
+    fn fixed_noncreature_subtype_helpers_share_authority() {
+        assert!(is_subtype_word("town"));
+        assert_eq!(infer_core_type_for_subtype("Town"), Some(CoreType::Land));
     }
 
     #[test]

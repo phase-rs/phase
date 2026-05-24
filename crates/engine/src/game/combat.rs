@@ -10,7 +10,7 @@ use crate::types::card_type::{CoreType, Supertype};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
-use crate::types::keywords::{Keyword, ProtectionTarget};
+use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
 use crate::types::statics::{BlockExceptionKind, StaticMode};
@@ -558,43 +558,17 @@ pub fn validate_blockers_for_player(
             }
         }
 
-        // CR 702.16e: Protection — a creature with protection can't be blocked by
-        // creatures with the specified quality.
+        // CR 702.16f: Protection — an attacking creature with protection can't
+        // be blocked by creatures with the stated quality.
         for kw in &attacker.keywords {
-            match kw {
-                Keyword::Protection(ProtectionTarget::Color(color))
-                    if blocker.color.contains(color) =>
-                {
+            if let Keyword::Protection(target) = kw {
+                if crate::game::keywords::source_matches_protection_target(
+                    target, attacker, blocker,
+                ) {
                     return Err(format!(
-                        "{:?} cannot block {:?} (protection from {:?})",
-                        blocker_id, attacker_id, color
+                        "{blocker_id:?} cannot block {attacker_id:?} (protection)",
                     ));
                 }
-                Keyword::Protection(ProtectionTarget::Multicolored) if blocker.color.len() > 1 => {
-                    return Err(format!(
-                        "{:?} cannot block {:?} (protection from multicolored)",
-                        blocker_id, attacker_id
-                    ));
-                }
-                // CR 702.16: ChosenColor resolves from the source permanent's chosen_attributes
-                Keyword::Protection(ProtectionTarget::ChosenColor) => {
-                    if let Some(color) = attacker.chosen_color() {
-                        if blocker.color.contains(&color) {
-                            return Err(format!(
-                                "{:?} cannot block {:?} (protection from chosen color {:?})",
-                                blocker_id, attacker_id, color
-                            ));
-                        }
-                    }
-                }
-                // CR 702.16j: Protection from everything — blocked by no creature.
-                Keyword::Protection(ProtectionTarget::Everything) => {
-                    return Err(format!(
-                        "{:?} cannot block {:?} (protection from everything)",
-                        blocker_id, attacker_id
-                    ));
-                }
-                _ => {}
             }
         }
 
@@ -1866,28 +1840,10 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
         }
     }
     for kw in &attacker.keywords {
-        match kw {
-            Keyword::Protection(ProtectionTarget::Color(color))
-                if blocker.color.contains(color) =>
-            {
+        if let Keyword::Protection(target) = kw {
+            if crate::game::keywords::source_matches_protection_target(target, attacker, blocker) {
                 return false;
             }
-            Keyword::Protection(ProtectionTarget::Multicolored) if blocker.color.len() > 1 => {
-                return false;
-            }
-            // CR 702.16: ChosenColor resolves from the source permanent's chosen_attributes
-            Keyword::Protection(ProtectionTarget::ChosenColor) => {
-                if let Some(color) = attacker.chosen_color() {
-                    if blocker.color.contains(&color) {
-                        return false;
-                    }
-                }
-            }
-            // CR 702.16j: Protection from everything — blocked by no creature.
-            Keyword::Protection(ProtectionTarget::Everything) => {
-                return false;
-            }
-            _ => {}
         }
     }
     if attacker.has_keyword(&Keyword::Flying)
@@ -3323,6 +3279,35 @@ mod tests {
             .push(ManaColor::Green);
 
         assert!(validate_blockers(&state, &[(green_blocker, attacker)]).is_ok());
+    }
+
+    #[test]
+    fn protection_from_artifacts_prevents_artifact_creature_blocking() {
+        use crate::types::card_type::CoreType;
+        use crate::types::keywords::ProtectionTarget;
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Protected Attacker", 2, 2);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Protection(ProtectionTarget::CardType(
+                "artifacts".to_string(),
+            )));
+
+        let artifact_blocker = create_creature(&mut state, PlayerId(1), "Artifact Blocker", 1, 1);
+        state
+            .objects
+            .get_mut(&artifact_blocker)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        assert!(!can_block_pair(&state, artifact_blocker, attacker));
+        assert!(validate_blockers(&state, &[(artifact_blocker, attacker)]).is_err());
     }
 
     // --- Fear tests ---

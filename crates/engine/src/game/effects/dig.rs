@@ -12,43 +12,63 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (dig_num, keep_num, is_up_to, filter, kept_dest, rest_dest, is_reveal) =
-        match &ability.effect {
-            Effect::Dig {
-                count,
-                keep_count,
-                up_to,
-                filter,
-                destination,
-                rest_destination,
-                reveal,
-            } => {
-                let resolved_count =
-                    resolve_quantity_with_targets(state, count, ability).max(0) as usize;
-                let keep_all_for_reorder = destination == &Some(Zone::Library)
-                    && rest_destination == &Some(Zone::Library)
-                    && keep_count.is_none();
-                (
-                    resolved_count,
-                    if keep_all_for_reorder {
-                        resolved_count
-                    } else {
-                        keep_count.unwrap_or(1) as usize
-                    },
-                    *up_to,
-                    filter.clone(),
-                    *destination,
-                    *rest_destination,
-                    *reveal,
-                )
-            }
-            _ => (1, 1, false, TargetFilter::Any, None, None, false),
-        };
+    let (
+        library_owner_filter,
+        dig_num,
+        keep_num,
+        is_up_to,
+        filter,
+        kept_dest,
+        rest_dest,
+        is_reveal,
+    ) = match &ability.effect {
+        Effect::Dig {
+            player,
+            count,
+            keep_count,
+            up_to,
+            filter,
+            destination,
+            rest_destination,
+            reveal,
+        } => {
+            let resolved_count =
+                resolve_quantity_with_targets(state, count, ability).max(0) as usize;
+            let keep_all_for_reorder = destination == &Some(Zone::Library)
+                && rest_destination == &Some(Zone::Library)
+                && keep_count.is_none();
+            (
+                player,
+                resolved_count,
+                if keep_all_for_reorder {
+                    resolved_count
+                } else {
+                    keep_count.unwrap_or(1) as usize
+                },
+                *up_to,
+                filter.clone(),
+                *destination,
+                *rest_destination,
+                *reveal,
+            )
+        }
+        _ => (
+            &TargetFilter::Controller,
+            1,
+            1,
+            false,
+            TargetFilter::Any,
+            None,
+            None,
+            false,
+        ),
+    };
 
+    let library_owner = super::resolve_player_for_context_ref(state, ability, library_owner_filter);
     let player = state
         .players
         .iter()
-        .find(|p| p.id == ability.controller)
+        .find(|p| p.id == library_owner)
         .ok_or(EffectError::PlayerNotFound)?;
 
     // CR 401.5: If a library has fewer cards than required, use as many as available.
@@ -112,6 +132,7 @@ pub fn resolve(
 
     state.waiting_for = WaitingFor::DigChoice {
         player: ability.controller,
+        library_owner,
         selectable_cards,
         cards,
         keep_count,
@@ -144,6 +165,7 @@ mod tests {
     fn make_dig_ability(dig_num: u32) -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::Dig {
+                player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed {
                     value: dig_num as i32,
                 },
@@ -213,6 +235,42 @@ mod tests {
     }
 
     #[test]
+    fn pure_peek_uses_target_players_library_without_moving_cards() {
+        let mut state = GameState::new_two_player(42);
+        create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Opponent Top".to_string(),
+            Zone::Library,
+        );
+        let top_card = state.players[1].library[0];
+        let ability = ResolvedAbility::new(
+            Effect::Dig {
+                player: TargetFilter::Player,
+                count: QuantityExpr::Fixed { value: 1 },
+                destination: None,
+                keep_count: Some(0),
+                up_to: false,
+                filter: TargetFilter::Any,
+                rest_destination: None,
+                reveal: false,
+            },
+            vec![crate::types::ability::TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.last_revealed_ids, vec![top_card]);
+        assert_eq!(state.objects[&top_card].zone, Zone::Library);
+        assert_eq!(state.players[1].library.front(), Some(&top_card));
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    #[test]
     fn dig_reorder_mode_sets_keep_count_to_all_seen_cards() {
         let mut state = GameState::new_two_player(42);
         for i in 0..5 {
@@ -226,6 +284,7 @@ mod tests {
         }
         let ability = ResolvedAbility::new(
             Effect::Dig {
+                player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 3 },
                 destination: Some(Zone::Library),
                 keep_count: None,
@@ -293,6 +352,7 @@ mod tests {
         // `parse_dig_from_among`-patch Dig.
         let waiting = WaitingFor::DigChoice {
             player: PlayerId(0),
+            library_owner: PlayerId(0),
             selectable_cards: cards_on_top.clone(),
             cards: cards_on_top.clone(),
             keep_count: 2,
@@ -362,6 +422,7 @@ mod tests {
 
         let waiting = WaitingFor::DigChoice {
             player: PlayerId(0),
+            library_owner: PlayerId(0),
             selectable_cards: cards_on_top.clone(),
             cards: cards_on_top,
             keep_count: 3,
@@ -429,6 +490,7 @@ mod tests {
 
         let waiting = WaitingFor::DigChoice {
             player: PlayerId(0),
+            library_owner: PlayerId(0),
             selectable_cards: cards_on_top.clone(),
             cards: cards_on_top.clone(),
             keep_count: 3,
@@ -489,6 +551,7 @@ mod tests {
         );
         let waiting = WaitingFor::DigChoice {
             player: PlayerId(0),
+            library_owner: PlayerId(0),
             selectable_cards: vec![kept, other],
             cards: vec![kept, other],
             keep_count: 1,
@@ -558,6 +621,7 @@ mod tests {
         );
         let waiting = WaitingFor::DigChoice {
             player: PlayerId(0),
+            library_owner: PlayerId(0),
             selectable_cards: vec![first],
             cards: vec![first, second],
             keep_count: 1,
@@ -622,6 +686,7 @@ mod tests {
         );
         let waiting = WaitingFor::DigChoice {
             player: PlayerId(0),
+            library_owner: PlayerId(0),
             selectable_cards: vec![first],
             cards: vec![first, second],
             keep_count: 1,
@@ -696,6 +761,7 @@ mod tests {
             }]));
         let mut ability = ResolvedAbility::new(
             Effect::Dig {
+                player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 3 },
                 destination: None,
                 keep_count: Some(1),
@@ -888,6 +954,7 @@ mod tests {
         ]));
         let ability = ResolvedAbility::new(
             Effect::Dig {
+                player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 3 },
                 destination: Some(Zone::Battlefield),
                 keep_count: Some(1),
@@ -940,6 +1007,7 @@ mod tests {
         ]));
         let ability_you = ResolvedAbility::new(
             Effect::Dig {
+                player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 3 },
                 destination: Some(Zone::Battlefield),
                 keep_count: Some(1),
@@ -1004,6 +1072,7 @@ mod tests {
 
         let waiting = WaitingFor::DigChoice {
             player: PlayerId(0),
+            library_owner: PlayerId(0),
             selectable_cards: cards_on_top.clone(),
             cards: cards_on_top.clone(),
             keep_count: 1,

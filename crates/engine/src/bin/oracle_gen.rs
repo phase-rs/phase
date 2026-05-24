@@ -5,7 +5,7 @@ use std::process;
 use serde::{Deserialize, Serialize};
 
 use engine::database::legality::{legalities_to_export_map, normalize_legalities};
-use engine::database::mtgjson::{load_atomic_cards, AtomicCard, Ruling};
+use engine::database::mtgjson::{load_atomic_cards, AtomicCard, Ruling, SetFile};
 use engine::database::synthesis::{
     build_oracle_face, build_oracle_face_multi, layout_faces, map_layout, LayoutKind,
 };
@@ -162,26 +162,6 @@ fn build_export_layout(
     }
 }
 
-/// Minimal deserialization structs for MTGJSON set files — only reads card name + rarity.
-#[derive(Deserialize)]
-struct SetFile {
-    data: SetData,
-}
-
-#[derive(Deserialize)]
-struct SetData {
-    cards: Vec<SetCard>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SetCard {
-    name: String,
-    #[serde(default)]
-    face_name: Option<String>,
-    rarity: String,
-}
-
 /// Scan all set files in `data/mtgjson/sets/` to build a map of lowercased card name
 /// to the set of all rarities that card has been printed at. If the sets directory
 /// doesn't exist, returns an empty map (graceful degradation).
@@ -258,6 +238,69 @@ fn build_rarity_map(mtgjson_path: &std::path::Path) -> HashMap<String, BTreeSet<
     );
 
     map
+}
+
+#[derive(Default, Clone)]
+struct TokenSourceMetadata {
+    related_token_ids: BTreeSet<String>,
+    source_printing_ids: BTreeSet<String>,
+}
+
+fn build_token_source_metadata(
+    mtgjson_path: &std::path::Path,
+) -> HashMap<String, TokenSourceMetadata> {
+    let sets_dir = mtgjson_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("sets");
+
+    if !sets_dir.exists() {
+        return HashMap::new();
+    }
+
+    let mut map: HashMap<String, TokenSourceMetadata> = HashMap::new();
+    let entries = match std::fs::read_dir(&sets_dir) {
+        Ok(entries) => entries,
+        Err(_) => return HashMap::new(),
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(data) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(set_file) = serde_json::from_str::<SetFile>(&data) else {
+            continue;
+        };
+        for card in set_file.data.cards {
+            if card.related_cards.tokens.is_empty() && card.identifiers.scryfall_id.is_none() {
+                continue;
+            }
+            let key = card
+                .face_name
+                .as_deref()
+                .unwrap_or(&card.name)
+                .to_lowercase();
+            let entry = map.entry(key).or_default();
+            entry
+                .related_token_ids
+                .extend(card.related_cards.tokens.into_iter());
+            if let Some(id) = card.identifiers.scryfall_id {
+                entry.source_printing_ids.insert(id);
+            }
+        }
+    }
+    map
+}
+
+fn stamp_token_source_metadata(face: &mut CardFace, map: &HashMap<String, TokenSourceMetadata>) {
+    if let Some(metadata) = map.get(&face.name.to_lowercase()) {
+        face.metadata.related_token_ids = metadata.related_token_ids.iter().cloned().collect();
+        face.metadata.source_printing_ids = metadata.source_printing_ids.iter().cloned().collect();
+    }
 }
 
 fn main() {
@@ -394,6 +437,7 @@ fn main() {
 
     // Scan per-set MTGJSON files to build a card name → rarities map.
     let rarity_map = build_rarity_map(&mtgjson_path);
+    let token_source_metadata = build_token_source_metadata(&mtgjson_path);
 
     // Load non-MTGJSON bracket lists for signal stamping. Game Changers come
     // directly from MTGJSON `isGameChanger`; this file covers policy axes that
@@ -502,11 +546,12 @@ fn main() {
             {
                 let key = face_ref.name.to_lowercase();
                 let legalities = legalities_by_face.remove(&key).unwrap_or_default();
-                let face = face_ref.clone();
+                let mut face = face_ref.clone();
                 #[cfg(feature = "forge")]
                 if let Some(ref fi) = forge_index {
                     engine::database::forge::apply_forge_fallback(&mut face, fi);
                 }
+                stamp_token_source_metadata(&mut face, &token_source_metadata);
                 let layout_str = match layout_kind {
                     LayoutKind::Single => None,
                     _ => Some(faces[0].layout.clone()),
@@ -539,11 +584,12 @@ fn main() {
                 );
             }
         } else {
-            let face = build_oracle_face(&faces[0], oracle_id);
+            let mut face = build_oracle_face(&faces[0], oracle_id);
             #[cfg(feature = "forge")]
             if let Some(ref fi) = forge_index {
                 engine::database::forge::apply_forge_fallback(&mut face, fi);
             }
+            stamp_token_source_metadata(&mut face, &token_source_metadata);
             let key = face.name.to_lowercase();
             let legalities = legalities_to_export_map(&normalize_legalities(&faces[0].legalities));
 

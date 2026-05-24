@@ -239,6 +239,19 @@ describe("PermanentCard attachments", () => {
     expect(highlight?.className).toContain("pointer-events-none");
   });
 
+  it("renders the summoning sickness art overlay when marked by the engine", () => {
+    const gameState = makeState();
+    gameState.objects[1] = {
+      ...gameState.objects[1],
+      has_summoning_sickness: true,
+    };
+    useGameStore.setState({ gameState });
+
+    const { container } = renderPermanent();
+
+    expect(container.querySelector('[data-summoning-sickness-underwater="true"]')).toBeTruthy();
+  });
+
   it("opens the ability picker when a land has mana actions plus a non-mana activated ability", () => {
     const kessig = makeObject({
       id: 39,

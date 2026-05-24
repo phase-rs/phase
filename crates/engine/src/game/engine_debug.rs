@@ -1,7 +1,9 @@
 use std::collections::HashSet;
 
-use crate::types::ability::LibraryPosition;
-use crate::types::actions::DebugAction;
+use crate::types::ability::{
+    Effect, LibraryPosition, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+};
+use crate::types::actions::{DebugAction, DebugTokenRequest};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{ActionResult, GameState, WaitingFor};
@@ -124,7 +126,14 @@ pub fn apply_debug_action(
 
         DebugAction::ShuffleLibrary { player_id } => {
             validate_player(state, player_id)?;
-            shuffle_library(state, player_id);
+            shuffle_library(state, player_id, events);
+        }
+
+        DebugAction::Proliferate { player_id } => {
+            validate_player(state, player_id)?;
+            let ability = ResolvedAbility::new(Effect::Proliferate, vec![], ObjectId(0), player_id);
+            super::effects::proliferate::resolve(state, &ability, events)
+                .map_err(|err| EngineError::InvalidAction(format!("{err:?}")))?;
         }
 
         DebugAction::SetBasePowerToughness {
@@ -323,11 +332,32 @@ pub fn apply_debug_action(
             super::triggers::process_triggers(state, events);
         }
 
-        DebugAction::CreateToken {
-            owner,
-            characteristics,
-            enter_with_counters,
-        } => {
+        DebugAction::CreateToken { request } => {
+            let (owner, characteristics, enter_with_counters, preset_image_ref) = match request {
+                DebugTokenRequest::Preset {
+                    preset_id,
+                    owner,
+                    enter_with_counters,
+                } => {
+                    let preset = crate::game::token_presets::known_token_preset_by_id(&preset_id)
+                        .ok_or_else(|| {
+                        EngineError::InvalidAction(format!(
+                            "Debug: unknown token preset id {preset_id}"
+                        ))
+                    })?;
+                    (
+                        owner,
+                        preset.body.clone(),
+                        enter_with_counters,
+                        preset.token_image_ref.clone(),
+                    )
+                }
+                DebugTokenRequest::Custom {
+                    owner,
+                    characteristics,
+                    enter_with_counters,
+                } => (owner, characteristics, enter_with_counters, None),
+            };
             validate_player(state, owner)?;
             // CR 111.1 + CR 614.1a: Route debug token creation through the real
             // CreateToken pipeline so replacements, predefined-subtype
@@ -346,6 +376,7 @@ pub fn apply_debug_action(
                 sacrifice_at: None,
                 source_id: ObjectId(0),
                 controller: owner,
+                attach_to: None,
             };
             let proposed = ProposedEvent::CreateToken {
                 owner,
@@ -354,11 +385,19 @@ pub fn apply_debug_action(
                 count: 1,
                 applied: HashSet::new(),
             };
+            let first_created_id = state.next_object_id;
             match super::replacement::replace_event(state, proposed, events) {
                 super::replacement::ReplacementResult::Execute(event) => {
                     super::effects::token::apply_create_token_after_replacement(
                         state, event, events,
                     );
+                    if let Some(image_ref) = preset_image_ref {
+                        for (id, obj) in state.objects.iter_mut() {
+                            if id.0 >= first_created_id {
+                                obj.token_image_ref = Some(image_ref.clone());
+                            }
+                        }
+                    }
                     super::triggers::process_triggers(state, events); // CR 603: Process triggers
                     super::sba::check_state_based_actions(state, events); // CR 704: Check SBAs
                 }
@@ -368,6 +407,30 @@ pub fn apply_debug_action(
                         super::replacement::replacement_choice_waiting_for(player, state);
                 }
             }
+        }
+
+        DebugAction::CreateTokenCopy { source_id, owner } => {
+            validate_object(state, source_id)?;
+            validate_player(state, owner)?;
+            let ability = ResolvedAbility::new(
+                Effect::CopyTokenOf {
+                    target: TargetFilter::Any,
+                    owner: TargetFilter::Controller,
+                    source_filter: None,
+                    enters_attacking: false,
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    extra_keywords: vec![],
+                    additional_modifications: vec![],
+                },
+                vec![TargetRef::Object(source_id)],
+                source_id,
+                owner,
+            );
+            super::effects::token_copy::resolve(state, &ability, events)
+                .map_err(|err| EngineError::InvalidAction(format!("{err:?}")))?;
+            super::triggers::process_triggers(state, events);
+            super::sba::check_state_based_actions(state, events);
         }
     }
 
@@ -534,8 +597,10 @@ fn validate_player(state: &GameState, player_id: PlayerId) -> Result<(), EngineE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::zones::create_object;
     use crate::types::actions::GameAction;
     use crate::types::format::FormatConfig;
+    use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
     use crate::types::proposed_event::TokenCharacteristics;
@@ -568,9 +633,11 @@ mod tests {
     fn debug_create_token_enters_with_counters_survives_sba() {
         let mut state = sandbox_state();
         let action = GameAction::Debug(DebugAction::CreateToken {
-            owner: PlayerId(0),
-            characteristics: zero_zero_creature(),
-            enter_with_counters: vec![(CounterType::Plus1Plus1, 2)],
+            request: DebugTokenRequest::Custom {
+                owner: PlayerId(0),
+                characteristics: zero_zero_creature(),
+                enter_with_counters: vec![(CounterType::Plus1Plus1, 2)],
+            },
         });
         let result = crate::game::engine::apply(&mut state, PlayerId(0), action)
             .expect("debug CreateToken should succeed");
@@ -594,6 +661,92 @@ mod tests {
             Some(2),
             "token should carry the 2 +1/+1 counters supplied at create-time",
         );
+    }
+
+    #[test]
+    fn debug_proliferate_starts_real_choice() {
+        let mut state = sandbox_state();
+        let object_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Counter Bearer".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&object_id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+
+        let result = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::Debug(DebugAction::Proliferate {
+                player_id: PlayerId(0),
+            }),
+        )
+        .expect("debug Proliferate should succeed");
+
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::ProliferateChoice {
+                player: PlayerId(0),
+                ..
+            }
+        ));
+        if let WaitingFor::ProliferateChoice { eligible, .. } = result.waiting_for {
+            assert!(eligible.contains(&TargetRef::Object(object_id)));
+        }
+    }
+
+    #[test]
+    fn debug_create_token_copy_uses_copy_resolver() {
+        let mut state = sandbox_state();
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Copy Source".to_string(),
+            Zone::Battlefield,
+        );
+        let source = state.objects.get_mut(&source_id).unwrap();
+        source.base_card_types.core_types.push(CoreType::Creature);
+        source.card_types.core_types.push(CoreType::Creature);
+        source.base_power = Some(2);
+        source.power = Some(2);
+        source.base_toughness = Some(3);
+        source.toughness = Some(3);
+
+        let result = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::Debug(DebugAction::CreateTokenCopy {
+                source_id,
+                owner: PlayerId(1),
+            }),
+        )
+        .expect("debug CreateTokenCopy should succeed");
+
+        let token_id = result
+            .events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .expect("TokenCreated event should fire");
+        let token = state
+            .objects
+            .get(&token_id)
+            .expect("copy token should exist");
+
+        assert!(token.is_token);
+        assert_eq!(token.controller, PlayerId(1));
+        assert_eq!(token.name, "Copy Source");
+        assert_eq!(token.power, Some(2));
+        assert_eq!(token.toughness, Some(3));
     }
 
     /// Issue #464 — CR 110.2 + CR 613.1b: `DebugAction::SetController` must
@@ -879,9 +1032,11 @@ mod tests {
     fn debug_create_token_zero_zero_no_counters_dies_to_sba() {
         let mut state = sandbox_state();
         let action = GameAction::Debug(DebugAction::CreateToken {
-            owner: PlayerId(0),
-            characteristics: zero_zero_creature(),
-            enter_with_counters: Vec::new(),
+            request: DebugTokenRequest::Custom {
+                owner: PlayerId(0),
+                characteristics: zero_zero_creature(),
+                enter_with_counters: Vec::new(),
+            },
         });
         let result = crate::game::engine::apply(&mut state, PlayerId(0), action)
             .expect("debug CreateToken should succeed");
