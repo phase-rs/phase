@@ -1114,6 +1114,25 @@ pub(crate) enum OracleBlockAst {
         header: ModalHeaderAst,
         modes: Vec<ModeAst>,
     },
+    /// CR 614.12c + CR 607.2d: "As [this permanent] enters, choose <A> or
+    /// <B>. \n • <A> — <linked ability>. \n • <B> — <linked ability>." The
+    /// header text is the original "As ~ enters, choose <A> or <B>" sentence
+    /// and the modes' `label` fields hold the anchor words. Lowered to:
+    ///   - One `ReplacementDefinition` (Moved → `Choose { ChoiceType::Labeled,
+    ///     persist: true }`) that records the chosen anchor word as a
+    ///     `ChosenAttribute::Label` on the entering permanent.
+    ///   - One `TriggerDefinition` or `StaticDefinition` per mode, gated on
+    ///     `ChosenLabelIs { label: <anchor word> }` so the linked ability
+    ///     only functions while its anchor word was chosen.
+    AsEntersAnchorWordModal {
+        /// Original "As ~ enters, choose <A> or <B>" sentence text used as
+        /// the description on the synthesized replacement.
+        header_text: String,
+        /// Anchor-word labels in declaration order (matches `modes[i].label`).
+        labels: Vec<String>,
+        /// The bullet-prefixed linked-ability bodies, one per anchor word.
+        modes: Vec<ModeAst>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

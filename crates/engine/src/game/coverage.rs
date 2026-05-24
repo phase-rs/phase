@@ -5192,6 +5192,10 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::DevotionGE { .. } => ("DevotionGE", Handled),
         StaticCondition::IsPresent { .. } => ("IsPresent", Handled),
         StaticCondition::ChosenColorIs { .. } => ("ChosenColorIs", Handled),
+        // CR 614.12c + CR 607.2d: Anchor-word linked static abilities gated on
+        // the source's persisted `ChosenAttribute::Label`. Evaluated in
+        // `layers::evaluate_condition_with_context` alongside `ChosenColorIs`.
+        StaticCondition::ChosenLabelIs { .. } => ("ChosenLabelIs", Handled),
         StaticCondition::HasCounters { .. } => ("HasCounters", Handled),
         StaticCondition::RecipientHasCounters { .. } => ("RecipientHasCounters", Handled),
         StaticCondition::ClassLevelGE { .. } => ("ClassLevelGE", Handled),

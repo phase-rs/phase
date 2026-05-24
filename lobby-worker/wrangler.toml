@@ -28,22 +28,30 @@ class_name = "LobbyDO"
 tag = "v1"
 new_sqlite_classes = ["LobbyDO"]
 
-# Workers Logs — persistent per-invocation logs in the dashboard Observability
-# tab (status, outcome, exceptions, and our structured console.* output). The
-# always-on Workers *Metrics* view masks our failure mode: a TURN-mint failure
-# returns a handled `Response(502)`, which counts as a "Success" invocation, so
-# it's invisible there. These logs (and the zone HTTP-status view) are the only
-# way to actually see relay-mint failures. Free tier: 200k logs/day, 3-day
-# retention; head_sampling_rate=1 logs every request (this endpoint is low-volume
-# and every relay failure matters). `enabled = true` persists logs (incl.
-# invocation logs); `persist`/`traces` from the dashboard's exported blob are NOT
-# documented wrangler keys and would fail deploy validation, so they are omitted.
+# Workers Logs — persistent logs in the dashboard Observability tab. We keep this
+# ON for our structured console.* output: relay-mint failures surface via
+# `console.error({event:"turn_mint_failed"})` in turn.ts (the always-on Workers
+# *Metrics* view masks them — a handled `Response(502)` counts as a "Success"
+# invocation). Those content logs are what matter, and they are captured
+# regardless of `invocation_logs`.
+#
+# `invocation_logs = false`: the lobby is a WebSocket DO, so every inbound frame
+# is its own invocation. With invocation logs ON, each frame emitted an empty
+# `websocket:message` summary record (outcome+timing, no body) — one billable log
+# per heartbeat against the 200k/day free-tier cap, for zero signal. Disabling
+# them drops those envelopes while keeping every explicit console.* line. Per-
+# invocation counts / CPU time / error rate remain visible in the free Metrics
+# tab, which is a separate product from Logs.
+#
+# head_sampling_rate=1 keeps 100% of the (now rare, all-meaningful) content logs.
+# `persist`/`traces` from the dashboard's exported blob are NOT documented
+# wrangler keys and would fail deploy validation, so they are omitted.
 [observability]
 enabled = true
 head_sampling_rate = 1
 
 [observability.logs]
-invocation_logs = true
+invocation_logs = false
 
 [vars]
 # Cloudflare Realtime TURN key ID (NOT secret — useless without the API token,

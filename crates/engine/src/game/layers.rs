@@ -423,6 +423,16 @@ fn evaluate_condition_with_context(
             .get(&source_id)
             .and_then(|obj| obj.chosen_color())
             .is_some_and(|chosen| &chosen == color),
+        // CR 614.12c + CR 607.2d: An anchor-word linked static ability is
+        // active iff the source permanent's persisted `ChosenAttribute::Label`
+        // matches the anchor word. The comparison is case-insensitive so a
+        // capitalised anchor word ("Jeskai") matches a label persisted in
+        // any canonicalisation. Mirrors `ChosenColorIs`'s lookup pattern.
+        StaticCondition::ChosenLabelIs { label } => state
+            .objects
+            .get(&source_id)
+            .and_then(|obj| obj.chosen_label())
+            .is_some_and(|chosen| chosen.eq_ignore_ascii_case(label)),
         StaticCondition::QuantityComparison {
             lhs,
             comparator,

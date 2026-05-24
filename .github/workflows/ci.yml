@@ -111,14 +111,6 @@ jobs:
           mkdir -p data/mtgjson
           curl -fSL -o data/mtgjson/AtomicCards.json "https://mtgjson.com/api/v5/AtomicCards.json"
 
-      - name: Download MTGJSON SetList data
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: |
-          mkdir -p data/mtgjson
-          if [ ! -f data/mtgjson/SetList.json ]; then
-            curl -fSL -o data/mtgjson/SetList.json "https://mtgjson.com/api/v5/SetList.json"
-          fi
-
       - name: Cache generated card data
         # Output of `oracle-gen` is deterministic given (MTGJSON input + engine
         # source). Hash both into the key; on hit, skip the ~30k-card pass.
@@ -134,19 +126,26 @@ jobs:
           key: cardgen-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
 
       - name: Generate card data
+        # All engine-backed tools in this job use the SAME (profile, features)
+        # pair — `[tool, cli]` — so the engine crate compiles exactly once and is
+        # reused as a cache hit by validate, coverage, and semantic-audit below.
+        # Mixing profiles/feature-sets (e.g. dev here, release elsewhere)
+        # re-fingerprints engine and forces a full recompile per variant.
         if: steps.cardgen-cache.outputs.cache-hit != 'true'
         run: |
-          cargo run --bin oracle-gen --features cli -- data/ --stats --names-out data/card-names.json > data/card-data.json
+          cargo run --profile tool --features cli --bin oracle-gen -- data/ --stats --names-out data/card-names.json > data/card-data.json
 
       - name: Validate card-data against engine schema
         # PR-time gate — the same parse the WASM does at runtime, run against
         # the freshly produced card-data. If a parser/schema change makes the
         # engine unable to read its own output, fail the build before merge.
-        run: cargo run --bin card-data-validate -- data/card-data.json
+        # Same [tool, cli] fingerprint as card-gen above → engine cache hit.
+        run: cargo run --profile tool --features cli --bin card-data-validate -- data/card-data.json
 
       - name: Card support coverage report
+        # Same [tool, cli] fingerprint as card-gen above → engine cache hit.
         run: |
-          cargo run --bin coverage-report -- data/ --all > data/coverage-data.json
+          cargo run --profile tool --features cli --bin coverage-report -- data/ --all > data/coverage-data.json
           jq '{total_cards, supported_cards, coverage_pct, coverage_by_format}' data/coverage-data.json > data/coverage-summary.json
 
       - name: Coverage regression check (engine vs parser-honesty)
@@ -159,14 +158,6 @@ jobs:
             "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/preview/coverage-data.json" \
             data/coverage-data.json \
             --fail-on-engine
-
-      - name: Download draft set data
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: ./scripts/fetch-draft-sets.sh
-
-      - name: Generate draft pools
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: cargo run --release --bin draft-pool-gen -- data/mtgjson/sets data/draft-pools.json
 
       - name: Run semantic audit
         # Produces data/semantic-audit.json with structured findings for cards
@@ -202,6 +193,58 @@ jobs:
           npx wrangler r2 object put phase-rs-data/preview/coverage-data.json --file data/coverage-data.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
           npx wrangler r2 object put phase-rs-data/preview/coverage-summary.json --file data/coverage-summary.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
           npx wrangler r2 object put phase-rs-data/preview/semantic-audit.json --file data/semantic-audit.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
+
+  draft-pools:
+    # Split out of card-data-gate because draft-pool-gen lives in draft-core and
+    # cannot take `--features cli` — it always needs its own `[tool, default]`
+    # engine fingerprint, distinct from the `[tool, cli]` build every other
+    # card-data tool shares. Keeping it inline forced a second full engine
+    # compile onto card-data-gate's critical path; here it runs in parallel.
+    # Its output (draft-pools.json) is not consumed by ci.yml — this is a
+    # main-only smoke test that draft-pool-gen still compiles and runs.
+    name: Draft pools (smoke)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          # No wasm32 target: draft-pool-gen is a native binary. The target list
+          # isn't part of the rust-cache key, so omitting it still shares the
+          # rust-debug cache with card-data-gate.
+          cache-shared-key: rust-debug
+
+      - name: Set cache keys
+        id: cache-keys
+        run: echo "week=$(date +%Y-W%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache MTGJSON data
+        # Shares the weekly mtgjson key with card-data-gate so per-set files
+        # fetched by fetch-draft-sets.sh persist across runs.
+        uses: actions/cache@v4
+        with:
+          path: data/mtgjson
+          key: mtgjson-${{ steps.cache-keys.outputs.week }}
+          restore-keys: mtgjson-
+
+      - name: Download MTGJSON SetList data
+        # fetch-draft-sets.sh enumerates draftable sets from SetList.json.
+        run: |
+          mkdir -p data/mtgjson
+          if [ ! -f data/mtgjson/SetList.json ]; then
+            curl -fSL -o data/mtgjson/SetList.json "https://mtgjson.com/api/v5/SetList.json"
+          fi
+
+      - name: Download draft set data
+        run: ./scripts/fetch-draft-sets.sh
+
+      - name: Generate draft pools
+        # Profile `tool`, not `release`: release is the WASM-size profile
+        # (lto + codegen-units=1), the slowest compile in the repo, for a
+        # one-shot JSON transform.
+        run: cargo run --profile tool --bin draft-pool-gen -- data/mtgjson/sets data/draft-pools.json
 
   wasm-check:
     name: WASM compile check
@@ -276,6 +319,7 @@ jobs:
       - rust-lint
       - rust-test
       - card-data-gate
+      - draft-pools
       - wasm-check
       - tauri-check
     if: always()
@@ -285,12 +329,14 @@ jobs:
           RUST_LINT_RESULT: ${{ needs.rust-lint.result }}
           RUST_TEST_RESULT: ${{ needs.rust-test.result }}
           CARD_DATA_RESULT: ${{ needs.card-data-gate.result }}
+          DRAFT_POOLS_RESULT: ${{ needs.draft-pools.result }}
           WASM_RESULT: ${{ needs.wasm-check.result }}
           TAURI_RESULT: ${{ needs.tauri-check.result }}
         run: |
-          results="$RUST_LINT_RESULT $RUST_TEST_RESULT $CARD_DATA_RESULT $WASM_RESULT $TAURI_RESULT"
+          results="$RUST_LINT_RESULT $RUST_TEST_RESULT $CARD_DATA_RESULT $DRAFT_POOLS_RESULT $WASM_RESULT $TAURI_RESULT"
+          # `skipped` is a pass: draft-pools is main-only and is skipped on PRs.
           for result in $results; do
-            if [ "$result" != "success" ]; then
+            if [ "$result" != "success" ] && [ "$result" != "skipped" ]; then
               echo "One or more split Rust jobs failed: $results"
               exit 1
             fi

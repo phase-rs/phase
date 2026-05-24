@@ -231,11 +231,19 @@ jobs:
         # Reads data/mtgjson/sets/*.json → writes client/public/draft-pools.json.
         # Included in data-files.json manifest so it's uploaded to R2 and
         # stripped from the Pages dist automatically.
-        run: cargo run --release --bin draft-pool-gen
+        # Profile `tool`, not `release`: this is a one-shot JSON transform, not a
+        # shipped binary. `release` is the WASM-size profile (lto + codegen-units=1)
+        # — the slowest compile in the repo. draft-pool-gen lives in draft-core
+        # and can't take `--features cli`, so it gets its own `[tool,default]`
+        # engine fingerprint regardless; `tool` just makes that compile cheap.
+        run: cargo run --profile tool --bin draft-pool-gen
 
       - name: Validate card-data against engine schema
         # Deploy gate — refuse to ship card-data the current engine cannot parse.
-        run: cargo run --release --bin card-data-validate -- client/public/card-data.json
+        # `--profile tool --features cli` matches gen-card-data.sh's build above,
+        # so the engine + this bin are already compiled — a cache hit, not a
+        # second (release+LTO) engine compile.
+        run: cargo run --profile tool --features cli --bin card-data-validate -- client/public/card-data.json
 
       - name: Compute content-addressed card-data filename
         id: card-data-hash
