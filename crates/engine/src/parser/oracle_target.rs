@@ -1597,6 +1597,30 @@ pub fn parse_type_phrase_with_ctx<'a>(
     pos +=
         parse_ownership_or_controller_suffix(&lower[pos..], &mut properties, &mut controller, ctx);
 
+    // Grammar normalization (no CR-level rule): strip the comma in a
+    // distributive-"each" linker between a collective type word and a
+    // per-object property suffix — "creatures, each with power 1 or less" /
+    // "creatures, each with base power or toughness 1 or less" (Angelic
+    // Aberration class; #967). The "each " qualifier itself is a semantic
+    // no-op already consumed by `parse_pt_comparison`'s
+    // `opt(tag("each "))` arm (CR 208 governs the underlying power/toughness
+    // comparison). The leading comma is the only thing blocking suffix
+    // dispatch, so removing it lets the bare suffix reach
+    // `parse_power_suffix` (and, transitively, the shared
+    // `parse_pt_comparison` combinator) the same way the comma-less
+    // phrasing does. Keyword / counter / mana-value suffix parsers do NOT
+    // currently strip a leading `each ` — extending them to the same
+    // distributive form is left as follow-up if a card surfaces the need.
+    if let Ok((_, _)) = (
+        tag::<_, _, OracleError<'_>>(","),
+        opt(tag::<_, _, OracleError<'_>>(" ")),
+        tag::<_, _, OracleError<'_>>("each "),
+    )
+        .parse(&lower[pos..])
+    {
+        pos += 1;
+    }
+
     // Check "with power N or less/greater" suffix
     if let Some((prop, consumed)) = parse_mana_value_suffix(&lower[pos..], ctx) {
         properties.push(prop);
