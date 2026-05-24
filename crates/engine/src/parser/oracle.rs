@@ -1603,10 +1603,13 @@ pub(crate) fn parse_oracle_ir(
             }
         }
 
-        // Some instants/sorceries carry self color-defining CDA lines
-        // (e.g., "~ is colorless."). Intercept only that narrow class so we
-        // do not steal ordinary spell instruction lines that happen to have
-        // static-like phrasing.
+        // CR 604.3 + CR 604.3a + CR 105.2c: Some instants/sorceries carry
+        // self color-defining characteristic-defining abilities (e.g.,
+        // "~ is colorless.") that define the source's own color in all zones.
+        // Intercept only this narrow class before spell-effect lowering.
+        //
+        // Intercept only that narrow class so we do not steal ordinary spell
+        // instruction lines that happen to have static-like phrasing.
         if is_spell {
             let defs = parse_static_line_with_graveyard_keyword_continuation(&static_line);
             let is_self_color_cda = defs.len() == 1

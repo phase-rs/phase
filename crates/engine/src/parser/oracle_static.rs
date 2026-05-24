@@ -10243,41 +10243,36 @@ fn parse_self_subject_is_color_cda(
     tp: &TextPair<'_>,
     description: &str,
 ) -> Option<StaticDefinition> {
-    let (subject_tp, predicate_tp) = tp.split_around(" is ")?;
-    let subject_lower = subject_tp.lower.trim();
+    let (after_subject, subject_lower) = terminated(
+        take_until::<_, _, OracleError<'_>>(" is "),
+        tag::<_, _, OracleError<'_>>(" is "),
+    )
+    .parse(tp.lower)
+    .ok()?;
 
-    let is_explicit_self = subject_lower == "~"
-        || subject_lower == "this card"
-        || SELF_REF_TYPE_PHRASES.contains(&subject_lower);
+    let (after_predicate, predicate_lower) = alt((
+        terminated(take_until::<_, _, OracleError<'_>>("."), tag(".")),
+        rest,
+    ))
+    .parse(after_subject)
+    .ok()?;
+    eof::<_, OracleError<'_>>(after_predicate).ok()?;
 
-    // Reject obvious non-self class subjects so this branch does not steal
-    // global or attached-object "is" lines from their dedicated parsers.
-    let is_obvious_non_self = nom_tag_lower(subject_lower, subject_lower, "all ").is_some()
-        || nom_tag_lower(subject_lower, subject_lower, "each ").is_some()
-        || nom_tag_lower(subject_lower, subject_lower, "enchanted ").is_some()
-        || nom_tag_lower(subject_lower, subject_lower, "equipped ").is_some()
-        || nom_tag_lower(subject_lower, subject_lower, "target ").is_some()
-        || nom_tag_lower(subject_lower, subject_lower, "other ").is_some()
-        || nom_primitives::scan_contains(subject_lower, " creature")
-        || nom_primitives::scan_contains(subject_lower, "creature ")
-        || nom_primitives::scan_contains(subject_lower, "permanent")
-        || nom_primitives::scan_contains(subject_lower, "land")
-        || nom_primitives::scan_contains(subject_lower, "artifact")
-        || nom_primitives::scan_contains(subject_lower, "enchantment")
-        || nom_primitives::scan_contains(subject_lower, "planeswalker")
-        || nom_primitives::scan_contains(subject_lower, "battle")
-        || nom_primitives::scan_contains(subject_lower, "player")
-        || nom_primitives::scan_contains(subject_lower, "opponent")
-        || nom_primitives::scan_contains(subject_lower, "spells")
-        || nom_primitives::scan_contains(subject_lower, "cards")
-        || nom_primitives::scan_contains(subject_lower, "tokens");
+    let matches_subject = |pattern: &str| {
+        nom_tag_lower(subject_lower, subject_lower, pattern).is_some_and(|rest| rest.is_empty())
+    };
 
-    if !is_explicit_self && is_obvious_non_self {
+    let is_explicit_self = matches_subject("~")
+        || matches_subject("this card")
+        || SELF_REF_TYPE_PHRASES
+            .iter()
+            .any(|phrase| matches_subject(phrase));
+
+    if !is_explicit_self {
         return None;
     }
 
-    let predicate = predicate_tp.lower.trim().trim_end_matches('.');
-    let colors = parse_color_predicate(predicate)?;
+    let colors = parse_color_predicate(predicate_lower)?;
 
     Some(
         StaticDefinition::continuous()
