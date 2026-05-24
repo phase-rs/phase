@@ -1954,20 +1954,28 @@ pub(super) fn match_always(
     true
 }
 
-/// Explored: fires when a creature explores.
+/// CR 701.44b: Explored — fires when a creature explores.
+/// When `valid_card` is set (e.g. "whenever a creature you control explores"),
+/// the filter is checked against the event's source_id (the exploring creature).
 pub(super) fn match_explored(
     event: &GameEvent,
-    _trigger: &TriggerDefinition,
-    _source_id: ObjectId,
-    _state: &GameState,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
 ) -> bool {
-    matches!(
-        event,
-        GameEvent::EffectResolved {
-            kind: EffectKind::Explore,
-            ..
+    if let GameEvent::EffectResolved {
+        kind: EffectKind::Explore,
+        source_id: explorer_id,
+    } = event
+    {
+        if trigger.valid_card.is_some() {
+            valid_card_matches(trigger, state, *explorer_id, source_id)
+        } else {
+            true
         }
-    )
+    } else {
+        false
+    }
 }
 
 /// CR 702.110a: "When this creature exploits" = source is the exploiter.
