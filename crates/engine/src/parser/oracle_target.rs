@@ -5146,6 +5146,49 @@ mod tests {
     }
 
     #[test]
+    fn distributive_each_linker_preserves_mana_value_suffix() {
+        let (f, rest) = parse_type_phrase("creatures, each with mana value 2 or less");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 2 },
+            }]))
+        );
+    }
+
+    #[test]
+    fn distributive_each_linker_preserves_counter_suffix() {
+        let (f, rest) = parse_type_phrase("creatures, each with ice counters on them");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Counters {
+                    counters: CounterMatch::OfType(CounterType::Generic("ice".to_string())),
+                    comparator: Comparator::GE,
+                    count: QuantityExpr::Fixed { value: 1 },
+                }])
+            )
+        );
+    }
+
+    #[test]
+    fn distributive_each_linker_preserves_keyword_suffix() {
+        let (f, rest) = parse_type_phrase("creatures, each with flying");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::WithKeyword {
+                    value: Keyword::Flying,
+                }
+            ]))
+        );
+    }
+
+    #[test]
     fn colorless_adjective_does_not_distribute_across_or() {
         let (f, rest) = parse_type_phrase("artifact or colorless creature");
         assert!(rest.trim().is_empty(), "remainder: '{rest}'");
