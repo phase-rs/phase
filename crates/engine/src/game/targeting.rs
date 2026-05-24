@@ -1268,6 +1268,7 @@ mod tests {
     use super::*;
     use crate::game::game_object::AttachTarget;
     use crate::game::zones::create_object;
+    use crate::types::ability::{Comparator, QuantityExpr};
     use crate::types::card_type::CoreType;
     use crate::types::game_state::CastingVariant;
     use crate::types::identifiers::CardId;
@@ -2591,6 +2592,52 @@ mod tests {
 
         let obj = state.objects.get(&c1).unwrap();
         assert!(!can_target(obj, PlayerId(0), source_id, &state));
+    }
+
+    #[test]
+    fn protection_from_mana_value_filter_blocks_targeting() {
+        let (mut state, _c0, c1) = setup_with_creatures();
+        state
+            .objects
+            .get_mut(&c1)
+            .unwrap()
+            .keywords
+            .push(Keyword::Protection(ProtectionTarget::Filter(
+                TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Fixed { value: 3 },
+                }])),
+            )));
+
+        let low_mv_source = create_object(
+            &mut state,
+            CardId(103),
+            PlayerId(0),
+            "Small Spell".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&low_mv_source).unwrap().mana_cost =
+            crate::types::mana::ManaCost::Cost {
+                generic: 3,
+                shards: vec![],
+            };
+
+        let high_mv_source = create_object(
+            &mut state,
+            CardId(104),
+            PlayerId(0),
+            "Large Spell".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&high_mv_source).unwrap().mana_cost =
+            crate::types::mana::ManaCost::Cost {
+                generic: 4,
+                shards: vec![],
+            };
+
+        let obj = state.objects.get(&c1).unwrap();
+        assert!(!can_target(obj, PlayerId(0), low_mv_source, &state));
+        assert!(can_target(obj, PlayerId(0), high_mv_source, &state));
     }
 
     /// CR 702.16b + CR 702.16j: A player with protection from everything

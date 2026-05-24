@@ -2,6 +2,11 @@ use std::convert::Infallible;
 use std::fmt;
 use std::str::FromStr;
 
+use nom::branch::alt;
+use nom::bytes::complete::tag;
+use nom::combinator::value;
+use nom::sequence::preceded;
+use nom::Parser;
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
@@ -1839,18 +1844,12 @@ fn parse_protection_target(s: &str) -> ProtectionTarget {
 /// `TypedFilter` with a `Cmc` property. Uses nom combinators for structured
 /// extraction. Returns `None` if the input doesn't match.
 fn parse_protection_mana_value_filter(s: &str) -> Option<TypedFilter> {
-    use nom::branch::alt;
-    use nom::bytes::complete::tag;
-    use nom::combinator::value;
-    use nom::sequence::preceded;
-    use nom::Parser;
-
     type E<'a> = nom::error::Error<&'a str>;
 
     // "mana value N or less" / "mana value N or greater"
     let (rest, _) = tag::<_, _, E<'_>>("mana value ").parse(s).ok()?;
     let (rest, n) = crate::parser::oracle_nom::primitives::parse_number(rest).ok()?;
-    let (_, comparator) = preceded(
+    let (rest, comparator) = preceded(
         tag::<_, _, E<'_>>(" or "),
         alt((
             value(Comparator::LE, tag("less")),
@@ -1859,6 +1858,9 @@ fn parse_protection_mana_value_filter(s: &str) -> Option<TypedFilter> {
     )
     .parse(rest)
     .ok()?;
+    if !rest.is_empty() {
+        return None;
+    }
 
     Some(TypedFilter::default().properties(vec![FilterProp::Cmc {
         comparator,
@@ -2571,6 +2573,14 @@ mod tests {
             }
             other => panic!("Expected Protection(Filter(Typed(...))), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_protection_target_mana_value_filter_rejects_trailing_text() {
+        assert_eq!(
+            parse_protection_target("mana value 3 or less from sources"),
+            ProtectionTarget::CardType("mana value 3 or less from sources".to_string())
+        );
     }
 
     #[test]

@@ -229,9 +229,7 @@ pub fn source_matches_quality(source: &GameObject, quality: &str) -> bool {
 /// (conjunction — all must match). Only supports object-intrinsic properties
 /// that can be resolved from the source alone without game state access.
 ///
-/// Public because combat blocking checks (CR 702.16f) inline match arms
-/// per-variant rather than delegating to `source_matches_protection_target`.
-pub fn source_matches_protection_filter(
+fn source_matches_protection_filter(
     source: &GameObject,
     filter: &crate::types::ability::TargetFilter,
 ) -> bool {

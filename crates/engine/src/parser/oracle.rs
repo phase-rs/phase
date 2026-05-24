@@ -6488,6 +6488,36 @@ mod tests {
     }
 
     #[test]
+    fn extracts_keyword_after_ability_word_prefix() {
+        use crate::types::ability::{Comparator, FilterProp, QuantityExpr, TargetFilter};
+        use crate::types::keywords::ProtectionTarget;
+
+        let r = parse_with_keyword_names(
+            "Void Shields — Protection from mana value 3 or less",
+            "Reaver Titan",
+            &["protection"],
+            &["Artifact", "Creature"],
+            &["Vehicle"],
+        );
+        assert_eq!(r.extracted_keywords.len(), 1);
+        let Keyword::Protection(ProtectionTarget::Filter(TargetFilter::Typed(tf))) =
+            &r.extracted_keywords[0]
+        else {
+            panic!(
+                "expected filter-based protection, got {:?}",
+                r.extracted_keywords
+            );
+        };
+        assert!(matches!(
+            tf.properties.as_slice(),
+            [FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 3 },
+            }]
+        ));
+    }
+
+    #[test]
     fn skips_keywords_already_in_mtgjson() {
         // "Flying" is in MTGJSON — exact name match, should not be re-extracted
         let r = parse_with_keyword_names(
