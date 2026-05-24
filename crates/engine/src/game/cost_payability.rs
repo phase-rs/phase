@@ -16,8 +16,6 @@
 //! the enumerations.
 
 use crate::types::ability::{AbilityCost, TargetFilter};
-#[cfg(test)]
-use crate::types::ability::{FilterProp, TypedFilter};
 use crate::types::card_type::CoreType;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -102,8 +100,10 @@ impl AbilityCost {
                             state, player, source,
                         );
                 }
-                super::casting::find_eligible_sacrifice_targets(state, player, source, target).len()
-                    >= *count as usize
+                let eligible =
+                    super::casting::find_eligible_sacrifice_targets(state, player, source, target);
+                let (min_count, _) = super::casting::sacrifice_cost_bounds(*count, eligible.len());
+                eligible.len() >= min_count
             }
             // CR 119.4 + CR 119.8 + CR 903.4: Life cost is payable iff life >= amount
             // and "can't lose life" locks do not apply. `amount` is a QuantityExpr
@@ -447,7 +447,7 @@ fn counter_on_object(
 mod tests {
     use super::*;
     use crate::game::scenario::GameScenario;
-    use crate::types::ability::{QuantityExpr, TargetFilter};
+    use crate::types::ability::{FilterProp, QuantityExpr, TargetFilter, TypeFilter, TypedFilter};
     use crate::types::mana::ManaCost;
 
     const P0: PlayerId = PlayerId(0);
@@ -562,6 +562,29 @@ mod tests {
         scenario.add_creature(P0, "Bear", 2, 2);
         assert!(cost.is_payable(&scenario.state, P0, src));
         assert!(another_cost.is_payable(&scenario.state, P0, src));
+    }
+
+    #[test]
+    fn variable_sacrifice_cost_is_payable_with_zero_or_more_matches() {
+        let mut scenario = GameScenario::new();
+        let src = scenario.add_creature(P0, "Chatterfang", 3, 3).id();
+        let cost = AbilityCost::Sacrifice {
+            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Subtype("Squirrel".into()))),
+            count: u32::MAX,
+        };
+
+        assert!(
+            cost.is_payable(&scenario.state, P0, src),
+            "X sacrifice costs should be payable at X=0 even with no eligible permanents"
+        );
+
+        scenario
+            .add_creature(P0, "Squirrel Token", 1, 1)
+            .with_subtypes(vec!["Squirrel"]);
+        assert!(
+            cost.is_payable(&scenario.state, P0, src),
+            "X sacrifice costs should stay payable once eligible permanents exist"
+        );
     }
 
     #[test]

@@ -245,7 +245,13 @@ fn pt_modifications(
         PtValue::Fixed(n) if *n != 0 => {
             mods.push(ContinuousModification::AddPower { value: *n });
         }
-        PtValue::Variable(_) => {} // X-spell: value determined at cast time (TODO)
+        PtValue::Variable(alias) => {
+            if let Some(resolved) = resolve_pt_variable(alias, ability) {
+                if resolved != 0 {
+                    mods.push(ContinuousModification::AddPower { value: resolved });
+                }
+            }
+        }
         PtValue::Quantity(expr) => {
             let resolved = resolve_quantity_with_targets(state, expr, ability);
             if resolved != 0 {
@@ -258,7 +264,13 @@ fn pt_modifications(
         PtValue::Fixed(n) if *n != 0 => {
             mods.push(ContinuousModification::AddToughness { value: *n });
         }
-        PtValue::Variable(_) => {}
+        PtValue::Variable(alias) => {
+            if let Some(resolved) = resolve_pt_variable(alias, ability) {
+                if resolved != 0 {
+                    mods.push(ContinuousModification::AddToughness { value: resolved });
+                }
+            }
+        }
         PtValue::Quantity(expr) => {
             let resolved = resolve_quantity_with_targets(state, expr, ability);
             if resolved != 0 {
@@ -268,6 +280,19 @@ fn pt_modifications(
         _ => {}
     }
     mods
+}
+
+fn resolve_pt_variable(alias: &str, ability: &ResolvedAbility) -> Option<i32> {
+    let x = ability
+        .chosen_x
+        .map(|value| value.min(i32::MAX as u32) as i32)?;
+    if alias.eq_ignore_ascii_case("X") {
+        Some(x)
+    } else if alias.eq_ignore_ascii_case("-X") {
+        Some(-x)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -450,6 +475,31 @@ mod tests {
             "propagated parent target must NOT be pumped by SelfRef sub-ability"
         );
         assert_eq!(state.objects[&other].toughness, Some(3));
+    }
+
+    #[test]
+    fn pump_variable_x_uses_chosen_x_for_positive_and_negative_pt() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = make_creature(&mut state, "Target", 5, 3, PlayerId(0));
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Pump {
+                power: PtValue::Variable("X".to_string()),
+                toughness: PtValue::Variable("-X".to_string()),
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.chosen_x = Some(3);
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        assert_eq!(state.objects[&obj_id].power, Some(8));
+        assert_eq!(state.objects[&obj_id].toughness, Some(0));
     }
 
     /// CR 701.10c (issue #323 class): chained `DoublePT { target: SelfRef }`

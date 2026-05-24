@@ -1302,12 +1302,17 @@ function DrawnThisTurnTopdeckModal({ data }: { data: DrawnThisTurnTopdeckChoice[
 // ── Sacrifice Modal ──────────────────────────────────────────────────────────
 
 function SacrificeModal({ data }: { data: SacrificeForCost["data"] }) {
+  const isVariable = data.min_count !== data.count;
+  const subtitle = isVariable
+    ? `Choose up to ${data.count} permanent${data.count === 1 ? "" : "s"} to sacrifice`
+    : `Choose ${data.count} permanent${data.count > 1 ? "s" : ""} to sacrifice`;
+
   return (
     <PermanentCostModal
       data={data}
       choices={data.permanents}
       title="Sacrifice"
-      subtitle={`Choose ${data.count} permanent${data.count > 1 ? "s" : ""} to sacrifice`}
+      subtitle={subtitle}
       label="Sacrifice"
       selectedClassName="z-10 ring-2 ring-red-400/80"
       overlayClassName="absolute inset-0 flex items-center justify-center rounded-lg bg-red-500/20"
@@ -1321,6 +1326,7 @@ function SacrificeForManaAbilityModal({ data }: { data: SacrificeForManaAbility[
   const objects = useGameStore((s) => s.gameState?.objects);
   const hoverProps = useInspectHoverProps();
   const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
+  const minCount = "min_count" in data ? data.min_count : data.count;
 
   const toggleSelect = useCallback(
     (id: ObjectId) => {
@@ -1343,7 +1349,9 @@ function SacrificeForManaAbilityModal({ data }: { data: SacrificeForManaAbility[
 
   if (!objects) return null;
 
-  const isReady = selected.size === data.count;
+  const isReady = selected.size >= minCount && selected.size <= data.count;
+  const labelSuffix =
+    minCount === data.count ? `${selected.size}/${data.count}` : `${selected.size}/${data.count} max`;
 
   return (
     <ChoiceOverlay
@@ -1655,7 +1663,7 @@ function PermanentCostModal({
       subtitle={subtitle}
       footer={
         <CostActionFooter onCancel={handleCancel}>
-          <ConfirmButton onClick={handleConfirm} disabled={!isReady} label={`${label} (${selected.size}/${data.count})`} />
+          <ConfirmButton onClick={handleConfirm} disabled={!isReady} label={`${label} (${labelSuffix})`} />
         </CostActionFooter>
       }
     >

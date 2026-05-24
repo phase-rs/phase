@@ -558,14 +558,19 @@ pub(crate) fn handle_sacrifice_for_cost(
     player: PlayerId,
     mut pending: PendingCast,
     count: usize,
+    min_count: usize,
     legal_permanents: &[ObjectId],
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    if chosen.len() != count {
+    if chosen.len() < min_count || chosen.len() > count {
+        let requirement = if min_count == count {
+            format!("exactly {} permanent(s)", count)
+        } else {
+            format!("between {} and {} permanent(s)", min_count, count)
+        };
         return Err(EngineError::InvalidAction(format!(
-            "Must sacrifice exactly {} permanent(s), got {}",
-            count,
+            "Must sacrifice {requirement}, got {}",
             chosen.len()
         )));
     }
@@ -595,6 +600,12 @@ pub(crate) fn handle_sacrifice_for_cost(
     for &id in chosen {
         super::sacrifice::sacrifice_permanent(state, id, player, events)
             .map_err(|e| EngineError::InvalidAction(format!("{e}")))?;
+    }
+
+    if min_count == 0 {
+        pending
+            .ability
+            .set_chosen_x_recursive(chosen.len().try_into().unwrap_or(u32::MAX));
     }
 
     finish_pending_cost_or_cast(state, player, pending, events)
@@ -1987,16 +1998,17 @@ fn pay_additional_cost(
                     pending.object_id,
                     target,
                 );
-                // CR 118.3: cannot pay a multi-permanent sacrifice cost without
-                // `count` legal permanents to sacrifice.
-                if eligible.len() < count as usize {
+                let (min_count, max_count) =
+                    super::casting::sacrifice_cost_bounds(count, eligible.len());
+                if eligible.len() < min_count {
                     return Err(EngineError::ActionNotAllowed(
                         "Not enough eligible permanents to sacrifice".into(),
                     ));
                 }
                 return Ok(WaitingFor::SacrificeForCost {
                     player,
-                    count: count as usize,
+                    count: max_count,
+                    min_count,
                     permanents: eligible,
                     pending_cast: Box::new(pending),
                 });
@@ -5053,6 +5065,7 @@ mod tests {
             PlayerId(0),
             pending,
             1,
+            1,
             &legal,
             &chosen,
             &mut events,
@@ -5092,6 +5105,7 @@ mod tests {
             &mut state,
             PlayerId(0),
             pending,
+            1,
             1,
             &legal,
             &[],
@@ -5135,11 +5149,99 @@ mod tests {
             PlayerId(0),
             pending,
             1,
+            1,
             &legal,
             &chosen,
             &mut events,
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn variable_sacrifice_for_cost_sets_chosen_x_from_selection_size() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Chatterfang Test".to_string(),
+            Zone::Battlefield,
+        );
+        let squirrel_a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Squirrel A".to_string(),
+            Zone::Battlefield,
+        );
+        let squirrel_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Squirrel B".to_string(),
+            Zone::Battlefield,
+        );
+        for squirrel in [squirrel_a, squirrel_b] {
+            let obj = state.objects.get_mut(&squirrel).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Squirrel".to_string());
+        }
+
+        state.objects.get_mut(&source).unwrap().abilities =
+            Arc::new(vec![crate::types::ability::AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                    target: crate::types::ability::TargetFilter::Controller,
+                },
+            )]);
+
+        let mut pending = make_pending(source);
+        pending.ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                target: crate::types::ability::TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        let legal = vec![squirrel_a, squirrel_b];
+        let chosen = vec![squirrel_a, squirrel_b];
+        let mut events = Vec::new();
+
+        handle_sacrifice_for_cost(
+            &mut state,
+            PlayerId(0),
+            pending,
+            legal.len(),
+            0,
+            &legal,
+            &chosen,
+            &mut events,
+        )
+        .expect("variable sacrifice selection should succeed");
+
+        let Some(stack_entry) = state.stack.back() else {
+            panic!("activated ability should be pushed to the stack");
+        };
+        let chosen_x = match &stack_entry.kind {
+            crate::types::game_state::StackEntryKind::ActivatedAbility { ability, .. } => {
+                ability.chosen_x
+            }
+            other => panic!("expected activated ability on stack, got {other:?}"),
+        };
+        assert_eq!(chosen_x, Some(2));
+        assert_eq!(state.objects[&squirrel_a].zone, Zone::Graveyard);
+        assert_eq!(state.objects[&squirrel_b].zone, Zone::Graveyard);
     }
 
     /// CR 603.6c + CR 118.3: Sacrificing a permanent as part of a cost is a
@@ -5230,6 +5332,7 @@ mod tests {
             &mut state,
             PlayerId(0),
             pending,
+            1,
             1,
             &[treasure],
             &[treasure],
@@ -5345,6 +5448,7 @@ mod tests {
             &mut state,
             PlayerId(0),
             pending,
+            1,
             1,
             &[token],
             &[token],

@@ -312,15 +312,6 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             GameAction::SelectCards { cards: chosen },
         )
         | (
-            WaitingFor::SacrificeForCost {
-                player: _,
-                permanents: cards,
-                count,
-                ..
-            },
-            GameAction::SelectCards { cards: chosen },
-        )
-        | (
             WaitingFor::ReturnToHandForCost {
                 player: _,
                 permanents: cards,
@@ -382,6 +373,20 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             },
             GameAction::SelectCards { cards: chosen },
         ) => selection_mismatch(chosen, cards, Some(*count)),
+        (
+            WaitingFor::SacrificeForCost {
+                player: _,
+                permanents: cards,
+                count,
+                min_count,
+                ..
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => {
+            selection_mismatch(chosen, cards, None)
+                || chosen.len() < *min_count
+                || chosen.len() > *count
+        }
         // CR 701.68a: Blight always selects exactly one creature, regardless of N.
         (WaitingFor::BlightChoice { creatures, .. }, GameAction::SelectCards { cards: chosen }) => {
             selection_mismatch(chosen, creatures, Some(1))

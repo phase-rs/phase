@@ -79,6 +79,15 @@ pub(crate) fn begin_variable_speed_payment(
     }
 }
 
+pub(crate) fn sacrifice_cost_bounds(count: u32, eligible_len: usize) -> (usize, usize) {
+    if count == u32::MAX {
+        (0, eligible_len)
+    } else {
+        let exact = count as usize;
+        (exact, exact)
+    }
+}
+
 /// Emit `BecomesTarget` and `CrimeCommitted` events for each target.
 ///
 /// Called whenever targets are locked in for a spell or ability. CR 700.13:
@@ -6587,12 +6596,9 @@ fn can_pay_ability_cost_now(
     // The simulation would give a false positive since pay_ability_cost's
     // non-self Sacrifice arm is a no-op (it's handled interactively).
     if let Some((count, sac_filter)) = find_non_self_sacrifice_cost(cost) {
-        // CR 118.3: a multi-permanent sacrifice cost is unpayable without
-        // `count` legal permanents — keep AI legal actions in sync with
-        // `handle_activate_ability`.
-        if find_eligible_sacrifice_targets(state, player, source_id, sac_filter).len()
-            < count as usize
-        {
+        let eligible = find_eligible_sacrifice_targets(state, player, source_id, sac_filter);
+        let (min_count, _) = sacrifice_cost_bounds(count, eligible.len());
+        if eligible.len() < min_count {
             return false;
         }
     }
@@ -6877,9 +6883,8 @@ pub fn handle_activate_ability(
     if let Some(ref cost) = ability_def.cost {
         if let Some((count, sac_filter)) = find_non_self_sacrifice_cost(cost) {
             let eligible = find_eligible_sacrifice_targets(state, player, source_id, sac_filter);
-            // CR 118.3: cannot pay a multi-permanent sacrifice cost without
-            // `count` legal permanents to sacrifice.
-            if eligible.len() < count as usize {
+            let (min_count, max_count) = sacrifice_cost_bounds(count, eligible.len());
+            if eligible.len() < min_count {
                 return Err(EngineError::ActionNotAllowed(
                     "Not enough eligible permanents to sacrifice".into(),
                 ));
@@ -6890,7 +6895,8 @@ pub fn handle_activate_ability(
             pending_sac.activation_ability_index = Some(ability_index);
             return Ok(WaitingFor::SacrificeForCost {
                 player,
-                count: count as usize,
+                count: max_count,
+                min_count,
                 permanents: eligible,
                 pending_cast: Box::new(pending_sac),
             });

@@ -234,21 +234,24 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             };
         }
         // Try to extract a numeric count: "sacrifice two creatures", "sacrifice three lands"
-        let (use_count, filter_text) =
-            if let Some((count, rest_after_count)) = parse_number(&rest_lower) {
-                if count > 1 {
-                    // Parsed a count > 1 — use it and strip the count from the filter text
-                    (count, rest_after_count.trim().to_string())
-                } else {
-                    // Count was 1 — treat as single sacrifice with article stripping
-                    let stripped = strip_article(rest, &rest_lower);
-                    (1, stripped.to_string())
-                }
+        let (use_count, filter_text) = if let Some(((), rest_after_x)) =
+            nom_on_lower(rest, &rest_lower, |i| value((), tag("x ")).parse(i))
+        {
+            (u32::MAX, rest_after_x.trim().to_string())
+        } else if let Some((count, rest_after_count)) = parse_number(&rest_lower) {
+            if count > 1 {
+                // Parsed a count > 1 — use it and strip the count from the filter text
+                (count, rest_after_count.trim().to_string())
             } else {
-                // No number found — strip article
+                // Count was 1 — treat as single sacrifice with article stripping
                 let stripped = strip_article(rest, &rest_lower);
                 (1, stripped.to_string())
-            };
+            }
+        } else {
+            // No number found — strip article
+            let stripped = strip_article(rest, &rest_lower);
+            (1, stripped.to_string())
+        };
         let (filter, _) = parse_target(&format!("target {}", filter_text));
         return AbilityCost::Sacrifice {
             target: filter,
@@ -1189,6 +1192,24 @@ mod tests {
                 assert!(matches!(
                     target,
                     TargetFilter::Typed(ref tf) if matches!(tf.get_primary_type(), Some(TypeFilter::Creature))
+                ));
+            }
+            other => panic!("Expected Sacrifice, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cost_sacrifice_x_squirrels() {
+        match parse_oracle_cost("Sacrifice X Squirrels") {
+            AbilityCost::Sacrifice { target, count } => {
+                assert_eq!(count, u32::MAX);
+                assert!(matches!(
+                    target,
+                    TargetFilter::Typed(ref tf)
+                        if tf
+                            .type_filters
+                            .iter()
+                            .any(|filter| matches!(filter, TypeFilter::Subtype(name) if name == "Squirrel"))
                 ));
             }
             other => panic!("Expected Sacrifice, got {:?}", other),

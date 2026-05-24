@@ -1220,9 +1220,10 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
         WaitingFor::SacrificeForCost {
             player,
             count,
+            min_count,
             permanents,
             ..
-        } => bounded_select_card_candidates(*player, permanents, [*count]),
+        } => bounded_select_card_candidates(*player, permanents, *min_count..=*count),
         WaitingFor::ReturnToHandForCost {
             player,
             count,
