@@ -21071,6 +21071,46 @@ mod tests {
     }
 
     #[test]
+    fn effect_target_creature_pump_then_can_block_additional_inherits_target() {
+        let def = parse_effect_chain(
+            "Untap target creature. It gets +2/+2 until end of turn and can block an additional creature this turn.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(*def.effect, Effect::Untap { .. }));
+
+        let pump = def.sub_ability.expect("target creature should get pumped");
+        assert!(matches!(
+            &*pump.effect,
+            Effect::Pump {
+                power: PtValue::Fixed(2),
+                toughness: PtValue::Fixed(2),
+                target: TargetFilter::SelfRef
+            }
+        ));
+
+        let block_grant = pump
+            .sub_ability
+            .expect("additional-blocker grant should stay in the chain");
+        assert_eq!(block_grant.duration, Some(Duration::UntilEndOfTurn));
+        match &*block_grant.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                target: Some(TargetFilter::ParentTarget),
+                ..
+            } => {
+                assert!(matches!(
+                    static_abilities.as_slice(),
+                    [StaticDefinition {
+                        mode: crate::types::statics::StaticMode::ExtraBlockers { count: Some(1) },
+                        ..
+                    }]
+                ));
+            }
+            other => panic!("expected inherited-target ExtraBlockers grant, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn effect_target_creature_explores_x_times_sets_repeat_for() {
         let def = parse_effect_chain("Target creature explores X times", AbilityKind::Spell);
         assert!(matches!(*def.effect, Effect::TargetOnly { .. }));
