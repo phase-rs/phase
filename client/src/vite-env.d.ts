@@ -4,6 +4,7 @@
 declare const __APP_VERSION__: string;
 declare const __BUILD_HASH__: string;
 declare const __CARD_DATA_URL__: string;
+declare const __CARD_NAMES_URL__: string;
 declare const __COVERAGE_DATA_URL__: string;
 declare const __COVERAGE_SUMMARY_URL__: string;
 declare const __CARD_DATA_META_URL__: string;
@@ -15,3 +16,5 @@ declare const __SCRYFALL_TOKEN_IMAGES_URL__: string;
 declare const __SCRYFALL_PRINTINGS_URL__: string;
 declare const __SCRYFALL_SETS_URL__: string;
 declare const __GIT_REPO_URL__: string;
+declare const __PREVIEW_SITE_URL__: string;
+declare const __IS_RELEASE_BUILD__: boolean;

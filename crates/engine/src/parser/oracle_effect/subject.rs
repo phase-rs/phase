@@ -522,6 +522,20 @@ fn try_parse_can_block_additional(
     })
 }
 
+pub(super) fn is_can_block_extra_predicate(lower: &str) -> bool {
+    all_consuming((
+        tag::<_, _, OracleError<'_>>("can"),
+        tag(" "),
+        tag("block"),
+        tag(" "),
+        parse_extra_blockers_count,
+        parse_block_grant_duration,
+        opt(tag(".")),
+    ))
+    .parse(lower.trim())
+    .is_ok()
+}
+
 fn parse_extra_blockers_count(input: &str) -> OracleResult<'_, Option<u32>> {
     alt((
         map(

@@ -315,6 +315,10 @@ jobs:
           DATA_BASE_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev"
           CARD_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/${{ steps.card-data-hash.outputs.filename }}"
           AUDIO_BASE_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/audio"
+          # Tagged production release: surfaces the "try the preview build" CTA
+          # on the menu (see __IS_RELEASE_BUILD__ in vite.config.ts). The staging
+          # deploy (deploy.yml) deliberately omits this so it never self-links.
+          RELEASE_BUILD: "true"
         run: |
           cd client
           pnpm install --frozen-lockfile
@@ -407,9 +411,53 @@ jobs:
           path: client/public/draft-pools.json
           retention-days: 1
 
+  # ── Server binary compile (linux musl, shared) ──────────────────────────────
+  # Compiles the static musl binary ONCE per release run. Consumed by both
+  # build-server-image (prebuilt Docker image) and build-server's linux leg
+  # (release archive), so neither pays a redundant ~10min compile. Needs nothing
+  # the data pipeline produces, so it starts immediately.
+  build-server-binary:
+    name: Build Server Binary (linux)
+    needs: [resolve-release-ref]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-shared-key: rust-server-linux
+
+      - name: Install musl tools and target
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          rustup target add x86_64-unknown-linux-musl
+
+      - name: Build phase-server (static musl)
+        # No chmod here: upload-artifact strips the executable bit anyway; both
+        # consumers (image build, archive packaging) re-apply it.
+        run: |
+          cargo build --profile server-release --bin phase-server --target x86_64-unknown-linux-musl
+          cp target/x86_64-unknown-linux-musl/server-release/phase-server ./phase-server
+
+      - name: Upload server binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-binary-linux
+          path: phase-server
+          if-no-files-found: error
+          retention-days: 1
+
   build-server-image:
     name: Build Server Image
-    needs: [resolve-release-ref, build-wasm]
+    needs: [resolve-release-ref, build-wasm, build-server-binary]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -436,8 +484,16 @@ jobs:
           name: draft-pools
           path: data
 
-      - name: Verify server data
+      - name: Download server binary
+        uses: actions/download-artifact@v4
+        with:
+          name: server-binary-linux
+          path: .
+
+      - name: Verify build context
         run: |
+          test -s phase-server
+          chmod +x phase-server
           test -s data/card-data.json
           test -s data/draft-pools.json
 
@@ -449,12 +505,16 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push release image
+        # BINARY_STAGE=prebuilt: copy the musl binary from build-server-binary
+        # instead of compiling in-container — the build is just apt + COPY.
         uses: docker/build-push-action@v6
         env:
           DOCKER_BUILD_RECORD_UPLOAD: false
         with:
           context: .
           push: true
+          build-args: |
+            BINARY_STAGE=prebuilt
           tags: |
             ${{ env.IMAGE_NAME }}:${{ env.RELEASE_TAG }}
             ${{ env.IMAGE_NAME }}:latest
@@ -472,7 +532,7 @@ jobs:
           path: dist
 
       - name: Deploy to Cloudflare Pages
-        uses: cloudflare/wrangler-action@v3
+        uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -494,12 +554,24 @@ jobs:
         with:
           ref: ${{ needs.resolve-release-ref.outputs.release_sha }}
 
+      - name: Detect lobby Worker source
+        id: lobby-worker
+        run: |
+          if [ -d lobby-worker ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "lobby-worker/ is not present in this release commit; skipping lobby Worker deploy."
+          fi
+
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        if: steps.lobby-worker.outputs.exists == 'true'
         with:
           targets: wasm32-unknown-unknown
           cache-shared-key: rust-wasm
 
       - uses: taiki-e/install-action@v2
+        if: steps.lobby-worker.outputs.exists == 'true'
         with:
           # Must match the pinned wasm-bindgen crate version in
           # lobby-worker/broker-wasm/Cargo.toml (schema versions must be exact).
@@ -507,32 +579,36 @@ jobs:
 
       - name: Cache binaryen
         id: binaryen-cache
+        if: steps.lobby-worker.outputs.exists == 'true'
         uses: actions/cache@v4
         with:
           path: binaryen-version_123
           key: binaryen-123-x86_64-linux
 
       - name: Install binaryen
-        if: steps.binaryen-cache.outputs.cache-hit != 'true'
+        if: steps.lobby-worker.outputs.exists == 'true' && steps.binaryen-cache.outputs.cache-hit != 'true'
         run: curl -L https://github.com/WebAssembly/binaryen/releases/download/version_123/binaryen-version_123-x86_64-linux.tar.gz | tar xz
 
       - name: Add binaryen to PATH
+        if: steps.lobby-worker.outputs.exists == 'true'
         run: echo "$PWD/binaryen-version_123/bin" >> "$GITHUB_PATH"
 
       - name: Deploy lobby Worker to Cloudflare
+        if: steps.lobby-worker.outputs.exists == 'true'
         # `wrangler deploy` runs the [build] command in lobby-worker/wrangler.toml
         # (scripts/build-broker-wasm.sh release): cargo build -> wasm32,
         # wasm-bindgen, wasm-opt. The toolchain installed above is inherited.
-        uses: cloudflare/wrangler-action@v3
+        uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: "4.94.0"
           workingDirectory: lobby-worker
           command: deploy
 
   build-server:
     name: Build Server (${{ matrix.os }})
-    needs: [resolve-release-ref, tauri-preflight, build-wasm]
+    needs: [resolve-release-ref, tauri-preflight, build-wasm, build-server-binary]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 35
     env:
@@ -566,15 +642,20 @@ jobs:
         with:
           cache-shared-key: rust-server-${{ matrix.os }}
 
-      - name: Install musl tools
-        if: matrix.triple == 'x86_64-unknown-linux-musl'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools
-          rustup target add x86_64-unknown-linux-musl
-
-      - name: Build phase-server
+      - name: Build phase-server (macOS/Windows)
+        # Linux musl is compiled once in build-server-binary and reused below;
+        # only the non-musl targets compile here.
+        if: matrix.triple != 'x86_64-unknown-linux-musl'
         run: cargo build --profile server-release --bin phase-server --target ${{ matrix.triple }}
+
+      - name: Download prebuilt linux binary
+        # Reuse the single musl build from build-server-binary, placed at the
+        # canonical target path so the packaging step is identical across OSes.
+        if: matrix.triple == 'x86_64-unknown-linux-musl'
+        uses: actions/download-artifact@v4
+        with:
+          name: server-binary-linux
+          path: target/x86_64-unknown-linux-musl/server-release
 
       - name: Download card data
         uses: actions/download-artifact@v4
@@ -795,6 +876,10 @@ jobs:
         if: steps.macos-signing.outputs.skip != 'true'
         uses: tauri-apps/tauri-action@v0
         env:
+          # tauri-action runs beforeBuildCommand (pnpm build) as a child process,
+          # so this reaches vite.config.ts. Surfaces the preview-build CTA in the
+          # desktop app too (it routes through openExternal → shell open).
+          RELEASE_BUILD: "true"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
