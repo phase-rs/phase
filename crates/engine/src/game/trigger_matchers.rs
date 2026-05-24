@@ -121,6 +121,8 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::Waterbend => match_waterbend,
         TriggerMode::ElementalBend => match_elemental_bend,
         TriggerMode::BecomesPlotted => match_becomes_plotted,
+        // CR 104.3a: "Whenever a player loses the game" — dedicated matcher.
+        TriggerMode::LosesGame => match_loses_game,
         TriggerMode::DamagePreventedOnce
         | TriggerMode::AbilityCast
         | TriggerMode::AbilityResolves
@@ -134,7 +136,6 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::PhaseOut
         | TriggerMode::PhaseOutAll
         | TriggerMode::NewGame
-        | TriggerMode::LosesGame
         | TriggerMode::Championed
         | TriggerMode::Exerted
         | TriggerMode::Enlisted
@@ -325,6 +326,9 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // CR 725: Initiative triggers
     r.insert(TriggerMode::TakesInitiative, match_takes_initiative);
 
+    // CR 104.3a: "Whenever a player loses the game" — player-loss trigger.
+    r.insert(TriggerMode::LosesGame, match_loses_game);
+
     // CR 702.110a: Exploit trigger matcher
     r.insert(TriggerMode::Exploited, match_exploited);
 
@@ -356,7 +360,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::PhaseOutAll,
         TriggerMode::NewGame,
         // TriggerMode::TakesInitiative — moved to real matcher above
-        TriggerMode::LosesGame,
+        // TriggerMode::LosesGame — moved to real matcher above
         TriggerMode::Championed,
         TriggerMode::Exerted,
         // TriggerMode::Crewed — moved to real matcher below
@@ -2331,6 +2335,23 @@ pub(super) fn match_dungeon_completed(
     state: &GameState,
 ) -> bool {
     if let GameEvent::DungeonCompleted { player_id, .. } = event {
+        valid_player_matches(trigger, state, *player_id, source_id)
+    } else {
+        false
+    }
+}
+
+/// CR 104.3a: "Whenever a player loses the game" — fires when any player's
+/// loss event is recorded. The `valid_target` filter (if set) restricts
+/// which player's loss triggers the ability. Cards: Withengar Unbound,
+/// Ramses Assassin Lord, Blood Tyrant.
+pub(super) fn match_loses_game(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::PlayerLost { player_id } = event {
         valid_player_matches(trigger, state, *player_id, source_id)
     } else {
         false
@@ -7405,6 +7426,60 @@ mod tests {
         assert!(
             match_changes_zone(&opp_milled_event, &trigger, source, &state),
             "parsed Undead Alchemist trigger must fire when an opponent's creature is milled"
+        );
+    }
+
+    /// CR 104.3a: match_loses_game fires when a PlayerLost event is received
+    /// and the losing player passes valid_player_matches (or no filter is set).
+    #[test]
+    fn loses_game_trigger_fires_on_player_lost_event() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Withengar Unbound".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Unscoped trigger (any player loses) — should fire for any player.
+        let mut trigger = make_trigger(TriggerMode::LosesGame);
+
+        let opp_lost = GameEvent::PlayerLost {
+            player_id: PlayerId(1),
+        };
+        assert!(
+            match_loses_game(&opp_lost, &trigger, source, &state),
+            "unscoped trigger must fire when any player loses"
+        );
+
+        let my_lost = GameEvent::PlayerLost {
+            player_id: PlayerId(0),
+        };
+        assert!(
+            match_loses_game(&my_lost, &trigger, source, &state),
+            "unscoped trigger must fire when controller loses"
+        );
+
+        // Non-PlayerLost event must not fire.
+        let non_lost = GameEvent::EffectResolved {
+            kind: EffectKind::Draw,
+            source_id: source,
+        };
+        assert!(
+            !match_loses_game(&non_lost, &trigger, source, &state),
+            "trigger must not fire for non-PlayerLost events"
+        );
+
+        // Controller-scoped trigger — only fires when controller loses.
+        trigger.valid_target = Some(TargetFilter::Controller);
+        assert!(
+            !match_loses_game(&opp_lost, &trigger, source, &state),
+            "controller-scoped trigger must not fire when opponent loses"
+        );
+        assert!(
+            match_loses_game(&my_lost, &trigger, source, &state),
+            "controller-scoped trigger must fire when controller loses"
         );
     }
 }

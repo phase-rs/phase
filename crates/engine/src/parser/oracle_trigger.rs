@@ -5242,6 +5242,29 @@ fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefi
         return Some(result);
     }
 
+    // CR 104.3a: "Whenever a player loses the game" — fires when any player's
+    // loss is recorded. Cards: Withengar Unbound, Ramses Assassin Lord, Blood Tyrant.
+    // "whenever an opponent loses the game" scopes to opponent-controlled players.
+    if matches!(
+        lower,
+        "whenever a player loses the game" | "when a player loses the game"
+    ) {
+        let mut def = make_base();
+        def.mode = TriggerMode::LosesGame;
+        return Some((TriggerMode::LosesGame, def));
+    }
+    if matches!(
+        lower,
+        "whenever an opponent loses the game" | "when an opponent loses the game"
+    ) {
+        let mut def = make_base();
+        def.mode = TriggerMode::LosesGame;
+        def.valid_target = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent),
+        ));
+        return Some((TriggerMode::LosesGame, def));
+    }
+
     // CR 701.54d: "Whenever the Ring tempts you" / "When the Ring tempts you" —
     // the Ring temptation event fires once per temptation resolution.
     if all_consuming(pair(
@@ -20098,5 +20121,46 @@ mod snapshot_tests {
         );
         assert_eq!(def.mode, TriggerMode::Exerted);
         assert!(def.valid_card.is_some());
+    }
+
+    /// CR 104.3a: "Whenever a player loses the game" — Withengar Unbound,
+    /// Ramses Assassin Lord, Blood Tyrant. Any player can trigger it; no
+    /// valid_target restriction.
+    #[test]
+    fn trigger_a_player_loses_the_game() {
+        let def = parse_trigger_line(
+            "Whenever a player loses the game, put thirteen +1/+1 counters on this creature.",
+            "Withengar Unbound",
+        );
+        assert_eq!(
+            def.mode,
+            TriggerMode::LosesGame,
+            "expected LosesGame mode, got {:?}",
+            def.mode
+        );
+        assert_eq!(
+            def.valid_target, None,
+            "valid_target must be None (fires for any player losing)"
+        );
+    }
+
+    /// CR 104.3a: "Whenever an opponent loses the game" — scopes to opponent
+    /// players only via a controller filter.
+    #[test]
+    fn trigger_an_opponent_loses_the_game() {
+        let def = parse_trigger_line(
+            "Whenever an opponent loses the game, you win the game.",
+            "SomeCard",
+        );
+        assert_eq!(
+            def.mode,
+            TriggerMode::LosesGame,
+            "expected LosesGame mode, got {:?}",
+            def.mode
+        );
+        assert!(
+            def.valid_target.is_some(),
+            "valid_target must be set to restrict to opponents"
+        );
     }
 }
