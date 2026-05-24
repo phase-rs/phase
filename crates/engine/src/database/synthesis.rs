@@ -390,8 +390,8 @@ fn synthesize_etb_token_attach_keyword(
     power: i32,
     toughness: i32,
     subtype_list: &[&str],
-    colors: Vec<ManaColor>,
-    description: String,
+    colors: &[ManaColor],
+    description: &str,
 ) {
     use crate::types::ability::PtValue;
 
@@ -428,7 +428,7 @@ fn synthesize_etb_token_attach_keyword(
         power: PtValue::Fixed(power),
         toughness: PtValue::Fixed(toughness),
         types,
-        colors,
+        colors: colors.to_vec(),
         keywords: vec![],
         tapped: false,
         count: QuantityExpr::Fixed { value: 1 },
@@ -460,7 +460,7 @@ fn synthesize_etb_token_attach_keyword(
             .execute(
                 AbilityDefinition::new(AbilityKind::Spell, token_effect).sub_ability(attach_effect),
             )
-            .description(description),
+            .description(description.to_string()),
     );
 }
 
@@ -474,8 +474,8 @@ pub fn synthesize_job_select(face: &mut CardFace) {
         1,
         1,
         &["Hero"],
-        vec![],
-        "Job select — create Hero token and attach".to_string(),
+        &[],
+        "Job select — create Hero token and attach",
     );
 }
 
@@ -503,8 +503,29 @@ pub fn synthesize_living_weapon(face: &mut CardFace) {
         0,
         0,
         &["Phyrexian", "Germ"],
-        vec![ManaColor::Black],
-        "Living weapon — create Phyrexian Germ token and attach".to_string(),
+        &[ManaColor::Black],
+        "Living weapon — create Phyrexian Germ token and attach",
+    );
+}
+
+/// CR 702.163a: Synthesize For Mirrodin! trigger — when this Equipment enters,
+/// create a 2/2 red Rebel creature token, then attach this Equipment to it.
+/// Structurally identical to `synthesize_job_select` and `synthesize_living_weapon` —
+/// all three delegate to `synthesize_etb_token_attach_keyword`, differing only
+/// in the leaf-level axes (P/T, token name, subtype list, color, description).
+///
+/// CR 205.3m: "Rebel" is a creature subtype.
+/// CR 105.2: For Mirrodin! tokens are red (single-color).
+pub fn synthesize_for_mirrodin(face: &mut CardFace) {
+    synthesize_etb_token_attach_keyword(
+        face,
+        |k| matches!(k, Keyword::ForMirrodin),
+        "Rebel",
+        2,
+        2,
+        &["Rebel"],
+        &[ManaColor::Red],
+        "For Mirrodin! — create Rebel token and attach",
     );
 }
 
@@ -3203,6 +3224,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     // to it. Same shape as job select; both share the keyword-to-ETB-attach
     // synthesis pattern.
     synthesize_living_weapon(face);
+    // CR 702.163a: For Mirrodin! — same ETB-token-attach shape as living weapon
+    // and job select; creates a 2/2 red Rebel creature token.
+    synthesize_for_mirrodin(face);
     synthesize_level_up(face);
     synthesize_cycling(face);
     synthesize_scavenge(face);
@@ -10090,6 +10114,114 @@ mod living_weapon_synthesis_tests {
     fn synthesize_living_weapon_binds_battlefield_trigger_zone() {
         let mut face = face_with_living_weapon();
         synthesize_living_weapon(&mut face);
+        let trigger = &face.triggers[0];
+        assert_eq!(trigger.trigger_zones, vec![Zone::Battlefield]);
+    }
+}
+
+#[cfg(test)]
+mod for_mirrodin_synthesis_tests {
+    use super::*;
+    use crate::types::triggers::TriggerMode;
+
+    fn face_with_for_mirrodin() -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::ForMirrodin);
+        face
+    }
+
+    /// CR 702.163a: For Mirrodin! synthesis produces exactly one ChangesZone
+    /// ETB trigger whose execute chain is `Token(Rebel, 2/2 red) →
+    /// Attach(SelfRef, LastCreated)`. Shares the keyword-to-ETB-attach
+    /// synthesis pattern with Living weapon and Job select.
+    #[test]
+    fn synthesize_for_mirrodin_builds_etb_trigger_with_token_and_attach() {
+        let mut face = face_with_for_mirrodin();
+        synthesize_for_mirrodin(&mut face);
+
+        assert_eq!(face.triggers.len(), 1, "exactly one For Mirrodin! trigger");
+        let trigger = &face.triggers[0];
+        assert!(
+            matches!(trigger.mode, TriggerMode::ChangesZone),
+            "trigger should be ChangesZone (ETB)",
+        );
+        assert_eq!(trigger.destination, Some(Zone::Battlefield));
+        assert_eq!(
+            trigger.valid_card,
+            Some(TargetFilter::SelfRef),
+            "trigger must scope to self-ETB only",
+        );
+
+        // Verify execute chain: Token(Rebel, 2/2 red) → Attach.
+        let execute = trigger.execute.as_ref().expect("trigger must have execute");
+        match execute.effect.as_ref() {
+            Effect::Token {
+                name,
+                power,
+                toughness,
+                types,
+                colors,
+                ..
+            } => {
+                assert_eq!(name, "Rebel");
+                assert!(matches!(power, crate::types::ability::PtValue::Fixed(2)));
+                assert!(matches!(
+                    toughness,
+                    crate::types::ability::PtValue::Fixed(2)
+                ));
+                assert!(types.contains(&"Creature".to_string()));
+                assert!(types.contains(&"Rebel".to_string()));
+                assert_eq!(
+                    colors,
+                    &vec![crate::types::mana::ManaColor::Red],
+                    "Rebel must be red (CR 702.163a)",
+                );
+            }
+            other => panic!("expected Token effect, got {:?}", other),
+        }
+
+        // Verify sub_ability is Attach { attachment: SelfRef, target: LastCreated }.
+        let sub = execute
+            .sub_ability
+            .as_ref()
+            .expect("Token effect must chain to Attach sub_ability");
+        assert!(
+            matches!(
+                sub.effect.as_ref(),
+                Effect::Attach {
+                    attachment: TargetFilter::SelfRef,
+                    target: TargetFilter::LastCreated,
+                }
+            ),
+            "sub_ability should be Attach(SelfRef, LastCreated), got {:?}",
+            sub.effect,
+        );
+    }
+
+    /// Re-running synthesis must not duplicate the ETB trigger.
+    #[test]
+    fn synthesize_for_mirrodin_is_idempotent() {
+        let mut face = face_with_for_mirrodin();
+        synthesize_for_mirrodin(&mut face);
+        let count = face.triggers.len();
+        synthesize_for_mirrodin(&mut face);
+        assert_eq!(face.triggers.len(), count);
+    }
+
+    /// Faces without the For Mirrodin! keyword get no Rebel-token trigger.
+    #[test]
+    fn synthesize_for_mirrodin_skips_without_keyword() {
+        let mut face = CardFace::default();
+        synthesize_for_mirrodin(&mut face);
+        assert!(face.triggers.is_empty());
+    }
+
+    /// CR 603.6a: ETB triggers fire from the battlefield. The synthesized
+    /// ChangesZone trigger must list `Zone::Battlefield` in `trigger_zones`.
+    #[test]
+    fn synthesize_for_mirrodin_binds_battlefield_trigger_zone() {
+        let mut face = face_with_for_mirrodin();
+        synthesize_for_mirrodin(&mut face);
         let trigger = &face.triggers[0];
         assert_eq!(trigger.trigger_zones, vec![Zone::Battlefield]);
     }
