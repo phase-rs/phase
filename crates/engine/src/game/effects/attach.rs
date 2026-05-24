@@ -589,8 +589,7 @@ mod tests {
         let ability = crate::types::ability::ResolvedAbility::new(
             Effect::UnattachAll {
                 attachment: TargetFilter::Typed(
-                    crate::types::ability::TypedFilter::default()
-                        .subtype("Equipment".to_string()),
+                    crate::types::ability::TypedFilter::default().subtype("Equipment".to_string()),
                 ),
                 target: TargetFilter::Any,
             },
@@ -608,7 +607,10 @@ mod tests {
             state.objects.get(&aura).unwrap().attached_to,
             Some(AttachTarget::Object(creature))
         );
-        assert_eq!(state.objects.get(&creature).unwrap().attachments, vec![aura]);
+        assert_eq!(
+            state.objects.get(&creature).unwrap().attachments,
+            vec![aura]
+        );
         assert_eq!(
             events
                 .iter()
@@ -631,8 +633,7 @@ mod tests {
         let ability = crate::types::ability::ResolvedAbility::new(
             Effect::UnattachAll {
                 attachment: TargetFilter::Typed(
-                    crate::types::ability::TypedFilter::default()
-                        .subtype("Equipment".to_string()),
+                    crate::types::ability::TypedFilter::default().subtype("Equipment".to_string()),
                 ),
                 target: TargetFilter::ParentTarget,
             },
