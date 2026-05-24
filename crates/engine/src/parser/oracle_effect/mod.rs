@@ -6462,6 +6462,24 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
         }
     }
 
+    // CR 608.2c + CR 701.8a: Self-reference carry-forward for compound actions.
+    // "destroy that creature and ~" splits on " and " into sub-text "~" which
+    // lacks a verb. Prepend the primary verb so it becomes "destroy ~" — parsed
+    // as Destroy { target: SelfRef }. Handles Loyal Sentry, etc.
+    if matches!(sub_clause.effect, Effect::Unimplemented { .. })
+        && tag::<_, _, OracleError<'_>>("~")
+            .parse(sub_lower.as_str())
+            .is_ok()
+    {
+        if let Some(verb) = extract_effect_verb(&primary_effect) {
+            let reparsed_text = format!("{verb} {sub_text}");
+            let reparsed = parse_imperative_effect(&reparsed_text, &mut continuation_ctx);
+            if !matches!(reparsed.effect, Effect::Unimplemented { .. }) {
+                sub_clause = reparsed;
+            }
+        }
+    }
+
     // CR 608.2c: Possessive zone carry-forward for compound actions.
     // "exiles a creature they control and their graveyard" → sub-text "their graveyard"
     // lacks a verb. Prepend the primary verb so it becomes "exile their graveyard".
@@ -17336,6 +17354,32 @@ mod tests {
                 );
             }
             other => panic!("expected Destroy, got {:?}", other),
+        }
+    }
+
+    /// CR 608.2c + CR 701.8a: Verb carry-forward for self-reference "~" in compound
+    /// actions. "destroy that creature and ~" → sub-clause becomes Destroy { SelfRef }.
+    #[test]
+    fn compound_verb_carry_forward_self_ref() {
+        let clause =
+            parse_effect_clause("Destroy that creature and ~", &mut ParseContext::default());
+        assert!(
+            matches!(clause.effect, Effect::Destroy { .. }),
+            "primary clause must be Destroy, got {:?}",
+            clause.effect
+        );
+        let sub = clause
+            .sub_ability
+            .expect("must have sub_ability for compound");
+        match sub.effect.as_ref() {
+            Effect::Destroy { target, .. } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::SelfRef,
+                    "sub-clause target must be SelfRef for '~'",
+                );
+            }
+            other => panic!("sub-clause must be Destroy, got {:?}", other),
         }
     }
 
