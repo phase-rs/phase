@@ -2289,15 +2289,18 @@ pub(super) fn match_rolled_die(
     }
 }
 
-/// CR 705: Match coin flip events.
+/// CR 705.1: "Whenever [player] wins a coin flip" — fires only on a winning
+/// flip (won == true). The player who flipped the coin is checked against
+/// valid_target (Controller for "you win", unset for "a player wins").
 pub(super) fn match_flipped_coin(
     event: &GameEvent,
     trigger: &TriggerDefinition,
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::CoinFlipped { player_id, .. } = event {
-        valid_player_matches(trigger, state, *player_id, source_id)
+    if let GameEvent::CoinFlipped { player_id, won } = event {
+        // CR 705.1: only fire when the relevant player won the flip.
+        *won && valid_player_matches(trigger, state, *player_id, source_id)
     } else {
         false
     }
@@ -7405,6 +7408,52 @@ mod tests {
         assert!(
             match_changes_zone(&opp_milled_event, &trigger, source, &state),
             "parsed Undead Alchemist trigger must fire when an opponent's creature is milled"
+        );
+    }
+
+    /// CR 705.1: match_flipped_coin fires only when won == true.
+    /// When the controller wins (won=true, player_id=controller) it fires.
+    /// When the controller loses (won=false) it does not.
+    /// When an opponent wins it does not fire (with Controller scoping).
+    #[test]
+    fn flipped_coin_fires_only_on_win() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Tavern Scoundrel".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut trigger = make_trigger(TriggerMode::FlippedCoin);
+        trigger.valid_target = Some(TargetFilter::Controller);
+
+        let win_event = GameEvent::CoinFlipped {
+            player_id: PlayerId(0),
+            won: true,
+        };
+        assert!(
+            match_flipped_coin(&win_event, &trigger, source, &state),
+            "trigger must fire when controller wins a coin flip"
+        );
+
+        let lose_event = GameEvent::CoinFlipped {
+            player_id: PlayerId(0),
+            won: false,
+        };
+        assert!(
+            !match_flipped_coin(&lose_event, &trigger, source, &state),
+            "trigger must not fire when controller loses a coin flip"
+        );
+
+        let opp_wins_event = GameEvent::CoinFlipped {
+            player_id: PlayerId(1),
+            won: true,
+        };
+        assert!(
+            !match_flipped_coin(&opp_wins_event, &trigger, source, &state),
+            "trigger must not fire when opponent wins (Controller scoping)"
         );
     }
 }

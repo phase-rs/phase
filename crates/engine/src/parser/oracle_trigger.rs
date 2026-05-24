@@ -6916,6 +6916,31 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some((TriggerMode::LifeLost, def));
     }
 
+    // CR 705.1 + CR 603.2: "Whenever you win a coin flip" — fires when a coin
+    // flips and the controller is the winner (won == true). Cards: Tavern
+    // Scoundrel, Chance Encounter, Toothy and Zndrsplt, Setzer, Wandering Gambler.
+    // valid_target = Controller scopes the player; match_flipped_coin checks won.
+    if matches!(
+        lower,
+        "whenever you win a coin flip" | "when you win a coin flip"
+    ) {
+        let mut def = make_base();
+        def.mode = TriggerMode::FlippedCoin;
+        def.valid_target = Some(TargetFilter::Controller);
+        return Some((TriggerMode::FlippedCoin, def));
+    }
+
+    // CR 705.1: "Whenever a player wins a coin flip" — any player wins.
+    // Cards: Okaun, Eye of Chaos; Zndrsplt, Eye of Wisdom.
+    if matches!(
+        lower,
+        "whenever a player wins a coin flip" | "when a player wins a coin flip"
+    ) {
+        let mut def = make_base();
+        def.mode = TriggerMode::FlippedCoin;
+        return Some((TriggerMode::FlippedCoin, def));
+    }
+
     // CR 601.2: "Whenever you cast a/an [type] spell [post-spell modifier]" — extract
     // the spell filter. Handles pre-spell type qualifier, post-spell modifier
     // (e.g. "with {X} in its mana cost", CR 107.3 + CR 202.1), or both.
@@ -20098,5 +20123,48 @@ mod snapshot_tests {
         );
         assert_eq!(def.mode, TriggerMode::Exerted);
         assert!(def.valid_card.is_some());
+    }
+
+    /// CR 705.1: "Whenever you win a coin flip" — Tavern Scoundrel, Chance
+    /// Encounter, Toothy and Zndrsplt, Setzer. Must produce FlippedCoin with
+    /// valid_target = Controller so match_flipped_coin can scope it to the
+    /// controller's winning flips.
+    #[test]
+    fn trigger_you_win_a_coin_flip() {
+        let def = parse_trigger_line(
+            "Whenever you win a coin flip, create two Treasure tokens.",
+            "Tavern Scoundrel",
+        );
+        assert_eq!(
+            def.mode,
+            TriggerMode::FlippedCoin,
+            "expected FlippedCoin mode, got {:?}",
+            def.mode
+        );
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Controller),
+            "valid_target must be Controller to scope to the player"
+        );
+    }
+
+    /// CR 705.1: "Whenever a player wins a coin flip" — Okaun, Eye of Chaos;
+    /// Zndrsplt, Eye of Wisdom. No valid_target restriction (fires for any player).
+    #[test]
+    fn trigger_a_player_wins_a_coin_flip() {
+        let def = parse_trigger_line(
+            "Whenever a player wins a coin flip, draw a card.",
+            "Zndrsplt, Eye of Wisdom",
+        );
+        assert_eq!(
+            def.mode,
+            TriggerMode::FlippedCoin,
+            "expected FlippedCoin mode, got {:?}",
+            def.mode
+        );
+        assert_eq!(
+            def.valid_target, None,
+            "valid_target must be None (any player wins)"
+        );
     }
 }
