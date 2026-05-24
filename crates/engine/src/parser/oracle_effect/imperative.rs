@@ -7130,15 +7130,11 @@ mod tests {
     /// Issue #967: "sacrifice any number of creatures, each with power 1 or
     /// less" — the comma+"each" distributive linker between the collective
     /// type word and the per-object property suffix dropped the power filter
-    /// entirely (the parser stopped at the comma, leaving `, each with…`
+    /// entirely (the parser stopped at the comma, leaving `, each with...`
     /// unconsumed; the type-phrase fallback then produced
     /// `Effect::Sacrifice { target: TargetFilter::Typed(Creature), count: 1 }`
     /// — no power constraint, fixed count). CR 208.1: the per-object power
-    /// comparison applies via the existing P/T suffix combinator (the "each"
-    /// distributive qualifier is a grammar normalization, not a CR rule).
-    /// Verify both the comma form and the bare "each with" phrasing produce
-    /// identical AST, and that the encoded comparison is `power <= 1`
-    /// against the chosen value.
+    /// comparison applies via the existing P/T suffix combinator.
     #[test]
     fn parse_sacrifice_any_number_creatures_comma_each_power_filter_attached() {
         use crate::types::ability::{Comparator, FilterProp, PtStat, PtValueScope};
@@ -7157,7 +7153,6 @@ mod tests {
             let Effect::Sacrifice { target, count, .. } = lower_targeted_action_ast(result) else {
                 panic!("expected Effect::Sacrifice for {text:?}");
             };
-            // Target must be Creature with `PtComparison Power LE 1`.
             let TargetFilter::Typed(ref tf) = target else {
                 panic!("expected Typed filter for {text:?}, got {target:?}");
             };
@@ -7181,8 +7176,6 @@ mod tests {
                 "missing PtComparison(Power, Current, LE, 1) for {text:?}: {:?}",
                 tf.properties,
             );
-            // Count must remain the dynamic `UpTo(ObjectCount(<same filter>))`
-            // ceiling — not the fixed-1 fallback the bug produced.
             match count {
                 QuantityExpr::UpTo { max } => match *max {
                     QuantityExpr::Ref {
