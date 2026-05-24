@@ -856,6 +856,17 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
         }
     }
 
+    // CR 702.57a: Ripple N — when you cast this spell, you may reveal the top N cards
+    // of your library and cast any with the same name without paying their mana cost.
+    // Keyword::Ripple is a unit variant (the number is flavour text, not engine state).
+    // Cards: Surging Aether, Surging Dementia, Surging Might, Surging Sentinels.
+    // allow-noncombinator: dispatching on already-classified pre-trimmed phrase
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("ripple ").parse(text) {
+        if nom_primitives::parse_number.parse(rest.trim()).is_ok() {
+            return Some(Keyword::Ripple);
+        }
+    }
+
     // For parameterized keywords, find the first space to split name from parameter.
     // Oracle format: "protection from multicolored" → name="protection", rest="from multicolored"
     // Oracle format: "ward {2}" → name="ward", rest="{2}"
@@ -1379,6 +1390,24 @@ mod tests {
         // CR 702.85a: Cascade is a no-parameter keyword.
         let kw = parse_keyword_from_oracle("cascade").unwrap();
         assert_eq!(kw, Keyword::Cascade);
+    }
+
+    /// CR 702.57a: Ripple N triggers when the spell is cast; the number is
+    /// flavour text only — Keyword::Ripple is a unit variant.  Verify several
+    /// numeric suffixes all map to the same unit keyword (Surging Aether uses
+    /// "ripple 4").
+    #[test]
+    fn parse_keyword_from_oracle_ripple() {
+        assert_eq!(
+            parse_keyword_from_oracle("ripple 4"),
+            Some(Keyword::Ripple),
+            "ripple 4 (Surging Aether oracle text)"
+        );
+        assert_eq!(
+            parse_keyword_from_oracle("ripple 2"),
+            Some(Keyword::Ripple),
+            "ripple 2 — numeric variant still maps to unit Ripple"
+        );
     }
 
     /// CR 702.85a: Full Oracle text for Bloodbraid Elf and Shardless Agent
