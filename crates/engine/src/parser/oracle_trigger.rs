@@ -7237,6 +7237,19 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some((TriggerMode::DamageReceived, def));
     }
 
+    // CR 701.38: "whenever players finish voting" — fires once per vote resolution.
+    // The VoteResolved event carries no per-player info, so valid_target is left
+    // unset (any trigger with this mode fires unconditionally when voting ends).
+    // Cards: Model of Unity, Erestor of the Council, Grudge Keeper.
+    if matches!(
+        lower,
+        "whenever players finish voting" | "when players finish voting"
+    ) {
+        let mut def = make_base();
+        def.mode = TriggerMode::Vote;
+        return Some((TriggerMode::Vote, def));
+    }
+
     None
 }
 
@@ -20141,5 +20154,27 @@ mod snapshot_tests {
         );
         assert_eq!(def.mode, TriggerMode::Exerted);
         assert!(def.valid_card.is_some());
+    }
+
+    /// CR 701.38: "Whenever players finish voting" triggers with no player scope.
+    /// Cards: Model of Unity, Erestor of the Council, Grudge Keeper.
+    #[test]
+    fn trigger_players_finish_voting_whenever() {
+        let def = parse_trigger_line(
+            "Whenever players finish voting, you and each opponent who voted for a choice you voted for may scry 2.",
+            "Model of Unity",
+        );
+        assert_eq!(def.mode, TriggerMode::Vote);
+        assert_eq!(def.valid_target, None);
+    }
+
+    /// CR 701.38: "When players finish voting" — alternate temporal prefix.
+    #[test]
+    fn trigger_players_finish_voting_when() {
+        let def = parse_trigger_line(
+            "Whenever players finish voting, each opponent who voted for a choice you didn't vote for loses 2 life.",
+            "Grudge Keeper",
+        );
+        assert_eq!(def.mode, TriggerMode::Vote);
     }
 }
