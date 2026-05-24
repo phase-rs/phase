@@ -4,6 +4,7 @@ use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{ReplacementDefinition, RestrictionExpiry};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
+use crate::types::format::GameFormat;
 use crate::types::game_state::{AutoPassMode, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::phase::Phase;
@@ -1168,15 +1169,11 @@ pub fn finish_cleanup_discard(
 /// game per CR 903.2 (Commander supports both two-player and multiplayer
 /// setups) — the skip rule applies to it.
 ///
-/// The shared-team-turns check uses `state.format_config.team_based` to
-/// match the engine's existing precedent in `game/players.rs`,
-/// `game/elimination.rs`, and `game/priority.rs`. Semantically this gates
-/// on "any shared-team-turns format" (CR 805) — currently only Two-Headed
-/// Giant (CR 810; CR 810.6 specifically restates the first-team draw
-/// skip), but the predicate stays aligned with how every other engine
-/// site recognises team-based turn structure.
+/// The team case intentionally checks the format enum rather than the broader
+/// `team_based` axis: CR 103.8b names Two-Headed Giant specifically, while
+/// CR 805 shared-team-turns can be used by other multiplayer variants.
 fn first_player_skips_first_draw(state: &GameState) -> bool {
-    state.format_config.team_based || state.players.len() == 2
+    matches!(state.format_config.format, GameFormat::TwoHeadedGiant) || state.players.len() == 2
 }
 
 /// CR 103.8 + CR 614.1b + CR 614.10: Whether the active player should skip
@@ -3190,12 +3187,9 @@ mod tests {
     /// their first draw step, even though the game has 4 players.
     #[test]
     fn two_headed_giant_first_team_skips_first_draw() {
-        use crate::types::format::{FormatConfig, GameFormat};
+        use crate::types::format::FormatConfig;
 
-        let mut config = FormatConfig::standard();
-        config.format = GameFormat::TwoHeadedGiant;
-        config.team_based = true;
-        let mut state = GameState::new(config, 4, 42);
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
         state.turn_number = 1;
         assert!(
             should_skip_draw(&state),
