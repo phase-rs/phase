@@ -172,13 +172,50 @@ fn effect_adds_mana_to_triggering_player(effect_lower: &str) -> bool {
     .is_ok()
 }
 
-fn trigger_condition_source_zone(condition: &TriggerCondition) -> Option<Zone> {
+/// CR 113.6 + CR 113.6b: Collect every zone the trigger's
+/// source must occupy for the condition to be satisfiable. Returns the
+/// deduplicated union of `SourceInZone { zone }` references across
+/// `And`/`Or` composites, in first-seen declaration order. Mirrors the
+/// static-side analog `oracle_static::collect_source_in_zones`.
+///
+/// Two motivating shapes:
+/// - Single zone (CR 113.6b): a graveyard-functioning trigger with
+///   condition `SourceInZone { Graveyard }` returns `[Graveyard]`.
+/// - Multi-zone disjunction (Eminence ability word per CR 207.2c — e.g.
+///   Edgar Markov, The Ur-Dragon): "if ~ is in the
+///   command zone or on the battlefield" parses to
+///   `Or { [SourceInZone(Command), SourceInZone(Battlefield)] }` and
+///   returns `[Command, Battlefield]`, so the runtime trigger scanner
+///   considers both zones when locating the source.
+///
+/// `Not { SourceInZone(X) }` is deliberately NOT recursed: a "source is
+/// NOT in X" condition would be the opposite signal (the runtime
+/// condition check filters the trigger out in zone X), so adding X to
+/// the scan-zones list would be backwards. No production card currently
+/// constructs that shape — flagged for documentation.
+///
+/// Issue #817 — Edgar Markov: the previous `Option<Zone>` shape only
+/// returned the first zone from `And` composites and ignored `Or`
+/// entirely, so an Eminence trigger's `trigger_zones` stayed at the
+/// `[Battlefield]` `make_base` default and the command-zone source was
+/// never scanned.
+fn trigger_condition_source_zones(condition: &TriggerCondition) -> Vec<Zone> {
+    let mut out: Vec<Zone> = Vec::new();
+    collect_trigger_condition_source_zones(condition, &mut out);
+    out
+}
+
+fn collect_trigger_condition_source_zones(condition: &TriggerCondition, out: &mut Vec<Zone>) {
     match condition {
-        TriggerCondition::SourceInZone { zone } => Some(*zone),
-        TriggerCondition::And { conditions } => {
-            conditions.iter().find_map(trigger_condition_source_zone)
+        TriggerCondition::SourceInZone { zone } if !out.contains(zone) => {
+            out.push(*zone);
         }
-        _ => None,
+        TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
+            for inner in conditions {
+                collect_trigger_condition_source_zones(inner, out);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -773,13 +810,20 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     // Preserve original oracle text for coverage/UI annotation.
     def.description = Some(ir.source_text.clone());
 
-    // CR 113.6k: Derive trigger source zone from typed trigger/effect data.
-    if let Some(zone) = def
+    // CR 113.6k: Derive trigger source zones from typed trigger/effect
+    // data. `trigger_condition_source_zones` collects across `And`/`Or`
+    // composites, so an Eminence-style (ability word per CR 207.2c)
+    // "in the command zone or on the battlefield" intervening-if yields
+    // both zones — required for the runtime trigger scanner to locate
+    // Edgar Markov (and any other Eminence card) when its source is in
+    // the command zone (#817).
+    let condition_zones = def
         .condition
         .as_ref()
-        .and_then(trigger_condition_source_zone)
-    {
-        def.trigger_zones = vec![zone];
+        .map(trigger_condition_source_zones)
+        .unwrap_or_default();
+    if !condition_zones.is_empty() {
+        def.trigger_zones = condition_zones;
     } else if matches!(def.valid_card, Some(TargetFilter::SelfRef))
         && def.destination == Some(Zone::Graveyard)
     {
@@ -12040,6 +12084,78 @@ mod tests {
                 .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Vampire")),
             "expected Subtype(Vampire) in {:?}",
             tf.type_filters
+        );
+    }
+
+    /// Issue #817 — CR 113.6b + CR 207.2c: Eminence (ability word) triggers
+    /// function in both the command zone and on the battlefield. The "if ~ is
+    /// in the command zone or on the battlefield" intervening-if parses to
+    /// `TriggerCondition::Or { [SourceInZone(Command), SourceInZone(Battlefield)] }`,
+    /// and the trigger's `trigger_zones` MUST list both — otherwise the
+    /// runtime trigger scanner only walks the battlefield and silently
+    /// skips a command-zone Edgar Markov (the original bug).
+    #[test]
+    fn trigger_eminence_command_zone_or_battlefield_extends_trigger_zones() {
+        let def = parse_trigger_line(
+            "Whenever you cast another Vampire spell, if ~ is in the command zone or on the battlefield, create a 1/1 black Vampire creature token.",
+            "Edgar Markov",
+        );
+        assert!(
+            def.trigger_zones.contains(&Zone::Command),
+            "Eminence trigger must scan the command zone, got {:?}",
+            def.trigger_zones,
+        );
+        assert!(
+            def.trigger_zones.contains(&Zone::Battlefield),
+            "Eminence trigger must also scan the battlefield, got {:?}",
+            def.trigger_zones,
+        );
+    }
+
+    /// Issue #817 follow-up: Oloro, Ageless Ascetic exercises the same
+    /// Eminence intervening-if from a different mode path (BeginningOfPhase,
+    /// not SpellCast). Confirms the trigger-zones derivation block runs
+    /// regardless of which `try_parse_*` arm produced the trigger.
+    #[test]
+    fn trigger_eminence_oloro_upkeep_command_zone_or_battlefield() {
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, if ~ is in the command zone or on the battlefield, you gain 1 life.",
+            "Oloro, Ageless Ascetic",
+        );
+        assert!(
+            def.trigger_zones.contains(&Zone::Command),
+            "Oloro Eminence upkeep trigger must scan the command zone, got {:?}",
+            def.trigger_zones,
+        );
+        assert!(
+            def.trigger_zones.contains(&Zone::Battlefield),
+            "Oloro Eminence upkeep trigger must also scan the battlefield, got {:?}",
+            def.trigger_zones,
+        );
+    }
+
+    /// CR 113.6b: A trigger whose intervening-if mentions no zone clause
+    /// at all leaves the `trigger_zones` derivation to fall through to the
+    /// `make_base()` `[Battlefield]` default — Eminence's `Or`-of-zones is
+    /// the only path that adds non-battlefield zones. Locks in that the
+    /// multi-zone refactor doesn't widen the scan for unrelated triggers.
+    #[test]
+    fn trigger_no_zone_condition_defaults_to_battlefield_only() {
+        let def = parse_trigger_line("Whenever you cast a spell, draw a card.", "Test No Zone");
+        assert!(
+            def.trigger_zones.contains(&Zone::Battlefield),
+            "no-zone trigger must default-scan battlefield, got {:?}",
+            def.trigger_zones,
+        );
+        assert!(
+            !def.trigger_zones.contains(&Zone::Command),
+            "no-zone trigger must NOT pick up Command, got {:?}",
+            def.trigger_zones,
+        );
+        assert!(
+            !def.trigger_zones.contains(&Zone::Graveyard),
+            "no-zone trigger must NOT pick up Graveyard, got {:?}",
+            def.trigger_zones,
         );
     }
 
