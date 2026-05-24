@@ -5196,7 +5196,7 @@ fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefi
         def.mode = TriggerMode::CrankContraption;
         return Some((TriggerMode::CrankContraption, def));
     }
-    // CR 701.52a: "Whenever the Ring tempts you" / "When the Ring tempts you" —
+    // CR 701.54d: "Whenever the Ring tempts you" / "When the Ring tempts you" —
     // the Ring temptation event fires once per temptation resolution.
     if all_consuming(pair(
         alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when "))),
