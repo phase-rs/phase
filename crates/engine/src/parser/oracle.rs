@@ -1599,6 +1599,19 @@ pub(crate) fn parse_oracle_ir(
                         i += 2;
                         continue;
                     }
+
+                    // Some instants/sorceries carry static text lines that define their own
+                    // characteristics (e.g., "~ is colorless."). Parse these as statics
+                    // before the spell-resolution catch-all consumes the line as an effect.
+                    if is_spell {
+                        let defs =
+                            parse_static_line_with_graveyard_keyword_continuation(&static_line);
+                        if !defs.is_empty() {
+                            result.statics.extend(defs);
+                            i += 1;
+                            continue;
+                        }
+                    }
                 }
             }
         }
@@ -4026,6 +4039,42 @@ mod tests {
         );
         assert_eq!(r.abilities.len(), 1);
         assert_eq!(r.abilities[0].kind, AbilityKind::Spell);
+    }
+
+    #[test]
+    fn ghostfire_has_self_color_cda_and_spell_damage() {
+        let r = parse(
+            "Ghostfire is colorless.\nGhostfire deals 3 damage to any target.",
+            "Ghostfire",
+            &[],
+            &["Instant"],
+            &[],
+        );
+
+        assert_eq!(r.statics.len(), 1, "expected one self color CDA static");
+        let static_def = &r.statics[0];
+        assert!(static_def.characteristic_defining);
+        assert_eq!(static_def.affected, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            static_def.modifications,
+            vec![ContinuousModification::SetColor { colors: vec![] }]
+        );
+        assert_eq!(
+            static_def.active_zones,
+            vec![
+                Zone::Library,
+                Zone::Hand,
+                Zone::Battlefield,
+                Zone::Graveyard,
+                Zone::Stack,
+                Zone::Exile,
+                Zone::Command,
+            ]
+        );
+
+        assert_eq!(r.abilities.len(), 1, "expected one spell ability");
+        assert_eq!(r.abilities[0].kind, AbilityKind::Spell);
+        assert!(matches!(*r.abilities[0].effect, Effect::DealDamage { .. }));
     }
 
     /// CR 115.1 + CR 701.9b: "random target X" — the parser stamps

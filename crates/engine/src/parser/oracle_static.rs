@@ -1414,6 +1414,14 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         );
     }
 
+    // CR 604.3 + CR 604.3a + CR 105.2c + CR 613.1e: Self-scoped
+    // characteristic-defining color line ("~ is colorless.",
+    // "~ is white and blue."). CDAs function in all zones and define the
+    // source object's own color characteristic.
+    if let Some(def) = parse_self_subject_is_color_cda(&tp, &text) {
+        return Some(def);
+    }
+
     // --- CDA: "~'s power is equal to the number of card types among cards in all graveyards
     //     and its toughness is equal to that number plus 1" (Tarmogoyf) ---
     if let Some(def) = parse_cda_pt_equality(tp.lower, tp.original) {
@@ -10225,6 +10233,70 @@ fn parse_color_predicate(text: &str) -> Option<Vec<ManaColor>> {
     parse_color_list(text)
 }
 
+/// CR 604.3 + CR 604.3a + CR 105.2c + CR 613.1e: Parse self-referential
+/// "[self subject] is [color expression]." lines into a color CDA.
+///
+/// This covers the class of card text that defines the source object's own
+/// color as a characteristic (Ghostfire-style), not global/class filters
+/// handled by `parse_all_subject_are_color`.
+fn parse_self_subject_is_color_cda(
+    tp: &TextPair<'_>,
+    description: &str,
+) -> Option<StaticDefinition> {
+    let (subject_tp, predicate_tp) = tp.split_around(" is ")?;
+    let subject_lower = subject_tp.lower.trim();
+
+    let is_explicit_self = subject_lower == "~"
+        || subject_lower == "this card"
+        || SELF_REF_TYPE_PHRASES.contains(&subject_lower);
+
+    // Reject obvious non-self class subjects so this branch does not steal
+    // global or attached-object "is" lines from their dedicated parsers.
+    let is_obvious_non_self = nom_tag_lower(subject_lower, subject_lower, "all ").is_some()
+        || nom_tag_lower(subject_lower, subject_lower, "each ").is_some()
+        || nom_tag_lower(subject_lower, subject_lower, "enchanted ").is_some()
+        || nom_tag_lower(subject_lower, subject_lower, "equipped ").is_some()
+        || nom_tag_lower(subject_lower, subject_lower, "target ").is_some()
+        || nom_tag_lower(subject_lower, subject_lower, "other ").is_some()
+        || nom_primitives::scan_contains(subject_lower, " creature")
+        || nom_primitives::scan_contains(subject_lower, "creature ")
+        || nom_primitives::scan_contains(subject_lower, "permanent")
+        || nom_primitives::scan_contains(subject_lower, "land")
+        || nom_primitives::scan_contains(subject_lower, "artifact")
+        || nom_primitives::scan_contains(subject_lower, "enchantment")
+        || nom_primitives::scan_contains(subject_lower, "planeswalker")
+        || nom_primitives::scan_contains(subject_lower, "battle")
+        || nom_primitives::scan_contains(subject_lower, "player")
+        || nom_primitives::scan_contains(subject_lower, "opponent")
+        || nom_primitives::scan_contains(subject_lower, "spells")
+        || nom_primitives::scan_contains(subject_lower, "cards")
+        || nom_primitives::scan_contains(subject_lower, "tokens");
+
+    if !is_explicit_self && is_obvious_non_self {
+        return None;
+    }
+
+    let predicate = predicate_tp.lower.trim().trim_end_matches('.');
+    let colors = parse_color_predicate(predicate)?;
+
+    Some(
+        StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::SetColor { colors }])
+            .active_zones(vec![
+                Zone::Library,
+                Zone::Hand,
+                Zone::Battlefield,
+                Zone::Graveyard,
+                Zone::Stack,
+                Zone::Exile,
+                Zone::Command,
+            ])
+            .cda()
+            .description(description.to_string()),
+    )
+}
+
 /// CR 305.7: Parse "[Subject] lands are [type]" land type-changing static abilities.
 /// Handles replacement ("Nonbasic lands are Mountains"), additive ("Each land is a
 /// Swamp in addition to its other land types"), and all-basic-types ("Lands you control
@@ -18209,6 +18281,55 @@ mod tests {
             "expected a land-type modification, got {:?}",
             def.modifications
         );
+    }
+
+    #[test]
+    fn static_self_is_colorless_is_cda_all_zones() {
+        // CR 604.3 + CR 604.3a + CR 105.2c: Ghostfire-style self color CDA.
+        let def = parse_static_line("~ is colorless.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert!(def.characteristic_defining);
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::SetColor { colors: vec![] }]
+        );
+        assert_eq!(
+            def.active_zones,
+            vec![
+                Zone::Library,
+                Zone::Hand,
+                Zone::Battlefield,
+                Zone::Graveyard,
+                Zone::Stack,
+                Zone::Exile,
+                Zone::Command,
+            ]
+        );
+    }
+
+    #[test]
+    fn static_cardname_is_colorless_parses_as_self_cda() {
+        // Card-name form should route to the same self-CDA shape as "~".
+        let def = parse_static_line("Ghostfire is colorless.").unwrap();
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert!(def.characteristic_defining);
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::SetColor { colors: vec![] }]
+        );
+    }
+
+    #[test]
+    fn static_self_is_multicolor_cda() {
+        let def = parse_static_line("~ is white and blue.").unwrap();
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::SetColor {
+                colors: vec![ManaColor::White, ManaColor::Blue]
+            }]
+        );
+        assert!(def.characteristic_defining);
     }
 
     // --- Group A: Chosen color/type creature pump ---
