@@ -241,7 +241,7 @@ pub fn resolve(
 
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
-            source_id: ability.source_id,
+            source_id: explorer_id,
         });
         return Ok(());
     }
@@ -278,7 +278,7 @@ pub fn resolve(
 
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
-            source_id: ability.source_id,
+            source_id: explorer_id,
         });
     } else {
         // CR 701.44a: Nonland revealed — put a +1/+1 counter on the creature,
@@ -302,7 +302,7 @@ pub fn resolve(
 
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
-            source_id: ability.source_id,
+            source_id: explorer_id,
         });
     }
 
@@ -563,6 +563,16 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Explore,
+                    source_id
+                } if *source_id == target
+            )),
+            "explore completion event should identify the exploring permanent"
+        );
         assert_eq!(
             state.objects[&target].counters[&CounterType::Plus1Plus1],
             1,

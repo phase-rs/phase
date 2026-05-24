@@ -36,6 +36,7 @@ import { MobileHandDrawer } from "../components/hand/MobileHandDrawer.tsx";
 import { HandBadge } from "../components/hand/HandBadge.tsx";
 import { PlayerHand } from "../components/hand/PlayerHand.tsx";
 import { FlowHelpNudge } from "../components/help/FlowHelpNudge.tsx";
+import { SandboxToolsNudge } from "../components/help/SandboxToolsNudge.tsx";
 import { HelpSheet } from "../components/help/HelpSheet.tsx";
 import { GameLogPanel } from "../components/log/GameLogPanel.tsx";
 import { ChooseXValueUI } from "../components/mana/ChooseXValueUI.tsx";
@@ -677,6 +678,8 @@ function GamePageContent({
   const helpSheetOpen = useUiStore((s) => s.helpSheetOpen);
   const setHelpSheetOpen = useUiStore((s) => s.setHelpSheetOpen);
   const dismissedFlowHelpNudge = usePreferencesStore((s) => s.dismissedFlowHelpNudge);
+  const dismissedSandboxToolsNudge = usePreferencesStore((s) => s.dismissedSandboxToolsNudge);
+  const debugPanelOpen = useUiStore((s) => s.debugPanelOpen);
   const opponentDisplayName = useMultiplayerStore((s) => s.opponentDisplayName);
   const adapter = useGameStore((s) => s.adapter);
   const focusedOpponent = useUiStore((s) => s.focusedOpponent);
@@ -898,6 +901,29 @@ function GamePageContent({
     canActForWaitingState &&
     stackLength === 0;
 
+  // Sequenced after the flow nudge (requires it dismissed first) so the two
+  // first-run hints never stack. Same calm-moment guards as the flow nudge,
+  // plus: hidden once the panel is already open (nothing left to advertise).
+  const showSandboxToolsNudge =
+    !dismissedSandboxToolsNudge &&
+    dismissedFlowHelpNudge &&
+    !debugPanelOpen &&
+    !helpSheetOpen &&
+    (mode === "ai" || mode === "local") &&
+    viewingZone == null &&
+    preferencesOpen == null &&
+    boardContextMenu == null &&
+    !showCardDataMissing &&
+    resumeResetReason == null &&
+    !showConcedeDialog &&
+    disconnectChoice == null &&
+    pauseReason == null &&
+    reconnectState.status === "idle" &&
+    waitingFor?.type === "Priority" &&
+    waitingFor.data.player === playerId &&
+    canActForWaitingState &&
+    stackLength === 0;
+
   return (
     <div
       ref={containerRef}
@@ -1059,6 +1085,7 @@ function GamePageContent({
         }}
       >
         {showFlowHelpNudge && <FlowHelpNudge />}
+        {showSandboxToolsNudge && <SandboxToolsNudge />}
         <CombatPhaseIndicator />
         <div className="flex items-center gap-1.5">
           <HandBadge />
@@ -1080,6 +1107,8 @@ function GamePageContent({
         onSettingsClick={() => setPreferencesOpen({})}
         onHelpClick={() => setHelpSheetOpen(true)}
         onConcede={onShowConcedeDialog}
+        showSandboxTools={mode === "ai" || mode === "local" || isSandboxGame}
+        onSandboxToolsClick={() => useUiStore.getState().openSandboxTools()}
       />
       <HelpSheet />
 

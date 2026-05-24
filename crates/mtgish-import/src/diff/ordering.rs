@@ -350,6 +350,10 @@ pub const ORDERING_MANIFEST: &[((&str, &str), OrderingClass)] = &[
         ("SpellContext", "kickers_paid"),
         OrderingClass::SetEquivalent,
     ),
+    (
+        ("SpellContext", "controller_controlled_as_cast"),
+        OrderingClass::SetEquivalent,
+    ),
     // ----- Trigger cause filters -----
     (("TriggerCause", "core_types"), OrderingClass::SetEquivalent),
 ];

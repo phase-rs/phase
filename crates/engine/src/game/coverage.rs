@@ -5013,6 +5013,9 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::ControllerControlsMatching { .. } => {
             ("ControllerControlsMatching", Handled)
         }
+        AbilityCondition::ControllerControlledMatchingAsCast { .. } => {
+            ("ControllerControlledMatchingAsCast", Handled)
+        }
         AbilityCondition::ZoneChangeObjectMatchesFilter { .. } => {
             ("ZoneChangeObjectMatchesFilter", Handled)
         }
