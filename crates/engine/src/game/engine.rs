@@ -145,14 +145,24 @@ pub fn apply(
     state.exiled_from_hand_this_resolution = 0;
     check_actor_authorization(state, actor, &action)?;
     let mut result = apply_action(state, actor, action)?;
+    reconcile_terminal_result(state, &mut result);
     bump_state_revision(state);
     mark_public_state_all_dirty(state);
     sync_waiting_for(state, &result.waiting_for);
     run_auto_pass_loop(state, &mut result);
+    reconcile_terminal_result(state, &mut result);
     remember_public_reveals(state, &result.events);
     finalize_public_state(state);
     result.log_entries = super::log::resolve_log_entries(&result.events, state);
     Ok(result)
+}
+
+fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
+    super::elimination::ensure_game_over_if_terminal(state, &mut result.events);
+    if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+        match_flow::handle_game_over_transition(state);
+        result.waiting_for = state.waiting_for.clone();
+    }
 }
 
 fn remember_public_reveals(state: &mut GameState, events: &[GameEvent]) {
@@ -450,6 +460,41 @@ mod auto_pass_decision_tests {
         state.priority_passes.clear();
         state.priority_pass_count = 0;
         state
+    }
+
+    #[test]
+    fn apply_reconciles_eliminated_two_player_game_to_game_over() {
+        let mut state = priority_state();
+        state.players[1].is_eliminated = true;
+        state.eliminated_players.push(PlayerId(1));
+
+        let result = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SetAutoPass {
+                mode: AutoPassRequest::UntilEndOfTurn,
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(0))
+            }
+        ));
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(0))
+            }
+        ));
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            GameEvent::GameOver {
+                winner: Some(PlayerId(0))
+            }
+        )));
     }
 
     fn push_simple_stack_entry(state: &mut GameState, id: u64, controller: PlayerId) {
@@ -1694,6 +1739,29 @@ fn apply_action(
         ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
         // CR 118.3: Player selected permanents to sacrifice as cost.
         (
+            WaitingFor::ActivationCostOneOfChoice {
+                player,
+                costs,
+                pending_cast,
+            },
+            GameAction::ChooseActivationCostBranch { index },
+        ) => engine_casting::handle_activation_cost_one_of_choice(
+            state,
+            *player,
+            *pending_cast.clone(),
+            costs,
+            index,
+            &mut events,
+        )?,
+        (
+            WaitingFor::ActivationCostOneOfChoice {
+                player,
+                pending_cast,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        (
             WaitingFor::SacrificeForCost {
                 player,
                 count,
@@ -1738,6 +1806,35 @@ fn apply_action(
         )?,
         (
             WaitingFor::ReturnToHandForCost {
+                player,
+                pending_cast,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        // CR 118.3 + CR 122.1: Player selected a permanent to remove a counter
+        // from as a cost.
+        (
+            WaitingFor::RemoveCounterForCost {
+                player,
+                count,
+                counter_type,
+                permanents,
+                pending_cast,
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => casting_costs::handle_remove_counter_for_cost(
+            state,
+            *player,
+            *pending_cast.clone(),
+            *count,
+            counter_type.clone(),
+            permanents,
+            &chosen,
+            &mut events,
+        )?,
+        (
+            WaitingFor::RemoveCounterForCost {
                 player,
                 pending_cast,
                 ..

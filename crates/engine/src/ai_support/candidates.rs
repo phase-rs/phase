@@ -1242,12 +1242,41 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             permanents,
             ..
         } => bounded_select_card_candidates(*player, permanents, [*count]),
+        // CR 118.12a: AI selects a branch of a disjunctive activation cost.
+        WaitingFor::ActivationCostOneOfChoice {
+            player,
+            costs,
+            pending_cast,
+        } => costs
+            .iter()
+            .enumerate()
+            .filter(|(_, cost)| cost.is_payable(state, *player, pending_cast.object_id))
+            .map(|(i, _)| {
+                candidate(
+                    GameAction::ChooseActivationCostBranch { index: i },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::ReturnToHandForCost {
             player,
             count,
             permanents,
             ..
         } => bounded_select_card_candidates(*player, permanents, [*count]),
+        WaitingFor::RemoveCounterForCost {
+            player, permanents, ..
+        } => permanents
+            .iter()
+            .map(|id| {
+                candidate(
+                    GameAction::SelectCards { cards: vec![*id] },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         // CR 701.68a: AI selects exactly one creature to put N -1/-1 counters on as cost.
         WaitingFor::BlightChoice {
             player, creatures, ..

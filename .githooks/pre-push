@@ -15,6 +15,9 @@ cargo fmt --all -- --check
 echo "  [rust] cargo clippy"
 cargo clippy --workspace --all-targets --features engine/proptest -- -D warnings
 
+echo "  [rust] mtgish ordering manifest coverage"
+cargo test -p mtgish-import --test manifest_coverage every_list_field_is_in_ordering_manifest
+
 echo "  [rust] card-data-validate release check"
 cargo check --release --bin card-data-validate
 

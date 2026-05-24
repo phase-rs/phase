@@ -616,6 +616,7 @@ mod tests {
         let mut c = instant_face("Brainstorm Shape");
         c.mana_cost = ManaCost::generic(1);
         c.abilities.push(spell_ability(Effect::Dig {
+            player: TargetFilter::Controller,
             count: QuantityExpr::Fixed { value: 3 },
             destination: None,
             keep_count: Some(3),
@@ -635,6 +636,7 @@ mod tests {
         let mut c = sorcery_face("Light Up the Stage Shape");
         c.mana_cost = ManaCost::generic(2);
         c.abilities.push(spell_ability(Effect::Dig {
+            player: TargetFilter::Controller,
             count: QuantityExpr::Fixed { value: 2 },
             destination: Some(Zone::Exile),
             keep_count: Some(2),

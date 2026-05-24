@@ -68,6 +68,12 @@ pub const ORDERING_MANIFEST: &[((&str, &str), OrderingClass)] = &[
         ("AbilityDefinition", "activation_restrictions"),
         OrderingClass::SetEquivalent,
     ),
+    // Target constraints are independent legality predicates ANDed together.
+    // Reordering does not alter the target set accepted by validation.
+    (
+        ("AbilityDefinition", "target_constraints"),
+        OrderingClass::SetEquivalent,
+    ),
     // ----- TargetFilter -----
     // Or/And conjunctions are commutative (CR 700.2 / set semantics).
     // Keyed by both the enum name (for the manifest_coverage test) and

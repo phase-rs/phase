@@ -126,16 +126,52 @@ WARNING_PATTERNS_OUTPUT_TMP="${WARNING_PATTERNS_OUTPUT}.tmp"
 META_OUTPUT_TMP="${META_OUTPUT}.tmp"
 
 # --- Group 1: card-data + card-names (expensive, independent of coverage) ---
+# Build every generator bin in ONE cargo invocation, then run the binaries
+# directly from target/tool/. Two reasons this matters for build time:
+#   1. Unified feature set: mixing `--features cli` and no-feature invocations
+#      re-fingerprints the engine crate and recompiles it on each switch.
+#   2. Single invocation "shape": cargo's tool-profile artifacts stabilize per
+#      set of requested --bin targets; alternating shapes (e.g. tokens-gen
+#      alone vs the others) recompiles the engine on each switch. One shape for
+#      every build keeps the warm case a true no-op.
+TOOL_BINS=(--bin tokens-gen --bin oracle-gen --bin coverage-report --bin card-data-validate)
+TOOL_BIN="target/tool"
+cargo build --profile tool --features "$FEATURES" "${TOOL_BINS[@]}"
+
+# The token catalog is baked into the engine lib at compile time via
+# `include_str!("../../data/known-tokens.toml")` (token_presets.rs). Regenerate
+# it, then re-embed it only if it actually changed.
 echo "Generating token preset catalog from MTGJSON set files..."
-cargo run --profile tool --bin tokens-gen -- --input "$DATA_DIR/mtgjson/sets" --output crates/engine/data/known-tokens.toml
+TOKENS_FILE="crates/engine/data/known-tokens.toml"
+# Temp beside the target so the replace below is an atomic same-filesystem
+# rename (Tilt's card-data resource may run this script concurrently).
+TOKENS_TMP="$(mktemp "${TOKENS_FILE}.XXXXXX")"
+"$TOOL_BIN/tokens-gen" --input "$DATA_DIR/mtgjson/sets" --output "$TOKENS_TMP"
+# tokens-gen output is deterministic, so only overwrite when content actually
+# changed — an unconditional copy bumps the file's mtime and forces a full
+# (40-65s) engine recompile via the include_str! dependency for nothing.
+if cmp -s "$TOKENS_TMP" "$TOKENS_FILE"; then
+  rm -f "$TOKENS_TMP"
+else
+  mv -f "$TOKENS_TMP" "$TOKENS_FILE"
+  # The catalog changed, so the generator bins built above embed the stale
+  # copy. Rebuild them (same shape) to re-bake the new catalog — this is the
+  # one case where an engine recompile is genuinely required.
+  echo "Token catalog changed; rebuilding generators to embed it..."
+  cargo build --profile tool --features "$FEATURES" "${TOOL_BINS[@]}"
+fi
 
 track_tmp "$OUTPUT_TMP"
 track_tmp "$NAMES_OUTPUT_TMP"
 run_tool_with_recovery \
   "$OUTPUT_TMP" \
-  cargo run --profile tool --bin oracle-gen --features "$FEATURES" -- "$DATA_DIR" --stats --names-out "$NAMES_OUTPUT_TMP"
-if [ ! -s "$OUTPUT_TMP" ] || ! jq -e 'type == "object" and length > 0' "$OUTPUT_TMP" >/dev/null 2>&1; then
-  echo "Generated $OUTPUT_TMP is empty or not a valid card object; aborting." >&2
+  "$TOOL_BIN/oracle-gen" "$DATA_DIR" --stats --names-out "$NAMES_OUTPUT_TMP"
+# Cheap presence guard only. The full JSON/object/non-empty/integrity
+# validation is done by card-data-validate below (CardDatabase::from_export),
+# which is strictly stronger than a jq shape check — so an extra jq parse of
+# the 90MB file here would be pure redundancy.
+if [ ! -s "$OUTPUT_TMP" ]; then
+  echo "Generated $OUTPUT_TMP is empty; aborting." >&2
   exit 1
 fi
 if [ ! -s "$NAMES_OUTPUT_TMP" ] || ! jq -e '.' "$NAMES_OUTPUT_TMP" >/dev/null 2>&1; then
@@ -149,7 +185,7 @@ fi
 # the WASM/card-data drift defense — see `card-data-validate` and the
 # content-addressed copy step further down.
 echo "Validating card-data against current engine schema..."
-if ! cargo run --profile tool --bin card-data-validate -- "$OUTPUT_TMP"; then
+if ! "$TOOL_BIN/card-data-validate" "$OUTPUT_TMP"; then
   echo "Schema validation failed for $OUTPUT_TMP; aborting." >&2
   exit 1
 fi
@@ -199,7 +235,7 @@ track_tmp "$COVERAGE_SUMMARY_TMP"
 track_tmp "$WARNING_PATTERNS_OUTPUT_TMP"
 coverage_ok=1
 if ! run_tool_with_recovery "$COVERAGE_OUTPUT_TMP" \
-      cargo run --profile tool --bin coverage-report -- "$DATA_DIR" --all --brief --write-warning-patterns "$WARNING_PATTERNS_OUTPUT_TMP"; then
+      "$TOOL_BIN/coverage-report" "$DATA_DIR" --all --brief --write-warning-patterns "$WARNING_PATTERNS_OUTPUT_TMP"; then
   echo "WARNING: coverage-report failed; leaving existing $COVERAGE_OUTPUT in place." >&2
   coverage_ok=0
 elif [ ! -s "$COVERAGE_OUTPUT_TMP" ] || ! jq -e '.' "$COVERAGE_OUTPUT_TMP" >/dev/null 2>&1; then
@@ -245,8 +281,7 @@ echo "Generated $META_OUTPUT"
 # --- Group 4: set-list projection (best-effort sidecar) ---
 SET_LIST_OUTPUT_TMP="${SET_LIST_OUTPUT}.tmp"
 track_tmp "$SET_LIST_OUTPUT_TMP"
-if cargo run --profile tool --bin oracle-gen --features "$FEATURES" -- \
-     set-list "$DATA_DIR" "$SET_LIST_OUTPUT_TMP"; then
+if "$TOOL_BIN/oracle-gen" set-list "$DATA_DIR" "$SET_LIST_OUTPUT_TMP"; then
   if jq -e 'type == "object" and length > 0' "$SET_LIST_OUTPUT_TMP" >/dev/null 2>&1; then
     promote_tmp "$SET_LIST_OUTPUT_TMP" "$SET_LIST_OUTPUT"
     echo "Promoted $SET_LIST_OUTPUT"
@@ -263,8 +298,7 @@ fi
 # builds so parser coverage gaps surface as "decks blocked by card X".
 DECKS_OUTPUT_TMP="${DECKS_OUTPUT}.tmp"
 track_tmp "$DECKS_OUTPUT_TMP"
-if cargo run --profile tool --bin oracle-gen --features "$FEATURES" -- \
-     decks "$DATA_DIR" "$DECKS_OUTPUT_TMP" --emit-skipped; then
+if "$TOOL_BIN/oracle-gen" decks "$DATA_DIR" "$DECKS_OUTPUT_TMP" --emit-skipped; then
   if jq -e 'type == "object"' "$DECKS_OUTPUT_TMP" >/dev/null 2>&1; then
     promote_tmp "$DECKS_OUTPUT_TMP" "$DECKS_OUTPUT"
     echo "Promoted $DECKS_OUTPUT"
@@ -278,6 +312,8 @@ fi
 # Summary
 FILE_SIZE=$(du -h "$OUTPUT" | cut -f1)
 NAMES_SIZE=$(du -h "$NAMES_OUTPUT" | cut -f1)
-CARD_COUNT=$(grep -o '"name"' "$OUTPUT" | wc -l | tr -d ' ')
+# Count entries in the small names array (648K) rather than grepping the 90MB
+# card-data for `"name"` — the latter is slower and overcounts nested keys.
+CARD_COUNT=$(jq 'length' "$NAMES_OUTPUT")
 echo "Generated $OUTPUT ($FILE_SIZE, ~$CARD_COUNT cards)"
 echo "Generated $NAMES_OUTPUT ($NAMES_SIZE)"

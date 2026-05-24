@@ -363,7 +363,11 @@ fn collect_matching_triggers(
                         condition: trig_def.condition.clone(),
                         ability: ability.clone(),
                         timestamp,
-                        target_constraints: Vec::new(),
+                        target_constraints: trig_def
+                            .execute
+                            .as_ref()
+                            .map(|execute| execute.target_constraints.clone())
+                            .unwrap_or_default(),
                         distribute: trig_def
                             .execute
                             .as_ref()
@@ -2348,6 +2352,7 @@ pub fn check_state_triggers(state: &mut GameState) {
                     )
                 });
 
+                let target_constraints = execute.target_constraints.clone();
                 let ability = build_resolved_from_def(&execute, obj_id, controller);
                 pending.push(PendingTrigger {
                     source_id: obj_id,
@@ -2355,7 +2360,7 @@ pub fn check_state_triggers(state: &mut GameState) {
                     condition: trigger.condition.clone(),
                     ability,
                     timestamp,
-                    target_constraints: Vec::new(),
+                    target_constraints,
                     distribute: trigger
                         .execute
                         .as_ref()
@@ -6892,6 +6897,7 @@ pub mod tests {
                                         .with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
                                 ),
                                 count: None,
+                                random: false,
                                 choice_optional: false,
                             },
                         )

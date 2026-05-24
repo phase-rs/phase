@@ -84,6 +84,28 @@ async function getCompatibilityWorker(onStatus?: EvaluateOptions["onStatus"]): P
   return compatibilityWorkerPromise;
 }
 
+/**
+ * Tear down the singleton compatibility worker, releasing its full
+ * card-database WASM instance. Called when leaving setup to start a match so
+ * its ~full-DB linear memory is not resident concurrently with game init
+ * (which allocates its own engine instance + per-game card faces) — the
+ * combined peak is what traps as "memory access out of bounds" on
+ * low-memory devices. The worker is lazily recreated by
+ * `getCompatibilityWorker` on the next compatibility check. Result caches are
+ * intentionally retained (small JSON, cheap, and useful on return to setup);
+ * only the in-flight maps are dropped so a dispose mid-request can't leave a
+ * rejected promise cached under its key.
+ */
+export function disposeCompatibilityWorker(): void {
+  const pending = compatibilityWorkerPromise;
+  compatibilityWorkerPromise = null;
+  fullCompatibilityInflight.clear();
+  summaryCompatibilityInflight.clear();
+  if (pending) {
+    void pending.then((worker) => worker.dispose()).catch(() => {});
+  }
+}
+
 function buildRequest(deck: ParsedDeck, options: EvaluateOptions): DeckCompatibilityRequest {
   return {
     ...expandParsedDeck(deck),

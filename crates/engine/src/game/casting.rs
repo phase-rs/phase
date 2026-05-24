@@ -4782,6 +4782,11 @@ fn continue_with_prepared(
 
     let target_slots = build_target_slots(state, &resolved)?;
     if !target_slots.is_empty() {
+        let target_constraints = prepared
+            .ability_def
+            .as_ref()
+            .map(|ability| ability.target_constraints.clone())
+            .unwrap_or_default();
         let has_kicker_cost = state
             .objects
             .get(&prepared.object_id)
@@ -4834,7 +4839,7 @@ fn continue_with_prepared(
         }
 
         if let Some(targets) =
-            auto_select_targets_for_ability(state, &resolved, &target_slots, &[])?
+            auto_select_targets_for_ability(state, &resolved, &target_slots, &target_constraints)?
         {
             let mut resolved = resolved;
             assign_targets_in_chain(state, &mut resolved, &targets)?;
@@ -4853,7 +4858,12 @@ fn continue_with_prepared(
             );
         }
 
-        let selection = begin_target_selection_for_ability(state, &resolved, &target_slots, &[])?;
+        let selection = begin_target_selection_for_ability(
+            state,
+            &resolved,
+            &target_slots,
+            &target_constraints,
+        )?;
         let mut pending_targets = PendingCast::new(
             prepared.object_id,
             prepared.card_id,
@@ -4866,6 +4876,7 @@ fn continue_with_prepared(
             .ability_def
             .as_ref()
             .and_then(|a| a.distribute.clone());
+        pending_targets.target_constraints = target_constraints;
         pending_targets.origin_zone = prepared.origin_zone;
         pending_targets.payment_mode = prepared.payment_mode;
         return Ok(WaitingFor::TargetSelection {
@@ -5041,7 +5052,12 @@ pub fn spell_has_legal_targets(
             if target_slots.is_empty() {
                 true
             } else {
-                has_legal_target_assignment_for_ability(&simulated, &resolved, &target_slots, &[])
+                has_legal_target_assignment_for_ability(
+                    &simulated,
+                    &resolved,
+                    &target_slots,
+                    &ability_def.target_constraints,
+                )
             }
         }
         Err(_) => false,
@@ -6201,19 +6217,13 @@ pub fn pay_ability_cost(
                 );
             }
         }
-        // Targeted remove-counter costs ("remove a counter from target X") would
-        // need an interactive WaitingFor flow to let the player pick the permanent.
-        // The current parser only emits `target: None`, so this is unreachable in
-        // practice but kept exhaustive to catch any future parser extension.
+        // Targeted remove-counter costs are paid by the interactive
+        // WaitingFor::RemoveCounterForCost path before automatic cost
+        // components resume here. This arm intentionally no-ops so composite
+        // activation costs can still pay their remaining automatic pieces.
         AbilityCost::RemoveCounter {
             target: Some(_), ..
-        } => {
-            return Err(EngineError::ActionNotAllowed(
-                "Targeted remove-counter costs require interactive resolution and must be \
-                 intercepted before reaching pay_ability_cost"
-                    .to_string(),
-            ));
-        }
+        } => {}
         // CR 701.43a: "To exert a permanent, its controller chooses to have it
         // not untap during its controller's next untap step." Modeled as a
         // transient continuous effect with `StaticMode::CantUntap` scoped to
@@ -6378,6 +6388,22 @@ fn find_tap_creatures_cost(cost: &AbilityCost) -> Option<(u32, &TargetFilter)> {
     }
 }
 
+fn find_targeted_remove_counter_cost(
+    cost: &AbilityCost,
+) -> Option<(u32, &crate::types::counter::CounterMatch, &TargetFilter)> {
+    match cost {
+        AbilityCost::RemoveCounter {
+            count,
+            counter_type,
+            target: Some(target),
+        } => Some((*count, counter_type, target)),
+        AbilityCost::Composite { costs } => {
+            costs.iter().find_map(find_targeted_remove_counter_cost)
+        }
+        _ => None,
+    }
+}
+
 /// Shared eligibility helper for hand-card cost payments — returns every card
 /// in `player`'s hand matching `filter` (if any), excluding the cast source.
 /// Used by both discard-as-cost (CR 601.2b) and exile-from-hand-as-cost
@@ -6454,6 +6480,14 @@ pub(crate) fn find_eligible_exile_for_cost_targets(
     }
 }
 
+fn find_one_of_cost(cost: &AbilityCost) -> Option<&Vec<AbilityCost>> {
+    match cost {
+        AbilityCost::OneOf { costs } => Some(costs),
+        AbilityCost::Composite { costs } => costs.iter().find_map(find_one_of_cost),
+        _ => None,
+    }
+}
+
 fn find_return_to_hand_cost(cost: &AbilityCost) -> Option<(u32, Option<&TargetFilter>)> {
     match cost {
         // CR 118.12: This helper currently only handles the default
@@ -6490,6 +6524,41 @@ pub(crate) fn find_eligible_return_to_hand_targets(
                 obj.controller == player
                     && filter
                         .is_none_or(|f| super::filter::matches_target_filter(state, id, f, &ctx))
+            })
+        })
+        .collect()
+}
+
+fn removable_counter_count(
+    obj: &crate::game::game_object::GameObject,
+    counter_type: &crate::types::counter::CounterMatch,
+) -> u32 {
+    match counter_type {
+        crate::types::counter::CounterMatch::OfType(ty) => {
+            obj.counters.get(ty).copied().unwrap_or(0)
+        }
+        crate::types::counter::CounterMatch::Any => obj.counters.values().copied().sum(),
+    }
+}
+
+pub(crate) fn find_eligible_remove_counter_for_cost_targets(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    target: &TargetFilter,
+    counter_type: &crate::types::counter::CounterMatch,
+    count: u32,
+) -> Vec<ObjectId> {
+    let ctx = super::filter::FilterContext::from_source(state, source);
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|&id| {
+            state.objects.get(&id).is_some_and(|obj| {
+                obj.controller == player
+                    && super::filter::matches_target_filter(state, id, target, &ctx)
+                    && removable_counter_count(obj, counter_type) >= count
             })
         })
         .collect()
@@ -6825,7 +6894,7 @@ pub fn can_activate_ability_now(
                     &simulated,
                     &resolved,
                     &target_slots,
-                    &[],
+                    &ability_def.target_constraints,
                 )
         }
         Err(_) => false,
@@ -7045,6 +7114,19 @@ pub fn handle_activate_ability(
             });
         }
 
+        // CR 118.12a: Pre-check for OneOf costs — detour to WaitingFor before any cost payment.
+        if let Some(costs) = find_one_of_cost(cost) {
+            let mut pending_one_of =
+                PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+            pending_one_of.activation_cost = Some(cost.clone());
+            pending_one_of.activation_ability_index = Some(ability_index);
+            return Ok(WaitingFor::ActivationCostOneOfChoice {
+                player,
+                costs: costs.clone(),
+                pending_cast: Box::new(pending_one_of),
+            });
+        }
+
         // CR 118.3: Pre-check for ReturnToHand costs — same WaitingFor detour pattern as
         // Sacrifice above. Ordering matters for Composite costs: Sacrifice wins if both are
         // present, but no real cards combine them.
@@ -7064,6 +7146,37 @@ pub fn handle_activate_ability(
                 count: count as usize,
                 permanents: eligible,
                 pending_cast: Box::new(pending_return),
+            });
+        }
+
+        // CR 118.3 + CR 122.1 + CR 602.2b: Pre-check targeted
+        // remove-counter activation costs. The player chooses which matching
+        // permanent supplies the counter before automatic cost components are
+        // paid and the ability is put on the stack.
+        if let Some((count, counter_type, target)) = find_targeted_remove_counter_cost(cost) {
+            let eligible = find_eligible_remove_counter_for_cost_targets(
+                state,
+                player,
+                source_id,
+                target,
+                counter_type,
+                count,
+            );
+            if eligible.is_empty() {
+                return Err(EngineError::ActionNotAllowed(
+                    "No eligible permanents with counters".into(),
+                ));
+            }
+            let mut pending_counter =
+                PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+            pending_counter.activation_cost = Some(cost.clone());
+            pending_counter.activation_ability_index = Some(ability_index);
+            return Ok(WaitingFor::RemoveCounterForCost {
+                player,
+                count,
+                counter_type: counter_type.clone(),
+                permanents: eligible,
+                pending_cast: Box::new(pending_counter),
             });
         }
 
@@ -7120,8 +7233,9 @@ pub fn handle_activate_ability(
 
     let target_slots = build_target_slots(state, &resolved)?;
     if !target_slots.is_empty() {
+        let target_constraints = ability_def.target_constraints.clone();
         if let Some(targets) =
-            auto_select_targets_for_ability(state, &resolved, &target_slots, &[])?
+            auto_select_targets_for_ability(state, &resolved, &target_slots, &target_constraints)?
         {
             let mut resolved = resolved;
             assign_targets_in_chain(state, &mut resolved, &targets)?;
@@ -7178,7 +7292,12 @@ pub fn handle_activate_ability(
             return Ok(WaitingFor::Priority { player });
         }
 
-        let selection = begin_target_selection_for_ability(state, &resolved, &target_slots, &[])?;
+        let selection = begin_target_selection_for_ability(
+            state,
+            &resolved,
+            &target_slots,
+            &target_constraints,
+        )?;
         let mut pending_target = PendingCast::new(
             source_id,
             CardId(0),
@@ -7187,6 +7306,7 @@ pub fn handle_activate_ability(
         );
         pending_target.activation_cost = ability_def.cost.clone();
         pending_target.activation_ability_index = Some(ability_index);
+        pending_target.target_constraints = target_constraints;
         return Ok(WaitingFor::TargetSelection {
             player,
             pending_cast: Box::new(pending_target),
@@ -7308,7 +7428,8 @@ pub fn handle_cancel_cast(
 
 // Cost payment handlers are in casting_costs module.
 pub(crate) use super::casting_costs::{
-    handle_discard_for_cost, handle_return_to_hand_for_cost, handle_sacrifice_for_cost,
+    handle_activation_cost_one_of_choice, handle_discard_for_cost, handle_return_to_hand_for_cost,
+    handle_sacrifice_for_cost,
 };
 
 fn generic_mana_in_cost(cost: &AbilityCost) -> u32 {
@@ -20869,6 +20990,109 @@ mod tests {
                     .unwrap_or(0),
                 2,
                 "one counter removed, two remain"
+            );
+        }
+
+        #[test]
+        fn targeted_counter_cost_prompts_and_removes_from_chosen_permanent() {
+            use crate::game::engine::apply_as_current;
+
+            let mut state = setup_game_at_main_phase();
+            let source = create_object(
+                &mut state,
+                CardId(901),
+                PlayerId(0),
+                "Counter Scholar".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&source).unwrap();
+                obj.card_types.core_types.push(CoreType::Artifact);
+                Arc::make_mut(&mut obj.abilities).push(
+                    AbilityDefinition::new(
+                        AbilityKind::Activated,
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        },
+                    )
+                    .cost(AbilityCost::Composite {
+                        costs: vec![
+                            AbilityCost::Tap,
+                            AbilityCost::RemoveCounter {
+                                count: 1,
+                                counter_type: CounterMatch::Any,
+                                target: Some(TargetFilter::Typed(
+                                    TypedFilter::new(TypeFilter::Permanent)
+                                        .controller(ControllerRef::You),
+                                )),
+                            },
+                        ],
+                    }),
+                );
+            }
+            let saga = create_object(
+                &mut state,
+                CardId(902),
+                PlayerId(0),
+                "Test Saga".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&saga).unwrap();
+                obj.card_types.core_types.push(CoreType::Enchantment);
+                obj.counters.insert(CounterType::Lore, 1);
+            }
+            let empty_permanent = create_object(
+                &mut state,
+                CardId(903),
+                PlayerId(0),
+                "No Counter".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&empty_permanent)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Artifact);
+
+            assert!(can_activate_ability_now(&state, PlayerId(0), source, 0));
+            let waiting =
+                handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut Vec::new())
+                    .unwrap();
+            match &waiting {
+                WaitingFor::RemoveCounterForCost {
+                    player,
+                    count,
+                    counter_type,
+                    permanents,
+                    ..
+                } => {
+                    assert_eq!(*player, PlayerId(0));
+                    assert_eq!(*count, 1);
+                    assert_eq!(*counter_type, CounterMatch::Any);
+                    assert_eq!(permanents, &vec![saga]);
+                }
+                other => panic!("Expected RemoveCounterForCost, got {other:?}"),
+            }
+            state.waiting_for = waiting;
+
+            apply_as_current(&mut state, GameAction::SelectCards { cards: vec![saga] }).unwrap();
+
+            assert!(state.objects[&source].tapped);
+            assert_eq!(
+                state.objects[&saga]
+                    .counters
+                    .get(&CounterType::Lore)
+                    .copied()
+                    .unwrap_or(0),
+                0
+            );
+            assert!(
+                state.stack.iter().any(|entry| entry.source_id == source),
+                "activated ability should reach the stack after targeted counter cost payment"
             );
         }
     }
