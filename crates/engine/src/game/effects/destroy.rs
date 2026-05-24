@@ -810,7 +810,9 @@ mod tests {
     ///   the target (power 3) and lower-power creatures (power 2) survive.
     #[test]
     fn fell_the_mighty_destroys_only_higher_power_creatures() {
-        use crate::types::ability::{FilterProp, ObjectScope, TargetRef};
+        use crate::types::ability::{
+            Comparator, FilterProp, ObjectScope, PtStat, PtValueScope, TargetRef,
+        };
 
         let mut state = GameState::new_two_player(42);
         let power_2 = spawn_creature_with_power(&mut state, CardId(1), PlayerId(0), "Cub", 2);
@@ -819,10 +821,15 @@ mod tests {
 
         // Mass filter: creatures with power >= (Target's power + 1) — i.e.
         // strictly greater than the chosen target's power.
+        // CR 208.1: the unified `PtComparison` predicate parameterizes the
+        // former `PowerGE` / `PowerLE` / `ToughnessGE` / `ToughnessLE` cluster.
         let mass_filter = TargetFilter::Typed(TypedFilter {
             type_filters: vec![TypeFilter::Creature],
             controller: None,
-            properties: vec![FilterProp::PowerGE {
+            properties: vec![FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::GE,
                 value: QuantityExpr::Offset {
                     inner: Box::new(QuantityExpr::Ref {
                         qty: QuantityRef::Power {

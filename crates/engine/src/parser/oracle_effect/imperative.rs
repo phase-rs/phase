@@ -5758,11 +5758,14 @@ fn filter_references_target_object_quantity(filter: &TargetFilter) -> bool {
 fn filter_prop_references_target_object_quantity(prop: &FilterProp) -> bool {
     match prop {
         // QuantityExpr-bearing variants — recurse into the expression.
-        FilterProp::PowerLE { value }
-        | FilterProp::PowerGE { value }
-        | FilterProp::ToughnessLE { value }
-        | FilterProp::ToughnessGE { value }
-        | FilterProp::Cmc { value, .. } => quantity_expr_references_target_object(value),
+        // CR 208 + CR 202.3: `PtComparison` parameterizes the former
+        // PowerLE/PowerGE/ToughnessLE/ToughnessGE sibling cluster along the
+        // (stat, scope, comparator) axes; `Cmc` parameterizes the analogous
+        // mana-value comparison cluster. Both carry a `QuantityExpr` value
+        // that may embed an `ObjectScope::Target` quantity ref.
+        FilterProp::PtComparison { value, .. } | FilterProp::Cmc { value, .. } => {
+            quantity_expr_references_target_object(value)
+        }
         FilterProp::Counters { count, .. } => quantity_expr_references_target_object(count),
         // Composite — walk inner props.
         FilterProp::AnyOf { props } => props
@@ -9490,7 +9493,7 @@ mod tests {
     #[test]
     fn fell_the_mighty_anchors_destroy_all_with_target_creature_slot() {
         use crate::parser::oracle::parse_oracle_text;
-        use crate::types::ability::ObjectScope;
+        use crate::types::ability::{Comparator, ObjectScope, PtStat};
 
         let parsed = parse_oracle_text(
             "Destroy all creatures with power greater than target creature's power.",
@@ -9535,9 +9538,14 @@ mod tests {
                 TargetFilter::Typed(tf) => {
                     assert!(tf.type_filters.contains(&TypeFilter::Creature));
                     // Mass filter must keep the power-greater-than-target encoding.
+                    // CR 208.1: parser emits `PtComparison { stat: Power,
+                    // comparator: GE }` after the P/T sibling-cluster unification.
                     let has_target_ref = tf.properties.iter().any(|prop| {
-                        if let FilterProp::PowerGE {
+                        if let FilterProp::PtComparison {
+                            stat: PtStat::Power,
+                            comparator: Comparator::GE,
                             value: QuantityExpr::Offset { inner, offset: 1 },
+                            ..
                         } = prop
                         {
                             matches!(
