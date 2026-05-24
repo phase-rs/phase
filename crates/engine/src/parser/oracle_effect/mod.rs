@@ -3970,6 +3970,10 @@ fn parse_skip_step_name(input: &str) -> OracleResult<'_, Phase> {
         value(Phase::Untap, tag("untap step")),
         value(Phase::Upkeep, tag("upkeep step")),
         value(Phase::Draw, tag("draw step")),
+        // CR 500.11: Skipping a phase skips all steps within it.
+        // "combat phase" → BeginCombat is used as a sentinel for the entire
+        // combat phase; the resolver expands it to all five combat steps.
+        value(Phase::BeginCombat, tag("combat phase")),
     ))
     .parse(input)
 }
@@ -33411,6 +33415,59 @@ mod tests {
         };
         assert_eq!(target, &TargetFilter::DefendingPlayer);
         assert_eq!(step, &Phase::Untap);
+        assert_eq!(
+            count,
+            &crate::types::ability::QuantityExpr::Fixed { value: 1 }
+        );
+    }
+
+    /// CR 500.11: "Target opponent skips their next combat phase" — Stonehorn
+    /// Dignitary. parse_skip_step_name maps "combat phase" → Phase::BeginCombat
+    /// (used as sentinel for the full phase). The resolver later expands this to
+    /// all five combat steps. Parser must produce SkipNextStep{step:BeginCombat}.
+    #[test]
+    fn target_opponent_skips_next_combat_phase_parses_as_begin_combat() {
+        let def = parse_effect_chain(
+            "Target opponent skips their next combat phase.",
+            AbilityKind::Spell,
+        );
+        let Effect::SkipNextStep {
+            target,
+            step,
+            count,
+        } = &*def.effect
+        else {
+            panic!("expected SkipNextStep, got {:?}", def.effect);
+        };
+        assert_eq!(target, &TargetFilter::Opponent);
+        // BeginCombat is the sentinel for "entire combat phase" per CR 500.11.
+        assert_eq!(step, &Phase::BeginCombat);
+        assert_eq!(
+            count,
+            &crate::types::ability::QuantityExpr::Fixed { value: 1 }
+        );
+    }
+
+    /// CR 500.11: "That player skips their next combat phase" — Blinding Angel's
+    /// triggered effect. Subject "that player" resolves to ParentTarget (the
+    /// player who was dealt combat damage, set in context by the trigger parser).
+    #[test]
+    fn that_player_skips_next_combat_phase_parses_as_begin_combat() {
+        let def = parse_effect_chain(
+            "That player skips their next combat phase.",
+            AbilityKind::Spell,
+        );
+        let Effect::SkipNextStep {
+            target,
+            step,
+            count,
+        } = &*def.effect
+        else {
+            panic!("expected SkipNextStep, got {:?}", def.effect);
+        };
+        // "That player" without trigger context defaults to ParentTarget.
+        assert_eq!(target, &TargetFilter::ParentTarget);
+        assert_eq!(step, &Phase::BeginCombat);
         assert_eq!(
             count,
             &crate::types::ability::QuantityExpr::Fixed { value: 1 }

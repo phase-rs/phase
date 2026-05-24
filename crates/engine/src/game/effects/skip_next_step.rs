@@ -41,7 +41,23 @@ pub fn resolve(
         if idx >= state.steps_to_skip.len() {
             state.steps_to_skip.resize_with(idx + 1, Default::default);
         }
-        *state.steps_to_skip[idx].entry(*step).or_default() += n;
+        // CR 500.11: Skipping a phase means all steps within that phase are
+        // skipped. BeginCombat is the sentinel for "entire combat phase", so
+        // expand it to all five combat steps. Individual step skips are stored
+        // as-is (untap, upkeep, draw steps have no sub-steps to expand).
+        if *step == Phase::BeginCombat {
+            for combat_step in [
+                Phase::BeginCombat,
+                Phase::DeclareAttackers,
+                Phase::DeclareBlockers,
+                Phase::CombatDamage,
+                Phase::EndCombat,
+            ] {
+                *state.steps_to_skip[idx].entry(combat_step).or_default() += n;
+            }
+        } else {
+            *state.steps_to_skip[idx].entry(*step).or_default() += n;
+        }
     }
 
     events.push(GameEvent::EffectResolved {
@@ -120,5 +136,38 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    /// CR 500.11: Skipping a phase means all steps within that phase are
+    /// skipped. When the effect targets Phase::BeginCombat (the "combat phase"
+    /// sentinel from parse_skip_step_name), the resolver must expand it to all
+    /// five combat steps. Cards: Stonehorn Dignitary, Blinding Angel, Revenant
+    /// Patriarch, Moment of Silence.
+    #[test]
+    fn skip_combat_phase_expands_to_all_five_combat_steps() {
+        let mut state = GameState::default();
+        let mut events = Vec::new();
+        let ability = make_ability(Phase::BeginCombat, QuantityExpr::Fixed { value: 1 });
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // CR 500.11: all five combat steps must be in steps_to_skip.
+        let skips = &state.steps_to_skip[0];
+        assert_eq!(skips.get(&Phase::BeginCombat), Some(&1), "BeginCombat");
+        assert_eq!(
+            skips.get(&Phase::DeclareAttackers),
+            Some(&1),
+            "DeclareAttackers"
+        );
+        assert_eq!(
+            skips.get(&Phase::DeclareBlockers),
+            Some(&1),
+            "DeclareBlockers"
+        );
+        assert_eq!(skips.get(&Phase::CombatDamage), Some(&1), "CombatDamage");
+        assert_eq!(skips.get(&Phase::EndCombat), Some(&1), "EndCombat");
+        // Non-combat steps must not be touched.
+        assert!(skips.get(&Phase::Untap).is_none(), "Untap must not be set");
+        assert!(skips.get(&Phase::Draw).is_none(), "Draw must not be set");
     }
 }
