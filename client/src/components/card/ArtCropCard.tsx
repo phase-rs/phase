@@ -43,6 +43,7 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
     faceIndex: imageLookup.faceIndex,
     isToken: obj?.face_down ? false : isToken,
     tokenFilters: !obj?.face_down && isToken && obj ? tokenFiltersForObject(obj) : undefined,
+    tokenImageRef: !obj?.face_down && isToken && obj ? obj.token_image_ref : undefined,
     oracleId: obj?.face_down ? undefined : imageLookup.oracleId,
     faceName: obj?.face_down ? undefined : imageLookup.faceName,
   });

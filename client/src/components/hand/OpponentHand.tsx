@@ -30,6 +30,7 @@ export function OpponentHand({ showCards = false }: OpponentHandProps) {
   const opponent = players?.[opponentId];
   const objects = useGameStore((s) => s.gameState?.objects);
   const revealedCards = useGameStore((s) => s.gameState?.revealed_cards);
+  const publicRevealedCards = useGameStore((s) => s.gameState?.public_revealed_cards);
 
   if (!opponent) return null;
 
@@ -49,7 +50,8 @@ export function OpponentHand({ showCards = false }: OpponentHandProps) {
       <AnimatePresence>
         {opponent.hand.map((id, i) => {
           const obj = objects ? objects[id] : null;
-          const isRevealed = revealedCards?.includes(id) ?? false;
+          const isRevealed = (revealedCards?.includes(id) ?? false)
+            || (publicRevealedCards?.includes(id) ?? false);
           const showFace = showCards || isRevealed;
           // Negate rotation so fan opens toward opponent (top of screen)
           const rotation = -((i - center) * 6);

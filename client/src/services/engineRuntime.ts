@@ -1,4 +1,8 @@
-import type { GameFormat } from "../adapter/types";
+import type {
+  GameFormat,
+  TokenCharacteristics,
+  TokenImageRef,
+} from "../adapter/types";
 
 type EngineModule = typeof import("@wasm/engine");
 
@@ -134,17 +138,15 @@ export async function sideboardPolicyForFormat(
  * first access; the result is cached for the session because the catalog is
  * static engine data (compiled into the WASM binary via `include_str!`).
  */
-import type { TokenCharacteristics } from "../adapter/types";
-
 export type PredefinedTokenKind =
   | "Treasure"
   | "Food"
+  | "Gold"
   | "Clue"
   | "Blood"
   | "Powerstone"
   | "Map"
-  | "Spawn"
-  | "Gold";
+  | "Lander";
 
 export type TokenCategory =
   | { PredefinedArtifact: { kind: PredefinedTokenKind } }
@@ -163,6 +165,20 @@ export interface TokenPreset {
   category: TokenCategory;
   fidelity: PresetFidelity;
   body: TokenCharacteristics;
+  source_card_names?: string[];
+  source_card_refs?: Array<{
+    card_name: string;
+    face_name?: string | null;
+    scryfall_oracle_id?: string | null;
+    scryfall_id?: string | null;
+  }>;
+  token_image_ref?: TokenImageRef | null;
+  set_code?: string;
+  set_name?: string;
+  collector_number?: string | null;
+  released_at?: string | null;
+  type_line?: string;
+  rules_text?: string | null;
 }
 
 let tokenPresetsCache: TokenPreset[] | null = null;

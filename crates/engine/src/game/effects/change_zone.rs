@@ -16,11 +16,17 @@ use crate::types::zones::Zone;
 
 /// CR 401.3: Shuffle a player's library using the game's seeded RNG.
 /// Reusable helper for auto-shuffle after zone moves to Library.
-pub fn shuffle_library(state: &mut GameState, player: PlayerId) {
+pub fn shuffle_library(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEvent>) {
     let GameState { players, rng, .. } = state;
     if let Some(p) = players.iter_mut().find(|p| p.id == player) {
         crate::util::im_ext::shuffle_vector(&mut p.library, rng);
     }
+    // CR 701.24a: Emit player-action event so trigger matchers can filter
+    // by the identity of the shuffling player.
+    events.push(GameEvent::PlayerPerformedAction {
+        player_id: player,
+        action: crate::types::events::PlayerActionKind::ShuffledLibrary,
+    });
 }
 
 /// CR 701.17c + CR 603.7: For a `TrackedSet` / `TrackedSetFiltered` target,
@@ -152,7 +158,7 @@ pub(crate) fn deliver_replaced_zone_change(
         if to == Zone::Library {
             let owner = state.objects.get(&object_id).map(|o| o.owner);
             if let Some(owner) = owner {
-                shuffle_library(state, owner);
+                shuffle_library(state, owner, events);
             }
         }
         // Track cards exiled by the source. Some linked exiles return when the
@@ -172,6 +178,20 @@ pub(crate) fn deliver_replaced_zone_change(
                     kind,
                 });
             }
+        }
+        // CR 614.12a: Drain mandatory replacement post-effects after the zone
+        // change completes. This shared delivery path covers effect-driven moves
+        // (`ChangeZone`) in the same way stack resolution and land play already
+        // do, so as-enters work such as "enters prepared" or persisted choices
+        // applies before triggers and priority.
+        if state.post_replacement_continuation.is_some() {
+            let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+                state,
+                Some(object_id),
+                None,
+                Some(crate::types::replacements::ReplacementEvent::Moved),
+                events,
+            );
         }
     }
 }

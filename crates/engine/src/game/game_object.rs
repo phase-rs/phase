@@ -8,7 +8,7 @@ use crate::types::ability::{
     CastingPermission, CastingRestriction, ChosenAttribute, ChosenSubtypeKind, ModalChoice,
     ReplacementDefinition, SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
 };
-use crate::types::card::{LayoutKind, PrintedCardRef};
+use crate::types::card::{LayoutKind, PrintedCardRef, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::CounterType;
 use crate::types::definitions::Definitions;
@@ -299,6 +299,14 @@ pub struct GameObject {
     pub static_definitions: Definitions<StaticDefinition>,
     pub color: Vec<ManaColor>,
     pub printed_ref: Option<PrintedCardRef>,
+    /// Exact token-art lookup metadata, populated only when the engine can
+    /// identify one printed token catalog entry without guessing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_image_ref: Option<TokenImageRef>,
+    /// MTGJSON token UUIDs linked from this printed source card. Display/catalog
+    /// metadata copied from `CardFace`; game rules never read it directly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_related_token_ids: Vec<String>,
 
     // Back face data for double-faced cards (DFCs)
     pub back_face: Option<BackFaceData>,
@@ -439,9 +447,16 @@ pub struct GameObject {
     #[serde(skip_deserializing, default)]
     pub available_mana_pips: Vec<ManaPip>,
 
-    // Planeswalker: whether a loyalty ability has been activated this turn
+    /// CR 606.3 + CR 606.1: Per-permanent loyalty-ability activation count for
+    /// the current turn. Default cap is 1 (CR 606.3 "once per turn"); raised
+    /// for the controller by `GameState::extra_loyalty_activations_this_turn`
+    /// (The Chain Veil class). The gate logic lives in
+    /// `planeswalker::can_activate_loyalty_ability`. The historical bool
+    /// "loyalty_activated_this_turn" is replaced by `count > 0`. Cleared at
+    /// turn start (CR 606.3 "that turn" reset) and on battlefield re-entry
+    /// (CR 400.7 — a re-entering permanent is a new object with no memory).
     #[serde(skip_deserializing, default)]
-    pub loyalty_activated_this_turn: bool,
+    pub loyalty_activations_this_turn: u32,
 
     // Commander: whether this object is a commander card
     #[serde(default)]
@@ -644,6 +659,13 @@ impl GameObject {
             keywords: self.keywords.clone(),
             power: self.power,
             toughness: self.toughness,
+            // CR 208.4b + CR 613.4b: Snapshot the layer-7b base values the same
+            // way `power`/`toughness` capture the post-layer-7 current values,
+            // so `PtComparison { scope: Base }` look-back filters read the
+            // event-time base (a base-1/1 with a +1/+1 counter records base 1,
+            // current 2).
+            base_power: self.base_power,
+            base_toughness: self.base_toughness,
             colors: self.color.clone(),
             mana_value: self.mana_cost.mana_value(),
             controller: self.controller,
@@ -740,6 +762,8 @@ impl GameObject {
             static_definitions: Definitions::default(),
             color: Vec::new(),
             printed_ref: None,
+            token_image_ref: None,
+            source_related_token_ids: Vec::new(),
             back_face: None,
             base_power: None,
             base_toughness: None,
@@ -771,7 +795,7 @@ impl GameObject {
             mana_ability_index: None,
             devotion: None,
             available_mana_pips: Vec::new(),
-            loyalty_activated_this_turn: false,
+            loyalty_activations_this_turn: 0,
             is_commander: false,
             commander_tax: None,
             is_renowned: false,
@@ -814,6 +838,10 @@ impl GameObject {
             name: self.name.clone(),
             power: self.power,
             toughness: self.toughness,
+            // CR 208.4b + CR 613.4b: Layer-7b base values, mirroring how
+            // `power`/`toughness` capture the post-layer-7 current values.
+            base_power: self.base_power,
+            base_toughness: self.base_toughness,
             mana_value: self.mana_cost.mana_value(),
             controller: self.controller,
             owner: self.owner,
@@ -847,7 +875,7 @@ impl GameObject {
         self.tapped = false;
         self.damage_marked = 0;
         self.dealt_deathtouch_damage = false;
-        self.loyalty_activated_this_turn = false;
+        self.loyalty_activations_this_turn = 0;
         self.is_suspected = false;
         self.is_renowned = false;
         self.monstrous = false;
@@ -989,6 +1017,30 @@ impl GameObject {
     pub fn chosen_number(&self) -> Option<u8> {
         self.chosen_attributes.iter().find_map(|a| match a {
             ChosenAttribute::Number(n) => Some(*n),
+            _ => None,
+        })
+    }
+
+    /// CR 608.2d: Look up a stored chosen keyword (Urborg / Walking Sponge
+    /// "choose an ability the target has, then remove it"). Read by
+    /// `ContinuousModification::RemoveChosenKeyword` at Layer 6 evaluation
+    /// to strip the chosen keyword from the recipient.
+    pub fn chosen_keyword(&self) -> Option<&Keyword> {
+        self.chosen_attributes.iter().find_map(|a| match a {
+            ChosenAttribute::Keyword(k) => Some(k),
+            _ => None,
+        })
+    }
+
+    /// CR 614.12c + CR 607.2d: Look up the persisted anchor-word label chosen
+    /// as this permanent entered the battlefield (e.g. "Jeskai" / "Temur" on
+    /// Frostcliff Siege, "Khans" / "Dragons" on a Khans of Tarkir Siege).
+    /// Read by `StaticCondition::ChosenLabelIs` and
+    /// `TriggerCondition::ChosenLabelIs` to gate the linked anchor-word
+    /// abilities for the lifetime of the permanent.
+    pub fn chosen_label(&self) -> Option<&str> {
+        self.chosen_attributes.iter().find_map(|a| match a {
+            ChosenAttribute::Label(s) => Some(s.as_str()),
             _ => None,
         })
     }

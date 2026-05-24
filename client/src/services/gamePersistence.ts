@@ -25,6 +25,10 @@ export interface ActiveGameMeta {
   /** Per-AI-seat config for multi-opponent AI games. Absent for online/P2P
    *  modes and for pre-migration saved games. */
   aiSeats?: AiSeatMeta[];
+  /** Full setup-time format config for local games that started outside the
+   *  dedicated setup page. URL params carry the format name; this preserves
+   *  custom knobs like player count limits, starting life, and deck size. */
+  formatConfig?: FormatConfig;
   /** Bare 5-char room code for P2P guest resume. */
   p2pRoomCode?: string;
 }
@@ -77,8 +81,8 @@ const P2P_HOST_KEY_PREFIX = "phase-p2p-host:";
  * GameObjects with full ability definitions), so we use IndexedDB which
  * has no practical size limit.
  *
- * ActiveGameMeta remains in localStorage — it's < 200 bytes and benefits
- * from synchronous access for instant menu rendering.
+ * ActiveGameMeta remains in localStorage — it's small and benefits from
+ * synchronous access for instant menu rendering.
  *
  * The IDB store is lazily created on first use to avoid errors in
  * environments where IndexedDB is unavailable (tests, SSR).

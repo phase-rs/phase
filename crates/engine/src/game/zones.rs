@@ -71,6 +71,10 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
                 name: obj.name.clone(),
                 power: obj.power,
                 toughness: obj.toughness,
+                // CR 208.4b + CR 613.4b: Capture the layer-7b base values so
+                // base-scope P/T look-back filters read the base, not current.
+                base_power: obj.base_power,
+                base_toughness: obj.base_toughness,
                 mana_value: obj.mana_cost.mana_value(),
                 controller: obj.controller,
                 owner: obj.owner,
@@ -517,7 +521,10 @@ pub fn remove_from_zone(state: &mut GameState, object_id: ObjectId, zone: Zone, 
             }
         }
         Zone::Battlefield => state.battlefield.retain(|id| *id != object_id),
-        Zone::Stack => state.stack.retain(|e| e.id != object_id),
+        Zone::Stack => {
+            state.stack.retain(|e| e.id != object_id);
+            state.stack_paid_facts.remove(&object_id);
+        }
         Zone::Exile => state.exile.retain(|id| *id != object_id),
         Zone::Command => state.command_zone.retain(|id| *id != object_id),
     }

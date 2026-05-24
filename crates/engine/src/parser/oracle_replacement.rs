@@ -3,8 +3,8 @@ use std::str::FromStr;
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::char;
-use nom::combinator::{all_consuming, opt, peek, value};
+use nom::character::complete::{char, multispace1};
+use nom::combinator::{all_consuming, eof, opt, peek, value};
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
@@ -15,7 +15,7 @@ use super::oracle_effect::{
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::replacement::ReplacementIr;
 use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
-use super::oracle_nom::condition::parse_inner_condition;
+use super::oracle_nom::condition::{parse_attached_subject_target_filter, parse_inner_condition};
 use super::oracle_nom::duration::parse_duration;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_quantity::capitalize_first;
@@ -27,10 +27,10 @@ use super::oracle_util::{
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, CombatDamageScope,
     Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit, DamageModification,
-    DamageTargetFilter, DamageTargetPlayerScope, Duration, Effect, FilterProp, ManaModification,
-    ManaReplacementScope, PreventionAmount, QuantityExpr, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, ReplacementMode, ReplacementPlayerScope, StaticCondition, TargetFilter,
-    TypeFilter, TypedFilter,
+    DamageRedirectTarget, DamageTargetFilter, DamageTargetPlayerScope, Duration, Effect,
+    FilterProp, ManaModification, ManaReplacementScope, PreventionAmount, QuantityExpr,
+    QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
+    ReplacementPlayerScope, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::mana::{ManaColor, ManaCost, ManaType};
@@ -77,6 +77,13 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     // --- "As ~ enters, choose a [type]" → Moved replacement with persisted Choose ---
     // Must be checked BEFORE shock lands, which may contain this as a sub-pattern.
     if let Some(def) = parse_as_enters_choose(&norm_lower, &text) {
+        return Some(def);
+    }
+
+    // --- "~ enters prepared." ---
+    // CR 722.3a: "enters prepared" gives the entering permanent the prepared
+    // designation as part of the entry event, not through a triggered ability.
+    if let Some(def) = parse_enters_prepared(&norm_lower, &text) {
         return Some(def);
     }
 
@@ -431,6 +438,13 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(def);
     }
 
+    // --- Life-floor damage replacement: "if you control a [filter], damage that would
+    // reduce your life total to less than N reduces it to N instead" ---
+    // CR 614.1a: Worship-class replacement effect.
+    if let Some(def) = parse_life_floor_damage_replacement(&norm_lower) {
+        return Some(def);
+    }
+
     None
 }
 
@@ -573,6 +587,34 @@ fn parse_self_enters_pay_cost_replacement(
 /// Case-insensitive replacement of card name and self-referencing phrases with "~".
 fn replace_self_refs(text: &str, card_name: &str) -> String {
     normalize_card_name_refs(text, card_name)
+}
+
+fn parse_enters_prepared(norm_lower: &str, text: &str) -> Option<ReplacementDefinition> {
+    let mut parser = value(
+        (),
+        all_consuming(preceded(
+            alt((
+                tag::<_, _, OracleError<'_>>("~"),
+                tag("this creature"),
+                tag("this permanent"),
+                tag("it"),
+            )),
+            (tag(" enters prepared"), opt(tag("."))),
+        )),
+    );
+    parser.parse(norm_lower.trim()).ok()?;
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::BecomePrepared {
+                    target: TargetFilter::SelfRef,
+                },
+            ))
+            .valid_card(TargetFilter::SelfRef)
+            .description(text.to_string()),
+    )
 }
 
 /// CR 603.6b + CR 701.20a: Parse the reveal-land pattern.
@@ -2759,6 +2801,241 @@ fn parse_damage_modification_replacement(
     Some(def)
 }
 
+/// CR 614.9 + CR 614.1a + CR 615: Parse a one-shot "the next time [source]
+/// would deal [combat] damage [to X] this turn, [modify/redirect] instead"
+/// damage-replacement effect into `Effect::CreateDamageReplacement`.
+///
+/// This is effect-creating text living in an activated/triggered ability body
+/// (after `{T}:`, `{0}:`, in a flip-coin branch — Desperate Gambit, Soltari
+/// Guerrillas, Beacon of Destiny, Jade Monolith, Goblin Psychopath), NOT a
+/// permanent static replacement (those route through `parse_replacement_line`).
+///
+/// The detector IS the parser: the one-shot branch is gated by the
+/// `tag("the next time ")` prefix combinator succeeding, never a string
+/// heuristic. Returns `None` (fall-through) when the prefix or grammar fails.
+pub(crate) fn parse_oneshot_damage_replacement(norm_lower: &str) -> Option<Effect> {
+    // CR 614.1a + CR 514.2: "the next time ... this turn" — a replacement effect
+    // ("instead", CR 614.1a) with a "this turn" duration that ends at cleanup
+    // (CR 514.2). The one-opportunity consumption is CR 614.5 (see resolver).
+    let (after_prefix, _) = preceded(
+        tag::<_, _, OracleError<'_>>("the next time "),
+        peek(take_until::<_, _, OracleError<'_>>("would deal")),
+    )
+    .parse(norm_lower)
+    .ok()?;
+    // Require a "would deal ... this turn" spine; bail early otherwise so this
+    // never shadows other "the next time" effects (e.g. card-draw replacements).
+    if !nom_primitives::scan_contains(after_prefix, "would deal")
+        || !nom_primitives::scan_contains(after_prefix, "this turn")
+    {
+        return None;
+    }
+
+    // Strip the prefix for sub-parser reuse — `parse_damage_source_filter`
+    // splits on "would deal" itself, so feed it the post-prefix slice.
+    let body = after_prefix.trim();
+
+    // The "would deal ... this turn" clause carries the source + original
+    // recipient; the result clause (after the comma) carries the redirect /
+    // amount. Split there so recipient parsing never sees the redirect's "to ..."
+    // and vice-versa.
+    let (would_clause, result_clause) = split_would_deal_clause(body);
+
+    // Source spec (subject before "would deal"). Reuse the shared source-filter
+    // parser, then layer the one-shot-specific anaphors it doesn't cover.
+    let source_filter = parse_oneshot_source_filter(body);
+
+    // Combat scope: "combat damage" vs "damage".
+    let combat_scope = scan_combat_scope(would_clause);
+
+    // Original-recipient scope from the would-deal clause: a typed scope ("to an
+    // opponent" / "to a creature") OR a chosen target ("to target creature" —
+    // Jade Monolith). The latter becomes a hosted object slot, not a scope.
+    let recipient_object_filter = parse_damage_to_target_filter(would_clause);
+    let target_filter = if recipient_object_filter.is_some() {
+        None
+    } else {
+        parse_damage_target_filter(would_clause)
+    };
+
+    // Result clause: amount-modifying form ("double that damage") first; else
+    // redirection form ("it deals that damage to <recipient> instead").
+    if let Some(modification) = scan_damage_modification(result_clause) {
+        // CR 614.1a: amount-modifying one-shot (Desperate Gambit).
+        return Some(Effect::CreateDamageReplacement {
+            source_filter,
+            combat_scope,
+            target_filter,
+            modification: Some(modification),
+            redirect_to: None,
+            redirect_object_filter: None,
+            recipient_object_filter,
+        });
+    }
+
+    // CR 614.9: redirection one-shot.
+    if let Some(redirect_to) = parse_redirect_recipient(result_clause) {
+        let redirect_object_filter = match redirect_to {
+            DamageRedirectTarget::ChosenObjectTarget => {
+                parse_damage_to_target_filter(result_clause)
+            }
+            DamageRedirectTarget::Controller | DamageRedirectTarget::SourceObject => None,
+        };
+        return Some(Effect::CreateDamageReplacement {
+            source_filter,
+            combat_scope,
+            target_filter,
+            modification: None,
+            redirect_to: Some(redirect_to),
+            redirect_object_filter,
+            recipient_object_filter,
+        });
+    }
+
+    // CR 615: prevention sibling ("the next time [source] would deal damage this
+    // turn, prevent that damage" — Desperate Gambit lose-branch). The existing
+    // `PreventDamage` resolver builds a one-shot `ShieldKind::Prevention` shield;
+    // route the source-scoped one-shot prevention through it rather than
+    // duplicating the shield-creation flow.
+    if nom_primitives::scan_contains(result_clause, "prevent that damage")
+        || nom_primitives::scan_contains(result_clause, "prevent the damage")
+    {
+        return Some(Effect::PreventDamage {
+            amount: PreventionAmount::All,
+            amount_dynamic: None,
+            target: TargetFilter::Any,
+            scope: combat_scope
+                .map(|_| crate::types::ability::PreventionScope::CombatDamage)
+                .unwrap_or(crate::types::ability::PreventionScope::AllDamage),
+            damage_source_filter: source_filter,
+        });
+    }
+
+    None
+}
+
+/// Split the one-shot body at the "this turn[,]" boundary into the would-deal
+/// clause (source + original recipient) and the result clause (redirect /
+/// amount / prevention). The result clause is what follows "this turn".
+fn split_would_deal_clause(body: &str) -> (&str, &str) {
+    match nom_primitives::split_once_on(body, "this turn") {
+        Ok((_, (before, after))) => {
+            // `after` begins after "this turn"; trim a leading comma/space.
+            let after = after.trim_start_matches([',', ' ']);
+            (before, after)
+        }
+        Err(_) => (body, body),
+    }
+}
+
+/// CR 115.1: Detect a chosen-target recipient ("to target creature" / "to
+/// target permanent") and return its `TargetFilter`. Distinct from
+/// `parse_damage_target_filter`, which handles typed *scopes* ("to a creature",
+/// "to an opponent"). Returns `None` when the recipient is a scope or implicit.
+fn parse_damage_to_target_filter(clause: &str) -> Option<TargetFilter> {
+    nom_primitives::scan_at_word_boundaries(clause, |input| {
+        let (input, _) = tag("to ").parse(input)?;
+        let (input, filter) = alt((
+            value(
+                TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)),
+                tag("target creature"),
+            ),
+            value(
+                TargetFilter::Typed(TypedFilter::default()),
+                tag("target permanent"),
+            ),
+        ))
+        .parse(input)?;
+        Ok((input, filter))
+    })
+}
+
+/// CR 614.1a: Resolve the one-shot replacement's damage *source* spec. Delegates
+/// to the shared `parse_damage_source_filter` for the "source you control" /
+/// color / type forms, then layers the one-shot anaphors:
+/// - "it" / "~" / "this creature" → `SelfRef` (Goblin Psychopath, Soltari).
+/// - "that source" / "a source of your choice" → `ChosenDamageSource` (Desperate
+///   Gambit, Beacon of Destiny, Jade Monolith) — bound to the source chosen by
+///   the preceding "choose a source" step at resolution time.
+fn parse_oneshot_source_filter(body: &str) -> Option<TargetFilter> {
+    let (_, (subject, _)) = nom_primitives::split_once_on(body, "would deal").ok()?;
+    let subject = subject.trim();
+    // Bare-anaphor source references (handled by combinator dispatch, not the
+    // generic source-filter parser).
+    //
+    // TODO (known limitation, deferred): cross-sentence anaphora. In the
+    // Desperate Gambit lose-branch ("...the next time it would deal damage this
+    // turn, prevent that damage"), the bare "it" co-refers with the prior
+    // sentence's "that source" (the chosen source), so it should resolve to
+    // `ChosenDamageSource`, not `SelfRef`. Resolving that requires sentence-level
+    // anaphora tracking across the FlipCoin branches, which is a separate parser
+    // problem out of scope here. The win-branch (amount) and the activated-ability
+    // cards (Soltari/Beacon/Jade/Goblin Psychopath) are unaffected.
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("it"),
+        tag("~"),
+        tag("this creature"),
+    ))
+    .parse(subject)
+    {
+        if rest.trim().is_empty() {
+            return Some(TargetFilter::SelfRef);
+        }
+    }
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("that source"),
+        tag("a source of your choice"),
+    ))
+    .parse(subject)
+    {
+        if rest.trim().is_empty() {
+            // TODO (known limitation, deferred): the candidate constraint on the
+            // chosen source is dropped. Desperate Gambit's separate "Choose a
+            // source you control" sentence parses as TargetOnly{Any}, and the
+            // inline source prompt enumerates with TargetFilter::Any — so a
+            // "you control" restriction (and any similar qualifier) is not yet
+            // enforced when the player picks the source. Closing this needs the
+            // pre-choice candidate filter threaded into ChosenDamageSource;
+            // out of scope for this change.
+            return Some(TargetFilter::ChosenDamageSource);
+        }
+    }
+    parse_damage_source_filter(body)
+}
+
+/// CR 614.9: Parse the redirection recipient from the result clause by scanning
+/// word boundaries for one redirection lead-in followed by a recipient. The
+/// three lead-ins ("it deals that damage to ", "that damage is dealt to ",
+/// "that source deals that damage to ") collapse to two `to`-anchors; the
+/// recipient is "you" (Controller), "~" (the source object), or "target
+/// creature"/"target permanent" (a chosen object target).
+fn parse_redirect_recipient(body: &str) -> Option<DamageRedirectTarget> {
+    nom_primitives::scan_at_word_boundaries(body, parse_redirect_recipient_phrase)
+}
+
+/// Nom combinator for a redirection lead-in + recipient phrase.
+fn parse_redirect_recipient_phrase(
+    input: &str,
+) -> nom::IResult<&str, DamageRedirectTarget, OracleError<'_>> {
+    // Lead-in: "(deals|is dealt) that damage to " — the active form ("it/that
+    // source deals that damage to") and passive form ("that damage is dealt
+    // to") share the trailing "that damage ... to ".
+    let (input, _) = alt((
+        tag("deals that damage to "),
+        tag("that damage is dealt to "),
+    ))
+    .parse(input)?;
+    alt((
+        value(DamageRedirectTarget::Controller, tag("you")),
+        value(DamageRedirectTarget::SourceObject, tag("~")),
+        value(
+            DamageRedirectTarget::ChosenObjectTarget,
+            alt((tag("target creature"), tag("target permanent"))),
+        ),
+    ))
+    .parse(input)
+}
+
 /// Parse the damage source filter from the subject clause before "would deal".
 fn parse_damage_source_filter(norm_lower: &str) -> Option<TargetFilter> {
     let (_, (subject, _)) = nom_primitives::split_once_on(norm_lower, "would deal").ok()?;
@@ -3681,6 +3958,9 @@ fn token_description_to_spec(
         // Placeholder: overwritten at apply time with the replacement source's identity.
         source_id: crate::types::identifiers::ObjectId(0),
         controller: crate::types::player::PlayerId(0),
+        // Replacement-created tokens ("instead, create a token") are not the
+        // "attached to" Aura/Role class; that path flows through `Effect::Token`.
+        attach_to: None,
     })
 }
 
@@ -3959,44 +4239,90 @@ fn parse_damage_to_player_instead_followup(
     )
 }
 
+/// CR 614.1a: Strip a leading "as long as <condition>, " gate from a damage
+/// prevention replacement's normalized lowercase text and lift it to a typed
+/// `ReplacementCondition`. Returns the trimmed slice plus the gate (or the
+/// untouched input and `None` when no parseable gate is present).
+///
+/// Shares `replacement_condition_from_static` with `parse_source_state_external_entry`
+/// so any condition shape the static-condition lifter supports — quantity
+/// comparisons (party-size, opponents-count, life), `SourceIsTapped`,
+/// `Not(SourceIsTapped)` — flows through unchanged.
+///
+/// When the prefix is present but the body fails to parse or doesn't lift to a
+/// supported `ReplacementCondition`, the function returns the untouched input
+/// and `None`. The caller continues with the original text rather than failing
+/// — preserving prior coverage for prevention lines whose gate the typed
+/// surface can't yet carry (still applies the description-based shield, same
+/// as before this gate-extraction was added).
+fn strip_as_long_as_prefix_for_prevention(
+    norm_lower: &str,
+) -> (&str, Option<ReplacementCondition>) {
+    let parsed = (|| -> Option<(&str, ReplacementCondition)> {
+        let (rest, _) = tag::<_, _, OracleError<'_>>("as long as ")
+            .parse(norm_lower)
+            .ok()?;
+        let (rest, static_cond) = parse_inner_condition(rest).ok()?;
+        let (rest, _) = tag::<_, _, OracleError<'_>>(", ").parse(rest).ok()?;
+        let rc = replacement_condition_from_static(static_cond)?;
+        Some((rest, rc))
+    })();
+    match parsed {
+        Some((rest, rc)) => (rest, Some(rc)),
+        None => (norm_lower, None),
+    }
+}
+
 /// CR 615: Parse damage prevention replacement effects.
 /// Handles:
 /// - "prevent all combat damage that would be dealt [this turn]" (Fog, Moments Peace)
 /// - "prevent all damage that would be dealt to you [this turn]" (Hallow)
 /// - "prevent the next N damage that would be dealt to [target] this turn" (Mending Hands)
 /// - "prevent all damage that would be dealt to and dealt by [creature]" (Stonehorn Dignitary)
+/// - "prevent all damage that would be dealt to enchanted/equipped creature" — scoped via
+///   `valid_card` with `EnchantedBy`/`EquippedBy` so only damage to the attached creature
+///   is prevented (Inviolability, General's Kabuto, Magebane Armor, Artifact Ward, Multiclass Baldric).
+/// - Optional leading "as long as <condition>, " gate (CR 614.1a) — Multiclass Baldric's
+///   "As long as you have a full party, prevent all damage that would be dealt to equipped creature."
 fn parse_damage_prevention_replacement(
     norm_lower: &str,
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
+    // CR 614.1a: An "as long as <cond>, " prefix on a prevention replacement gates
+    // the shield itself, not its post-replacement followup. Strip the gate first
+    // and lift it to a typed `ReplacementCondition` so the rest of the parser
+    // operates on the bare prevention clause. Shares `replacement_condition_from_static`
+    // with `parse_source_state_external_entry` and other "as long as" callers.
+    let (working_lower, prefix_condition) = strip_as_long_as_prefix_for_prevention(norm_lower);
+
     // Must contain "prevent" and "damage" to be a prevention pattern
-    if !nom_primitives::scan_contains(norm_lower, "prevent")
-        || !nom_primitives::scan_contains(norm_lower, "damage")
+    if !nom_primitives::scan_contains(working_lower, "prevent")
+        || !nom_primitives::scan_contains(working_lower, "damage")
     {
         return None;
     }
 
     // "damage can't be prevented" is NOT a prevention replacement -- it's a restriction.
-    if nom_primitives::scan_contains(norm_lower, "can't be prevented") {
+    if nom_primitives::scan_contains(working_lower, "can't be prevented") {
         return None;
     }
 
     // CR 615: "sources of the color of your choice" requires interactive color choice —
     // handled as a Choose → PreventDamage spell effect chain, not a passive replacement.
-    if nom_primitives::scan_contains(norm_lower, "color of your choice") {
+    if nom_primitives::scan_contains(working_lower, "color of your choice") {
         return None;
     }
 
     // Redirection patterns ("prevent that damage. ~ deals that much damage to") are handled
     // by parse_damage_redirection_replacement — don't intercept them here.
-    if nom_primitives::scan_contains(norm_lower, "prevent that damage")
-        && nom_primitives::scan_contains(norm_lower, "deals that much damage")
+    if nom_primitives::scan_contains(working_lower, "prevent that damage")
+        && nom_primitives::scan_contains(working_lower, "deals that much damage")
     {
         return None;
     }
     // "is dealt to ~ instead" patterns are also redirections, not pure prevention
-    if nom_primitives::scan_contains(norm_lower, "is dealt to")
-        && nom_primitives::scan_contains(norm_lower, "instead")
+    if nom_primitives::scan_contains(working_lower, "is dealt to")
+        && nom_primitives::scan_contains(working_lower, "instead")
     {
         return None;
     }
@@ -4004,14 +4330,14 @@ fn parse_damage_prevention_replacement(
     // --- 1. Extract prevention amount ---
     // CR 615.7: "prevent the next N damage" → specific shield amount
     // CR 615.1a: "prevent all damage" → prevent everything
-    let amount = if nom_primitives::scan_contains(norm_lower, "prevent all") {
+    let amount = if nom_primitives::scan_contains(working_lower, "prevent all") {
         PreventionAmount::All
-    } else if let Some(rest) = strip_after(norm_lower, "prevent the next ") {
+    } else if let Some(rest) = strip_after(working_lower, "prevent the next ") {
         // Uses oracle_util::parse_number (not nom directly) because it handles "X" → 0
         // for cards like Temper, Acolyte's Reward, etc.
         let (n, _) = parse_number(rest)?;
         PreventionAmount::Next(n)
-    } else if nom_primitives::scan_contains(norm_lower, "prevent that damage") {
+    } else if nom_primitives::scan_contains(working_lower, "prevent that damage") {
         // "prevent that damage" in redirection context — redirect handled separately
         PreventionAmount::All
     } else {
@@ -4022,9 +4348,9 @@ fn parse_damage_prevention_replacement(
     // CR 615: "combat damage" restricts to combat damage only.
     // Longest-match-first: "noncombat damage" before "combat damage" because
     // "noncombat" contains the substring "combat".
-    let combat_scope = if nom_primitives::scan_contains(norm_lower, "noncombat damage") {
+    let combat_scope = if nom_primitives::scan_contains(working_lower, "noncombat damage") {
         Some(CombatDamageScope::NoncombatOnly)
-    } else if nom_primitives::scan_contains(norm_lower, "combat damage") {
+    } else if nom_primitives::scan_contains(working_lower, "combat damage") {
         Some(CombatDamageScope::CombatOnly)
     } else {
         None
@@ -4032,13 +4358,13 @@ fn parse_damage_prevention_replacement(
 
     // --- 3. Extract damage target filter ---
     // "to you" → player only, "to target creature" → creature only
-    let damage_target_filter = if nom_primitives::scan_contains(norm_lower, "dealt to you")
-        || nom_primitives::scan_contains(norm_lower, "deal to you")
+    let damage_target_filter = if nom_primitives::scan_contains(working_lower, "dealt to you")
+        || nom_primitives::scan_contains(working_lower, "deal to you")
     {
         Some(damage_target_any_player())
-    } else if nom_primitives::scan_contains(norm_lower, "dealt to target creature")
-        || nom_primitives::scan_contains(norm_lower, "dealt to ~")
-        || nom_primitives::scan_contains(norm_lower, "dealt to and dealt by ~")
+    } else if nom_primitives::scan_contains(working_lower, "dealt to target creature")
+        || nom_primitives::scan_contains(working_lower, "dealt to ~")
+        || nom_primitives::scan_contains(working_lower, "dealt to and dealt by ~")
     {
         Some(DamageTargetFilter::CreatureOnly)
     } else {
@@ -4046,8 +4372,31 @@ fn parse_damage_prevention_replacement(
         None
     };
 
+    // CR 301.5 + CR 303.4 + CR 614.1a: Damage prevention scoped to the source's
+    // attached creature ("equipped creature" / "enchanted creature"). The dedicated
+    // `DamageTargetFilter` enum can't express attachment relationships (it covers
+    // only player/creature type axes per CR 614.1a), so route through `valid_card`
+    // — the runtime resolves `EquippedBy`/`EnchantedBy` against the source's own
+    // `attached_to` (see `game/filter.rs` `FilterProp::EquippedBy`), correctly
+    // scoping the shield to only the attached creature regardless of how many
+    // other creatures are on the battlefield. Without this, the falls-through to
+    // `damage_target_filter = None` caused the shield to prevent ALL damage to
+    // any target, which was the Multiclass Baldric / Inviolability / Artifact Ward
+    // class of bug.
+    let valid_card_filter: Option<TargetFilter> =
+        nom_primitives::scan_at_word_boundaries(working_lower, |input| {
+            preceded(
+                tag::<_, _, OracleError<'_>>("dealt to "),
+                terminated(
+                    parse_attached_subject_target_filter,
+                    alt((value((), eof), value((), multispace1), value((), tag(".")))),
+                ),
+            )
+            .parse(input)
+        });
+
     // --- 4. Extract damage source filter ---
-    let damage_source_filter = parse_damage_source_filter(norm_lower);
+    let damage_source_filter = parse_damage_source_filter(working_lower);
 
     // --- 5. Build the replacement definition ---
     let mut def = ReplacementDefinition::new(ReplacementEvent::DamageDone)
@@ -4062,6 +4411,12 @@ fn parse_damage_prevention_replacement(
     }
     if let Some(sf) = damage_source_filter {
         def = def.damage_source_filter(sf);
+    }
+    if let Some(vc) = valid_card_filter {
+        def = def.valid_card(vc);
+    }
+    if let Some(cond) = prefix_condition {
+        def = def.condition(cond);
     }
 
     // CR 615.5: A prevention effect may include an additional effect referring to
@@ -4498,9 +4853,73 @@ fn parse_generic_unless_condition(
     })
 }
 
+/// CR 614.1a: Parse "if you control a [filter], damage that would reduce
+/// your life total to less than N reduces it to N instead." (Worship class).
+///
+/// Returns a `ReplacementDefinition` with:
+/// - `event`: `DamageDone`
+/// - `condition`: `IfControlsMatching { filter }` (controller scope)
+/// - `damage_modification`: `LifeFloor { minimum: N }`
+/// - `damage_target_filter`: `DamageTargetFilter::Player(Controller)`
+fn parse_life_floor_damage_replacement(norm_lower: &str) -> Option<ReplacementDefinition> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("if you control ")
+        .parse(norm_lower)
+        .ok()?;
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))
+        .parse(rest)
+        .ok()?;
+
+    let (after_threshold, filter_text) = terminated(
+        take_until::<_, _, OracleError<'_>>(
+            ", damage that would reduce your life total to less than ",
+        ),
+        tag::<_, _, OracleError<'_>>(", damage that would reduce your life total to less than "),
+    )
+    .parse(rest)
+    .ok()?;
+
+    let (tail, minimum) = nom_primitives::parse_number.parse(after_threshold).ok()?;
+    let (tail, floor_val) = preceded(
+        tag::<_, _, OracleError<'_>>(" reduces it to "),
+        nom_primitives::parse_number,
+    )
+    .parse(tail)
+    .ok()?;
+    if floor_val != minimum {
+        return None;
+    }
+    let (_, _) = all_consuming((
+        tag::<_, _, OracleError<'_>>(" instead"),
+        opt(tag::<_, _, OracleError<'_>>(".")),
+    ))
+    .parse(tail)
+    .ok()?;
+
+    // Build the controller-scoped filter (e.g., "creature you control").
+    let (filter, leftover) = parse_type_phrase(filter_text);
+    if filter == TargetFilter::Any || !leftover.trim().is_empty() {
+        return None;
+    }
+    let condition_filter = inject_controller(filter, ControllerRef::You);
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .condition(ReplacementCondition::IfControlsMatching {
+                filter: condition_filter,
+            })
+            .damage_modification(DamageModification::LifeFloor {
+                minimum: minimum as i32,
+            })
+            .damage_target_filter(DamageTargetFilter::Player {
+                player: DamageTargetPlayerScope::Controller,
+            }),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::{
         Comparator, ControllerRef, CountScope, QuantityExpr, QuantityModification, QuantityRef,
         ReplacementCondition, ShieldKind, ZoneRef,
@@ -5001,6 +5420,43 @@ mod tests {
     }
 
     #[test]
+    fn replacement_enters_prepared() {
+        let def = parse_replacement_line("This creature enters prepared.", "Test Creature")
+            .expect("enters prepared should parse as replacement");
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::BecomePrepared {
+                target: TargetFilter::SelfRef
+            }
+        ));
+    }
+
+    #[test]
+    fn oracle_enters_prepared_is_replacement_not_trigger() {
+        let parsed = parse_oracle_text(
+            "Lluwen enters prepared.",
+            "Lluwen, Exchange Student",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        assert!(parsed.triggers.is_empty());
+        assert_eq!(parsed.replacements.len(), 1);
+        assert!(matches!(
+            *parsed.replacements[0]
+                .execute
+                .as_ref()
+                .expect("execute should be set")
+                .effect,
+            Effect::BecomePrepared {
+                target: TargetFilter::SelfRef
+            }
+        ));
+    }
+
+    #[test]
     fn replacement_prevent_all_combat_damage_to_you() {
         let def = parse_replacement_line(
             "Prevent all combat damage that would be dealt to you.",
@@ -5073,6 +5529,171 @@ mod tests {
         ));
         assert!(def.combat_scope.is_none()); // all damage, not just combat
         assert_eq!(def.damage_target_filter, Some(damage_target_any_player()));
+    }
+
+    #[test]
+    fn replacement_prevent_damage_to_equipped_creature_scopes_via_valid_card() {
+        // General's Kabuto: prevention is scoped to the equipped creature, not "any creature".
+        // Before the fix, the parser left `valid_card = None`, so the shield would prevent
+        // damage to every creature on the battlefield once Kabuto was on the field.
+        let def = parse_replacement_line(
+            "Prevent all combat damage that would be dealt to equipped creature.",
+            "General's Kabuto",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert!(matches!(
+            def.shield_kind,
+            ShieldKind::Prevention {
+                amount: PreventionAmount::All
+            }
+        ));
+        assert_eq!(def.combat_scope, Some(CombatDamageScope::CombatOnly));
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EquippedBy])
+            ))
+        );
+        // No type-based filter — the scoping comes from valid_card alone.
+        assert!(def.damage_target_filter.is_none());
+        assert!(def.condition.is_none());
+    }
+
+    #[test]
+    fn replacement_prevent_noncombat_damage_to_equipped_creature() {
+        // Magebane Armor: noncombat-only variant of the same scoping pattern.
+        let def = parse_replacement_line(
+            "Prevent all noncombat damage that would be dealt to equipped creature.",
+            "Magebane Armor",
+        )
+        .unwrap();
+        assert_eq!(def.combat_scope, Some(CombatDamageScope::NoncombatOnly));
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EquippedBy])
+            ))
+        );
+    }
+
+    #[test]
+    fn replacement_prevent_damage_to_enchanted_creature_scopes_via_valid_card() {
+        // Inviolability: aura variant of the same building block.
+        let def = parse_replacement_line(
+            "Prevent all damage that would be dealt to enchanted creature.",
+            "Inviolability",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])
+            ))
+        );
+    }
+
+    #[test]
+    fn replacement_prevent_damage_to_enchanted_permanent_subjects_scope_via_valid_card() {
+        for (text, type_filter) in [
+            (
+                "Prevent all damage that would be dealt to enchanted permanent.",
+                TypeFilter::Permanent,
+            ),
+            (
+                "Prevent all damage that would be dealt to enchanted artifact.",
+                TypeFilter::Artifact,
+            ),
+            (
+                "Prevent all damage that would be dealt to enchanted land.",
+                TypeFilter::Land,
+            ),
+        ] {
+            let def = parse_replacement_line(text, "Attachment Prevention").unwrap();
+            assert_eq!(
+                def.valid_card,
+                Some(TargetFilter::Typed(
+                    TypedFilter::new(type_filter).properties(vec![FilterProp::EnchantedBy])
+                )),
+                "expected attached-object scope for {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn replacement_multiclass_baldric_full_party_gates_equipped_prevention() {
+        // CR 700.8c + CR 614.1a + CR 615: "As long as you have a full party,
+        // prevent all damage that would be dealt to equipped creature."
+        // Both the gate (full party) AND the target scope (equipped creature)
+        // must be encoded so the shield only fires when both hold. Before the
+        // fix, neither was — so the shield prevented all damage everywhere
+        // whenever Multiclass Baldric was on the battlefield.
+        let def = parse_replacement_line(
+            "As long as you have a full party, prevent all damage that would be dealt to equipped creature.",
+            "Multiclass Baldric",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert!(matches!(
+            def.shield_kind,
+            ShieldKind::Prevention {
+                amount: PreventionAmount::All
+            }
+        ));
+        // Gate: only applies while party size >= 4 (CR 700.8c full party).
+        match def.condition {
+            Some(ReplacementCondition::OnlyIfQuantity {
+                ref lhs,
+                comparator,
+                ref rhs,
+                active_player_req,
+            }) => {
+                assert_eq!(comparator, Comparator::GE);
+                assert_eq!(active_player_req, None);
+                assert!(matches!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::PartySize {
+                            player: crate::types::ability::PlayerScope::Controller
+                        }
+                    }
+                ));
+                assert!(matches!(rhs, QuantityExpr::Fixed { value: 4 }));
+            }
+            other => panic!("expected OnlyIfQuantity gate, got {:?}", other),
+        }
+        // Target scope: only damage to the equipped creature is prevented.
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EquippedBy])
+            ))
+        );
+    }
+
+    #[test]
+    fn strip_as_long_as_prefix_returns_input_unchanged_when_absent() {
+        // No "as long as" prefix: function leaves the slice untouched and reports no gate.
+        let (rest, cond) = strip_as_long_as_prefix_for_prevention(
+            "prevent all damage that would be dealt to equipped creature.",
+        );
+        assert_eq!(
+            rest,
+            "prevent all damage that would be dealt to equipped creature."
+        );
+        assert!(cond.is_none());
+    }
+
+    #[test]
+    fn strip_as_long_as_prefix_leaves_input_intact_when_body_unparseable() {
+        // Prefix is present but the body doesn't lift to a typed ReplacementCondition.
+        // Function leaves the slice untouched so the rest of the parser can still
+        // produce a description-only replacement (no regression vs. pre-fix behavior).
+        let input = "as long as ~ has flying, prevent all damage that would be dealt to it.";
+        let (rest, cond) = strip_as_long_as_prefix_for_prevention(input);
+        assert_eq!(rest, input);
+        assert!(cond.is_none());
     }
 
     #[test]
@@ -8633,6 +9254,53 @@ mod tests {
             other => panic!("expected Scry execute, got {other:?}"),
         }
     }
+
+    /// CR 614.1a: Worship — "If you control a creature, damage that would
+    /// reduce your life total to less than 1 reduces it to 1 instead."
+    /// Verifies: DamageDone event, IfControlsMatching(creature), LifeFloor(1),
+    /// damage target = Controller.
+    #[test]
+    fn parses_worship_life_floor_replacement() {
+        let def = parse_replacement_line(
+            "If you control a creature, damage that would reduce your life total to less than 1 reduces it to 1 instead.",
+            "Worship",
+        )
+        .expect("Worship should parse as a DamageDone replacement");
+
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+
+        match &def.condition {
+            Some(ReplacementCondition::IfControlsMatching { filter }) => {
+                let is_creature = match filter {
+                    TargetFilter::Typed(tf) => tf.type_filters.contains(&TypeFilter::Creature),
+                    TargetFilter::And { filters } => filters.iter().any(|f| {
+                        matches!(f, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Creature))
+                    }),
+                    _ => false,
+                };
+                assert!(
+                    is_creature,
+                    "condition filter should be Creature, got {:?}",
+                    filter
+                );
+            }
+            other => panic!("condition should be IfControlsMatching, got {:?}", other),
+        }
+
+        assert_eq!(
+            def.damage_modification,
+            Some(crate::types::ability::DamageModification::LifeFloor { minimum: 1 }),
+            "damage modification should be LifeFloor(1)"
+        );
+
+        assert_eq!(
+            def.damage_target_filter,
+            Some(crate::types::ability::DamageTargetFilter::Player {
+                player: crate::types::ability::DamageTargetPlayerScope::Controller
+            }),
+            "damage target should be Controller"
+        );
+    }
 }
 
 /// Snapshot tests locking current replacement parser output before/after the IR split.
@@ -8672,6 +9340,134 @@ mod snapshot_tests {
         )
         .unwrap();
         insta::assert_json_snapshot!(def);
+    }
+
+    // CR 614.1a + CR 614.9: building-block coverage for the one-shot
+    // damage-replacement parser across the source × scope × recipient axes.
+    #[test]
+    fn oneshot_amount_double_from_chosen_source() {
+        // Desperate Gambit win-branch.
+        let effect = parse_oneshot_damage_replacement(
+            "the next time that source would deal damage this turn, it deals double that damage instead",
+        )
+        .expect("must parse amount one-shot");
+        match effect {
+            Effect::CreateDamageReplacement {
+                modification: Some(DamageModification::Double),
+                redirect_to: None,
+                source_filter: Some(TargetFilter::ChosenDamageSource),
+                combat_scope: None,
+                ..
+            } => {}
+            other => panic!("expected Double amount one-shot, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oneshot_redirect_to_target_creature_combat_from_self() {
+        // Soltari Guerrillas.
+        let effect = parse_oneshot_damage_replacement(
+            "the next time ~ would deal combat damage to an opponent this turn, it deals that damage to target creature instead",
+        )
+        .expect("must parse redirection one-shot");
+        match effect {
+            Effect::CreateDamageReplacement {
+                modification: None,
+                redirect_to: Some(DamageRedirectTarget::ChosenObjectTarget),
+                source_filter: Some(TargetFilter::SelfRef),
+                combat_scope: Some(CombatDamageScope::CombatOnly),
+                target_filter: Some(DamageTargetFilter::Player { .. }),
+                // CR 115.1: the "to target creature instead" redirect recipient
+                // must surface a creature target filter so the targeting layer
+                // offers the slot (Defect 1).
+                redirect_object_filter: Some(_),
+                recipient_object_filter: None,
+            } => {}
+            other => panic!("expected redirect-to-target-creature, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oneshot_redirect_to_source_passive_phrasing() {
+        // Beacon of Destiny — passive "that damage is dealt to ~ instead".
+        let effect = parse_oneshot_damage_replacement(
+            "the next time a source of your choice would deal damage to you this turn, that damage is dealt to ~ instead",
+        )
+        .expect("must parse passive redirection one-shot");
+        match effect {
+            Effect::CreateDamageReplacement {
+                modification: None,
+                redirect_to: Some(DamageRedirectTarget::SourceObject),
+                source_filter: Some(TargetFilter::ChosenDamageSource),
+                ..
+            } => {}
+            other => panic!("expected redirect-to-source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oneshot_redirect_to_controller_from_chosen_source() {
+        // Jade Monolith.
+        let effect = parse_oneshot_damage_replacement(
+            "the next time a source of your choice would deal damage to target creature this turn, that source deals that damage to you instead",
+        )
+        .expect("must parse redirect-to-you one-shot");
+        match effect {
+            Effect::CreateDamageReplacement {
+                modification: None,
+                redirect_to: Some(DamageRedirectTarget::Controller),
+                source_filter: Some(TargetFilter::ChosenDamageSource),
+                // CR 614.9: "would deal damage to target creature" — the
+                // protected creature is a chosen original-recipient target, not
+                // a broad scope (Defect 3). `target_filter` must stay None.
+                recipient_object_filter: Some(_),
+                target_filter: None,
+                redirect_object_filter: None,
+                ..
+            } => {}
+            other => panic!("expected redirect-to-controller, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oneshot_redirect_to_controller_combat_from_self() {
+        // Goblin Psychopath.
+        let effect = parse_oneshot_damage_replacement(
+            "the next time it would deal combat damage this turn, it deals that damage to you instead",
+        )
+        .expect("must parse Goblin Psychopath one-shot");
+        match effect {
+            Effect::CreateDamageReplacement {
+                modification: None,
+                redirect_to: Some(DamageRedirectTarget::Controller),
+                source_filter: Some(TargetFilter::SelfRef),
+                combat_scope: Some(CombatDamageScope::CombatOnly),
+                ..
+            } => {}
+            other => panic!("expected Goblin Psychopath redirect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oneshot_prevention_sibling() {
+        // Desperate Gambit lose-branch — routes to PreventDamage.
+        let effect = parse_oneshot_damage_replacement(
+            "the next time it would deal damage this turn, prevent that damage",
+        )
+        .expect("must parse prevention sibling");
+        assert!(
+            matches!(effect, Effect::PreventDamage { .. }),
+            "expected PreventDamage, got {effect:?}"
+        );
+    }
+
+    #[test]
+    fn oneshot_rejects_unrelated_next_time_text() {
+        // "the next time you draw" must not be hijacked by the damage parser.
+        assert!(parse_oneshot_damage_replacement(
+            "the next time you would draw a card this turn, draw two cards instead"
+        )
+        .is_none());
     }
 
     /// CR 614.1a + CR 614.6 + CR 121.6 + CR 701.20a: Abundance — the

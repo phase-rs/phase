@@ -84,6 +84,7 @@ export function HostSetup({
   const [playerCount, setPlayerCount] = useState(initialFormatConfig.min_players);
   const [matchType, setMatchType] = useState<MatchType>("Bo1");
   const [aiSeats, setAiSeats] = useState<AiSeatConfig[]>([]);
+  const [startWhenFull, setStartWhenFull] = useState(true);
 
   // Mirror the in-flight format to the store on every change so sibling
   // views (the deck picker shown when the user clicks "Change Deck" out
@@ -172,6 +173,7 @@ export function HostSetup({
       formatConfig: finalConfig,
       matchType: playerCount === 2 ? matchType : "Bo1",
       aiSeats,
+      startWhenFull,
       roomName: resolvedRoomName,
     });
   };
@@ -460,6 +462,16 @@ export function HostSetup({
             </div>
           </div>
         )}
+
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={startWhenFull}
+            onChange={(e) => setStartWhenFull(e.target.checked)}
+            className={isP2P ? "accent-cyan-500" : "accent-emerald-500"}
+          />
+          <span className="text-sm text-gray-300">Start when full</span>
+        </label>
 
         {/* List in lobby (server mode only) */}
         {!isP2P && (

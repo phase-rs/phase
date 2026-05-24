@@ -328,6 +328,20 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         | WaitingFor::UnlessBounceChoice { .. } => {
             Some(GameAction::SelectCards { cards: Vec::new() })
         }
+        // CR 608.2d: SearchPartitionChoice requires EXACTLY primary_count cards —
+        // an empty selection is illegal. Deterministically take the first
+        // primary_count of the found set for the battlefield (rest auto-route).
+        WaitingFor::SearchPartitionChoice {
+            cards,
+            primary_count,
+            ..
+        } => Some(GameAction::SelectCards {
+            cards: cards
+                .iter()
+                .take(*primary_count as usize)
+                .copied()
+                .collect(),
+        }),
         WaitingFor::OutsideGameChoice { choices, count, .. } => {
             Some(GameAction::ChooseOutsideGameCards {
                 sideboard_indices: choices
@@ -370,6 +384,16 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
 
         // Unless payment: decline to pay (let the effect resolve).
         WaitingFor::UnlessPayment { .. } => Some(GameAction::PayUnlessCost { pay: false }),
+
+        // Disjunctive activation costs: default to the first payable branch.
+        WaitingFor::ActivationCostOneOfChoice {
+            player,
+            costs,
+            pending_cast,
+        } => costs
+            .iter()
+            .position(|cost| cost.is_payable(state, *player, pending_cast.object_id))
+            .map(|index| GameAction::ChooseActivationCostBranch { index }),
         // CR 118.12a: Disjunctive unless-cost choice. Fallback is to decline
         // the choice (let the effect resolve), mirroring `UnlessPayment`'s
         // pessimistic-default policy.
@@ -607,12 +631,18 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             targets: Vec::new(),
         }),
 
-        // Copy retarget: keep current targets.
+        // Copy retarget: keep current targets when present; freshly cast
+        // prepare/paradigm copies start empty, so choose the first legal target.
         WaitingFor::CopyRetarget { target_slots, .. } => {
-            let targets: Vec<_> = target_slots.iter().map(|s| s.current.clone()).collect();
-            Some(GameAction::RetargetSpell {
-                new_targets: targets,
-            })
+            let targets: Option<Vec<_>> = target_slots
+                .iter()
+                .map(|slot| {
+                    slot.current
+                        .clone()
+                        .or_else(|| slot.legal_alternatives.first().cloned())
+                })
+                .collect();
+            targets.map(|new_targets| GameAction::RetargetSpell { new_targets })
         }
 
         // Assign combat damage: all damage to first blocker or zero.
@@ -765,6 +795,7 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         | WaitingFor::BeholdForCost { .. }
         | WaitingFor::TapCreaturesForSpellCost { .. }
         | WaitingFor::ExileForCost { .. }
+        | WaitingFor::RemoveCounterForCost { .. }
         | WaitingFor::CollectEvidenceChoice { .. }
         | WaitingFor::HarmonizeTapChoice { .. } => {
             // These are all pending-cast states — the has_pending_cast guard
@@ -2040,6 +2071,7 @@ mod tests {
             reveal: false,
             up_to: false,
             constraint: engine::types::ability::SearchSelectionConstraint::None,
+            split: None,
         };
 
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);
@@ -2299,6 +2331,7 @@ mod tests {
             constraint: SearchSelectionConstraint::DistinctQualities {
                 qualities: vec![SharedQuality::Name],
             },
+            split: None,
         };
 
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);

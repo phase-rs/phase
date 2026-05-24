@@ -293,7 +293,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
       "ring-2 ring-emerald-300/70 shadow-[0_0_10px_3px_rgba(74,222,128,0.35)]";
   } else if (isValidTarget) {
     glowClass =
-      "ring-2 ring-amber-400/60 shadow-[0_0_12px_3px_rgba(201,176,55,0.8)]";
+      "outline outline-2 outline-black/80 ring-4 ring-lime-300 shadow-[0_0_18px_6px_rgba(190,242,100,0.72),inset_0_0_18px_4px_rgba(190,242,100,0.22)]";
   } else if (isActivatable) {
     glowClass =
       "ring-2 ring-cyan-400 shadow-[0_0_14px_4px_rgba(34,211,238,0.55)]";
@@ -304,11 +304,6 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
     glowClass =
       "ring-2 ring-white shadow-[0_0_8px_2px_rgba(255,255,255,0.6)]";
   }
-
-  const sicknessFilter = hasSummoningSickness ? "saturate(50%)" : undefined;
-  const sicknessGlow = hasSummoningSickness
-    ? "0 0 6px 1px rgba(255,255,255,0.3)"
-    : undefined;
 
   // CR 702.26: Per-permanent phasing — phased-out permanents stay on the
   // battlefield but are treated as though they don't exist (CR 702.26d). We
@@ -449,11 +444,9 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
       data-object-id={objectId}
       data-card-hover
       layoutId={`permanent-${objectId}`}
-      className="relative inline-flex w-fit cursor-pointer rounded-lg self-end select-none"
+      className="relative inline-flex w-fit cursor-pointer overflow-visible rounded-lg self-end select-none"
       style={{
         zIndex: attachmentsLifted ? HOVERED_ATTACHMENT_HOST_Z_INDEX : hoveredObjectId === objectId ? HOVERED_CARD_Z_INDEX : isAttacking ? 50 : undefined,
-        filter: sicknessFilter,
-        boxShadow: sicknessGlow,
         transformOrigin: "center center",
         // Reserve space below for exile ghost cards
         marginBottom:
@@ -514,7 +507,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
 
       {/* Main card — art crop or full card based on preference */}
       {useArtCrop ? (
-        <div className={`relative z-10 rounded-lg ${glowClass}`}>
+        <div className="relative z-10 rounded-lg">
           <ArtCropCard objectId={objectId} />
           {/* CR 702.26: phased-out tint overlay — sky-blue mix-blend-screen
               matches the player-area treatment (PlayerArea.tsx 4d6cfb506). */}
@@ -527,8 +520,8 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
         </div>
       ) : (
         <>
-          <div className={`relative z-10 rounded-lg overflow-hidden ${glowClass}`}>
-            <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined} oracleText={obj.display_source === "Token" ? obj.token_rules_text : undefined} faceDown={obj.face_down} />
+          <div className="relative z-10 rounded-lg overflow-hidden">
+            <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined} tokenImageRef={obj.token_image_ref} oracleText={obj.display_source === "Token" ? obj.token_rules_text : undefined} faceDown={obj.face_down} />
             {/* Keyword strip overlay — inside the card image wrapper so absolute positioning works */}
             {showKeywordStrip && obj.keywords.length > 0 && !obj.face_down && (
               <KeywordStrip
@@ -614,6 +607,26 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
         </>
       )}
 
+      {hasSummoningSickness && (
+        <SummoningSicknessOverlay variant={useArtCrop ? "artCrop" : "fullCard"} />
+      )}
+
+      {glowClass && (
+        <div
+          aria-hidden
+          data-card-affordance-highlight="true"
+          className={`pointer-events-none absolute inset-[-3px] z-30 rounded-xl ${glowClass}`}
+        />
+      )}
+
+      {isValidTarget && (
+        <div
+          className={`pointer-events-none absolute ${isUnderAttack ? "left-1 top-7" : "left-1 top-1"} z-40 rounded bg-lime-300 px-1.5 py-0.5 text-[9px] font-black uppercase leading-none tracking-normal text-black ring-1 ring-black/70 shadow-[0_1px_4px_rgba(0,0,0,0.75)]`}
+        >
+          Target
+        </div>
+      )}
+
       {/* Debug-panel preview highlight — fuchsia neon ring + animated pulse.
           Triggered when an ObjectSelect option in the debug panel is hovered
           (`debugHighlightedObjectId` state). Deliberately loud and visually
@@ -627,6 +640,16 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
         />
       )}
     </motion.div>
+  );
+});
+
+const SummoningSicknessOverlay = memo(function SummoningSicknessOverlay({ variant }: { variant: "artCrop" | "fullCard" }) {
+  return (
+    <div
+      aria-hidden
+      data-summoning-sickness-underwater="true"
+      className={`summoning-sickness-underwater summoning-sickness-underwater--${variant}`}
+    />
   );
 });
 
@@ -699,7 +722,7 @@ const ExileGhostCard = memo(function ExileGhostCard({ objectId, offset }: ExileG
       {useArtCrop ? (
         <ArtCropCard objectId={objectId} />
       ) : (
-        <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} size="small" colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined} oracleText={obj.display_source === "Token" ? obj.token_rules_text : undefined} faceDown={obj.face_down} />
+        <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} size="small" colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined} tokenImageRef={obj.token_image_ref} oracleText={obj.display_source === "Token" ? obj.token_rules_text : undefined} faceDown={obj.face_down} />
       )}
     </div>
   );

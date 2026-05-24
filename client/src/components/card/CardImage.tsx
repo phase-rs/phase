@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useEngineCardData } from "../../hooks/useEngineCardData.ts";
 import type { TokenSearchFilters } from "../../services/scryfall.ts";
+import type { TokenImageRef } from "../../adapter/types.ts";
 import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { getBevelBorderStyle } from "./cardFrame.ts";
 
@@ -15,6 +16,7 @@ interface CardImageProps {
   colors?: string[];
   isToken?: boolean;
   tokenFilters?: TokenSearchFilters;
+  tokenImageRef?: TokenImageRef | null;
   faceDown?: boolean;
   /**
    * Canonical lookup id from `printed_ref.oracle_id` (battlefield call sites).
@@ -40,6 +42,7 @@ export function CardImage({
   colors,
   isToken = false,
   tokenFilters,
+  tokenImageRef,
   faceDown = false,
   oracleId,
   faceName,
@@ -50,6 +53,7 @@ export function CardImage({
     faceIndex,
     isToken: faceDown ? false : isToken,
     tokenFilters: faceDown ? undefined : tokenFilters,
+    tokenImageRef: faceDown ? undefined : tokenImageRef,
     oracleId: faceDown ? undefined : oracleId,
     faceName: faceDown ? undefined : faceName,
   });

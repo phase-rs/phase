@@ -89,7 +89,96 @@ pub struct LeadershipSkills {
 #[serde(rename_all = "camelCase")]
 pub struct AtomicIdentifiers {
     #[serde(default)]
+    pub scryfall_id: Option<String>,
+    #[serde(default)]
     pub scryfall_oracle_id: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct SetFile {
+    pub data: SetData,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SetData {
+    pub code: String,
+    pub name: String,
+    #[serde(default)]
+    pub release_date: Option<String>,
+    #[serde(default)]
+    pub cards: Vec<SetCard>,
+    #[serde(default)]
+    pub tokens: Vec<SetToken>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SetCard {
+    pub uuid: String,
+    pub name: String,
+    #[serde(default)]
+    pub face_name: Option<String>,
+    #[serde(default)]
+    pub rarity: String,
+    #[serde(default)]
+    pub identifiers: SetIdentifiers,
+    #[serde(default)]
+    pub related_cards: SetRelatedCards,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SetToken {
+    pub uuid: String,
+    pub name: String,
+    pub layout: String,
+    #[serde(default)]
+    pub side: Option<String>,
+    #[serde(default)]
+    pub face_name: Option<String>,
+    #[serde(default)]
+    pub number: Option<String>,
+    #[serde(rename = "type")]
+    pub type_line: String,
+    #[serde(default)]
+    pub types: Vec<String>,
+    #[serde(default)]
+    pub subtypes: Vec<String>,
+    #[serde(default)]
+    pub supertypes: Vec<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub power: Option<String>,
+    #[serde(default)]
+    pub toughness: Option<String>,
+    #[serde(default)]
+    pub colors: Vec<String>,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    #[serde(default)]
+    pub identifiers: SetIdentifiers,
+    #[serde(default)]
+    pub related_cards: SetRelatedCards,
+}
+
+#[derive(Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SetIdentifiers {
+    #[serde(default)]
+    pub scryfall_id: Option<String>,
+    #[serde(default)]
+    pub scryfall_oracle_id: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SetRelatedCards {
+    #[serde(default)]
+    pub tokens: Vec<String>,
+    #[serde(default)]
+    pub reverse_related: Vec<String>,
 }
 
 /// Load and deserialize an AtomicCards.json file.

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
-    ActivationRestriction, AdditionalCost, CastTimingPermission, CastingRestriction, Comparator,
+    ActivationRestriction, AdditionalCost, CastTimingPermission, CastingRestriction,
     ContinuousModification, DelayedTriggerCondition, Effect, ManaProduction, ModalChoice,
     ParsedCondition, QuantityExpr, ReplacementDefinition, SolveCondition, SpellCastingOption,
     StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition,
@@ -902,8 +902,9 @@ fn is_spell_resolution_instruction_line(
 /// - Ferocious: you control a creature with power 4 or greater
 fn ability_word_to_condition(word: &str) -> Option<crate::types::ability::StaticCondition> {
     use crate::types::ability::{
-        CardTypeSetSource, ControllerRef, CountScope, FilterProp, PlayerScope, QuantityExpr,
-        QuantityRef, StaticCondition, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+        CardTypeSetSource, Comparator, ControllerRef, CountScope, FilterProp, PlayerScope, PtStat,
+        PtValueScope, QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TypeFilter,
+        TypedFilter, ZoneRef,
     };
 
     match word {
@@ -984,7 +985,10 @@ fn ability_word_to_condition(word: &str) -> Option<crate::types::ability::Static
                         TypedFilter::creature()
                             .controller(ControllerRef::You)
                             .properties(vec![
-                                FilterProp::PowerGE {
+                                FilterProp::PtComparison {
+                                    stat: PtStat::Power,
+                                    scope: PtValueScope::Current,
+                                    comparator: Comparator::GE,
                                     value: QuantityExpr::Fixed { value: 4 },
                                 },
                                 FilterProp::InZone {
@@ -1503,22 +1507,6 @@ pub(crate) fn parse_oracle_ir(
                     continue;
                 }
             }
-        }
-
-        // CR 702.xxx: Prepare (Strixhaven) — `~ enters prepared.` is a self-ETB
-        // rider shorthand (analogous to `enters tapped` / `enters transformed`)
-        // that synthesizes a self-ETB trigger whose effect is BecomePrepared.
-        // Delegated to the oracle_trigger combinator; nom-composed detection.
-        // Normalize self-refs first so lines like "Lluwen enters prepared." (where
-        // the short card name is still the subject) reach the `~`-gated combinator.
-        let prepared_normalized = normalize_self_refs_for_static(&line, card_name);
-        if let Some(mut trigger) =
-            super::oracle_trigger::try_parse_enters_prepared_rider(&prepared_normalized)
-        {
-            trigger.description = Some(line.clone());
-            result.triggers.push(trigger);
-            i += 1;
-            continue;
         }
 
         // Priority 1: Modal block (standard "Choose one —" + modes, or Spree + modes).
@@ -2748,6 +2736,16 @@ pub(crate) fn parse_oracle_ir(
                 result.triggers.extend(triggers);
                 continue;
             }
+            // Try as keyword — the ability-word prefix ("Void Shields —") was
+            // stripped, so the remainder may be a keyword line that Priority 1b
+            // missed because it ran on the unprefixed original line.
+            if let Some(kw) = parse_keyword_from_oracle(&effect_lower) {
+                if !matches!(kw, Keyword::Unknown(_)) {
+                    result.extracted_keywords.push(kw);
+                    i += 1;
+                    continue;
+                }
+            }
             // Try as static
             if is_static_pattern(&effect_lower) {
                 let effect_static = normalize_self_refs_for_static(&effect_text, card_name);
@@ -3241,11 +3239,16 @@ fn try_parse_loyalty_line(line: &str, ctx: &mut ParseContext) -> Option<AbilityD
 /// CR 606.3: A player may activate a loyalty ability only during a main phase
 /// of their turn with an empty stack, and only if no player has previously
 /// activated a loyalty ability of that permanent that turn. The planeswalker
-/// activation path (`game::planeswalker::can_activate_loyalty`) already gates
-/// this independently, but tagging the ability with `AsSorcery` +
-/// `OnlyOnceEachTurn` + the display flag keeps parser output self-describing
-/// and satisfies the shared invariant that every sorcery-speed activated
-/// ability carries `ActivationRestriction::AsSorcery`.
+/// activation path (`game::planeswalker::can_activate_loyalty_ability`) is the
+/// authoritative gate for the "once per permanent per turn" rule — it reads
+/// `obj.loyalty_activations_this_turn` against a cap raised by
+/// `state.extra_loyalty_activations_this_turn` (The Chain Veil class). We do
+/// NOT add `ActivationRestriction::OnlyOnceEachTurn` here: that restriction is
+/// per-ability-index, while CR 606.3 is per-permanent (across ALL loyalty
+/// ability indices). Conflating the two would (a) incorrectly allow a +2 and
+/// a -1 on the same planeswalker in one turn and (b) block The Chain Veil's
+/// "as though none of its loyalty abilities have been activated this turn"
+/// cap-raise from ever taking effect.
 fn apply_loyalty_restrictions(def: &mut AbilityDefinition) {
     // CR 606.3: "...only during a main phase of their turn when the stack is empty..."
     def.sorcery_speed = true;
@@ -3255,15 +3258,6 @@ fn apply_loyalty_restrictions(def: &mut AbilityDefinition) {
     {
         def.activation_restrictions
             .push(ActivationRestriction::AsSorcery);
-    }
-    // CR 606.3: "...only if no player has previously activated a loyalty ability
-    // of that permanent that turn."
-    if !def
-        .activation_restrictions
-        .contains(&ActivationRestriction::OnlyOnceEachTurn)
-    {
-        def.activation_restrictions
-            .push(ActivationRestriction::OnlyOnceEachTurn);
     }
 }
 
@@ -5216,6 +5210,7 @@ mod tests {
             filter,
             rest_destination,
             reveal,
+            ..
         } = &*effect.effect
         else {
             panic!("expected Dig payload, got {:?}", effect.effect);
@@ -6497,6 +6492,36 @@ mod tests {
     }
 
     #[test]
+    fn extracts_keyword_after_ability_word_prefix() {
+        use crate::types::ability::{Comparator, FilterProp, QuantityExpr, TargetFilter};
+        use crate::types::keywords::ProtectionTarget;
+
+        let r = parse_with_keyword_names(
+            "Void Shields — Protection from mana value 3 or less",
+            "Reaver Titan",
+            &["protection"],
+            &["Artifact", "Creature"],
+            &["Vehicle"],
+        );
+        assert_eq!(r.extracted_keywords.len(), 1);
+        let Keyword::Protection(ProtectionTarget::Filter(TargetFilter::Typed(tf))) =
+            &r.extracted_keywords[0]
+        else {
+            panic!(
+                "expected filter-based protection, got {:?}",
+                r.extracted_keywords
+            );
+        };
+        assert!(matches!(
+            tf.properties.as_slice(),
+            [FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 3 },
+            }]
+        ));
+    }
+
+    #[test]
     fn skips_keywords_already_in_mtgjson() {
         // "Flying" is in MTGJSON — exact name match, should not be re-extracted
         let r = parse_with_keyword_names(
@@ -6548,6 +6573,47 @@ mod tests {
             !has_unimplemented,
             "Toxic keyword line should not produce Unimplemented effects"
         );
+    }
+
+    // CR 205.3g: Spacecraft is an artifact subtype that can appear in subtype filters.
+    #[test]
+    fn end_to_end_beyond_the_quiet_no_spacecraft_gap() {
+        let r = parse(
+            "Exile all creatures and Spacecraft.",
+            "Beyond the Quiet",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        assert!(
+            !has_unimplemented(&r.abilities[0]),
+            "Beyond the Quiet should not produce Unimplemented effects: {:?}",
+            r.abilities[0]
+        );
+        match &*r.abilities[0].effect {
+            Effect::ChangeZoneAll {
+                destination,
+                target,
+                ..
+            } => {
+                assert_eq!(*destination, Zone::Exile);
+                match target {
+                    TargetFilter::Or { filters } => {
+                        assert_eq!(filters.len(), 2);
+                        assert_eq!(filters[0], TargetFilter::Typed(TypedFilter::creature()));
+                        assert_eq!(
+                            filters[1],
+                            TargetFilter::Typed(
+                                TypedFilter::default().subtype("Spacecraft".to_string())
+                            )
+                        );
+                    }
+                    other => panic!("expected Creature/Spacecraft Or filter, got {other:?}"),
+                }
+            }
+            other => panic!("expected ChangeZoneAll, got {other:?}"),
+        }
     }
 
     #[test]
@@ -7756,18 +7822,31 @@ mod tests {
     fn for_each_prefix_creates_token() {
         // "for each opponent, create a 2/2 black Zombie creature token"
         use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::{QuantityExpr, QuantityRef};
         let def = parse_effect_chain(
             "for each opponent, create a 2/2 black Zombie creature token",
             crate::types::ability::AbilityKind::Spell,
         );
+        // CR 111.1 + CR 616.1: a bare single-clause "for each X, create a token"
+        // folds the iteration into the token's `count` (one batched CreateToken
+        // event), so it must NOT carry a repeat loop. See
+        // `try_fold_token_repeat_into_count`.
         assert!(
-            def.repeat_for.is_some(),
-            "repeat_for should be set for 'for each opponent'"
+            def.repeat_for.is_none(),
+            "bare for-each token must fold into count, not loop: {:?}",
+            def.repeat_for
         );
+        let Effect::Token { count, .. } = &*def.effect else {
+            panic!("inner effect should be Token, got {:?}", def.effect);
+        };
         assert!(
-            matches!(*def.effect, Effect::Token { .. }),
-            "inner effect should be Token, got {:?}",
-            def.effect,
+            matches!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::PlayerCount { .. }
+                }
+            ),
+            "count should carry the per-opponent quantity, got {count:?}"
         );
     }
 
@@ -10089,6 +10168,40 @@ mod tests {
     }
 
     #[test]
+    fn each_player_discards_their_hand_binds_count_to_scoped_player() {
+        // #781 Wheel of Fortune: "Each player discards their hand, then draws
+        // seven cards." The "their hand" count must bind to the iterated player
+        // (ScopedPlayer), not the caster (Controller). Pre-fix it parsed to
+        // HandSize{Controller}, so under player_scope iteration only the caster's
+        // (already-emptied) hand size drove every player's discard count and
+        // opponents kept their hands.
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::{PlayerFilter, PlayerScope, QuantityExpr, QuantityRef};
+        let def = parse_effect_chain(
+            "Each player discards their hand, then draws seven cards.",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        assert_eq!(
+            def.player_scope,
+            Some(PlayerFilter::All),
+            "player_scope should be All for 'each player'"
+        );
+        let count = match &*def.effect {
+            Effect::Discard { count, .. } => count,
+            other => panic!("expected Discard, got {other:?}"),
+        };
+        assert_eq!(
+            *count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::ScopedPlayer,
+                },
+            },
+            "discard count must bind 'their hand' to ScopedPlayer (#781)"
+        );
+    }
+
+    #[test]
     fn each_opponent_loses_life_produces_player_scope() {
         use crate::parser::oracle_effect::parse_effect_chain;
         use crate::types::ability::PlayerFilter;
@@ -10905,6 +11018,80 @@ mod tests {
         }
     }
 
+    /// Visions (LEG / 4ED): "Look at the top five cards of target player's
+    /// library. You may then have that player shuffle that library."
+    ///
+    /// End-to-end verification of the wrapper chain: the primary effect is a
+    /// `Dig` (look-at) keyed on a player target, with a `may`-gated sub-ability
+    /// emitting `Effect::Shuffle { target: ParentTarget }` that resolves at
+    /// runtime against the parent's inherited `TargetRef::Player`. The
+    /// `"shuffle that library"` anaphor is the new arm added in
+    /// `parse_shuffle_ast`.
+    #[test]
+    fn visions_look_then_have_target_player_shuffle() {
+        let result = parse(
+            "Look at the top five cards of target player's library. You may then have that player shuffle that library.",
+            "Visions",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert_eq!(result.abilities.len(), 1, "Visions has one ability");
+        let ability = &result.abilities[0];
+        // Primary effect: Look at top 5 cards (Dig with reveal=false, no
+        // keep_count — pure peek). The parent target is the player whose
+        // library we are looking at.
+        match &*ability.effect {
+            Effect::Dig {
+                count,
+                keep_count,
+                player,
+                reveal,
+                ..
+            } => {
+                assert_eq!(count, &QuantityExpr::Fixed { value: 5 }, "look at top 5");
+                assert_eq!(
+                    player,
+                    &TargetFilter::Player,
+                    "target player's library should surface a player target"
+                );
+                assert_eq!(
+                    keep_count,
+                    &Some(0),
+                    "bare look-at instruction should be a pure peek"
+                );
+                assert!(!reveal, "look at (private), not reveal (public)");
+            }
+            other => panic!(
+                "Expected Dig effect for sentence 1, got {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+        // Sub-ability: "you may then have that player shuffle that library"
+        // → `may`-gated `Effect::Shuffle { target: ParentTarget }`.
+        let sub = ability
+            .sub_ability
+            .as_ref()
+            .expect("Visions should have a sub-ability for the shuffle clause");
+        // CR 608.2d: A spell's resolution-time "you may" choice — the player
+        // announces the optional shuffle while applying the effect.
+        assert!(sub.optional, "sub-ability should be optional ('you may')");
+        match &*sub.effect {
+            Effect::Shuffle { target, .. } => {
+                assert_eq!(
+                    target,
+                    &TargetFilter::ParentTarget,
+                    "shuffle target should be the context-ref ParentTarget filter so it \
+                     inherits the parent ability's targeted player at resolution",
+                );
+            }
+            other => panic!(
+                "Expected Effect::Shuffle in sub-ability, got {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+    }
+
     /// Satyr Wayfinder: "reveal the top four cards" → Dig with reveal=true,
     /// continuation patches keep_count, filter, rest_destination from "you may put a land card
     /// from among them into your hand. Put the rest into your graveyard."
@@ -10931,6 +11118,7 @@ mod tests {
                 filter,
                 rest_destination,
                 reveal,
+                ..
             } => {
                 assert_eq!(
                     count,
@@ -11423,7 +11611,7 @@ mod tests {
 
     #[test]
     fn ferocious_ability_word_applies_power_condition_to_spell_effect() {
-        use crate::types::ability::{AbilityCondition, QuantityRef};
+        use crate::types::ability::{AbilityCondition, PtStat, PtValueScope, QuantityRef};
 
         let r = parse_oracle_text(
             "You gain 5 life.\nFerocious \u{2014} You gain 10 life instead if you control a creature with power 4 or greater.",
@@ -11477,7 +11665,10 @@ mod tests {
             panic!("expected typed creature filter");
         };
         assert_eq!(filter.controller, Some(ControllerRef::You));
-        assert!(filter.properties.contains(&FilterProp::PowerGE {
+        assert!(filter.properties.contains(&FilterProp::PtComparison {
+            stat: PtStat::Power,
+            scope: PtValueScope::Current,
+            comparator: Comparator::GE,
             value: QuantityExpr::Fixed { value: 4 },
         }));
     }
@@ -13545,6 +13736,156 @@ mod pipeline_snapshot_tests {
                 }
                 ref other => panic!("unexpected payoff trigger mode: {:?}", other),
             }
+        }
+    }
+
+    /// CR 608.2c: Compound "destroy X and up to one other target Y" must parse
+    /// both halves as Destroy effects with the verb carried forward to the
+    /// "up to" sub-clause. Cards: Relic Crush, Sword of Sinew and Steel.
+    #[test]
+    fn pipeline_relic_crush_compound_destroy_up_to() {
+        use crate::types::ability::{FilterProp, MultiTargetSpec, QuantityExpr, TargetFilter};
+        let result = pipeline_parse(
+            "Destroy target artifact or enchantment and up to one other target artifact or enchantment.",
+            "Relic Crush",
+            &["Sorcery"],
+            &[],
+        );
+        assert_eq!(
+            result.abilities.len(),
+            1,
+            "expected one spell ability, got {:?}",
+            result.abilities,
+        );
+        let ab = &result.abilities[0];
+        assert!(
+            matches!(*ab.effect, Effect::Destroy { .. }),
+            "primary effect must be Destroy, got {:?}",
+            ab.effect,
+        );
+        let sub = ab.sub_ability.as_deref().expect("must have sub_ability");
+        assert!(
+            matches!(*sub.effect, Effect::Destroy { .. }),
+            "sub-effect must be Destroy, got {:?}",
+            sub.effect,
+        );
+        // CR 115.6: "up to one" cardinality must be preserved on the sub-ability.
+        assert_eq!(
+            sub.multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
+            "sub-ability must carry up-to-one multi_target",
+        );
+        // CR 608.2c: "other" must appear as FilterProp::Another in the sub-effect target.
+        match sub.effect.as_ref() {
+            Effect::Destroy { target, .. } => {
+                // Target may be Typed or Or { filters: [Typed, Typed] } for
+                // "artifact or enchantment".
+                let typed_filters: Vec<_> = match target {
+                    TargetFilter::Typed(tf) => vec![tf],
+                    TargetFilter::Or { filters } => filters
+                        .iter()
+                        .map(|f| match f {
+                            TargetFilter::Typed(tf) => tf,
+                            other => panic!("expected Typed in Or, got {:?}", other),
+                        })
+                        .collect(),
+                    other => panic!("expected Typed or Or target, got {:?}", other),
+                };
+                assert!(
+                    typed_filters
+                        .iter()
+                        .all(|tf| tf.properties.contains(&FilterProp::Another)),
+                    "all sub-clause target filters must have Another property, got {:?}",
+                    typed_filters,
+                );
+            }
+            other => panic!("expected Destroy, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn pipeline_scheming_aspirant_proliferate_trigger() {
+        let result = pipeline_parse(
+            "Whenever you proliferate, each opponent loses 2 life and you gain 2 life.",
+            "Scheming Aspirant",
+            &["Creature"],
+            &["Human", "Noble"],
+        );
+        assert_eq!(result.triggers.len(), 1);
+        let trigger = &result.triggers[0];
+        assert_eq!(trigger.mode, TriggerMode::PlayerPerformedAction);
+        assert_eq!(trigger.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(
+            trigger.player_actions,
+            Some(vec![crate::types::events::PlayerActionKind::Proliferate])
+        );
+        // Verify the execute body is LoseLife + GainLife
+        let exec = trigger.execute.as_ref().expect("execute body");
+        assert!(
+            matches!(exec.effect.as_ref(), Effect::LoseLife { .. }),
+            "expected LoseLife, got {:?}",
+            exec.effect
+        );
+        let sub = exec.sub_ability.as_ref().expect("sub_ability");
+        assert!(
+            matches!(sub.effect.as_ref(), Effect::GainLife { .. }),
+            "expected GainLife, got {:?}",
+            sub.effect
+        );
+    }
+
+    /// CR 608.2c + CR 701.8a: Loyal Sentry — "destroy that creature and ~"
+    /// compound action with self-reference carry-forward.
+    #[test]
+    fn pipeline_loyal_sentry_compound_destroy_self_ref() {
+        use crate::types::ability::TargetFilter;
+        use crate::types::triggers::TriggerMode;
+        let result = pipeline_parse(
+            "When this creature blocks a creature, destroy that creature and ~.",
+            "Loyal Sentry",
+            &["Creature"],
+            &[],
+        );
+        // Should have one triggered ability.
+        assert_eq!(
+            result.triggers.len(),
+            1,
+            "expected one trigger, got {:?}",
+            result.triggers,
+        );
+        let trig = &result.triggers[0];
+        // CR 509.1g: Trigger mode must be Blocks.
+        assert_eq!(
+            trig.mode,
+            TriggerMode::Blocks,
+            "trigger mode must be Blocks",
+        );
+        // The execute field holds the AbilityDefinition for the triggered effect.
+        let exec = trig.execute.as_deref().expect("trigger must have execute");
+        // CR 608.2c: Primary effect is Destroy targeting the blocked creature.
+        // The anaphoric "that creature" resolves to ParentTarget (inherits the
+        // trigger's target binding via try_split_targeted_compound).
+        match exec.effect.as_ref() {
+            Effect::Destroy { target, .. } => {
+                assert_eq!(
+                    target.clone(),
+                    TargetFilter::ParentTarget,
+                    "primary target must be ParentTarget (the blocked creature)",
+                );
+            }
+            other => panic!("primary effect must be Destroy, got {:?}", other),
+        }
+        // CR 608.2c + CR 701.8a: Sub-clause is Destroy { SelfRef } for '~'.
+        let sub = exec.sub_ability.as_deref().expect("must have sub_ability");
+        match sub.effect.as_ref() {
+            Effect::Destroy { target, .. } => {
+                assert_eq!(
+                    target.clone(),
+                    TargetFilter::SelfRef,
+                    "sub-clause target must be SelfRef for '~'",
+                );
+            }
+            other => panic!("sub-clause must be Destroy, got {:?}", other),
         }
     }
 }

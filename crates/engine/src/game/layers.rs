@@ -14,7 +14,7 @@ use crate::types::ability::{
     TypedFilter,
 };
 use crate::types::attribution::EffectRef;
-use crate::types::card_type::{is_land_subtype, CoreType};
+use crate::types::card_type::{is_land_subtype, noncreature_subtype_set, CoreType, SubtypeSet};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::game_state::{DayNight, GameState};
 use crate::types::identifiers::ObjectId;
@@ -32,6 +32,32 @@ struct ActiveCombatAssignmentRuleEffect {
     modification: ContinuousModification,
     affected_filter: TargetFilter,
     condition: Option<StaticCondition>,
+}
+
+// CR 205.3c: Each subtype is correlated to its appropriate card type.
+fn subtype_matches_core_types(
+    subtype: &str,
+    core_types: &[CoreType],
+    all_creature_types: &[String],
+) -> bool {
+    let Some(set) = noncreature_subtype_set(subtype) else {
+        return core_types.contains(&CoreType::Creature)
+            || core_types.contains(&CoreType::Kindred)
+            || all_creature_types
+                .iter()
+                .any(|creature_type| creature_type == subtype);
+    };
+    core_types.iter().any(|core_type| {
+        matches!(
+            (core_type, set),
+            (CoreType::Artifact, SubtypeSet::Artifact)
+                | (CoreType::Enchantment, SubtypeSet::Enchantment)
+                | (CoreType::Land, SubtypeSet::Land)
+                | (CoreType::Planeswalker, SubtypeSet::Planeswalker)
+                | (CoreType::Instant | CoreType::Sorcery, SubtypeSet::Spell)
+                | (CoreType::Battle, SubtypeSet::Battle)
+        )
+    })
 }
 
 /// Remove transient effects that have expired based on their duration.
@@ -397,6 +423,16 @@ fn evaluate_condition_with_context(
             .get(&source_id)
             .and_then(|obj| obj.chosen_color())
             .is_some_and(|chosen| &chosen == color),
+        // CR 614.12c + CR 607.2d: An anchor-word linked static ability is
+        // active iff the source permanent's persisted `ChosenAttribute::Label`
+        // matches the anchor word. The comparison is case-insensitive so a
+        // capitalised anchor word ("Jeskai") matches a label persisted in
+        // any canonicalisation. Mirrors `ChosenColorIs`'s lookup pattern.
+        StaticCondition::ChosenLabelIs { label } => state
+            .objects
+            .get(&source_id)
+            .and_then(|obj| obj.chosen_label())
+            .is_some_and(|chosen| chosen.eq_ignore_ascii_case(label)),
         StaticCondition::QuantityComparison {
             lhs,
             comparator,
@@ -1563,6 +1599,7 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
         &b.modification,
         ContinuousModification::AddKeyword { .. }
             | ContinuousModification::RemoveKeyword { .. }
+            | ContinuousModification::RemoveChosenKeyword
             | ContinuousModification::AddDynamicKeyword { .. }
             | ContinuousModification::GrantAbility { .. }
             | ContinuousModification::GrantTrigger { .. }
@@ -1831,6 +1868,34 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
         None
     };
 
+    // Pre-read chosen keyword from source (avoids borrow conflict in the loop).
+    // CR 608.2d + CR 613.1f: When the modification is `RemoveChosenKeyword`,
+    // the granting source's `chosen_attributes` carry the typed `Keyword` that
+    // was selected at resolution time (Urborg / Walking Sponge). Read once
+    // here so the per-recipient loop below can strip by discriminant without
+    // re-borrowing `state` for every affected object — mirrors the
+    // `chosen_color` / `chosen_subtype` / `chosen_card_type` pre-read blocks
+    // immediately above and below.
+    //
+    // Caveat (mirrors `chosen_color` semantics): if the same source has
+    // multiple concurrent `RemoveChosenKeyword` effects (e.g., Urborg
+    // activated twice in the same turn), each currently reads the FIRST
+    // `ChosenAttribute::Keyword` on the source. Same limitation applies to
+    // `chosen_color` / `chosen_card_type` upstream; documented here for
+    // symmetry. Acceptable for v1 — fix paired with the broader
+    // chosen-attribute scoping refactor.
+    let chosen_keyword = if matches!(
+        effect.modification,
+        ContinuousModification::RemoveChosenKeyword
+    ) {
+        state
+            .objects
+            .get(&effect.source_id)
+            .and_then(|src| src.chosen_keyword().cloned())
+    } else {
+        None
+    };
+
     // Pre-read chosen card type from source (avoids borrow conflict in the loop).
     // CR 702.16 + CR 205.2: when the granted keyword is
     // `Protection(ChosenCardType)`, the granting source's chosen card type must
@@ -1912,6 +1977,7 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
     } else {
         None
     };
+    let all_creature_types = state.all_creature_types.clone();
 
     for id in affected_ids {
         // CR 613.4c: When the dynamic modification's QuantityExpr depends on
@@ -2043,6 +2109,31 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
                     !KeywordTriggerInstaller::trigger_matches_keyword_kind(trigger, keyword)
                 });
             }
+            // CR 608.2d + CR 613.1f + CR 702.14: Strip the *exact* keyword
+            // chosen at resolution time (read off the source's
+            // `chosen_attributes` above). Unlike the unparameterized
+            // `RemoveKeyword` arm, the chosen-keyword surface is concrete —
+            // `ChosenAttribute::Keyword(Landwalk("Swamp"))` is exactly
+            // swampwalk, not "any landwalk." CR 702.14 treats each landwalk
+            // subtype as a distinct keyword, so removing swampwalk must
+            // leave islandwalk intact. Use `PartialEq` (`k == kw`) rather
+            // than `std::mem::discriminant` to preserve that distinction.
+            // Triggers associated with the keyword kind (e.g. lifelink's
+            // lifegain hook) are still removed by `KeywordKind`, which is
+            // the granularity at which keyword-derived triggers are
+            // installed by `KeywordTriggerInstaller`. If no keyword is
+            // currently stored on the source (e.g. the static is gathered
+            // before the choose effect has resolved), this is a no-op
+            // rather than a panic — mirrors the unresolved-attribute
+            // behavior of `AddChosenColor`.
+            ContinuousModification::RemoveChosenKeyword => {
+                if let Some(kw) = chosen_keyword.as_ref() {
+                    obj.keywords.retain(|k| k != kw);
+                    obj.trigger_definitions.retain(|trigger| {
+                        !KeywordTriggerInstaller::trigger_matches_keyword_kind(trigger, kw)
+                    });
+                }
+            }
             ContinuousModification::RemoveAllAbilities => {
                 Arc::make_mut(&mut obj.abilities).clear();
                 obj.trigger_definitions.clear();
@@ -2077,18 +2168,20 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             // CR 205.1a + CR 613.1d: Replace the entire core card-type set.
             ContinuousModification::SetCardTypes { ref core_types } => {
                 obj.card_types.core_types = core_types.clone();
+                obj.card_types.subtypes.retain(|subtype| {
+                    subtype_matches_core_types(subtype, core_types, &all_creature_types)
+                });
             }
             // CR 205.1a + CR 613.1d: Remove every subtype belonging to the
             // named subtype set. Membership for the `Creature` set is resolved
             // against the runtime-populated `state.all_creature_types` — the
             // same source `AddAllCreatureTypes` uses below.
             ContinuousModification::RemoveAllSubtypes { set } => {
-                use crate::types::card_type::SubtypeSet;
                 match set {
                     SubtypeSet::Creature => {
                         obj.card_types
                             .subtypes
-                            .retain(|s| !state.all_creature_types.iter().any(|c| c == s));
+                            .retain(|s| !all_creature_types.iter().any(|c| c == s));
                     }
                     SubtypeSet::Land => {
                         // CR 205.3i: land-type membership via the basic/non-basic
@@ -2098,11 +2191,12 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
                     SubtypeSet::Artifact
                     | SubtypeSet::Enchantment
                     | SubtypeSet::Planeswalker
-                    | SubtypeSet::Spell => unreachable!(
-                        "RemoveAllSubtypes for {set:?} has no membership source wired; \
-                         only Creature and Land subtype removal is emitted by the parser. \
-                         Add a membership classifier before emitting this set."
-                    ),
+                    | SubtypeSet::Spell
+                    | SubtypeSet::Battle => {
+                        obj.card_types
+                            .subtypes
+                            .retain(|s| noncreature_subtype_set(s) != Some(*set));
+                    }
                 }
             }
             // CR 205.4 + CR 707.9d: "in addition to its other types" — append
@@ -2499,6 +2593,38 @@ mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    #[test]
+    fn set_card_types_prunes_subtypes_not_matching_new_core_types() {
+        let mut state = setup();
+        state.all_creature_types = vec!["Bear".to_string(), "Berserker".to_string()];
+
+        assert!(subtype_matches_core_types(
+            "Bear",
+            &[CoreType::Creature],
+            &state.all_creature_types
+        ));
+        assert!(!subtype_matches_core_types(
+            "Equipment",
+            &[CoreType::Creature],
+            &state.all_creature_types
+        ));
+        assert!(!subtype_matches_core_types(
+            "Mountain",
+            &[CoreType::Creature],
+            &state.all_creature_types
+        ));
+        assert!(subtype_matches_core_types(
+            "Equipment",
+            &[CoreType::Artifact, CoreType::Creature],
+            &state.all_creature_types
+        ));
+        assert!(subtype_matches_core_types(
+            "Siege",
+            &[CoreType::Battle],
+            &state.all_creature_types
+        ));
     }
 
     fn make_creature(
@@ -4453,6 +4579,163 @@ mod tests {
         );
     }
 
+    // CR 608.2d + CR 613.1f: Urborg's "loses [chosen ability] until end of
+    // turn" — the chosen Keyword is stored on the source's `chosen_attributes`
+    // and read back by `RemoveChosenKeyword` at layer evaluation time. The
+    // recipient (target creature) is the affected object; the source (Urborg)
+    // owns the choice. Same indirection pattern as `AddChosenColor`.
+    #[test]
+    fn test_remove_chosen_keyword_strips_first_strike_from_target() {
+        use crate::types::ability::ChosenAttribute;
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup();
+
+        // Source (e.g., Urborg) — carries the chosen keyword attribute.
+        let urborg = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Urborg".to_string(),
+            Zone::Battlefield,
+        );
+        // Recipient (target creature) — has First Strike printed; we expect
+        // the layered view to strip it.
+        let target = make_creature(&mut state, "Knight", 2, 2, PlayerId(0));
+        let ts = state.next_timestamp();
+        {
+            let obj = state.objects.get_mut(&target).unwrap();
+            obj.timestamp = ts;
+            obj.base_keywords.push(Keyword::FirstStrike);
+            obj.keywords.push(Keyword::FirstStrike);
+        }
+        {
+            let obj = state.objects.get_mut(&urborg).unwrap();
+            obj.chosen_attributes
+                .push(ChosenAttribute::Keyword(Keyword::FirstStrike));
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: target })
+                    .modifications(vec![ContinuousModification::RemoveChosenKeyword]),
+            );
+        }
+
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&target).unwrap();
+        assert!(
+            !obj.keywords.contains(&Keyword::FirstStrike),
+            "RemoveChosenKeyword should strip First Strike from the target"
+        );
+    }
+
+    // CR 608.2d + CR 613.1f + CR 702.14: Swampwalk is `Landwalk("Swamp")`
+    // and is a *distinct* keyword from islandwalk per CR 702.14 — the
+    // chosen-keyword surface must remove only the exact parameterized
+    // variant chosen at resolution time, leaving other landwalk variants
+    // on the same creature intact. This test guards the `PartialEq`-based
+    // stripping in the `RemoveChosenKeyword` arm against future regression
+    // to discriminant-only matching.
+    #[test]
+    fn test_remove_chosen_keyword_strips_only_chosen_landwalk_variant() {
+        use crate::types::ability::ChosenAttribute;
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup();
+
+        let urborg = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Urborg".to_string(),
+            Zone::Battlefield,
+        );
+        let target = make_creature(&mut state, "Marsh Stalker", 2, 2, PlayerId(0));
+        let ts = state.next_timestamp();
+        {
+            let obj = state.objects.get_mut(&target).unwrap();
+            obj.timestamp = ts;
+            obj.base_keywords
+                .push(Keyword::Landwalk("Swamp".to_string()));
+            obj.base_keywords
+                .push(Keyword::Landwalk("Island".to_string()));
+            obj.keywords.push(Keyword::Landwalk("Swamp".to_string()));
+            obj.keywords.push(Keyword::Landwalk("Island".to_string()));
+        }
+        {
+            let obj = state.objects.get_mut(&urborg).unwrap();
+            obj.chosen_attributes
+                .push(ChosenAttribute::Keyword(Keyword::Landwalk(
+                    "Swamp".to_string(),
+                )));
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: target })
+                    .modifications(vec![ContinuousModification::RemoveChosenKeyword]),
+            );
+        }
+
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&target).unwrap();
+        assert!(
+            !obj.keywords
+                .contains(&Keyword::Landwalk("Swamp".to_string())),
+            "RemoveChosenKeyword should strip the chosen Swampwalk"
+        );
+        assert!(
+            obj.keywords
+                .contains(&Keyword::Landwalk("Island".to_string())),
+            "RemoveChosenKeyword must NOT strip the non-chosen Islandwalk (CR 702.14)"
+        );
+    }
+
+    // No-op safety: when the source has no `ChosenAttribute::Keyword` stored,
+    // `RemoveChosenKeyword` must NOT panic and must NOT touch the recipient.
+    // Mirrors the unresolved-attribute behavior of `AddChosenColor`.
+    #[test]
+    fn test_remove_chosen_keyword_without_choice_is_noop() {
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup();
+
+        let urborg = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Urborg".to_string(),
+            Zone::Battlefield,
+        );
+        let target = make_creature(&mut state, "Knight", 2, 2, PlayerId(0));
+        let ts = state.next_timestamp();
+        {
+            let obj = state.objects.get_mut(&target).unwrap();
+            obj.timestamp = ts;
+            obj.base_keywords.push(Keyword::FirstStrike);
+            obj.keywords.push(Keyword::FirstStrike);
+        }
+        {
+            // Note: source has no chosen_attributes pushed.
+            let obj = state.objects.get_mut(&urborg).unwrap();
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: target })
+                    .modifications(vec![ContinuousModification::RemoveChosenKeyword]),
+            );
+        }
+
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&target).unwrap();
+        assert!(
+            obj.keywords.contains(&Keyword::FirstStrike),
+            "RemoveChosenKeyword with no stored choice should be a no-op"
+        );
+    }
+
     #[test]
     fn test_tarmogoyf_cda_counts_card_types_in_graveyards() {
         let mut state = setup();
@@ -5098,6 +5381,54 @@ mod tests {
             !land.card_types.subtypes.contains(&"Forest".to_string()),
             "Land should no longer have Forest subtype"
         );
+    }
+
+    // CR 113.6b + CR 408: SourceInZone evaluator — used by the Eminence /
+    // Anger / Squee class of statics that name a non-battlefield zone.
+    #[test]
+    fn evaluate_source_in_zone_command_true_when_in_command_zone() {
+        let mut state = setup();
+        let id = make_creature(&mut state, "Cmdr", 2, 2, PlayerId(0));
+        // Move from battlefield to command zone for this scenario.
+        state.objects.get_mut(&id).unwrap().zone = Zone::Command;
+        assert!(evaluate_condition_for_test(
+            &state,
+            &StaticCondition::SourceInZone {
+                zone: Zone::Command
+            },
+            PlayerId(0),
+            id,
+        ));
+    }
+
+    /// CR 113.6b: An Eminence-style Or-disjunction ("~ is in the command zone
+    /// or on the battlefield") must evaluate true for either zone individually
+    /// and false outside both.
+    #[test]
+    fn evaluate_source_in_zone_or_disjunction_command_or_battlefield() {
+        let mut state = setup();
+        let id = make_creature(&mut state, "Cmdr", 2, 2, PlayerId(0));
+        let cond = StaticCondition::Or {
+            conditions: vec![
+                StaticCondition::SourceInZone {
+                    zone: Zone::Command,
+                },
+                StaticCondition::SourceInZone {
+                    zone: Zone::Battlefield,
+                },
+            ],
+        };
+        // On battlefield (created here) → true.
+        assert!(evaluate_condition_for_test(&state, &cond, PlayerId(0), id));
+        // Move to command zone → still true.
+        state.objects.get_mut(&id).unwrap().zone = Zone::Command;
+        assert!(evaluate_condition_for_test(&state, &cond, PlayerId(0), id));
+        // Move to graveyard → false (neither zone).
+        state.objects.get_mut(&id).unwrap().zone = Zone::Graveyard;
+        assert!(!evaluate_condition_for_test(&state, &cond, PlayerId(0), id));
+        // Exile → false.
+        state.objects.get_mut(&id).unwrap().zone = Zone::Exile;
+        assert!(!evaluate_condition_for_test(&state, &cond, PlayerId(0), id));
     }
 
     #[test]
@@ -7332,6 +7663,8 @@ mod tests {
                 name: "Mortician Beetle".to_string(),
                 power: Some(1),
                 toughness: Some(1),
+                base_power: Some(1),
+                base_toughness: Some(1),
                 mana_value: 1,
                 controller: PlayerId(0),
                 owner: PlayerId(0),

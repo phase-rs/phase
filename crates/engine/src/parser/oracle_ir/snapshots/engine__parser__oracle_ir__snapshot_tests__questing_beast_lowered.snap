@@ -120,7 +120,10 @@ expression: "&lowered"
             "controller": null,
             "properties": [
               {
-                "type": "PowerLE",
+                "type": "PtComparison",
+                "stat": "Power",
+                "scope": "Current",
+                "comparator": "LE",
                 "value": {
                   "type": "Fixed",
                   "value": 2

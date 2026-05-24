@@ -1,4 +1,4 @@
-use crate::types::ability::TargetRef;
+use crate::types::ability::{AbilityTag, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -99,8 +99,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::SpellCopied { .. }
         | GameEvent::AbilityActivated { .. }
         | GameEvent::NinjutsuActivated { .. }
-        | GameEvent::BoastAbilityActivated { .. }
-        | GameEvent::ExhaustAbilityActivated { .. }
+        | GameEvent::KeywordAbilityActivated { .. }
         | GameEvent::StackPushed { .. }
         | GameEvent::StackResolved { .. }
         | GameEvent::SpellCountered { .. } => LogCategory::Stack,
@@ -256,9 +255,14 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             card_seg(state, *object_id),
         ],
 
-        GameEvent::AbilityActivated { source_id } => {
-            vec![text("Ability activated: "), card_seg(state, *source_id)]
-        }
+        GameEvent::AbilityActivated {
+            player_id,
+            source_id,
+        } => vec![
+            player_seg(state, *player_id),
+            text(" activates ability: "),
+            card_seg(state, *source_id),
+        ],
 
         GameEvent::NinjutsuActivated {
             player_id,
@@ -269,24 +273,23 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             card_seg(state, *source_id),
         ],
 
-        GameEvent::BoastAbilityActivated {
-            player_id,
-            source_id,
-        } => vec![
-            player_seg(state, *player_id),
-            text(" activates boast: "),
-            card_seg(state, *source_id),
-        ],
-
-        GameEvent::ExhaustAbilityActivated {
+        GameEvent::KeywordAbilityActivated {
+            ability_tag,
             player_id,
             source_id,
             ..
-        } => vec![
-            player_seg(state, *player_id),
-            text(" activates exhaust: "),
-            card_seg(state, *source_id),
-        ],
+        } => {
+            let label = match ability_tag {
+                AbilityTag::Boast => " activates boast: ",
+                AbilityTag::Exhaust => " activates exhaust: ",
+                AbilityTag::Outlast => " activates outlast: ",
+            };
+            vec![
+                player_seg(state, *player_id),
+                text(label),
+                card_seg(state, *source_id),
+            ]
+        }
 
         GameEvent::BecomesPlotted {
             object_id,
@@ -1105,6 +1108,8 @@ mod tests {
                 name: "Grizzly Bears".to_string(),
                 power: Some(2),
                 toughness: Some(2),
+                base_power: Some(2),
+                base_toughness: Some(2),
                 mana_value: 2,
                 controller: PlayerId(0),
                 owner: PlayerId(0),

@@ -2633,15 +2633,22 @@ fn apply_battlefield_cost_modifiers_inner(
 ) {
     use crate::types::ability::ControllerRef;
 
-    // CR 702.26b + CR 114.4: Functioning gate (phased-out / command-zone) owned
-    // by `battlefield_functioning_statics`. We deliberately use the non-
-    // condition-filtered helper here — CR 604.1 condition evaluation must run
-    // against `caster` (so `SpellsCastThisTurn`-style conditions resolve against
-    // the casting player's history), not against the static's controller. The
+    // CR 702.26b + CR 114.4 + CR 113.6b: Functioning gate (phased-out /
+    // command-zone with Eminence-style opt-in) owned by
+    // `game_functioning_statics`. We deliberately use the non-condition-
+    // filtered helper here — CR 604.1 condition evaluation must run against
+    // `caster` (so `SpellsCastThisTurn`-style conditions resolve against the
+    // casting player's history), not against the static's controller. The
     // inline `evaluate_condition(... caster, ...)` call below does that work.
-    for (bf_obj, def) in super::functioning_abilities::battlefield_functioning_statics(state) {
-        let bf_id = bf_obj.id;
-        let source_controller = bf_obj.controller;
+    //
+    // CR 113.6b: cost-reduction statics that opt into the command zone via
+    // `active_zones.contains(Command)` (Eminence — The Ur-Dragon, Edgar Markov)
+    // function from the command zone for non-emblem objects; the per-static
+    // `active_zones` filter below still enforces the static's declared zones
+    // when the source is on the battlefield.
+    for (src_obj, def) in super::functioning_abilities::game_functioning_statics(state) {
+        let bf_id = src_obj.id;
+        let source_controller = src_obj.controller;
 
         {
             let (amount, spell_filter, dynamic_count, is_raise) = match &def.mode {
@@ -2676,9 +2683,15 @@ fn apply_battlefield_cost_modifiers_inner(
                 continue;
             }
 
-            // CR 113.6: Statics that declare non-battlefield active_zones must not
-            // fire from the battlefield. Empty active_zones = battlefield default.
-            if !def.active_zones.is_empty() && !def.active_zones.contains(&Zone::Battlefield) {
+            // CR 113.6 + CR 113.6b: A static functions only in its declared
+            // zones. Empty `active_zones` means battlefield default; non-empty
+            // means restrict to the listed zones. Eminence statics list both
+            // Battlefield and Command and pass for either source zone.
+            if def.active_zones.is_empty() {
+                if src_obj.zone != Zone::Battlefield {
+                    continue;
+                }
+            } else if !def.active_zones.contains(&src_obj.zone) {
                 continue;
             }
 
@@ -3098,6 +3111,35 @@ fn alternative_spell_layout(obj: &crate::game::game_object::GameObject) -> Optio
         Some(_) => None,
         None => Some(LayoutKind::Adventure),
     }
+}
+
+/// CR 712.11b: Returns true if `obj` is a Modal double-faced card whose two
+/// faces present a real *cast*-time face choice — i.e. both faces are spells
+/// (neither is a land). This is the spell//spell MDFC class (Esika, God of the
+/// Tree // The Prismatic Bridge and the other Kaldheim gods, Valki // Tibalt,
+/// Halvar // Sword, etc.) where `CastSpell` must let the player choose which
+/// face to put on the stack.
+///
+/// Land faces are deliberately excluded: a land MDFC face is put onto the
+/// battlefield through the play-land special action (`handle_play_land`), which
+/// runs its own `ModalFaceChoice`. A spell//land MDFC casts its spell (front)
+/// face normally and plays its land (back) face via PlayLand, so neither needs
+/// a cast-time choice here.
+///
+/// The gate keys off `back_face.layout_kind == Modal`, which
+/// `snapshot_object_face` clears to `None` after a swap — so re-entry into the
+/// cast pipeline for the chosen face does not re-prompt.
+fn modal_spell_face_choice_available(obj: &crate::game::game_object::GameObject) -> bool {
+    use crate::types::card_type::CoreType;
+    let Some(back) = obj.back_face.as_ref() else {
+        return false;
+    };
+    if back.layout_kind != Some(LayoutKind::Modal) {
+        return false;
+    }
+    let front_is_land = obj.card_types.core_types.contains(&CoreType::Land);
+    let back_is_land = back.card_types.core_types.contains(&CoreType::Land);
+    !front_is_land && !back_is_land
 }
 
 fn casting_variant_for_alternative_spell(layout: LayoutKind) -> CastingVariant {
@@ -4201,6 +4243,22 @@ pub fn handle_cast_spell_with_payment_mode(
         }
     }
 
+    // CR 712.11b: Spell//spell Modal DFCs from hand require choosing which face
+    // to cast (Esika, God of the Tree // The Prismatic Bridge, etc.). The
+    // `ChooseModalFace` handler swaps to the chosen face (if back) and re-enters
+    // this function; the swap clears the back face's Modal `layout_kind`, so the
+    // re-entry casts the chosen face without re-prompting.
+    if let Some(obj) = state.objects.get(&object_id) {
+        if obj.zone == Zone::Hand && modal_spell_face_choice_available(obj) {
+            return Ok(WaitingFor::ModalFaceChoice {
+                player,
+                object_id,
+                card_id,
+                payment_mode,
+            });
+        }
+    }
+
     let variant_choices = casting_variant_choice_set(state, player, object_id);
     if variant_choices.options.len() > 1 {
         return Ok(WaitingFor::CastingVariantChoice {
@@ -4782,6 +4840,11 @@ fn continue_with_prepared(
 
     let target_slots = build_target_slots(state, &resolved)?;
     if !target_slots.is_empty() {
+        let target_constraints = prepared
+            .ability_def
+            .as_ref()
+            .map(|ability| ability.target_constraints.clone())
+            .unwrap_or_default();
         let has_kicker_cost = state
             .objects
             .get(&prepared.object_id)
@@ -4834,7 +4897,7 @@ fn continue_with_prepared(
         }
 
         if let Some(targets) =
-            auto_select_targets_for_ability(state, &resolved, &target_slots, &[])?
+            auto_select_targets_for_ability(state, &resolved, &target_slots, &target_constraints)?
         {
             let mut resolved = resolved;
             assign_targets_in_chain(state, &mut resolved, &targets)?;
@@ -4853,7 +4916,12 @@ fn continue_with_prepared(
             );
         }
 
-        let selection = begin_target_selection_for_ability(state, &resolved, &target_slots, &[])?;
+        let selection = begin_target_selection_for_ability(
+            state,
+            &resolved,
+            &target_slots,
+            &target_constraints,
+        )?;
         let mut pending_targets = PendingCast::new(
             prepared.object_id,
             prepared.card_id,
@@ -4866,6 +4934,7 @@ fn continue_with_prepared(
             .ability_def
             .as_ref()
             .and_then(|a| a.distribute.clone());
+        pending_targets.target_constraints = target_constraints;
         pending_targets.origin_zone = prepared.origin_zone;
         pending_targets.payment_mode = prepared.payment_mode;
         return Ok(WaitingFor::TargetSelection {
@@ -5041,7 +5110,12 @@ pub fn spell_has_legal_targets(
             if target_slots.is_empty() {
                 true
             } else {
-                has_legal_target_assignment_for_ability(&simulated, &resolved, &target_slots, &[])
+                has_legal_target_assignment_for_ability(
+                    &simulated,
+                    &resolved,
+                    &target_slots,
+                    &ability_def.target_constraints,
+                )
             }
         }
         Err(_) => false,
@@ -5255,6 +5329,23 @@ fn can_cast_prepared_now(
     // spell face is castable; in that case the card is still legally castable
     // and will prompt AdventureCastChoice.
     if alternative_spell_layout(obj).is_some() {
+        let mut sim = state.clone();
+        if let Some(sim_obj) = sim.objects.get_mut(&prepared.object_id) {
+            swap_to_alternative_spell_face(sim_obj);
+        }
+        return can_cast_object_now(&sim, player, prepared.object_id);
+    }
+
+    // CR 712.11c: For a spell//spell Modal DFC, only the face that will be face
+    // up on the stack is evaluated to determine if it can be cast — so the back
+    // face must be tested independently. The front face may be unaffordable
+    // (Esika, God of the Tree needs {1}{G}{G}) while the back face is castable
+    // (The Prismatic Bridge needs {W}{U}{B}{R}{G}); the card is still legally
+    // castable and will prompt ModalFaceChoice (CR 712.11b). Mirror the Adventure
+    // recursion: swap to the back face and re-test. `swap_to_alternative_spell_face`
+    // clears the back face's `layout_kind`, so the recursive call does not
+    // re-enter this branch (no infinite recursion).
+    if modal_spell_face_choice_available(obj) {
         let mut sim = state.clone();
         if let Some(sim_obj) = sim.objects.get_mut(&prepared.object_id) {
             swap_to_alternative_spell_face(sim_obj);
@@ -6201,19 +6292,13 @@ pub fn pay_ability_cost(
                 );
             }
         }
-        // Targeted remove-counter costs ("remove a counter from target X") would
-        // need an interactive WaitingFor flow to let the player pick the permanent.
-        // The current parser only emits `target: None`, so this is unreachable in
-        // practice but kept exhaustive to catch any future parser extension.
+        // Targeted remove-counter costs are paid by the interactive
+        // WaitingFor::RemoveCounterForCost path before automatic cost
+        // components resume here. This arm intentionally no-ops so composite
+        // activation costs can still pay their remaining automatic pieces.
         AbilityCost::RemoveCounter {
             target: Some(_), ..
-        } => {
-            return Err(EngineError::ActionNotAllowed(
-                "Targeted remove-counter costs require interactive resolution and must be \
-                 intercepted before reaching pay_ability_cost"
-                    .to_string(),
-            ));
-        }
+        } => {}
         // CR 701.43a: "To exert a permanent, its controller chooses to have it
         // not untap during its controller's next untap step." Modeled as a
         // transient continuous effect with `StaticMode::CantUntap` scoped to
@@ -6378,6 +6463,22 @@ fn find_tap_creatures_cost(cost: &AbilityCost) -> Option<(u32, &TargetFilter)> {
     }
 }
 
+fn find_targeted_remove_counter_cost(
+    cost: &AbilityCost,
+) -> Option<(u32, &crate::types::counter::CounterMatch, &TargetFilter)> {
+    match cost {
+        AbilityCost::RemoveCounter {
+            count,
+            counter_type,
+            target: Some(target),
+        } => Some((*count, counter_type, target)),
+        AbilityCost::Composite { costs } => {
+            costs.iter().find_map(find_targeted_remove_counter_cost)
+        }
+        _ => None,
+    }
+}
+
 /// Shared eligibility helper for hand-card cost payments — returns every card
 /// in `player`'s hand matching `filter` (if any), excluding the cast source.
 /// Used by both discard-as-cost (CR 601.2b) and exile-from-hand-as-cost
@@ -6454,6 +6555,14 @@ pub(crate) fn find_eligible_exile_for_cost_targets(
     }
 }
 
+fn find_one_of_cost(cost: &AbilityCost) -> Option<&Vec<AbilityCost>> {
+    match cost {
+        AbilityCost::OneOf { costs } => Some(costs),
+        AbilityCost::Composite { costs } => costs.iter().find_map(find_one_of_cost),
+        _ => None,
+    }
+}
+
 fn find_return_to_hand_cost(cost: &AbilityCost) -> Option<(u32, Option<&TargetFilter>)> {
     match cost {
         // CR 118.12: This helper currently only handles the default
@@ -6490,6 +6599,41 @@ pub(crate) fn find_eligible_return_to_hand_targets(
                 obj.controller == player
                     && filter
                         .is_none_or(|f| super::filter::matches_target_filter(state, id, f, &ctx))
+            })
+        })
+        .collect()
+}
+
+fn removable_counter_count(
+    obj: &crate::game::game_object::GameObject,
+    counter_type: &crate::types::counter::CounterMatch,
+) -> u32 {
+    match counter_type {
+        crate::types::counter::CounterMatch::OfType(ty) => {
+            obj.counters.get(ty).copied().unwrap_or(0)
+        }
+        crate::types::counter::CounterMatch::Any => obj.counters.values().copied().sum(),
+    }
+}
+
+pub(crate) fn find_eligible_remove_counter_for_cost_targets(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    target: &TargetFilter,
+    counter_type: &crate::types::counter::CounterMatch,
+    count: u32,
+) -> Vec<ObjectId> {
+    let ctx = super::filter::FilterContext::from_source(state, source);
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|&id| {
+            state.objects.get(&id).is_some_and(|obj| {
+                obj.controller == player
+                    && super::filter::matches_target_filter(state, id, target, &ctx)
+                    && removable_counter_count(obj, counter_type) >= count
             })
         })
         .collect()
@@ -6825,7 +6969,7 @@ pub fn can_activate_ability_now(
                     &simulated,
                     &resolved,
                     &target_slots,
-                    &[],
+                    &ability_def.target_constraints,
                 )
         }
         Err(_) => false,
@@ -7045,6 +7189,19 @@ pub fn handle_activate_ability(
             });
         }
 
+        // CR 118.12a: Pre-check for OneOf costs — detour to WaitingFor before any cost payment.
+        if let Some(costs) = find_one_of_cost(cost) {
+            let mut pending_one_of =
+                PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+            pending_one_of.activation_cost = Some(cost.clone());
+            pending_one_of.activation_ability_index = Some(ability_index);
+            return Ok(WaitingFor::ActivationCostOneOfChoice {
+                player,
+                costs: costs.clone(),
+                pending_cast: Box::new(pending_one_of),
+            });
+        }
+
         // CR 118.3: Pre-check for ReturnToHand costs — same WaitingFor detour pattern as
         // Sacrifice above. Ordering matters for Composite costs: Sacrifice wins if both are
         // present, but no real cards combine them.
@@ -7064,6 +7221,37 @@ pub fn handle_activate_ability(
                 count: count as usize,
                 permanents: eligible,
                 pending_cast: Box::new(pending_return),
+            });
+        }
+
+        // CR 118.3 + CR 122.1 + CR 602.2b: Pre-check targeted
+        // remove-counter activation costs. The player chooses which matching
+        // permanent supplies the counter before automatic cost components are
+        // paid and the ability is put on the stack.
+        if let Some((count, counter_type, target)) = find_targeted_remove_counter_cost(cost) {
+            let eligible = find_eligible_remove_counter_for_cost_targets(
+                state,
+                player,
+                source_id,
+                target,
+                counter_type,
+                count,
+            );
+            if eligible.is_empty() {
+                return Err(EngineError::ActionNotAllowed(
+                    "No eligible permanents with counters".into(),
+                ));
+            }
+            let mut pending_counter =
+                PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+            pending_counter.activation_cost = Some(cost.clone());
+            pending_counter.activation_ability_index = Some(ability_index);
+            return Ok(WaitingFor::RemoveCounterForCost {
+                player,
+                count,
+                counter_type: counter_type.clone(),
+                permanents: eligible,
+                pending_cast: Box::new(pending_counter),
             });
         }
 
@@ -7120,8 +7308,9 @@ pub fn handle_activate_ability(
 
     let target_slots = build_target_slots(state, &resolved)?;
     if !target_slots.is_empty() {
+        let target_constraints = ability_def.target_constraints.clone();
         if let Some(targets) =
-            auto_select_targets_for_ability(state, &resolved, &target_slots, &[])?
+            auto_select_targets_for_ability(state, &resolved, &target_slots, &target_constraints)?
         {
             let mut resolved = resolved;
             assign_targets_in_chain(state, &mut resolved, &targets)?;
@@ -7164,7 +7353,10 @@ pub fn handle_activate_ability(
             // CR 117.1b: Priority permits unbounded activation. `pending_activations`
             // is a per-priority-window AI-guard — see `GameState::pending_activations`.
             state.pending_activations.push((source_id, ability_index));
-            events.push(GameEvent::AbilityActivated { source_id });
+            events.push(GameEvent::AbilityActivated {
+                player_id: player,
+                source_id,
+            });
             // CR 702.142b: Emit additional event when a boast ability is activated.
             super::casting_targets::emit_keyword_ability_event_if_tagged(
                 state,
@@ -7178,7 +7370,12 @@ pub fn handle_activate_ability(
             return Ok(WaitingFor::Priority { player });
         }
 
-        let selection = begin_target_selection_for_ability(state, &resolved, &target_slots, &[])?;
+        let selection = begin_target_selection_for_ability(
+            state,
+            &resolved,
+            &target_slots,
+            &target_constraints,
+        )?;
         let mut pending_target = PendingCast::new(
             source_id,
             CardId(0),
@@ -7187,6 +7384,7 @@ pub fn handle_activate_ability(
         );
         pending_target.activation_cost = ability_def.cost.clone();
         pending_target.activation_ability_index = Some(ability_index);
+        pending_target.target_constraints = target_constraints;
         return Ok(WaitingFor::TargetSelection {
             player,
             pending_cast: Box::new(pending_target),
@@ -7231,7 +7429,10 @@ pub fn handle_activate_ability(
     // CR 117.1b: Priority permits unbounded activation. `pending_activations`
     // is a per-priority-window AI-guard — see `GameState::pending_activations`.
     state.pending_activations.push((source_id, ability_index));
-    events.push(GameEvent::AbilityActivated { source_id });
+    events.push(GameEvent::AbilityActivated {
+        player_id: player,
+        source_id,
+    });
     // CR 702.142b: Emit additional event when a boast ability is activated.
     super::casting_targets::emit_keyword_ability_event_if_tagged(
         state,
@@ -7301,13 +7502,15 @@ pub fn handle_cancel_cast(
             .rposition(|entry| entry.id == pending.object_id)
         {
             state.stack.remove(pos);
+            state.stack_paid_facts.remove(&pending.object_id);
         }
     }
 }
 
 // Cost payment handlers are in casting_costs module.
 pub(crate) use super::casting_costs::{
-    handle_discard_for_cost, handle_return_to_hand_for_cost, handle_sacrifice_for_cost,
+    handle_activation_cost_one_of_choice, handle_discard_for_cost, handle_return_to_hand_for_cost,
+    handle_sacrifice_for_cost,
 };
 
 fn generic_mana_in_cost(cost: &AbilityCost) -> u32 {
@@ -12760,7 +12963,7 @@ mod tests {
         assert!(state.objects[&source].tapped);
         assert!(events.iter().any(|event| matches!(
             event,
-            GameEvent::AbilityActivated { source_id } if *source_id == source
+            GameEvent::AbilityActivated { source_id, .. } if *source_id == source
         )));
     }
 
@@ -12947,7 +13150,8 @@ mod tests {
         assert!(second.is_err());
         assert!(events.iter().any(|event| matches!(
             event,
-            GameEvent::ExhaustAbilityActivated {
+            GameEvent::KeywordAbilityActivated {
+                ability_tag: AbilityTag::Exhaust,
                 player_id: PlayerId(0),
                 source_id,
                 is_mana_ability: false,
@@ -13045,6 +13249,7 @@ mod tests {
                         reveal: false,
                         target_player: None,
                         selection_constraint: SearchSelectionConstraint::None,
+                        split: None,
                     },
                 )
                 .cost(AbilityCost::ReturnToHand {
@@ -16802,7 +17007,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::Counter {
                     target: TargetFilter::Typed(crate::types::ability::TypedFilter::card()),
-                    source_static: None,
+                    source_rider: None,
                 },
             ));
             obj.mana_cost = ManaCost::Cost {
@@ -20868,6 +21073,109 @@ mod tests {
                 "one counter removed, two remain"
             );
         }
+
+        #[test]
+        fn targeted_counter_cost_prompts_and_removes_from_chosen_permanent() {
+            use crate::game::engine::apply_as_current;
+
+            let mut state = setup_game_at_main_phase();
+            let source = create_object(
+                &mut state,
+                CardId(901),
+                PlayerId(0),
+                "Counter Scholar".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&source).unwrap();
+                obj.card_types.core_types.push(CoreType::Artifact);
+                Arc::make_mut(&mut obj.abilities).push(
+                    AbilityDefinition::new(
+                        AbilityKind::Activated,
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        },
+                    )
+                    .cost(AbilityCost::Composite {
+                        costs: vec![
+                            AbilityCost::Tap,
+                            AbilityCost::RemoveCounter {
+                                count: 1,
+                                counter_type: CounterMatch::Any,
+                                target: Some(TargetFilter::Typed(
+                                    TypedFilter::new(TypeFilter::Permanent)
+                                        .controller(ControllerRef::You),
+                                )),
+                            },
+                        ],
+                    }),
+                );
+            }
+            let saga = create_object(
+                &mut state,
+                CardId(902),
+                PlayerId(0),
+                "Test Saga".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&saga).unwrap();
+                obj.card_types.core_types.push(CoreType::Enchantment);
+                obj.counters.insert(CounterType::Lore, 1);
+            }
+            let empty_permanent = create_object(
+                &mut state,
+                CardId(903),
+                PlayerId(0),
+                "No Counter".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&empty_permanent)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Artifact);
+
+            assert!(can_activate_ability_now(&state, PlayerId(0), source, 0));
+            let waiting =
+                handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut Vec::new())
+                    .unwrap();
+            match &waiting {
+                WaitingFor::RemoveCounterForCost {
+                    player,
+                    count,
+                    counter_type,
+                    permanents,
+                    ..
+                } => {
+                    assert_eq!(*player, PlayerId(0));
+                    assert_eq!(*count, 1);
+                    assert_eq!(*counter_type, CounterMatch::Any);
+                    assert_eq!(permanents, &vec![saga]);
+                }
+                other => panic!("Expected RemoveCounterForCost, got {other:?}"),
+            }
+            state.waiting_for = waiting;
+
+            apply_as_current(&mut state, GameAction::SelectCards { cards: vec![saga] }).unwrap();
+
+            assert!(state.objects[&source].tapped);
+            assert_eq!(
+                state.objects[&saga]
+                    .counters
+                    .get(&CounterType::Lore)
+                    .copied()
+                    .unwrap_or(0),
+                0
+            );
+            assert!(
+                state.stack.iter().any(|entry| entry.source_id == source),
+                "activated ability should reach the stack after targeted counter cost payment"
+            );
+        }
     }
 
     mod unattach_cost {
@@ -21873,7 +22181,7 @@ mod tests {
                 .objects
                 .get_mut(&pw)
                 .unwrap()
-                .loyalty_activated_this_turn = true;
+                .loyalty_activations_this_turn = 1;
 
             // CR 606.3: every remaining loyalty ability on the same PW is denied.
             assert!(
@@ -21910,7 +22218,7 @@ mod tests {
                 .objects
                 .get_mut(&pw)
                 .unwrap()
-                .loyalty_activated_this_turn = true;
+                .loyalty_activations_this_turn = 1;
             assert!(!can_activate_ability_now(&state, PlayerId(0), pw, 0));
             assert!(!can_activate_ability_now(&state, PlayerId(0), pw, 1));
 
@@ -21929,11 +22237,11 @@ mod tests {
 
             assert!(
                 can_activate_ability_now(&state, PlayerId(0), pw, 0),
-                "ability 0 must be activatable again after loyalty_activated_this_turn reset"
+                "ability 0 must be activatable again after loyalty_activations_this_turn reset"
             );
             assert!(
                 can_activate_ability_now(&state, PlayerId(0), pw, 1),
-                "ability 1 must be activatable again after loyalty_activated_this_turn reset"
+                "ability 1 must be activatable again after loyalty_activations_this_turn reset"
             );
         }
 
@@ -21962,7 +22270,7 @@ mod tests {
                 .objects
                 .get_mut(&pw1)
                 .unwrap()
-                .loyalty_activated_this_turn = true;
+                .loyalty_activations_this_turn = 1;
 
             // PW1 fully locked.
             assert!(!can_activate_ability_now(&state, PlayerId(0), pw1, 0));
@@ -22524,6 +22832,7 @@ mod tests {
                     reveal: true,
                     target_player: None,
                     selection_constraint: SearchSelectionConstraint::None,
+                    split: None,
                 },
             )
             .cost(AbilityCost::Composite {

@@ -3,7 +3,7 @@ use thiserror::Error;
 
 use crate::types::ability::{EffectKind, KeywordAction, TargetRef};
 use crate::types::actions::GameAction;
-use crate::types::events::{BendingType, GameEvent, ManaTapState};
+use crate::types::events::{BendingType, GameEvent, ManaTapState, PlayerActionKind};
 use crate::types::game_state::{
     ActionResult, AutoPassMode, AutoPassRequest, ConvokeMode, GameState, StackEntry,
     StackEntryKind, WaitingFor,
@@ -145,13 +145,32 @@ pub fn apply(
     state.exiled_from_hand_this_resolution = 0;
     check_actor_authorization(state, actor, &action)?;
     let mut result = apply_action(state, actor, action)?;
+    reconcile_terminal_result(state, &mut result);
     bump_state_revision(state);
     mark_public_state_all_dirty(state);
     sync_waiting_for(state, &result.waiting_for);
     run_auto_pass_loop(state, &mut result);
+    reconcile_terminal_result(state, &mut result);
+    remember_public_reveals(state, &result.events);
     finalize_public_state(state);
     result.log_entries = super::log::resolve_log_entries(&result.events, state);
     Ok(result)
+}
+
+fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
+    super::elimination::ensure_game_over_if_terminal(state, &mut result.events);
+    if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+        match_flow::handle_game_over_transition(state);
+        result.waiting_for = state.waiting_for.clone();
+    }
+}
+
+fn remember_public_reveals(state: &mut GameState, events: &[GameEvent]) {
+    for event in events {
+        if let GameEvent::CardsRevealed { card_ids, .. } = event {
+            state.public_revealed_cards.extend(card_ids.iter().copied());
+        }
+    }
 }
 
 /// Engine-level authorization guard. Any *game action* must come from the
@@ -443,6 +462,41 @@ mod auto_pass_decision_tests {
         state
     }
 
+    #[test]
+    fn apply_reconciles_eliminated_two_player_game_to_game_over() {
+        let mut state = priority_state();
+        state.players[1].is_eliminated = true;
+        state.eliminated_players.push(PlayerId(1));
+
+        let result = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SetAutoPass {
+                mode: AutoPassRequest::UntilEndOfTurn,
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(0))
+            }
+        ));
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(0))
+            }
+        ));
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            GameEvent::GameOver {
+                winner: Some(PlayerId(0))
+            }
+        )));
+    }
+
     fn push_simple_stack_entry(state: &mut GameState, id: u64, controller: PlayerId) {
         state.stack.push_back(StackEntry {
             id: ObjectId(id),
@@ -611,6 +665,43 @@ mod auto_pass_decision_tests {
             .insert(PlayerId(0), vec![Phase::DeclareBlockers]);
         assert!(phase_stop_hit(&state, PlayerId(0)));
         assert!(!end_of_turn_active(&state, PlayerId(0)));
+    }
+
+    #[test]
+    fn until_end_of_turn_does_not_auto_submit_available_blockers() {
+        let waiting_for = WaitingFor::DeclareBlockers {
+            player: PlayerId(0),
+            valid_blocker_ids: vec![ObjectId(10)],
+            valid_block_targets: [(ObjectId(10), vec![ObjectId(20)])].into_iter().collect(),
+        };
+        let mut state = GameState {
+            phase: Phase::DeclareBlockers,
+            active_player: PlayerId(1),
+            waiting_for: waiting_for.clone(),
+            ..GameState::default()
+        };
+        state
+            .auto_pass
+            .insert(PlayerId(0), AutoPassMode::UntilEndOfTurn);
+
+        let mut result = ActionResult {
+            events: Vec::new(),
+            waiting_for,
+            log_entries: Vec::new(),
+        };
+        run_auto_pass_loop(&mut state, &mut result);
+
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::DeclareBlockers {
+                player: PlayerId(0),
+                ..
+            }
+        ));
+        assert!(
+            state.auto_pass.contains_key(&PlayerId(0)),
+            "the defender's auto-pass session should stay armed after pausing for legal blockers"
+        );
     }
 
     #[test]
@@ -882,22 +973,19 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
                 }
             }
 
-            // Auto-submit empty blockers when there's nothing to choose:
-            //   (a) the defender is in UntilEndOfTurn mode, OR
-            //   (b) no legal blocks are available — CR 509.1 says the turn-based action
-            //       still runs, and CR 117.1c requires the active player to receive
-            //       priority during the step (instants and Ninjutsu-family activations
-            //       per CR 702.49 — notably Sneak, which is restricted to this step).
-            // A phase stop on Declare Blockers overrides both paths regardless of
-            // whether an auto-pass session is active: if the player explicitly asked
-            // to pause here, honor it.
+            // Auto-submit empty blockers only when there's nothing to choose.
+            // CR 509.1 says the turn-based action still runs when no legal blocks
+            // are available, and CR 117.1c requires the active player to receive
+            // priority during the step (instants and Ninjutsu-family activations
+            // per CR 702.49 — notably Sneak, which is restricted to this step).
+            // A phase stop on Declare Blockers overrides this even without an
+            // auto-pass session: if the player explicitly asked to pause here,
+            // honor it.
             WaitingFor::DeclareBlockers {
                 player,
                 valid_blocker_ids,
                 ..
-            } if !phase_stop_hit(state, *player)
-                && (valid_blocker_ids.is_empty() || end_of_turn_active(state, *player)) =>
-            {
+            } if !phase_stop_hit(state, *player) && valid_blocker_ids.is_empty() => {
                 let mut events = Vec::new();
                 match engine_combat::handle_empty_blockers(state, *player, &mut events) {
                     Ok(wf) => {
@@ -924,8 +1012,17 @@ fn finalize_copy_retarget(
     copy_id: ObjectId,
     slots: &[crate::types::game_state::CopyTargetSlot],
     events: &mut Vec<GameEvent>,
-) {
-    let targets: Vec<_> = slots.iter().map(|s| s.current.clone()).collect();
+) -> Result<(), EngineError> {
+    let targets: Vec<_> = slots
+        .iter()
+        .map(|slot| {
+            slot.current.clone().ok_or_else(|| {
+                EngineError::InvalidAction(
+                    "Copy target selection has an unchosen target slot".to_string(),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     if let Some(entry) = state.stack.iter_mut().find(|e| e.id == copy_id) {
         if let Some(ability) = entry.ability_mut() {
             ability.targets = targets;
@@ -938,6 +1035,7 @@ fn finalize_copy_retarget(
     state.waiting_for = WaitingFor::Priority { player };
     state.priority_player = player;
     effects::drain_pending_continuation(state, events);
+    Ok(())
 }
 
 fn apply_action(
@@ -1375,12 +1473,14 @@ fn apply_action(
             *payment_mode,
             &mut events,
         )?,
-        // CR 712.12: Player chooses which face of an MDFC to play as a land.
+        // CR 712.12 (land face) / CR 712.11b (spell face): Player chooses which
+        // face of an MDFC to play (land) or cast (spell).
         (
             WaitingFor::ModalFaceChoice {
                 player,
                 object_id,
                 card_id,
+                payment_mode,
             },
             GameAction::ChooseModalFace { back_face },
         ) => {
@@ -1399,17 +1499,36 @@ fn apply_action(
                     // Do NOT set obj.transformed — MDFC face choice ≠ transform
                 } else {
                     // Front face chosen — clear layout_kind so the MDFC intercept
-                    // won't re-fire on re-entry into handle_play_land.
+                    // won't re-fire on re-entry into handle_play_land / handle_cast_spell.
                     if let Some(ref mut bf) = obj.back_face {
                         bf.layout_kind = None;
                     }
                 }
             }
-            // Re-enter handle_play_land. After swap, the new back_face (from
-            // snapshot_object_face) has layout_kind: None. After front-face choice,
-            // layout_kind is explicitly cleared. Either way, the both-faces-land
-            // intercept won't re-fire.
-            handle_play_land(state, *object_id, *card_id, &mut events)?
+            // CR 712.12 / CR 712.11b: Route the re-entry by the now-active face's
+            // type. A land face is put onto the battlefield via the play-land
+            // special action (CR 712.12); a spell face is cast (CR 712.11b — Esika
+            // // The Prismatic Bridge). After a swap
+            // the new back_face (from snapshot_object_face) has layout_kind: None,
+            // and a front-face choice clears it explicitly — so neither the
+            // both-faces-land intercept nor the spell-face intercept re-fires.
+            let active_is_land = state.objects.get(object_id).is_some_and(|obj| {
+                obj.card_types
+                    .core_types
+                    .contains(&crate::types::card_type::CoreType::Land)
+            });
+            if active_is_land {
+                handle_play_land(state, *object_id, *card_id, &mut events)?
+            } else {
+                casting::handle_cast_spell_with_payment_mode(
+                    state,
+                    *player,
+                    *object_id,
+                    *card_id,
+                    *payment_mode,
+                    &mut events,
+                )?
+            }
         }
         // CR 118.9: Player chooses between the printed mana cost and the
         // keyword-granted alternative cost. The `keyword` axis on the waiting
@@ -1641,6 +1760,29 @@ fn apply_action(
         ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
         // CR 118.3: Player selected permanents to sacrifice as cost.
         (
+            WaitingFor::ActivationCostOneOfChoice {
+                player,
+                costs,
+                pending_cast,
+            },
+            GameAction::ChooseActivationCostBranch { index },
+        ) => engine_casting::handle_activation_cost_one_of_choice(
+            state,
+            *player,
+            *pending_cast.clone(),
+            costs,
+            index,
+            &mut events,
+        )?,
+        (
+            WaitingFor::ActivationCostOneOfChoice {
+                player,
+                pending_cast,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        (
             WaitingFor::SacrificeForCost {
                 player,
                 count,
@@ -1685,6 +1827,35 @@ fn apply_action(
         )?,
         (
             WaitingFor::ReturnToHandForCost {
+                player,
+                pending_cast,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        // CR 118.3 + CR 122.1: Player selected a permanent to remove a counter
+        // from as a cost.
+        (
+            WaitingFor::RemoveCounterForCost {
+                player,
+                count,
+                counter_type,
+                permanents,
+                pending_cast,
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => casting_costs::handle_remove_counter_for_cost(
+            state,
+            *player,
+            *pending_cast.clone(),
+            *count,
+            counter_type.clone(),
+            permanents,
+            &chosen,
+            &mut events,
+        )?,
+        (
+            WaitingFor::RemoveCounterForCost {
                 player,
                 pending_cast,
                 ..
@@ -3375,6 +3546,11 @@ fn apply_action(
                 kind: crate::types::ability::EffectKind::Proliferate,
                 source_id: ObjectId(0), // Source not tracked through choice state
             });
+            // CR 701.34a: Emit player-action event so proliferate triggers fire.
+            events.push(GameEvent::PlayerPerformedAction {
+                player_id: p,
+                action: PlayerActionKind::Proliferate,
+            });
             state.waiting_for = WaitingFor::Priority { player: p };
             state.priority_player = p;
             effects::drain_pending_continuation(state, &mut events);
@@ -3458,10 +3634,14 @@ fn apply_action(
                         "Target {t:?} not a legal alternative for copy slot {slot_idx}"
                     )));
                 }
+            } else if target_slots[slot_idx].current.is_none() {
+                return Err(EngineError::InvalidAction(format!(
+                    "Copy target slot {slot_idx} has no current target to keep"
+                )));
             }
             let mut updated_slots = target_slots.clone();
             if let Some(t) = target {
-                updated_slots[slot_idx].current = t.clone();
+                updated_slots[slot_idx].current = Some(t.clone());
             }
             let next_slot = slot_idx + 1;
             if next_slot < updated_slots.len() {
@@ -3472,7 +3652,7 @@ fn apply_action(
                     current_slot: next_slot,
                 };
             } else {
-                finalize_copy_retarget(state, p, cid, &updated_slots, &mut events);
+                finalize_copy_retarget(state, p, cid, &updated_slots, &mut events)?;
             }
             state.waiting_for.clone()
         }
@@ -3494,7 +3674,7 @@ fn apply_action(
             let p = *player;
             let cid = *copy_id;
             let slots = target_slots.clone();
-            finalize_copy_retarget(state, p, cid, &slots, &mut events);
+            finalize_copy_retarget(state, p, cid, &slots, &mut events)?;
             state.waiting_for.clone()
         }
         // CR 510.1c/d: Combat damage assignment from attacker to blockers.
@@ -4005,11 +4185,14 @@ fn handle_play_land(
         });
 
         if is_modal && front_is_land && back_is_land {
-            // Both faces are lands — player must choose which face to put into play
+            // Both faces are lands — player must choose which face to put into play.
+            // The land path never consumes payment_mode (lands cost no mana), but
+            // the field is required; Auto is the inert default.
             return Ok(WaitingFor::ModalFaceChoice {
                 player,
                 object_id,
                 card_id,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             });
         }
 
@@ -5222,6 +5405,21 @@ mod tests {
                 target: TargetFilter::Controller,
             },
         )
+    }
+
+    #[test]
+    fn cards_revealed_events_are_remembered_publicly() {
+        let mut state = GameState::new_two_player(42);
+        let card_id = ObjectId(42);
+        let events = vec![GameEvent::CardsRevealed {
+            player: PlayerId(1),
+            card_ids: vec![card_id],
+            card_names: vec!["Known Card".to_string()],
+        }];
+
+        remember_public_reveals(&mut state, &events);
+
+        assert!(state.public_revealed_cards.contains(&card_id));
     }
 
     /// Create a DealDamage ability for testing.
@@ -8551,7 +8749,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::Counter {
                     target: TargetFilter::Typed(TypedFilter::card()),
-                    source_static: None,
+                    source_rider: None,
                 },
             ));
             obj.mana_cost = ManaCost::Cost {
@@ -11573,6 +11771,86 @@ mod exile_return_tests {
         assert!(
             state.exile_links.is_empty(),
             "ExileLink should be cleaned up"
+        );
+    }
+
+    // #783: end-to-end integration. Component tests cover link creation and the
+    // return in isolation; this drives the WHOLE flow — exile via the real
+    // change_zone resolver (which must create the UntilSourceLeaves link), then
+    // the host actually leaves the battlefield via move_to_zone, then
+    // check_exile_returns runs on that event batch. The exiled permanent must
+    // return. CR 610.3a.
+    #[test]
+    fn exile_until_host_leaves_returns_card_through_full_pipeline() {
+        use crate::game::effects::change_zone;
+        use crate::game::zones::move_to_zone;
+        use crate::types::ability::{Duration, Effect, ResolvedAbility, TargetFilter, TargetRef};
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Banishing Light".to_string(),
+            Zone::Battlefield,
+        );
+        let victim_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent's Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&victim_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // "exile target nonland permanent ... until this enchantment leaves the
+        // battlefield" — exile resolves and must register the return link.
+        let mut exile = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![TargetRef::Object(victim_id)],
+            source_id,
+            PlayerId(0),
+        );
+        exile.duration = Some(Duration::UntilHostLeavesPlay);
+
+        let mut events = Vec::new();
+        change_zone::resolve(&mut state, &exile, &mut events).unwrap();
+        assert!(state.exile.contains(&victim_id), "victim should be exiled");
+        assert_eq!(state.exile_links.len(), 1, "exile link must be created");
+
+        // Host leaves the battlefield (e.g. destroyed or sacrificed).
+        let mut leave_events = Vec::new();
+        move_to_zone(&mut state, source_id, Zone::Graveyard, &mut leave_events);
+        check_exile_returns(&mut state, &mut leave_events);
+
+        assert!(
+            state.battlefield.contains(&victim_id),
+            "#783: exiled permanent must return when the host leaves the battlefield"
+        );
+        assert!(
+            !state.exile.contains(&victim_id),
+            "returned permanent must no longer be in exile"
         );
     }
 
@@ -18305,6 +18583,165 @@ mod mdfc_land_tests {
         assert!(
             land_actions.is_empty(),
             "CR 712.8a: MDFC Creature/Land in graveyard should not be offered as PlayLand"
+        );
+    }
+
+    /// Build a spell//spell Modal DFC (Esika, God of the Tree //
+    /// The Prismatic Bridge) in hand with explicit, asymmetric mana costs.
+    fn create_spell_mdfc_in_hand(state: &mut GameState) -> (ObjectId, CardId) {
+        use crate::types::mana::ManaCostShard;
+        let obj_id = create_object(
+            state,
+            CardId(400),
+            PlayerId(0),
+            "Esika, God of the Tree".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.card_types = make_creature_type();
+        // Front: {1}{G}{G}
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green, ManaCostShard::Green],
+            generic: 1,
+        };
+        let mut back = make_back_face(
+            "The Prismatic Bridge",
+            CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Enchantment],
+                subtypes: vec![],
+            },
+            Some(LayoutKind::Modal),
+        );
+        // Back: {W}{U}{B}{R}{G}
+        back.mana_cost = ManaCost::Cost {
+            shards: vec![
+                ManaCostShard::White,
+                ManaCostShard::Blue,
+                ManaCostShard::Black,
+                ManaCostShard::Red,
+                ManaCostShard::Green,
+            ],
+            generic: 0,
+        };
+        obj.back_face = Some(back);
+        (obj_id, CardId(400))
+    }
+
+    /// Add one mana of each given color to the player's pool.
+    fn add_pool_mana(
+        state: &mut GameState,
+        player: PlayerId,
+        colors: &[crate::types::mana::ManaType],
+    ) {
+        use crate::types::mana::ManaUnit;
+        let p = state.players.iter_mut().find(|p| p.id == player).unwrap();
+        for &color in colors {
+            p.mana_pool.add(ManaUnit {
+                color,
+                source_id: ObjectId(0),
+                snow: false,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: Vec::new(),
+                grants: vec![],
+                expiry: None,
+            });
+        }
+    }
+
+    // CR 712.11c: A spell//spell MDFC is castable when only the *back* face is
+    // affordable — only the face that will be on the stack is evaluated for
+    // castability (front Esika needs {1}{G}{G}; back Prismatic Bridge needs
+    // {W}{U}{B}{R}{G}). The user's bug: with W/U/B/R/G in pool the front is
+    // unaffordable, so the card was dropping out of legal actions entirely.
+    #[test]
+    fn spell_mdfc_castable_when_only_back_face_affordable() {
+        use crate::types::mana::ManaType;
+        let mut state = setup_game_at_main_phase();
+        let (obj_id, _card_id) = create_spell_mdfc_in_hand(&mut state);
+        add_pool_mana(
+            &mut state,
+            PlayerId(0),
+            &[
+                ManaType::White,
+                ManaType::Blue,
+                ManaType::Black,
+                ManaType::Red,
+                ManaType::Green,
+            ],
+        );
+
+        assert!(
+            crate::game::casting::can_cast_object_now(&state, PlayerId(0), obj_id),
+            "Spell MDFC must be castable when only the back face is affordable"
+        );
+
+        let candidates = crate::ai_support::legal_actions(&state);
+        assert!(
+            candidates.iter().any(|c| matches!(
+                c,
+                GameAction::CastSpell { object_id, .. } if *object_id == obj_id
+            )),
+            "Expected a CastSpell candidate for the spell MDFC"
+        );
+    }
+
+    // CR 712.11b: Casting a spell//spell MDFC prompts a face choice, and choosing
+    // the back face puts the back-face spell on the stack.
+    #[test]
+    fn spell_mdfc_cast_back_face_goes_on_stack() {
+        use crate::types::mana::ManaType;
+        let mut state = setup_game_at_main_phase();
+        let (obj_id, card_id) = create_spell_mdfc_in_hand(&mut state);
+        add_pool_mana(
+            &mut state,
+            PlayerId(0),
+            &[
+                ManaType::White,
+                ManaType::Blue,
+                ManaType::Black,
+                ManaType::Red,
+                ManaType::Green,
+            ],
+        );
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: obj_id,
+                card_id,
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                result.waiting_for,
+                WaitingFor::ModalFaceChoice {
+                    player: PlayerId(0),
+                    ..
+                }
+            ),
+            "Casting a spell MDFC should prompt ModalFaceChoice, got {:?}",
+            result.waiting_for
+        );
+
+        let result =
+            apply_as_current(&mut state, GameAction::ChooseModalFace { back_face: true }).unwrap();
+        assert!(
+            matches!(result.waiting_for, WaitingFor::Priority { .. }),
+            "Expected Priority after casting the back face, got {:?}",
+            result.waiting_for
+        );
+
+        // The back-face spell is on the stack; the object left the hand.
+        let on_stack = state.stack.iter().any(|e| e.id == obj_id);
+        assert!(on_stack, "back-face spell should be on the stack");
+        let obj = state.objects.get(&obj_id).unwrap();
+        assert_eq!(obj.name, "The Prismatic Bridge");
+        assert!(
+            !obj.transformed,
+            "MDFC face choice must not set transformed"
         );
     }
 

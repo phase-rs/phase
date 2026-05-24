@@ -273,7 +273,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::Counter {
                 target: engine::types::ability::TargetFilter::Any,
-                source_static: None,
+                source_rider: None,
             },
         ));
         oid

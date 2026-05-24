@@ -290,6 +290,7 @@ pub fn resolve(
         //   - rest go to graveyard (but there's only 1 card, so keep=hand, don't keep=graveyard)
         state.waiting_for = WaitingFor::DigChoice {
             player: controller,
+            library_owner: controller,
             selectable_cards: vec![top_card_id],
             cards: vec![top_card_id],
             keep_count: 1,

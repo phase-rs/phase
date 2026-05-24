@@ -146,6 +146,7 @@ export function BattlefieldPeekPopover({
                   size="small"
                   isToken={obj.display_source === "Token"}
                   tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined}
+                  tokenImageRef={obj.token_image_ref}
                 />
               </div>
               {pt && (

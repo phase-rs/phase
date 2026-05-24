@@ -11,6 +11,8 @@ PID_CARDS=$!
 PID_WASM=$!
 ./scripts/gen-scryfall-images.sh &
 PID_IMAGES=$!
+./scripts/gen-scryfall-token-images.sh &
+PID_TOKEN_IMAGES=$!
 ./scripts/gen-scryfall-printings.sh &
 PID_PRINTINGS=$!
 
@@ -18,6 +20,7 @@ FAIL=0
 wait $PID_CARDS || FAIL=1
 wait $PID_WASM || FAIL=1
 wait $PID_IMAGES || FAIL=1
+wait $PID_TOKEN_IMAGES || FAIL=1
 wait $PID_PRINTINGS || FAIL=1
 if [ $FAIL -ne 0 ]; then
   echo "ERROR: Card data generation or WASM build failed."

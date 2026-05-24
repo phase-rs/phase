@@ -1,12 +1,13 @@
 use crate::types::ability::{
     CastingPermission, ContinuousModification, Duration, EffectKind, KeywordAction,
-    ResolvedAbility, TargetFilter,
+    ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CastingVariant, ExileLink, ExileLinkKind, GameState, StackEntry, StackEntryKind,
+    StackPaidSnapshot,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::zones::Zone;
@@ -85,6 +86,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         Some(e) => e,
         None => return,
     };
+    state.stack_paid_facts.remove(&entry.id);
 
     // CR 113.3b: Activated keyword abilities (Equip / Crew / Saddle / Station)
     // resolve via their typed payload — they have no ResolvedAbility/targets
@@ -679,7 +681,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 .filter(|obj| obj.zone == Zone::Library)
                 .map(|obj| obj.owner)
             {
-                effects::change_zone::shuffle_library(state, owner);
+                effects::change_zone::shuffle_library(state, owner, events);
             }
         }
 
@@ -1077,12 +1079,7 @@ pub fn stack_display_groups(state: &GameState) -> Vec<StackDisplayGroup> {
     // Track the previous entry's key alongside the output vector so we can
     // decide "merge or push" in O(1) per entry instead of re-scanning the
     // stack to look up the representative each iteration.
-    let mut last_key: Option<(
-        String,
-        &'static str,
-        Option<String>,
-        Vec<crate::types::ability::TargetRef>,
-    )> = None;
+    let mut last_key: Option<StackGroupKey> = None;
     for entry in &state.stack {
         // KeywordAction entries (Equip/Crew/Station/Saddle) carry their
         // target inside the enum variant, not via ResolvedAbility, so the
@@ -1100,9 +1097,8 @@ pub fn stack_display_groups(state: &GameState) -> Vec<StackDisplayGroup> {
             last_key = None;
             continue;
         }
-        let (name, tag, desc, targets) = group_key(state, entry);
-        let owned_key = (name, tag, desc.map(str::to_owned), targets.to_vec());
-        if last_key.as_ref() == Some(&owned_key) {
+        let key = group_key(state, entry);
+        if last_key.as_ref() == Some(&key) {
             let last = out.last_mut().unwrap();
             last.count += 1;
             last.member_ids.push(entry.id);
@@ -1112,10 +1108,20 @@ pub fn stack_display_groups(state: &GameState) -> Vec<StackDisplayGroup> {
                 count: 1,
                 member_ids: vec![entry.id],
             });
-            last_key = Some(owned_key);
+            last_key = Some(key);
         }
     }
     out
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StackGroupKey {
+    source_name: String,
+    tag: &'static str,
+    description: Option<String>,
+    targets: Vec<TargetRef>,
+    paid: Option<StackPaidSnapshot>,
+    trigger_context: Vec<String>,
 }
 
 /// Grouping signature for `stack_display_groups`. Two entries coalesce iff
@@ -1123,15 +1129,7 @@ pub fn stack_display_groups(state: &GameState) -> Vec<StackDisplayGroup> {
 /// visually-identical triggers that fire against different targets (e.g.
 /// N copies of "target player loses 1 life" picking different players)
 /// remain separate — coalescing them would misrepresent the resolution.
-fn group_key<'a>(
-    state: &'a GameState,
-    entry: &'a StackEntry,
-) -> (
-    String,
-    &'static str,
-    Option<&'a str>,
-    &'a [crate::types::ability::TargetRef],
-) {
+fn group_key(state: &GameState, entry: &StackEntry) -> StackGroupKey {
     let source_name = state
         .objects
         .get(&entry.source_id)
@@ -1145,9 +1143,31 @@ fn group_key<'a>(
         }
         StackEntryKind::KeywordAction { .. } => ("keyword", None),
     };
-    let targets: &[crate::types::ability::TargetRef] =
-        entry.ability().map(|a| a.targets.as_slice()).unwrap_or(&[]);
-    (source_name, tag, description, targets)
+    let targets = entry
+        .ability()
+        .map(flatten_targets_in_chain)
+        .unwrap_or_default();
+    let paid = state.stack_paid_facts.get(&entry.id).cloned();
+    let trigger_context = state
+        .stack_trigger_event_batches
+        .get(&entry.id)
+        .map(|events| events.iter().map(|event| format!("{event:?}")).collect())
+        .or_else(|| match &entry.kind {
+            StackEntryKind::TriggeredAbility {
+                trigger_event: Some(event),
+                ..
+            } => Some(vec![format!("{event:?}")]),
+            _ => None,
+        })
+        .unwrap_or_default();
+    StackGroupKey {
+        source_name,
+        tag,
+        description: description.map(str::to_owned),
+        targets,
+        paid,
+        trigger_context,
+    }
 }
 
 /// CR 110.4: Permanent types that resolve to the battlefield.
@@ -2307,6 +2327,61 @@ mod tests {
             groups.len(),
             2,
             "triggers with divergent targets must not coalesce: got {:?}",
+            groups
+        );
+    }
+
+    #[test]
+    fn stack_display_groups_distinguish_chained_targets() {
+        use crate::types::ability::{Effect, ResolvedAbility, TargetRef};
+        use crate::types::identifiers::{CardId, ObjectId};
+
+        let mut state = GameState::new_two_player(42);
+        let sid = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Chained Trigger".to_string(),
+            Zone::Battlefield,
+        );
+        let mk_effect = || Effect::Unimplemented {
+            name: "test".to_string(),
+            description: None,
+        };
+        let mk_entry = |id: u64, target: TargetRef| {
+            let mut ability = ResolvedAbility::new(mk_effect(), Vec::new(), sid, PlayerId(0));
+            ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+                mk_effect(),
+                vec![target],
+                sid,
+                PlayerId(0),
+            )));
+            StackEntry {
+                id: ObjectId(id),
+                source_id: sid,
+                controller: PlayerId(0),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: sid,
+                    ability: Box::new(ability),
+                    condition: None,
+                    trigger_event: None,
+                    description: Some("then target player loses 1 life".to_string()),
+                    source_name: String::new(),
+                },
+            }
+        };
+        state
+            .stack
+            .push_back(mk_entry(10_001, TargetRef::Player(PlayerId(0))));
+        state
+            .stack
+            .push_back(mk_entry(10_002, TargetRef::Player(PlayerId(1))));
+
+        let groups = stack_display_groups(&state);
+        assert_eq!(
+            groups.len(),
+            2,
+            "chained targets must participate in stack grouping; got {:?}",
             groups
         );
     }

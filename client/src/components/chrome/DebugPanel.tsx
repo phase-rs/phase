@@ -5,11 +5,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { GameState } from "../../adapter/types";
 import { audioManager } from "../../audio/AudioManager";
 import { restoreGameState } from "../../game/dispatch";
+import { usePlayerId } from "../../hooks/usePlayerId";
+import { getSeatColor } from "../../hooks/useSeatColor";
 import {
   copyGameStateDebugSnapshot,
   exportGameStateDebugZip,
 } from "../../services/gameStateExport";
 import { useGameStore } from "../../stores/gameStore";
+import { getPlayerDisplayName } from "../../stores/multiplayerStore";
 import { useUiStore } from "../../stores/uiStore";
 import { DebugActions } from "./DebugActions";
 
@@ -96,6 +99,7 @@ export function DebugPanel() {
   const turnCheckpoints = useGameStore((s) => s.turnCheckpoints);
   const gameState = useGameStore((s) => s.gameState);
   const gameMode = useGameStore((s) => s.gameMode);
+  const localPlayerId = usePlayerId();
   const [importText, setImportText] = useState("");
   const [status, setStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -120,7 +124,7 @@ export function DebugPanel() {
 
   const handleRestore = useCallback(async (state: GameState) => {
     setStatus(null);
-    const err = await restoreGameState(state);
+    const err = await restoreGameState(state, { preserveCheckpoints: true });
     if (err) {
       setStatus({ type: "error", message: err });
     } else {
@@ -346,15 +350,31 @@ export function DebugPanel() {
             <p className="text-xs text-gray-600">No checkpoints yet (saved at turn start)</p>
           ) : (
             <div className="flex flex-col gap-1">
-              {turnCheckpoints.map((cp, i) => (
-                <button
-                  key={i}
-                  onClick={() => handleRestore(cp)}
-                  className="rounded bg-gray-800 px-2 py-1 text-left text-xs transition-colors hover:bg-gray-700"
-                >
-                  Turn {cp.turn_number} &middot; Player {cp.active_player}
-                </button>
-              ))}
+              {turnCheckpoints.map((cp, i) => {
+                const activePlayerName = getPlayerDisplayName(cp.active_player, localPlayerId);
+                const activePlayerColor = getSeatColor(
+                  cp.active_player,
+                  cp.seat_order ?? gameState?.seat_order,
+                );
+                return (
+                  <button
+                    key={i}
+                    onClick={() => handleRestore(cp)}
+                    className="flex items-center justify-between gap-2 rounded bg-gray-800 px-2 py-1 text-left text-xs transition-colors hover:bg-gray-700"
+                  >
+                    <span>Turn {cp.turn_number}</span>
+                    <span
+                      className="max-w-36 truncate rounded px-1.5 py-0.5 font-semibold"
+                      style={{
+                        backgroundColor: `${activePlayerColor}22`,
+                        color: activePlayerColor,
+                      }}
+                    >
+                      {activePlayerName}
+                    </span>
+                  </button>
+                );
+              })}
             </div>
           )}
         </section>

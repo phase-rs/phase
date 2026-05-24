@@ -845,12 +845,13 @@ async function writeDiscordTracking(
 }
 
 async function cmdMarkHandled(): Promise<void> {
-  // Two forms:
-  //  --until-thread=<id>          bootstrap: tag every thread <= the watermark
   //  --thread=<id>[,<id>...]      tag specific threads (e.g. "dup of #406")
-  // Both store a sentinel record so `pending` never resurfaces the thread.
+  // Stores a sentinel record so `pending` never resurfaces the thread.
+  // NOTE: the bulk `--until-thread=<watermark>` form was REMOVED. It once
+  // swept ~368 threads into sentinels in a single run, silently suppressing
+  // unresolved bugs along with resolved ones. Mark threads one at a time,
+  // intentionally — never in bulk by timestamp.
   const argv = process.argv.slice(3);
-  const untilArg = argv.find((a: string) => a.startsWith("--until-thread="));
   const threadArgs = argv
     .filter((a: string) => a.startsWith("--thread="))
     .flatMap((a: string) => a.slice("--thread=".length).split(",").map((s: string) => s.trim()))
@@ -859,11 +860,10 @@ async function cmdMarkHandled(): Promise<void> {
   const notes = notesArg !== undefined ? notesArg.slice("--notes=".length) : undefined;
   const dryRun = argv.includes("--dry-run");
 
-  if (untilArg === undefined && threadArgs.length === 0) {
+  if (threadArgs.length === 0) {
     console.error(
       "Usage:\n" +
-        "  mark-handled --thread=<id>[,<id>...] [--notes='dup of #406'] [--dry-run]\n" +
-        "  mark-handled --until-thread=<thread_id> [--dry-run]",
+        "  mark-handled --thread=<id>[,<id>...] [--notes='dup of #406'] [--dry-run]",
     );
     process.exit(1);
   }
@@ -877,18 +877,6 @@ async function cmdMarkHandled(): Promise<void> {
 
   // Resolve the set of thread ids to mark.
   const targets = new Set<string>();
-  if (untilArg !== undefined) {
-    const watermarkId = untilArg.slice("--until-thread=".length);
-    const watermarkTs = lastByThread.get(watermarkId);
-    if (watermarkTs === undefined) {
-      console.error(`Error: watermark thread ${watermarkId} not in local messages.`);
-      process.exit(1);
-    }
-    for (const [tid, ts] of lastByThread) {
-      if (ts <= watermarkTs) targets.add(tid);
-    }
-    console.log(`Watermark: ${watermarkId} (last activity ${watermarkTs})`);
-  }
   for (const tid of threadArgs) {
     if (!lastByThread.has(tid)) {
       console.error(`Warning: thread ${tid} not in local messages — recording anyway.`);
@@ -1336,11 +1324,11 @@ Commands:
   read      Dump the full message stream of a thread so the operator can read
             and judge it inline.
             Flags: --thread=<thread_id>
-  mark-handled  Mark threads as already-handled without filing a GH issue.
-            Two forms: (a) --until-thread=<id> bootstraps every thread <= the
-            watermark, (b) --thread=<id>[,<id>...] marks specific threads
-            (e.g. "this is a dup of #N", "already resolved").
-            Flags: --until-thread=<id>, --thread=<id>[,<id>], --dry-run
+  mark-handled  Mark specific threads as already-handled without filing a GH
+            issue (e.g. "this is a dup of #N", "already resolved"). One thread
+            at a time — the bulk --until-thread watermark form was removed
+            because it once mass-suppressed unresolved bugs.
+            Flags: --thread=<id>[,<id>], --notes='...', --dry-run
   publish   Create a GH issue for each --thread=<id> the operator listed, then
             react 👀 + post tracking link in the Discord thread. Mechanics only
             — the operator has already decided these threads are worth filing.

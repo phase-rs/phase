@@ -1,4 +1,4 @@
-use crate::types::ability::{AdditionalCost, BeholdCostAction};
+use crate::types::ability::{AbilityCost, AdditionalCost, BeholdCostAction};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CollectEvidenceResume, GameState, PendingCast, PendingManaAbility, WaitingFor,
@@ -88,6 +88,17 @@ pub(super) fn handle_discard_for_cost(
         chosen,
         events,
     )
+}
+
+pub(super) fn handle_activation_cost_one_of_choice(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: PendingCast,
+    costs: &[AbilityCost],
+    index: usize,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    casting::handle_activation_cost_one_of_choice(state, player, pending, costs, index, events)
 }
 
 pub(super) fn handle_sacrifice_for_cost(

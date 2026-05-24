@@ -333,7 +333,7 @@ mod tests {
             CoreType::Instant,
             vec![make_ability(Effect::Counter {
                 target: TargetFilter::Any,
-                source_static: None,
+                source_rider: None,
             })],
         );
 
@@ -386,7 +386,7 @@ mod tests {
             CoreType::Instant,
             vec![make_ability(Effect::Counter {
                 target: TargetFilter::Any,
-                source_static: None,
+                source_rider: None,
             })],
         );
 
@@ -416,7 +416,7 @@ mod tests {
             CoreType::Instant,
             vec![make_ability(Effect::Counter {
                 target: TargetFilter::Any,
-                source_static: None,
+                source_rider: None,
             })],
         );
 
@@ -634,6 +634,7 @@ mod tests {
                 reveal: false,
                 target_player: None,
                 selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
+                split: None,
             })],
         );
 
