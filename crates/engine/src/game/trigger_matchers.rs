@@ -1954,20 +1954,28 @@ pub(super) fn match_always(
     true
 }
 
-/// Explored: fires when a creature explores.
+/// CR 701.44b: Explored — fires when a creature explores.
+/// When `valid_card` is set (e.g. "whenever a creature you control explores"),
+/// the filter is checked against the event's source_id (the exploring creature).
 pub(super) fn match_explored(
     event: &GameEvent,
-    _trigger: &TriggerDefinition,
-    _source_id: ObjectId,
-    _state: &GameState,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
 ) -> bool {
-    matches!(
-        event,
-        GameEvent::EffectResolved {
-            kind: EffectKind::Explore,
-            ..
+    if let GameEvent::EffectResolved {
+        kind: EffectKind::Explore,
+        source_id: explorer_id,
+    } = event
+    {
+        if trigger.valid_card.is_some() {
+            valid_card_matches(trigger, state, *explorer_id, source_id)
+        } else {
+            true
         }
-    )
+    } else {
+        false
+    }
 }
 
 /// CR 702.110a: "When this creature exploits" = source is the exploiter.
@@ -7034,6 +7042,61 @@ mod tests {
             player_id: PlayerId(1),
         };
         assert!(!match_sacrificed(&event, &trigger, source_id, &state));
+    }
+
+    #[test]
+    fn explored_trigger_filters_exploring_creature_controller() {
+        let mut state = setup();
+        let source_id = create_object(
+            &mut state,
+            CardId(340),
+            PlayerId(0),
+            "Wildgrowth Walker".to_string(),
+            Zone::Battlefield,
+        );
+        make_creature(&mut state, source_id);
+        let controlled_explorer = create_object(
+            &mut state,
+            CardId(341),
+            PlayerId(0),
+            "Merfolk Branchwalker".to_string(),
+            Zone::Battlefield,
+        );
+        make_creature(&mut state, controlled_explorer);
+        let opponent_explorer = create_object(
+            &mut state,
+            CardId(342),
+            PlayerId(1),
+            "Opponent Scout".to_string(),
+            Zone::Battlefield,
+        );
+        make_creature(&mut state, opponent_explorer);
+        let trigger = parse_trigger_line(
+            "Whenever a creature you control explores, put a +1/+1 counter on this creature and you gain 3 life.",
+            "Wildgrowth Walker",
+        );
+
+        let controlled_event = GameEvent::EffectResolved {
+            kind: EffectKind::Explore,
+            source_id: controlled_explorer,
+        };
+        assert!(match_explored(
+            &controlled_event,
+            &trigger,
+            source_id,
+            &state
+        ));
+
+        let opponent_event = GameEvent::EffectResolved {
+            kind: EffectKind::Explore,
+            source_id: opponent_explorer,
+        };
+        assert!(!match_explored(
+            &opponent_event,
+            &trigger,
+            source_id,
+            &state
+        ));
     }
 
     #[test]

@@ -4906,6 +4906,8 @@ fn try_parse_event(
         Mutates,
         ExploitsCreature,
         Exploits,
+        /// CR 701.44b: A permanent "explores" after the explore process completes.
+        Explores,
         Transforms,
         Stations,
         SaddlesOrCrews,
@@ -4969,6 +4971,9 @@ fn try_parse_event(
             // CR 702.110b: "exploits a creature" — exploit trigger
             value(SimpleEvent::ExploitsCreature, tag("exploits a creature")),
             value(SimpleEvent::Exploits, tag("exploits")),
+            // CR 701.44b: "explores" / "explore" — explore trigger
+            value(SimpleEvent::Explores, tag("explores")),
+            value(SimpleEvent::Explores, tag("explore")),
             // CR 712.14: "transforms" / "transforms into"
             value(SimpleEvent::Transforms, tag("transforms")),
             // CR 702.184a: "stations ~" — actor-side Station trigger.
@@ -5047,6 +5052,14 @@ fn try_parse_event(
             }
             SimpleEvent::ExploitsCreature | SimpleEvent::Exploits => {
                 def.mode = TriggerMode::Exploited;
+                def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::Explores => {
+                if !remaining.trim().is_empty() {
+                    return None;
+                }
+                // CR 701.44b: "explores" fires after the explore process completes.
+                def.mode = TriggerMode::Explored;
                 def.valid_card = Some(subject.clone());
             }
             SimpleEvent::Transforms => {
@@ -9845,6 +9858,36 @@ mod tests {
             "Sidisi's Faithful",
         );
         assert_eq!(def.mode, TriggerMode::Exploited);
+    }
+
+    #[test]
+    fn trigger_creature_you_control_explores() {
+        let def = parse_trigger_line(
+            "Whenever a creature you control explores, put a +1/+1 counter on Wildgrowth Walker and you gain 3 life.",
+            "Wildgrowth Walker",
+        );
+        assert_eq!(def.mode, TriggerMode::Explored);
+        assert!(def.valid_card.is_some());
+    }
+
+    #[test]
+    fn trigger_self_explores() {
+        let def = parse_trigger_line("Whenever this creature explores, draw a card.", "Test Card");
+        assert_eq!(def.mode, TriggerMode::Explored);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn trigger_explores_card_quality_remains_unknown() {
+        let def = parse_trigger_line(
+            "Whenever a creature you control explores a land card, you may put a land card from your hand onto the battlefield tapped.",
+            "Nicanzil, Current Conductor",
+        );
+        assert!(
+            matches!(def.mode, TriggerMode::Unknown(_)),
+            "explore-card-quality trigger needs event payload support, got {:?}",
+            def.mode
+        );
     }
 
     // --- Subject decomposition tests ---
