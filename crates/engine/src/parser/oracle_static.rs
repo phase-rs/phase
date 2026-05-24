@@ -7424,7 +7424,7 @@ fn parse_continuous_gets_has(
             .or_else(|| nom_tag_lower(&pt_lower, &pt_lower, "get "))
             .unwrap_or(&pt_lower);
 
-        if let Some((p, t)) = parse_pt_mod(pt_source) {
+        if let Some((p, t)) = parse_pt_modifier_with_prefix(pt_source) {
             if let Some(quantity) =
                 super::oracle_quantity::parse_for_each_clause_expr(for_each_clause)
             {
@@ -7510,7 +7510,7 @@ fn parse_dynamic_for_each_pt_modifications(text: &str) -> Option<Vec<ContinuousM
     let pt_text = pt_text.trim();
     let pt_source = nom_tag_lower(pt_text, pt_text, "gets ")
         .or_else(|| nom_tag_lower(pt_text, pt_text, "get "))?;
-    let (power, toughness) = parse_pt_mod(pt_source)?;
+    let (power, toughness) = parse_pt_modifier_with_prefix(pt_source)?;
     let quantity = super::oracle_quantity::parse_for_each_clause_expr(
         strip_trailing_keyword_clause(for_each_clause.trim_end_matches('.')),
     )?;
@@ -7618,7 +7618,7 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
         nom_tag_tp(&unquoted_tp, "gets ").or_else(|| nom_tag_tp(&unquoted_tp, "get "))
     {
         let after = rest_tp.original.trim();
-        if let Some((p, t)) = parse_pt_mod(after) {
+        if let Some((p, t)) = parse_pt_modifier_with_prefix(after) {
             modifications.push(ContinuousModification::AddPower { value: p });
             modifications.push(ContinuousModification::AddToughness { value: t });
         }
@@ -8509,6 +8509,20 @@ fn parse_pt_mod(text: &str) -> Option<(i32, i32)> {
     let p = p_str.replace('+', "").parse::<i32>().ok()?;
     let t = t_str.replace('+', "").parse::<i32>().ok()?;
     Some((p, t))
+}
+
+fn parse_pt_modifier_with_prefix(text: &str) -> Option<(i32, i32)> {
+    let trimmed = text.trim();
+    if let Some(pt) = parse_pt_mod(trimmed) {
+        return Some(pt);
+    }
+
+    let lower = trimmed.to_lowercase();
+    let tp = TextPair::new(trimmed, &lower);
+    let rest = nom_tag_tp(&tp, "an additional ")
+        .or_else(|| nom_tag_tp(&tp, "another "))
+        .or_else(|| nom_tag_tp(&tp, "additional "))?;
+    parse_pt_mod(rest.original.trim())
 }
 
 /// Map a keyword text to a Keyword enum variant using the FromStr impl.
@@ -14437,6 +14451,45 @@ mod tests {
             "Expected IsPresent condition, got {:?}",
             def.condition
         );
+    }
+
+    #[test]
+    fn static_enchanted_creature_gets_additional_pt_as_long_as_no_cards_in_hand() {
+        let def = parse_static_line(
+            "Enchanted creature gets an additional +2/+0 as long as you have no cards in hand.",
+        )
+        .expect("should parse additional P/T with hand-size condition");
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+            ))
+        );
+        assert!(
+            def.modifications
+                .contains(&ContinuousModification::AddPower { value: 2 }),
+            "Expected AddPower(2), got {:?}",
+            def.modifications
+        );
+        assert!(
+            def.modifications
+                .contains(&ContinuousModification::AddToughness { value: 0 }),
+            "Expected AddToughness(0), got {:?}",
+            def.modifications
+        );
+        assert!(matches!(
+            def.condition,
+            Some(StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Controller
+                    }
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            })
+        ));
     }
 
     #[test]

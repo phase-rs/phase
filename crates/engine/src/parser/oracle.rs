@@ -11415,6 +11415,62 @@ mod tests {
     }
 
     #[test]
+    fn taste_for_mayhem_parses_base_and_hellbent_static_buffs() {
+        let r = parse_oracle_text(
+            "Enchant creature\nEnchanted creature gets +2/+0.\nHellbent -- Enchanted creature gets an additional +2/+0 as long as you have no cards in hand.",
+            "Taste for Mayhem",
+            &[],
+            &["Enchantment".to_string()],
+            &["Aura".to_string()],
+        );
+
+        assert!(
+            r.parse_warnings.is_empty(),
+            "unexpected parse warnings: {:?}",
+            r.parse_warnings
+        );
+        assert_eq!(r.statics.len(), 2, "expected two continuous static buffs");
+
+        let base = r
+            .statics
+            .iter()
+            .find(|def| def.condition.is_none())
+            .expect("expected unconditional +2/+0 static");
+        assert!(base
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 2 }));
+        assert!(base
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 0 }));
+
+        let hellbent = r
+            .statics
+            .iter()
+            .find(|def| {
+                matches!(
+                    def.condition,
+                    Some(StaticCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::HandSize {
+                                player: PlayerScope::Controller
+                            }
+                        },
+                        comparator: Comparator::EQ,
+                        rhs: QuantityExpr::Fixed { value: 0 },
+                    })
+                )
+            })
+            .expect("expected hellbent conditional static");
+
+        assert!(hellbent
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 2 }));
+        assert!(hellbent
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 0 }));
+    }
+
+    #[test]
     fn instead_if_condition_composes_without_ability_word_mapping() {
         use crate::types::ability::{AbilityCondition, QuantityRef};
 
