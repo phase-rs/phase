@@ -6525,8 +6525,10 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     // CR 601.2: "Whenever you cast a/an [type] spell [post-spell modifier]" — extract
     // the spell filter. Handles pre-spell type qualifier, post-spell modifier
     // (e.g. "with {X} in its mana cost", CR 107.3 + CR 202.1), or both.
-    for prefix in ["you cast an ", "you cast a "] {
+    // CR 603.4: "another" prefix adds FilterProp::Another to exclude the source.
+    for prefix in ["you cast another ", "you cast an ", "you cast a "] {
         if let Some(after) = strip_after(lower, prefix) {
+            let is_another = prefix == "you cast another ";
             let mut def = make_base();
             def.mode = TriggerMode::SpellCast;
             // "you" = trigger's controller
@@ -6565,7 +6567,11 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             // First, try the post-spell-modifier-aware decomposition for shapes
             // that include "with {X} in its mana cost" etc.
             if let Some(filter) = parse_spell_qualifier_payload(payload) {
-                def.valid_card = Some(filter);
+                def.valid_card = Some(if is_another {
+                    add_another_prop(filter)
+                } else {
+                    filter
+                });
                 return Some((TriggerMode::SpellCast, def));
             }
 
@@ -6579,7 +6585,16 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
                 _ => false,
             };
             if is_meaningful {
-                def.valid_card = Some(filter);
+                def.valid_card = Some(if is_another {
+                    add_another_prop(filter)
+                } else {
+                    filter
+                });
+            } else if is_another {
+                // "another spell" with no type restriction — still need Another.
+                def.valid_card = Some(TargetFilter::Typed(
+                    TypedFilter::default().properties(vec![FilterProp::Another]),
+                ));
             }
             return Some((TriggerMode::SpellCast, def));
         }
@@ -11368,6 +11383,34 @@ mod tests {
             tf.type_filters
                 .contains(&TypeFilter::Non(Box::new(TypeFilter::Creature))),
             "expected Non(Creature) in {:?}",
+            tf.type_filters
+        );
+    }
+
+    /// CR 603.4: "Whenever you cast another Vampire spell" — the "another"
+    /// prefix must produce `FilterProp::Another` on `valid_card` so the trigger
+    /// does not fire on the source spell itself (Edgar Markov).
+    #[test]
+    fn trigger_you_cast_another_vampire_spell() {
+        let def = parse_trigger_line(
+            "Whenever you cast another Vampire spell, if ~ is in the command zone or on the battlefield, create a 1/1 black Vampire creature token.",
+            "Edgar Markov",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        let Some(TargetFilter::Typed(tf)) = &def.valid_card else {
+            panic!("expected Typed valid_card, got {:?}", def.valid_card);
+        };
+        assert!(
+            tf.properties.contains(&FilterProp::Another),
+            "expected Another in {:?}",
+            tf.properties
+        );
+        assert!(
+            tf.type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Vampire")),
+            "expected Subtype(Vampire) in {:?}",
             tf.type_filters
         );
     }
