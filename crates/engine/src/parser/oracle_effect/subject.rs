@@ -1016,10 +1016,12 @@ pub(super) fn parse_subject_application(
         });
     }
     // CR 608.2k: Bare pronoun "it" — context-dependent. In trigger context,
-    // `ctx.subject` identifies the trigger subject; in spell/effect-chain
-    // context, subject-predicate "it ..." refers back to the prior target.
+    // `ctx.subject` identifies the triggering subject. In effect-chain context,
+    // `parent_target_available` records that a previous chunk introduced a real
+    // typed object referent. Standalone clause parsing leaves it false, so
+    // "it connives" remains self-referential instead of inventing ParentTarget.
     if lower == "it" {
-        if ctx.subject.is_none() {
+        if ctx.subject.is_none() && ctx.parent_target_available {
             return Some(SubjectApplication {
                 affected: TargetFilter::ParentTarget,
                 target: None,

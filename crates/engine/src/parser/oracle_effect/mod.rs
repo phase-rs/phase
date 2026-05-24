@@ -7805,6 +7805,9 @@ fn has_typed_target(effect: &Effect) -> bool {
         } | Effect::Tap {
             target: TargetFilter::Typed(_),
             ..
+        } | Effect::Untap {
+            target: TargetFilter::Typed(_),
+            ..
         } | Effect::Bounce {
             target: TargetFilter::Typed(_),
             ..
@@ -7825,6 +7828,9 @@ fn has_typed_target(effect: &Effect) -> bool {
             ..
         } | Effect::GenericEffect {
             target: Some(TargetFilter::Typed(_)),
+            ..
+        } | Effect::TargetOnly {
+            target: TargetFilter::Typed(_),
             ..
         } | Effect::CastFromZone {
             target: TargetFilter::Typed(_),
@@ -8068,7 +8074,6 @@ fn lower_subject_predicate_ast(
                 };
 
                 if subject.target.is_some()
-                    || subject.inherits_parent
                     || matches!(subject.affected, TargetFilter::TriggeringSource)
                 {
                     let mut explore = AbilityDefinition::new(AbilityKind::Spell, Effect::Explore);
@@ -8085,6 +8090,9 @@ fn lower_subject_predicate_ast(
                         optional: subject.is_optional,
                         unless_pay: None,
                     };
+                }
+                if subject.inherits_parent {
+                    return clause;
                 }
 
                 if !matches!(subject.affected, TargetFilter::SelfRef) {
@@ -11592,6 +11600,8 @@ pub(crate) fn parse_effect_chain_ir(
         } else {
             if_you_do_anchor.clone().or_else(|| ctx.subject.clone())
         };
+        let parent_target_available =
+            if_you_do_anchor.is_some() || chain_has_prior_typed_referent(&clauses);
         let mut chunk_ctx = ParseContext {
             subject: chunk_subject,
             card_name: ctx.card_name.clone(),
@@ -11628,6 +11638,7 @@ pub(crate) fn parse_effect_chain_ir(
             // zone so a `"the exiled card"` anaphor in any effect chunk
             // disambiguates to `CostPaidObject` (Jhoira of the Ghitu).
             current_ability_exile_cost_zone: ctx.current_ability_exile_cost_zone,
+            parent_target_available,
             ..Default::default()
         };
         let ctx = &mut chunk_ctx;
@@ -21161,7 +21172,7 @@ mod tests {
         match &*block_grant.effect {
             Effect::GenericEffect {
                 static_abilities,
-                target: None,
+                target: Some(TargetFilter::ParentTarget),
                 ..
             } => {
                 assert!(matches!(
