@@ -73,6 +73,7 @@ mod tempt_with_discovery;
 mod the_chain_veil_loyalty_grants;
 mod timely_ward_regression;
 mod tinybones_joins_up_multi_target;
+mod tireless_provisioner_token_choice;
 mod tombstone_stairwell_per_player_tokens;
 mod treasured_find_regression;
 mod twice_instead_repeat_for;
