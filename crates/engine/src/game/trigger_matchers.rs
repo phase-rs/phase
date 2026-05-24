@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::types::ability::{
-    AbilityTag, ControllerRef, DamageKindFilter, EffectKind, OriginConstraint, TargetFilter,
-    TargetRef, TriggerDefinition, TypedFilter,
+    AbilityTag, CoinFlipResult, ControllerRef, DamageKindFilter, EffectKind, OriginConstraint,
+    TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{GameState, StackEntryKind};
@@ -2304,7 +2304,18 @@ pub(super) fn match_flipped_coin(
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::CoinFlipped { player_id, .. } = event {
+    if let GameEvent::CoinFlipped { player_id, won } = event {
+        // CR 705.2: If the trigger specifies a result filter, check it.
+        if let Some(required) = &trigger.coin_flip_result {
+            let event_won = *won;
+            let matches = match required {
+                CoinFlipResult::Won => event_won,
+                CoinFlipResult::Lost => !event_won,
+            };
+            if !matches {
+                return false;
+            }
+        }
         valid_player_matches(trigger, state, *player_id, source_id)
     } else {
         false
@@ -2913,6 +2924,49 @@ mod tests {
     }
 
     #[test]
+    fn flipped_coin_matcher_filters_player_and_result() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Krark's Thumb".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger =
+            make_trigger(TriggerMode::FlippedCoin).valid_target(TargetFilter::Controller);
+        trigger.coin_flip_result = Some(CoinFlipResult::Won);
+
+        assert!(match_flipped_coin(
+            &GameEvent::CoinFlipped {
+                player_id: PlayerId(0),
+                won: true,
+            },
+            &trigger,
+            source,
+            &state,
+        ));
+        assert!(!match_flipped_coin(
+            &GameEvent::CoinFlipped {
+                player_id: PlayerId(0),
+                won: false,
+            },
+            &trigger,
+            source,
+            &state,
+        ));
+        assert!(!match_flipped_coin(
+            &GameEvent::CoinFlipped {
+                player_id: PlayerId(1),
+                won: true,
+            },
+            &trigger,
+            source,
+            &state,
+        ));
+    }
+
+    #[test]
     fn attached_trigger_matches_equipped_source_and_host_filter() {
         let mut state = setup();
         let equipment = create_object(
@@ -3190,6 +3244,73 @@ mod tests {
                 from_zone: Zone::Hand,
             },
             &trigger,
+            source,
+            &state,
+        ));
+    }
+
+    #[test]
+    fn become_monarch_trigger_filters_player_scope() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Custodi Lich".to_string(),
+            Zone::Battlefield,
+        );
+        let controller_trigger = parse_trigger_line(
+            "Whenever you become the monarch, target player sacrifices a creature of their choice.",
+            "Custodi Lich",
+        );
+        let opponent_trigger = parse_trigger_line(
+            "Whenever an opponent becomes the monarch, that player loses 2 life.",
+            "Knights of the Black Rose",
+        );
+        let any_player_trigger = parse_trigger_line(
+            "Whenever a player becomes the monarch, draw a card.",
+            "Test Card",
+        );
+        let controller_event = GameEvent::MonarchChanged {
+            player_id: PlayerId(0),
+        };
+        let opponent_event = GameEvent::MonarchChanged {
+            player_id: PlayerId(1),
+        };
+
+        assert!(match_become_monarch(
+            &controller_event,
+            &controller_trigger,
+            source,
+            &state,
+        ));
+        assert!(!match_become_monarch(
+            &opponent_event,
+            &controller_trigger,
+            source,
+            &state,
+        ));
+        assert!(match_become_monarch(
+            &opponent_event,
+            &opponent_trigger,
+            source,
+            &state,
+        ));
+        assert!(!match_become_monarch(
+            &controller_event,
+            &opponent_trigger,
+            source,
+            &state,
+        ));
+        assert!(match_become_monarch(
+            &controller_event,
+            &any_player_trigger,
+            source,
+            &state,
+        ));
+        assert!(match_become_monarch(
+            &opponent_event,
+            &any_player_trigger,
             source,
             &state,
         ));

@@ -32,10 +32,10 @@ use super::oracle_util::{
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AttachmentKind, CastVariantPaid,
-    Comparator, ControllerRef, CounterTriggerFilter, DamageKindFilter, Effect, FilterProp,
-    OriginConstraint, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, StaticCondition,
-    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessPayModifier, ZoneChangeClause,
+    CoinFlipResult, Comparator, ControllerRef, CounterTriggerFilter, DamageKindFilter, Effect,
+    FilterProp, OriginConstraint, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
+    StaticCondition, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
+    TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::parse_counter_type;
@@ -613,8 +613,16 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     let effect_for_parse_lower = effect_for_parse.to_lowercase();
     let has_up_to = scan_contains(&effect_for_parse_lower, "up to one");
     let body = if !effect_for_parse.is_empty() {
+        if parse_monarch_turn_began_condition(effect_for_parse_lower.as_str()).is_some() {
+            Some(TriggerBody::PreLowered(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Unimplemented {
+                    name: "Unsupported monarch turn-began condition".to_string(),
+                    description: Some(effect_for_parse.clone()),
+                },
+            ))))
         // CR 701.38 + CR 207.2c: Vote blocks produce AbilityDefinition directly.
-        if let Some(vote_def) =
+        } else if let Some(vote_def) =
             crate::parser::oracle_vote::parse_vote_block(&effect_for_parse, AbilityKind::Spell)
         {
             let mut ability = vote_def;
@@ -5251,6 +5259,18 @@ fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefi
         return Some((TriggerMode::DungeonCompleted, def));
     }
 
+    // CR 705.2: "Whenever you/a player win(s)/lose(s) a coin flip" — FlippedCoin
+    // with result filter.  Decomposed into three independent axes:
+    //   1. keyword ("whenever" | "when")
+    //   2. player  ("you" → Controller | "a player" → Player)
+    //   3. result  ("win"/"wins" → Won | "lose"/"loses" → Lost)
+    if let Some((target, result)) = parse_coin_flip_result_trigger(lower) {
+        def.mode = TriggerMode::FlippedCoin;
+        def.coin_flip_result = Some(result);
+        def.valid_target = target;
+        return Some((TriggerMode::FlippedCoin, def));
+    }
+
     if let Some(result) = try_parse_die_roll_trigger(lower) {
         return Some(result);
     }
@@ -5268,6 +5288,30 @@ fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefi
         return Some((TriggerMode::RingTemptsYou, def));
     }
     None
+}
+
+fn parse_coin_flip_result_trigger(lower: &str) -> Option<(Option<TargetFilter>, CoinFlipResult)> {
+    let (_, (_, target, result, _)) = all_consuming((
+        alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when "))),
+        alt((
+            value(Some(TargetFilter::Controller), tag("you ")),
+            value(
+                Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                )),
+                tag("an opponent "),
+            ),
+            value(Some(TargetFilter::Player), tag("a player ")),
+        )),
+        alt((
+            value(CoinFlipResult::Won, alt((tag("wins"), tag("win")))),
+            value(CoinFlipResult::Lost, alt((tag("loses"), tag("lose")))),
+        )),
+        tag(" a coin flip"),
+    ))
+    .parse(lower)
+    .ok()?;
+    Some((target, result))
 }
 
 fn try_parse_die_roll_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
@@ -6646,6 +6690,18 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         def.mode = TriggerMode::LifeGained;
         def.valid_target = Some(TargetFilter::Controller);
         return Some((TriggerMode::LifeGained, def));
+    }
+    // CR 725.1: "Whenever you become the monarch" / "Whenever an opponent becomes
+    // the monarch" — monarch-designation trigger. Decompose into prefix (whenever/when)
+    // + subject (you/opponent/player) + verb (become/becomes) + "the monarch".
+    if let Some((valid_target, after)) = parse_become_monarch_trigger(lower) {
+        if !after.trim().is_empty() {
+            return None;
+        }
+        let mut def = make_base();
+        def.mode = TriggerMode::BecomeMonarch;
+        def.valid_target = valid_target;
+        return Some((TriggerMode::BecomeMonarch, def));
     }
 
     // "whenever you cast your Nth spell each turn" — must precede generic "you cast a"
@@ -8915,6 +8971,53 @@ fn parse_land_play_trigger_subject(
     Some((valid_target, qualifier, after_land))
 }
 
+/// CR 725.1: Parse "whenever/when [subject] become(s) the monarch" trigger.
+///
+/// Decomposes the phrase into three axes via nom combinators:
+/// 1. Prefix: "whenever " / "when "
+/// 2. Subject + verb: "you become" / "an opponent becomes" / "a player becomes"
+/// 3. Object: " the monarch"
+///
+/// Returns `(valid_target, remaining_text)` on success.
+fn parse_become_monarch_trigger(lower: &str) -> Option<(Option<TargetFilter>, &str)> {
+    let (after_prefix, _) = alt((
+        tag::<_, _, OracleError<'_>>("whenever "),
+        tag::<_, _, OracleError<'_>>("when "),
+    ))
+    .parse(lower)
+    .ok()?;
+    let (after_verb, valid_target) = alt((
+        value(
+            Some(TargetFilter::Controller),
+            tag::<_, _, OracleError<'_>>("you become"),
+        ),
+        value(
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent),
+            )),
+            tag::<_, _, OracleError<'_>>("an opponent becomes"),
+        ),
+        value(
+            Some(TargetFilter::Player),
+            pair(tag::<_, _, OracleError<'_>>("a player"), tag(" becomes")),
+        ),
+    ))
+    .parse(after_prefix)
+    .ok()?;
+    let (after_monarch, _) = tag::<_, _, OracleError<'_>>(" the monarch")
+        .parse(after_verb)
+        .ok()?;
+    Some((valid_target, after_monarch))
+}
+
+fn parse_monarch_turn_began_condition(lower: &str) -> Option<&str> {
+    let (after_condition, _) =
+        tag::<_, _, OracleError<'_>>("if you were the monarch as the turn began,")
+            .parse(lower)
+            .ok()?;
+    Some(after_condition)
+}
+
 /// CR 700.13: "Whenever [subject] commits a crime" — scoped crime trigger parser.
 ///
 /// Handles three subject forms (trailing space bundled into each tag for precision):
@@ -10094,6 +10197,70 @@ mod tests {
         // invariant is that it is NOT scoped to Controller (which would silently
         // restrict to the source's controller).
         assert_ne!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    // CR 725.1: "become the monarch" trigger tests.
+    #[test]
+    fn trigger_you_become_the_monarch_scopes_to_controller() {
+        // Custodi Lich: "Whenever you become the monarch, target player
+        // sacrifices a creature of their choice."
+        let def = parse_trigger_line(
+            "Whenever you become the monarch, target player sacrifices a creature of their choice.",
+            "Custodi Lich",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomeMonarch);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+    #[test]
+    fn trigger_opponent_becomes_the_monarch() {
+        // Knights of the Black Rose: "Whenever an opponent becomes the monarch,
+        // if you were the monarch as the turn began, that player loses 2 life."
+        let def = parse_trigger_line(
+            "Whenever an opponent becomes the monarch, that player loses 2 life.",
+            "Knights of the Black Rose",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomeMonarch);
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+    }
+
+    #[test]
+    fn trigger_monarch_turn_began_condition_stays_unimplemented() {
+        let def = parse_trigger_line(
+            "Whenever an opponent becomes the monarch, if you were the monarch as the turn began, that player loses 2 life and you gain 2 life.",
+            "Knights of the Black Rose",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomeMonarch);
+        let execute = def.execute.expect("trigger should keep an explicit body");
+        assert!(
+            matches!(
+                execute.effect.as_ref(),
+                Effect::Unimplemented { name, .. }
+                    if name == "Unsupported monarch turn-began condition"
+            ),
+            "unsupported monarch turn-began guard must not parse as unconditional, got {:?}",
+            execute.effect
+        );
+    }
+
+    #[test]
+    fn trigger_a_player_becomes_the_monarch() {
+        let def = parse_trigger_line(
+            "Whenever a player becomes the monarch, draw a card.",
+            "Some Card",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomeMonarch);
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+    }
+
+    #[test]
+    fn trigger_become_the_monarch_rejects_partial_suffix() {
+        let def = parse_trigger_line("Whenever you become the monarchy, draw a card.", "Test");
+        assert!(matches!(def.mode, TriggerMode::Unknown(_)));
     }
 
     #[test]
@@ -14178,6 +14345,62 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::DungeonCompleted);
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_you_win_a_coin_flip() {
+        // CR 705.2: "Whenever you win a coin flip" fires only on won flips.
+        let def = parse_trigger_line(
+            "Whenever you win a coin flip, draw a card.",
+            "Krark's Thumb",
+        );
+        assert_eq!(def.mode, TriggerMode::FlippedCoin);
+        assert_eq!(def.coin_flip_result, Some(CoinFlipResult::Won));
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_you_lose_a_coin_flip() {
+        let def = parse_trigger_line(
+            "Whenever you lose a coin flip, target opponent gains 1 life.",
+            "Bad Luck Charm",
+        );
+        assert_eq!(def.mode, TriggerMode::FlippedCoin);
+        assert_eq!(def.coin_flip_result, Some(CoinFlipResult::Lost));
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_a_player_loses_a_coin_flip() {
+        let def = parse_trigger_line(
+            "When a player loses a coin flip, you gain 1 life.",
+            "Tavern Swindler",
+        );
+        assert_eq!(def.mode, TriggerMode::FlippedCoin);
+        assert_eq!(def.coin_flip_result, Some(CoinFlipResult::Lost));
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+    }
+
+    #[test]
+    fn trigger_opponent_wins_a_coin_flip() {
+        let def = parse_trigger_line(
+            "Whenever an opponent wins a coin flip, you gain 1 life.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::FlippedCoin);
+        assert_eq!(def.coin_flip_result, Some(CoinFlipResult::Won));
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+    }
+
+    #[test]
+    fn trigger_coin_flip_rejects_partial_suffix() {
+        let def = parse_trigger_line("Whenever you win a coin flipper, draw a card.", "Test Card");
+        assert!(matches!(def.mode, TriggerMode::Unknown(_)));
     }
 
     #[test]
