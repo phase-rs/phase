@@ -2537,6 +2537,12 @@ pub(crate) const PREDICATE_VERBS: &[&str] = &[
     "deal",
     "discard",
     "draw",
+    // CR 701.63: Endure — "it endures N" / "this creature endures N" /
+    // "~ endures N" / "<cardname> endures N". The self-referential subject is
+    // stripped here so the deconjugated predicate ("endure N") re-dispatches
+    // through the imperative path to `Effect::Endure`. The endure resolver acts
+    // on the ability source, so no subject target injection is required.
+    "endure",
     "exile",
     "explore",
     "fight",

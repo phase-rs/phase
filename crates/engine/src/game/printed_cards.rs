@@ -1,11 +1,15 @@
 use crate::database::CardDatabase;
-use crate::types::ability::{CopiableValues, PtValue};
+use crate::types::ability::{
+    AbilityCost, AbilityDefinition, ContinuousModification, CopiableValues, Effect, PtValue,
+    ReplacementDefinition, ReplacementMode, StaticDefinition, TriggerDefinition,
+};
 use crate::types::card::{CardFace, CardLayout, LayoutKind, PrintedCardRef};
 use crate::types::counter::CounterType;
 use crate::types::game_state::GameState;
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::zones::Zone;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::game_object::{BackFaceData, GameObject};
@@ -301,14 +305,542 @@ pub fn snapshot_object_face(obj: &GameObject) -> BackFaceData {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Conjure-target effect walker
+//
+// `Effect::Conjure` (digital-only, no CR entry) creates a card from outside the
+// game (`game/effects/conjure.rs`). The handler resolves the conjured face from
+// `GameState::card_face_registry`, which previously held *every* card face in the
+// database — a full-DB clone on each game init. To avoid that allocation spike,
+// `rehydrate_game_from_card_db` now scopes the registry to exactly the faces a
+// game can reach as Conjure targets: the transitive closure of conjure names
+// over the seed faces present in the game (objects + deck pools).
+//
+// These walkers yield every conjure name reachable from a `CardFace`. They
+// traverse every nested ability/effect/cost carrier. The core `walk_effect`
+// match is wildcard-free so any future `Effect` variant that carries a nested
+// `Box<Effect>` / `Box<AbilityDefinition>` must be handled here at compile time.
+//
+// TODO: consolidate with coverage traversal (`game/coverage.rs`). The coverage
+// pass builds `ParsedItem` trees rather than yielding `Effect`s, so no reusable
+// visitor exists today; extracting one is out of scope for this memory fix.
+// ---------------------------------------------------------------------------
+
+/// Collect every conjure name reachable from a single card face's ability set.
+fn collect_conjure_names_from_face(face: &CardFace, out: &mut Vec<String>) {
+    for ability in &face.abilities {
+        walk_ability_def(ability, out);
+    }
+    for trigger in &face.triggers {
+        walk_trigger(trigger, out);
+    }
+    for static_def in &face.static_abilities {
+        walk_static(static_def, out);
+    }
+    for replacement in &face.replacements {
+        walk_replacement(replacement, out);
+    }
+}
+
+fn walk_ability_def(def: &AbilityDefinition, out: &mut Vec<String>) {
+    walk_effect(&def.effect, out);
+    if let Some(cost) = &def.cost {
+        walk_cost(cost, out);
+    }
+    if let Some(sub) = &def.sub_ability {
+        walk_ability_def(sub, out);
+    }
+    if let Some(else_ability) = &def.else_ability {
+        walk_ability_def(else_ability, out);
+    }
+    for mode in &def.mode_abilities {
+        walk_ability_def(mode, out);
+    }
+    // "unless [player] pays {cost}" — the cost may be an EffectCost that conjures.
+    if let Some(unless_pay) = &def.unless_pay {
+        walk_cost(&unless_pay.cost, out);
+    }
+}
+
+fn walk_trigger(trigger: &TriggerDefinition, out: &mut Vec<String>) {
+    if let Some(execute) = &trigger.execute {
+        walk_ability_def(execute, out);
+    }
+    if let Some(unless_pay) = &trigger.unless_pay {
+        walk_cost(&unless_pay.cost, out);
+    }
+}
+
+fn walk_replacement(replacement: &ReplacementDefinition, out: &mut Vec<String>) {
+    if let Some(execute) = &replacement.execute {
+        walk_ability_def(execute, out);
+    }
+    // The mode carries the decline continuation (and, for MayCost, a cost),
+    // either of which may conjure. Descend into both.
+    match &replacement.mode {
+        ReplacementMode::MayCost { cost, decline } => {
+            walk_cost(cost, out);
+            if let Some(decline) = decline {
+                walk_ability_def(decline, out);
+            }
+        }
+        ReplacementMode::Optional { decline } => {
+            if let Some(decline) = decline {
+                walk_ability_def(decline, out);
+            }
+        }
+        ReplacementMode::Mandatory => {}
+    }
+    // `runtime_execute` holds a resolution-time continuation that is never
+    // present on a printed/static `CardFace`; skipped intentionally.
+}
+
+fn walk_static(static_def: &StaticDefinition, out: &mut Vec<String>) {
+    for modification in &static_def.modifications {
+        walk_continuous_mod(modification, out);
+    }
+}
+
+fn walk_continuous_mod(modification: &ContinuousModification, out: &mut Vec<String>) {
+    match modification {
+        ContinuousModification::GrantAbility { definition } => walk_ability_def(definition, out),
+        ContinuousModification::GrantTrigger { trigger } => walk_trigger(trigger, out),
+        ContinuousModification::GrantStaticAbility { definition } => walk_static(definition, out),
+        ContinuousModification::CopyValues { values } => walk_copiable_values(values, out),
+        // Remaining modifications carry no nested ability/effect carriers.
+        ContinuousModification::SetName { .. }
+        | ContinuousModification::AddPower { .. }
+        | ContinuousModification::AddToughness { .. }
+        | ContinuousModification::SetPower { .. }
+        | ContinuousModification::SetToughness { .. }
+        | ContinuousModification::AddKeyword { .. }
+        | ContinuousModification::RemoveKeyword { .. }
+        | ContinuousModification::RemoveAllAbilities
+        | ContinuousModification::AddType { .. }
+        | ContinuousModification::RemoveType { .. }
+        | ContinuousModification::AddSubtype { .. }
+        | ContinuousModification::RemoveSubtype { .. }
+        | ContinuousModification::SetCardTypes { .. }
+        | ContinuousModification::RemoveAllSubtypes { .. }
+        | ContinuousModification::SetDynamicPower { .. }
+        | ContinuousModification::SetDynamicToughness { .. }
+        | ContinuousModification::SetPowerDynamic { .. }
+        | ContinuousModification::SetToughnessDynamic { .. }
+        | ContinuousModification::AddDynamicPower { .. }
+        | ContinuousModification::AddDynamicToughness { .. }
+        | ContinuousModification::AddDynamicKeyword { .. }
+        | ContinuousModification::AddAllCreatureTypes
+        | ContinuousModification::AddAllBasicLandTypes
+        | ContinuousModification::AddChosenSubtype { .. }
+        | ContinuousModification::AddChosenColor
+        | ContinuousModification::RemoveChosenKeyword
+        | ContinuousModification::SetColor { .. }
+        | ContinuousModification::AddColor { .. }
+        | ContinuousModification::AddStaticMode { .. }
+        | ContinuousModification::SwitchPowerToughness
+        | ContinuousModification::AssignDamageFromToughness
+        | ContinuousModification::AssignDamageAsThoughUnblocked
+        | ContinuousModification::AssignNoCombatDamage
+        | ContinuousModification::ChangeController
+        | ContinuousModification::SetBasicLandType { .. }
+        | ContinuousModification::RetainPrintedTriggerFromSource { .. }
+        | ContinuousModification::AddSupertype { .. }
+        | ContinuousModification::RemoveSupertype { .. }
+        | ContinuousModification::AddCounterOnEnter { .. } => {}
+    }
+}
+
+fn walk_copiable_values(values: &CopiableValues, out: &mut Vec<String>) {
+    for ability in values.abilities.iter() {
+        walk_ability_def(ability, out);
+    }
+    for trigger in values.trigger_definitions.iter() {
+        walk_trigger(trigger, out);
+    }
+    for static_def in values.static_definitions.iter() {
+        walk_static(static_def, out);
+    }
+    for replacement in values.replacement_definitions.iter() {
+        walk_replacement(replacement, out);
+    }
+}
+
+fn walk_cost(cost: &AbilityCost, out: &mut Vec<String>) {
+    match cost {
+        AbilityCost::EffectCost { effect } => walk_effect(effect, out),
+        AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+            for sub in costs {
+                walk_cost(sub, out);
+            }
+        }
+        AbilityCost::PerCounter { base, .. } => walk_cost(base, out),
+        // Remaining costs carry no nested effect/cost carriers.
+        AbilityCost::Mana { .. }
+        | AbilityCost::ManaDynamic { .. }
+        | AbilityCost::Tap
+        | AbilityCost::Untap
+        | AbilityCost::Loyalty { .. }
+        | AbilityCost::Sacrifice { .. }
+        | AbilityCost::PayLife { .. }
+        | AbilityCost::Discard { .. }
+        | AbilityCost::Exile { .. }
+        | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::TapCreatures { .. }
+        | AbilityCost::RemoveCounter { .. }
+        | AbilityCost::PayEnergy { .. }
+        | AbilityCost::PaySpeed { .. }
+        | AbilityCost::ReturnToHand { .. }
+        | AbilityCost::Unattach
+        | AbilityCost::Mill { .. }
+        | AbilityCost::Exert
+        | AbilityCost::Blight { .. }
+        | AbilityCost::Reveal { .. }
+        | AbilityCost::Behold { .. }
+        | AbilityCost::Waterbend { .. }
+        | AbilityCost::NinjutsuFamily { .. }
+        | AbilityCost::Unimplemented { .. } => {}
+    }
+}
+
+/// Yield every conjure name carried by `effect` and its nested ability/effect
+/// carriers. The match is wildcard-free, so a new `Effect` variant forces a
+/// decision here (compile error until handled). That guarantee is necessary but
+/// not sufficient: a variant wrongly added to the leaf arm, or a new nested
+/// *struct field* (which is field access, not a match arm), compiles silently.
+/// `walker_covers_every_nested_carrier` is the complementary safety net for
+/// those cases — extend it whenever a carrier is added.
+fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
+    match effect {
+        Effect::Conjure { cards, .. } => {
+            for conjure_card in cards {
+                out.push(conjure_card.name.clone());
+            }
+        }
+        // Nested-ability carriers — descend.
+        Effect::Vote {
+            per_choice_effect, ..
+        } => {
+            for sub in per_choice_effect {
+                walk_ability_def(sub, out);
+            }
+        }
+        Effect::SeparateIntoPiles {
+            chosen_pile_effect, ..
+        } => walk_ability_def(chosen_pile_effect, out),
+        Effect::RevealFromHand { on_decline, .. } => {
+            if let Some(sub) = on_decline {
+                walk_ability_def(sub, out);
+            }
+        }
+        // Only the delayed `effect` is walked; the `condition`'s embedded
+        // TriggerDefinition has `execute: None` by construction (it is a matcher,
+        // not a payload), so it carries no conjure name.
+        Effect::CreateDelayedTrigger { effect, .. } => walk_ability_def(effect, out),
+        Effect::FlipCoin {
+            win_effect,
+            lose_effect,
+        }
+        | Effect::FlipCoins {
+            win_effect,
+            lose_effect,
+            ..
+        } => {
+            if let Some(sub) = win_effect {
+                walk_ability_def(sub, out);
+            }
+            if let Some(sub) = lose_effect {
+                walk_ability_def(sub, out);
+            }
+        }
+        Effect::FlipCoinUntilLose { win_effect } => walk_ability_def(win_effect, out),
+        Effect::RollDie { results, .. } => {
+            for branch in results {
+                walk_ability_def(&branch.effect, out);
+            }
+        }
+        Effect::ChooseOneOf { branches, .. } => {
+            for branch in branches {
+                walk_ability_def(branch, out);
+            }
+        }
+        // GenericEffect applies static abilities at resolution; their
+        // modifications can grant abilities/triggers that themselves conjure.
+        // Descend into the granted definitions rather than treating it as a leaf.
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => {
+            for static_def in static_abilities {
+                walk_static(static_def, out);
+            }
+        }
+        // Carries a nested ReplacementDefinition whose execute/decline/cost may conjure.
+        Effect::AddTargetReplacement { replacement, .. } => walk_replacement(replacement, out),
+        // Counter's `source_static` applies a static to the countered source; it
+        // may grant an ability that conjures.
+        Effect::Counter { source_static, .. } => {
+            if let Some(static_def) = source_static {
+                walk_static(static_def, out);
+            }
+        }
+        // Tokens and emblems can host granted static/triggered abilities that conjure.
+        Effect::Token {
+            static_abilities, ..
+        } => {
+            for static_def in static_abilities {
+                walk_static(static_def, out);
+            }
+        }
+        Effect::CreateEmblem { statics, triggers } => {
+            for static_def in statics {
+                walk_static(static_def, out);
+            }
+            for trigger in triggers {
+                walk_trigger(trigger, out);
+            }
+        }
+        // Leaf effects with no nested ability/effect carrier.
+        Effect::StartYourEngines { .. }
+        | Effect::ChangeSpeed { .. }
+        | Effect::DealDamage { .. }
+        | Effect::Draw { .. }
+        | Effect::Pump { .. }
+        | Effect::PairWith { .. }
+        | Effect::Destroy { .. }
+        | Effect::Regenerate { .. }
+        | Effect::CounterAll { .. }
+        | Effect::GainLife { .. }
+        | Effect::LoseLife { .. }
+        | Effect::Tap { .. }
+        | Effect::Untap { .. }
+        | Effect::TapAll { .. }
+        | Effect::UntapAll { .. }
+        | Effect::AddCounter { .. }
+        | Effect::RemoveCounter { .. }
+        | Effect::Sacrifice { .. }
+        | Effect::DiscardCard { .. }
+        | Effect::Mill { .. }
+        | Effect::Scry { .. }
+        | Effect::PumpAll { .. }
+        | Effect::DamageAll { .. }
+        | Effect::DamageEachPlayer { .. }
+        | Effect::DestroyAll { .. }
+        | Effect::ChangeZone { .. }
+        | Effect::ChangeZoneAll { .. }
+        | Effect::Dig { .. }
+        | Effect::GainControl { .. }
+        | Effect::ControlNextTurn { .. }
+        | Effect::Attach { .. }
+        | Effect::Surveil { .. }
+        | Effect::Fight { .. }
+        | Effect::Bounce { .. }
+        | Effect::BounceAll { .. }
+        | Effect::Explore
+        | Effect::ExploreAll { .. }
+        | Effect::Investigate
+        | Effect::Tribute { .. }
+        | Effect::TimeTravel
+        | Effect::BecomeMonarch
+        | Effect::Proliferate
+        | Effect::Populate
+        | Effect::Clash
+        | Effect::SwitchPT { .. }
+        | Effect::CopySpell { .. }
+        | Effect::CopyTokenOf { .. }
+        | Effect::Myriad
+        | Effect::BecomeCopy { .. }
+        | Effect::ChooseCard { .. }
+        | Effect::PutCounter { .. }
+        | Effect::PutCounterAll { .. }
+        | Effect::MultiplyCounter { .. }
+        | Effect::DoublePT { .. }
+        | Effect::DoublePTAll { .. }
+        | Effect::MoveCounters { .. }
+        | Effect::Animate { .. }
+        | Effect::RegisterBending { .. }
+        | Effect::Cleanup { .. }
+        | Effect::Mana { .. }
+        | Effect::Discard { .. }
+        | Effect::Shuffle { .. }
+        | Effect::Transform { .. }
+        | Effect::SearchLibrary { .. }
+        | Effect::SearchOutsideGame { .. }
+        | Effect::RevealHand { .. }
+        | Effect::Reveal { .. }
+        | Effect::RevealTop { .. }
+        | Effect::ExileTop { .. }
+        | Effect::TargetOnly { .. }
+        | Effect::Choose { .. }
+        | Effect::ChooseDamageSource { .. }
+        | Effect::Suspect { .. }
+        | Effect::Connive { .. }
+        | Effect::PhaseOut { .. }
+        | Effect::PhaseIn { .. }
+        | Effect::ForceBlock { .. }
+        | Effect::SolveCase
+        | Effect::BecomePrepared { .. }
+        | Effect::BecomeUnprepared { .. }
+        | Effect::SetClassLevel { .. }
+        | Effect::AddRestriction { .. }
+        | Effect::ReduceNextSpellCost { .. }
+        | Effect::GrantNextSpellAbility { .. }
+        | Effect::AddPendingETBCounters { .. }
+        | Effect::PayCost { .. }
+        | Effect::CastFromZone { .. }
+        | Effect::PreventDamage { .. }
+        | Effect::LoseTheGame
+        | Effect::WinTheGame
+        | Effect::RingTemptsYou
+        | Effect::VentureIntoDungeon
+        | Effect::VentureInto { .. }
+        | Effect::TakeTheInitiative
+        | Effect::ProcessRadCounters
+        | Effect::GrantCastingPermission { .. }
+        | Effect::ChooseFromZone { .. }
+        | Effect::ChooseObjectsIntoTrackedSet { .. }
+        | Effect::ChooseAndSacrificeRest { .. }
+        | Effect::Exploit { .. }
+        | Effect::GainEnergy { .. }
+        | Effect::GivePlayerCounter { .. }
+        | Effect::LoseAllPlayerCounters { .. }
+        | Effect::ExileFromTopUntil { .. }
+        | Effect::RevealUntil { .. }
+        | Effect::Discover { .. }
+        | Effect::Cascade
+        | Effect::MiracleCast { .. }
+        | Effect::MadnessCast { .. }
+        | Effect::PutAtLibraryPosition { .. }
+        | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
+        | Effect::PutOnTopOrBottom { .. }
+        | Effect::GiftDelivery { .. }
+        | Effect::Goad { .. }
+        | Effect::GoadAll { .. }
+        | Effect::Detain { .. }
+        | Effect::ExchangeControl { .. }
+        | Effect::ChangeTargets { .. }
+        | Effect::Manifest { .. }
+        | Effect::ManifestDread
+        | Effect::ExtraTurn { .. }
+        | Effect::GrantExtraLoyaltyActivations { .. }
+        | Effect::SkipNextTurn { .. }
+        | Effect::SkipNextStep { .. }
+        | Effect::AdditionalPhase { .. }
+        | Effect::Double { .. }
+        | Effect::RuntimeHandled { .. }
+        | Effect::Incubate { .. }
+        | Effect::Amass { .. }
+        | Effect::Monstrosity { .. }
+        | Effect::Bolster { .. }
+        | Effect::Adapt { .. }
+        | Effect::Learn
+        | Effect::Forage
+        | Effect::CollectEvidence { .. }
+        | Effect::Endure { .. }
+        | Effect::BlightEffect { .. }
+        | Effect::Seek { .. }
+        | Effect::SetLifeTotal { .. }
+        | Effect::SetDayNight { .. }
+        | Effect::GiveControl { .. }
+        | Effect::RemoveFromCombat { .. }
+        | Effect::Unimplemented { .. } => {}
+    }
+}
+
+/// Collect every conjure name seeded by the faces present in the game: each
+/// object's printed face (resolved via the database) plus every deck-pool face
+/// (carried inline as `DeckEntry.card`).
+///
+/// Boundary: only printed faces are seeds. A sourceless object (a token or
+/// emblem with no `printed_ref`) whose granted ability conjures would not seed
+/// its target. No current card hits this; revisit if a printed-faceless
+/// conjure source is ever added.
+fn collect_seed_conjure_names(state: &GameState, db: &CardDatabase) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+
+    for object in state.objects.values() {
+        if let Some(printed_ref) = &object.printed_ref {
+            if let Some(face) = db.get_face_by_printed_ref(printed_ref) {
+                collect_conjure_names_from_face(face, &mut names);
+            }
+        }
+    }
+
+    for pool in &state.deck_pools {
+        let entry_lists = [
+            &pool.registered_main,
+            &pool.registered_sideboard,
+            &pool.current_main,
+            &pool.current_sideboard,
+            &pool.registered_commander,
+            &pool.current_commander,
+        ];
+        for entry_list in entry_lists {
+            for entry in entry_list.iter() {
+                collect_conjure_names_from_face(&entry.card, &mut names);
+            }
+        }
+    }
+
+    names
+}
+
+/// Build the scoped Conjure registry: the transitive closure of conjure-target
+/// faces reachable from the seed faces present in the game. The closure follows
+/// conjure names (a conjured card may itself conjure another) to a fixpoint.
+/// Returns the registry plus every conjure name encountered along the way (used
+/// by the debug-only walker-coverage safety net).
+fn build_conjure_registry(
+    state: &GameState,
+    db: &CardDatabase,
+) -> (HashMap<String, CardFace>, Vec<String>) {
+    let mut pending = collect_seed_conjure_names(state, db);
+    let mut all_collected = pending.clone();
+
+    // Transitive closure: resolve each pending name, insert its face, and walk
+    // it for further conjure names until the frontier is empty.
+    let mut registry: HashMap<String, CardFace> = HashMap::new();
+    while let Some(name) = pending.pop() {
+        // The Conjure handler keys lookups by `name.to_lowercase()`
+        // (game/effects/conjure.rs); mirror that exactly so resolution hits.
+        let key = name.to_lowercase();
+        if registry.contains_key(&key) {
+            continue;
+        }
+        let Some(face) = db.get_face_by_name(&name) else {
+            continue;
+        };
+        let before = pending.len();
+        collect_conjure_names_from_face(face, &mut pending);
+        all_collected.extend_from_slice(&pending[before..]);
+        registry.insert(key, face.clone());
+    }
+
+    (registry, all_collected)
+}
+
 pub fn rehydrate_game_from_card_db(state: &mut GameState, db: &CardDatabase) {
-    // Populate card face registry for runtime card lookup (used by Conjure effect handler).
+    // Populate the Conjure card-face registry (used by the Conjure effect
+    // handler). Scoped to exactly the faces reachable as Conjure targets so we
+    // never clone the entire database into per-game state. Decks with no
+    // conjure cards yield an empty registry and pay no allocation cost.
     if state.card_face_registry.is_empty() {
-        state.card_face_registry = std::sync::Arc::new(
-            db.face_iter()
-                .map(|(key, face)| (key.to_string(), face.clone()))
-                .collect(),
-        );
+        let (registry, collected_names) = build_conjure_registry(state, db);
+
+        // Safety net: a walker that misses a nested effect/ability carrier would
+        // silently ship a broken conjure. Fire only for names the database
+        // *could* resolve — names it cannot resolve (typos, Alchemy-only,
+        // export-filtered) are legitimately absent today.
+        #[cfg(debug_assertions)]
+        for name in &collected_names {
+            debug_assert!(
+                db.get_face_by_name(name).is_none() || registry.contains_key(&name.to_lowercase()),
+                "conjure walker missed resolvable card '{name}' — a nested \
+                 effect/ability carrier is not traversed by walk_effect"
+            );
+        }
+        #[cfg(not(debug_assertions))]
+        let _ = collected_names;
+
+        state.card_face_registry = std::sync::Arc::new(registry);
     }
 
     // Restore the `#[serde(skip)]` "name a card" validation list. Without this,
@@ -562,10 +1094,14 @@ mod tests {
     use super::*;
     use crate::database::CardDatabase;
     use crate::game::deck_loading::create_object_from_card_face;
+    use crate::game::deck_loading::DeckEntry;
     use crate::game::game_object::GameObject;
     use crate::types::ability::{
-        AbilityDefinition, AdditionalCost, CastingRestriction, ModalChoice, ReplacementDefinition,
-        SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
+        AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, CastingRestriction,
+        ConjureCard, ContinuousModification, ControllerRef, DelayedTriggerCondition,
+        DieResultBranch, Effect, ModalChoice, PlayerFilter, PlayerScope, QuantityExpr,
+        ReplacementDefinition, SolveCondition, SpellCastingOption, StaticDefinition, TargetFilter,
+        TriggerDefinition, UnlessPayModifier, VoterScope,
     };
     use crate::types::card::CardFace;
     use crate::types::card_type::{CardType, CoreType};
@@ -574,7 +1110,11 @@ mod tests {
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
     use crate::types::player::PlayerId;
+    use crate::types::replacements::ReplacementEvent;
+    use crate::types::statics::StaticMode;
+    use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
+    use crate::types::Phase;
 
     fn test_face(
         name: &str,
@@ -960,5 +1500,486 @@ mod tests {
             obj.base_characteristics_initialized,
             "first-time application must mark the object initialized"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Conjure registry scoping tests
+    // -----------------------------------------------------------------------
+
+    /// Build a `CardDatabase` from in-memory faces via the export JSON path so
+    /// `get_face_by_name` / `get_face_by_printed_ref` resolve exactly as in
+    /// production. Each face must carry a distinct oracle id.
+    fn db_from_faces(faces: &[CardFace]) -> CardDatabase {
+        let mut map = serde_json::Map::new();
+        for face in faces {
+            map.insert(
+                face.name.to_lowercase(),
+                serde_json::to_value(face).unwrap(),
+            );
+        }
+        let json = serde_json::Value::Object(map).to_string();
+        CardDatabase::from_json_str(&json).expect("export db should parse")
+    }
+
+    fn conjure_ability(target_name: &str, destination: Zone) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Conjure {
+                cards: vec![ConjureCard {
+                    name: target_name.to_string(),
+                    count: QuantityExpr::Fixed { value: 1 },
+                }],
+                destination,
+                tapped: false,
+            },
+        )
+    }
+
+    fn deck_entry(card: CardFace) -> DeckEntry {
+        DeckEntry { card, count: 1 }
+    }
+
+    #[test]
+    fn registry_scopes_to_reachable_conjure_targets_not_full_db() {
+        // The seed deck card conjures exactly one target. The database also
+        // holds many unrelated faces that must NOT enter the registry.
+        let mut conjurer = test_face(
+            "Conjurer Source",
+            "oracle-conjurer",
+            vec![CoreType::Sorcery],
+            ManaCost::default(),
+        );
+        conjurer
+            .abilities
+            .push(conjure_ability("Conjured Spirit", Zone::Battlefield));
+
+        let target = test_face(
+            "Conjured Spirit",
+            "oracle-spirit",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+
+        // Unrelated noise that should be excluded by scoping.
+        let noise_a = test_face(
+            "Noise A",
+            "oracle-noise-a",
+            vec![CoreType::Land],
+            ManaCost::default(),
+        );
+        let noise_b = test_face(
+            "Noise B",
+            "oracle-noise-b",
+            vec![CoreType::Instant],
+            ManaCost::default(),
+        );
+
+        let db = db_from_faces(&[conjurer.clone(), target.clone(), noise_a, noise_b]);
+
+        let mut state = GameState::default();
+        create_object_from_card_face(&mut state, &conjurer, PlayerId(0));
+
+        rehydrate_game_from_card_db(&mut state, &db);
+
+        assert_eq!(
+            state.card_face_registry.len(),
+            1,
+            "registry must hold only the reachable conjure target, not the full db"
+        );
+        assert!(
+            state.card_face_registry.contains_key("conjured spirit"),
+            "the conjure target must be present, keyed lowercase"
+        );
+    }
+
+    #[test]
+    fn registry_empty_when_no_conjure_cards() {
+        let vanilla = test_face(
+            "Vanilla Bear",
+            "oracle-vanilla",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+        let db = db_from_faces(std::slice::from_ref(&vanilla));
+
+        let mut state = GameState::default();
+        create_object_from_card_face(&mut state, &vanilla, PlayerId(0));
+
+        rehydrate_game_from_card_db(&mut state, &db);
+
+        assert!(
+            state.card_face_registry.is_empty(),
+            "non-conjure decks must produce an empty registry (no allocation spike)"
+        );
+    }
+
+    #[test]
+    fn registry_keys_mixed_case_conjure_target_lowercase() {
+        // B3: a conjure target whose printed name has capitals must be keyed by
+        // its lowercased form so the handler's `name.to_lowercase()` lookup hits.
+        let mut conjurer = test_face(
+            "Mixed Case Conjurer",
+            "oracle-mixed-conjurer",
+            vec![CoreType::Sorcery],
+            ManaCost::default(),
+        );
+        conjurer
+            .abilities
+            .push(conjure_ability("Aetherflux Reservoir", Zone::Battlefield));
+
+        let target = test_face(
+            "Aetherflux Reservoir",
+            "oracle-aetherflux",
+            vec![CoreType::Artifact],
+            ManaCost::default(),
+        );
+
+        let db = db_from_faces(&[conjurer.clone(), target.clone()]);
+
+        let mut state = GameState::default();
+        create_object_from_card_face(&mut state, &conjurer, PlayerId(0));
+
+        rehydrate_game_from_card_db(&mut state, &db);
+
+        // Mirror the conjure handler's lookup (game/effects/conjure.rs).
+        let resolved = state
+            .card_face_registry
+            .get(&"Aetherflux Reservoir".to_lowercase());
+        assert!(
+            resolved.is_some(),
+            "mixed-case conjure target must resolve via lowercased key"
+        );
+        assert_eq!(resolved.unwrap().name, "Aetherflux Reservoir");
+    }
+
+    #[test]
+    fn registry_follows_transitive_conjure_chain() {
+        // A conjures B, B conjures C → registry must contain B and C.
+        let mut card_a = test_face(
+            "Card A",
+            "oracle-a",
+            vec![CoreType::Sorcery],
+            ManaCost::default(),
+        );
+        card_a.abilities.push(conjure_ability("Card B", Zone::Hand));
+
+        let mut card_b = test_face(
+            "Card B",
+            "oracle-b",
+            vec![CoreType::Sorcery],
+            ManaCost::default(),
+        );
+        card_b.abilities.push(conjure_ability("Card C", Zone::Hand));
+
+        let card_c = test_face(
+            "Card C",
+            "oracle-c",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+
+        let db = db_from_faces(&[card_a.clone(), card_b.clone(), card_c.clone()]);
+
+        let mut state = GameState::default();
+        // Seed Card A via the deck pool to also exercise the deck-pool seed path.
+        state
+            .deck_pools
+            .push(crate::types::game_state::PlayerDeckPool {
+                player: PlayerId(0),
+                current_main: std::sync::Arc::new(vec![deck_entry(card_a.clone())]),
+                ..Default::default()
+            });
+
+        rehydrate_game_from_card_db(&mut state, &db);
+
+        assert_eq!(state.card_face_registry.len(), 2);
+        assert!(state.card_face_registry.contains_key("card b"));
+        assert!(
+            state.card_face_registry.contains_key("card c"),
+            "transitive conjure (B conjures C) must be followed to fixpoint"
+        );
+    }
+
+    /// FIELD-COVERAGE: place an `Effect::Conjure` in EVERY nested ability/effect
+    /// carrier and assert the walker collects all names. A future struct gaining
+    /// a new `Box<AbilityDefinition>` field is NOT caught by the compiler (it is
+    /// struct-field access, not a match arm) — this test is that safety net.
+    #[test]
+    fn walker_covers_every_nested_carrier() {
+        let mut names: Vec<String> = Vec::new();
+
+        // sub_ability / else_ability / mode_abilities on AbilityDefinition.
+        let mut def = AbilityDefinition::new(AbilityKind::Spell, Effect::Investigate);
+        def.sub_ability = Some(Box::new(conjure_ability("sub", Zone::Hand)));
+        def.else_ability = Some(Box::new(conjure_ability("else", Zone::Hand)));
+        def.mode_abilities.push(conjure_ability("mode", Zone::Hand));
+        // cost: EffectCost carrying a Conjure effect.
+        def.cost = Some(AbilityCost::EffectCost {
+            effect: Box::new(Effect::Conjure {
+                cards: vec![ConjureCard {
+                    name: "cost".to_string(),
+                    count: QuantityExpr::Fixed { value: 1 },
+                }],
+                destination: Zone::Hand,
+                tapped: false,
+            }),
+        });
+        def.unless_pay = Some(UnlessPayModifier {
+            cost: AbilityCost::EffectCost {
+                effect: Box::new(Effect::Conjure {
+                    cards: vec![ConjureCard {
+                        name: "unless_pay_ability".to_string(),
+                        count: QuantityExpr::Fixed { value: 1 },
+                    }],
+                    destination: Zone::Hand,
+                    tapped: false,
+                }),
+            },
+            payer: TargetFilter::Controller,
+        });
+        walk_ability_def(&def, &mut names);
+
+        // Effect-level carriers.
+        let vote = Effect::Vote {
+            choices: vec!["x".into()],
+            per_choice_effect: vec![Box::new(conjure_ability("vote", Zone::Hand))],
+            starting_with: ControllerRef::You,
+            voter_scope: VoterScope::AllPlayers,
+        };
+        walk_effect(&vote, &mut names);
+
+        let piles = Effect::SeparateIntoPiles {
+            partition_subject: VoterScope::EachOpponent,
+            object_filter: TargetFilter::Any,
+            chooser: PlayerScope::Controller,
+            chosen_pile_effect: Box::new(conjure_ability("piles", Zone::Hand)),
+        };
+        walk_effect(&piles, &mut names);
+
+        let reveal = Effect::RevealFromHand {
+            filter: TargetFilter::Any,
+            on_decline: Some(Box::new(conjure_ability("on_decline", Zone::Hand))),
+        };
+        walk_effect(&reveal, &mut names);
+
+        let delayed = Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::Upkeep,
+            },
+            effect: Box::new(conjure_ability("delayed", Zone::Hand)),
+            uses_tracked_set: false,
+        };
+        walk_effect(&delayed, &mut names);
+
+        let flip = Effect::FlipCoin {
+            win_effect: Some(Box::new(conjure_ability("flip_win", Zone::Hand))),
+            lose_effect: Some(Box::new(conjure_ability("flip_lose", Zone::Hand))),
+        };
+        walk_effect(&flip, &mut names);
+
+        let until_lose = Effect::FlipCoinUntilLose {
+            win_effect: Box::new(conjure_ability("until_lose", Zone::Hand)),
+        };
+        walk_effect(&until_lose, &mut names);
+
+        let roll = Effect::RollDie {
+            sides: 6,
+            results: vec![DieResultBranch {
+                min: 1,
+                max: 6,
+                effect: Box::new(conjure_ability("roll", Zone::Hand)),
+            }],
+        };
+        walk_effect(&roll, &mut names);
+
+        let choose_one = Effect::ChooseOneOf {
+            chooser: PlayerFilter::Controller,
+            branches: vec![conjure_ability("choose_one", Zone::Hand)],
+        };
+        walk_effect(&choose_one, &mut names);
+
+        // GenericEffect applies static abilities at resolution; descend into the
+        // granted definitions.
+        let mut generic_static = StaticDefinition::new(StaticMode::Continuous);
+        generic_static
+            .modifications
+            .push(ContinuousModification::GrantAbility {
+                definition: Box::new(conjure_ability("generic_effect", Zone::Hand)),
+            });
+        let generic = Effect::GenericEffect {
+            static_abilities: vec![generic_static],
+            duration: None,
+            target: None,
+        };
+        walk_effect(&generic, &mut names);
+
+        // AddTargetReplacement carries a nested ReplacementDefinition that may conjure.
+        let mut atr_replacement = ReplacementDefinition::new(ReplacementEvent::ChangeZone);
+        atr_replacement.execute = Some(Box::new(conjure_ability(
+            "add_target_replacement",
+            Zone::Hand,
+        )));
+        let add_target_repl = Effect::AddTargetReplacement {
+            replacement: Box::new(atr_replacement),
+            target: TargetFilter::Any,
+        };
+        walk_effect(&add_target_repl, &mut names);
+
+        // Token can grant static abilities that conjure.
+        let mut token_static = StaticDefinition::new(StaticMode::Continuous);
+        token_static
+            .modifications
+            .push(ContinuousModification::GrantAbility {
+                definition: Box::new(conjure_ability("token_static", Zone::Hand)),
+            });
+        let token = Effect::Token {
+            name: "T".to_string(),
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            types: vec!["Creature".to_string()],
+            colors: vec![],
+            keywords: vec![],
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: false,
+            supertypes: vec![],
+            static_abilities: vec![token_static],
+            enter_with_counters: vec![],
+        };
+        walk_effect(&token, &mut names);
+
+        // Emblem hosts static + triggered abilities that conjure.
+        let mut emblem_static = StaticDefinition::new(StaticMode::Continuous);
+        emblem_static
+            .modifications
+            .push(ContinuousModification::GrantAbility {
+                definition: Box::new(conjure_ability("emblem_static", Zone::Hand)),
+            });
+        let mut emblem_trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+        emblem_trigger.execute = Some(Box::new(conjure_ability("emblem_trigger", Zone::Hand)));
+        let emblem = Effect::CreateEmblem {
+            statics: vec![emblem_static],
+            triggers: vec![emblem_trigger],
+        };
+        walk_effect(&emblem, &mut names);
+
+        // Counter.source_static may grant an ability that conjures.
+        let mut counter_static = StaticDefinition::new(StaticMode::Continuous);
+        counter_static
+            .modifications
+            .push(ContinuousModification::GrantAbility {
+                definition: Box::new(conjure_ability("counter_source_static", Zone::Hand)),
+            });
+        let counter = Effect::Counter {
+            target: TargetFilter::Any,
+            source_static: Some(counter_static),
+        };
+        walk_effect(&counter, &mut names);
+
+        // Trigger / replacement / static carriers via CardFace.
+        let mut face = test_face(
+            "Carrier Face",
+            "oracle-carrier",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+        let mut trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+        trigger.execute = Some(Box::new(conjure_ability("trigger", Zone::Hand)));
+        trigger.unless_pay = Some(UnlessPayModifier {
+            cost: AbilityCost::EffectCost {
+                effect: Box::new(Effect::Conjure {
+                    cards: vec![ConjureCard {
+                        name: "unless_pay_trigger".to_string(),
+                        count: QuantityExpr::Fixed { value: 1 },
+                    }],
+                    destination: Zone::Hand,
+                    tapped: false,
+                }),
+            },
+            payer: TargetFilter::Controller,
+        });
+        face.triggers.push(trigger);
+
+        let mut replacement = ReplacementDefinition::new(ReplacementEvent::ChangeZone);
+        replacement.execute = Some(Box::new(conjure_ability("replacement", Zone::Hand)));
+        face.replacements.push(replacement);
+
+        // Static carrying a granted ability whose effect conjures.
+        let mut static_def = StaticDefinition::new(StaticMode::Continuous);
+        static_def
+            .modifications
+            .push(ContinuousModification::GrantAbility {
+                definition: Box::new(conjure_ability("granted_ability", Zone::Hand)),
+            });
+        face.static_abilities.push(static_def);
+
+        // ReplacementMode carriers: MayCost { cost, decline } and Optional { decline }.
+        let mut repl_maycost = ReplacementDefinition::new(ReplacementEvent::ChangeZone);
+        repl_maycost.mode = ReplacementMode::MayCost {
+            cost: AbilityCost::EffectCost {
+                effect: Box::new(Effect::Conjure {
+                    cards: vec![ConjureCard {
+                        name: "repl_maycost_cost".to_string(),
+                        count: QuantityExpr::Fixed { value: 1 },
+                    }],
+                    destination: Zone::Hand,
+                    tapped: false,
+                }),
+            },
+            decline: Some(Box::new(conjure_ability(
+                "repl_maycost_decline",
+                Zone::Hand,
+            ))),
+        };
+        face.replacements.push(repl_maycost);
+
+        let mut repl_optional = ReplacementDefinition::new(ReplacementEvent::ChangeZone);
+        repl_optional.mode = ReplacementMode::Optional {
+            decline: Some(Box::new(conjure_ability(
+                "repl_optional_decline",
+                Zone::Hand,
+            ))),
+        };
+        face.replacements.push(repl_optional);
+
+        collect_conjure_names_from_face(&face, &mut names);
+
+        let expected = [
+            "sub",
+            "else",
+            "mode",
+            "cost",
+            "vote",
+            "piles",
+            "on_decline",
+            "delayed",
+            "flip_win",
+            "flip_lose",
+            "until_lose",
+            "roll",
+            "choose_one",
+            "trigger",
+            "replacement",
+            "granted_ability",
+            "generic_effect",
+            "repl_maycost_cost",
+            "repl_maycost_decline",
+            "repl_optional_decline",
+            "add_target_replacement",
+            "token_static",
+            "emblem_static",
+            "emblem_trigger",
+            "counter_source_static",
+            "unless_pay_ability",
+            "unless_pay_trigger",
+        ];
+        for name in expected {
+            assert!(
+                names.iter().any(|n| n == name),
+                "walker missed conjure name '{name}' in a nested carrier"
+            );
+        }
     }
 }

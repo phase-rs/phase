@@ -23,6 +23,7 @@ import { FORMAT_DEFAULTS } from "../stores/multiplayerStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
 import { saveActiveGame, useGameStore } from "../stores/gameStore";
 import type { DeckCompatibilityResult } from "../services/deckCompatibility";
+import { disposeCompatibilityWorker } from "../services/deckCompatibility";
 
 // --- Format trigger styling ---
 //
@@ -142,6 +143,11 @@ export function GameSetupPage() {
     const headDifficulty = aiSeats[0]?.difficulty ?? "Medium";
     saveActiveGame({ id: gameId, mode: "ai", difficulty: headDifficulty, aiSeats });
     useGameStore.setState({ gameId });
+    // Release the setup-page compatibility worker's full card-DB WASM instance
+    // before the game engine allocates its own — otherwise both are resident at
+    // game init, the peak that traps as "memory access out of bounds" on
+    // low-memory devices. Lazily recreated on the next compatibility check.
+    disposeCompatibilityWorker();
     const firstParam = firstPlayer !== "random" ? `&first=${firstPlayer}` : "";
     navigate(
       `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${formatConfig.format}&players=${playerCount}&match=${matchType.toLowerCase()}${firstParam}`,

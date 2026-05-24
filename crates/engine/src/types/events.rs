@@ -83,6 +83,8 @@ pub enum PlayerActionKind {
     Scry,
     Surveil,
     CollectEvidence,
+    /// CR 701.24a: A player shuffled their library.
+    ShuffledLibrary,
 }
 
 /// CR 701.30d: Result of a clash — whether the controller won, lost, or tied.

@@ -310,6 +310,7 @@ fn redundancy_delta(
         | Effect::PutOnTopOrBottom { .. }
         | Effect::GiftDelivery { .. }
         | Effect::Goad { .. }
+        | Effect::GoadAll { .. }
         | Effect::Detain { .. }
         | Effect::ExchangeControl { .. }
         | Effect::ChangeTargets { .. }

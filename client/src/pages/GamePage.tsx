@@ -9,7 +9,7 @@ import {
 import { useLocation, useNavigate, useParams, useSearchParams } from "react-router";
 import { AnimatePresence, motion } from "framer-motion";
 
-import type { DeckCardCount, GameFormat, MatchConfig } from "../adapter/types";
+import type { DeckCardCount, GameFormat, MatchConfig, SerializedAbilityCost } from "../adapter/types";
 import { useDraftStore } from "../stores/draftStore";
 import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
 import type { DraftMatchResult } from "../services/quickDraftPersistence";
@@ -107,7 +107,7 @@ import {
 } from "../stores/multiplayerStore.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
 import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from "../hooks/usePlayerId.ts";
-import { abilityChoiceLabel } from "../viewmodel/costLabel.ts";
+import { abilityChoiceLabel, formatAbilityCost } from "../viewmodel/costLabel.ts";
 import { getWaitingForObjectChoiceIds } from "../viewmodel/gameStateView.ts";
 import { gameButtonClass } from "../components/ui/buttonStyles.ts";
 import { cardImageLookup } from "../services/cardImageLookup.ts";
@@ -1296,6 +1296,10 @@ function GamePageContent({
           canActForWaitingState && (
             <UnlessPaymentChooseCostModal />
           )}
+        {waitingFor?.type === "ActivationCostOneOfChoice" &&
+          canActForWaitingState && (
+            <ActivationCostOneOfChoiceModal />
+          )}
       </DialogHost>
 
       {waitingFor?.type === "CompanionReveal" &&
@@ -2395,6 +2399,31 @@ function UnlessPaymentChooseCostModal() {
           data: { choice },
         });
       }}
+    />
+  );
+}
+
+function ActivationCostOneOfChoiceModal() {
+  const dispatch = useGameDispatch();
+  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+
+  if (waitingFor?.type !== "ActivationCostOneOfChoice") return null;
+
+  const branchOptions = waitingFor.data.costs.map((cost: SerializedAbilityCost, idx: number) => ({
+    id: String(idx),
+    label: formatAbilityCost(cost),
+  }));
+
+  return (
+    <ChoiceModal
+      title="Choose Activation Cost"
+      options={branchOptions}
+      onChoose={(id) =>
+        dispatch({
+          type: "ChooseActivationCostBranch",
+          data: { index: Number.parseInt(id, 10) },
+        })
+      }
     />
   );
 }

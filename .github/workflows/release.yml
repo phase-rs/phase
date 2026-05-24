@@ -468,6 +468,58 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: pages deploy dist --project-name=phase-rs --commit-dirty=true
 
+  deploy-lobby-worker:
+    # Builds the Rust lobby-broker -> WASM and deploys the Cloudflare Worker +
+    # Durable Object (the matchmaking broker). Independent of the Pages deploy —
+    # the DO is reachable via its own endpoint and is not yet the client's
+    # DEFAULT_SERVER. Redeploys are idempotent (the [[migrations]] tag is only
+    # applied once). The wasm build is driven by wrangler's [build] command
+    # (scripts/build-broker-wasm.sh), so the rust/wasm toolchain must be on PATH.
+    name: Deploy Lobby Worker (Cloudflare)
+    needs: [resolve-release-ref]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-release-ref.outputs.release_sha }}
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          targets: wasm32-unknown-unknown
+          cache-shared-key: rust-wasm
+
+      - uses: taiki-e/install-action@v2
+        with:
+          # Must match the pinned wasm-bindgen crate version in
+          # lobby-worker/broker-wasm/Cargo.toml (schema versions must be exact).
+          tool: wasm-bindgen-cli@0.2.121
+
+      - name: Cache binaryen
+        id: binaryen-cache
+        uses: actions/cache@v4
+        with:
+          path: binaryen-version_123
+          key: binaryen-123-x86_64-linux
+
+      - name: Install binaryen
+        if: steps.binaryen-cache.outputs.cache-hit != 'true'
+        run: curl -L https://github.com/WebAssembly/binaryen/releases/download/version_123/binaryen-version_123-x86_64-linux.tar.gz | tar xz
+
+      - name: Add binaryen to PATH
+        run: echo "$PWD/binaryen-version_123/bin" >> "$GITHUB_PATH"
+
+      - name: Deploy lobby Worker to Cloudflare
+        # `wrangler deploy` runs the [build] command in lobby-worker/wrangler.toml
+        # (scripts/build-broker-wasm.sh release): cargo build -> wasm32,
+        # wasm-bindgen, wasm-opt. The toolchain installed above is inherited.
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: lobby-worker
+          command: deploy
+
   build-server:
     name: Build Server (${{ matrix.os }})
     needs: [resolve-release-ref, tauri-preflight, build-wasm]

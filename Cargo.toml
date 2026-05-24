@@ -3,7 +3,10 @@ cargo-features = ["codegen-backend"]
 [workspace]
 resolver = "2"
 members = ["crates/*"]
-exclude = ["client/src-tauri"]
+# lobby-worker/broker-wasm is a standalone wasm32 artifact (Cloudflare Worker
+# Durable Object brain). Excluded so the native workspace build / Tilt clippy
+# never compile it for the host target — it is built only via wasm-bindgen.
+exclude = ["client/src-tauri", "lobby-worker/broker-wasm"]
 
 [workspace.package]
 version = "0.1.35"

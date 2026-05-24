@@ -15,7 +15,7 @@ use super::ability::{
 use super::attribution::ObjectAttribution;
 use super::card::CardFace;
 use super::card_type::{CoreType, Supertype};
-use super::counter::CounterType;
+use super::counter::{CounterMatch, CounterType};
 use super::events::{GameEvent, PlayerActionKind};
 use super::format::FormatConfig;
 use super::identifiers::{CardId, ObjectId, TrackedSetId};
@@ -1037,6 +1037,8 @@ impl PublicStateDirty {
 #[serde(tag = "type")]
 pub enum TargetSelectionConstraint {
     DifferentTargetPlayers,
+    /// CR 115.1 + CR 601.2c: Object targets must be controlled by different players.
+    DifferentObjectControllers,
 }
 
 /// CR 508.1d + CR 509.1c: Which combat step a `WaitingFor::CombatTaxPayment` belongs to.
@@ -1481,7 +1483,11 @@ pub enum WaitingFor {
     },
     /// CR 701.20e: Waiting for the player to choose which looked-at cards to keep.
     DigChoice {
+        /// Player who looks at the cards and makes any selection.
         player: PlayerId,
+        /// Player whose library the cards came from.
+        #[serde(default)]
+        library_owner: PlayerId,
         cards: Vec<ObjectId>,
         keep_count: usize,
         /// True = select 0..=keep_count ("up to N"), false = exactly keep_count.
@@ -2098,6 +2104,24 @@ pub enum WaitingFor {
         /// Pre-filtered eligible permanents on the battlefield.
         permanents: Vec<ObjectId>,
         /// The pending cast to resume after the return is complete.
+        pending_cast: Box<PendingCast>,
+    },
+    /// CR 118.12a: Player must choose which branch of a disjunctive activation cost
+    /// (`AbilityCost::OneOf`) to pay.
+    ActivationCostOneOfChoice {
+        player: PlayerId,
+        costs: Vec<AbilityCost>,
+        pending_cast: Box<PendingCast>,
+    },
+    /// CR 118.3 / CR 122.1 / CR 601.2b: Player must choose a permanent to
+    /// remove counters from as a cost.
+    RemoveCounterForCost {
+        player: PlayerId,
+        count: u32,
+        counter_type: CounterMatch,
+        /// Pre-filtered eligible permanents on the battlefield.
+        permanents: Vec<ObjectId>,
+        /// The pending cast or activated ability to resume after the counter is removed.
         pending_cast: Box<PendingCast>,
     },
     /// Blight N — player must choose one creature to put N -1/-1 counters on as cost.
@@ -2751,6 +2775,8 @@ impl WaitingFor {
             | WaitingFor::DiscardForCost { player, .. }
             | WaitingFor::SacrificeForCost { player, .. }
             | WaitingFor::ReturnToHandForCost { player, .. }
+            | WaitingFor::ActivationCostOneOfChoice { player, .. }
+            | WaitingFor::RemoveCounterForCost { player, .. }
             | WaitingFor::BlightChoice { player, .. }
             | WaitingFor::TapCreaturesForSpellCost { player, .. }
             | WaitingFor::BeholdForCost { player, .. }
@@ -2860,6 +2886,8 @@ impl WaitingFor {
             | WaitingFor::DiscardForCost { pending_cast, .. }
             | WaitingFor::SacrificeForCost { pending_cast, .. }
             | WaitingFor::ReturnToHandForCost { pending_cast, .. }
+            | WaitingFor::ActivationCostOneOfChoice { pending_cast, .. }
+            | WaitingFor::RemoveCounterForCost { pending_cast, .. }
             | WaitingFor::BlightChoice { pending_cast, .. }
             | WaitingFor::TapCreaturesForSpellCost { pending_cast, .. }
             | WaitingFor::BeholdForCost { pending_cast, .. }
@@ -4897,6 +4925,7 @@ mod tests {
         }));
         variants.push(Box::new(WaitingFor::DigChoice {
             player: PlayerId(0),
+            library_owner: PlayerId(0),
             cards: vec![ObjectId(1)],
             keep_count: 1,
             up_to: false,

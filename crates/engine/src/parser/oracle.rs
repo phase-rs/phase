@@ -2732,6 +2732,16 @@ pub(crate) fn parse_oracle_ir(
                 result.triggers.extend(triggers);
                 continue;
             }
+            // Try as keyword — the ability-word prefix ("Void Shields —") was
+            // stripped, so the remainder may be a keyword line that Priority 1b
+            // missed because it ran on the unprefixed original line.
+            if let Some(kw) = parse_keyword_from_oracle(&effect_lower) {
+                if !matches!(kw, Keyword::Unknown(_)) {
+                    result.extracted_keywords.push(kw);
+                    i += 1;
+                    continue;
+                }
+            }
             // Try as static
             if is_static_pattern(&effect_lower) {
                 let effect_static = normalize_self_refs_for_static(&effect_text, card_name);
@@ -5196,6 +5206,7 @@ mod tests {
             filter,
             rest_destination,
             reveal,
+            ..
         } = &*effect.effect
         else {
             panic!("expected Dig payload, got {:?}", effect.effect);
@@ -6473,6 +6484,36 @@ mod tests {
         assert!(matches!(
             &r.extracted_keywords[0],
             Keyword::Protection(ProtectionTarget::Multicolored)
+        ));
+    }
+
+    #[test]
+    fn extracts_keyword_after_ability_word_prefix() {
+        use crate::types::ability::{Comparator, FilterProp, QuantityExpr, TargetFilter};
+        use crate::types::keywords::ProtectionTarget;
+
+        let r = parse_with_keyword_names(
+            "Void Shields — Protection from mana value 3 or less",
+            "Reaver Titan",
+            &["protection"],
+            &["Artifact", "Creature"],
+            &["Vehicle"],
+        );
+        assert_eq!(r.extracted_keywords.len(), 1);
+        let Keyword::Protection(ProtectionTarget::Filter(TargetFilter::Typed(tf))) =
+            &r.extracted_keywords[0]
+        else {
+            panic!(
+                "expected filter-based protection, got {:?}",
+                r.extracted_keywords
+            );
+        };
+        assert!(matches!(
+            tf.properties.as_slice(),
+            [FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 3 },
+            }]
         ));
     }
 
@@ -7777,18 +7818,31 @@ mod tests {
     fn for_each_prefix_creates_token() {
         // "for each opponent, create a 2/2 black Zombie creature token"
         use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::{QuantityExpr, QuantityRef};
         let def = parse_effect_chain(
             "for each opponent, create a 2/2 black Zombie creature token",
             crate::types::ability::AbilityKind::Spell,
         );
+        // CR 111.1 + CR 616.1: a bare single-clause "for each X, create a token"
+        // folds the iteration into the token's `count` (one batched CreateToken
+        // event), so it must NOT carry a repeat loop. See
+        // `try_fold_token_repeat_into_count`.
         assert!(
-            def.repeat_for.is_some(),
-            "repeat_for should be set for 'for each opponent'"
+            def.repeat_for.is_none(),
+            "bare for-each token must fold into count, not loop: {:?}",
+            def.repeat_for
         );
+        let Effect::Token { count, .. } = &*def.effect else {
+            panic!("inner effect should be Token, got {:?}", def.effect);
+        };
         assert!(
-            matches!(*def.effect, Effect::Token { .. }),
-            "inner effect should be Token, got {:?}",
-            def.effect,
+            matches!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::PlayerCount { .. }
+                }
+            ),
+            "count should carry the per-opponent quantity, got {count:?}"
         );
     }
 
@@ -10984,8 +11038,24 @@ mod tests {
         // keep_count — pure peek). The parent target is the player whose
         // library we are looking at.
         match &*ability.effect {
-            Effect::Dig { count, reveal, .. } => {
+            Effect::Dig {
+                count,
+                keep_count,
+                player,
+                reveal,
+                ..
+            } => {
                 assert_eq!(count, &QuantityExpr::Fixed { value: 5 }, "look at top 5");
+                assert_eq!(
+                    player,
+                    &TargetFilter::Player,
+                    "target player's library should surface a player target"
+                );
+                assert_eq!(
+                    keep_count,
+                    &Some(0),
+                    "bare look-at instruction should be a pure peek"
+                );
                 assert!(!reveal, "look at (private), not reveal (public)");
             }
             other => panic!(
@@ -11044,6 +11114,7 @@ mod tests {
                 filter,
                 rest_destination,
                 reveal,
+                ..
             } => {
                 assert_eq!(
                     count,
@@ -13658,6 +13729,70 @@ mod pipeline_snapshot_tests {
                 }
                 ref other => panic!("unexpected payoff trigger mode: {:?}", other),
             }
+        }
+    }
+
+    /// CR 608.2c: Compound "destroy X and up to one other target Y" must parse
+    /// both halves as Destroy effects with the verb carried forward to the
+    /// "up to" sub-clause. Cards: Relic Crush, Sword of Sinew and Steel.
+    #[test]
+    fn pipeline_relic_crush_compound_destroy_up_to() {
+        use crate::types::ability::{FilterProp, MultiTargetSpec, QuantityExpr, TargetFilter};
+        let result = pipeline_parse(
+            "Destroy target artifact or enchantment and up to one other target artifact or enchantment.",
+            "Relic Crush",
+            &["Sorcery"],
+            &[],
+        );
+        assert_eq!(
+            result.abilities.len(),
+            1,
+            "expected one spell ability, got {:?}",
+            result.abilities,
+        );
+        let ab = &result.abilities[0];
+        assert!(
+            matches!(*ab.effect, Effect::Destroy { .. }),
+            "primary effect must be Destroy, got {:?}",
+            ab.effect,
+        );
+        let sub = ab.sub_ability.as_deref().expect("must have sub_ability");
+        assert!(
+            matches!(*sub.effect, Effect::Destroy { .. }),
+            "sub-effect must be Destroy, got {:?}",
+            sub.effect,
+        );
+        // CR 115.6: "up to one" cardinality must be preserved on the sub-ability.
+        assert_eq!(
+            sub.multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
+            "sub-ability must carry up-to-one multi_target",
+        );
+        // CR 608.2c: "other" must appear as FilterProp::Another in the sub-effect target.
+        match sub.effect.as_ref() {
+            Effect::Destroy { target, .. } => {
+                // Target may be Typed or Or { filters: [Typed, Typed] } for
+                // "artifact or enchantment".
+                let typed_filters: Vec<_> = match target {
+                    TargetFilter::Typed(tf) => vec![tf],
+                    TargetFilter::Or { filters } => filters
+                        .iter()
+                        .map(|f| match f {
+                            TargetFilter::Typed(tf) => tf,
+                            other => panic!("expected Typed in Or, got {:?}", other),
+                        })
+                        .collect(),
+                    other => panic!("expected Typed or Or target, got {:?}", other),
+                };
+                assert!(
+                    typed_filters
+                        .iter()
+                        .all(|tf| tf.properties.contains(&FilterProp::Another)),
+                    "all sub-clause target filters must have Another property, got {:?}",
+                    typed_filters,
+                );
+            }
+            other => panic!("expected Destroy, got {:?}", other),
         }
     }
 }

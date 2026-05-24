@@ -1717,6 +1717,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             filter,
             rest_destination,
             reveal,
+            ..
         } => {
             d.push(("count".into(), fmt_qty(count)));
             if let Some(dest) = destination {
@@ -1800,6 +1801,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             target,
             card_filter,
             count,
+            random,
             ..
         } => {
             d.push(("player".into(), fmt_target(target)));
@@ -1808,6 +1810,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             if let Some(c) = count {
                 d.push(("count".into(), fmt_quantity(c)));
+            }
+            if *random {
+                d.push(("selection".into(), "random".into()));
             }
         }
         Effect::RevealFromHand { filter, on_decline } => {
@@ -2064,7 +2069,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Bolster { count } => {
             d.push(("counters".into(), fmt_quantity(count)));
         }
-        Effect::Goad { target } => {
+        Effect::Goad { target } | Effect::GoadAll { target } => {
             d.push(("target".into(), fmt_target(target)));
         }
         Effect::Detain { target } => {
@@ -6201,10 +6206,15 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
 
         // Also check if this line is covered by keywords, casting restrictions, or
         // other non-ability structured data
+        let after_ability_word = lower
+            .find(" \u{2014} ")
+            .map(|pos| lower[pos + 4..].trim_start());
         let covered_by_keyword = face.keywords.iter().any(|k| {
             let kw_name = format!("{k:?}").to_lowercase();
             lower.starts_with(&kw_name)
-        }) || is_keyword_line(&lower);
+                || after_ability_word.is_some_and(|aw| aw.starts_with(&kw_name))
+        }) || is_keyword_line(&lower)
+            || after_ability_word.is_some_and(is_keyword_line);
         let covered_by_casting = !face.casting_restrictions.is_empty()
             && (lower.starts_with("cast this spell only ")
                 || lower.starts_with("you can't cast ")

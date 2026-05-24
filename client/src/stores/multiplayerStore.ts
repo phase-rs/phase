@@ -431,7 +431,17 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
 
       setServerInfo: (info) => set({ serverInfo: info }),
       setDisplayName: (name) => set({ displayName: name }),
-      setServerAddress: (address) => set({ serverAddress: address }),
+      setServerAddress: (address) => {
+        // Switching servers invalidates the live subscription socket: it's
+        // still connected to the previous region and would keep streaming
+        // that lobby's games and PlayerCount. Tear it down so the next
+        // `ensureSubscriptionSocket` dials the new address. No-op when the
+        // address is unchanged (re-selecting the current server).
+        if (address !== get().serverAddress) {
+          get().closeSubscriptionSocket();
+        }
+        set({ serverAddress: address });
+      },
       setConnectionStatus: (status) => set({ connectionStatus: status }),
       setActivePlayerId: (id) => set({ activePlayerId: id }),
       setOpponentDisplayName: (name) => {

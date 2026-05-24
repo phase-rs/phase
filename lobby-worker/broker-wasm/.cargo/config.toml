@@ -1,0 +1,7 @@
+# Selects getrandom's JS-crypto backend for wasm32. The Cloudflare Worker
+# runtime exposes `globalThis.crypto`, so getrandom's `wasm_js` backend works at
+# runtime; this cfg (plus the `wasm_js` feature in Cargo.toml) is what picks it
+# at compile time. Read only when cargo is invoked with this dir in its config
+# search path (i.e. build from within lobby-worker/broker-wasm/).
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']

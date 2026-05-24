@@ -790,6 +790,7 @@ pub(super) fn handle_resolution_choice(
         (
             WaitingFor::DigChoice {
                 player,
+                library_owner,
                 cards,
                 keep_count,
                 up_to,
@@ -847,7 +848,7 @@ pub(super) fn handle_resolution_choice(
                     let player_state = state
                         .players
                         .iter_mut()
-                        .find(|candidate| candidate.id == player)
+                        .find(|candidate| candidate.id == library_owner)
                         .expect("player exists");
                     player_state.library.retain(|id| !cards.contains(id));
                     for (index, &card_id) in kept.iter().enumerate() {
