@@ -17,7 +17,7 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::{multispace0, multispace1};
-use nom::combinator::{eof, map, opt, rest, value};
+use nom::combinator::{all_consuming, eof, map, opt, rest, value};
 use nom::multi::many1;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -6470,7 +6470,7 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     // lacks a verb. Prepend the primary verb so it becomes "destroy ~" — parsed
     // as Destroy { target: SelfRef }. Handles Loyal Sentry, etc.
     if matches!(sub_clause.effect, Effect::Unimplemented { .. })
-        && tag::<_, _, OracleError<'_>>("~")
+        && all_consuming(tag::<_, _, OracleError<'_>>("~"))
             .parse(sub_lower.as_str())
             .is_ok()
     {
