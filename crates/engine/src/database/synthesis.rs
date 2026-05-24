@@ -371,9 +371,10 @@ pub fn synthesize_mobilize(face: &mut CardFace) {
 ///   "When this Equipment enters, create a <P/T> <color> <subtypes>
 ///    creature token, then attach this Equipment to it."
 ///
-/// Currently used by Job select (CR 702.182a — 1/1 colorless Hero) and
-/// Living weapon (CR 702.92a — 0/0 black Phyrexian Germ). Future keywords
-/// with the same shape can register here without copying the skeleton.
+/// Currently used by Job select (CR 702.182a — 1/1 colorless Hero), Living
+/// weapon (CR 702.92a — 0/0 black Phyrexian Germ), and For Mirrodin!
+/// (CR 702.163a — 2/2 red Rebel). Future keywords with the same shape can
+/// register here without copying the skeleton.
 ///
 /// The helper prepends "Creature" to the subtype list internally so callers
 /// only pass the actual subtypes (`["Hero"]`, `["Phyrexian", "Germ"]`). The
