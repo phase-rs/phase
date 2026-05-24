@@ -10269,7 +10269,47 @@ fn parse_self_subject_is_color_cda(
             .any(|phrase| matches_subject(phrase));
 
     if !is_explicit_self {
-        return None;
+        let (_, subject_words) =
+            separated_list1(space1::<_, OracleError<'_>>, alpha1::<_, OracleError<'_>>)
+                .parse(subject_lower)
+                .ok()?;
+
+        let has_nonself_subject_word = subject_words.iter().any(|word| {
+            matches!(
+                *word,
+                "all"
+                    | "each"
+                    | "enchanted"
+                    | "equipped"
+                    | "target"
+                    | "other"
+                    | "creature"
+                    | "creatures"
+                    | "permanent"
+                    | "permanents"
+                    | "land"
+                    | "lands"
+                    | "artifact"
+                    | "artifacts"
+                    | "enchantment"
+                    | "enchantments"
+                    | "planeswalker"
+                    | "planeswalkers"
+                    | "battle"
+                    | "battles"
+                    | "player"
+                    | "players"
+                    | "opponent"
+                    | "opponents"
+                    | "spells"
+                    | "cards"
+                    | "tokens"
+            )
+        });
+
+        if has_nonself_subject_word {
+            return None;
+        }
     }
 
     let colors = parse_color_predicate(predicate_lower)?;
