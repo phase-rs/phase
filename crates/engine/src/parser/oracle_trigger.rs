@@ -5196,7 +5196,29 @@ fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefi
         def.mode = TriggerMode::CrankContraption;
         return Some((TriggerMode::CrankContraption, def));
     }
-
+    // CR 706.2: "Whenever you roll {one or more dice | a die}" — die-roll triggers.
+    // Shared prefix: whenever/when + you + roll; axis: batch (RolledDie) vs single (RolledDieOnce).
+    if let Ok((_, (_, _, _, mode))) = (
+        alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when "))),
+        tag("you "),
+        tag("roll "),
+        alt((
+            value(
+                TriggerMode::RolledDie,
+                tag::<_, _, OracleError<'_>>("one or more dice"),
+            ),
+            value(TriggerMode::RolledDieOnce, tag("a die")),
+        )),
+    )
+        .parse(lower)
+    {
+        def.valid_target = Some(TargetFilter::Controller);
+        if mode == TriggerMode::RolledDie {
+            def.batched = true;
+        }
+        def.mode = mode.clone();
+        return Some((mode, def));
+    }
     None
 }
 
@@ -13972,6 +13994,26 @@ mod tests {
             "Contraption",
         );
         assert_eq!(def.mode, TriggerMode::CrankContraption);
+    }
+
+    #[test]
+    fn trigger_rolled_die_batch() {
+        let def = parse_trigger_line(
+            "Whenever you roll one or more dice, put a +1/+1 counter on ~.",
+            "Vrondiss, Rage of Ancients",
+        );
+        assert_eq!(def.mode, TriggerMode::RolledDie);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_rolled_die_single() {
+        let def = parse_trigger_line(
+            "Whenever you roll a die, put a +1/+1 counter on ~.",
+            "The Space Family Goblinson",
+        );
+        assert_eq!(def.mode, TriggerMode::RolledDieOnce);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
     }
 
     #[test]
