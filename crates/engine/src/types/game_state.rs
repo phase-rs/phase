@@ -1013,6 +1013,15 @@ pub struct PendingManaAbility {
     /// resolve in inline mana ability resolution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_paid_object: Option<CostPaidObjectSnapshot>,
+    /// CR 605.3a: Other identical, choice-free mana sources the controller
+    /// could activate for the same `SingleColor` prompt (their other
+    /// Treasures, etc.). Computed only when the prompt is `SingleColor` and the
+    /// cost resolves with no further player choice. `GameAction::ChooseManaColor`
+    /// may bulk-activate up to this many additional sources with the chosen
+    /// color. The frontend reads `.len()` to cap its quantity stepper. Empty for
+    /// every non-batchable activation (the default).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub batch_siblings: Vec<ObjectId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5225,6 +5234,7 @@ mod tests {
                 chosen_exiled_battlefield: Vec::new(),
                 chosen_sacrificed_battlefield: Vec::new(),
                 cost_paid_object: None,
+                batch_siblings: Vec::new(),
             }),
         };
         assert!(!tap_mana.has_pending_cast());

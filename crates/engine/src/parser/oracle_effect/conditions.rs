@@ -9,6 +9,7 @@ use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
+use super::super::oracle_nom::condition::inject_controller_you;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity::{canonicalize_quantity_ref, parse_cda_quantity};
@@ -1355,6 +1356,10 @@ pub(super) fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
         return Some(condition);
     }
 
+    if let Some(condition) = parse_controller_controlled_as_cast_condition_text(text) {
+        return Some(condition);
+    }
+
     if let Some(condition) = parse_cast_during_phase_condition_text(text) {
         return Some(condition);
     }
@@ -1429,6 +1434,33 @@ fn parse_urza_land_type(input: &str) -> super::super::oracle_nom::error::OracleR
         value("Tower".to_string(), tag("tower")),
     ))
     .parse(input)
+}
+
+fn parse_controller_controlled_as_cast_condition_text(text: &str) -> Option<AbilityCondition> {
+    let lower = text.to_ascii_lowercase();
+    nom_parse_lower(&lower, |input| {
+        all_consuming(parse_controller_controlled_as_cast_condition).parse(input)
+    })
+}
+
+fn parse_controller_controlled_as_cast_condition(
+    input: &str,
+) -> OracleResult<'_, AbilityCondition> {
+    let (rest, _) = tag("you controlled ").parse(input)?;
+    let (filter, remainder) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let (rest, _) = tag("as you cast this spell").parse(remainder.trim_start())?;
+    Ok((
+        rest,
+        AbilityCondition::ControllerControlledMatchingAsCast {
+            filter: inject_controller_you(filter),
+        },
+    ))
 }
 
 fn parse_cast_during_phase_condition_text(text: &str) -> Option<AbilityCondition> {

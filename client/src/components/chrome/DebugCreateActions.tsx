@@ -644,6 +644,41 @@ function CustomTokenForm({ onDispatch }: Props) {
   );
 }
 
+// Copy an existing permanent via the engine's real CR 707.2 copy-token
+// resolver (`Effect::CopyTokenOf`). The engine already owns every nuance —
+// copiable-value snapshotting, legendary-rule SBAs, ETB triggers — so this
+// form is a thin source+owner picker over the `CreateTokenCopy` debug action.
+function CopyPermanentForm({ onDispatch }: Props) {
+  const [sourceId, setSourceId] = useState<ObjectId | null>(null);
+  const [owner, setOwner] = useState<PlayerId>(0);
+
+  return (
+    <>
+      <ObjectSelect
+        value={sourceId}
+        onChange={setSourceId}
+        // Copies are made of permanents; restrict the picker to the battlefield
+        // so the list isn't cluttered with hand/library/graveyard objects.
+        filter={(obj) => obj.zone === "Battlefield"}
+        label="Copy Of"
+        placeholder="Pick a permanent…"
+      />
+      <FieldRow label="Owner">
+        <PlayerSelect value={owner} onChange={setOwner} />
+      </FieldRow>
+      <SubmitButton
+        onClick={() => {
+          if (sourceId == null) return;
+          onDispatch({ type: "CreateTokenCopy", data: { source_id: sourceId, owner } });
+        }}
+        disabled={sourceId == null}
+      >
+        Create Copy
+      </SubmitButton>
+    </>
+  );
+}
+
 export function DebugCreateActions({ onDispatch }: Props) {
   const { expanded, toggle } = useAccordion();
 
@@ -657,6 +692,9 @@ export function DebugCreateActions({ onDispatch }: Props) {
       </AccordionItem>
       <AccordionItem label="Create Token (Custom)" expanded={expanded === "token-custom"} onToggle={() => toggle("token-custom")}>
         <CustomTokenForm onDispatch={onDispatch} />
+      </AccordionItem>
+      <AccordionItem label="Copy Permanent" expanded={expanded === "copy"} onToggle={() => toggle("copy")}>
+        <CopyPermanentForm onDispatch={onDispatch} />
       </AccordionItem>
     </div>
   );

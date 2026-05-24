@@ -625,6 +625,7 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                         candidate(
                             GameAction::ChooseManaColor {
                                 choice: ManaChoice::SingleColor(color),
+                                count: 1,
                             },
                             TacticalClass::Mana,
                             Some(*player),
@@ -637,6 +638,7 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                         candidate(
                             GameAction::ChooseManaColor {
                                 choice: ManaChoice::Combination(combo.clone()),
+                                count: 1,
                             },
                             TacticalClass::Mana,
                             Some(*player),
@@ -652,6 +654,7 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                             candidate(
                                 GameAction::ChooseManaColor {
                                     choice: ManaChoice::Combination(combo),
+                                    count: 1,
                                 },
                                 TacticalClass::Mana,
                                 Some(*player),

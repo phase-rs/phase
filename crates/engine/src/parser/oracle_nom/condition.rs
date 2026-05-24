@@ -2127,7 +2127,7 @@ fn parse_filter_have_total_property(input: &str) -> OracleResult<'_, StaticCondi
 }
 
 /// Inject `ControllerRef::You` into a TargetFilter produced by `parse_type_phrase`.
-fn inject_controller_you(filter: TargetFilter) -> TargetFilter {
+pub(crate) fn inject_controller_you(filter: TargetFilter) -> TargetFilter {
     match filter {
         TargetFilter::Typed(mut tf) => {
             tf.controller = Some(ControllerRef::You);
@@ -5543,6 +5543,38 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn test_control_count_ge_fixed_land_subtype() {
+        let (rest, c) = parse_inner_condition("you control five or more towns").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(typed),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 5 },
+            } => {
+                assert!(
+                    typed
+                        .type_filters
+                        .contains(&TypeFilter::Subtype("Town".to_string())),
+                    "expected Town subtype filter, got {:?}",
+                    typed.type_filters
+                );
+                assert_eq!(typed.controller, Some(ControllerRef::You));
+                assert!(typed.properties.contains(&FilterProp::InZone {
+                    zone: Zone::Battlefield
+                }));
+            }
+            other => panic!("expected ObjectCount Town GE 5, got {other:?}"),
+        }
     }
 
     #[test]
