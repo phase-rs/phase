@@ -2087,7 +2087,7 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
             maximum: *maximum,
         }),
 
-        // CR 614.12c + CR 607.1b: Anchor-word labels bridge directly between
+        // CR 614.12c + CR 607.2d: Anchor-word labels bridge directly between
         // static and trigger sides — both query the same persisted
         // `ChosenAttribute::Label` on the source permanent. Lets a single
         // `parse_inner_condition` invocation flow into either an

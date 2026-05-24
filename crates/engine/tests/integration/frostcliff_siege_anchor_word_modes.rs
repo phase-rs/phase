@@ -38,7 +38,7 @@
 //!   - CR 510.1b: A creature deals combat damage equal to its power.
 //!   - CR 121.1: A draw moves the top card from the library to the player's
 //!     hand.
-//!   - CR 613.1c (P/T modification) + CR 613.1f (keyword grant): The Temur
+//!   - CR 613.4c (P/T modification) + CR 613.1f (keyword grant): The Temur
 //!     static contributes `AddPower(+1)` in layer 7c and `AddKeyword(Trample)`
 //!     / `AddKeyword(Haste)` in layer 6.
 //!

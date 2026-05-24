@@ -6,18 +6,22 @@ use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, ModalChoice, ModalSelectionCondition,
-    ModalSelectionConstraint, PlayerFilter,
+    AbilityDefinition, AbilityKind, ChoiceType, Effect, ModalChoice, ModalSelectionCondition,
+    ModalSelectionConstraint, PlayerFilter, ReplacementDefinition, StaticCondition, TargetFilter,
+    TriggerCondition,
 };
+use crate::types::replacements::ReplacementEvent;
 
 use super::oracle::{find_activated_colon, strip_activated_constraints};
-use super::oracle_effect::parse_effect_chain_with_context;
+use super::oracle_cost::parse_oracle_cost;
+use super::oracle_effect::{parse_effect_chain_with_context, try_parse_named_choice};
 use super::oracle_ir::context::ParseContext;
 use super::oracle_nom::condition as nom_condition;
 use super::oracle_nom::primitives::{self as nom_primitives, scan_preceded};
+use super::oracle_static::parse_static_line;
+use super::oracle_trigger::parse_trigger_lines;
 use super::oracle_util::{parse_mana_symbols, strip_reminder_text};
 use crate::parser::oracle_ir::ast::{ModalHeaderAst, ModeAst, OracleBlockAst};
-use crate::types::ability::TargetFilter;
 
 pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(OracleBlockAst, usize)> {
     let line = strip_reminder_text(lines.get(start)?.trim());
@@ -220,8 +224,6 @@ fn strip_mode_separator(text: &str) -> &str {
 /// the choose clause doesn't reduce to a labeled-option list (per
 /// `try_parse_labeled_choice`'s 1-2-word capitalisation/structure gates).
 pub(crate) fn try_parse_as_enters_anchor_labels(lower: &str) -> Option<Vec<String>> {
-    use crate::parser::oracle_effect::try_parse_named_choice;
-    use crate::types::ability::ChoiceType;
     type E<'a> = OracleError<'a>;
 
     // "as <self-ref>, enters, choose ..." → strip the framing prefix. The
@@ -573,9 +575,6 @@ pub(crate) fn lower_oracle_block(
     host_self_reference: Option<TargetFilter>,
     result: &mut super::oracle::ParsedAbilities,
 ) {
-    use super::oracle_cost::parse_oracle_cost;
-    use super::oracle_trigger::parse_trigger_lines;
-
     match block {
         OracleBlockAst::ActivatedModal {
             cost_text,
@@ -640,13 +639,13 @@ pub(crate) fn lower_oracle_block(
 ///      between the anchor-word labels and persists the answer as a
 ///      `ChosenAttribute::Label` on the entering permanent.
 ///   2. One `TriggerDefinition` or `StaticDefinition` per linked-ability mode
-///      (CR 607.1b makes each linked ability), each gated on
+///      (CR 607.2d makes each linked ability), each gated on
 ///      `ChosenLabelIs { label }` so the linked ability functions only while
 ///      its anchor word was chosen.
 ///
-/// Falls back to a single `Effect::Unimplemented`-tagged replacement when a
-/// mode body parses to neither a trigger nor a static — preserves the choice
-/// shape for the coverage report instead of silently dropping a mode.
+/// Falls back to a no-op placeholder static with an `Unrecognized` condition
+/// when a mode body parses to neither a trigger nor a static — preserves the
+/// choice shape for the coverage report instead of silently dropping a mode.
 fn lower_as_enters_anchor_word_modal(
     header_text: String,
     labels: Vec<String>,
@@ -654,11 +653,6 @@ fn lower_as_enters_anchor_word_modal(
     card_name: &str,
     result: &mut super::oracle::ParsedAbilities,
 ) {
-    use super::oracle_static::parse_static_line;
-    use super::oracle_trigger::parse_trigger_lines;
-    use crate::types::ability::{ChoiceType, Effect, ReplacementDefinition, StaticCondition};
-    use crate::types::replacements::ReplacementEvent;
-
     // 1. Synthesise the as-enters choose replacement. Mirrors the existing
     //    `parse_as_enters_choose` (oracle_replacement.rs) shape but uses the
     //    parsed labels directly so we don't re-run the labeled-choice
@@ -771,7 +765,6 @@ fn attach_chosen_label_to_trigger(
     trigger: &mut crate::types::ability::TriggerDefinition,
     label: &str,
 ) {
-    use crate::types::ability::TriggerCondition;
     let gate = TriggerCondition::ChosenLabelIs {
         label: label.to_string(),
     };
@@ -793,7 +786,6 @@ fn attach_chosen_label_to_static(
     static_def: &mut crate::types::ability::StaticDefinition,
     label: &str,
 ) {
-    use crate::types::ability::StaticCondition;
     let gate = StaticCondition::ChosenLabelIs {
         label: label.to_string(),
     };
@@ -1376,7 +1368,10 @@ mod tests {
     // ---- Ao, the Dawn Sky (SOC) — modal dies trigger integration ----
 
     use crate::parser::oracle::parse_oracle_text;
-    use crate::types::ability::{Effect, TargetFilter};
+    use crate::types::ability::{
+        ChoiceType, Effect, StaticCondition, TargetFilter, TriggerCondition,
+    };
+    use crate::types::replacements::ReplacementEvent;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
 
@@ -1443,6 +1438,59 @@ mod tests {
                 mode.effect
             );
         }
+    }
+
+    const FROSTCLIFF_SIEGE_ORACLE: &str = "As this enchantment enters, choose Jeskai or Temur.\n\
+• Jeskai — Whenever one or more creatures you control deal combat damage to a player, draw a card.\n\
+• Temur — Creatures you control get +1/+0 and have trample and haste.";
+
+    #[test]
+    fn frostcliff_siege_anchor_word_modal_lowers_choice_and_linked_gates() {
+        // CR 614.12c + CR 607.2d: anchor-word permanents lower to one
+        // as-enters labeled choice and one chosen-label gate on each linked
+        // ability. This is parser-only so it does not depend on generated
+        // card-data.json being present in the checkout.
+        let parsed = parse_oracle_text(FROSTCLIFF_SIEGE_ORACLE, "Frostcliff Siege", &[], &[], &[]);
+
+        assert_eq!(parsed.replacements.len(), 1);
+        let replacement = &parsed.replacements[0];
+        assert_eq!(replacement.event, ReplacementEvent::Moved);
+        assert_eq!(replacement.destination_zone, Some(Zone::Battlefield));
+        let execute = replacement.execute.as_ref().expect("choice execute");
+        match execute.effect.as_ref() {
+            Effect::Choose {
+                choice_type: ChoiceType::Labeled { options },
+                persist,
+            } => {
+                assert!(*persist);
+                assert_eq!(options, &vec!["Jeskai".to_string(), "Temur".to_string()]);
+            }
+            other => panic!("expected persisted labeled choose, got {other:?}"),
+        }
+
+        assert_eq!(parsed.triggers.len(), 1);
+        assert_eq!(
+            parsed.triggers[0].mode,
+            TriggerMode::DamageDoneOnceByController
+        );
+        assert!(matches!(
+            parsed.triggers[0]
+                .execute
+                .as_ref()
+                .map(|ability| ability.effect.as_ref()),
+            Some(Effect::Draw { .. })
+        ));
+        assert!(matches!(
+            parsed.triggers[0].condition.as_ref(),
+            Some(TriggerCondition::ChosenLabelIs { label }) if label == "Jeskai"
+        ));
+
+        assert_eq!(parsed.statics.len(), 1);
+        assert!(matches!(
+            parsed.statics[0].condition.as_ref(),
+            Some(StaticCondition::ChosenLabelIs { label }) if label == "Temur"
+        ));
+        assert_eq!(parsed.statics[0].modifications.len(), 4);
     }
 
     // ---- Final Act (SOC / M3C) — "Choose one or more —" modal spell ----
