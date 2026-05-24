@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::types::ability::{
-    AbilityTag, ControllerRef, DamageKindFilter, EffectKind, OriginConstraint, TargetFilter,
-    TargetRef, TriggerDefinition, TypedFilter,
+    AbilityTag, CoinFlipResult, ControllerRef, DamageKindFilter, EffectKind, OriginConstraint,
+    TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{GameState, StackEntryKind};
@@ -2290,7 +2290,18 @@ pub(super) fn match_flipped_coin(
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::CoinFlipped { player_id, .. } = event {
+    if let GameEvent::CoinFlipped { player_id, won } = event {
+        // CR 705.2: If the trigger specifies a result filter, check it.
+        if let Some(required) = &trigger.coin_flip_result {
+            let event_won = *won;
+            let matches = match required {
+                CoinFlipResult::Won => event_won,
+                CoinFlipResult::Lost => !event_won,
+            };
+            if !matches {
+                return false;
+            }
+        }
         valid_player_matches(trigger, state, *player_id, source_id)
     } else {
         false
