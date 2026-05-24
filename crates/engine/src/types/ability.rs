@@ -5187,6 +5187,15 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
+    /// CR 701.3d: Unattach every matching Equipment from a matched host while
+    /// leaving that Equipment on the battlefield. `attachment` scopes which
+    /// attached objects move; `target` scopes the host object.
+    UnattachAll {
+        #[serde(default = "default_target_filter_any")]
+        attachment: TargetFilter,
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+    },
     /// CR 701.25a: Surveil N — look at the top N cards, then put any number
     /// into the graveyard and the rest on top in any order.
     /// CR 115.1 + CR 601.2c: When `target` is `TargetFilter::Player` (or any
@@ -7017,6 +7026,7 @@ impl Effect {
             | Effect::GainControl { target, .. }
             | Effect::ControlNextTurn { target, .. }
             | Effect::Attach { target, .. }
+            | Effect::UnattachAll { target, .. }
             | Effect::Fight { target, .. }
             | Effect::Bounce { target, .. }
             | Effect::SwitchPT { target, .. }
@@ -7279,6 +7289,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::GainControl { .. } => "GainControl",
         Effect::ControlNextTurn { .. } => "ControlNextTurn",
         Effect::Attach { .. } => "Attach",
+        Effect::UnattachAll { .. } => "UnattachAll",
         Effect::Surveil { .. } => "Surveil",
         Effect::Fight { .. } => "Fight",
         Effect::Bounce { .. } => "Bounce",
@@ -7453,6 +7464,7 @@ pub enum EffectKind {
     ControlNextTurn,
     Attach,
     AttachAll,
+    UnattachAll,
     Surveil,
     Fight,
     Bounce,
@@ -7630,6 +7642,7 @@ impl From<&Effect> for EffectKind {
             Effect::GainControl { .. } => EffectKind::GainControl,
             Effect::ControlNextTurn { .. } => EffectKind::ControlNextTurn,
             Effect::Attach { .. } => EffectKind::Attach,
+            Effect::UnattachAll { .. } => EffectKind::UnattachAll,
             Effect::Surveil { .. } => EffectKind::Surveil,
             Effect::Fight { .. } => EffectKind::Fight,
             Effect::Bounce { .. } => EffectKind::Bounce,

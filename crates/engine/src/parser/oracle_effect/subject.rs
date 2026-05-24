@@ -489,7 +489,17 @@ fn try_parse_can_block_additional(
     let (subject_lower, predicate_lower) =
         nom_primitives::scan_split_at_phrase(&lower, |i| tag("can block ").parse(i))?;
     let subject_text = &text[..subject_lower.len()];
-    let application = parse_subject_application(subject_text.trim(), ctx)?;
+    let application = if subject_text.trim().is_empty() {
+        SubjectApplication {
+            affected: TargetFilter::ParentTarget,
+            target: Some(TargetFilter::ParentTarget),
+            multi_target: None,
+            inherits_parent: true,
+            is_optional: false,
+        }
+    } else {
+        parse_subject_application(subject_text.trim(), ctx)?
+    };
 
     let (_rest, (_, _, _, _, count, duration, _)) = all_consuming((
         tag("can"),
@@ -502,6 +512,11 @@ fn try_parse_can_block_additional(
     ))
     .parse(predicate_lower)
     .ok()?;
+    let duration = if subject_text.trim().is_empty() {
+        duration.or(Some(Duration::UntilEndOfTurn))
+    } else {
+        duration
+    };
     let mode = StaticMode::ExtraBlockers { count };
     let affected = static_affected_for_application(&application);
     Some(ParsedEffectClause {
@@ -1000,8 +1015,21 @@ pub(super) fn parse_subject_application(
             is_optional: false,
         });
     }
-    // CR 608.2k: Bare pronoun "it" — context-dependent
+    // CR 608.2k: Bare pronoun "it" — context-dependent. In trigger context,
+    // `ctx.subject` identifies the triggering subject. In effect-chain context,
+    // `parent_target_available` records that a previous chunk introduced a real
+    // typed object referent. Standalone clause parsing leaves it false, so
+    // "it connives" remains self-referential instead of inventing ParentTarget.
     if lower == "it" {
+        if ctx.subject.is_none() && ctx.parent_target_available {
+            return Some(SubjectApplication {
+                affected: TargetFilter::ParentTarget,
+                target: None,
+                multi_target: None,
+                inherits_parent: true,
+                is_optional: false,
+            });
+        }
         return Some(SubjectApplication {
             affected: resolve_it_pronoun(ctx),
             target: None,

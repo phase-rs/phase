@@ -843,6 +843,7 @@ fn starts_clause_text_lower(s: &str) -> bool {
         value((), tag("conjure ")),
         value((), tag("target ")),
         value((), tag("transform ")),
+        value((), tag("unattach ")),
         value((), tag("untap ")),
         value((), tag("you may ")),
         value((), tag("you ")),
@@ -2269,6 +2270,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::GainControl { .. }
         | Effect::ControlNextTurn { .. }
         | Effect::Attach { .. }
+        | Effect::UnattachAll { .. }
         | Effect::Surveil { .. }
         | Effect::Fight { .. }
         | Effect::Bounce { .. }
