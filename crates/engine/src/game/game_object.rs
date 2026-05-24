@@ -1032,6 +1032,19 @@ impl GameObject {
         })
     }
 
+    /// CR 614.12c + CR 607.2d: Look up the persisted anchor-word label chosen
+    /// as this permanent entered the battlefield (e.g. "Jeskai" / "Temur" on
+    /// Frostcliff Siege, "Khans" / "Dragons" on a Khans of Tarkir Siege).
+    /// Read by `StaticCondition::ChosenLabelIs` and
+    /// `TriggerCondition::ChosenLabelIs` to gate the linked anchor-word
+    /// abilities for the lifetime of the permanent.
+    pub fn chosen_label(&self) -> Option<&str> {
+        self.chosen_attributes.iter().find_map(|a| match a {
+            ChosenAttribute::Label(s) => Some(s.as_str()),
+            _ => None,
+        })
+    }
+
     /// CR 310.8a + CR 310.8e: Return this battle's protector, if any. Derived
     /// from `ChosenAttribute::Player` stored when the Siege's "As ~ enters"
     /// replacement resolved. Non-battle permanents return `None`.

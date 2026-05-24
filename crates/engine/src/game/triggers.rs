@@ -2912,6 +2912,15 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::SourceMatchesFilter { filter } => source_id.is_some_and(|id| {
             matches_target_filter(state, id, filter, &FilterContext::from_source(state, id))
         }),
+        // CR 614.12c + CR 607.2d + CR 603.4: True iff the trigger source's
+        // persisted `ChosenAttribute::Label` (set when the anchor-word
+        // permanent entered the battlefield) matches the linked anchor word.
+        // Case-insensitive to match the persistence canonicalisation used by
+        // `StaticCondition::ChosenLabelIs`.
+        TriggerCondition::ChosenLabelIs { label } => source_id
+            .and_then(|id| state.objects.get(&id))
+            .and_then(|obj| obj.chosen_label())
+            .is_some_and(|chosen| chosen.eq_ignore_ascii_case(label)),
         // "if you control a [type]" — check for presence of matching permanent.
         TriggerCondition::ControlsType { filter } => {
             let ctx = FilterContext::from_source(state, source_id.unwrap_or(ObjectId(0)));
