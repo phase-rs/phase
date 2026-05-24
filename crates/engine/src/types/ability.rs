@@ -6,6 +6,7 @@ use serde::ser::SerializeStructVariant;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
+use super::card::PrintedCardRef;
 use super::card_type::{CardType, CoreType, SubtypeSet, Supertype};
 use super::counter::{CounterMatch, CounterType};
 use super::events::BendingType;
@@ -8719,6 +8720,10 @@ pub enum AbilityCondition {
     /// Queen on_decline), wrap with `AbilityCondition::Not`.
     /// `filter` MUST have its `ControllerRef::You` pre-bound by the parser.
     ControllerControlsMatching { filter: TargetFilter },
+    /// CR 601.2 + CR 608.2c: "if you controlled a [filter] as you cast this spell" —
+    /// gates on a casting-time snapshot in `SpellContext`, not the resolution-time
+    /// battlefield. The parser pre-binds `ControllerRef::You` and battlefield scope.
+    ControllerControlledMatchingAsCast { filter: TargetFilter },
     /// CR 608.2c: "If it's your turn" — gates sub_ability on whether the active player
     /// is the ability's controller. For "if it's not your turn", wrap with
     /// `AbilityCondition::Not`.
@@ -8919,6 +8924,12 @@ pub struct SpellContext {
     /// conditions such as "if you cast this spell during your main phase".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_phase: Option<Phase>,
+    /// CR 601.2 + CR 608.2c: Presence filters the controller matched as the
+    /// spell was cast. Used by effects that say "if you controlled a [filter]
+    /// as you cast this spell"; the resolver checks this snapshot instead of
+    /// the resolution-time battlefield.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub controller_controlled_as_cast: Vec<TargetFilter>,
 }
 
 impl SpellContext {
@@ -9571,6 +9582,10 @@ pub struct TriggerDefinition {
     /// CR 603.2c: "One or more" triggers fire once per batch of simultaneous events.
     #[serde(default)]
     pub batched: bool,
+    /// CR 706.2: Optional sides filter for die-roll triggers such as
+    /// "Whenever you roll a d20". `None` accepts any die.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub die_sides: Option<u8>,
     /// CR 700.14: Expend threshold — fires when cumulative mana spent on spells crosses N.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expend_threshold: Option<u32>,
@@ -9618,6 +9633,7 @@ impl TriggerDefinition {
             counter_filter: None,
             unless_pay: None,
             batched: false,
+            die_sides: None,
             expend_threshold: None,
             attack_target_filter: None,
             player_actions: None,
@@ -10381,6 +10397,14 @@ pub struct CopiableValues {
 pub enum ContinuousModification {
     CopyValues {
         values: Box<CopiableValues>,
+        /// Display-identity pointer of the copy source (oracle id + displayed
+        /// face name). NOT a CR 707.2 copiable characteristic — it carries no
+        /// rules weight and is deliberately kept off `CopiableValues`. It rides
+        /// on the modification so the copy's art is applied (and reverts) through
+        /// the same layer pass as the copied characteristics. `None` when the
+        /// source is a true token with no printed identity.
+        #[serde(default)]
+        printed_ref: Option<PrintedCardRef>,
     },
     /// CR 707.9 + CR 707.2: Override the copy's name after `CopyValues` applies.
     /// Used by "enter as a copy, except its name is X" (e.g., Superior Spider-Man's
@@ -11585,6 +11609,7 @@ mod tests {
             counter_filter: None,
             unless_pay: None,
             batched: false,
+            die_sides: None,
             expend_threshold: None,
             attack_target_filter: None,
             player_actions: None,

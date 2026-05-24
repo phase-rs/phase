@@ -456,6 +456,7 @@ fn hide_card(state: &mut GameState, obj_id: ObjectId) {
         obj.static_definitions.clear();
         obj.casting_permissions.clear();
         obj.printed_ref = None;
+        obj.base_printed_ref = None;
         obj.token_image_ref = None;
         obj.source_related_token_ids.clear();
         obj.foretold = false;

@@ -1017,6 +1017,22 @@ pub(super) fn player_can_spend_as_any_color_for_optional_spell(
             })
 }
 
+pub(super) fn player_can_spend_as_any_color_for_payment(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ctx: Option<&PaymentContext<'_>>,
+) -> bool {
+    if matches!(
+        ctx,
+        Some(PaymentContext::Effect | PaymentContext::Activation { .. })
+    ) {
+        super::static_abilities::player_can_spend_as_any_color(state, player)
+    } else {
+        player_can_spend_as_any_color_for_spell(state, player, source_id)
+    }
+}
+
 /// CR 601.2a + CR 611.2a: Check if an object has an alt-cost cast-from-exile
 /// permission that authorizes this player and satisfies offer-time constraints.
 fn has_alt_cost_permission_for(
@@ -5390,7 +5406,7 @@ fn can_pay_mana_cost_after_auto_tap_with_context(
     // castable while the real cast failed "Cannot pay mana cost").
     super::triggers::resolve_tap_mana_triggers_inline(&mut simulated, &mut tap_events, 0);
 
-    let any_color = player_can_spend_as_any_color_for_spell(&simulated, player, source_id);
+    let any_color = player_can_spend_as_any_color_for_payment(&simulated, player, source_id, ctx);
     // CR 107.4f + CR 118.1 + CR 118.3 + CR 119.8: Bundle the payer's
     // payment-time permissions (`any_color`, `max_life`, `life_colors`) so
     // K'rrik-style life-for-{B} grants are visible to the affordability check.
@@ -5536,6 +5552,17 @@ fn requires_untapped(cost: &AbilityCost) -> bool {
         AbilityCost::Tap => true,
         AbilityCost::Composite { costs } => costs.iter().any(requires_untapped),
         _ => false,
+    }
+}
+
+pub(super) fn ability_mana_payment_excluded_sources(
+    cost: &AbilityCost,
+    source_id: ObjectId,
+) -> HashSet<ObjectId> {
+    if requires_untapped(cost) {
+        HashSet::from([source_id])
+    } else {
+        HashSet::new()
     }
 }
 
@@ -5727,6 +5754,26 @@ pub(super) fn pay_ability_mana_cost_excluding(
     events: &mut Vec<GameEvent>,
     excluded_sources: &HashSet<ObjectId>,
 ) -> Result<(), EngineError> {
+    pay_ability_mana_cost_with_choices_excluding(
+        state,
+        player,
+        source_id,
+        cost,
+        None,
+        events,
+        excluded_sources,
+    )
+}
+
+pub(super) fn pay_ability_mana_cost_with_choices_excluding(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+    phyrexian_choices: Option<&[crate::types::game_state::ShardChoice]>,
+    events: &mut Vec<GameEvent>,
+    excluded_sources: &HashSet<ObjectId>,
+) -> Result<(), EngineError> {
     if state.layers_dirty {
         super::layers::evaluate_layers(state);
     }
@@ -5743,7 +5790,7 @@ pub(super) fn pay_ability_mana_cost_excluding(
         source_id,
         cost,
         Some(&activation_ctx),
-        None,
+        phyrexian_choices,
         events,
         excluded_sources,
     )?;
@@ -5889,7 +5936,7 @@ fn auto_tap_and_pay_cost_excluding(
     // (`any_color`, `max_life`, `life_colors`) once for the cast — K'rrik-style
     // life-for-{B} grants flow through the same dry-run + execution helpers.
     let permissions = {
-        let any_color = player_can_spend_as_any_color_for_spell(state, player, source_id);
+        let any_color = player_can_spend_as_any_color_for_payment(state, player, source_id, ctx);
         super::static_abilities::build_cost_permission_context(state, player, any_color)
     };
     {
@@ -6033,6 +6080,18 @@ pub fn pay_ability_cost(
     cost: &AbilityCost,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
+    let excluded_sources = ability_mana_payment_excluded_sources(cost, source_id);
+    pay_ability_cost_inner(state, player, source_id, cost, events, &excluded_sources)
+}
+
+fn pay_ability_cost_inner(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &AbilityCost,
+    events: &mut Vec<GameEvent>,
+    excluded_sources: &HashSet<ObjectId>,
+) -> Result<(), EngineError> {
     match cost {
         AbilityCost::Tap => {
             let obj = state
@@ -6060,11 +6119,29 @@ pub fn pay_ability_cost(
             // CR 106.6: Ability activation — restriction enforcement routes
             // through `allows_activation` (not `allows_spell`) via the
             // activation context built from the source permanent's types.
-            pay_ability_mana_cost(state, player, source_id, cost, events)?;
+            if excluded_sources.is_empty() {
+                pay_ability_mana_cost(state, player, source_id, cost, events)?;
+            } else {
+                pay_ability_mana_cost_excluding(
+                    state,
+                    player,
+                    source_id,
+                    cost,
+                    events,
+                    excluded_sources,
+                )?;
+            }
         }
         AbilityCost::Composite { costs } => {
             for sub_cost in costs {
-                pay_ability_cost(state, player, source_id, sub_cost, events)?;
+                pay_ability_cost_inner(
+                    state,
+                    player,
+                    source_id,
+                    sub_cost,
+                    events,
+                    excluded_sources,
+                )?;
             }
         }
         AbilityCost::PayLife { amount } => {
@@ -8033,6 +8110,24 @@ mod tests {
         }
     }
 
+    fn add_restricted_mana(
+        state: &mut GameState,
+        player: PlayerId,
+        color: ManaType,
+        restrictions: Vec<ManaRestriction>,
+    ) {
+        let player_data = state.players.iter_mut().find(|p| p.id == player).unwrap();
+        player_data.mana_pool.add(ManaUnit {
+            color,
+            source_id: ObjectId(0),
+            snow: false,
+            source_could_produce_two_or_more_colors: false,
+            restrictions,
+            grants: vec![],
+            expiry: None,
+        });
+    }
+
     fn add_activation_only_colorless_source(
         state: &mut GameState,
         card_id: CardId,
@@ -9074,6 +9169,488 @@ mod tests {
             .cost(AbilityCost::Tap),
         );
         obj_id
+    }
+
+    fn colorless_tap_mana_ability() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Tap)
+    }
+
+    fn blue_tap_mana_ability() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![ManaColor::Blue],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Tap)
+    }
+
+    fn colorless_activation_mana_cost() -> ManaCost {
+        ManaCost::Cost {
+            shards: vec![ManaCostShard::Colorless],
+            generic: 0,
+        }
+    }
+
+    fn create_colorless_tap_activated_source(
+        state: &mut GameState,
+        player: PlayerId,
+        cost: AbilityCost,
+        effect: Effect,
+    ) -> ObjectId {
+        let obj_id = create_object(
+            state,
+            CardId(52),
+            player,
+            "Mirrorlake Stand-In".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        Arc::make_mut(&mut obj.abilities).push(colorless_tap_mana_ability());
+        Arc::make_mut(&mut obj.abilities)
+            .push(AbilityDefinition::new(AbilityKind::Activated, effect).cost(cost));
+        obj_id
+    }
+
+    #[test]
+    fn composite_mana_tap_activation_excludes_source_from_auto_tap() {
+        let mut state = setup_game_at_main_phase();
+        let cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: colorless_activation_mana_cost(),
+                },
+                AbilityCost::Tap,
+            ],
+        };
+        let source = create_colorless_tap_activated_source(
+            &mut state,
+            PlayerId(0),
+            cost,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+
+        assert!(!can_activate_ability_now(&state, PlayerId(0), source, 1));
+
+        let mut events = Vec::new();
+        let result = handle_activate_ability(&mut state, PlayerId(0), source, 1, &mut events);
+
+        assert!(result.is_err());
+        assert!(!state.objects[&source].tapped);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn composite_mana_tap_sacrifice_activation_uses_alternate_mana_source() {
+        let mut state = setup_game_at_main_phase();
+        let source_cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: colorless_activation_mana_cost(),
+                },
+                AbilityCost::Tap,
+                AbilityCost::Sacrifice {
+                    target: TargetFilter::SelfRef,
+                    count: 1,
+                },
+            ],
+        };
+        let source = create_colorless_tap_activated_source(
+            &mut state,
+            PlayerId(0),
+            source_cost,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        let alternate = add_brushland_like_land(&mut state, CardId(53), "Colorless Helper", false);
+
+        assert!(can_activate_ability_now(&state, PlayerId(0), source, 1));
+
+        let mut events = Vec::new();
+        let waiting =
+            handle_activate_ability(&mut state, PlayerId(0), source, 1, &mut events).unwrap();
+
+        assert!(matches!(waiting, WaitingFor::Priority { .. }));
+        assert!(state.objects[&source].tapped);
+        assert_eq!(state.objects[&source].zone, Zone::Graveyard);
+        assert!(state.objects[&alternate].tapped);
+        assert_eq!(state.stack.len(), 1);
+    }
+
+    #[test]
+    fn targeted_composite_mana_tap_activation_excludes_source_after_target_selection() {
+        let mut state = setup_game_at_main_phase();
+        let cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: colorless_activation_mana_cost(),
+                },
+                AbilityCost::Tap,
+            ],
+        };
+        let source = create_colorless_tap_activated_source(
+            &mut state,
+            PlayerId(0),
+            cost,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                damage_source: None,
+            },
+        );
+        let target = create_object(
+            &mut state,
+            CardId(54),
+            PlayerId(1),
+            "Target Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&target)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let other_target = create_object(
+            &mut state,
+            CardId(55),
+            PlayerId(1),
+            "Other Target Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&other_target)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let waiting =
+            handle_activate_ability(&mut state, PlayerId(0), source, 1, &mut Vec::new()).unwrap();
+        assert!(matches!(waiting, WaitingFor::TargetSelection { .. }));
+        state.waiting_for = waiting;
+
+        let result = handle_select_targets(
+            &mut state,
+            PlayerId(0),
+            vec![TargetRef::Object(target)],
+            &mut Vec::new(),
+        );
+
+        assert!(result.is_err());
+        assert!(!state.objects[&source].tapped);
+    }
+
+    #[test]
+    fn x_composite_mana_tap_activation_rejects_source_only_pending_payment_without_tapping() {
+        use super::super::engine::apply_as_current;
+        use crate::types::ability::QuantityRef;
+
+        let mut state = setup_game_at_main_phase();
+        let source = create_colorless_tap_activated_source(
+            &mut state,
+            PlayerId(0),
+            AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            shards: vec![ManaCostShard::X],
+                            generic: 0,
+                        },
+                    },
+                    AbilityCost::Tap,
+                ],
+            },
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                target: TargetFilter::Controller,
+            },
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 1,
+            },
+        )
+        .unwrap();
+        match state.waiting_for.clone() {
+            WaitingFor::ChooseXValue { max, .. } => assert_eq!(
+                max, 0,
+                "the activation source cannot raise X while it must remain untapped for {{T}}"
+            ),
+            other => panic!("expected ChooseXValue, got {other:?}"),
+        }
+
+        let result = apply_as_current(&mut state, GameAction::ChooseX { value: 1 });
+
+        assert!(result.is_err());
+        assert!(
+            !state.objects[&source].tapped,
+            "failed pending X payment must not spend the source before its Tap cost"
+        );
+    }
+
+    #[test]
+    fn x_composite_mana_tap_activation_excludes_source_during_pending_payment() {
+        use super::super::engine::apply_as_current;
+        use crate::types::ability::QuantityRef;
+
+        let mut state = setup_game_at_main_phase();
+        let source = create_colorless_tap_activated_source(
+            &mut state,
+            PlayerId(0),
+            AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            shards: vec![ManaCostShard::X],
+                            generic: 0,
+                        },
+                    },
+                    AbilityCost::Tap,
+                ],
+            },
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                target: TargetFilter::Controller,
+            },
+        );
+        let alternate = add_brushland_like_land(&mut state, CardId(56), "X Helper", false);
+
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 1,
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }),
+            "X activation should ask for X before payment"
+        );
+        assert!(
+            !state.objects[&source].tapped,
+            "source must stay untapped before pending mana payment"
+        );
+
+        apply_as_current(&mut state, GameAction::ChooseX { value: 1 }).unwrap();
+
+        assert!(state.objects[&source].tapped);
+        assert!(
+            state.objects[&alternate].tapped,
+            "pending activation mana payment must use the alternate source"
+        );
+        assert_eq!(state.stack.len(), 1);
+    }
+
+    #[test]
+    fn x_phyrexian_composite_mana_tap_activation_excludes_source_during_phyrexian_prepass() {
+        use super::super::engine::apply_as_current;
+        use crate::types::ability::QuantityRef;
+
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(57),
+            PlayerId(0),
+            "Phyrexian Mirrorlake Stand-In".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            Arc::make_mut(&mut obj.abilities).push(blue_tap_mana_ability());
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Draw {
+                        count: QuantityExpr::Ref {
+                            qty: QuantityRef::Variable {
+                                name: "X".to_string(),
+                            },
+                        },
+                        target: TargetFilter::Controller,
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::Cost {
+                                shards: vec![ManaCostShard::X, ManaCostShard::PhyrexianBlue],
+                                generic: 0,
+                            },
+                        },
+                        AbilityCost::Tap,
+                    ],
+                }),
+            );
+        }
+        let life_before = state.players[0].life;
+
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 1,
+            },
+        )
+        .unwrap();
+
+        match state.waiting_for.clone() {
+            WaitingFor::ChooseXValue { max, .. } => assert_eq!(
+                max, 0,
+                "the activation source's own blue mana ability cannot pay X while {{T}} remains due"
+            ),
+            other => panic!("expected ChooseXValue, got {other:?}"),
+        }
+
+        apply_as_current(&mut state, GameAction::ChooseX { value: 0 }).unwrap();
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::PhyrexianPayment { .. }),
+            "source-only Phyrexian activation has no mana/life choice once the source is excluded"
+        );
+        if matches!(state.waiting_for, WaitingFor::ManaPayment { .. }) {
+            apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        }
+
+        assert!(state.objects[&source].tapped);
+        assert_eq!(state.players[0].life, life_before - 2);
+        assert_eq!(state.stack.len(), 1);
+    }
+
+    #[test]
+    fn x_phyrexian_composite_mana_tap_activation_keeps_source_untapped_until_choice_resume() {
+        use super::super::engine::apply_as_current;
+        use crate::types::ability::QuantityRef;
+        use crate::types::game_state::{ShardChoice, ShardOptions};
+
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(58),
+            PlayerId(0),
+            "Choice Phyrexian Mirrorlake Stand-In".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            Arc::make_mut(&mut obj.abilities).push(blue_tap_mana_ability());
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Draw {
+                        count: QuantityExpr::Ref {
+                            qty: QuantityRef::Variable {
+                                name: "X".to_string(),
+                            },
+                        },
+                        target: TargetFilter::Controller,
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::Cost {
+                                shards: vec![ManaCostShard::X, ManaCostShard::PhyrexianBlue],
+                                generic: 0,
+                            },
+                        },
+                        AbilityCost::Tap,
+                    ],
+                }),
+            );
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+        let life_before = state.players[0].life;
+
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 1,
+            },
+        )
+        .unwrap();
+        apply_as_current(&mut state, GameAction::ChooseX { value: 0 }).unwrap();
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ManaPayment {
+                player: PlayerId(0),
+                convoke_mode: None
+            }
+        ));
+        assert!(
+            !state.objects[&source].tapped,
+            "source must remain untapped before pending mana payment finalizes"
+        );
+
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        match state.waiting_for.clone() {
+            WaitingFor::PhyrexianPayment { shards, .. } => {
+                assert_eq!(shards.len(), 1);
+                assert!(matches!(shards[0].options, ShardOptions::ManaOrLife));
+            }
+            other => panic!("expected PhyrexianPayment, got {other:?}"),
+        }
+        assert!(
+            !state.objects[&source].tapped,
+            "source must remain untapped while the Phyrexian mana choice is pending"
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::SubmitPhyrexianChoices {
+                choices: vec![ShardChoice::PayMana],
+            },
+        )
+        .unwrap();
+
+        assert!(state.objects[&source].tapped);
+        assert_eq!(state.players[0].life, life_before);
+        assert_eq!(state.players[0].mana_pool.total(), 0);
+        assert_eq!(state.stack.len(), 1);
     }
 
     #[test]
@@ -19718,6 +20295,44 @@ mod tests {
         assert_eq!(
             state.players[0].life, life_before,
             "paying mana (not life) must not change life total"
+        );
+    }
+
+    #[test]
+    fn phyrexian_spell_prepass_honors_spell_mana_restrictions() {
+        let mut state = setup_game_at_main_phase();
+        let spell = create_phyrexian_instant_in_hand(
+            &mut state,
+            PlayerId(0),
+            vec![ManaCostShard::PhyrexianBlue],
+            0,
+        );
+        add_restricted_mana(
+            &mut state,
+            PlayerId(0),
+            ManaType::Blue,
+            vec![ManaRestriction::OnlyForSpellType("Creature".to_string())],
+        );
+        let life_before = state.players[0].life;
+
+        let waiting = handle_cast_spell(
+            &mut state,
+            PlayerId(0),
+            spell,
+            CardId(0x9117),
+            &mut Vec::new(),
+        )
+        .expect("restricted mana cannot pay this instant, but life can");
+
+        assert!(
+            !matches!(waiting, WaitingFor::PhyrexianPayment { .. }),
+            "spell-restricted mana must not create a false mana/life choice for an ineligible spell"
+        );
+        assert_eq!(state.players[0].life, life_before - 2);
+        assert_eq!(
+            state.players[0].mana_pool.total(),
+            1,
+            "ineligible restricted mana must remain in the pool"
         );
     }
 

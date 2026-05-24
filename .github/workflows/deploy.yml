@@ -184,7 +184,7 @@ jobs:
 
       - name: Stage server data artifact
         # card-data.json + draft-pools.json are baked into the server image by
-        # build-docker. They are NOT in data-files.json (the server reads them
+        # push-server-image. They are NOT in data-files.json (the server reads them
         # from disk, not R2), so they ship via artifact instead.
         run: |
           mkdir -p server-data
@@ -342,18 +342,24 @@ jobs:
         id: deploy
         uses: actions/deploy-pages@v4
 
-  # ── Server image (parallel, needs only card-data's server-data) ─────────────
-  # phase-server is compiled NATIVELY as a static musl binary (warm Swatinem
-  # cargo cache, incremental across runs) and copied into a slim runtime image.
-  # This replaces a cold ~10min in-container release compile on every deploy.
-  build-docker:
-    name: Build & push server image
-    needs: card-data
+  # ── Server binary compile (parallel with card-data) ─────────────────────────
+  # phase-server is compiled NATIVELY as a static musl binary, then uploaded as
+  # an artifact for push-server-image to bake into the runtime image. The compile
+  # needs nothing the data pipeline produces, so it deliberately has no `needs:`
+  # and overlaps card-data's ~10min run instead of serializing behind it.
+  #
+  # NOTE: this is a cold ~10min compile every run. Swatinem's rust-cache (via
+  # setup-rust-toolchain) caches registry/git deps but prunes the workspace
+  # crates' own artifacts, so the optimized server-release build of the engine
+  # crate recompiles each time. The win here is parallelism, not incrementality;
+  # warming the workspace compile would need sccache or similar.
+  build-server-binary:
+    name: Build server binary
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
-      packages: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -372,25 +378,59 @@ jobs:
           sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
           rustup target add x86_64-unknown-linux-musl
 
+      - name: Build phase-server (static musl)
+        # Static musl binary: no glibc dependency, so it runs on the slim debian
+        # runtime regardless of this runner's glibc. Mirrors release.yml's Linux
+        # server build.
+        # No chmod here: upload-artifact strips the executable bit anyway;
+        # push-server-image re-applies it (and the Dockerfile chmods in-image).
+        run: |
+          cargo build --profile server-release --bin phase-server --target x86_64-unknown-linux-musl
+          cp target/x86_64-unknown-linux-musl/server-release/phase-server ./phase-server
+
+      - name: Upload server binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-binary
+          path: phase-server
+          if-no-files-found: error
+          retention-days: 1
+
+  # ── Server image push (needs binary + data) ─────────────────────────────────
+  # Pure packaging step: pulls the prebuilt musl binary and the server data,
+  # then BINARY_STAGE=prebuilt makes Docker just apt + COPY (no compile). Gated
+  # on both producers so it starts the moment the slower of the two finishes.
+  push-server-image:
+    name: Build & push server image
+    needs: [build-server-binary, card-data]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - name: Download server binary artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: server-binary
+          path: .
+
       - name: Download server data artifact
         uses: actions/download-artifact@v4
         with:
           name: server-data
           path: data
 
-      - name: Verify server data
+      - name: Verify build context
         run: |
+          test -s phase-server
+          chmod +x phase-server
           test -s data/card-data.json
           test -s data/draft-pools.json
-
-      - name: Build phase-server (static musl)
-        # Static musl binary: no glibc dependency, so it runs on the slim debian
-        # runtime regardless of this runner's glibc. Mirrors release.yml's Linux
-        # server build. Cached across runs via the rust-server key.
-        run: |
-          cargo build --profile server-release --bin phase-server --target x86_64-unknown-linux-musl
-          cp target/x86_64-unknown-linux-musl/server-release/phase-server ./phase-server
-          chmod +x ./phase-server
 
       - name: Compute image tags
         id: image
@@ -404,7 +444,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push preview image
-        # BINARY_STAGE=prebuilt makes Docker copy the musl binary built above
+        # BINARY_STAGE=prebuilt makes Docker copy the prebuilt musl binary
         # instead of compiling in-container — the build is just apt + COPY.
         uses: docker/build-push-action@v6
         with:

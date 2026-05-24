@@ -74,6 +74,7 @@ fn brigid_activated_ability_offers_color_choice_and_produces_x_mana() {
     runner
         .act(GameAction::ChooseManaColor {
             choice: ManaChoice::SingleColor(ManaType::Green),
+            count: 1,
         })
         .expect("submitting the Green color choice must succeed");
 
@@ -122,6 +123,7 @@ fn brigid_with_no_other_creatures_produces_zero_mana() {
         runner
             .act(GameAction::ChooseManaColor {
                 choice: ManaChoice::SingleColor(ManaType::White),
+                count: 1,
             })
             .expect("submitting the White color choice must succeed");
     }

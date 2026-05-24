@@ -39,7 +39,7 @@ expression: "&ir"
         "sub_ability": {
           "kind": "Spell",
           "effect": {
-            "type": "PumpAll",
+            "type": "Pump",
             "power": {
               "type": "Fixed",
               "value": 4
@@ -49,12 +49,7 @@ expression: "&ir"
               "value": 4
             },
             "target": {
-              "type": "Typed",
-              "type_filters": [
-                "Creature"
-              ],
-              "controller": null,
-              "properties": []
+              "type": "ParentTarget"
             }
           },
           "cost": null,

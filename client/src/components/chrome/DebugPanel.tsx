@@ -119,7 +119,10 @@ export function DebugPanel() {
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   const prevSnapshotLenRef = useRef(0);
 
-  const [activeTab, setActiveTab] = useState<"console" | "actions">("console");
+  // Tab lives in uiStore so external entry points (Sandbox Tools nudge/button)
+  // can open the panel straight to "actions" via `openSandboxTools()`.
+  const activeTab = useUiStore((s) => s.debugPanelTab);
+  const setActiveTab = useUiStore((s) => s.setDebugPanelTab);
   const canRestoreCheckpoints = gameMode === "ai" || gameMode === "local";
 
   const handleRestore = useCallback(async (state: GameState) => {
