@@ -2839,15 +2839,15 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
     }
 
     // Object noun phrase: the "ability" being activated. Decomposed into
-    // article + noun so the article can later admit modifiers ("an activated
-    // ability"), and so this is the clean extension point for the source-
-    // object filter axis ("an ability **of an artifact**", "of a creature or
-    // land", "of a permanent"). The matcher already consults `def.valid_card`
-    // via `valid_card_matches`, so adding source-object filters here unlocks
-    // Crackdown Construct, Wizened Mentor, Runic Armasaur, Ceaseless
+    // article + optional modifier + noun so the grammar accepts both "an
+    // ability" and "an activated ability". This is also the clean extension
+    // point for the source-object filter axis ("an ability **of an artifact**",
+    // "of a creature or land", "of a permanent"). The matcher already consults
+    // `def.valid_card` via `valid_card_matches`, so adding source-object filters
+    // here unlocks Crackdown Construct, Wizened Mentor, Runic Armasaur, Ceaseless
     // Searblades, and similar cards.
     fn parse_ability_object(input: &str) -> OracleResult<'_, ()> {
-        value((), pair(tag("an "), tag("ability"))).parse(input)
+        value((), (tag("an "), opt(tag("activated ")), tag("ability"))).parse(input)
     }
 
     fn parse_qualifier(input: &str) -> OracleResult<'_, Option<TriggerCondition>> {
@@ -14987,6 +14987,20 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::AbilityActivated);
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn ability_activation_trigger_accepts_activated_modifier() {
+        let def = parse_trigger_line(
+            "Whenever you activate an activated ability that isn't a mana ability, draw a card.",
+            "Hypothetical Activated-Modifier",
+        );
+        assert_eq!(def.mode, TriggerMode::AbilityActivated);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::ActivatedAbilityIsNonMana)
+        );
     }
 
     // --- CR 115.9c: "that targets only [X]" trigger tests ---
