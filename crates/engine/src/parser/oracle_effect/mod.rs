@@ -7398,6 +7398,9 @@ fn replace_target_with_parent(effect: &mut Effect) {
         Effect::Attach { target, .. } if !matches!(target, TargetFilter::LastCreated) => {
             *target = TargetFilter::ParentTarget;
         }
+        Effect::UnattachAll { target, .. } if !matches!(target, TargetFilter::LastCreated) => {
+            *target = TargetFilter::ParentTarget;
+        }
         Effect::PutCounter { target, .. }
         | Effect::AddCounter { target, .. }
         | Effect::RemoveCounter { target, .. } => {
@@ -7543,6 +7546,9 @@ fn has_typed_target(effect: &Effect) -> bool {
             target: TargetFilter::Typed(_),
             ..
         } | Effect::Attach {
+            target: TargetFilter::Typed(_),
+            ..
+        } | Effect::UnattachAll {
             target: TargetFilter::Typed(_),
             ..
         } | Effect::ChangeZone {
@@ -8362,6 +8368,7 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         | Effect::GainControl { target, .. }
         | Effect::ControlNextTurn { target, .. }
         | Effect::Attach { target, .. }
+        | Effect::UnattachAll { target, .. }
         | Effect::Bounce { target, .. }
         | Effect::SwitchPT { target, .. }
         | Effect::CopySpell { target, .. }
@@ -9762,6 +9769,7 @@ fn rewrite_parent_targets_to_tracked_set(effect: &mut Effect) {
         | Effect::ChangeZone { target, .. }
         | Effect::ChangeZoneAll { target, .. } => rewrite_filter_parent_to_tracked_set(target),
         Effect::Attach { target, .. } => rewrite_filter_parent_to_tracked_set(target),
+        Effect::UnattachAll { target, .. } => rewrite_filter_parent_to_tracked_set(target),
         Effect::GenericEffect {
             target,
             static_abilities,
@@ -9921,6 +9929,7 @@ pub(crate) fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
         | Effect::DealDamage { target, .. }
         | Effect::Pump { target, .. }
         | Effect::Attach { target, .. }
+        | Effect::UnattachAll { target, .. }
         | Effect::Counter { target, .. }
         | Effect::Transform { target, .. }
         | Effect::Connive { target, .. }

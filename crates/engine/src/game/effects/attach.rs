@@ -1,3 +1,4 @@
+use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::AttachTarget;
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
@@ -35,6 +36,53 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id,
+    });
+
+    Ok(())
+}
+
+/// CR 701.3d: Unattach each matching Equipment from the matched host while the
+/// Equipment remain on the battlefield.
+pub fn resolve_unattach_all(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let (attachment_filter, target_filter) = match &ability.effect {
+        Effect::UnattachAll { attachment, target } => (attachment, target),
+        _ => (&TargetFilter::Any, &TargetFilter::Any),
+    };
+
+    let target_ids = resolve_object_filters(state, ability, target_filter);
+    if target_ids.is_empty() {
+        return Err(EffectError::MissingParam(
+            "No target for UnattachAll".to_string(),
+        ));
+    }
+
+    let ctx = FilterContext::from_ability(ability);
+    for target_id in target_ids {
+        let attachments = state
+            .objects
+            .get(&target_id)
+            .map(|target| target.attachments.clone())
+            .unwrap_or_default();
+        for attachment_id in attachments {
+            if !matches_target_filter(state, attachment_id, attachment_filter, &ctx) {
+                continue;
+            }
+            if let Some(old_target) = unattach(state, attachment_id) {
+                events.push(GameEvent::Unattached {
+                    attachment_id,
+                    old_target,
+                });
+            }
+        }
+    }
+
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::from(&ability.effect),
+        source_id: ability.source_id,
     });
 
     Ok(())
@@ -84,6 +132,61 @@ fn resolve_object_filter<'a>(
             TargetRef::Object(id) => Some(*id),
             TargetRef::Player(_) => None,
         }),
+    }
+}
+
+fn resolve_object_filters(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    match filter {
+        TargetFilter::ParentTarget => ability
+            .targets
+            .iter()
+            .filter_map(|target| match target {
+                TargetRef::Object(id) => Some(*id),
+                TargetRef::Player(_) => None,
+            })
+            .collect(),
+        TargetFilter::ParentTargetSlot { index } => ability
+            .targets
+            .get(*index)
+            .and_then(|target| match target {
+                TargetRef::Object(id) => Some(*id),
+                TargetRef::Player(_) => None,
+            })
+            .into_iter()
+            .collect(),
+        TargetFilter::LastCreated => state.last_created_token_ids.clone(),
+        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => {
+            let effective_filter =
+                crate::game::targeting::resolve_tracked_set_sentinel(state, filter.clone());
+            let ctx = FilterContext::from_ability(ability);
+            state
+                .battlefield
+                .iter()
+                .copied()
+                .filter(|id| matches_target_filter(state, *id, &effective_filter, &ctx))
+                .collect()
+        }
+        _ => {
+            let explicit_targets: Vec<ObjectId> = ability
+                .targets
+                .iter()
+                .filter_map(|target| match target {
+                    TargetRef::Object(id) => Some(*id),
+                    TargetRef::Player(_) => None,
+                })
+                .collect();
+            if !explicit_targets.is_empty() {
+                return explicit_targets;
+            }
+            let mut target_slots = ability.targets.iter();
+            resolve_object_filter(state, ability, filter, &mut target_slots)
+                .into_iter()
+                .collect()
+        }
     }
 }
 
@@ -470,6 +573,88 @@ mod tests {
             .unwrap()
             .attachments
             .contains(&equipment_id));
+    }
+
+    #[test]
+    fn unattach_all_removes_matching_equipment_from_target() {
+        let mut state = setup();
+        let sword = spawn_with_subtype(&mut state, "Sword", "Equipment");
+        let shield = spawn_with_subtype(&mut state, "Shield", "Equipment");
+        let aura = spawn_with_subtype(&mut state, "Pacifism", "Aura");
+        let creature = spawn_creature(&mut state, "Bear");
+        attach_to(&mut state, sword, creature);
+        attach_to(&mut state, shield, creature);
+        attach_to(&mut state, aura, creature);
+
+        let ability = crate::types::ability::ResolvedAbility::new(
+            Effect::UnattachAll {
+                attachment: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::default()
+                        .subtype("Equipment".to_string()),
+                ),
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(creature)],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        let mut events = vec![];
+
+        resolve_unattach_all(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects.get(&sword).unwrap().attached_to, None);
+        assert_eq!(state.objects.get(&shield).unwrap().attached_to, None);
+        assert_eq!(
+            state.objects.get(&aura).unwrap().attached_to,
+            Some(AttachTarget::Object(creature))
+        );
+        assert_eq!(state.objects.get(&creature).unwrap().attachments, vec![aura]);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::Unattached { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn unattach_all_parent_target_removes_equipment_from_each_parent_host() {
+        let mut state = setup();
+        let sword = spawn_with_subtype(&mut state, "Sword", "Equipment");
+        let shield = spawn_with_subtype(&mut state, "Shield", "Equipment");
+        let bear = spawn_creature(&mut state, "Bear");
+        let elf = spawn_creature(&mut state, "Elf");
+        attach_to(&mut state, sword, bear);
+        attach_to(&mut state, shield, elf);
+
+        let ability = crate::types::ability::ResolvedAbility::new(
+            Effect::UnattachAll {
+                attachment: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::default()
+                        .subtype("Equipment".to_string()),
+                ),
+                target: TargetFilter::ParentTarget,
+            },
+            vec![TargetRef::Object(bear), TargetRef::Object(elf)],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        let mut events = vec![];
+
+        resolve_unattach_all(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects.get(&sword).unwrap().attached_to, None);
+        assert_eq!(state.objects.get(&shield).unwrap().attached_to, None);
+        assert!(state.objects.get(&bear).unwrap().attachments.is_empty());
+        assert!(state.objects.get(&elf).unwrap().attachments.is_empty());
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::Unattached { .. }))
+                .count(),
+            2
+        );
     }
 
     #[test]

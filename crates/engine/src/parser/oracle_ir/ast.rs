@@ -750,6 +750,10 @@ pub(crate) enum UtilityImperativeAst {
         attachment: TargetFilter,
         target: TargetFilter,
     },
+    UnattachAll {
+        attachment: TargetFilter,
+        target: TargetFilter,
+    },
     /// CR 613.4d: Switch power and toughness.
     SwitchPT {
         target: TargetFilter,

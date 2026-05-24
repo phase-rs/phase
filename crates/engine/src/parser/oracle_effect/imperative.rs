@@ -2502,6 +2502,20 @@ pub(super) fn parse_utility_imperative_ast(
             _ => unreachable!(),
         };
     }
+    if let Some(((), target_text)) = nom_on_lower(text, lower, |input| {
+        let (input, _) = tag("unattach all equipment from ").parse(input)?;
+        Ok((input, ()))
+    }) {
+        let (target, rem) = parse_target(target_text);
+        if rem.trim().is_empty() {
+            return Some(UtilityImperativeAst::UnattachAll {
+                attachment: TargetFilter::Typed(
+                    TypedFilter::default().subtype("Equipment".to_string()),
+                ),
+                target,
+            });
+        }
+    }
     // CR 701.27 + CR 701.28: "transform" and "convert" are equivalent game actions.
     // CR 608.2k: the bare-pronoun and self-deictic arms ("transform it" /
     // "transform itself" / "transform this creature") split into two anaphor
@@ -2742,6 +2756,9 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
         UtilityImperativeAst::Transform { target } => Effect::Transform { target },
         UtilityImperativeAst::Attach { attachment, target } => {
             Effect::Attach { attachment, target }
+        }
+        UtilityImperativeAst::UnattachAll { attachment, target } => {
+            Effect::UnattachAll { attachment, target }
         }
         // CR 613.4d: Switch power and toughness.
         UtilityImperativeAst::SwitchPT { target } => Effect::SwitchPT { target },
@@ -4545,7 +4562,7 @@ pub(super) fn parse_imperative_family_ast(
             .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::SearchCreation(ast))),
 
         // Utility verbs (CR 615, CR 701.19, CR 701.6, CR 613.4d)
-        "prevent" | "regenerate" | "copy" | "attach" | "switch" => {
+        "prevent" | "regenerate" | "copy" | "attach" | "unattach" | "switch" => {
             parse_utility_imperative_ast(text, lower, ctx)
                 .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Utility(ast)))
         }
@@ -6451,6 +6468,21 @@ mod tests {
             target,
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
         );
+    }
+
+    #[test]
+    fn parse_unattach_all_equipment_from_target_creature() {
+        let input = "unattach all Equipment from target creature";
+        let lower = input.to_lowercase();
+        let result = parse_utility_imperative_ast(input, &lower, &mut ParseContext::default());
+        let Some(UtilityImperativeAst::UnattachAll { attachment, target }) = result else {
+            panic!("{input}: expected UnattachAll, got {result:?}");
+        };
+        assert_eq!(
+            attachment,
+            TargetFilter::Typed(TypedFilter::default().subtype("Equipment".to_string()))
+        );
+        assert_eq!(target, TargetFilter::Typed(TypedFilter::creature()));
     }
 
     /// CR 608.2k regression — issue #319 sibling.
