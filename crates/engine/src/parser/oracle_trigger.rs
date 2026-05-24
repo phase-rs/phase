@@ -5235,6 +5235,22 @@ fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefi
         def.mode = TriggerMode::CrankContraption;
         return Some((TriggerMode::CrankContraption, def));
     }
+    // CR 309.7: "Whenever you complete a dungeon" — fires as that dungeon card
+    // is removed from the game.
+    if (
+        alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when "))),
+        tag("you "),
+        tag("complete "),
+        tag("a dungeon"),
+    )
+        .parse(lower)
+        .is_ok()
+    {
+        def.mode = TriggerMode::DungeonCompleted;
+        def.valid_target = Some(TargetFilter::Controller);
+        return Some((TriggerMode::DungeonCompleted, def));
+    }
+
     if let Some(result) = try_parse_die_roll_trigger(lower) {
         return Some(result);
     }
@@ -14104,6 +14120,25 @@ mod tests {
             "Contraption",
         );
         assert_eq!(def.mode, TriggerMode::CrankContraption);
+    }
+
+    #[test]
+    fn trigger_dungeon_completed_whenever() {
+        let def = parse_trigger_line(
+            "Whenever you complete a dungeon, create a 2/2 green Wolf creature token.",
+            "Varis, Silverymoon Ranger",
+        );
+        assert_eq!(def.mode, TriggerMode::DungeonCompleted);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+    #[test]
+    fn trigger_dungeon_completed_when() {
+        let def = parse_trigger_line(
+            "When you complete a dungeon, create a 5/5 red Dragon creature token with flying.",
+            "Loot Dispute",
+        );
+        assert_eq!(def.mode, TriggerMode::DungeonCompleted);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
     }
 
     #[test]
