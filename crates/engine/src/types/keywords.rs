@@ -781,12 +781,10 @@ pub enum Keyword {
         cost: ManaCost,
     },
 
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler (ETB token + auto-attach trigger not wired).
     /// CR 702.163a: For Mirrodin! — Equipment-only triggered ability.
     /// "When this Equipment enters, create a 2/2 red Rebel creature
     /// token, then attach this Equipment to it." Bare keyword; ETB
-    /// trigger semantics are not yet wired.
+    /// trigger semantics are synthesized in `database::synthesis`.
     ForMirrodin,
 
     /// RUNTIME: TODO — converter accepts this keyword but engine has no
@@ -1692,6 +1690,7 @@ impl FromStr for Keyword {
             "riot" => Ok(Keyword::Riot),
             "livingweapon" => Ok(Keyword::LivingWeapon),
             "jobselect" => Ok(Keyword::JobSelect),
+            "formirrodin!" => Ok(Keyword::ForMirrodin),
             "totemarmor" => Ok(Keyword::TotemArmor),
             "evolve" => Ok(Keyword::Evolve),
             "extort" => Ok(Keyword::Extort),
@@ -1962,6 +1961,7 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Riot" => Ok(Keyword::Riot),
         "LivingWeapon" => Ok(Keyword::LivingWeapon),
         "JobSelect" => Ok(Keyword::JobSelect),
+        "ForMirrodin" => Ok(Keyword::ForMirrodin),
         "TotemArmor" => Ok(Keyword::TotemArmor),
         "Exalted" => Ok(Keyword::Exalted),
         "Flanking" => Ok(Keyword::Flanking),
@@ -2338,6 +2338,10 @@ mod tests {
             Keyword::LivingWeapon
         );
         assert_eq!(Keyword::from_str("Job Select").unwrap(), Keyword::JobSelect);
+        assert_eq!(
+            Keyword::from_str("For Mirrodin!").unwrap(),
+            Keyword::ForMirrodin
+        );
         assert_eq!(
             Keyword::from_str("Totem Armor").unwrap(),
             Keyword::TotemArmor
