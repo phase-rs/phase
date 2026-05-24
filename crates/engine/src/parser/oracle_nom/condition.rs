@@ -17,7 +17,9 @@ use super::primitives::{
     parse_article, parse_color, parse_keyword_name, parse_mana_cost, parse_number,
 };
 use super::quantity as nom_quantity;
-use crate::parser::oracle_target::{parse_type_phrase, parse_zone_suffix};
+use crate::parser::oracle_target::{
+    parse_type_phrase, parse_zone_suffix, parse_zone_word, peek_zone_boundary,
+};
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AggregateFunction, CastManaObjectScope, CastManaSpentMetric, CommanderOwnership, Comparator,
@@ -2356,10 +2358,7 @@ fn parse_source_self_token(input: &str) -> OracleResult<'_, ()> {
 ///   - " in the <Z>"  — shared zones with definite article (CR 408 command).
 ///   - " in your <Z>" — player-specific zones (CR 401 / 402 / 403).
 ///   - " in <Z>"      — Exile (shared zone with no possessive; CR 406).
-fn parse_zone_phrase(input: &str) -> OracleResult<'_, crate::types::zones::Zone> {
-    use crate::parser::oracle_target::{parse_zone_word, peek_zone_boundary};
-    use crate::types::zones::Zone;
-
+fn parse_zone_phrase(input: &str) -> OracleResult<'_, Zone> {
     // Parse a zone token and assert it matches `allowed`. Composes
     // `parse_zone_word` (the canonical zone vocabulary) with the per-
     // qualifier CR constraint, so adding a new zone is a single edit in
@@ -2420,7 +2419,7 @@ fn parse_source_in_zone_condition(input: &str) -> OracleResult<'_, StaticConditi
     // listed zones. ("or" is English grammar, not a CR construct; the rules
     // authority for the disjunction is the same CR 113.6b that authorizes the
     // zone clause itself.)
-    let (rest, more) = many0(preceded(tag(" or"), parse_zone_phrase)).parse(rest)?;
+    let (rest, more) = many0(preceded(parse_zone_list_separator, parse_zone_phrase)).parse(rest)?;
     if more.is_empty() {
         return Ok((rest, StaticCondition::SourceInZone { zone: first }));
     }
@@ -2432,13 +2431,15 @@ fn parse_source_in_zone_condition(input: &str) -> OracleResult<'_, StaticConditi
     Ok((rest, StaticCondition::Or { conditions }))
 }
 
+fn parse_zone_list_separator(input: &str) -> OracleResult<'_, ()> {
+    value((), alt((tag(", or"), tag(" or"), tag(",")))).parse(input)
+}
+
 /// CR 113.6b: Parse zone-based source conditions.
 /// Handles all player-specific zones (graveyard, hand, library) with "your",
 /// the shared exile and command zones (no "your"), and disjunctions across
 /// any pair of those zones ("~ is in the command zone or on the battlefield").
 fn parse_zone_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
-    use crate::types::zones::Zone;
-
     alt((
         // CR 702.62b: A card is suspended while it is in exile with a time
         // counter on it. The "has suspend" component is guaranteed by cards
@@ -5682,6 +5683,35 @@ mod tests {
             vec![
                 crate::types::zones::Zone::Battlefield,
                 crate::types::zones::Zone::Command,
+            ]
+        );
+    }
+
+    /// CR 113.6b: Source-zone lists can contain three or more zones using
+    /// comma and Oxford-comma separators, not just a two-zone "or" pair.
+    /// This locks the reusable zone-list separator used by all
+    /// source-referential zone conditions.
+    #[test]
+    fn test_source_in_three_zone_oxford_list() {
+        let (rest, c) =
+            parse_inner_condition("~ is in your graveyard, in your hand, or in exile").unwrap();
+        assert_eq!(rest, "");
+        let zones = match c {
+            StaticCondition::Or { conditions } => conditions
+                .into_iter()
+                .filter_map(|c| match c {
+                    StaticCondition::SourceInZone { zone } => Some(zone),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            other => panic!("expected Or {{ conditions }}, got {other:?}"),
+        };
+        assert_eq!(
+            zones,
+            vec![
+                crate::types::zones::Zone::Graveyard,
+                crate::types::zones::Zone::Hand,
+                crate::types::zones::Zone::Exile,
             ]
         );
     }
