@@ -3387,8 +3387,38 @@ fn split_or_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<Stri
             // or sacrifice a token" shares the object between both verbs. If the
             // first half ends with a bare verb (no object), propagate the object
             // from the second verb.
-            if let Some(last_word) = first.rsplit(' ').next() {
-                if is_bare_event_verb(&last_word.to_lowercase()) {
+            //
+            // Detect a bare trailing verb by comparing the lowercased first half
+            // against the already-extracted `keyword_and_subject` (which strips
+            // the event verb via `extract_subject_text`). If the trimmed first
+            // half is longer than `keyword_and_subject`, the excess is the
+            // bare verb; confirm it matches a known event verb with an
+            // all_consuming nom check before propagating the object.
+            {
+                let first_lower_trimmed = cond_lower[..pos].trim();
+                let ks_lower = keyword_and_subject.to_lowercase();
+                let trailing = first_lower_trimmed
+                    .strip_prefix(ks_lower.as_str())
+                    .unwrap_or("")
+                    .trim();
+                // CR 701.7 + CR 701.21: Known bare event verbs that can appear
+                // without an explicit object when sharing one with the second verb.
+                let is_bare_verb = !trailing.is_empty()
+                    && all_consuming(alt((
+                        value((), tag::<_, _, OracleError<'_>>("create")),
+                        value((), tag("creates")),
+                        value((), tag("sacrifice")),
+                        value((), tag("sacrifices")),
+                        value((), tag("discard")),
+                        value((), tag("discards")),
+                        value((), tag("play")),
+                        value((), tag("plays")),
+                        value((), tag("cast")),
+                        value((), tag("casts")),
+                    )))
+                    .parse(trailing)
+                    .is_ok();
+                if is_bare_verb {
                     if let Some(obj) = extract_shared_object(after, second_event) {
                         first = format!("{first} {obj}");
                     }
@@ -3402,28 +3432,28 @@ fn split_or_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<Stri
     None
 }
 
-/// Check if a single word (no spaces) is a known event verb.
-fn is_bare_event_verb(word: &str) -> bool {
-    matches!(
-        word,
-        "create"
-            | "creates"
-            | "sacrifice"
-            | "sacrifices"
-            | "discard"
-            | "discards"
-            | "play"
-            | "plays"
-            | "cast"
-            | "casts"
-    )
-}
-
-/// Extract the shared object from a verb+object phrase.
-/// E.g., `"sacrifice a token"` → `Some("a token")` (using original case).
+/// Extract the shared object from a verb+object phrase using nom combinators.
+///
+/// Skips the leading event verb (first non-whitespace word) and returns the
+/// remainder as the object, using `original` for preserved case.
+///
+/// E.g., `lower = "sacrifice a token"`, `original = "sacrifice a token"` →
+/// `Some("a token")`.
+///
+/// Uses `take_till` + `space1` (nom) to locate the word boundary, eliminating
+/// raw `.find(' ')` indexing.
 fn extract_shared_object<'a>(lower: &str, original: &'a str) -> Option<&'a str> {
-    let space = lower.find(' ')?;
-    let obj = original[space..].trim();
+    // Skip the verb word using nom: consume non-whitespace then mandatory space.
+    // CR 701.21 / CR 701.7: The verb (e.g., "sacrifice", "create") is the first
+    // word; everything after the first whitespace is the shared object.
+    let (rest_lower, _) = pair(
+        nom::bytes::complete::take_till::<_, _, OracleError<'_>>(|c: char| c.is_ascii_whitespace()),
+        space1,
+    )
+    .parse(lower)
+    .ok()?;
+    let obj_start = lower.len() - rest_lower.len();
+    let obj = original[obj_start..].trim();
     if obj.is_empty() {
         None
     } else {
@@ -3497,12 +3527,14 @@ fn extract_subject_text(text: &str) -> &str {
             tag("casts "),
             tag("cast "),
             // CR 701.7: Keep in sync with `is_event_verb_start` for
-            // create-or-sacrifice compound triggers. Spaceless variants
-            // handle end-of-string after compound split removes the object.
+            // create-or-sacrifice compound triggers. Bare-verb variants
+            // (without trailing space) handle end-of-string after the
+            // compound split removes the object; `peek` guards prevent
+            // matching prefixes of other words (e.g., "created").
             tag("creates "),
-            tag("creates"),
+            terminated(tag("creates"), peek(alt((eof, recognize(one_of(" ,")))))),
             tag("create "),
-            tag("create"),
+            terminated(tag("create"), peek(alt((eof, recognize(one_of(" ,")))))),
         ));
         alt((combat_or_zone, player_actions)).parse(i)
     }) {
