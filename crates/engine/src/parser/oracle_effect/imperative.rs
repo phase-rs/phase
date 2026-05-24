@@ -5776,6 +5776,19 @@ fn filter_prop_references_target_object_quantity(prop: &FilterProp) -> bool {
         FilterProp::DifferentNameFrom { filter }
         | FilterProp::TargetsOnly { filter }
         | FilterProp::Targets { filter } => filter_references_target_object_quantity(filter),
+        // CR 109 + CR 201.2 / CR 202.3 / CR 205 / CR 208: `SharesQuality` is a
+        // multi-quality predicate (Name, ManaValue, CardType, CreatureType,
+        // LandType, Color, Power, Toughness). Its optional `reference` filter
+        // names the source set the shared-quality predicate compares against
+        // (e.g., "shares a color with target creature") and can itself embed
+        // an `ObjectScope::Target` quantity ref, so walk it when present.
+        FilterProp::SharesQuality {
+            reference: Some(reference),
+            ..
+        } => filter_references_target_object_quantity(reference),
+        FilterProp::SharesQuality {
+            reference: None, ..
+        } => false,
         // All other variants carry no embedded QuantityExpr and no nested
         // TargetFilter — they cannot reference a target-scoped object quantity.
         FilterProp::Token
@@ -5820,7 +5833,6 @@ fn filter_prop_references_target_object_quantity(prop: &FilterProp) -> bool {
         | FilterProp::Modified
         | FilterProp::Historic
         | FilterProp::InAnyZone { .. }
-        | FilterProp::SharesQuality { .. }
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::EnteredThisTurn
         | FilterProp::ZoneChangedThisTurn { .. }
@@ -5859,12 +5871,23 @@ fn quantity_expr_references_target_object(expr: &QuantityExpr) -> bool {
 }
 
 /// CR 115.1: True iff `qty` reads from `ability.targets` at resolution time —
-/// i.e. is one of the `scope: ObjectScope` variants of `QuantityRef` whose
-/// scope resolves to `ObjectScope::Target` (the first object target). Covers
-/// every `QuantityRef` variant carrying an `ObjectScope` axis so the mass-
-/// destroy intercept catches the full class, not just `Power`/`Toughness`.
-/// `ObjectScope::Recipient` is deliberately excluded — it is the layer-
-/// evaluator's per-recipient binding, not a spell-resolution target slot.
+/// either directly (one of the `scope: ObjectScope` variants resolving to
+/// `Target`) or transitively (a `TargetFilter` payload that itself embeds a
+/// target-scoped quantity ref).
+///
+/// Direct axis: `ObjectScope::Target` on any of the seven `scope`-bearing
+/// variants (`Power`, `Toughness`, `ObjectManaValue`, `ObjectColorCount`,
+/// `ObjectNameWordCount`, `ManaSymbolsInManaCost`, `CountersOn`).
+/// `ObjectScope::Recipient` is deliberately excluded — it is the
+/// layer-evaluator's per-recipient binding, not a spell-resolution target
+/// slot.
+///
+/// Transitive axis: variants whose payload includes a `filter: TargetFilter`
+/// (or `Option<TargetFilter>` / `Box<TargetFilter>`) recurse into that filter
+/// via `filter_references_target_object_quantity`. Without this recursion,
+/// composite predicates like "number of creatures with power > target
+/// creature's power" (an `ObjectCount` whose filter embeds a `Target` ref)
+/// would be missed, leaving the mass-destroy intercept unable to anchor them.
 ///
 /// The match below is intentionally exhaustive (no `_` wildcard) — see
 /// CLAUDE.md "exhaustive `match` without wildcard fallbacks" guidance. Every
@@ -5873,7 +5896,7 @@ fn quantity_expr_references_target_object(expr: &QuantityExpr) -> bool {
 /// an `ObjectScope::Target` reference (and would therefore require a
 /// target-anchor wrap in the mass-destroy intercept).
 fn quantity_ref_uses_target_scope(qty: &QuantityRef) -> bool {
-    use crate::types::ability::ObjectScope;
+    use crate::types::ability::{CardTypeSetSource, CastManaSpentMetric, ObjectScope};
     match qty {
         // ObjectScope-axis variants — true iff scope is Target.
         QuantityRef::Power { scope }
@@ -5883,27 +5906,62 @@ fn quantity_ref_uses_target_scope(qty: &QuantityRef) -> bool {
         | QuantityRef::ObjectNameWordCount { scope }
         | QuantityRef::ManaSymbolsInManaCost { scope, .. }
         | QuantityRef::CountersOn { scope, .. } => matches!(scope, ObjectScope::Target),
-        // All other QuantityRef variants either carry no ObjectScope axis
-        // (player-scoped, filter-scoped, zone-scoped, aggregate, etc.) or
-        // use a different scope enum (PlayerScope, CountScope). None read
-        // from `ability.targets`'s object slot the way ObjectScope::Target
-        // does, so they do not require a target-anchor wrap.
+        // Filter-bearing variants — recurse into the embedded `TargetFilter`
+        // so a `PtComparison { Power, Target }` (or any other target-scoped
+        // ref) nested inside the filter is still detected.
+        QuantityRef::ObjectCount { filter }
+        | QuantityRef::ObjectCountDistinct { filter, .. }
+        | QuantityRef::CountersOnObjects { filter, .. }
+        | QuantityRef::Aggregate { filter, .. }
+        | QuantityRef::EnteredThisTurn { filter }
+        | QuantityRef::SacrificedThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
+        | QuantityRef::CounterAddedThisTurn { target: filter, .. }
+        | QuantityRef::TokensCreatedThisTurn { filter, .. }
+        | QuantityRef::DistinctColorsAmongPermanents { filter } => {
+            filter_references_target_object_quantity(filter)
+        }
+        QuantityRef::SpellsCastThisTurn { filter, .. }
+        | QuantityRef::SpellsCastThisGame { filter, .. } => filter
+            .as_ref()
+            .is_some_and(filter_references_target_object_quantity),
+        // CR 120.3: `DamageDealtThisTurn` carries two boxed filters (source and
+        // recipient). Either can embed an `ObjectScope::Target` ref.
+        QuantityRef::DamageDealtThisTurn { source, target, .. } => {
+            filter_references_target_object_quantity(source)
+                || filter_references_target_object_quantity(target)
+        }
+        // CR 205.2a + CR 607.2a: `DistinctCardTypes::Objects { filter }` is the
+        // only `CardTypeSetSource` arm carrying a `TargetFilter`; the other
+        // arms (`Zone`, `ExiledBySource`) carry only scalar/zone scopes.
+        QuantityRef::DistinctCardTypes { source } => match source {
+            CardTypeSetSource::Objects { filter } => {
+                filter_references_target_object_quantity(filter)
+            }
+            CardTypeSetSource::Zone { .. } | CardTypeSetSource::ExiledBySource => false,
+        },
+        // CR 106.3 + CR 601.2h: `ManaSpentToCast::FromSource { source_filter }`
+        // is the only mana-spent metric arm carrying a `TargetFilter`.
+        QuantityRef::ManaSpentToCast { metric, .. } => match metric {
+            CastManaSpentMetric::FromSource { source_filter } => {
+                filter_references_target_object_quantity(source_filter)
+            }
+            CastManaSpentMetric::Total | CastManaSpentMetric::DistinctColors => false,
+        },
+        // All remaining QuantityRef variants carry no `ObjectScope` axis and
+        // no nested `TargetFilter` — they cannot reference a target-scoped
+        // object quantity directly or transitively.
         QuantityRef::HandSize { .. }
         | QuantityRef::LifeTotal { .. }
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal
-        | QuantityRef::ObjectCount { .. }
-        | QuantityRef::ObjectCountDistinct { .. }
         | QuantityRef::PlayerCount { .. }
-        | QuantityRef::CountersOnObjects { .. }
         | QuantityRef::PlayerCounter { .. }
         | QuantityRef::Variable { .. }
         | QuantityRef::SelfManaValue
-        | QuantityRef::Aggregate { .. }
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::Devotion { .. }
-        | QuantityRef::DistinctCardTypes { .. }
         | QuantityRef::CardsExiledBySource
         | QuantityRef::ZoneCardCount { .. }
         | QuantityRef::BasicLandTypeCount { .. }
@@ -5916,34 +5974,24 @@ fn quantity_ref_uses_target_scope(qty: &QuantityRef) -> bool {
         | QuantityRef::EventContextAmount
         | QuantityRef::AttachmentsOnLeavingObject { .. }
         | QuantityRef::EventContextSourceCostX
-        | QuantityRef::SpellsCastThisTurn { .. }
-        | QuantityRef::EnteredThisTurn { .. }
-        | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
-        | QuantityRef::ZoneChangeCountThisTurn { .. }
-        | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::ChosenNumber
         | QuantityRef::AttackedThisTurn
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::SpellsCastLastTurn
-        | QuantityRef::SpellsCastThisGame { .. }
-        | QuantityRef::CounterAddedThisTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
-        | QuantityRef::TokensCreatedThisTurn { .. }
         | QuantityRef::PlayerActionsThisTurn { .. }
         | QuantityRef::DungeonsCompleted
         | QuantityRef::CostXPaid
         | QuantityRef::KickerCount
         | QuantityRef::ConvokedCreatureCount
-        | QuantityRef::ManaSpentToCast { .. }
         | QuantityRef::ColorsInCommandersColorIdentity
-        | QuantityRef::CommanderCastFromCommandZoneCount
-        | QuantityRef::DistinctColorsAmongPermanents { .. } => false,
+        | QuantityRef::CommanderCastFromCommandZoneCount => false,
     }
 }
 
@@ -6116,43 +6164,61 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             clause
         }
         // CR 115.1 + CR 608.2c: "Destroy all <subject> with <property
-        // referencing target <type>'s power/toughness>" — Fell the Mighty
-        // class. The parsed mass filter embeds a `QuantityRef::Power { scope:
-        // Target }` (or toughness) reference that needs a real parent target
-        // slot to resolve against. `Effect::DestroyAll` does not surface its
-        // `target` field as a stack-time target slot (see
+        // referencing target <type>'s power/toughness/etc.>" — Fell the Mighty
+        // class. The parsed mass filter embeds a target-scoped `QuantityRef`
+        // (Power/Toughness/ObjectManaValue/...) that needs a real parent
+        // target slot to resolve against. `Effect::DestroyAll` does not
+        // surface its `target` field as a stack-time target slot (see
         // `Effect::target_filter` — DestroyAll returns `None` there). That
         // return is intentional: `DestroyAll.target` models the mass-scan
         // predicate (CR 700.4 — "all" sweep), not a player-chosen target slot.
-        // Rather than retrofitting `DestroyAll.target_filter()` to surface the
-        // mass filter (which would create a circular "pick a creature with
-        // power > your own power" target requirement), the fix surfaces a
-        // SEPARATE parent anchor via `Effect::TargetOnly`. Without that anchor
-        // the embedded `Target` ref reads from an empty targets slice and the
-        // comparison degenerates (e.g. "power >= 0 + 1" matches every creature
-        // with power >= 1).
+        // Retrofitting `DestroyAll.target_filter()` to surface the mass filter
+        // would create a circular "pick a creature with power > your own
+        // power" target requirement; instead, surface a SEPARATE parent
+        // anchor via `Effect::TargetOnly`. Without that anchor the embedded
+        // `Target` ref reads from an empty targets slice and the comparison
+        // degenerates (e.g. "power >= 0 + 1" matches every creature with
+        // power >= 1).
         //
         // Wrap with `Effect::TargetOnly { target: creature }` (mirrors the
         // existing Leadership Vacuum and choose-two-targets intercepts above)
-        // so casting surfaces a "target creature" slot. The DestroyAll
-        // sub_ability inherits `ability.targets` at resolution time via the
-        // standard sub-chain target propagation in
+        // so casting surfaces a real target slot. The anchor type MUST be the
+        // narrowest legal target type implied by the embedded `QuantityRef`,
+        // not a generic `permanent()` — CR 115 requires the chosen target to
+        // satisfy the spell's target type, and CR 208.1 restricts power and
+        // toughness to creatures. A broader `permanent()` anchor would let
+        // the controller pick a land; `Power { Target }` would then read
+        // `obj.power.unwrap_or(0) == 0`, reducing the comparison to
+        // "power >= 1" and re-introducing the original Fell-the-Mighty bug
+        // verbatim. Power/Toughness `Target` refs imply Creature anchor;
+        // other `ObjectScope::Target`-bearing refs (ObjectManaValue,
+        // ObjectColorCount, etc.) have no real-card representative yet, so
+        // the conservative Creature anchor covers every detected case in the
+        // current corpus. When a non-creature target-ref card surfaces, the
+        // anchor will need to widen along the embedded-ref axis (e.g.,
+        // ObjectManaValue → permanent), not as a one-shot generalization.
+        //
+        // The DestroyAll sub_ability inherits `ability.targets` at resolution
+        // time via the standard sub-chain target propagation in
         // `crate::game::effects::resolve_chain_body`, letting the embedded
-        // `Power { Target }` resolve against the chosen creature.
+        // `Target` ref resolve against the chosen creature.
+        //
+        // The inner `Effect::DestroyAll` is produced by `lower_zone_counter_ast`
+        // — the same authority that the fallback arm below delegates to — so
+        // the cant-regenerate handling, optional-field defaults, and any future
+        // changes to the destroy lowering apply uniformly to both paths.
         ImperativeFamilyAst::ZoneCounter(ZoneCounterImperativeAst::Destroy {
             target,
             all: true,
         }) if filter_references_target_object_quantity(&target) => {
             let anchor = TargetFilter::Typed(TypedFilter::creature());
-            let destroy = AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::DestroyAll {
-                    target,
-                    cant_regenerate: false,
-                },
-            );
+            let destroy_effect =
+                lower_zone_counter_ast(ZoneCounterImperativeAst::Destroy { target, all: true });
             let mut clause = parsed_clause(Effect::TargetOnly { target: anchor });
-            clause.sub_ability = Some(Box::new(destroy));
+            clause.sub_ability = Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                destroy_effect,
+            )));
             clause
         }
         // All other arms produce a bare Effect with no sub_ability chain.
@@ -9506,6 +9572,11 @@ mod tests {
         let ability = &parsed.abilities[0];
 
         // Parent effect: TargetOnly anchoring a "target creature" slot.
+        // CR 115 + CR 208.1: the anchor type is Creature because the embedded
+        // `QuantityRef::Power { Target }` requires the chosen target to have
+        // power, which is a creature-only characteristic. A broader anchor
+        // would let the controller pick a non-creature and re-introduce the
+        // original Fell-the-Mighty bug at runtime.
         match &*ability.effect {
             Effect::TargetOnly { target } => match target {
                 TargetFilter::Typed(tf) => {
@@ -9570,5 +9641,168 @@ mod tests {
             },
             other => panic!("expected DestroyAll sub_ability, got {other:?}"),
         }
+    }
+
+    /// Walker-level coverage for #988's broadened target-reference walker.
+    /// The Fell-the-Mighty test exercises only the `PtComparison` →
+    /// `Power { Target }` path; this test pins the recursion through every
+    /// other shape doc-guardian and code-reviewer flagged as load-bearing:
+    /// the `SharesQuality.reference` filter (multi-quality predicate), the
+    /// `ObjectCount.filter` and `Aggregate.filter` recursion (filter-bearing
+    /// `QuantityRef` variants), and the `DamageDealtThisTurn { source, target }`
+    /// dual-filter case. Each shape both with and without an embedded
+    /// `ObjectScope::Target` ref to lock down the false / true symmetry.
+    #[test]
+    fn target_object_quantity_walker_covers_filter_bearing_refs() {
+        use crate::types::ability::{
+            AggregateFunction, Comparator, FilterProp, ObjectProperty, ObjectScope, PtStat,
+            PtValueScope, QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation,
+            TargetFilter, TypedFilter,
+        };
+
+        let target_power_ref = || QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::Target,
+            },
+        };
+        let fixed_one = || QuantityExpr::Fixed { value: 1 };
+
+        // Helper to build a typed creature filter with a single PtComparison
+        // referencing target power. Used as the "embedded target ref" payload
+        // throughout the cases below.
+        let creature_with_target_power = || {
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::GE,
+                    value: target_power_ref(),
+                },
+            ]))
+        };
+
+        // 1. SharesQuality.reference recursion — gemini medium #1.
+        let shares_with_target = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::SharesQuality {
+                quality: SharedQuality::Color,
+                reference: Some(Box::new(creature_with_target_power())),
+                relation: SharedQualityRelation::Shares,
+            },
+        ]));
+        assert!(
+            filter_references_target_object_quantity(&shares_with_target),
+            "SharesQuality.reference embedding a target ref must be detected",
+        );
+        let shares_without_target = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::SharesQuality {
+                quality: SharedQuality::Color,
+                reference: None,
+                relation: SharedQualityRelation::Shares,
+            },
+        ]));
+        assert!(
+            !filter_references_target_object_quantity(&shares_without_target),
+            "SharesQuality with no reference must not flag",
+        );
+
+        // 2. ObjectCount.filter recursion — gemini medium #2 (filter-bearing
+        // `QuantityRef`). Wrap inside a Cmc comparator so it has a real
+        // FilterProp host.
+        let object_count_target =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: creature_with_target_power(),
+                    },
+                },
+            }]));
+        assert!(
+            filter_references_target_object_quantity(&object_count_target),
+            "ObjectCount.filter embedding a target ref must be detected",
+        );
+        let object_count_no_target =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(TypedFilter::creature()),
+                    },
+                },
+            }]));
+        assert!(
+            !filter_references_target_object_quantity(&object_count_no_target),
+            "ObjectCount.filter with no target ref must not flag",
+        );
+
+        // 3. Aggregate.filter recursion — confirms the population-scope walk.
+        let aggregate_target = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Aggregate {
+                        function: AggregateFunction::Max,
+                        property: ObjectProperty::ManaValue,
+                        filter: creature_with_target_power(),
+                    },
+                },
+            },
+        ]));
+        assert!(
+            filter_references_target_object_quantity(&aggregate_target),
+            "Aggregate.filter embedding a target ref must be detected",
+        );
+
+        // 4. DamageDealtThisTurn { source, target } — either side independently.
+        let damage_via_source =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::DamageDealtThisTurn {
+                        source: Box::new(creature_with_target_power()),
+                        target: Box::new(TargetFilter::Player),
+                        aggregate: AggregateFunction::Sum,
+                        group_by: None,
+                    },
+                },
+            }]));
+        assert!(
+            filter_references_target_object_quantity(&damage_via_source),
+            "DamageDealtThisTurn.source embedding a target ref must be detected",
+        );
+        let damage_via_target =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::DamageDealtThisTurn {
+                        source: Box::new(TargetFilter::Any),
+                        target: Box::new(creature_with_target_power()),
+                        aggregate: AggregateFunction::Sum,
+                        group_by: None,
+                    },
+                },
+            }]));
+        assert!(
+            filter_references_target_object_quantity(&damage_via_target),
+            "DamageDealtThisTurn.target embedding a target ref must be detected",
+        );
+
+        // 5. Fixed-only baseline — nothing embedded ⇒ no flag. Pins the
+        // false return to guard against the walker accidentally returning
+        // true on inert inputs.
+        let fixed_only = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::LE,
+                value: fixed_one(),
+            },
+        ]));
+        assert!(
+            !filter_references_target_object_quantity(&fixed_only),
+            "Fixed value with no target ref must not flag",
+        );
     }
 }

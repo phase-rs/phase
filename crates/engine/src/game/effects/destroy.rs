@@ -853,9 +853,16 @@ mod tests {
         );
 
         // Parent ability: TargetOnly anchoring the chosen power-3 creature.
-        // The DestroyAll sub-ability inherits the parent's targets via the
-        // standard sub-chain target propagation in `resolve_chain_body`, so the
-        // embedded `Power { Target }` resolves against the chosen creature.
+        // CR 115 + CR 208.1: the anchor is `Creature` — narrower than the
+        // sub-filter's creature type constraint by intent, because the
+        // embedded `QuantityRef::Power { Target }` requires the chosen
+        // target to have power (creature-only). A broader anchor would let
+        // a land be picked at cast time; `obj.power.unwrap_or(0) == 0` would
+        // then reduce the mass filter to "power >= 1" and re-introduce the
+        // original bug. The DestroyAll sub-ability inherits the parent's
+        // targets via the standard sub-chain target propagation in
+        // `resolve_chain_body`, so the embedded `Power { Target }` resolves
+        // against the chosen creature.
         let ability = ResolvedAbility::new(
             Effect::TargetOnly {
                 target: TargetFilter::Typed(TypedFilter::creature()),
