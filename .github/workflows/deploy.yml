@@ -361,11 +361,16 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          targets: x86_64-unknown-linux-musl
           cache-shared-key: rust-server
 
-      - name: Install musl tools
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+      - name: Install musl tools and target
+        # The musl target must be added explicitly with `rustup target add`, not
+        # via setup-rust-toolchain's `targets:` input: rust-toolchain.toml pins
+        # the toolchain and its own `targets` list (wasm32 only), which overrides
+        # the action input. Mirrors release.yml's Linux server build.
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+          rustup target add x86_64-unknown-linux-musl
 
       - name: Download server data artifact
         uses: actions/download-artifact@v4

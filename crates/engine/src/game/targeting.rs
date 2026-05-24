@@ -390,6 +390,12 @@ pub fn resolved_targets(
             .map(|snap| TargetRef::Object(snap.object_id))
             .collect();
     }
+    if matches!(target_filter, TargetFilter::ParentTarget) && ability.targets.is_empty() {
+        if let Some(target) = resolve_event_context_target(state, target_filter, ability.source_id)
+        {
+            return vec![target];
+        }
+    }
     let use_self = matches!(
         target_filter,
         TargetFilter::None | TargetFilter::ParentTarget
@@ -431,6 +437,10 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
             let event = event?;
             let obj_id = extract_source_from_event(event)?;
             Some(TargetRef::Object(obj_id))
+        }
+        TargetFilter::ParentTarget => {
+            let event = event?;
+            blocked_attacker_from_event(event, source_id).map(TargetRef::Object)
         }
         // CR 506.3d: "defending player" — look up from combat state using the source creature.
         TargetFilter::DefendingPlayer => {
@@ -493,6 +503,20 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
         TargetFilter::PostReplacementDamageTarget => state.post_replacement_event_target.clone(),
         _ => None,
     }
+}
+
+fn blocked_attacker_from_event(
+    event: &crate::types::events::GameEvent,
+    source_id: ObjectId,
+) -> Option<ObjectId> {
+    let crate::types::events::GameEvent::BlockersDeclared { assignments } = event else {
+        return None;
+    };
+    let mut attackers = assignments
+        .iter()
+        .filter_map(|(blocker, attacker)| (*blocker == source_id).then_some(*attacker));
+    let first = attackers.next()?;
+    attackers.all(|attacker| attacker == first).then_some(first)
 }
 
 /// Resolve a player reference carried in an effect target slot.
@@ -2809,6 +2833,22 @@ mod tests {
         );
         // Suppress unused-variable warning when setup_with_creatures changes.
         let _ = &mut state;
+    }
+
+    /// CR 509.1g + CR 608.2c: for "When this creature blocks a creature,
+    /// destroy that creature", `ParentTarget` resolves to the blocked attacker
+    /// carried by the split `BlockersDeclared` trigger event.
+    #[test]
+    fn resolved_targets_parent_target_for_block_event_returns_blocked_attacker() {
+        let (mut state, blocker, attacker) = setup_with_creatures();
+        state.current_trigger_event = Some(crate::types::events::GameEvent::BlockersDeclared {
+            assignments: vec![(blocker, attacker)],
+        });
+        let ability = make_resolved_with_targets(vec![], blocker);
+
+        let result = resolved_targets(&ability, &TargetFilter::ParentTarget, &state);
+
+        assert_eq!(result, vec![TargetRef::Object(attacker)]);
     }
 
     /// CR 601.2c: Tier 3 — when neither self-ref nor event-context applies,

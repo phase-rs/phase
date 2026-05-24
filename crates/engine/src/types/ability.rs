@@ -539,6 +539,15 @@ pub enum ChosenAttribute {
     /// remove it"). Read by `ContinuousModification::RemoveChosenKeyword` at
     /// Layer 6 evaluation to strip the chosen keyword from the recipient.
     Keyword(Keyword),
+    /// CR 614.12c: Records the anchor-word label chosen as the permanent
+    /// entered the battlefield (e.g. Frostcliff Siege "Jeskai" / "Temur",
+    /// Khans of Tarkir Sieges "Khans" / "Dragons"). Read by
+    /// `StaticCondition::ChosenLabelIs` and `TriggerCondition::ChosenLabelIs`
+    /// to gate which of the two anchor-word-marked abilities (CR 607: linked
+    /// abilities) functions while the permanent is on the battlefield. The
+    /// label is stored case-canonicalised to match `ChoiceType::Labeled`'s
+    /// capitalised option list.
+    Label(String),
 }
 
 impl ChosenAttribute {
@@ -569,6 +578,13 @@ impl ChosenAttribute {
             Self::Keyword(_) => ChoiceType::Keyword {
                 options: Vec::new(),
             },
+            // CR 614.12c: Anchor-word labels are a free-form labeled choice
+            // (the per-card option list — e.g. ["Jeskai", "Temur"] — is
+            // emitted at the choice site, mirroring the `Keyword` template
+            // idiom). The stored single label is one of those options.
+            Self::Label(label) => ChoiceType::Labeled {
+                options: vec![label.clone()],
+            },
         }
     }
 
@@ -586,7 +602,11 @@ impl ChosenAttribute {
             ChoiceValue::TwoColors(colors) => Some(Self::TwoColors(colors)),
             ChoiceValue::Number(n) => Some(Self::Number(n)),
             ChoiceValue::Keyword(keyword) => Some(Self::Keyword(keyword)),
-            ChoiceValue::Label(_) | ChoiceValue::LandType(_) => None,
+            // CR 614.12c: Persist a labeled choice as an anchor-word label so
+            // companion `ChosenLabelIs` conditions (static + trigger) can read
+            // it for the lifetime of the permanent.
+            ChoiceValue::Label(label) => Some(Self::Label(label)),
+            ChoiceValue::LandType(_) => None,
         }
     }
 }
@@ -3542,6 +3562,15 @@ pub enum StaticCondition {
     /// Used for cards that choose a color on ETB and have color-conditional effects.
     ChosenColorIs {
         color: ManaColor,
+    },
+    /// CR 614.12c + CR 607.2d: True when the source object's persisted
+    /// `ChosenAttribute::Label` matches the given anchor word. Used by
+    /// anchor-word modal permanents (Khans of Tarkir Sieges, Tarkir:
+    /// Dragonstorm enchantments) to gate the linked static ability "as long
+    /// as [anchor word] was chosen as this permanent entered the
+    /// battlefield, this permanent has [ability]." Mirrors `ChosenColorIs`.
+    ChosenLabelIs {
+        label: String,
     },
     /// True when a measurable quantity expression satisfies a comparison against another.
     /// Supports quantity-vs-quantity ("hand size > life total") and quantity-vs-constant
@@ -9157,6 +9186,16 @@ pub enum TriggerCondition {
     /// CR 603.4 + CR 611.2b: Source-bound intervening-if predicate expressed
     /// as a normal target filter evaluated against the trigger source.
     SourceMatchesFilter { filter: TargetFilter },
+
+    /// CR 614.12c + CR 607.2d + CR 603.4: True when the trigger source's
+    /// persisted `ChosenAttribute::Label` matches the given anchor word.
+    /// Used by anchor-word modal permanents (Khans of Tarkir Sieges, Tarkir:
+    /// Dragonstorm enchantments) to gate the linked triggered ability "as
+    /// long as [anchor word] was chosen as this permanent entered the
+    /// battlefield, this permanent has [ability]." Mirrors
+    /// `StaticCondition::ChosenLabelIs`. Checked at both fire-time and
+    /// resolution-time per CR 603.4.
+    ChosenLabelIs { label: String },
 
     /// CR 508.1 + CR 603.2c + CR 603.4: Intervening-if for "attacks with N or more creatures"
     /// triggers. Reads the triggering `AttackersDeclared` event and counts attackers whose
