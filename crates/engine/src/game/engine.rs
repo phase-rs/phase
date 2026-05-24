@@ -3546,6 +3546,7 @@ fn apply_action(
                 kind: crate::types::ability::EffectKind::Proliferate,
                 source_id: ObjectId(0), // Source not tracked through choice state
             });
+            // CR 701.34a: Emit player-action event so proliferate triggers fire.
             events.push(GameEvent::PlayerPerformedAction {
                 player_id: p,
                 action: PlayerActionKind::Proliferate,

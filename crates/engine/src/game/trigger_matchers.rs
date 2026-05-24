@@ -150,7 +150,6 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::ConjureAll
         | TriggerMode::Vote
         | TriggerMode::BecomeRenowned
-        | TriggerMode::Proliferate
         | TriggerMode::Abandoned
         | TriggerMode::ClaimPrize
         | TriggerMode::CrankContraption
@@ -160,6 +159,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::GiveGift
         | TriggerMode::Mentored
         | TriggerMode::Mutates
+        | TriggerMode::Proliferate
         | TriggerMode::SeekAll
         | TriggerMode::SetInMotion
         | TriggerMode::Specializes
@@ -377,7 +377,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::ConjureAll,
         TriggerMode::Vote,
         TriggerMode::BecomeRenowned,
-        TriggerMode::Proliferate,
         TriggerMode::Abandoned,
         TriggerMode::ClaimPrize,
         TriggerMode::CrankContraption,
