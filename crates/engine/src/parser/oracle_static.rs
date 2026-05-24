@@ -10243,76 +10243,7 @@ fn parse_self_subject_is_color_cda(
     tp: &TextPair<'_>,
     description: &str,
 ) -> Option<StaticDefinition> {
-    let (after_subject, subject_lower) = terminated(
-        take_until::<_, _, OracleError<'_>>(" is "),
-        tag::<_, _, OracleError<'_>>(" is "),
-    )
-    .parse(tp.lower)
-    .ok()?;
-
-    let (after_predicate, predicate_lower) = alt((
-        terminated(take_until::<_, _, OracleError<'_>>("."), tag(".")),
-        rest,
-    ))
-    .parse(after_subject)
-    .ok()?;
-    eof::<_, OracleError<'_>>(after_predicate).ok()?;
-
-    let matches_subject = |pattern: &str| {
-        nom_tag_lower(subject_lower, subject_lower, pattern).is_some_and(|rest| rest.is_empty())
-    };
-
-    let is_explicit_self = matches_subject("~")
-        || matches_subject("this card")
-        || SELF_REF_TYPE_PHRASES
-            .iter()
-            .any(|phrase| matches_subject(phrase));
-
-    if !is_explicit_self {
-        let (_, subject_words) =
-            separated_list1(space1::<_, OracleError<'_>>, alpha1::<_, OracleError<'_>>)
-                .parse(subject_lower)
-                .ok()?;
-
-        let has_nonself_subject_word = subject_words.iter().any(|word| {
-            matches!(
-                *word,
-                "all"
-                    | "each"
-                    | "enchanted"
-                    | "equipped"
-                    | "target"
-                    | "other"
-                    | "creature"
-                    | "creatures"
-                    | "permanent"
-                    | "permanents"
-                    | "land"
-                    | "lands"
-                    | "artifact"
-                    | "artifacts"
-                    | "enchantment"
-                    | "enchantments"
-                    | "planeswalker"
-                    | "planeswalkers"
-                    | "battle"
-                    | "battles"
-                    | "player"
-                    | "players"
-                    | "opponent"
-                    | "opponents"
-                    | "spells"
-                    | "cards"
-                    | "tokens"
-            )
-        });
-
-        if has_nonself_subject_word {
-            return None;
-        }
-    }
-
-    let colors = parse_color_predicate(predicate_lower)?;
+    let (_, colors) = parse_self_subject_is_color_cda_line(tp.lower).ok()?;
 
     Some(
         StaticDefinition::continuous()
@@ -10330,6 +10261,47 @@ fn parse_self_subject_is_color_cda(
             .cda()
             .description(description.to_string()),
     )
+}
+
+fn parse_self_subject_is_color_cda_line(input: &str) -> OracleResult<'_, Vec<ManaColor>> {
+    let (after_subject, _) = parse_self_color_subject(input)?;
+    let (after_predicate, predicate_lower) = alt((
+        terminated(take_until::<_, _, OracleError<'_>>("."), tag(".")),
+        rest,
+    ))
+    .parse(after_subject)?;
+    eof::<_, OracleError<'_>>(after_predicate)?;
+    let Some(colors) = parse_color_predicate(predicate_lower) else {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            predicate_lower,
+            nom::error::ErrorKind::Fail,
+        )));
+    };
+    Ok((after_predicate, colors))
+}
+
+fn parse_self_color_subject(input: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = alt((
+        value((), tag::<_, _, OracleError<'_>>("~")),
+        value((), tag("this card")),
+        value((), tag("this spell")),
+        parse_self_ref_type_subject,
+    ))
+    .parse(input)?;
+    let (rest, _) = tag(" is ").parse(rest)?;
+    Ok((rest, ()))
+}
+
+fn parse_self_ref_type_subject(input: &str) -> OracleResult<'_, ()> {
+    for phrase in SELF_REF_TYPE_PHRASES {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*phrase).parse(input) {
+            return Ok((rest, ()));
+        }
+    }
+    Err(nom::Err::Error(nom::error::Error::new(
+        input,
+        nom::error::ErrorKind::Fail,
+    )))
 }
 
 /// CR 305.7: Parse "[Subject] lands are [type]" land type-changing static abilities.
@@ -18344,15 +18316,8 @@ mod tests {
     }
 
     #[test]
-    fn static_cardname_is_colorless_parses_as_self_cda() {
-        // Card-name form should route to the same self-CDA shape as "~".
-        let def = parse_static_line("Ghostfire is colorless.").unwrap();
-        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
-        assert!(def.characteristic_defining);
-        assert_eq!(
-            def.modifications,
-            vec![ContinuousModification::SetColor { colors: vec![] }]
-        );
+    fn static_raw_cardname_is_colorless_is_not_contextless_self_cda() {
+        assert!(parse_static_line("Ghostfire is colorless.").is_none());
     }
 
     #[test]
