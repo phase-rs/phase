@@ -51,6 +51,7 @@ type MultiTargetSelection = Extract<WaitingFor, { type: "MultiTargetSelection" }
 type ParadigmCastOffer = Extract<WaitingFor, { type: "ParadigmCastOffer" }>;
 type PayManaAbilityMana = Extract<WaitingFor, { type: "PayManaAbilityMana" }>;
 type ReturnToHandForCost = Extract<WaitingFor, { type: "ReturnToHandForCost" }>;
+type RemoveCounterForCost = Extract<WaitingFor, { type: "RemoveCounterForCost" }>;
 type BlightChoice = Extract<WaitingFor, { type: "BlightChoice" }>;
 type BeholdForCost = Extract<WaitingFor, { type: "BeholdForCost" }>;
 type ExileForCost = Extract<WaitingFor, { type: "ExileForCost" }>;
@@ -252,6 +253,9 @@ export function CardChoiceModal() {
     case "ReturnToHandForCost":
       if (!canActForWaitingState) return null;
       return <ReturnToHandModal key={waitingFor.data.permanents.join(",")} data={waitingFor.data} />;
+    case "RemoveCounterForCost":
+      if (!canActForWaitingState) return null;
+      return <RemoveCounterModal key={waitingFor.data.permanents.join(",")} data={waitingFor.data} />;
     case "BlightChoice":
       if (!canActForWaitingState) return null;
       return <BlightModal data={waitingFor.data} />;
@@ -1741,6 +1745,21 @@ function ReturnToHandModal({ data }: { data: ReturnToHandForCost["data"] }) {
   );
 }
 
+function RemoveCounterModal({ data }: { data: RemoveCounterForCost["data"] }) {
+  return (
+    <PermanentCostModal
+      data={data}
+      choices={data.permanents}
+      title="Remove Counter"
+      subtitle="Choose a permanent to remove a counter from"
+      label="Remove"
+      selectedClassName="z-10 ring-2 ring-violet-300/80"
+      overlayClassName="absolute inset-0 flex items-center justify-center rounded-lg bg-violet-500/20"
+      badgeClassName="rounded-full bg-violet-500/90 px-3 py-1 text-xs font-bold text-white"
+    />
+  );
+}
+
 function PermanentCostModal({
   data,
   choices,
@@ -1754,6 +1773,7 @@ function PermanentCostModal({
   data:
     | SacrificeForCost["data"]
     | ReturnToHandForCost["data"]
+    | RemoveCounterForCost["data"]
     | ExileFromBattlefieldForManaAbility["data"]
     | SacrificeForManaAbility["data"];
   choices: ObjectId[];
@@ -3084,7 +3104,18 @@ function ManaColorChoiceModal({ data }: { data: ChooseManaColor["data"] }) {
       />
     );
   }
-  return <ManaSingleColorChoiceModal options={data.choice.data.options} />;
+  // CR 605.3a: When the source is a mana ability with identical, choice-free
+  // twins (the player's other Treasures, etc.), the engine reports them in
+  // `context.batch_siblings`. Offer a quantity stepper so one color choice can
+  // bulk-activate up to `siblings + 1` sources. `+ 1` counts the just-tapped
+  // source already paid for before this prompt.
+  const batchMax =
+    data.context.type === "ManaAbility"
+      ? (data.context.data.batch_siblings?.length ?? 0) + 1
+      : 1;
+  return (
+    <ManaSingleColorChoiceModal options={data.choice.data.options} batchMax={batchMax} />
+  );
 }
 
 function PayManaAbilityManaModal({ data }: { data: PayManaAbilityMana["data"] }) {
@@ -3098,26 +3129,43 @@ function PayManaAbilityManaModal({ data }: { data: PayManaAbilityMana["data"] })
   );
 }
 
-function ManaSingleColorChoiceModal({ options }: { options: ManaType[] }) {
+function ManaSingleColorChoiceModal({
+  options,
+  batchMax = 1,
+}: {
+  options: ManaType[];
+  batchMax?: number;
+}) {
   const dispatch = useGameDispatch();
   const [selected, setSelected] = useState<ManaType | null>(null);
+  // CR 605.3a: how many identical sources to activate with the chosen color.
+  const [count, setCount] = useState(1);
 
   const handleConfirm = useCallback(() => {
     if (selected) {
       dispatch({
         type: "ChooseManaColor",
-        data: { choice: { type: "SingleColor", data: selected } },
+        data: { choice: { type: "SingleColor", data: selected }, count },
       });
     }
-  }, [dispatch, selected]);
+  }, [dispatch, selected, count]);
+
+  const canBatch = batchMax > 1;
+  const confirmLabel = selected && count > 1 ? `Add ${count}` : "Confirm";
 
   return (
     <ChoiceOverlay
       title="Choose Mana Color"
-      subtitle="Select which color of mana to produce"
+      subtitle={
+        canBatch
+          ? "Select a color, then how many sources to tap"
+          : "Select which color of mana to produce"
+      }
       widthClassName="w-fit max-w-full"
       maxWidthClassName="max-w-md"
-      footer={<ConfirmButton onClick={handleConfirm} disabled={selected === null} />}
+      footer={
+        <ConfirmButton onClick={handleConfirm} disabled={selected === null} label={confirmLabel} />
+      }
     >
       <div className="mx-auto flex w-fit items-center justify-center gap-3 px-4 py-4 sm:gap-5 sm:px-6 sm:py-6">
         {options.map((color, index) => {
@@ -3139,6 +3187,35 @@ function ManaSingleColorChoiceModal({ options }: { options: ManaType[] }) {
           );
         })}
       </div>
+      {canBatch && (
+        <div className="mx-auto mb-4 flex w-fit items-center gap-4">
+          <span className="text-sm text-white/70">How many?</span>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              aria-label="Tap fewer"
+              disabled={count <= 1}
+              onClick={() => setCount((c) => Math.max(1, c - 1))}
+              className="flex h-9 w-9 items-center justify-center rounded-full border border-white/20 text-xl leading-none text-white transition hover:border-white/40 disabled:opacity-30"
+            >
+              −
+            </button>
+            <span className="w-8 text-center text-lg font-semibold tabular-nums text-white">
+              {count}
+            </span>
+            <button
+              type="button"
+              aria-label="Tap more"
+              disabled={count >= batchMax}
+              onClick={() => setCount((c) => Math.min(batchMax, c + 1))}
+              className="flex h-9 w-9 items-center justify-center rounded-full border border-white/20 text-xl leading-none text-white transition hover:border-white/40 disabled:opacity-30"
+            >
+              +
+            </button>
+            <span className="text-sm text-white/50">/ {batchMax}</span>
+          </div>
+        </div>
+      )}
     </ChoiceOverlay>
   );
 }

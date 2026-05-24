@@ -13,8 +13,7 @@ expression: "&ir"
             "type": "Counter",
             "target": {
               "type": "ParentTarget"
-            },
-            "source_static": null
+            }
           },
           "cost": null,
           "sub_ability": null,

@@ -8,6 +8,7 @@ import {
   findPrintingById,
   getCardPrintings,
   isCardImageRotatedSync,
+  resolveFaceIndexSync,
   resolveOracleIdSync,
   resolvePrintingImageUrl,
 } from "../services/scryfall.ts";
@@ -324,19 +325,27 @@ export function useCardImage(
 
   const resolvedOracleId = oracleId || resolveOracleIdSync(cardName) || "";
 
+  // The printings/art-strategy path indexes faces numerically, but for a
+  // DFC/MDFC the reliable signal is the engine's `faceName` (an MDFC cast as its
+  // back face reports `transformed: false`, so the caller's `faceIndex` is 0 —
+  // the front). Resolve the real index from `faceName` here so every override
+  // path renders the active face; fall back to the caller's `faceIndex`.
+  const resolvedFaceIndex =
+    resolveFaceIndexSync(resolvedOracleId, faceName) ?? faceIndex;
+
   let overrideUrl: string | null = null;
   if (!isToken && resolvedOracleId) {
     if (scryfallId) {
-      overrideUrl = resolveOverrideUrl(resolvedOracleId, scryfallId, faceIndex, size);
+      overrideUrl = resolveOverrideUrl(resolvedOracleId, scryfallId, resolvedFaceIndex, size);
     } else if (artOverrides[resolvedOracleId]) {
-      overrideUrl = resolveOverrideUrl(resolvedOracleId, artOverrides[resolvedOracleId].scryfallId, faceIndex, size);
+      overrideUrl = resolveOverrideUrl(resolvedOracleId, artOverrides[resolvedOracleId].scryfallId, resolvedFaceIndex, size);
     } else if (artChain.length > 0) {
       if (sourcePrinting && artChain.some((e) => e.type === "source_printing")) {
         const printings = printingsCacheMap.get(resolvedOracleId);
         if (printings) {
           const winner = applyChain(artChain, printings, sourcePrinting);
           if (winner) {
-            overrideUrl = resolvePrintingImageUrl(winner, faceIndex, size);
+            overrideUrl = resolvePrintingImageUrl(winner, resolvedFaceIndex, size);
           }
         } else {
           resolveStrategyInBackground(resolvedOracleId, artChain);
@@ -344,13 +353,13 @@ export function useCardImage(
       } else {
         const cached = strategyCacheMap.get(resolvedOracleId);
         if (cached) {
-          overrideUrl = resolvePrintingImageUrl(cached, faceIndex, size);
+          overrideUrl = resolvePrintingImageUrl(cached, resolvedFaceIndex, size);
         } else {
           resolveStrategyInBackground(resolvedOracleId, artChain);
         }
       }
     } else if (sourcePrinting) {
-      overrideUrl = resolveSourcePrintingUrl(resolvedOracleId, sourcePrinting, faceIndex, size);
+      overrideUrl = resolveSourcePrintingUrl(resolvedOracleId, sourcePrinting, resolvedFaceIndex, size);
     }
   }
 

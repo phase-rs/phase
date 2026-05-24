@@ -146,6 +146,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
 
     if let WaitingFor::DigChoice {
         player,
+        library_owner,
         ref cards,
         keep_count,
         up_to,
@@ -158,6 +159,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         if !can_view_private_for_player(player) {
             filtered.waiting_for = WaitingFor::DigChoice {
                 player,
+                library_owner,
                 cards: cards.iter().map(|_| ObjectId(0)).collect(),
                 keep_count,
                 up_to,

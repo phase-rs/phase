@@ -423,6 +423,16 @@ fn evaluate_condition_with_context(
             .get(&source_id)
             .and_then(|obj| obj.chosen_color())
             .is_some_and(|chosen| &chosen == color),
+        // CR 614.12c + CR 607.2d: An anchor-word linked static ability is
+        // active iff the source permanent's persisted `ChosenAttribute::Label`
+        // matches the anchor word. The comparison is case-insensitive so a
+        // capitalised anchor word ("Jeskai") matches a label persisted in
+        // any canonicalisation. Mirrors `ChosenColorIs`'s lookup pattern.
+        StaticCondition::ChosenLabelIs { label } => state
+            .objects
+            .get(&source_id)
+            .and_then(|obj| obj.chosen_label())
+            .is_some_and(|chosen| chosen.eq_ignore_ascii_case(label)),
         StaticCondition::QuantityComparison {
             lhs,
             comparator,
@@ -5373,6 +5383,54 @@ mod tests {
         );
     }
 
+    // CR 113.6b + CR 408: SourceInZone evaluator — used by the Eminence /
+    // Anger / Squee class of statics that name a non-battlefield zone.
+    #[test]
+    fn evaluate_source_in_zone_command_true_when_in_command_zone() {
+        let mut state = setup();
+        let id = make_creature(&mut state, "Cmdr", 2, 2, PlayerId(0));
+        // Move from battlefield to command zone for this scenario.
+        state.objects.get_mut(&id).unwrap().zone = Zone::Command;
+        assert!(evaluate_condition_for_test(
+            &state,
+            &StaticCondition::SourceInZone {
+                zone: Zone::Command
+            },
+            PlayerId(0),
+            id,
+        ));
+    }
+
+    /// CR 113.6b: An Eminence-style Or-disjunction ("~ is in the command zone
+    /// or on the battlefield") must evaluate true for either zone individually
+    /// and false outside both.
+    #[test]
+    fn evaluate_source_in_zone_or_disjunction_command_or_battlefield() {
+        let mut state = setup();
+        let id = make_creature(&mut state, "Cmdr", 2, 2, PlayerId(0));
+        let cond = StaticCondition::Or {
+            conditions: vec![
+                StaticCondition::SourceInZone {
+                    zone: Zone::Command,
+                },
+                StaticCondition::SourceInZone {
+                    zone: Zone::Battlefield,
+                },
+            ],
+        };
+        // On battlefield (created here) → true.
+        assert!(evaluate_condition_for_test(&state, &cond, PlayerId(0), id));
+        // Move to command zone → still true.
+        state.objects.get_mut(&id).unwrap().zone = Zone::Command;
+        assert!(evaluate_condition_for_test(&state, &cond, PlayerId(0), id));
+        // Move to graveyard → false (neither zone).
+        state.objects.get_mut(&id).unwrap().zone = Zone::Graveyard;
+        assert!(!evaluate_condition_for_test(&state, &cond, PlayerId(0), id));
+        // Exile → false.
+        state.objects.get_mut(&id).unwrap().zone = Zone::Exile;
+        assert!(!evaluate_condition_for_test(&state, &cond, PlayerId(0), id));
+    }
+
     #[test]
     fn evaluate_source_is_tapped_true_when_tapped() {
         let mut state = setup();
@@ -7605,6 +7663,8 @@ mod tests {
                 name: "Mortician Beetle".to_string(),
                 power: Some(1),
                 toughness: Some(1),
+                base_power: Some(1),
+                base_toughness: Some(1),
                 mana_value: 1,
                 controller: PlayerId(0),
                 owner: PlayerId(0),

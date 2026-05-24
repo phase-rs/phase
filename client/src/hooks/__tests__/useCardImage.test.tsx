@@ -119,6 +119,7 @@ describe("useCardImage", () => {
       findPrintingById: vi.fn(),
       getCardPrintings: vi.fn().mockResolvedValue([]),
       isCardImageRotatedSync: vi.fn().mockReturnValue(false),
+      resolveFaceIndexSync: vi.fn().mockReturnValue(null),
       resolveOracleIdSync: vi.fn().mockReturnValue(null),
       resolvePrintingImageUrl: vi.fn(),
     }));

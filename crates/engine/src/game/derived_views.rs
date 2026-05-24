@@ -440,13 +440,16 @@ fn trigger_event_display(state: &GameState, event: &GameEvent) -> Option<Trigger
             object_id: Some(*object_id),
             player: Some(*controller),
         }),
-        GameEvent::AbilityActivated { source_id } => Some(TriggerContextDisplay {
+        GameEvent::AbilityActivated {
+            player_id,
+            source_id,
+        } => Some(TriggerContextDisplay {
             label: format!(
                 "{} ability activated",
                 target_label(state, &TargetRef::Object(*source_id))
             ),
             object_id: Some(*source_id),
-            player: state.objects.get(source_id).map(|obj| obj.controller),
+            player: Some(*player_id),
         }),
         GameEvent::VehicleCrewed {
             vehicle_id,
@@ -812,6 +815,8 @@ mod tests {
                 keywords: Vec::new(),
                 power: None,
                 toughness: None,
+                base_power: None,
+                base_toughness: None,
                 colors: Vec::new(),
                 mana_value: 0,
                 controller: PlayerId(1),

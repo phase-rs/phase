@@ -9,7 +9,7 @@ import {
 import { useLocation, useNavigate, useParams, useSearchParams } from "react-router";
 import { AnimatePresence, motion } from "framer-motion";
 
-import type { DeckCardCount, GameFormat, MatchConfig } from "../adapter/types";
+import type { DeckCardCount, GameFormat, MatchConfig, SerializedAbilityCost } from "../adapter/types";
 import { useDraftStore } from "../stores/draftStore";
 import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
 import type { DraftMatchResult } from "../services/quickDraftPersistence";
@@ -36,6 +36,7 @@ import { MobileHandDrawer } from "../components/hand/MobileHandDrawer.tsx";
 import { HandBadge } from "../components/hand/HandBadge.tsx";
 import { PlayerHand } from "../components/hand/PlayerHand.tsx";
 import { FlowHelpNudge } from "../components/help/FlowHelpNudge.tsx";
+import { SandboxToolsNudge } from "../components/help/SandboxToolsNudge.tsx";
 import { HelpSheet } from "../components/help/HelpSheet.tsx";
 import { GameLogPanel } from "../components/log/GameLogPanel.tsx";
 import { ChooseXValueUI } from "../components/mana/ChooseXValueUI.tsx";
@@ -107,7 +108,7 @@ import {
 } from "../stores/multiplayerStore.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
 import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from "../hooks/usePlayerId.ts";
-import { abilityChoiceLabel } from "../viewmodel/costLabel.ts";
+import { abilityChoiceLabel, formatAbilityCost } from "../viewmodel/costLabel.ts";
 import { getWaitingForObjectChoiceIds } from "../viewmodel/gameStateView.ts";
 import { gameButtonClass } from "../components/ui/buttonStyles.ts";
 import { cardImageLookup } from "../services/cardImageLookup.ts";
@@ -677,6 +678,8 @@ function GamePageContent({
   const helpSheetOpen = useUiStore((s) => s.helpSheetOpen);
   const setHelpSheetOpen = useUiStore((s) => s.setHelpSheetOpen);
   const dismissedFlowHelpNudge = usePreferencesStore((s) => s.dismissedFlowHelpNudge);
+  const dismissedSandboxToolsNudge = usePreferencesStore((s) => s.dismissedSandboxToolsNudge);
+  const debugPanelOpen = useUiStore((s) => s.debugPanelOpen);
   const opponentDisplayName = useMultiplayerStore((s) => s.opponentDisplayName);
   const adapter = useGameStore((s) => s.adapter);
   const focusedOpponent = useUiStore((s) => s.focusedOpponent);
@@ -898,6 +901,29 @@ function GamePageContent({
     canActForWaitingState &&
     stackLength === 0;
 
+  // Sequenced after the flow nudge (requires it dismissed first) so the two
+  // first-run hints never stack. Same calm-moment guards as the flow nudge,
+  // plus: hidden once the panel is already open (nothing left to advertise).
+  const showSandboxToolsNudge =
+    !dismissedSandboxToolsNudge &&
+    dismissedFlowHelpNudge &&
+    !debugPanelOpen &&
+    !helpSheetOpen &&
+    (mode === "ai" || mode === "local") &&
+    viewingZone == null &&
+    preferencesOpen == null &&
+    boardContextMenu == null &&
+    !showCardDataMissing &&
+    resumeResetReason == null &&
+    !showConcedeDialog &&
+    disconnectChoice == null &&
+    pauseReason == null &&
+    reconnectState.status === "idle" &&
+    waitingFor?.type === "Priority" &&
+    waitingFor.data.player === playerId &&
+    canActForWaitingState &&
+    stackLength === 0;
+
   return (
     <div
       ref={containerRef}
@@ -1059,6 +1085,7 @@ function GamePageContent({
         }}
       >
         {showFlowHelpNudge && <FlowHelpNudge />}
+        {showSandboxToolsNudge && <SandboxToolsNudge />}
         <CombatPhaseIndicator />
         <div className="flex items-center gap-1.5">
           <HandBadge />
@@ -1080,6 +1107,8 @@ function GamePageContent({
         onSettingsClick={() => setPreferencesOpen({})}
         onHelpClick={() => setHelpSheetOpen(true)}
         onConcede={onShowConcedeDialog}
+        showSandboxTools={mode === "ai" || mode === "local" || isSandboxGame}
+        onSandboxToolsClick={() => useUiStore.getState().openSandboxTools()}
       />
       <HelpSheet />
 
@@ -1295,6 +1324,10 @@ function GamePageContent({
         {waitingFor?.type === "UnlessPaymentChooseCost" &&
           canActForWaitingState && (
             <UnlessPaymentChooseCostModal />
+          )}
+        {waitingFor?.type === "ActivationCostOneOfChoice" &&
+          canActForWaitingState && (
+            <ActivationCostOneOfChoiceModal />
           )}
       </DialogHost>
 
@@ -2395,6 +2428,31 @@ function UnlessPaymentChooseCostModal() {
           data: { choice },
         });
       }}
+    />
+  );
+}
+
+function ActivationCostOneOfChoiceModal() {
+  const dispatch = useGameDispatch();
+  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+
+  if (waitingFor?.type !== "ActivationCostOneOfChoice") return null;
+
+  const branchOptions = waitingFor.data.costs.map((cost: SerializedAbilityCost, idx: number) => ({
+    id: String(idx),
+    label: formatAbilityCost(cost),
+  }));
+
+  return (
+    <ChoiceModal
+      title="Choose Activation Cost"
+      options={branchOptions}
+      onChoose={(id) =>
+        dispatch({
+          type: "ChooseActivationCostBranch",
+          data: { index: Number.parseInt(id, 10) },
+        })
+      }
     />
   );
 }

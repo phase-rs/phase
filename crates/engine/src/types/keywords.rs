@@ -2,12 +2,17 @@ use std::convert::Infallible;
 use std::fmt;
 use std::str::FromStr;
 
+use nom::branch::alt;
+use nom::bytes::complete::tag;
+use nom::combinator::value;
+use nom::sequence::preceded;
+use nom::Parser;
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
 use super::ability::ControllerRef;
 use super::ability::{
-    AbilityCost, FilterProp, QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
+    AbilityCost, Comparator, FilterProp, QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
 };
 use super::counter::{parse_counter_type, CounterType};
 use super::mana::{ManaColor, ManaCost};
@@ -334,6 +339,14 @@ pub enum ProtectionTarget {
     /// regardless of that object's characteristic values. Matches every source
     /// in `source_matches_protection_target`.
     Everything,
+    /// CR 702.16a: "Protection from [quality]" where the quality is a
+    /// characteristic-value predicate expressible as a `TargetFilter`.
+    /// Covers "protection from mana value N or less/greater" and any future
+    /// filter-based protection (e.g., "protection from power 2 or less").
+    /// Evaluated by testing the source object's characteristics against the
+    /// filter's properties — only `FilterProp` predicates that can be resolved
+    /// from the object alone (without game state) are valid here.
+    Filter(super::ability::TargetFilter),
 }
 
 /// CR 702.21a: Ward cost — what the targeting player must pay.
@@ -1355,16 +1368,23 @@ impl fmt::Display for Keyword {
         match self {
             Keyword::FirstStrike => write!(f, "First Strike"),
             Keyword::DoubleStrike => write!(f, "Double Strike"),
+            // CR 702.14a: Landwalk surfaces in Oracle text as "[type]walk" when
+            // [type] is a land subtype (Plainswalk, Desertwalk, Gatewalk, ...).
+            // When [type] is a supertype or non-land card type, the canonical
+            // phrasing is "[type] landwalk" (Legendary landwalk, Nonbasic landwalk,
+            // Snow landwalk, artifact landwalk). Capitalize "Landwalk" in the
+            // composed form so the rendered label matches the title-case style
+            // used by the rest of this Display impl (e.g. "First Strike").
             Keyword::Landwalk(subtype) => match subtype.as_str() {
                 "Plains" => write!(f, "Plainswalk"),
                 "Island" => write!(f, "Islandwalk"),
                 "Swamp" => write!(f, "Swampwalk"),
                 "Mountain" => write!(f, "Mountainwalk"),
                 "Forest" => write!(f, "Forestwalk"),
-                "Legendary" => write!(f, "Legendary landwalk"),
-                "Nonbasic" => write!(f, "Nonbasic landwalk"),
-                "Snow" => write!(f, "Snow landwalk"),
-                other => write!(f, "{other} landwalk"),
+                "Legendary" | "Nonbasic" | "Snow" | "Artifact" => {
+                    write!(f, "{subtype} Landwalk")
+                }
+                other => write!(f, "{other}walk"),
             },
             Keyword::Flying => write!(f, "Flying"),
             Keyword::Trample => write!(f, "Trample"),
@@ -1809,8 +1829,43 @@ fn parse_protection_target(s: &str) -> ProtectionTarget {
         // Lowercase the stored quality — `source_matches_card_type` only matches
         // lowercase, so the canonical stored form must be lowercase.
         _ if lower.starts_with("from ") => ProtectionTarget::Quality(lower),
-        _ => ProtectionTarget::CardType(lower),
+        _ => {
+            // CR 702.16a + CR 202.3: "mana value N or less/greater" — protection
+            // from objects whose mana value satisfies a comparator threshold.
+            if let Some(filter) = parse_protection_mana_value_filter(&lower) {
+                return ProtectionTarget::Filter(TargetFilter::Typed(filter));
+            }
+            ProtectionTarget::CardType(lower)
+        }
     }
+}
+
+/// CR 702.16a + CR 202.3: Parse "mana value N or less/greater" into a
+/// `TypedFilter` with a `Cmc` property. Uses nom combinators for structured
+/// extraction. Returns `None` if the input doesn't match.
+fn parse_protection_mana_value_filter(s: &str) -> Option<TypedFilter> {
+    type E<'a> = nom::error::Error<&'a str>;
+
+    // "mana value N or less" / "mana value N or greater"
+    let (rest, _) = tag::<_, _, E<'_>>("mana value ").parse(s).ok()?;
+    let (rest, n) = crate::parser::oracle_nom::primitives::parse_number(rest).ok()?;
+    let (rest, comparator) = preceded(
+        tag::<_, _, E<'_>>(" or "),
+        alt((
+            value(Comparator::LE, tag("less")),
+            value(Comparator::GE, tag("greater")),
+        )),
+    )
+    .parse(rest)
+    .ok()?;
+    if !rest.is_empty() {
+        return None;
+    }
+
+    Some(TypedFilter::default().properties(vec![FilterProp::Cmc {
+        comparator,
+        value: QuantityExpr::Fixed { value: n as i32 },
+    }]))
 }
 
 /// Custom Deserialize: accepts both the typed externally-tagged format (new)
@@ -2296,6 +2351,22 @@ mod tests {
     }
 
     #[test]
+    fn display_landwalk_uses_oracle_spelling_for_subtypes_and_card_types() {
+        assert_eq!(
+            Keyword::Landwalk("Island".to_string()).to_string(),
+            "Islandwalk"
+        );
+        assert_eq!(
+            Keyword::Landwalk("Snow".to_string()).to_string(),
+            "Snow Landwalk"
+        );
+        assert_eq!(
+            Keyword::Landwalk("Artifact".to_string()).to_string(),
+            "Artifact Landwalk"
+        );
+    }
+
+    #[test]
     fn parse_parameterized_keywords_as_mana_cost() {
         // Cost-bearing keywords now parse to ManaCost
         let kicker = Keyword::from_str("Kicker:1G").unwrap();
@@ -2452,6 +2523,63 @@ mod tests {
         assert_eq!(
             parse_protection_target("from artifacts"),
             ProtectionTarget::Quality("from artifacts".to_string())
+        );
+    }
+
+    /// CR 702.16a + CR 202.3: "mana value N or less/greater" parses to
+    /// `ProtectionTarget::Filter` with a `Cmc` property.
+    #[test]
+    fn parse_protection_target_mana_value_filter() {
+        // "mana value 3 or less" → Filter(Cmc { LE, Fixed(3) })
+        let pt = parse_protection_target("mana value 3 or less");
+        assert_eq!(
+            pt,
+            ProtectionTarget::Filter(TargetFilter::Typed(TypedFilter::default().properties(
+                vec![FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Fixed { value: 3 },
+                }]
+            )))
+        );
+
+        // "mana value 3 or greater" → Filter(Cmc { GE, Fixed(3) })
+        let pt = parse_protection_target("mana value 3 or greater");
+        assert_eq!(
+            pt,
+            ProtectionTarget::Filter(TargetFilter::Typed(TypedFilter::default().properties(
+                vec![FilterProp::Cmc {
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Fixed { value: 3 },
+                }]
+            )))
+        );
+
+        // Roundtrip via Keyword::from_str (MTGJSON colon form)
+        let kw = Keyword::from_str("Protection:mana value 3 or less").unwrap();
+        match kw {
+            Keyword::Protection(ProtectionTarget::Filter(TargetFilter::Typed(tf))) => {
+                assert_eq!(tf.properties.len(), 1);
+                assert!(
+                    matches!(
+                        &tf.properties[0],
+                        FilterProp::Cmc {
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: 3 },
+                        }
+                    ),
+                    "Expected Cmc {{ LE, Fixed(3) }}, got {:?}",
+                    tf.properties[0]
+                );
+            }
+            other => panic!("Expected Protection(Filter(Typed(...))), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_protection_target_mana_value_filter_rejects_trailing_text() {
+        assert_eq!(
+            parse_protection_target("mana value 3 or less from sources"),
+            ProtectionTarget::CardType("mana value 3 or less from sources".to_string())
         );
     }
 

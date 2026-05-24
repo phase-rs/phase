@@ -2078,7 +2078,7 @@ mod tests {
         let mut rewind = ResolvedAbility::new(
             Effect::Counter {
                 target: TargetFilter::StackSpell,
-                source_static: None,
+                source_rider: None,
             },
             Vec::new(),
             rewind_id,

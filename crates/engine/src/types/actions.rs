@@ -416,6 +416,10 @@ pub enum GameAction {
     ChooseUnlessCostBranch {
         choice: UnlessCostBranch,
     },
+    /// CR 118.12a: Choose which branch of a disjunctive activation cost to pay.
+    ChooseActivationCostBranch {
+        index: usize,
+    },
     /// CR 508.1d + CR 508.1h + CR 509.1c + CR 509.1d: Pay or decline the aggregate
     /// combat tax (Ghostly Prison, Propaganda, Sphere of Safety, Windborn Muse).
     /// On accept the engine deducts the locked-in total and completes the paused
@@ -549,8 +553,17 @@ pub enum GameAction {
     /// Shape mirrors the prompt variant (`SingleColor` or `Combination`).
     /// `AnyCombination` prompts submit a `Combination` vector with one entry
     /// per produced mana unit.
+    ///
+    /// CR 605.3a: `count` (default 1) bulk-activates `count - 1` additional
+    /// identical, choice-free mana sources (e.g. a player's other Treasures)
+    /// with the same color in one round-trip — each is an independent mana
+    /// ability that resolves before the next (CR 605.3c). Only honored for a
+    /// `SingleColor` prompt answering a `ManaAbility` context; capped by the
+    /// engine-computed `PendingManaAbility::batch_siblings`.
     ChooseManaColor {
         choice: super::game_state::ManaChoice,
+        #[serde(default = "default_one")]
+        count: u32,
     },
     /// CR 605.3a + CR 601.2h + CR 107.4e: Answer the
     /// `WaitingFor::PayManaAbilityMana` prompt by picking one of the legal
@@ -1008,6 +1021,12 @@ impl DebugAction {
     }
 }
 
+/// Serde default for `GameAction::ChooseManaColor::count` — a single activation
+/// when the field is absent (every pre-batch client/serialized action).
+fn default_one() -> u32 {
+    1
+}
+
 impl GameAction {
     /// Returns the enum variant name as a static string (e.g., `"CastSpell"`, `"PassPriority"`).
     /// Useful for structured logging without the full `Debug` representation.
@@ -1140,11 +1159,11 @@ impl GameAction {
             | GameAction::Concede { .. }
             | GameAction::Debug(_)
             | GameAction::GrantDebugPermission { .. }
-            | GameAction::RevokeDebugPermission { .. } => None,
+            | GameAction::RevokeDebugPermission { .. }
+            | GameAction::ChooseActivationCostBranch { .. } => None,
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

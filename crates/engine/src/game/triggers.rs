@@ -347,6 +347,11 @@ fn collect_matching_triggers(
                     .into_iter()
                     .map(|trigger_event| vec![trigger_event])
                     .collect()
+            } else if matches!(trig_def.mode, TriggerMode::Blocks) {
+                super::trigger_matchers::matching_block_events(event, trig_def, obj_id, state)
+                    .into_iter()
+                    .map(|trigger_event| vec![trigger_event])
+                    .collect()
             } else {
                 vec![vec![event.clone()]]
             };
@@ -363,7 +368,11 @@ fn collect_matching_triggers(
                         condition: trig_def.condition.clone(),
                         ability: ability.clone(),
                         timestamp,
-                        target_constraints: Vec::new(),
+                        target_constraints: trig_def
+                            .execute
+                            .as_ref()
+                            .map(|execute| execute.target_constraints.clone())
+                            .unwrap_or_default(),
                         distribute: trig_def
                             .execute
                             .as_ref()
@@ -966,7 +975,7 @@ fn collect_pending_triggers(
                                     let unless_cost = ward_cost_to_ability_cost(ward);
                                     let counter_effect = Effect::Counter {
                                         target: TargetFilter::TriggeringSource,
-                                        source_static: None,
+                                        source_rider: None,
                                     };
                                     let mut ward_ability = ResolvedAbility::new(
                                         counter_effect,
@@ -2348,6 +2357,7 @@ pub fn check_state_triggers(state: &mut GameState) {
                     )
                 });
 
+                let target_constraints = execute.target_constraints.clone();
                 let ability = build_resolved_from_def(&execute, obj_id, controller);
                 pending.push(PendingTrigger {
                     source_id: obj_id,
@@ -2355,7 +2365,7 @@ pub fn check_state_triggers(state: &mut GameState) {
                     condition: trigger.condition.clone(),
                     ability,
                     timestamp,
-                    target_constraints: Vec::new(),
+                    target_constraints,
                     distribute: trigger
                         .execute
                         .as_ref()
@@ -2846,10 +2856,18 @@ pub(crate) fn check_trigger_condition(
             .and_then(|id| state.objects.get(&id))
             .map(|obj| obj.cast_variant_paid == Some((*variant, state.turn_number)))
             .unwrap_or(false),
+        // CR 605.1a: "that isn't a mana ability" gate on activated-ability
+        // trigger events. `KeywordAbilityActivated` carries the explicit flag
+        // (Exhaust mana abilities still emit this event). `AbilityActivated`
+        // is emitted only by stack-using activations (CR 605.3b: mana
+        // abilities never reach the stack-pushing emission sites), so it
+        // trivially satisfies the qualifier; the explicit arm keeps the
+        // AST-level qualifier honest if the event family ever widens.
         TriggerCondition::ActivatedAbilityIsNonMana => match trigger_event {
             Some(GameEvent::KeywordAbilityActivated {
                 is_mana_ability, ..
             }) => !*is_mana_ability,
+            Some(GameEvent::AbilityActivated { .. }) => true,
             _ => false,
         },
         // CR 700.4 + CR 120.1: True when the dying creature was dealt damage by the
@@ -2899,6 +2917,15 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::SourceMatchesFilter { filter } => source_id.is_some_and(|id| {
             matches_target_filter(state, id, filter, &FilterContext::from_source(state, id))
         }),
+        // CR 614.12c + CR 607.2d + CR 603.4: True iff the trigger source's
+        // persisted `ChosenAttribute::Label` (set when the anchor-word
+        // permanent entered the battlefield) matches the linked anchor word.
+        // Case-insensitive to match the persistence canonicalisation used by
+        // `StaticCondition::ChosenLabelIs`.
+        TriggerCondition::ChosenLabelIs { label } => source_id
+            .and_then(|id| state.objects.get(&id))
+            .and_then(|obj| obj.chosen_label())
+            .is_some_and(|chosen| chosen.eq_ignore_ascii_case(label)),
         // "if you control a [type]" — check for presence of matching permanent.
         TriggerCondition::ControlsType { filter } => {
             let ctx = FilterContext::from_source(state, source_id.unwrap_or(ObjectId(0)));
@@ -3582,6 +3609,41 @@ pub mod tests {
             &TriggerCondition::ControlsCommander {
                 ownership: CommanderOwnership::Any,
             },
+            PlayerId(0),
+            None,
+            None,
+        ));
+    }
+
+    /// CR 605.1a + CR 605.3b: `AbilityActivated` is emitted only by stack-using
+    /// activations (mana abilities never reach those emission sites), so the
+    /// "that isn't a mana ability" qualifier on Burning-Tree Shaman /
+    /// Flamescroll Celebrant is trivially satisfied — the explicit arm keeps
+    /// the AST-level gate honest if the event family ever widens.
+    #[test]
+    fn activated_ability_is_non_mana_accepts_ability_activated_event() {
+        let state = setup();
+        let event = GameEvent::AbilityActivated {
+            player_id: PlayerId(0),
+            source_id: ObjectId(1),
+        };
+        assert!(check_trigger_condition(
+            &state,
+            &TriggerCondition::ActivatedAbilityIsNonMana,
+            PlayerId(0),
+            None,
+            Some(&event),
+        ));
+    }
+
+    /// CR 605.1a: With no trigger event present, the non-mana qualifier
+    /// cannot be evaluated — and so must conservatively return false.
+    #[test]
+    fn activated_ability_is_non_mana_rejects_missing_event() {
+        let state = setup();
+        assert!(!check_trigger_condition(
+            &state,
+            &TriggerCondition::ActivatedAbilityIsNonMana,
             PlayerId(0),
             None,
             None,
@@ -5307,6 +5369,8 @@ pub mod tests {
                 name: "Countered Dead".to_string(),
                 power: Some(2),
                 toughness: Some(2),
+                base_power: Some(2),
+                base_toughness: Some(2),
                 mana_value: 2,
                 controller: PlayerId(0),
                 owner: PlayerId(0),
@@ -6892,6 +6956,7 @@ pub mod tests {
                                         .with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
                                 ),
                                 count: None,
+                                random: false,
                                 choice_optional: false,
                             },
                         )

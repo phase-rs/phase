@@ -15,7 +15,7 @@ use super::ability::{
 use super::attribution::ObjectAttribution;
 use super::card::CardFace;
 use super::card_type::{CoreType, Supertype};
-use super::counter::CounterType;
+use super::counter::{CounterMatch, CounterType};
 use super::events::{GameEvent, PlayerActionKind};
 use super::format::FormatConfig;
 use super::identifiers::{CardId, ObjectId, TrackedSetId};
@@ -137,6 +137,16 @@ pub struct LKISnapshot {
     pub name: String,
     pub power: Option<i32>,
     pub toughness: Option<i32>,
+    /// CR 208.4b + CR 613.4b: Base power as it last existed in the public zone
+    /// (layer-7b value). Threaded so that an LKI snapshot converted to a
+    /// `ZoneChangeRecord` (see `matches_target_filter_on_lki_snapshot`)
+    /// evaluates `PtComparison { scope: Base }` against the base value rather
+    /// than defaulting to 0.
+    #[serde(default)]
+    pub base_power: Option<i32>,
+    /// CR 208.4b + CR 613.4b: Base toughness as it last existed in the public zone.
+    #[serde(default)]
+    pub base_toughness: Option<i32>,
     pub mana_value: u32,
     pub controller: PlayerId,
     pub owner: PlayerId,
@@ -312,6 +322,16 @@ pub struct ZoneChangeRecord {
     pub power: Option<i32>,
     /// CR 208.1: Toughness as of the zone change.
     pub toughness: Option<i32>,
+    /// CR 208.4b + CR 613.4b: Base power as of the zone change (the layer-7b
+    /// value, ignoring +1/+1 counters and non-setting P/T modifiers in layer
+    /// 7c). Read by `PtComparison` filters with `scope = Base` on the look-back
+    /// (leaves-the-battlefield / dies) path so base-vs-current is honored after
+    /// the object has left the battlefield (CR 603.10a).
+    #[serde(default)]
+    pub base_power: Option<i32>,
+    /// CR 208.4b + CR 613.4b: Base toughness as of the zone change.
+    #[serde(default)]
+    pub base_toughness: Option<i32>,
     /// CR 105.1 / CR 202.2: Colors as of the zone change.
     pub colors: Vec<ManaColor>,
     /// CR 202.3: Mana value as of the zone change.
@@ -405,6 +425,8 @@ impl ZoneChangeRecord {
             keywords: Vec::new(),
             power: None,
             toughness: None,
+            base_power: None,
+            base_toughness: None,
             colors: Vec::new(),
             mana_value: 0,
             controller: PlayerId(0),
@@ -991,6 +1013,15 @@ pub struct PendingManaAbility {
     /// resolve in inline mana ability resolution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_paid_object: Option<CostPaidObjectSnapshot>,
+    /// CR 605.3a: Other identical, choice-free mana sources the controller
+    /// could activate for the same `SingleColor` prompt (their other
+    /// Treasures, etc.). Computed only when the prompt is `SingleColor` and the
+    /// cost resolves with no further player choice. `GameAction::ChooseManaColor`
+    /// may bulk-activate up to this many additional sources with the chosen
+    /// color. The frontend reads `.len()` to cap its quantity stepper. Empty for
+    /// every non-batchable activation (the default).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub batch_siblings: Vec<ObjectId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1037,6 +1068,8 @@ impl PublicStateDirty {
 #[serde(tag = "type")]
 pub enum TargetSelectionConstraint {
     DifferentTargetPlayers,
+    /// CR 115.1 + CR 601.2c: Object targets must be controlled by different players.
+    DifferentObjectControllers,
 }
 
 /// CR 508.1d + CR 509.1c: Which combat step a `WaitingFor::CombatTaxPayment` belongs to.
@@ -1514,7 +1547,11 @@ pub enum WaitingFor {
     },
     /// CR 701.20e: Waiting for the player to choose which looked-at cards to keep.
     DigChoice {
+        /// Player who looks at the cards and makes any selection.
         player: PlayerId,
+        /// Player whose library the cards came from.
+        #[serde(default)]
+        library_owner: PlayerId,
         cards: Vec<ObjectId>,
         keep_count: usize,
         /// True = select 0..=keep_count ("up to N"), false = exactly keep_count.
@@ -1811,12 +1848,22 @@ pub enum WaitingFor {
         #[serde(default)]
         payment_mode: CastPaymentMode,
     },
-    /// CR 712.12: Player chooses which face of an MDFC to play as a land
-    /// when both faces have the Land type.
+    /// CR 712.12 / CR 712.11b: Player chooses which face of an MDFC to
+    /// play/cast. Two cases reach this prompt: (a) both faces are lands (CR
+    /// 712.12 — the player picks which to put onto the battlefield via the
+    /// play-land action), and (b) both faces are spells (CR 712.11b — e.g.
+    /// Esika, God of the Tree // The Prismatic Bridge and the other Kaldheim
+    /// gods — where the player picks which face to cast before it goes on the
+    /// stack). The `ChooseModalFace` handler routes the post-choice re-entry
+    /// by the now-active face's type (land → play-land, spell → cast).
+    /// `payment_mode` carries the manual/auto mana mode forward into the
+    /// spell-cast re-entry (ignored for the land path, which is always Auto).
     ModalFaceChoice {
         player: PlayerId,
         object_id: ObjectId,
         card_id: CardId,
+        #[serde(default)]
+        payment_mode: CastPaymentMode,
     },
     /// CR 118.9: Player chooses between paying the spell's printed mana cost
     /// and paying a keyword-granted alternative mana cost. Only presented when
@@ -2131,6 +2178,24 @@ pub enum WaitingFor {
         /// Pre-filtered eligible permanents on the battlefield.
         permanents: Vec<ObjectId>,
         /// The pending cast to resume after the return is complete.
+        pending_cast: Box<PendingCast>,
+    },
+    /// CR 118.12a: Player must choose which branch of a disjunctive activation cost
+    /// (`AbilityCost::OneOf`) to pay.
+    ActivationCostOneOfChoice {
+        player: PlayerId,
+        costs: Vec<AbilityCost>,
+        pending_cast: Box<PendingCast>,
+    },
+    /// CR 118.3 / CR 122.1 / CR 601.2b: Player must choose a permanent to
+    /// remove counters from as a cost.
+    RemoveCounterForCost {
+        player: PlayerId,
+        count: u32,
+        counter_type: CounterMatch,
+        /// Pre-filtered eligible permanents on the battlefield.
+        permanents: Vec<ObjectId>,
+        /// The pending cast or activated ability to resume after the counter is removed.
         pending_cast: Box<PendingCast>,
     },
     /// Blight N — player must choose one creature to put N -1/-1 counters on as cost.
@@ -2784,6 +2849,8 @@ impl WaitingFor {
             | WaitingFor::DiscardForCost { player, .. }
             | WaitingFor::SacrificeForCost { player, .. }
             | WaitingFor::ReturnToHandForCost { player, .. }
+            | WaitingFor::ActivationCostOneOfChoice { player, .. }
+            | WaitingFor::RemoveCounterForCost { player, .. }
             | WaitingFor::BlightChoice { player, .. }
             | WaitingFor::TapCreaturesForSpellCost { player, .. }
             | WaitingFor::BeholdForCost { player, .. }
@@ -2893,6 +2960,8 @@ impl WaitingFor {
             | WaitingFor::DiscardForCost { pending_cast, .. }
             | WaitingFor::SacrificeForCost { pending_cast, .. }
             | WaitingFor::ReturnToHandForCost { pending_cast, .. }
+            | WaitingFor::ActivationCostOneOfChoice { pending_cast, .. }
+            | WaitingFor::RemoveCounterForCost { pending_cast, .. }
             | WaitingFor::BlightChoice { pending_cast, .. }
             | WaitingFor::TapCreaturesForSpellCost { pending_cast, .. }
             | WaitingFor::BeholdForCost { pending_cast, .. }
@@ -4930,6 +4999,7 @@ mod tests {
         }));
         variants.push(Box::new(WaitingFor::DigChoice {
             player: PlayerId(0),
+            library_owner: PlayerId(0),
             cards: vec![ObjectId(1)],
             keep_count: 1,
             up_to: false,
@@ -5197,6 +5267,7 @@ mod tests {
                 chosen_exiled_battlefield: Vec::new(),
                 chosen_sacrificed_battlefield: Vec::new(),
                 cost_paid_object: None,
+                batch_siblings: Vec::new(),
             }),
         };
         assert!(!tap_mana.has_pending_cast());

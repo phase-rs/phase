@@ -41,7 +41,7 @@ use super::super::oracle_target::{
 };
 use super::super::oracle_util::{
     contains_possessive, contains_self_or_object_pronoun, parse_count_expr, parse_mana_symbols,
-    parse_ordinal, split_around, starts_with_possessive, strip_after, TextPair,
+    parse_ordinal, split_around, starts_with_possessive, TextPair,
 };
 
 /// CR 702.26: Phasing direction used by the "phase in"/"phase out" dispatch.
@@ -56,6 +56,30 @@ enum PhaseDir {
 /// reminder text stripping removes the parenthetical that contains the target).
 pub(super) fn default_earthbend_target() -> TargetFilter {
     TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You))
+}
+
+fn parse_dig_library_owner(rest_lower: &str) -> TargetFilter {
+    if preceded(
+        take_until::<_, _, OracleError<'_>>("target player's library"),
+        tag::<_, _, OracleError<'_>>("target player's library"),
+    )
+    .parse(rest_lower)
+    .is_ok()
+    {
+        return TargetFilter::Player;
+    }
+
+    if preceded(
+        take_until::<_, _, OracleError<'_>>("that player's library"),
+        tag::<_, _, OracleError<'_>>("that player's library"),
+    )
+    .parse(rest_lower)
+    .is_ok()
+    {
+        return TargetFilter::ParentTarget;
+    }
+
+    TargetFilter::Controller
 }
 
 /// Shared ControlNextTurn suffix parser (CR 722.1). Called after a prefix
@@ -237,6 +261,53 @@ fn parse_dynamic_count_phrase(lower: &str) -> Option<QuantityExpr> {
     None
 }
 
+fn parse_life_verb_remainder<'a>(
+    text: &'a str,
+    lower: &str,
+    verb: &str,
+    third_person: &str,
+) -> Option<&'a str> {
+    let you_verb = format!("you {verb} ");
+    let bare_verb = format!("{verb} ");
+    let direct_third_person = format!("{third_person} ");
+    if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
+        value(
+            (),
+            alt((
+                tag(you_verb.as_str()),
+                tag(bare_verb.as_str()),
+                tag(direct_third_person.as_str()),
+            )),
+        )
+        .parse(input)
+    }) {
+        return Some(rest);
+    }
+
+    let subject_predicate = format!(" {third_person} ");
+    nom_on_lower(text, lower, |input| {
+        let (rest, _) = (
+            take_until::<_, _, OracleError<'_>>(subject_predicate.as_str()),
+            tag(subject_predicate.as_str()),
+        )
+            .parse(input)?;
+        Ok((rest, ()))
+    })
+    .map(|(_, rest)| rest)
+}
+
+fn parse_life_equal_quantity(after_verb_lower: &str) -> Option<QuantityExpr> {
+    let (qty_text, _) = tag::<_, _, OracleError<'_>>("life equal to ")
+        .parse(after_verb_lower)
+        .ok()?;
+    let qty_text = qty_text.trim_end_matches('.').trim();
+    if let Some(qty) = crate::parser::oracle_quantity::parse_event_context_quantity(qty_text) {
+        return Some(qty);
+    }
+    crate::parser::oracle_quantity::parse_quantity_ref(qty_text)
+        .map(|qty| QuantityExpr::Ref { qty })
+}
+
 pub(super) fn parse_numeric_imperative_ast(
     text: &str,
     lower: &str,
@@ -268,7 +339,7 @@ pub(super) fn parse_numeric_imperative_ast(
         if let Some(count) = parse_dynamic_count_phrase(rest_lower.as_str()) {
             return Some(NumericImperativeAst::Draw { count, up_to });
         }
-        // CR 119.1 / CR 121.1: When the verb committed but the quantity phrase
+        // CR 121.1: When the verb committed but the quantity phrase
         // can't be classified, return None so the line surfaces as
         // `Effect::Unimplemented` upstream. Silently substituting Fixed{1} hides
         // dynamic-quantity gaps from the coverage report.
@@ -276,144 +347,96 @@ pub(super) fn parse_numeric_imperative_ast(
         return Some(NumericImperativeAst::Draw { count, up_to });
     }
 
-    if nom_primitives::scan_contains(lower, "gain") && nom_primitives::scan_contains(lower, "life")
-    {
-        // CR 119.1: Handle "life equal to {quantity}" — dynamic amount from game state.
-        if let Some(qty_text) =
-            strip_after(lower, "life equal to ").map(|s| s.trim_end_matches('.'))
-        {
-            if let Some(qty) =
-                crate::parser::oracle_quantity::parse_event_context_quantity(qty_text)
-            {
-                return Some(NumericImperativeAst::GainLife { amount: qty });
-            }
-            // CR 119.1: target-relative quantity refs ("target creature's
-            // power/toughness/mana value"). Mirrors LoseLife. Soul's Grace,
-            // Heron's Grace Champion, Lifeblood Hydra, etc.
-            if let Some(qty) = crate::parser::oracle_quantity::parse_quantity_ref(qty_text) {
-                return Some(NumericImperativeAst::GainLife {
-                    amount: QuantityExpr::Ref { qty },
-                });
-            }
-        }
-        let after_gain = nom_on_lower(text, lower, |input| {
-            value((), alt((tag("you gain "), tag("gain ")))).parse(input)
-        })
-        .map(|(_, rest)| rest)
-        .or_else(|| {
-            nom_on_lower(text, lower, |input| {
-                let (rest, _) = (
-                    take_until::<_, _, OracleError<'_>>(" gains "),
-                    tag(" gains "),
-                )
-                    .parse(input)?;
-                Ok((rest, ()))
-            })
-            .map(|(_, rest)| rest)
-        })
-        .unwrap_or("");
-        if !after_gain.is_empty() {
-            // CR 603.7c + CR 119.1: "gain that much life" / "gain that many life" —
-            // amount is the triggering event's amount (Exquisite Blood). Extract the
-            // amount phrase before " life" and route through the event-context
-            // quantity parser so "that much" resolves to `EventContextAmount`
-            // rather than defaulting to 1.
-            let after_lower = after_gain.to_ascii_lowercase();
-            // CR 614.1a: First try the full phrase including any " life plus N" /
-            // " life minus N" suffix. The Offset-aware combinator in
-            // `parse_event_context_quantity` recognises the post-quantifier noun
-            // ("that much life plus 1" / "that many life minus 2"), so cards
-            // like Heron of Hope, Angel of Vitality, Leyline of Hope must be
-            // probed BEFORE the bare-quantifier path strips " life" via
-            // `take_until` (which would discard the offset clause).
-            //
-            // Strip the trailing " instead" rider via PATTERNS.md §2a:
-            // `terminated(take_until(...), opt(tag(...)))` — the parser stops at
-            // the suffix and consumes it (when present), leaving the body for
-            // the offset combinator. Falls back to the trimmed full phrase
-            // when the suffix is absent (Exquisite Blood-class non-replacement
-            // gain-life).
-            let full_phrase = after_lower.trim_end_matches('.').trim();
-            let full_phrase_no_instead = terminated(
-                take_until::<_, _, OracleError<'_>>(" instead"),
-                opt(tag(" instead")),
-            )
-            .parse(full_phrase)
-            .map(|(_rem, body)| body.trim_end())
-            .unwrap_or(full_phrase);
-            if let Some(qty) =
-                crate::parser::oracle_quantity::parse_event_context_quantity(full_phrase_no_instead)
-            {
-                return Some(NumericImperativeAst::GainLife { amount: qty });
-            }
-            let amount_phrase = take_until::<_, _, OracleError<'_>>(" life")
-                .parse(after_lower.as_str())
-                .map(|(_, before)| before.trim())
-                .unwrap_or(full_phrase);
-            if let Some(qty) =
-                crate::parser::oracle_quantity::parse_event_context_quantity(amount_phrase)
-            {
-                return Some(NumericImperativeAst::GainLife { amount: qty });
-            }
-            // CR 119.1: GainLife committed but quantity phrase unclassified —
-            // surface as Unimplemented rather than fabricating Fixed{1}.
-            let amount = parse_count_expr(after_gain).map(|(q, _)| q)?;
+    if let Some(after_gain) = parse_life_verb_remainder(text, lower, "gain", "gains") {
+        let after_lower = after_gain.to_ascii_lowercase();
+        // CR 119.3: Handle "life equal to {quantity}" — dynamic amount from game state.
+        // CR 119.3: target-relative quantity refs ("target creature's
+        // power/toughness/mana value"). Mirrors LoseLife. Soul's Grace,
+        // Heron's Grace Champion, Lifeblood Hydra, etc.
+        if let Some(amount) = parse_life_equal_quantity(after_lower.as_str()) {
             return Some(NumericImperativeAst::GainLife { amount });
         }
+        // CR 119.3: "gain that much life" / "gain that many life" —
+        // amount is the triggering event's amount (Exquisite Blood). Extract the
+        // amount phrase before " life" and route through the event-context
+        // quantity parser so "that much" resolves to `EventContextAmount`
+        // rather than defaulting to 1.
+        // CR 614.1a: First try the full phrase including any " life plus N" /
+        // " life minus N" suffix. The Offset-aware combinator in
+        // `parse_event_context_quantity` recognises the post-quantifier noun
+        // ("that much life plus 1" / "that many life minus 2"), so cards
+        // like Heron of Hope, Angel of Vitality, Leyline of Hope must be
+        // probed BEFORE the bare-quantifier path strips " life" via
+        // `take_until` (which would discard the offset clause).
+        //
+        // Strip the trailing " instead" rider via PATTERNS.md §2a:
+        // `terminated(take_until(...), opt(tag(...)))` — the parser stops at
+        // the suffix and consumes it (when present), leaving the body for
+        // the offset combinator. Falls back to the trimmed full phrase
+        // when the suffix is absent (Exquisite Blood-class non-replacement
+        // gain-life).
+        let full_phrase = after_lower.trim_end_matches('.').trim();
+        let full_phrase_no_instead = terminated(
+            take_until::<_, _, OracleError<'_>>(" instead"),
+            opt(tag(" instead")),
+        )
+        .parse(full_phrase)
+        .map(|(_rem, body)| body.trim_end())
+        .unwrap_or(full_phrase);
+        if let Some(qty) =
+            crate::parser::oracle_quantity::parse_event_context_quantity(full_phrase_no_instead)
+        {
+            return Some(NumericImperativeAst::GainLife { amount: qty });
+        }
+        let amount_phrase = take_until::<_, _, OracleError<'_>>(" life")
+            .parse(after_lower.as_str())
+            .map(|(_, before)| before.trim())
+            .unwrap_or(full_phrase);
+        if let Some(qty) =
+            crate::parser::oracle_quantity::parse_event_context_quantity(amount_phrase)
+        {
+            return Some(NumericImperativeAst::GainLife { amount: qty });
+        }
+        // CR 119.3: GainLife committed but quantity phrase unclassified —
+        // surface as Unimplemented rather than fabricating Fixed{1}.
+        let amount = parse_count_expr(after_gain).map(|(q, _)| q)?;
+        return Some(NumericImperativeAst::GainLife { amount });
     }
 
-    if nom_primitives::scan_contains(lower, "lose") && nom_primitives::scan_contains(lower, "life")
-    {
-        if let Some(expr) = try_parse_half_life_amount(lower) {
+    if let Some(after_lose) = parse_life_verb_remainder(text, lower, "lose", "loses") {
+        let after_lower = after_lose.to_ascii_lowercase();
+        if let Some(expr) = try_parse_half_life_amount(after_lower.as_str()) {
             return Some(NumericImperativeAst::LoseLife { amount: expr });
         }
         // CR 119.3: Handle "life equal to {quantity}" — dynamic amount from game state.
-        if let Some(qty_text) =
-            strip_after(lower, "life equal to ").map(|s| s.trim_end_matches('.'))
+        // CR 119.3: target-relative quantity refs ("target creature's
+        // power/toughness/mana value", etc.) — Final Punishment, Tomb
+        // Blade-class drain, Genesis of the Daleks. Delegates to the
+        // shared `parse_quantity_ref` building block.
+        if let Some(amount) = parse_life_equal_quantity(after_lower.as_str()) {
+            return Some(NumericImperativeAst::LoseLife { amount });
+        }
+        // CR 119.3: "lose that much life" / "lose that many life" —
+        // amount is the triggering event's amount. Probe for event-context phrases
+        // before falling back to the numeric last-word extractor.
+        if let Ok((_, before_life)) =
+            take_until::<_, _, OracleError<'_>>("life").parse(after_lower.as_str())
         {
+            let amount_phrase = take_until::<_, _, OracleError<'_>>(" life")
+                .parse(after_lower.as_str())
+                .map(|(_, before)| before.trim())
+                .unwrap_or_else(|_: nom::Err<OracleError<'_>>| {
+                    after_lower.trim_end_matches('.').trim()
+                });
             if let Some(qty) =
-                crate::parser::oracle_quantity::parse_event_context_quantity(qty_text)
+                crate::parser::oracle_quantity::parse_event_context_quantity(amount_phrase)
             {
                 return Some(NumericImperativeAst::LoseLife { amount: qty });
             }
-            // CR 119.3: target-relative quantity refs ("target creature's
-            // power/toughness/mana value", etc.) — Final Punishment, Tomb
-            // Blade-class drain, Genesis of the Daleks. Delegates to the
-            // shared `parse_quantity_ref` building block.
-            if let Some(qty) = crate::parser::oracle_quantity::parse_quantity_ref(qty_text) {
-                return Some(NumericImperativeAst::LoseLife {
-                    amount: QuantityExpr::Ref { qty },
-                });
-            }
-        }
-        // CR 603.7c + CR 119.3: "lose that much life" / "lose that many life" —
-        // amount is the triggering event's amount. Probe for event-context phrases
-        // before falling back to the numeric last-word extractor.
-        if let Ok((_, before_life)) = take_until::<_, _, OracleError<'_>>("life").parse(lower) {
-            let after_verb = nom_on_lower(text, lower, |input| {
-                value((), alt((tag("you lose "), tag("lose ")))).parse(input)
-            })
-            .map(|(_, rest)| rest)
-            .unwrap_or("");
-            if !after_verb.is_empty() {
-                let after_lower = after_verb.to_ascii_lowercase();
-                let amount_phrase = take_until::<_, _, OracleError<'_>>(" life")
-                    .parse(after_lower.as_str())
-                    .map(|(_, before)| before.trim())
-                    .unwrap_or_else(|_: nom::Err<OracleError<'_>>| {
-                        after_lower.trim_end_matches('.').trim()
-                    });
-                if let Some(qty) =
-                    crate::parser::oracle_quantity::parse_event_context_quantity(amount_phrase)
-                {
-                    return Some(NumericImperativeAst::LoseLife { amount: qty });
+            if let Some((amount, remainder)) = parse_count_expr(amount_phrase) {
+                if remainder.trim().is_empty() {
+                    return Some(NumericImperativeAst::LoseLife { amount });
                 }
-                if let Some((amount, remainder)) = parse_count_expr(amount_phrase) {
-                    if remainder.trim().is_empty() {
-                        return Some(NumericImperativeAst::LoseLife { amount });
-                    }
-                }
-                return None;
             }
             // CR 119.3: LoseLife committed but neither the event-context phrase
             // nor a numeric tail parsed — return None so the line lands in
@@ -495,14 +518,10 @@ pub(super) fn parse_numeric_imperative_ast(
 /// and (b) silently mis-bound the nom remainder. Both bugs disappear by
 /// routing through the shared combinator.
 fn try_parse_half_life_amount(lower: &str) -> Option<QuantityExpr> {
-    // Strip "lose " / "loses " and any intervening whitespace.
-    let (after_verb, _) = alt((tag::<_, _, OracleError<'_>>("lose "), tag("loses ")))
-        .parse(lower)
-        .ok()?;
-    let after_verb = after_verb.trim_start();
     // Delegate to the shared "half ..." combinator. This picks up the
     // possessive inner ref AND the rounding suffix in one call.
-    let (_, expr) = super::super::oracle_nom::quantity::parse_half_rounded(after_verb).ok()?;
+    let (_, expr) =
+        super::super::oracle_nom::quantity::parse_half_rounded(lower.trim_start()).ok()?;
     Some(expr)
 }
 
@@ -874,6 +893,14 @@ pub(super) fn parse_targeted_action_ast(
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
         return Some(TargetedImperativeAst::UntapAll { target });
+    }
+    if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
+        value((), alt((tag("goad all "), tag("goad each ")))).parse(input)
+    }) {
+        let (target, _rem) = parse_target_with_ctx(rest, ctx);
+        #[cfg(debug_assertions)]
+        assert_no_compound_remainder(_rem, text);
+        return Some(TargetedImperativeAst::GoadAll { target });
     }
     // CR 701.16a: "sacrifice [count] <filter> [of their choice]" —
     // delegates to `parse_count_expr` so "a"/"an"/"X"/"half the permanents
@@ -1334,6 +1361,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
         TargetedImperativeAst::Untap { target } => Effect::Untap { target },
         TargetedImperativeAst::TapAll { target } => Effect::TapAll { target },
         TargetedImperativeAst::UntapAll { target } => Effect::UntapAll { target },
+        TargetedImperativeAst::GoadAll { target } => Effect::GoadAll { target },
         TargetedImperativeAst::Sacrifice {
             target,
             count,
@@ -1616,7 +1644,11 @@ pub(super) fn parse_search_and_creation_ast(
         } else {
             QuantityExpr::Fixed { value: 1 }
         };
-        return Some(SearchCreationImperativeAst::Dig { count, reveal });
+        return Some(SearchCreationImperativeAst::Dig {
+            count,
+            reveal,
+            player: parse_dig_library_owner(rest_lower),
+        });
     }
     // CR 701.16a: "look at that many cards from the top of your library" — variable-count dig
     // where "that many" references the result of a previous effect (e.g., damage dealt).
@@ -1636,7 +1668,11 @@ pub(super) fn parse_search_and_creation_ast(
         let count = QuantityExpr::Ref {
             qty: QuantityRef::EventContextAmount,
         };
-        return Some(SearchCreationImperativeAst::Dig { count, reveal });
+        return Some(SearchCreationImperativeAst::Dig {
+            count,
+            reveal,
+            player: TargetFilter::Controller,
+        });
     }
     if let Some((_, _)) = nom_on_lower(text, lower, |input| value((), tag("create ")).parse(input))
     {
@@ -1820,7 +1856,12 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             destination,
             include_face_up_exile,
         },
-        SearchCreationImperativeAst::Dig { count, reveal } => Effect::Dig {
+        SearchCreationImperativeAst::Dig {
+            count,
+            reveal,
+            player,
+        } => Effect::Dig {
+            player,
             count,
             destination: None,
             keep_count: None,
@@ -1905,42 +1946,39 @@ pub(super) fn parse_hand_reveal_ast(
     if nom_on_lower(text, lower, |input| value((), tag("look at ")).parse(input)).is_some()
         && nom_primitives::scan_contains(lower, "hand")
     {
-        if contains_possessive(lower, "look at", "hand") {
-            // CR 400.1/400.2 + CR 508.5 + CR 608.2c: Possessive hand phrases are
-            // player references, not object targets. Map the reusable player
-            // axes explicitly so combat-trigger forms like "defending player's
-            // hand" do not fall back to `Any`.
-            let target = nom_on_lower(text, lower, |input| {
-                preceded(
-                    tag("look at "),
-                    alt((
-                        value(TargetFilter::Controller, tag("your hand")),
-                        value(TargetFilter::Player, tag("target player's hand")),
-                        value(
-                            TargetFilter::Typed(
-                                TypedFilter::default().controller(ControllerRef::Opponent),
-                            ),
-                            tag("target opponent's hand"),
-                        ),
-                        value(TargetFilter::TriggeringPlayer, tag("that player's hand")),
-                        value(TargetFilter::TriggeringPlayer, tag("their hand")),
-                        value(
-                            TargetFilter::DefendingPlayer,
-                            tag("defending player's hand"),
-                        ),
-                    )),
-                )
-                .parse(input)
-            })
-            .map(|(target, _)| target);
-            let target = target?;
-            return Some(HandRevealImperativeAst::LookAt { target });
+        // CR 400.1/400.2 + CR 508.5 + CR 608.2c: Possessive hand phrases are
+        // player references, not object targets. Map the reusable player axes
+        // explicitly so combat-trigger forms like "defending player's hand" and
+        // random-card forms like "a card at random in target player's hand" do
+        // not fall back to parsing "card" as the effect target.
+        if let Some(((target, count, random), _)) = nom_on_lower(text, lower, |input| {
+            let (rest, _) = tag("look at ").parse(input)?;
+            let (rest, random_count) = opt(value(
+                QuantityExpr::Fixed { value: 1 },
+                alt((
+                    tag::<_, _, OracleError<'_>>("a card at random in "),
+                    tag("one card at random in "),
+                )),
+            ))
+            .parse(rest)?;
+            let (rest, target) = parse_hand_possessive_target(rest)?;
+            Ok((rest, (target, random_count.clone(), random_count.is_some())))
+        }) {
+            return Some(HandRevealImperativeAst::LookAt {
+                target,
+                count,
+                random,
+            });
         }
 
         let (_, after_look_at) =
             nom_on_lower(text, lower, |input| value((), tag("look at ")).parse(input))?;
         let (target, _) = parse_target(after_look_at);
-        return Some(HandRevealImperativeAst::LookAt { target });
+        return Some(HandRevealImperativeAst::LookAt {
+            target,
+            count: None,
+            random: false,
+        });
     }
 
     let (_, after_reveal) = nom_on_lower(text, lower, |input| {
@@ -2020,22 +2058,29 @@ fn parse_hand_reveal_card_filter(after_reveal_lower: &str) -> TargetFilter {
 
 pub(super) fn lower_hand_reveal_ast(ast: HandRevealImperativeAst) -> Effect {
     match ast {
-        HandRevealImperativeAst::LookAt { target } => Effect::RevealHand {
+        HandRevealImperativeAst::LookAt {
+            target,
+            count,
+            random,
+        } => Effect::RevealHand {
             target,
             card_filter: TargetFilter::None,
-            count: None,
+            count,
+            random,
             choice_optional: false,
         },
         HandRevealImperativeAst::RevealAll { card_filter } => Effect::RevealHand {
             target: TargetFilter::Any,
             card_filter,
             count: None,
+            random: false,
             choice_optional: false,
         },
         HandRevealImperativeAst::RevealPartial { count } => Effect::RevealHand {
             target: TargetFilter::Any,
             card_filter: TargetFilter::None,
             count: Some(count),
+            random: false,
             choice_optional: false,
         },
         // CR 701.20a: Back-reference reveal — distinct from RevealHand (zone-wide).
@@ -2044,6 +2089,24 @@ pub(super) fn lower_hand_reveal_ast(ast: HandRevealImperativeAst) -> Effect {
             target: TargetFilter::ParentTarget,
         },
     }
+}
+
+fn parse_hand_possessive_target(input: &str) -> nom::IResult<&str, TargetFilter, OracleError<'_>> {
+    alt((
+        value(TargetFilter::Controller, tag("your hand")),
+        value(TargetFilter::Player, tag("target player's hand")),
+        value(
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            tag("target opponent's hand"),
+        ),
+        value(TargetFilter::TriggeringPlayer, tag("that player's hand")),
+        value(TargetFilter::TriggeringPlayer, tag("their hand")),
+        value(
+            TargetFilter::DefendingPlayer,
+            tag("defending player's hand"),
+        ),
+    ))
+    .parse(input)
 }
 
 pub(super) fn parse_choose_ast(
@@ -2554,6 +2617,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             target: TargetFilter::Any,
             card_filter,
             count: None,
+            random: false,
             choice_optional,
         },
         // CR 700.2: Anaphoric "choose N of them/those" → select from the tracked set
@@ -3266,7 +3330,7 @@ fn try_parse_that_many_counters(lower: &str, ctx: &mut ParseContext) -> Option<E
         TargetFilter::SelfRef
     };
 
-    // CR 603.7c: "that many" — resolve from trigger event context at runtime.
+    // "That many" resolves from trigger event context at runtime.
     Some(Effect::PutCounter {
         counter_type,
         count: QuantityExpr::Ref {
@@ -3969,8 +4033,10 @@ pub(super) fn parse_exile_ast(
         // player_scope iteration binds to the iterating player. The chunk_ctx
         // surfaces this via `relative_player_scope = ScopedPlayer`, which
         // `that_player_library_filter` already maps to `TargetFilter::ScopedPlayer`.
-        // For the third-person "each player's library" alternate phrasing we also
-        // accept that variant directly.
+        // For the third-person "each player's library" alternate phrasing,
+        // return `ScopedPlayer`; effect-chain lowering lifts that sentinel into
+        // `player_scope: All` so the existing scoped resolver exiles from each
+        // player's own library without target selection.
         for (pattern, player) in [
             ("card of your library", TargetFilter::Controller),
             ("cards of your library", TargetFilter::Controller),
@@ -3978,8 +4044,8 @@ pub(super) fn parse_exile_ast(
             ("cards of that player's library", that_player.clone()),
             ("card of their library", that_player.clone()),
             ("cards of their library", that_player.clone()),
-            ("card of each player's library", TargetFilter::Player),
-            ("cards of each player's library", TargetFilter::Player),
+            ("card of each player's library", TargetFilter::ScopedPlayer),
+            ("cards of each player's library", TargetFilter::ScopedPlayer),
         ] {
             if let Ok((after_lib, _)) = tag::<_, _, OracleError<'_>>(pattern).parse(remainder) {
                 // CR 406.3: Detect the "face down" suffix Oracle text uses to
@@ -4251,7 +4317,7 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
         let unless_pay = super::parse_unless_payment(rest).map(super::counter_unless_pay_modifier);
         return Some(ZoneCounterImperativeAst::Counter {
             target: stack_ability_filter_from_text(rest),
-            source_static: None,
+            source_rider: None,
             unless_pay,
             all: mass_consumed,
         });
@@ -4276,7 +4342,7 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
         let unless_pay = super::parse_unless_payment(rest).map(super::counter_unless_pay_modifier);
         return Some(ZoneCounterImperativeAst::Counter {
             target: stack_target,
-            source_static: None,
+            source_rider: None,
             unless_pay,
             all: mass_consumed,
         });
@@ -4294,7 +4360,7 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
     let unless_pay = super::parse_unless_payment(rest).map(super::counter_unless_pay_modifier);
     Some(ZoneCounterImperativeAst::Counter {
         target,
-        source_static: None,
+        source_rider: None,
         unless_pay,
         all: mass_consumed,
     })
@@ -4678,6 +4744,19 @@ pub(super) fn parse_imperative_family_ast(
         }
     }
 
+    // CR 614.9 + CR 614.1a + CR 615: One-shot "the next time [source] would deal
+    // [combat] damage [to X] this turn, [modify/redirect] instead" damage
+    // replacement (Desperate Gambit, Soltari Guerrillas, Beacon of Destiny, Jade
+    // Monolith, Goblin Psychopath). The text begins with "the next time" — not a
+    // verb — so it is intercepted here, alongside the other non-verb-led effects
+    // above, before the first-word verb dispatch. The detector is the prefix
+    // combinator inside `parse_oneshot_damage_replacement`; on failure it returns
+    // `None` and we fall through.
+    if let Some(effect) = crate::parser::oracle_replacement::parse_oneshot_damage_replacement(lower)
+    {
+        return Some(ImperativeFamilyAst::GainKeyword(effect));
+    }
+
     // NOTE: when adding verbs here, also add them to IMPERATIVE_EXTRA_VERBS
     // in game/gap_analysis.rs so the parser gap analyzer can classify them.
     match first_word {
@@ -4928,7 +5007,10 @@ pub(super) fn parse_imperative_family_ast(
                 .parse(lower)
                 .map(|(r, _)| r)
                 .unwrap_or("");
-            let count = nom_primitives::parse_number
+            // CR 701.63b: "endure X" degrades to 0 (nothing happens). parse_number_or_x
+            // maps a bare "x" to 0; the unwrap fallback only applies when no count token
+            // is present at all.
+            let count = nom_primitives::parse_number_or_x
                 .parse(rest.trim())
                 .map(|(_, n)| n)
                 .unwrap_or(1);
@@ -5087,6 +5169,17 @@ pub(super) fn parse_imperative_family_ast(
         "goad" | "goads" => {
             let rest = lower[first_word.len()..].trim();
             if !rest.is_empty() {
+                if let Ok((mass_rest, _)) = alt((
+                    tag::<_, _, OracleError<'_>>("all "),
+                    tag::<_, _, OracleError<'_>>("each "),
+                ))
+                .parse(rest)
+                {
+                    let (target, _) = parse_target(mass_rest);
+                    return Some(ImperativeFamilyAst::GainKeyword(Effect::GoadAll {
+                        target,
+                    }));
+                }
                 let (target, _) = parse_target(rest);
                 Some(ImperativeFamilyAst::GainKeyword(Effect::Goad { target }))
             } else {
@@ -5594,19 +5687,19 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
         // counter-specific bespoke branch.
         ImperativeFamilyAst::ZoneCounter(ZoneCounterImperativeAst::Counter {
             target,
-            source_static,
+            source_rider,
             unless_pay: Some(unless_pay),
             all,
         }) => {
             let effect = if all {
-                // CR 701.6 + CR 405.1: Mass counter drops both source_static
+                // CR 701.6 + CR 405.1: Mass counter drops both source_rider
                 // and unless_pay (no corpus card combines them with mass
                 // counter, and mass counter is non-targeting per CR 115.1).
                 Effect::CounterAll { target }
             } else {
                 Effect::Counter {
                     target,
-                    source_static: source_static.map(|s| *s),
+                    source_rider,
                 }
             };
             let mut clause = parsed_clause(effect);
@@ -6057,7 +6150,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
         },
         ZoneCounterImperativeAst::Counter {
             target,
-            source_static,
+            source_rider,
             // CR 118.12: An unless-pay-bearing Counter is intercepted in
             // `lower_imperative_family_ast` so the modifier flows into
             // `ParsedEffectClause.unless_pay`. By the time we reach this
@@ -6070,16 +6163,16 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
             all,
         } => {
             if all {
-                // CR 701.6 + CR 405.1: Mass counter. Drops `source_static` —
-                // no corpus card combines a source_static with mass counter,
+                // CR 701.6 + CR 405.1: Mass counter. Drops `source_rider` —
+                // no corpus card combines a source_rider with mass counter,
                 // and the runtime resolver does not honor that slot on
-                // `Effect::CounterAll`. (Source-static is a per-target-
-                // permanent silencing pattern.)
+                // `Effect::CounterAll`. (The rider is a per-target-permanent
+                // silence/destroy follow-up.)
                 Effect::CounterAll { target }
             } else {
                 Effect::Counter {
                     target,
-                    source_static: source_static.map(|s| *s),
+                    source_rider,
                 }
             }
         }
@@ -7612,6 +7705,33 @@ mod tests {
     }
 
     #[test]
+    fn parse_lose_life_equal_to_life_gained_this_turn() {
+        let text = "loses life equal to the amount of life you gained this turn";
+        let lower = text.to_lowercase();
+        let result = parse_numeric_imperative_ast(text, &lower);
+        assert!(
+            result.is_some(),
+            "Should parse third-person life loss whose amount references gained life"
+        );
+        match result.unwrap() {
+            NumericImperativeAst::LoseLife { amount } => {
+                assert!(
+                    matches!(
+                        amount,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::LifeGainedThisTurn {
+                                player: PlayerScope::Controller
+                            }
+                        }
+                    ),
+                    "Expected LifeGainedThisTurn {{ Controller }}, got {amount:?}"
+                );
+            }
+            other => panic!("Expected LoseLife, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_lose_life_two_times_x() {
         let text = "lose two times X life";
         let lower = text.to_lowercase();
@@ -7658,6 +7778,31 @@ mod tests {
                     "Expected Power {{ CostPaidObject }}, got {amount:?}"
                 );
             }
+            other => panic!("Expected GainLife, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_gains_life_equal_to_power() {
+        let text = "gains life equal to its power";
+        let lower = text.to_lowercase();
+        let result = parse_numeric_imperative_ast(text, &lower);
+        assert!(
+            result.is_some(),
+            "Should parse stripped third-person gain-life predicates"
+        );
+        match result.unwrap() {
+            NumericImperativeAst::GainLife { amount } => assert!(
+                matches!(
+                    amount,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: crate::types::ability::ObjectScope::Anaphoric
+                        }
+                    }
+                ),
+                "Expected Power {{ Anaphoric }}, got {amount:?}"
+            ),
             other => panic!("Expected GainLife, got {other:?}"),
         }
     }

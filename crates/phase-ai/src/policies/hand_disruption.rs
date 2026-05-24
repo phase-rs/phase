@@ -224,6 +224,7 @@ mod tests {
                     target: TargetFilter::Any,
                     card_filter: TargetFilter::Any,
                     count: None,
+                    random: false,
                     choice_optional: false,
                 },
             ),
@@ -287,6 +288,7 @@ mod tests {
                         properties: vec![],
                     }),
                     count: None,
+                    random: false,
                     choice_optional: false,
                 },
             )

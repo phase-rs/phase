@@ -10,13 +10,15 @@ use super::{resolve_it_pronoun, ParseContext};
 use crate::parser::oracle_ir::ast::*;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Duration, Effect,
-    FilterProp, GainLifePlayer, MultiTargetSpec, PlayerScope, PtValue, QuantityExpr, QuantityRef,
-    RoundingMode, StaticDefinition, TargetFilter, TypedFilter,
+    FilterProp, GainLifePlayer, MultiTargetSpec, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
+    QuantityRef, RoundingMode, StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::game_state::DayNight;
+use crate::types::keywords::Keyword;
 use crate::types::phase::Phase;
 use crate::types::statics::StaticMode;
 
+use super::super::oracle_keyword::parse_keyword_from_oracle;
 use super::super::oracle_nom::error::OracleResult;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::target::parse_event_context_ref;
@@ -1201,6 +1203,13 @@ fn build_pump_effect(
             target,
         };
     }
+    if application.inherits_parent {
+        return Effect::Pump {
+            power,
+            toughness,
+            target: TargetFilter::ParentTarget,
+        };
+    }
     if is_single_object_ref(&application.affected) {
         return Effect::Pump {
             power,
@@ -1281,6 +1290,75 @@ fn try_split_pump_compound(
     })
 }
 
+fn parse_keyword_choice_grant(predicate: &str) -> Option<(Keyword, Keyword, Option<Duration>)> {
+    let lower = predicate.to_lowercase();
+    let (choice_text, _) = tag::<_, _, OracleError<'_>>("gain your choice of ")
+        .parse(lower.as_str())
+        .ok()?;
+    let (keyword_text, duration) = super::strip_trailing_duration(choice_text);
+    let (_, (left, right)) = nom_primitives::split_once_on(keyword_text.trim(), " or ").ok()?;
+    let first = parse_keyword_from_oracle(left.trim())?;
+    let second = parse_keyword_from_oracle(right.trim())?;
+    Some((first, second, duration.or(Some(Duration::UntilEndOfTurn))))
+}
+
+fn keyword_choice_branch(
+    keyword: Keyword,
+    affected: TargetFilter,
+    target: Option<TargetFilter>,
+    duration: Option<Duration>,
+) -> AbilityDefinition {
+    let description = format!("gain {keyword}");
+    let mut branch = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(vec![ContinuousModification::AddKeyword { keyword }])
+                .description(description.clone())],
+            duration: duration.clone(),
+            target,
+        },
+    );
+    branch.duration = duration;
+    branch.description = Some(description);
+    branch
+}
+
+fn build_keyword_choice_clause(
+    application: &SubjectApplication,
+    predicate: &str,
+) -> Option<ParsedEffectClause> {
+    let (first, second, duration) = parse_keyword_choice_grant(predicate)?;
+    let affected = static_affected_for_application(application);
+    let branches = vec![
+        keyword_choice_branch(first, affected.clone(), None, duration.clone()),
+        keyword_choice_branch(second, affected, None, duration),
+    ];
+
+    let choose_effect = Effect::ChooseOneOf {
+        chooser: PlayerFilter::Controller,
+        branches,
+    };
+    let (effect, sub_ability) = if let Some(target) = application.target.clone() {
+        let choose = AbilityDefinition::new(AbilityKind::Spell, choose_effect);
+        (Effect::TargetOnly { target }, Some(Box::new(choose)))
+    } else {
+        (choose_effect, None)
+    };
+
+    Some(ParsedEffectClause {
+        effect,
+        duration: None,
+        sub_ability,
+        distribute: None,
+        multi_target: application.multi_target.clone(),
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
 fn build_continuous_clause(
     application: SubjectApplication,
     predicate: &str,
@@ -1322,6 +1400,10 @@ fn build_continuous_clause(
     // Split on " and " that follows a duration marker, producing a pump
     // with a chained sub_ability for the remainder.
     if let Some(clause) = try_split_pump_compound(&normalized, &application) {
+        return Some(clause);
+    }
+
+    if let Some(clause) = build_keyword_choice_clause(&application, &normalized) {
         return Some(clause);
     }
 
@@ -2537,6 +2619,12 @@ pub(crate) const PREDICATE_VERBS: &[&str] = &[
     "deal",
     "discard",
     "draw",
+    // CR 701.63: Endure — "it endures N" / "this creature endures N" /
+    // "~ endures N" / "<cardname> endures N". The self-referential subject is
+    // stripped here so the deconjugated predicate ("endure N") re-dispatches
+    // through the imperative path to `Effect::Endure`. The endure resolver acts
+    // on the ability source, so no subject target injection is required.
+    "endure",
     "exile",
     "explore",
     "fight",

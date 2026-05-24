@@ -68,14 +68,15 @@ export function DebugActions() {
         </h3>
         <button
           onClick={toggleDebugInteractionMode}
+          title="Click Mode: when ON, click any card on the board, in a hand, or in a zone viewer to open a debug menu for it (move zones, modify P/T, add counters, remove) instead of playing it normally. A banner appears at the top while it's active."
           className={
-            "rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider transition-colors " +
+            "rounded-full border px-2.5 py-0.5 font-mono text-[10px] uppercase tracking-wider transition-colors " +
             (debugInteractionMode
-              ? "border-amber-500/60 bg-amber-500/20 text-amber-300"
-              : "border-gray-700 bg-transparent text-gray-600 hover:border-gray-600 hover:text-gray-500")
+              ? "border-amber-500/70 bg-amber-500/25 text-amber-200"
+              : "border-amber-600/40 bg-transparent text-amber-500/80 hover:border-amber-500/60 hover:bg-amber-500/10 hover:text-amber-300")
           }
         >
-          {debugInteractionMode ? "Click Mode ON" : "Click Mode"}
+          {debugInteractionMode ? "● Click Mode ON" : "Click Mode"}
         </button>
       </div>
       <div className="mb-2 flex flex-wrap gap-1">

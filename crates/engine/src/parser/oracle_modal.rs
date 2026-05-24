@@ -6,18 +6,22 @@ use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, ModalChoice, ModalSelectionCondition,
-    ModalSelectionConstraint, PlayerFilter,
+    AbilityDefinition, AbilityKind, ChoiceType, Effect, ModalChoice, ModalSelectionCondition,
+    ModalSelectionConstraint, PlayerFilter, ReplacementDefinition, StaticCondition, TargetFilter,
+    TriggerCondition,
 };
+use crate::types::replacements::ReplacementEvent;
 
 use super::oracle::{find_activated_colon, strip_activated_constraints};
-use super::oracle_effect::parse_effect_chain_with_context;
+use super::oracle_cost::parse_oracle_cost;
+use super::oracle_effect::{parse_effect_chain_with_context, try_parse_named_choice};
 use super::oracle_ir::context::ParseContext;
 use super::oracle_nom::condition as nom_condition;
 use super::oracle_nom::primitives::{self as nom_primitives, scan_preceded};
+use super::oracle_static::parse_static_line;
+use super::oracle_trigger::parse_trigger_lines;
 use super::oracle_util::{parse_mana_symbols, strip_reminder_text};
 use crate::parser::oracle_ir::ast::{ModalHeaderAst, ModeAst, OracleBlockAst};
-use crate::types::ability::TargetFilter;
 
 pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(OracleBlockAst, usize)> {
     let line = strip_reminder_text(lines.get(start)?.trim());
@@ -51,6 +55,24 @@ pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(Oracle
 
     let candidate = strip_ability_word(&line).unwrap_or_else(|| line.clone());
     let lower = candidate.to_lowercase();
+
+    // CR 614.12c + CR 607.2d: "As [this permanent] enters, choose <A> or <B>."
+    // followed by bullet modes labeled with those anchor words. Detect before
+    // the generic modal/triggered-modal arms so we route to the dedicated
+    // anchor-word replacement-plus-linked-ability lowering instead of an
+    // effect-less `TriggerMode::Unknown("As ~ enters")` modal trigger.
+    if let Some(labels) = try_parse_as_enters_anchor_labels(&lower) {
+        if anchor_modes_match_labels(&modes, &labels) {
+            return Some((
+                OracleBlockAst::AsEntersAnchorWordModal {
+                    header_text: candidate.to_string(),
+                    labels,
+                    modes,
+                },
+                next,
+            ));
+        }
+    }
 
     if let Some(header) = parse_modal_header_ast(&candidate) {
         // Reject trigger prefixes — these are triggered modals, not plain modals
@@ -189,6 +211,64 @@ fn strip_mode_separator(text: &str) -> &str {
     .parse(trimmed)
     .map(|(rest, _)| rest.trim())
     .unwrap_or(trimmed)
+}
+
+/// CR 614.12c + CR 607.2d: Recognise an anchor-word as-enters header sentence
+/// — "as ~ enters, choose <A> or <B>" / "as ~ enters, choose <A>, <B>, or
+/// <C>" — and return the labels in declaration order. Operates entirely on
+/// already-normalised lowercase text using nom combinators so the per-card
+/// label vocabulary (Khans/Dragons, Jeskai/Temur, …) doesn't need to be
+/// hard-coded.
+///
+/// Returns `None` when the header isn't an as-enters-choose sentence or when
+/// the choose clause doesn't reduce to a labeled-option list (per
+/// `try_parse_labeled_choice`'s 1-2-word capitalisation/structure gates).
+pub(crate) fn try_parse_as_enters_anchor_labels(lower: &str) -> Option<Vec<String>> {
+    type E<'a> = OracleError<'a>;
+
+    // "as <self-ref>, enters, choose ..." → strip the framing prefix. The
+    // self-reference is always normalised to `~` by `normalize_self_refs`
+    // before this function runs (see `oracle_util::SELF_REF_TYPE_PHRASES`
+    // covers "this enchantment", "this permanent", etc.).
+    let trimmed = lower.trim().trim_end_matches('.');
+    let (rest, _) = tag::<_, _, E>("as ~ enters, ").parse(trimmed).ok()?;
+
+    // Delegate to the shared named-choice recogniser to extract the labels.
+    // Restricting to `Labeled` ensures we don't accidentally absorb "choose a
+    // color" / "choose a creature type" / etc. — those have their own existing
+    // `parse_as_enters_choose` replacement path.
+    match try_parse_named_choice(rest)? {
+        ChoiceType::Labeled { options } if options.len() >= 2 => Some(options),
+        _ => None,
+    }
+}
+
+/// CR 614.12c: True iff every collected bullet mode declares an anchor-word
+/// label and the label set matches `labels` exactly (order-independent,
+/// case-insensitive). Guards against false-positive matches on cards whose
+/// header text accidentally resembles an anchor-word choose clause but whose
+/// bullets aren't anchor-labeled (regular labeled modes).
+fn anchor_modes_match_labels(modes: &[ModeAst], labels: &[String]) -> bool {
+    if modes.len() != labels.len() {
+        return false;
+    }
+    let mode_labels: Vec<String> = modes
+        .iter()
+        .filter_map(|m| m.label.as_ref().map(|s| s.to_lowercase()))
+        .collect();
+    if mode_labels.len() != modes.len() {
+        return false;
+    }
+    let mut wanted: Vec<String> = labels.iter().map(|s| s.to_lowercase()).collect();
+    for actual in &mode_labels {
+        match wanted.iter().position(|w| w == actual) {
+            Some(pos) => {
+                wanted.swap_remove(pos);
+            }
+            None => return false,
+        }
+    }
+    wanted.is_empty()
 }
 
 pub(super) fn split_short_label_prefix(text: &str, max_words: usize) -> Option<(&str, &str)> {
@@ -495,9 +575,6 @@ pub(crate) fn lower_oracle_block(
     host_self_reference: Option<TargetFilter>,
     result: &mut super::oracle::ParsedAbilities,
 ) {
-    use super::oracle_cost::parse_oracle_cost;
-    use super::oracle_trigger::parse_trigger_lines;
-
     match block {
         OracleBlockAst::ActivatedModal {
             cost_text,
@@ -547,7 +624,177 @@ pub(crate) fn lower_oracle_block(
             }
             result.triggers.extend(triggers);
         }
+        OracleBlockAst::AsEntersAnchorWordModal {
+            header_text,
+            labels,
+            modes,
+        } => {
+            lower_as_enters_anchor_word_modal(header_text, labels, modes, card_name, result);
+        }
     }
+}
+
+/// CR 614.12c + CR 607.2d: Lower an as-enters anchor-word modal block into:
+///   1. A `Moved` `ReplacementDefinition` that asks the controller to choose
+///      between the anchor-word labels and persists the answer as a
+///      `ChosenAttribute::Label` on the entering permanent.
+///   2. One `TriggerDefinition` or `StaticDefinition` per linked-ability mode
+///      (CR 607.2d makes each linked ability), each gated on
+///      `ChosenLabelIs { label }` so the linked ability functions only while
+///      its anchor word was chosen.
+///
+/// Falls back to a no-op placeholder static with an `Unrecognized` condition
+/// when a mode body parses to neither a trigger nor a static — preserves the
+/// choice shape for the coverage report instead of silently dropping a mode.
+fn lower_as_enters_anchor_word_modal(
+    header_text: String,
+    labels: Vec<String>,
+    modes: Vec<ModeAst>,
+    card_name: &str,
+    result: &mut super::oracle::ParsedAbilities,
+) {
+    // 1. Synthesise the as-enters choose replacement. Mirrors the existing
+    //    `parse_as_enters_choose` (oracle_replacement.rs) shape but uses the
+    //    parsed labels directly so we don't re-run the labeled-choice
+    //    recogniser on the header text.
+    let choice_replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Choose {
+                choice_type: ChoiceType::Labeled {
+                    options: labels.clone(),
+                },
+                persist: true,
+            },
+        ))
+        .valid_card(TargetFilter::SelfRef)
+        .destination_zone(crate::types::zones::Zone::Battlefield)
+        // Description matches the printed header sentence so coverage and
+        // log output show the original Oracle phrasing. Internal storage
+        // detail ("persists as ChosenAttribute::Label") is documented on the
+        // `ChosenAttribute::Label` variant and `lower_as_enters_anchor_word_modal`
+        // itself, not duplicated here.
+        .description(header_text.trim().to_string());
+    result.replacements.push(choice_replacement);
+
+    // 2. Lower each anchor-word mode into a continuous ability gated on
+    //    `ChosenLabelIs { label }`. The mode body is fed back through the
+    //    normal trigger / static parsers so it benefits from every parser
+    //    primitive (Whenever / At / "creatures you control get +N/+M and have
+    //    <keyword> and <keyword>" / etc.).
+    for mode in &modes {
+        let Some(label) = mode.label.as_ref() else {
+            continue;
+        };
+        let body = mode.body.trim();
+        if body.is_empty() {
+            continue;
+        }
+
+        // Trigger first — "Whenever / When / At" patterns can only be
+        // triggers, never statics.
+        let trigger_lower = body.to_lowercase();
+        let is_trigger_pattern = nom::Parser::parse(
+            &mut alt((
+                tag::<_, _, OracleError<'_>>("when "),
+                tag("whenever "),
+                tag("at "),
+            )),
+            trigger_lower.as_str(),
+        )
+        .is_ok();
+
+        if is_trigger_pattern {
+            let mut triggers = parse_trigger_lines(body, card_name);
+            if !triggers.is_empty() {
+                for trigger in &mut triggers {
+                    attach_chosen_label_to_trigger(trigger, label);
+                }
+                result.triggers.extend(triggers);
+                continue;
+            }
+        }
+
+        // Static next — anthem-style "Creatures you control get +N/+M ..." or
+        // "~ has flying" patterns. `parse_static_line` returns `None` when
+        // the line isn't a recognised static, which falls through to the
+        // unimplemented fallback below.
+        if let Some(mut static_def) = parse_static_line(body) {
+            attach_chosen_label_to_static(&mut static_def, label);
+            result.statics.push(static_def);
+            continue;
+        }
+
+        // Fallback: the mode body parsed to neither a trigger nor a static.
+        // Emit a placeholder `StaticDefinition` with no modifications and
+        // both the anchor-word gate and an `Unrecognized` marker on its
+        // condition so the coverage report surfaces this specific anchor-word
+        // mode (not the parent enchantment as a whole) as an unimplemented
+        // pattern. The static has no continuous effect — the empty
+        // `modifications` vector keeps layer evaluation a no-op even when
+        // `ChosenLabelIs` is satisfied.
+        let placeholder = crate::types::ability::StaticDefinition {
+            mode: crate::types::statics::StaticMode::Continuous,
+            affected: Some(TargetFilter::SelfRef),
+            modifications: vec![],
+            condition: Some(StaticCondition::And {
+                conditions: vec![
+                    StaticCondition::ChosenLabelIs {
+                        label: label.clone(),
+                    },
+                    StaticCondition::Unrecognized {
+                        text: body.to_string(),
+                    },
+                ],
+            }),
+            affected_zone: None,
+            effect_zone: None,
+            active_zones: Vec::new(),
+            characteristic_defining: false,
+            description: Some(format!("CR 614.12c [{label}]: {body}")),
+        };
+        result.statics.push(placeholder);
+    }
+}
+
+/// Attach a `ChosenLabelIs` intervening-if to a parsed trigger. Composes with
+/// any pre-existing condition via `TriggerCondition::And` so the linked
+/// ability remains rule-correct even if the body itself carries an "if"
+/// clause (none in current corpus, future-safe).
+fn attach_chosen_label_to_trigger(
+    trigger: &mut crate::types::ability::TriggerDefinition,
+    label: &str,
+) {
+    let gate = TriggerCondition::ChosenLabelIs {
+        label: label.to_string(),
+    };
+    trigger.condition = Some(match trigger.condition.take() {
+        None => gate,
+        Some(existing) => TriggerCondition::And {
+            conditions: vec![gate, existing],
+        },
+    });
+    // CR 113.6 + CR 614.12c: Anchor-word linked abilities function only while
+    // the source permanent is on the battlefield (same as any printed trigger
+    // on a permanent). Leave `trigger_zones` untouched — the default
+    // battlefield-only behavior is correct.
+}
+
+/// Attach a `ChosenLabelIs` gate to a parsed static. Composes with any
+/// pre-existing condition via `StaticCondition::And`.
+fn attach_chosen_label_to_static(
+    static_def: &mut crate::types::ability::StaticDefinition,
+    label: &str,
+) {
+    let gate = StaticCondition::ChosenLabelIs {
+        label: label.to_string(),
+    };
+    static_def.condition = Some(match static_def.condition.take() {
+        None => gate,
+        Some(existing) => StaticCondition::And {
+            conditions: vec![gate, existing],
+        },
+    });
 }
 
 pub(crate) fn build_modal_ability(
@@ -1121,7 +1368,10 @@ mod tests {
     // ---- Ao, the Dawn Sky (SOC) — modal dies trigger integration ----
 
     use crate::parser::oracle::parse_oracle_text;
-    use crate::types::ability::{Effect, TargetFilter};
+    use crate::types::ability::{
+        ChoiceType, Effect, StaticCondition, TargetFilter, TriggerCondition,
+    };
+    use crate::types::replacements::ReplacementEvent;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
 
@@ -1188,6 +1438,59 @@ mod tests {
                 mode.effect
             );
         }
+    }
+
+    const FROSTCLIFF_SIEGE_ORACLE: &str = "As this enchantment enters, choose Jeskai or Temur.\n\
+• Jeskai — Whenever one or more creatures you control deal combat damage to a player, draw a card.\n\
+• Temur — Creatures you control get +1/+0 and have trample and haste.";
+
+    #[test]
+    fn frostcliff_siege_anchor_word_modal_lowers_choice_and_linked_gates() {
+        // CR 614.12c + CR 607.2d: anchor-word permanents lower to one
+        // as-enters labeled choice and one chosen-label gate on each linked
+        // ability. This is parser-only so it does not depend on generated
+        // card-data.json being present in the checkout.
+        let parsed = parse_oracle_text(FROSTCLIFF_SIEGE_ORACLE, "Frostcliff Siege", &[], &[], &[]);
+
+        assert_eq!(parsed.replacements.len(), 1);
+        let replacement = &parsed.replacements[0];
+        assert_eq!(replacement.event, ReplacementEvent::Moved);
+        assert_eq!(replacement.destination_zone, Some(Zone::Battlefield));
+        let execute = replacement.execute.as_ref().expect("choice execute");
+        match execute.effect.as_ref() {
+            Effect::Choose {
+                choice_type: ChoiceType::Labeled { options },
+                persist,
+            } => {
+                assert!(*persist);
+                assert_eq!(options, &vec!["Jeskai".to_string(), "Temur".to_string()]);
+            }
+            other => panic!("expected persisted labeled choose, got {other:?}"),
+        }
+
+        assert_eq!(parsed.triggers.len(), 1);
+        assert_eq!(
+            parsed.triggers[0].mode,
+            TriggerMode::DamageDoneOnceByController
+        );
+        assert!(matches!(
+            parsed.triggers[0]
+                .execute
+                .as_ref()
+                .map(|ability| ability.effect.as_ref()),
+            Some(Effect::Draw { .. })
+        ));
+        assert!(matches!(
+            parsed.triggers[0].condition.as_ref(),
+            Some(TriggerCondition::ChosenLabelIs { label }) if label == "Jeskai"
+        ));
+
+        assert_eq!(parsed.statics.len(), 1);
+        assert!(matches!(
+            parsed.statics[0].condition.as_ref(),
+            Some(StaticCondition::ChosenLabelIs { label }) if label == "Temur"
+        ));
+        assert_eq!(parsed.statics[0].modifications.len(), 4);
     }
 
     // ---- Final Act (SOC / M3C) — "Choose one or more —" modal spell ----

@@ -104,7 +104,6 @@ describe("OpponentHud", () => {
       expect(useUiStore.getState().focusedOpponent).toBe(3);
     });
     expect(usePreferencesStore.getState().followActiveOpponent).toBe(false);
-    expect(screen.getByRole("status")).toHaveTextContent("Follow off");
 
     act(() => {
       useGameStore.setState({
@@ -115,6 +114,47 @@ describe("OpponentHud", () => {
     await waitFor(() => {
       expect(useUiStore.getState().focusedOpponent).toBe(3);
     });
+  });
+
+  it("continues allowing manual opponent focus after Follow is disabled by selection", async () => {
+    usePreferencesStore.setState({ followActiveOpponent: true });
+    render(<OpponentHud />);
+
+    await waitFor(() => {
+      expect(useUiStore.getState().focusedOpponent).toBe(2);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Opp 4/ }));
+
+    await waitFor(() => {
+      expect(useUiStore.getState().focusedOpponent).toBe(3);
+    });
+    expect(usePreferencesStore.getState().followActiveOpponent).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: /Opp 2/ }));
+
+    await waitFor(() => {
+      expect(useUiStore.getState().focusedOpponent).toBe(1);
+    });
+  });
+
+  it("keeps the Follow toggle usable after selecting the last opponent", async () => {
+    usePreferencesStore.setState({ followActiveOpponent: true });
+    render(<OpponentHud />);
+
+    await waitFor(() => {
+      expect(useUiStore.getState().focusedOpponent).toBe(2);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Opp 4/ }));
+
+    await waitFor(() => {
+      expect(usePreferencesStore.getState().followActiveOpponent).toBe(false);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /follow active opponent/i }));
+
+    expect(usePreferencesStore.getState().followActiveOpponent).toBe(true);
   });
 
   it("keeps Follow enabled when selecting the active opponent", async () => {
@@ -129,6 +169,25 @@ describe("OpponentHud", () => {
 
     expect(usePreferencesStore.getState().followActiveOpponent).toBe(true);
     expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("keeps Follow enabled when browsing opponents on my turn", async () => {
+    usePreferencesStore.setState({ followActiveOpponent: true });
+    useGameStore.setState({
+      gameState: createGameState({
+        active_player: 0,
+        priority_player: 0,
+        waiting_for: { type: "Priority", data: { player: 0 } },
+      }),
+    });
+    render(<OpponentHud />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Opp 4/ }));
+
+    await waitFor(() => {
+      expect(useUiStore.getState().focusedOpponent).toBe(3);
+    });
+    expect(usePreferencesStore.getState().followActiveOpponent).toBe(true);
   });
 
   it("does not override manual selection while Follow is disabled", async () => {

@@ -133,6 +133,29 @@ export function resolveOracleIdSync(cardName: string): string | null {
   return scryfallDataResolved[cardName.toLowerCase()]?.oracle_id ?? null;
 }
 
+/**
+ * Resolve the numeric Scryfall face index for an engine-reported `faceName`.
+ *
+ * The printings/art-strategy path (`resolvePrintingImageUrl`) keys off a raw
+ * numeric `faceIndex`, but for a DFC/MDFC the engine only knows the *active
+ * face's name* — and for an MDFC cast as its back face, `transformed` stays
+ * `false`, so `cardImageLookup` yields `faceIndex: 0` (the front). This helper
+ * recovers the correct index by matching `faceName` against the entry's
+ * `face_names` array, the same way the canonical oracle-id image path does.
+ * Returns `null` when the data isn't loaded yet or the face can't be matched,
+ * so callers fall back to their provided `faceIndex`.
+ */
+export function resolveFaceIndexSync(
+  oracleId: string,
+  faceName: string | undefined,
+): number | null {
+  if (!scryfallDataResolved || !faceName) return null;
+  const entry = scryfallDataResolved[oracleId.toLowerCase()];
+  if (!entry) return null;
+  const idx = entry.face_names.indexOf(faceName.toLowerCase());
+  return idx >= 0 ? idx : null;
+}
+
 export function isCardImageRotatedSync(oracleId: string, cardName: string): boolean {
   if (!scryfallDataResolved) return false;
   const entry = scryfallDataResolved[oracleId.toLowerCase()]

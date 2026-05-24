@@ -405,6 +405,16 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
 
         // Unless payment: decline to pay (let the effect resolve).
         WaitingFor::UnlessPayment { .. } => Some(GameAction::PayUnlessCost { pay: false }),
+
+        // Disjunctive activation costs: default to the first payable branch.
+        WaitingFor::ActivationCostOneOfChoice {
+            player,
+            costs,
+            pending_cast,
+        } => costs
+            .iter()
+            .position(|cost| cost.is_payable(state, *player, pending_cast.object_id))
+            .map(|index| GameAction::ChooseActivationCostBranch { index }),
         // CR 118.12a: Disjunctive unless-cost choice. Fallback is to decline
         // the choice (let the effect resolve), mirroring `UnlessPayment`'s
         // pessimistic-default policy.
@@ -718,11 +728,13 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
                 ManaChoicePrompt::SingleColor { options } => {
                     options.first().map(|&color| GameAction::ChooseManaColor {
                         choice: ManaChoice::SingleColor(color),
+                        count: 1,
                     })
                 }
                 ManaChoicePrompt::Combination { options } => {
                     options.first().map(|combo| GameAction::ChooseManaColor {
                         choice: ManaChoice::Combination(combo.clone()),
+                        count: 1,
                     })
                 }
                 ManaChoicePrompt::AnyCombination { count, options } => {
@@ -735,6 +747,7 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
                     ];
                     Some(GameAction::ChooseManaColor {
                         choice: ManaChoice::Combination(combo),
+                        count: 1,
                     })
                 }
             }
@@ -806,6 +819,7 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         | WaitingFor::BeholdForCost { .. }
         | WaitingFor::TapCreaturesForSpellCost { .. }
         | WaitingFor::ExileForCost { .. }
+        | WaitingFor::RemoveCounterForCost { .. }
         | WaitingFor::CollectEvidenceChoice { .. }
         | WaitingFor::HarmonizeTapChoice { .. } => {
             // These are all pending-cast states — the has_pending_cast guard

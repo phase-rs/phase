@@ -200,7 +200,7 @@ fn mana_drain_refunds_colorless_equal_to_countered_spells_mana_value() {
     let counter_ability = ResolvedAbility::new(
         Effect::Counter {
             target: TargetFilter::StackSpell,
-            source_static: None,
+            source_rider: None,
         },
         vec![TargetRef::Object(spell_id)],
         mana_drain_source,

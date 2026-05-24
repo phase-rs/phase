@@ -491,7 +491,7 @@ fn counterspell_entry(count: u32) -> DeckEntry {
                 AbilityKind::Spell,
                 Effect::Counter {
                     target: TargetFilter::Any,
-                    source_static: None,
+                    source_rider: None,
                 },
             )],
             ..Default::default()

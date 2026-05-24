@@ -673,6 +673,21 @@ fn handle_debug_create_card(
         engine::game::printed_cards::apply_card_face_to_object(obj, &face);
         state.layers_dirty = true;
 
+        // Hydrate `back_face` for dual-faced spawns (MDFC, Transform, Adventure,
+        // Omen, Meld, Prepare). `apply_card_face_to_object` only writes the named
+        // face; without this, a debug-spawned Esika, God of the Tree has no
+        // Prismatic Bridge back face, so Ctrl-to-flip preview and MDFC face-choice
+        // casting silently no-op until a page refresh re-runs deck hydration. This
+        // is the same canonical primitive `load_and_hydrate_decks` uses, so the
+        // debug-spawn path can't drift from the normal load path. The new object
+        // already carries `printed_ref` (set by `apply_card_face_to_object`), which
+        // rehydrate uses to resolve the card and its other face.
+        CARD_DB.with(|cell| {
+            if let Some(db) = cell.borrow().as_ref() {
+                engine::game::printed_cards::rehydrate_game_from_card_db(state, db);
+            }
+        });
+
         // CR 303.4f + CR 704.5n: When the user picks an attachment target,
         // wire the host through the engine's attach resolvers BEFORE routing
         // through the ETB pipeline. The resolvers (`attach_to`,

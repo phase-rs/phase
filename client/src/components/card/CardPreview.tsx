@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import type { GameObject } from "../../adapter/types.ts";
+import type { GameObject, ManaCost } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import type { SourcePrinting } from "../../hooks/useCardImage.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
@@ -301,6 +301,8 @@ function CardPreviewInner({
           classLevel={classLevel}
           showInfoPanel={showInfoPanel}
           obj={obj}
+          showOtherFace={showOtherFace}
+          otherFaceCost={obj?.back_face?.mana_cost ?? null}
           isLoading={activeLoading}
           src={activeSrc}
           isRotated={activeRotated}
@@ -373,6 +375,8 @@ function CardImagePreview({
   classLevel,
   showInfoPanel,
   obj,
+  showOtherFace,
+  otherFaceCost,
   isLoading,
   src,
   isRotated,
@@ -385,6 +389,8 @@ function CardImagePreview({
   classLevel?: number | null;
   showInfoPanel?: boolean;
   obj: GameObject | null;
+  showOtherFace?: boolean;
+  otherFaceCost?: ManaCost | null;
   isLoading: boolean;
   src: string | null;
   isRotated: boolean;
@@ -416,9 +422,13 @@ function CardImagePreview({
     : `${frameClass} object-cover`;
 
   // Use effective spell cost from engine if available (reflects alt costs, reductions),
-  // otherwise fall back to printed mana cost.
+  // otherwise fall back to printed mana cost. When the user holds Ctrl to view the
+  // OTHER face of a DFC/MDFC, show THAT face's printed cost — the engine's effective
+  // cost only applies to the active face, so for the back face we use its printed
+  // mana cost (e.g. The Prismatic Bridge's {W}{U}{B}{R}{G} instead of Esika's
+  // {1}{G}{G}). See cardImageLookup / back_face wiring.
   const effectiveCost = useGameStore((s) => obj ? s.spellCosts[String(obj.id)] : undefined);
-  const displayCost = effectiveCost ?? obj?.mana_cost;
+  const displayCost = showOtherFace ? otherFaceCost : (effectiveCost ?? obj?.mana_cost);
 
   if (isLoading || !src) {
     return (

@@ -461,6 +461,10 @@ export type CounterType =
   | "stun"
   | (string & {});
 
+export type CounterMatch =
+  | { type: "Any" }
+  | { type: "OfType"; data: CounterType };
+
 export type PlayerCounterKind =
   | "Poison"
   | "Experience"
@@ -653,6 +657,14 @@ export interface GameObject {
   available_mana_pips?: ManaPip[];
   casting_permissions?: CastingPermission[];
   is_emblem?: boolean;
+  /**
+   * CR 111.1: Whether this object is a token (not a card). Independent of
+   * `display_source`: a token-copy of a real card (Twinflame, Helm of the
+   * Host) carries `is_token = true` AND `display_source = "Card"`, so it
+   * renders visually identical to the printed card. Combine the two to flag
+   * such copies (`is_token && display_source !== "Token"`).
+   */
+  is_token?: boolean;
   /**
    * Image-lookup routing hint from the engine. "Card" → look up the image
    * in the real-card database (default; also covers token-copies of real
@@ -952,6 +964,7 @@ export type OpeningHandBottomReason = { type: "TinyLeadersMultiCommander" };
 
 export type WaitingFor =
   | { type: "Priority"; data: { player: PlayerId } }
+  | { type: "ActivationCostOneOfChoice"; data: { player: PlayerId; costs: SerializedAbilityCost[]; pending_cast: PendingCast } }
   | {
       type: "MulliganDecision";
       data: {
@@ -1018,6 +1031,7 @@ export type WaitingFor =
   | { type: "DiscardForCost"; data: { player: PlayerId; count: number; cards: ObjectId[]; pending_cast: PendingCast } }
   | { type: "SacrificeForCost"; data: { player: PlayerId; count: number; permanents: ObjectId[]; pending_cast: PendingCast } }
   | { type: "ReturnToHandForCost"; data: { player: PlayerId; count: number; permanents: ObjectId[]; pending_cast: PendingCast } }
+  | { type: "RemoveCounterForCost"; data: { player: PlayerId; count: number; counter_type: CounterMatch; permanents: ObjectId[]; pending_cast: PendingCast } }
   | { type: "BlightChoice"; data: { player: PlayerId; count: number; creatures: ObjectId[]; pending_cast: PendingCast } }
   | { type: "BeholdForCost"; data: { player: PlayerId; count: number; choices: ObjectId[]; action: "ChooseOrReveal" | "ExileChosen"; pending_cast: PendingCast } }
   | { type: "TapCreaturesForManaAbility"; data: { player: PlayerId; count: number; creatures: ObjectId[]; pending_mana_ability: unknown } }
@@ -1025,7 +1039,19 @@ export type WaitingFor =
   | { type: "ExileFromBattlefieldForManaAbility"; data: { player: PlayerId; count: number; permanents: ObjectId[]; pending_mana_ability: unknown } }
   | { type: "SacrificeForManaAbility"; data: { player: PlayerId; count: number; permanents: ObjectId[]; pending_mana_ability: unknown } }
   | { type: "PayManaAbilityMana"; data: { player: PlayerId; options: ManaType[][]; pending_mana_ability: unknown } }
-  | { type: "ChooseManaColor"; data: { player: PlayerId; choice: ManaChoicePrompt; context: unknown } }
+  | {
+      type: "ChooseManaColor";
+      data: {
+        player: PlayerId;
+        choice: ManaChoicePrompt;
+        // CR 605.3a: Only the ManaAbility context carries the bulk-activation
+        // siblings the UI reads (omitted from the wire when empty). The heavy
+        // PendingManaAbility / ResolvedAbility payloads stay opaque here.
+        context:
+          | { type: "ManaAbility"; data: { batch_siblings?: ObjectId[] } }
+          | { type: "ResolvingEffect"; data: unknown };
+      };
+    }
   | { type: "TapCreaturesForSpellCost"; data: { player: PlayerId; count: number; creatures: ObjectId[]; pending_cast: PendingCast } }
   | { type: "ExileForCost"; data: { player: PlayerId; zone: ExileCostSourceZone; count: number; cards: ObjectId[]; pending_cast: PendingCast } }
   | { type: "CollectEvidenceChoice"; data: { player: PlayerId; minimum_mana_value: number; cards: ObjectId[]; resume: unknown } }
@@ -1292,6 +1318,7 @@ export type DebugAction =
 
 export type GameAction =
   | { type: "PassPriority" }
+  | { type: "ChooseActivationCostBranch"; data: { index: number } }
   | { type: "PlayLand"; data: { object_id: ObjectId; card_id: CardId } }
   | { type: "CastSpell"; data: { object_id: ObjectId; card_id: CardId; targets: ObjectId[] } }
   | { type: "CastSpellWithPaymentMode"; data: { object_id: ObjectId; card_id: CardId; targets: ObjectId[]; payment_mode: CastPaymentMode } }
@@ -1382,7 +1409,7 @@ export type GameAction =
   | { type: "ChooseX"; data: { value: number } }
   | { type: "SubmitPayAmount"; data: { amount: number } }
   | { type: "SubmitPhyrexianChoices"; data: { choices: ShardChoice[] } }
-  | { type: "ChooseManaColor"; data: { choice: ManaChoice } }
+  | { type: "ChooseManaColor"; data: { choice: ManaChoice; count?: number } }
   | { type: "PayManaAbilityMana"; data: { payment: ManaType[] } }
   | { type: "CastPreparedCopy"; data: { source: ObjectId } }
   | { type: "CastParadigmCopy"; data: { source: ObjectId } }
@@ -1432,7 +1459,7 @@ export type GameEvent =
   | { type: "PriorityPassed"; data: { player_id: PlayerId } }
   | { type: "SpellCast"; data: { card_id: CardId; controller: PlayerId; object_id: ObjectId } }
   | { type: "XValueChosen"; data: { player: PlayerId; object_id: ObjectId; value: number } }
-  | { type: "AbilityActivated"; data: { source_id: ObjectId } }
+  | { type: "AbilityActivated"; data: { player_id: PlayerId; source_id: ObjectId } }
   | { type: "ExhaustAbilityActivated"; data: { player_id: PlayerId; source_id: ObjectId; is_mana_ability: boolean } }
   | { type: "ZoneChanged"; data: { object_id: ObjectId; from: Zone; to: Zone } }
   | { type: "LifeChanged"; data: { player_id: PlayerId; amount: number } }

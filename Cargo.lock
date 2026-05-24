@@ -1337,6 +1337,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
+name = "lobby-broker"
+version = "0.1.35"
+dependencies = [
+ "engine",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1606,6 +1616,7 @@ dependencies = [
  "draft-core",
  "engine",
  "http",
+ "lobby-broker",
  "phase-ai",
  "rand 0.9.4",
  "rusqlite",
@@ -2315,6 +2326,7 @@ version = "0.1.35"
 dependencies = [
  "draft-core",
  "engine",
+ "lobby-broker",
  "phase-ai",
  "proptest",
  "rand 0.9.4",

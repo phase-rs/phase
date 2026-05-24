@@ -659,6 +659,13 @@ impl GameObject {
             keywords: self.keywords.clone(),
             power: self.power,
             toughness: self.toughness,
+            // CR 208.4b + CR 613.4b: Snapshot the layer-7b base values the same
+            // way `power`/`toughness` capture the post-layer-7 current values,
+            // so `PtComparison { scope: Base }` look-back filters read the
+            // event-time base (a base-1/1 with a +1/+1 counter records base 1,
+            // current 2).
+            base_power: self.base_power,
+            base_toughness: self.base_toughness,
             colors: self.color.clone(),
             mana_value: self.mana_cost.mana_value(),
             controller: self.controller,
@@ -831,6 +838,10 @@ impl GameObject {
             name: self.name.clone(),
             power: self.power,
             toughness: self.toughness,
+            // CR 208.4b + CR 613.4b: Layer-7b base values, mirroring how
+            // `power`/`toughness` capture the post-layer-7 current values.
+            base_power: self.base_power,
+            base_toughness: self.base_toughness,
             mana_value: self.mana_cost.mana_value(),
             controller: self.controller,
             owner: self.owner,
@@ -1017,6 +1028,19 @@ impl GameObject {
     pub fn chosen_keyword(&self) -> Option<&Keyword> {
         self.chosen_attributes.iter().find_map(|a| match a {
             ChosenAttribute::Keyword(k) => Some(k),
+            _ => None,
+        })
+    }
+
+    /// CR 614.12c + CR 607.2d: Look up the persisted anchor-word label chosen
+    /// as this permanent entered the battlefield (e.g. "Jeskai" / "Temur" on
+    /// Frostcliff Siege, "Khans" / "Dragons" on a Khans of Tarkir Siege).
+    /// Read by `StaticCondition::ChosenLabelIs` and
+    /// `TriggerCondition::ChosenLabelIs` to gate the linked anchor-word
+    /// abilities for the lifetime of the permanent.
+    pub fn chosen_label(&self) -> Option<&str> {
+        self.chosen_attributes.iter().find_map(|a| match a {
+            ChosenAttribute::Label(s) => Some(s.as_str()),
             _ => None,
         })
     }
