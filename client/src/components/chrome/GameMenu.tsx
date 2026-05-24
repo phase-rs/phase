@@ -17,6 +17,11 @@ interface GameMenuProps {
   onSettingsClick: () => void;
   onHelpClick: () => void;
   onConcede?: () => void;
+  /** Show the always-visible Sandbox Tools button. Gated by the caller to
+   *  game modes where debug actions actually work (vs-AI, local, or a
+   *  multiplayer sandbox). */
+  showSandboxTools?: boolean;
+  onSandboxToolsClick?: () => void;
 }
 
 export function GameMenu({
@@ -28,6 +33,8 @@ export function GameMenu({
   onSettingsClick,
   onHelpClick,
   onConcede,
+  showSandboxTools,
+  onSandboxToolsClick,
 }: GameMenuProps) {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -77,6 +84,29 @@ export function GameMenu({
         </button>
         <VolumeControl variant="game" />
         <FullscreenButton variant="game" />
+        {showSandboxTools && onSandboxToolsClick && (
+          <button
+            onClick={onSandboxToolsClick}
+            className="flex h-9 w-9 items-center justify-center rounded-lg bg-gray-800/80 text-amber-300/90 transition-colors hover:bg-gray-700/80 hover:text-amber-200"
+            aria-label="Sandbox Tools"
+            title="Sandbox Tools — set up any board state (`)"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 20 20"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={1.5}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="h-5 w-5"
+            >
+              <path d="M8 2.5v4.2L4 14.2a1.6 1.6 0 0 0 1.45 2.3h9.1A1.6 1.6 0 0 0 16 14.2L12 6.7V2.5" />
+              <path d="M7 2.5h6" />
+              <path d="M6.3 11.5h7.4" />
+            </svg>
+          </button>
+        )}
         {isOnlineMode && <ConnectionDot />}
       </div>
       {open && (

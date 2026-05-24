@@ -100,7 +100,27 @@ fn with_owner_scope(filter: TargetFilter, controller: ControllerRef) -> TargetFi
     }
 }
 
-fn self_recursion_trigger_zone(ability: &crate::types::ability::AbilityDefinition) -> Option<Zone> {
+fn parse_self_return_origin_zone(lower: &str) -> Option<Zone> {
+    nom_primitives::scan_preceded(lower, |input| {
+        let (rest, _) = (
+            alt((
+                tag::<_, _, OracleError<'_>>("return this card "),
+                tag("return ~ "),
+                tag("return it "),
+            )),
+            tag("from "),
+        )
+            .parse(input)?;
+        let (rest, zone) = parse_cast_origin_zone(rest)?;
+        Ok((rest, zone))
+    })
+    .and_then(|(_, zone, _)| zone)
+}
+
+fn self_recursion_trigger_zone(
+    ability: &crate::types::ability::AbilityDefinition,
+    source_lower: &str,
+) -> Option<Zone> {
     match ability.effect.as_ref() {
         crate::types::ability::Effect::ChangeZone {
             origin: Some(origin),
@@ -110,16 +130,18 @@ fn self_recursion_trigger_zone(ability: &crate::types::ability::AbilityDefinitio
         crate::types::ability::Effect::Bounce {
             target: TargetFilter::SelfRef,
             destination,
-        } if destination.is_none_or(|zone| zone == Zone::Hand) => Some(Zone::Graveyard),
+        } if destination.is_none_or(|zone| zone == Zone::Hand) => {
+            parse_self_return_origin_zone(source_lower)
+        }
         _ => ability
             .sub_ability
             .as_deref()
-            .and_then(self_recursion_trigger_zone)
+            .and_then(|ability| self_recursion_trigger_zone(ability, source_lower))
             .or_else(|| {
                 ability
                     .else_ability
                     .as_deref()
-                    .and_then(self_recursion_trigger_zone)
+                    .and_then(|ability| self_recursion_trigger_zone(ability, source_lower))
             }),
     }
 }
@@ -754,7 +776,11 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         && def.destination == Some(Zone::Graveyard)
     {
         def.trigger_zones = vec![Zone::Graveyard];
-    } else if let Some(zone) = def.execute.as_deref().and_then(self_recursion_trigger_zone) {
+    } else if let Some(zone) = def
+        .execute
+        .as_deref()
+        .and_then(|execute| self_recursion_trigger_zone(execute, modifiers.effect_lower.as_str()))
+    {
         def.trigger_zones = vec![zone];
     }
 
@@ -4880,6 +4906,8 @@ fn try_parse_event(
         Mutates,
         ExploitsCreature,
         Exploits,
+        /// CR 701.44b: A permanent "explores" after the explore process completes.
+        Explores,
         Transforms,
         Stations,
         SaddlesOrCrews,
@@ -4943,6 +4971,9 @@ fn try_parse_event(
             // CR 702.110b: "exploits a creature" — exploit trigger
             value(SimpleEvent::ExploitsCreature, tag("exploits a creature")),
             value(SimpleEvent::Exploits, tag("exploits")),
+            // CR 701.44b: "explores" / "explore" — explore trigger
+            value(SimpleEvent::Explores, tag("explores")),
+            value(SimpleEvent::Explores, tag("explore")),
             // CR 712.14: "transforms" / "transforms into"
             value(SimpleEvent::Transforms, tag("transforms")),
             // CR 702.184a: "stations ~" — actor-side Station trigger.
@@ -5021,6 +5052,14 @@ fn try_parse_event(
             }
             SimpleEvent::ExploitsCreature | SimpleEvent::Exploits => {
                 def.mode = TriggerMode::Exploited;
+                def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::Explores => {
+                if !remaining.trim().is_empty() {
+                    return None;
+                }
+                // CR 701.44b: "explores" fires after the explore process completes.
+                def.mode = TriggerMode::Explored;
                 def.valid_card = Some(subject.clone());
             }
             SimpleEvent::Transforms => {
@@ -5196,8 +5235,87 @@ fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefi
         def.mode = TriggerMode::CrankContraption;
         return Some((TriggerMode::CrankContraption, def));
     }
+    // CR 309.7: "Whenever you complete a dungeon" — fires as that dungeon card
+    // is removed from the game.
+    if (
+        alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when "))),
+        tag("you "),
+        tag("complete "),
+        tag("a dungeon"),
+    )
+        .parse(lower)
+        .is_ok()
+    {
+        def.mode = TriggerMode::DungeonCompleted;
+        def.valid_target = Some(TargetFilter::Controller);
+        return Some((TriggerMode::DungeonCompleted, def));
+    }
 
+    if let Some(result) = try_parse_die_roll_trigger(lower) {
+        return Some(result);
+    }
+
+    // CR 701.54d: "Whenever the Ring tempts you" / "When the Ring tempts you" —
+    // the Ring temptation event fires once per temptation resolution.
+    if all_consuming(pair(
+        alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when "))),
+        tag("the ring tempts you"),
+    ))
+    .parse(lower)
+    .is_ok()
+    {
+        def.mode = TriggerMode::RingTemptsYou;
+        return Some((TriggerMode::RingTemptsYou, def));
+    }
     None
+}
+
+fn try_parse_die_roll_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
+    // CR 706.2: die-roll triggers compose the triggering player axis
+    // (you/opponent/player) with the die object axis (a die/a d20/one or more dice).
+    let (rest, _) = alt((
+        value((), tag::<_, _, OracleError<'_>>("whenever ")),
+        value((), tag("when ")),
+    ))
+    .parse(lower)
+    .ok()?;
+
+    let (rest, valid_target) = parse_die_roll_actor(rest).ok()?;
+    let (rest, (mode, batched, die_sides)) = parse_die_roll_object(rest).ok()?;
+    if !rest.is_empty() {
+        return None;
+    }
+
+    let mut def = make_base();
+    def.mode = mode.clone();
+    def.valid_target = Some(valid_target);
+    def.batched = batched;
+    def.die_sides = die_sides;
+    Some((mode, def))
+}
+
+fn parse_die_roll_actor(input: &str) -> OracleResult<'_, TargetFilter> {
+    alt((
+        value(TargetFilter::Controller, pair(tag("you "), tag("roll "))),
+        value(
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            pair(tag("an opponent "), tag("rolls ")),
+        ),
+        value(TargetFilter::Player, pair(tag("a player "), tag("rolls "))),
+    ))
+    .parse(input)
+}
+
+fn parse_die_roll_object(input: &str) -> OracleResult<'_, (TriggerMode, bool, Option<u8>)> {
+    alt((
+        value(
+            (TriggerMode::RolledDie, true, None),
+            tag("one or more dice"),
+        ),
+        value((TriggerMode::RolledDieOnce, false, Some(20)), tag("a d20")),
+        value((TriggerMode::RolledDieOnce, false, None), tag("a die")),
+    ))
+    .parse(input)
 }
 
 /// CR 120.1 + CR 120.3 + CR 603.2: "Whenever a source [you control] deals
@@ -9765,6 +9883,36 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::Exploited);
     }
 
+    #[test]
+    fn trigger_creature_you_control_explores() {
+        let def = parse_trigger_line(
+            "Whenever a creature you control explores, put a +1/+1 counter on Wildgrowth Walker and you gain 3 life.",
+            "Wildgrowth Walker",
+        );
+        assert_eq!(def.mode, TriggerMode::Explored);
+        assert!(def.valid_card.is_some());
+    }
+
+    #[test]
+    fn trigger_self_explores() {
+        let def = parse_trigger_line("Whenever this creature explores, draw a card.", "Test Card");
+        assert_eq!(def.mode, TriggerMode::Explored);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn trigger_explores_card_quality_remains_unknown() {
+        let def = parse_trigger_line(
+            "Whenever a creature you control explores a land card, you may put a land card from your hand onto the battlefield tapped.",
+            "Nicanzil, Current Conductor",
+        );
+        assert!(
+            matches!(def.mode, TriggerMode::Unknown(_)),
+            "explore-card-quality trigger needs event payload support, got {:?}",
+            def.mode
+        );
+    }
+
     // --- Subject decomposition tests ---
 
     #[test]
@@ -14061,6 +14209,94 @@ mod tests {
     }
 
     #[test]
+    fn trigger_dungeon_completed_whenever() {
+        let def = parse_trigger_line(
+            "Whenever you complete a dungeon, create a 2/2 green Wolf creature token.",
+            "Varis, Silverymoon Ranger",
+        );
+        assert_eq!(def.mode, TriggerMode::DungeonCompleted);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+    #[test]
+    fn trigger_dungeon_completed_when() {
+        let def = parse_trigger_line(
+            "When you complete a dungeon, create a 5/5 red Dragon creature token with flying.",
+            "Loot Dispute",
+        );
+        assert_eq!(def.mode, TriggerMode::DungeonCompleted);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_ring_tempts_you_whenever() {
+        let def = parse_trigger_line(
+            "Whenever the Ring tempts you, you may discard your hand.",
+            "Sauron, the Dark Lord",
+        );
+        assert_eq!(def.mode, TriggerMode::RingTemptsYou);
+    }
+
+    #[test]
+    fn trigger_ring_tempts_you_when() {
+        let def = parse_trigger_line(
+            "When the Ring tempts you, return this card from your graveyard to your hand.",
+            "Ringwraiths",
+        );
+        assert_eq!(def.mode, TriggerMode::RingTemptsYou);
+    }
+
+    #[test]
+    fn trigger_rolled_die_batch() {
+        let def = parse_trigger_line(
+            "Whenever you roll one or more dice, put a +1/+1 counter on ~.",
+            "Vrondiss, Rage of Ancients",
+        );
+        assert_eq!(def.mode, TriggerMode::RolledDie);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert!(def.batched);
+        assert_eq!(def.die_sides, None);
+    }
+
+    #[test]
+    fn trigger_rolled_die_single() {
+        let def = parse_trigger_line(
+            "Whenever you roll a die, put a +1/+1 counter on ~.",
+            "The Space Family Goblinson",
+        );
+        assert_eq!(def.mode, TriggerMode::RolledDieOnce);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert!(!def.batched);
+        assert_eq!(def.die_sides, None);
+    }
+
+    #[test]
+    fn trigger_rolled_die_opponent_scope() {
+        let def = parse_trigger_line(
+            "Whenever an opponent rolls a die, draw a card.",
+            "Barbarian Class",
+        );
+        assert_eq!(def.mode, TriggerMode::RolledDieOnce);
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+        assert_eq!(def.die_sides, None);
+    }
+
+    #[test]
+    fn trigger_rolled_d20_filters_sides() {
+        let def = parse_trigger_line(
+            "Whenever you roll a d20, put a +1/+1 counter on ~.",
+            "Pixie Guide",
+        );
+        assert_eq!(def.mode, TriggerMode::RolledDieOnce);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(def.die_sides, Some(20));
+    }
+
+    #[test]
     fn trigger_turn_face_up_mode() {
         let def = parse_trigger_line(
             "When this creature is turned face up, draw a card.",
@@ -14425,6 +14661,55 @@ mod tests {
                 target: TargetFilter::SelfRef,
                 destination: None,
             })
+        ));
+    }
+
+    #[test]
+    fn trigger_card_name_self_return_uses_graveyard_zone() {
+        let def = parse_trigger_line(
+            "Whenever you fully unlock a Room, you may return Fear of Infinity from your graveyard to your hand.",
+            "Fear of Infinity",
+        );
+        assert_eq!(def.mode, TriggerMode::FullyUnlock);
+        assert_eq!(def.trigger_zones, vec![Zone::Graveyard]);
+        assert!(matches!(
+            def.execute
+                .as_deref()
+                .map(|ability| ability.effect.as_ref()),
+            Some(Effect::Bounce {
+                target: TargetFilter::SelfRef,
+                destination: None,
+            })
+        ));
+    }
+
+    #[test]
+    fn phase_trigger_self_bounce_stays_battlefield_hosted() {
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, if you control no Thopters other than this creature, return ~ to its owner's hand and create five 1/1 colorless Thopter artifact creature tokens with flying.",
+            "Thopter Assembly",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::Upkeep));
+        assert!(
+            def.trigger_zones.is_empty() || def.trigger_zones == vec![Zone::Battlefield],
+            "ordinary phase trigger must not be hosted from graveyard: {:?}",
+            def.trigger_zones
+        );
+        let execute = def.execute.as_deref().expect("should have execute");
+        assert!(matches!(
+            execute.effect.as_ref(),
+            Effect::Bounce {
+                target: TargetFilter::SelfRef,
+                destination: None,
+            }
+        ));
+        assert!(matches!(
+            execute
+                .sub_ability
+                .as_deref()
+                .map(|ability| ability.effect.as_ref()),
+            Some(Effect::Token { name, .. }) if name == "Thopter"
         ));
     }
 

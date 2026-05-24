@@ -925,6 +925,7 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::SourceMatchesFilter { .. }
             | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
             | AbilityCondition::ControllerControlsMatching { .. }
+            | AbilityCondition::ControllerControlledMatchingAsCast { .. }
             | AbilityCondition::IsYourTurn
             | AbilityCondition::WasStartingPlayer { .. }
             | AbilityCondition::SpellCastWithVariantThisTurn { .. }
@@ -3482,7 +3483,7 @@ fn resolve_chain_body(
 /// Returns whether the condition is met. Handles all `AbilityCondition` variants as
 /// pure boolean evaluators — callers are responsible for any terminal control flow
 /// (e.g., "Instead" overrides that early-return in the sub-ability context).
-fn evaluate_condition(
+pub(crate) fn evaluate_condition(
     condition: &AbilityCondition,
     state: &GameState,
     ability: &ResolvedAbility,
@@ -3753,6 +3754,13 @@ fn evaluate_condition(
                     && crate::game::filter::matches_target_filter(state, o.id, filter, &ctx)
             })
         }
+        // CR 601.2 + CR 608.2c: "if you controlled a [filter] as you cast this
+        // spell" reads the casting snapshot, not the resolution-time battlefield.
+        AbilityCondition::ControllerControlledMatchingAsCast { filter } => ability
+            .context
+            .controller_controlled_as_cast
+            .iter()
+            .any(|snapshot_filter| snapshot_filter == filter),
         // CR 608.2c: "If it's your turn" — check active player against the
         // scoped player during each-player iteration, otherwise the controller.
         AbilityCondition::IsYourTurn => {
@@ -10056,6 +10064,40 @@ mod tests {
             &state,
             &ability
         ));
+    }
+
+    #[test]
+    fn evaluate_controller_controlled_as_cast_reads_spell_context_snapshot() {
+        let state = GameState::new_two_player(42);
+        let filter = TargetFilter::Typed(
+            TypedFilter::creature()
+                .subtype("Faerie".to_string())
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                }]),
+        );
+        let condition = AbilityCondition::ControllerControlledMatchingAsCast {
+            filter: filter.clone(),
+        };
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )
+        .context(SpellContext {
+            controller_controlled_as_cast: vec![filter],
+            ..SpellContext::default()
+        });
+
+        assert!(evaluate_condition(&condition, &state, &ability));
+
+        ability.context.controller_controlled_as_cast.clear();
+        assert!(!evaluate_condition(&condition, &state, &ability));
     }
 
     #[test]

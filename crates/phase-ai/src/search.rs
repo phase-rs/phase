@@ -707,11 +707,13 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
                 ManaChoicePrompt::SingleColor { options } => {
                     options.first().map(|&color| GameAction::ChooseManaColor {
                         choice: ManaChoice::SingleColor(color),
+                        count: 1,
                     })
                 }
                 ManaChoicePrompt::Combination { options } => {
                     options.first().map(|combo| GameAction::ChooseManaColor {
                         choice: ManaChoice::Combination(combo.clone()),
+                        count: 1,
                     })
                 }
                 ManaChoicePrompt::AnyCombination { count, options } => {
@@ -724,6 +726,7 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
                     ];
                     Some(GameAction::ChooseManaColor {
                         choice: ManaChoice::Combination(combo),
+                        count: 1,
                     })
                 }
             }

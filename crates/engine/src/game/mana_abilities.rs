@@ -1,9 +1,9 @@
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, ChoiceValue, CostPaidObjectSnapshot, Effect, ManaProduction,
-    ResolvedAbility, TargetFilter,
+    AbilityCondition, AbilityCost, AbilityDefinition, ChoiceValue, CostPaidObjectSnapshot, Effect,
+    ManaProduction, ResolvedAbility, TargetFilter,
 };
 #[cfg(test)]
-use crate::types::counter::{CounterMatch, CounterType};
+use crate::types::counter::CounterMatch;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     GameState, ManaAbilityResume, ManaChoice, ManaChoiceContext, ManaChoicePrompt,
@@ -224,17 +224,19 @@ fn produce_mana_from_ability(
     // cost-paid object snapshot so quantity resolution sees it. Reused for
     // both production-count and sub-chain resolution paths so the same
     // snapshot is visible end-to-end.
-    let mut resolved_for_quantity =
-        super::ability_utils::build_resolved_from_def(ability_def, source_id, player);
-    if let Some(snapshot) = cost_paid_object {
-        resolved_for_quantity.set_cost_paid_object_recursive(snapshot);
-    }
+    let resolved_for_quantity = resolved_mana_ability_for_current_state(
+        state,
+        source_id,
+        player,
+        ability_def,
+        cost_paid_object,
+    );
 
     // CR 106.6: Resolve spend-restriction templates, grants, and expiry so they
     // attach to each produced `ManaUnit`. Dropping these here is the bug that
     // made Flamebraider's Elemental-only mana behave as unrestricted mana.
     let (produced_mana, restrictions, grants, expiry, source_could_produce_two_or_more_colors) =
-        match &*ability_def.effect {
+        match &resolved_for_quantity.effect {
             Effect::Mana {
                 produced,
                 restrictions,
@@ -308,7 +310,44 @@ fn produce_mana_from_ability(
     // effect chain (e.g. painlands' "This land deals 1 damage to you.")
     // resolves that chain inline — mana abilities don't use the stack, so
     // the sub-ability runs as part of the same atomic resolution.
-    resolve_mana_ability_sub_chain(state, source_id, player, ability_def, events);
+    resolve_mana_ability_sub_chain(state, &resolved_for_quantity, events);
+}
+
+fn resolved_mana_ability_for_current_state(
+    state: &GameState,
+    source_id: ObjectId,
+    player: PlayerId,
+    ability_def: &AbilityDefinition,
+    cost_paid_object: Option<CostPaidObjectSnapshot>,
+) -> ResolvedAbility {
+    let mut resolved =
+        super::ability_utils::build_resolved_from_def(ability_def, source_id, player);
+    if let Some(snapshot) = cost_paid_object {
+        resolved.set_cost_paid_object_recursive(snapshot);
+    }
+    apply_condition_instead_mana_swap(state, &resolved)
+}
+
+fn apply_condition_instead_mana_swap(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> ResolvedAbility {
+    let Some(sub) = ability.sub_ability.as_deref() else {
+        return ability.clone();
+    };
+    let Some(AbilityCondition::ConditionInstead { inner }) = sub.condition.as_ref() else {
+        return ability.clone();
+    };
+    if super::effects::evaluate_condition(inner, state, ability) {
+        if matches!(sub.effect, Effect::Mana { target: None, .. }) {
+            return super::ability_utils::apply_instead_swap(ability, sub);
+        }
+        return ability.clone();
+    }
+
+    let mut base = ability.clone();
+    base.sub_ability = sub.else_ability.clone();
+    base
 }
 
 fn resolve_single_color_override(
@@ -385,6 +424,7 @@ pub fn activate_mana_ability(
             chosen_exiled_battlefield: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            batch_siblings: Vec::new(),
         },
         events,
     )
@@ -603,6 +643,80 @@ pub fn handle_choose_mana_color(
     Ok(resume_waiting_for(pending.player, pending.resume.clone()))
 }
 
+/// CR 605.3a: Bulk-activate the controller's other identical, choice-free mana
+/// sources (their remaining Treasures, etc.) with the color just chosen for a
+/// `SingleColor` prompt. Runs immediately after `handle_choose_mana_color` has
+/// resolved the originally-tapped source; together they activate `count` sources
+/// in one `ChooseManaColor` round-trip.
+///
+/// Each sibling is an independent activated mana ability that resolves
+/// immediately and before the next is begun (CR 605.3c), without using the stack
+/// (CR 605.3b) — so no player gains priority between them. Cost-payment and mana
+/// events append to `events`; the caller's single post-handler trigger scan then
+/// fires each sacrifice's observers (Mayhem Devil, Korvold, Cruel Celebrant, …)
+/// exactly once. `pending.batch_siblings` was pre-filtered to choice-free,
+/// currently-activatable twins (see `cost_resolves_without_choice` /
+/// `batch_eligible_siblings`), so no sibling can surface a further interactive
+/// prompt — that invariant is asserted below rather than handled.
+pub(crate) fn batch_activate_mana_siblings(
+    state: &mut GameState,
+    pending: &PendingManaAbility,
+    chosen: &ManaChoice,
+    count: u32,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    let ManaChoice::SingleColor(color) = chosen else {
+        return Err(EngineError::InvalidAction(
+            "Bulk mana activation is only valid for a single-color choice".to_string(),
+        ));
+    };
+    // `count` is validated against `batch_siblings.len() + 1` by the dispatcher
+    // before any mana is produced, so `extra` never exceeds the sibling list and
+    // `take` is exact.
+    let extra = (count as usize).saturating_sub(1);
+
+    // The originally-activated source's mana ability is the shape every sibling
+    // was selected to match. Re-resolve each sibling's matching ability index
+    // (a sibling may carry unrelated abilities too).
+    let reference_def = state
+        .objects
+        .get(&pending.source_id)
+        .and_then(|obj| obj.abilities.get(pending.ability_index))
+        .cloned()
+        .ok_or_else(|| {
+            EngineError::InvalidAction("Mana ability source no longer exists".to_string())
+        })?;
+
+    for &sibling_id in pending.batch_siblings.iter().take(extra) {
+        let Some((index, def)) = state.objects.get(&sibling_id).and_then(|obj| {
+            obj.abilities
+                .iter()
+                .position(|ability| *ability == reference_def)
+                .map(|index| (index, obj.abilities[index].clone()))
+        }) else {
+            return Err(EngineError::InvalidAction(
+                "Bulk mana source is no longer available".to_string(),
+            ));
+        };
+        // CR 605.3a + CR 605.3b: independent mana ability, no stack, color fixed.
+        let resume = activate_mana_ability(
+            state,
+            sibling_id,
+            pending.player,
+            index,
+            &def,
+            events,
+            ManaAbilityResume::Priority,
+            Some(ProductionOverride::SingleColor(*color)),
+        )?;
+        debug_assert!(
+            matches!(resume, WaitingFor::Priority { .. }),
+            "batched choice-free mana sibling returned an interactive state: {resume:?}"
+        );
+    }
+    Ok(())
+}
+
 /// CR 118.3 / CR 605.3b: Complete the tapped-creature choice, then resolve the mana ability.
 pub fn handle_tap_creatures_for_mana_ability(
     state: &mut GameState,
@@ -784,7 +898,7 @@ pub fn can_activate_mana_ability_now(
 
 fn advance_mana_ability_activation(
     state: &mut GameState,
-    pending: PendingManaAbility,
+    mut pending: PendingManaAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let ability_def = state
@@ -921,16 +1035,15 @@ fn advance_mana_ability_activation(
     }
 
     if pending.color_override.is_none() {
-        let mut resolved_for_prompt = super::ability_utils::build_resolved_from_def(
-            &ability_def,
+        let resolved_for_prompt = resolved_mana_ability_for_current_state(
+            state,
             pending.source_id,
             pending.player,
+            &ability_def,
+            pending.cost_paid_object.clone(),
         );
-        if let Some(snapshot) = pending.cost_paid_object.clone() {
-            resolved_for_prompt.set_cost_paid_object_recursive(snapshot);
-        }
         if let Some(choice) = mana_choice_prompt(
-            &ability_def.effect,
+            &resolved_for_prompt.effect,
             state,
             pending.source_id,
             Some(&resolved_for_prompt),
@@ -965,6 +1078,17 @@ fn advance_mana_ability_activation(
             if events.len() > events_before {
                 let cost_events: Vec<_> = events[events_before..].to_vec();
                 super::triggers::process_triggers(state, &cost_events);
+            }
+            // CR 605.3a: When the prompt is a single shared color choice and the
+            // cost resolves with no further player input, surface this source's
+            // identical activatable twins so `GameAction::ChooseManaColor` can
+            // bulk-activate them with the chosen color in one round-trip
+            // (the player's 20 Treasures, etc.).
+            if matches!(choice, ManaChoicePrompt::SingleColor { .. })
+                && cost_resolves_without_choice(&ability_def.cost)
+            {
+                pending.batch_siblings =
+                    batch_eligible_siblings(state, pending.player, pending.source_id, &ability_def);
             }
             return Ok(WaitingFor::ChooseManaColor {
                 player: pending.player,
@@ -1077,16 +1201,18 @@ fn resolve_mana_ability_with_selected_choices(
     // CR 117.1 + CR 202.3: Build a transient `ResolvedAbility` carrying the
     // cost-paid object snapshot so production-count resolution sees it
     // (Food Chain class).
-    let mut resolved_for_quantity =
-        super::ability_utils::build_resolved_from_def(ability_def, source_id, player);
-    if let Some(snapshot) = cost_paid_object {
-        resolved_for_quantity.set_cost_paid_object_recursive(snapshot);
-    }
+    let resolved_for_quantity = resolved_mana_ability_for_current_state(
+        state,
+        source_id,
+        player,
+        ability_def,
+        cost_paid_object,
+    );
 
     // CR 106.6: Thread restrictions, grants, and expiry through the
     // selected-choices path too — otherwise color-picked or hybrid-paid mana
     // abilities would still emit unrestricted mana.
-    let (produced_mana, restrictions, grants, expiry) = match &*ability_def.effect {
+    let (produced_mana, restrictions, grants, expiry) = match &resolved_for_quantity.effect {
         Effect::Mana {
             produced,
             restrictions,
@@ -1143,7 +1269,7 @@ fn resolve_mana_ability_with_selected_choices(
 
     // CR 605.3b + CR 605.1a: Resolve the sub-ability chain inline (painlands'
     // "deals 1 damage to you", Llanowar Wastes-style self-damage, etc.).
-    resolve_mana_ability_sub_chain(state, source_id, player, ability_def, events);
+    resolve_mana_ability_sub_chain(state, &resolved_for_quantity, events);
 
     Ok(())
 }
@@ -1155,19 +1281,16 @@ fn resolve_mana_ability_with_selected_choices(
 /// controller, GainLife, etc.) route through the standard effect handlers.
 fn resolve_mana_ability_sub_chain(
     state: &mut GameState,
-    source_id: ObjectId,
-    player: PlayerId,
-    ability_def: &AbilityDefinition,
+    ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) {
-    let Some(sub_def) = ability_def.sub_ability.as_deref() else {
+    let Some(sub) = ability.sub_ability.as_deref() else {
         return;
     };
-    let resolved = super::ability_utils::build_resolved_from_def(sub_def, source_id, player);
     // Errors during the sub-chain are non-fatal — mana has already been
     // added to the pool and the cost has been paid. The damage/life clause
     // of a painland cannot legitimately fail in a well-formed game state.
-    let _ = super::effects::resolve_ability_chain(state, &resolved, events, 0);
+    let _ = super::effects::resolve_ability_chain(state, sub, events, 0);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1563,6 +1686,69 @@ pub(crate) fn mana_sub_cost_of(cost: &Option<AbilityCost>) -> Option<&ManaCost> 
         }),
         _ => None,
     }
+}
+
+/// CR 605.3a + CR 605.3b: True iff this cost resolves with NO player prompt once
+/// the produced color is pre-chosen — i.e. it hits none of the five interactive
+/// cost gates that `advance_mana_ability_activation` checks before producing
+/// mana (discard, tap-creatures, non-self exile, non-self sacrifice, and the
+/// mana sub-cost handled by `find_*`/`mana_sub_cost_of` directly above/below).
+/// This is the eligibility gate for bulk activation: only such sources can be
+/// batched behind a single shared color decision (CR 605.3b — no stack, resolves
+/// immediately).
+///
+/// Deny-by-default whitelist — only `Tap`, self-sacrifice (`SelfRef`, the
+/// Treasure/Gold cost shape), and `Composite`s built solely from those qualify.
+/// Every other cost variant — including any added later — is treated as
+/// choice-bearing and excluded, so a new interactive cost can never silently
+/// become batchable. Kept beside the gate matchers so the whitelist stays in
+/// lockstep if a sixth gate is introduced.
+fn cost_resolves_without_choice(cost: &Option<AbilityCost>) -> bool {
+    cost.as_ref().is_none_or(cost_component_choice_free)
+}
+
+fn cost_component_choice_free(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::Tap => true,
+        AbilityCost::Sacrifice {
+            target: TargetFilter::SelfRef,
+            count,
+        } => *count == 1,
+        AbilityCost::Composite { costs } => costs.iter().all(cost_component_choice_free),
+        _ => false,
+    }
+}
+
+/// CR 605.3a: The controller's *other* permanents that could be activated for
+/// the same `SingleColor` mana choice — identical ability definition, choice-
+/// free cost, and currently activatable (untapped, on the battlefield, not
+/// summoning-sick, via the shared `activatable_mana_options` gate). These are
+/// the sources `GameAction::ChooseManaColor` may bulk-activate with the chosen
+/// color. `exclude` is the just-activated source (already cost-paid, so omitted).
+/// Sorted by id for deterministic ordering across the WASM/multiplayer boundary.
+fn batch_eligible_siblings(
+    state: &GameState,
+    player: PlayerId,
+    exclude: ObjectId,
+    ability_def: &AbilityDefinition,
+) -> Vec<ObjectId> {
+    let candidates: Vec<ObjectId> = state
+        .objects
+        .iter()
+        .filter_map(|(id, obj)| {
+            (*id != exclude
+                && obj.controller == player
+                && obj.zone == Zone::Battlefield
+                && obj.abilities.iter().any(|ability| ability == ability_def))
+            .then_some(*id)
+        })
+        .collect();
+    let mut siblings: Vec<ObjectId> = candidates
+        .into_iter()
+        .filter(|&id| !mana_sources::activatable_mana_options(state, id, player).is_empty())
+        .collect();
+    siblings.sort_unstable_by_key(|id| id.0);
+    siblings
 }
 
 /// CR 107.4e + CR 601.2h: Enumerate legal per-hybrid-shard color assignments
@@ -2104,12 +2290,13 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCondition, AbilityCost, AbilityKind, AbilityTag, ActivationRestriction,
+        AbilityCondition, AbilityCost, AbilityKind, AbilityTag, ActivationRestriction, Comparator,
         ContinuousModification, ControllerRef, DevotionColors, Duration, Effect, LinkedExileScope,
-        ManaContribution, ManaProduction, MultiTargetSpec, PlayerScope, QuantityExpr, QuantityRef,
-        StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+        ManaContribution, ManaProduction, MultiTargetSpec, ObjectScope, PlayerScope, QuantityExpr,
+        QuantityRef, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
+    use crate::types::counter::CounterType;
     use crate::types::game_state::{ExileLink, ExileLinkKind};
     use crate::types::identifiers::CardId;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType};
@@ -2129,6 +2316,41 @@ mod tests {
             },
         )
         .cost(AbilityCost::Tap)
+    }
+
+    fn gemstone_caverns_mana_ability() -> AbilityDefinition {
+        let replacement = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    color_options: ManaColor::ALL.to_vec(),
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .condition(AbilityCondition::ConditionInstead {
+            inner: Box::new(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: Some(CounterType::Generic("luck".to_string())),
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }),
+        });
+
+        let mut ability = make_mana_ability(ManaProduction::Colorless {
+            count: QuantityExpr::Fixed { value: 1 },
+        });
+        ability.sub_ability = Some(Box::new(replacement));
+        ability
     }
 
     use crate::game::test_fixtures::brushland_colored_ability;
@@ -2228,6 +2450,116 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::ManaAdded { .. })));
+    }
+
+    #[test]
+    fn condition_instead_mana_ability_without_counter_produces_base_mana() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Gemstone Caverns".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = gemstone_caverns_mana_ability();
+        Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities).push(ability.clone());
+
+        let mut events = Vec::new();
+        let waiting = activate_mana_ability(
+            &mut state,
+            source,
+            PlayerId(0),
+            0,
+            &ability,
+            &mut events,
+            ManaAbilityResume::Priority,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            waiting,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        );
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Colorless),
+            1
+        );
+        assert_eq!(state.players[0].mana_pool.total(), 1);
+        assert!(state.objects.get(&source).unwrap().tapped);
+    }
+
+    #[test]
+    fn condition_instead_mana_ability_with_luck_counter_prompts_for_any_color() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Gemstone Caverns".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = gemstone_caverns_mana_ability();
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.counters
+            .insert(CounterType::Generic("luck".to_string()), 1);
+        Arc::make_mut(&mut obj.abilities).push(ability.clone());
+
+        let mut events = Vec::new();
+        let waiting = activate_mana_ability(
+            &mut state,
+            source,
+            PlayerId(0),
+            0,
+            &ability,
+            &mut events,
+            ManaAbilityResume::Priority,
+            None,
+        )
+        .unwrap();
+
+        let WaitingFor::ChooseManaColor {
+            player,
+            choice: ManaChoicePrompt::SingleColor { options },
+            context,
+        } = waiting
+        else {
+            panic!("expected ChooseManaColor, got {waiting:?}");
+        };
+        assert_eq!(player, PlayerId(0));
+        assert_eq!(
+            options,
+            vec![
+                ManaType::White,
+                ManaType::Blue,
+                ManaType::Black,
+                ManaType::Red,
+                ManaType::Green,
+            ]
+        );
+
+        let pending = expect_mana_ability_context(context);
+        handle_choose_mana_color(
+            &mut state,
+            &pending,
+            &ManaChoicePrompt::SingleColor {
+                options: options.clone(),
+            },
+            ManaChoice::SingleColor(ManaType::Blue),
+            &mut events,
+        )
+        .unwrap();
+
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Blue), 1);
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Colorless),
+            0
+        );
+        assert_eq!(state.players[0].mana_pool.total(), 1);
+        assert!(state.objects.get(&source).unwrap().tapped);
     }
 
     #[test]
@@ -2766,6 +3098,286 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::PermanentTapped { .. })));
+    }
+
+    /// Build a Treasure-style token — `{T}, Sacrifice this: Add one mana of any
+    /// color` over `colors` — attached as ability index 0. The
+    /// `Composite { Tap, Sacrifice SelfRef }` cost is choice-free, so two
+    /// definition-identical copies are batchable twins (CR 605.3a).
+    fn make_any_color_treasure(
+        state: &mut GameState,
+        card: u64,
+        player: PlayerId,
+        colors: Vec<ManaColor>,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(card),
+            player,
+            "Treasure".to_string(),
+            Zone::Battlefield,
+        );
+        let def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    color_options: colors,
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Tap,
+                AbilityCost::Sacrifice {
+                    target: TargetFilter::SelfRef,
+                    count: 1,
+                },
+            ],
+        });
+        Arc::make_mut(&mut state.objects.get_mut(&id).unwrap().abilities).push(def);
+        id
+    }
+
+    /// CR 605.3a: One color choice with `count = N` activates the tapped source
+    /// plus `N - 1` identical, choice-free twins — `N` mana of the chosen color,
+    /// `N` sources sacrificed, and a per-source tap each twin (the events a
+    /// sacrifice observer such as Mayhem Devil/Korvold sees).
+    #[test]
+    fn batch_activation_taps_multiple_identical_treasures() {
+        let mut state = GameState::new_two_player(42);
+        let a = make_any_color_treasure(&mut state, 9001, PlayerId(0), ManaColor::ALL.to_vec());
+        let b = make_any_color_treasure(&mut state, 9002, PlayerId(0), ManaColor::ALL.to_vec());
+        let c = make_any_color_treasure(&mut state, 9003, PlayerId(0), ManaColor::ALL.to_vec());
+
+        let result = crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ActivateAbility {
+                source_id: a,
+                ability_index: 0,
+            },
+        )
+        .expect("Treasure should activate into a color prompt");
+
+        let WaitingFor::ChooseManaColor {
+            context: ManaChoiceContext::ManaAbility(pending),
+            ..
+        } = &result.waiting_for
+        else {
+            panic!("expected ChooseManaColor, got {:?}", result.waiting_for);
+        };
+        assert_eq!(
+            pending.batch_siblings,
+            vec![b, c],
+            "the other two Treasures are batchable twins"
+        );
+
+        let result = crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ChooseManaColor {
+                choice: ManaChoice::SingleColor(ManaType::Red),
+                count: 3,
+            },
+        )
+        .expect("bulk color choice should resolve");
+
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Red),
+            3,
+            "three Treasures each produced one red"
+        );
+        let on_battlefield = [a, b, c]
+            .iter()
+            .filter(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|o| o.zone == Zone::Battlefield)
+            })
+            .count();
+        assert_eq!(on_battlefield, 0, "all three Treasures were sacrificed");
+        // CR 106.12 + CR 605.3a: each twin taps independently during the choice
+        // step (the first source was tapped earlier, before the prompt).
+        let twin_taps = result
+            .events
+            .iter()
+            .filter(|e| matches!(e, GameEvent::PermanentTapped { .. }))
+            .count();
+        assert_eq!(twin_taps, 2, "two twins tapped during the bulk activation");
+    }
+
+    /// CR 605.3a: A count larger than the available sources is rejected before
+    /// any mana is produced — no partial application.
+    #[test]
+    fn batch_activation_rejects_count_above_available() {
+        let mut state = GameState::new_two_player(42);
+        let a = make_any_color_treasure(&mut state, 9101, PlayerId(0), ManaColor::ALL.to_vec());
+        let b = make_any_color_treasure(&mut state, 9102, PlayerId(0), ManaColor::ALL.to_vec());
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ActivateAbility {
+                source_id: a,
+                ability_index: 0,
+            },
+        )
+        .expect("activate first Treasure");
+
+        let rejected = crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ChooseManaColor {
+                choice: ManaChoice::SingleColor(ManaType::Red),
+                count: 5,
+            },
+        );
+        assert!(
+            rejected.is_err(),
+            "count 5 with only two sources is illegal"
+        );
+        assert!(
+            state
+                .objects
+                .get(&b)
+                .is_some_and(|o| o.zone == Zone::Battlefield),
+            "the sibling is untouched by the rejected batch"
+        );
+        assert_eq!(
+            state.players[0].mana_pool.total(),
+            0,
+            "no mana is produced when the batch is rejected"
+        );
+    }
+
+    /// CR 605.3b: The default `count = 1` resolves a single source — twins are
+    /// left untouched (back-compatible single-tap behavior).
+    #[test]
+    fn batch_activation_default_count_resolves_single_source() {
+        let mut state = GameState::new_two_player(42);
+        let a = make_any_color_treasure(&mut state, 9151, PlayerId(0), ManaColor::ALL.to_vec());
+        let b = make_any_color_treasure(&mut state, 9152, PlayerId(0), ManaColor::ALL.to_vec());
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ActivateAbility {
+                source_id: a,
+                ability_index: 0,
+            },
+        )
+        .expect("activate first Treasure");
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ChooseManaColor {
+                choice: ManaChoice::SingleColor(ManaType::Red),
+                count: 1,
+            },
+        )
+        .expect("single color choice resolves");
+
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 1);
+        assert!(
+            state
+                .objects
+                .get(&b)
+                .is_some_and(|o| o.zone == Zone::Battlefield),
+            "the sibling remains untapped on the battlefield"
+        );
+    }
+
+    /// CR 605.3a: Only definition-identical twins batch together — a different
+    /// any-color source (distinct ability) is excluded.
+    #[test]
+    fn batch_groups_only_identical_ability_definitions() {
+        let mut state = GameState::new_two_player(42);
+        let a = make_any_color_treasure(&mut state, 9201, PlayerId(0), ManaColor::ALL.to_vec());
+        let b = make_any_color_treasure(&mut state, 9202, PlayerId(0), ManaColor::ALL.to_vec());
+        // Distinct AbilityDefinition (only W/U) → not a twin of the 5-color pair.
+        let _other = make_any_color_treasure(
+            &mut state,
+            9203,
+            PlayerId(0),
+            vec![ManaColor::White, ManaColor::Blue],
+        );
+
+        let result = crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ActivateAbility {
+                source_id: a,
+                ability_index: 0,
+            },
+        )
+        .expect("activate the 5-color Treasure");
+
+        let WaitingFor::ChooseManaColor {
+            context: ManaChoiceContext::ManaAbility(pending),
+            ..
+        } = &result.waiting_for
+        else {
+            panic!("expected ChooseManaColor, got {:?}", result.waiting_for);
+        };
+        assert_eq!(
+            pending.batch_siblings,
+            vec![b],
+            "only the identical 5-color Treasure is offered as a twin"
+        );
+    }
+
+    /// CR 605.3a: `cost_resolves_without_choice` is the batch eligibility gate —
+    /// a deny-by-default whitelist of `Tap`, self-sacrifice, and `Composite`s of
+    /// those. Any choice-bearing or unrecognized cost is excluded.
+    #[test]
+    fn cost_resolves_without_choice_whitelist() {
+        // Treasure: Tap + self-sacrifice → batchable.
+        assert!(cost_resolves_without_choice(&Some(
+            AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Tap,
+                    AbilityCost::Sacrifice {
+                        target: TargetFilter::SelfRef,
+                        count: 1,
+                    },
+                ],
+            }
+        )));
+        assert!(cost_resolves_without_choice(&Some(AbilityCost::Tap)));
+        assert!(cost_resolves_without_choice(&None));
+
+        // Phyrexian Altar: sacrifice a (non-self) creature → requires a choice.
+        assert!(!cost_resolves_without_choice(&Some(
+            AbilityCost::Sacrifice {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                count: 1,
+            }
+        )));
+        // Self-sacrifice of more than one is not the single-token shape.
+        assert!(!cost_resolves_without_choice(&Some(
+            AbilityCost::Sacrifice {
+                target: TargetFilter::SelfRef,
+                count: 2,
+            }
+        )));
+        // Filter-land style mana sub-cost requires a payment choice.
+        assert!(!cost_resolves_without_choice(&Some(
+            AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            shards: vec![],
+                            generic: 1,
+                        },
+                    },
+                    AbilityCost::Tap,
+                ],
+            }
+        )));
+        // Pay-life is non-interactive but conservatively excluded (deny-by-default).
+        assert!(!cost_resolves_without_choice(&Some(AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+        })));
     }
 
     #[test]
@@ -3846,6 +4458,7 @@ mod tests {
             chosen_exiled_battlefield: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            batch_siblings: Vec::new(),
         };
         let prompt = ManaChoicePrompt::SingleColor {
             options: vec![ManaType::Red, ManaType::Green],
@@ -3906,6 +4519,7 @@ mod tests {
                 chosen_exiled_battlefield: Vec::new(),
                 chosen_sacrificed_battlefield: Vec::new(),
                 cost_paid_object: None,
+                batch_siblings: Vec::new(),
             };
             let prompt = ManaChoicePrompt::SingleColor {
                 options: vec![ManaType::Green, ManaType::White],
@@ -4132,6 +4746,7 @@ mod tests {
             chosen_exiled_battlefield: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            batch_siblings: Vec::new(),
         };
         let prompt = ManaChoicePrompt::Combination {
             options: vec![
@@ -4231,6 +4846,7 @@ mod tests {
             chosen_exiled_battlefield: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            batch_siblings: Vec::new(),
         };
         let prompt = ManaChoicePrompt::Combination {
             options: vec![
@@ -4792,6 +5408,7 @@ mod tests {
             &mut state,
             crate::types::actions::GameAction::ChooseManaColor {
                 choice: ManaChoice::SingleColor(ManaType::Green),
+                count: 1,
             },
         )
         .expect("color choice should resolve");
@@ -5127,6 +5744,7 @@ mod tests {
             chosen_exiled_battlefield: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            batch_siblings: Vec::new(),
         };
         let options = vec![vec![ManaType::Blue], vec![ManaType::Black]];
         let mut events = Vec::new();
@@ -5409,6 +6027,7 @@ mod tests {
             chosen_exiled_battlefield: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            batch_siblings: Vec::new(),
         };
         let prompt = ManaChoicePrompt::SingleColor {
             options: vec![ManaType::Green, ManaType::White],
@@ -5844,6 +6463,7 @@ mod tests {
             chosen_exiled_battlefield: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            batch_siblings: Vec::new(),
         };
 
         let result = handle_sacrifice_for_mana_ability(
@@ -5961,6 +6581,7 @@ mod tests {
             chosen_exiled_battlefield: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            batch_siblings: Vec::new(),
         };
         let mut events = Vec::new();
         let _ = handle_exile_from_battlefield_for_mana_ability(
@@ -6020,6 +6641,7 @@ mod tests {
             chosen_exiled_battlefield: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            batch_siblings: Vec::new(),
         };
         let mut events = Vec::new();
         let _ = handle_exile_from_battlefield_for_mana_ability(
@@ -6170,6 +6792,7 @@ mod tests {
             chosen_exiled_battlefield: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            batch_siblings: Vec::new(),
         };
         let mut events = Vec::new();
         let _ = handle_exile_from_battlefield_for_mana_ability(
