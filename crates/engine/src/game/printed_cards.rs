@@ -86,6 +86,9 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     obj.base_color = color;
     obj.base_characteristics_initialized = true;
     obj.printed_ref = printed_ref_from_face(card_face);
+    // Display-identity baseline: the layer reset restores `printed_ref` from
+    // this each pass (see `game_object::base_printed_ref`).
+    obj.base_printed_ref = obj.printed_ref.clone();
     obj.source_related_token_ids = card_face.metadata.related_token_ids.clone();
     obj.modal = card_face.modal.clone();
     obj.additional_cost = card_face.additional_cost.clone();
@@ -198,6 +201,9 @@ pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) 
         Arc::new(back_face.static_definitions.iter_all().cloned().collect());
     obj.base_color = back_face.color;
     obj.base_characteristics_initialized = true;
+    // Display-identity baseline tracks the now-displayed face. Cloned BEFORE the
+    // move below, which consumes `back_face.printed_ref`.
+    obj.base_printed_ref = back_face.printed_ref.clone();
     obj.printed_ref = back_face.printed_ref;
     obj.modal = back_face.modal;
     obj.additional_cost = back_face.additional_cost;
@@ -406,7 +412,7 @@ fn walk_continuous_mod(modification: &ContinuousModification, out: &mut Vec<Stri
         ContinuousModification::GrantAbility { definition } => walk_ability_def(definition, out),
         ContinuousModification::GrantTrigger { trigger } => walk_trigger(trigger, out),
         ContinuousModification::GrantStaticAbility { definition } => walk_static(definition, out),
-        ContinuousModification::CopyValues { values } => walk_copiable_values(values, out),
+        ContinuousModification::CopyValues { values, .. } => walk_copiable_values(values, out),
         // Remaining modifications carry no nested ability/effect carriers.
         ContinuousModification::SetName { .. }
         | ContinuousModification::AddPower { .. }
